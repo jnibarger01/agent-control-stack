@@ -1,13 +1,13 @@
 import type { ServerResponse } from "node:http";
-import { SqliteAuditLog, type StoredAuditEvent } from "@agent-control-stack/audit-log";
 import { renderDashboard } from "@agent-control-stack/control-ui";
 import { evaluateApproval } from "@agent-control-stack/policy-gate";
-import { ControlStackError, type AuditEvent } from "@agent-control-stack/shared";
+import { ControlStackError } from "@agent-control-stack/shared";
 import {
   approvalRequestSchema,
   cancelRequestSchema,
   createWorkItemTools,
   SqliteWorkItemStore,
+  type StoredAuditEvent,
   submitWorkResultSchema
 } from "@agent-control-stack/work-items";
 import { ZodError } from "zod";
@@ -20,18 +20,10 @@ export interface GatewayOptions {
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
-  const auditLog = new SqliteAuditLog(dbPath);
-  const workItems = new SqliteWorkItemStore(dbPath);
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
-
-  function append(event: AuditEvent): StoredAuditEvent {
-    const stored = auditLog.append(event);
-    broadcast(stored);
-    return stored;
-  }
-
-  const tools = createWorkItemTools(workItems, append);
+  const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
+  const tools = createWorkItemTools(workItems);
 
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -57,7 +49,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     ]
   }));
 
-  app.get("/work-items", async (request) => ({ workItems: tools.list_work_items(request.query) }));
+  app.get("/work-items", async (request, reply) => {
+    try {
+      return { workItems: tools.list_work_items(request.query) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 
   app.get<{ Params: { id: string } }>("/work-items/:id", async (request, reply) => {
     const workItem = tools.get_work_item({ id: request.params.id });
@@ -89,7 +87,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
     const decision = evaluateApproval(workItem, approval.data);
     if (!decision.allowed) {
-      return reply.code(403).send(decision);
+      const blocked =
+        workItem.status === "pending_policy" || workItem.status === "needs_approval"
+          ? workItems.blockWorkItem(workItem.id)
+          : workItem;
+      return reply.code(403).send({ decision, workItem: blocked });
     }
 
     try {
@@ -115,7 +117,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.post<{ Params: { id: string } }>("/work-items/:id/results", async (request, reply) => {
-    const parsed = submitWorkResultSchema.safeParse({ ...(request.body as object), id: request.params.id });
+    const body = request.body && typeof request.body === "object" ? (request.body as Record<string, unknown>) : {};
+    const parsed = submitWorkResultSchema.safeParse({ ...body, id: request.params.id });
     if (!parsed.success) {
       return reply.code(400).send({ error: "invalid result request" });
     }
@@ -143,7 +146,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.addHook("onClose", async () => {
-    auditLog.close();
     workItems.close();
   });
 

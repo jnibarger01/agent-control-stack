@@ -17,6 +17,9 @@ CREATE TABLE IF NOT EXISTS work_items (
   requested_actions_json TEXT NOT NULL,
   risk TEXT NOT NULL,
   result_json TEXT,
+  worker_id TEXT,
+  started_at TEXT,
+  lease_expires_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

@@ -18,6 +18,8 @@ Agent Control Stack is a single TypeScript monorepo. Apps depend inward on packa
 - `apps/control-ui`: server-rendered dashboard HTML.
 - `apps/worker`: one-shot worker that executes the next approved item.
 
-SQLite is the local durability layer. `work_items` holds the current control-plane state, while `audit_events` records append-only lifecycle events. Events use `name`, `timeUnixNano`, `attributes`, and `body` so they can be mapped to OpenTelemetry exporters later without changing the domain model.
+SQLite is the local durability layer. `work_items` holds the current control-plane state, while `audit_events` records append-only lifecycle events. Work-item mutations insert their matching audit event in the same SQLite transaction. Events use `name`, `timeUnixNano`, `attributes`, and `body` so they can be mapped to OpenTelemetry exporters later without changing the domain model.
 
 Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. Execution only starts by transitioning an approved work item to `running`.
+
+Workers claim approved rows with a status compare-and-swap and a short lease. Worker startup marks expired running leases as failed before claiming new work.
