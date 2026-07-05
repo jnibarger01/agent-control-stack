@@ -10,6 +10,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import { isMcpJsonParseError, registerMcpRoutes, sendMcpParseError } from "./mcp.js";
 import { createGatewayWorkItemTools, workItemToolNames } from "./tools/work-items.js";
 
 export interface GatewayOptions {
@@ -23,6 +24,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const sseClients = new Set<ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
   const tools = createGatewayWorkItemTools(workItems);
+
+  app.setErrorHandler((error, _request, reply) => {
+    if (isMcpJsonParseError(error)) {
+      return sendMcpParseError(reply);
+    }
+    throw error;
+  });
 
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -42,6 +50,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
+  registerMcpRoutes(app, tools);
 
   app.get("/work-items", async (request, reply) => {
     try {
