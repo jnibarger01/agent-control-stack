@@ -2,6 +2,7 @@ import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
   approvalRequestSchema,
   cancelRequestSchema,
+  type ClaimedWorkItem,
   type WorkItem,
   type WorkItemStore
 } from "@agent-control-stack/work-items";
@@ -132,7 +133,7 @@ export function gateUnblock(
   return { decision, workItem: pending.status === "pending_policy" ? pending : store.transition(pending.id, "pending_policy") };
 }
 
-export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, input: unknown): WorkItem | undefined {
+export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, input: unknown): ClaimedWorkItem | undefined {
   const parsed = claimInputSchema.parse(input);
   const running = store.claimNextApprovedWorkItem(parsed.workerId, { leaseMs: parsed.leaseMs });
   if (!running) {
@@ -142,11 +143,14 @@ export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, inpu
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, running, parsed.workerId, "claim");
   const missing = approvalRequired(evaluations).find((evaluation) => !store.hasApproval(running.id, evaluation.actionHash));
   if (decision.decision === "deny" || missing) {
-    return store.submitWorkResult({
+    const blocked = store.submitWorkResult({
       id: running.id,
+      workerId: parsed.workerId,
+      leaseToken: running.leaseToken,
       status: "blocked",
       result: { error: missing ? "approval missing for action hash" : decision.reason }
     });
+    return { ...blocked, leaseToken: running.leaseToken };
   }
 
   return running;
@@ -176,7 +180,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       const parsed = cancelInputSchema.parse(input);
       return store.cancelWorkItem(parsed.id, parsed);
     },
-    claim_next_approved_work_item(input: unknown): WorkItem | undefined {
+    claim_next_approved_work_item(input: unknown): ClaimedWorkItem | undefined {
       return gateWorkerClaim(store, policy, input);
     },
     submit_work_result(input: unknown): WorkItem {
