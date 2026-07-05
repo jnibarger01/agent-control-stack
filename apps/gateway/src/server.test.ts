@@ -98,4 +98,69 @@ describe("gateway work-item routes", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("does not mutate state when approval policy denies", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const dbPath = join(dir, "control.db");
+    const setup = new SqliteWorkItemStore(dbPath);
+    const workItem = setup.create({
+      title: "Pending manual work",
+      requester: "user",
+      intent: "deny approval without blocking",
+      requestedActions: [{ kind: "manual", description: "ambiguous" }],
+      risk: "low"
+    });
+    setup.close();
+    const app = buildGateway({ dbPath, logger: false });
+
+    try {
+      const denied = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItem.id}/approve`,
+        payload: { approvedBy: "test" }
+      });
+
+      expect(denied.statusCode).toBe(403);
+      expect(denied.json().workItem.status).toBe("pending_policy");
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(check.get(workItem.id)?.status).toBe("pending_policy");
+      } finally {
+        check.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unblocks blocked work", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Denied work",
+          requester: "user",
+          intent: "verify unblock",
+          requestedActions: [{ kind: "command", description: "sudo", params: { command: ["sudo", "whoami"] } }],
+          risk: "low"
+        }
+      });
+
+      const unblocked = await app.inject({
+        method: "POST",
+        url: `/work-items/${created.json().id}/unblock`
+      });
+
+      expect(unblocked.statusCode).toBe(200);
+      expect(unblocked.json().workItem.status).toBe("pending_policy");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

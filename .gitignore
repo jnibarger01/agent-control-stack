@@ -4,3 +4,5 @@ dist/
 storage/*.db
 storage/*.db-*
 .env
+.ijfw/
+.ijfw/

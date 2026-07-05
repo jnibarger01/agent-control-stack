@@ -27,7 +27,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const client of sseClients) {
-      client.write(frame);
+      try {
+        client.write(frame);
+      } catch {
+        sseClients.delete(client);
+      }
     }
   }
 
@@ -92,6 +96,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const cancelled = tools.cancel_work_item({ id: request.params.id, ...cancel.data });
       return { workItem: cancelled };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/unblock", async (request, reply) => {
+    try {
+      const unblocked = tools.unblock_work_item({ id: request.params.id });
+      return { workItem: unblocked };
     } catch (error) {
       return sendError(reply, error);
     }

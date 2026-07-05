@@ -85,6 +85,7 @@ export interface WorkItemStore {
   transition(id: string, status: WorkItemStatus): WorkItem;
   approveWorkItem(id: string): WorkItem;
   blockWorkItem(id: string): WorkItem;
+  unblockWorkItem(id: string): WorkItem;
   cancelWorkItem(id: string): WorkItem;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): StoredAuditEvent;
@@ -204,6 +205,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   blockWorkItem(id: string): WorkItem {
     return this.transition(id, "blocked");
+  }
+
+  unblockWorkItem(id: string): WorkItem {
+    return this.transition(id, "pending_policy");
   }
 
   cancelWorkItem(id: string): WorkItem {
@@ -418,17 +423,28 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   private write<T>(operation: () => { value: T; events: StoredAuditEvent[] }): T {
     this.db.exec("BEGIN IMMEDIATE");
+    let result: { value: T; events: StoredAuditEvent[] };
     try {
-      const result = operation();
+      result = operation();
       this.db.exec("COMMIT");
-      for (const event of result.events) {
-        this.onEvent(event);
-      }
-      return result.value;
     } catch (error) {
-      this.db.exec("ROLLBACK");
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // best effort; the transaction may already have been closed by SQLite.
+      }
       throw error;
     }
+
+    for (const event of result.events) {
+      try {
+        this.onEvent(event);
+      } catch {
+        // Post-commit notifications are best-effort; state and audit already committed.
+      }
+    }
+
+    return result.value;
   }
 
   private ensureWorkItemColumn(name: string, definition: string): void {
@@ -439,14 +455,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 }
 
-export function nextApprovedWorkItem(store: WorkItemStore): WorkItem | undefined {
-  return store.list({ status: "approved" }).at(-1);
-}
-
 export function createWorkItemTools(store: WorkItemStore) {
   return {
     create_work_item(input: unknown): WorkItem {
-      return store.create(input);
+      throw new ControlStackError("policy_required", "create_work_item must be wrapped by a policy-aware tool");
     },
     get_work_item(input: unknown): WorkItem | undefined {
       const parsed = z.object({ id: z.string().min(1) }).parse(input);
@@ -457,14 +469,14 @@ export function createWorkItemTools(store: WorkItemStore) {
     },
     approve_work_item(input: unknown): WorkItem {
       const parsed = z.object({ id: z.string().min(1) }).merge(approvalRequestSchema).parse(input);
-      return store.approveWorkItem(parsed.id);
+      throw new ControlStackError("policy_required", "approve_work_item must be wrapped by a policy-aware tool");
     },
     cancel_work_item(input: unknown): WorkItem {
       const parsed = z.object({ id: z.string().min(1) }).merge(cancelRequestSchema).parse(input);
       return store.cancelWorkItem(parsed.id);
     },
     submit_work_result(input: unknown): WorkItem {
-      return store.submitWorkResult(input);
+      throw new ControlStackError("policy_required", "submit_work_result must be wrapped by a policy-aware tool");
     }
   };
 }

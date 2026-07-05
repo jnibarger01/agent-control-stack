@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
-import { SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
+import { SqliteWorkItemStore, WorkItemEvent, createWorkItemTools, transitionWorkItem } from "./index.js";
 
 describe("work item state machine", () => {
   it("rejects invalid transitions", () => {
@@ -162,6 +162,21 @@ describe("work item state machine", () => {
       expect(store.hasApproval(workItem.id, "hash_test")).toBe(true);
       expect(store.hasApproval(workItem.id, "other_hash")).toBe(false);
       expect(store.readEvents().at(-1)?.name).toBe("approval.recorded");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses policy-sensitive raw tool calls", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-tools-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store);
+
+    try {
+      expect(() => tools.create_work_item({})).toThrow(ControlStackError);
+      expect(() => tools.approve_work_item({ id: "wrk_test", approvedBy: "user" })).toThrow(ControlStackError);
+      expect(() => tools.submit_work_result({ id: "wrk_test", status: "succeeded" })).toThrow(ControlStackError);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

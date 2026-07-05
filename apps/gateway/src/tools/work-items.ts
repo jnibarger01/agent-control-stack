@@ -19,6 +19,7 @@ export const workItemToolNames = [
   "get_work_item",
   "list_work_items",
   "approve_work_item",
+  "unblock_work_item",
   "cancel_work_item",
   "submit_work_result"
 ] as const;
@@ -29,7 +30,7 @@ export function createGatewayWorkItemTools(store: WorkItemStore) {
   return {
     ...base,
     create_work_item(input: unknown): WorkItem {
-      const workItem = base.create_work_item(input);
+      const workItem = store.create(input);
       const evaluations = recordPolicy(store, workItem, workItem.requester);
       const summary = summarizePolicy(evaluations);
 
@@ -40,6 +41,10 @@ export function createGatewayWorkItemTools(store: WorkItemStore) {
         return workItem.status === "pending_policy" ? store.transition(workItem.id, "needs_approval") : workItem;
       }
       return store.approveWorkItem(workItem.id);
+    },
+    unblock_work_item(input: unknown): WorkItem {
+      const parsed = z.object({ id: z.string().min(1) }).parse(input);
+      return store.unblockWorkItem(parsed.id);
     },
     submit_work_result(input: unknown): WorkItem {
       const parsed = submitWorkResultSchema.parse(input);
@@ -61,7 +66,7 @@ export function createGatewayWorkItemTools(store: WorkItemStore) {
         );
       }
 
-      return base.submit_work_result(parsed);
+      return store.submitWorkResult(parsed);
     },
     approve_work_item(input: unknown): { decision: PolicyDecision; workItem: WorkItem } {
       const parsed = approvalRequestSchema.extend({ id: z.string().min(1) }).safeParse(input);
@@ -77,11 +82,7 @@ export function createGatewayWorkItemTools(store: WorkItemStore) {
       const evaluations = recordPolicy(store, workItem, parsed.data.approvedBy);
       const summary = summarizePolicy(evaluations);
       if (summary.decision === "deny") {
-        const blocked =
-          workItem.status === "pending_policy" || workItem.status === "needs_approval"
-            ? store.blockWorkItem(workItem.id)
-            : workItem;
-        return { decision: summary, workItem: blocked };
+        return { decision: summary, workItem };
       }
 
       for (const evaluation of evaluations.filter((entry) => entry.decision.decision === "require_approval")) {
