@@ -1,11 +1,14 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ControlStackError, createEvent, type AuditEvent } from "@agent-control-stack/shared";
-import { z } from "zod";
+import {
+  ControlStackError,
+  controlPlaneMigrationSql,
+  createEvent,
+  type AuditEvent
+} from "@agent-control-stack/shared";
 import { transitionWorkItem } from "./state-machine.js";
 import {
-  approvalRequestSchema,
   cancelRequestSchema,
   createWorkItem,
   listWorkItemsSchema,
@@ -55,6 +58,7 @@ export interface PolicyDecisionRecord {
   decision: "allow" | "deny" | "require_approval";
   reason: string;
   matchedRules: string[];
+  context: Record<string, unknown>;
   requiredApprover?: "user";
   maxRuntimeMs?: number;
   allowedPaths?: string[];
@@ -64,7 +68,7 @@ export interface ApprovalRecord {
   workItemId: string;
   actionHash: string;
   approvedBy: string;
-  reason?: string;
+  reason: string;
   createdAt?: string;
 }
 
@@ -86,7 +90,7 @@ export interface WorkItemStore {
   approveWorkItem(id: string): WorkItem;
   blockWorkItem(id: string): WorkItem;
   unblockWorkItem(id: string): WorkItem;
-  cancelWorkItem(id: string): WorkItem;
+  cancelWorkItem(id: string, input?: unknown): WorkItem;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): StoredAuditEvent;
   hasApproval(workItemId: string, actionHash: string): boolean;
@@ -110,39 +114,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
-      CREATE TABLE IF NOT EXISTS audit_events (
-        sequence INTEGER PRIMARY KEY AUTOINCREMENT,
-        id TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL,
-        time_unix_nano TEXT NOT NULL,
-        attributes TEXT NOT NULL,
-        body TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS work_items (
-        id TEXT PRIMARY KEY,
-        title TEXT NOT NULL,
-        requester TEXT NOT NULL,
-        status TEXT NOT NULL,
-        intent TEXT NOT NULL,
-        target_json TEXT NOT NULL,
-        requested_actions_json TEXT NOT NULL,
-        risk TEXT NOT NULL,
-        result_json TEXT,
-        worker_id TEXT,
-        started_at TEXT,
-        lease_expires_at TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS approval_records (
-        work_item_id TEXT NOT NULL,
-        action_hash TEXT NOT NULL,
-        approved_by TEXT NOT NULL,
-        reason TEXT,
-        created_at TEXT NOT NULL,
-        PRIMARY KEY (work_item_id, action_hash),
-        FOREIGN KEY (work_item_id) REFERENCES work_items(id)
-      );
+      ${controlPlaneMigrationSql()}
     `);
     this.ensureWorkItemColumn("worker_id", "worker_id TEXT");
     this.ensureWorkItemColumn("started_at", "started_at TEXT");
@@ -211,14 +183,22 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.transition(id, "pending_policy");
   }
 
-  cancelWorkItem(id: string): WorkItem {
-    return this.transition(id, "cancelled");
+  cancelWorkItem(id: string, input: unknown = {}): WorkItem {
+    const parsed = cancelRequestSchema.parse(input);
+    const attributes: Record<string, string> = { "work_item.cancelled_by": parsed.actor };
+    if (parsed.reason) {
+      attributes["work_item.cancel_reason"] = parsed.reason;
+    }
+    return this.transitionWithEvent(id, "cancelled", {
+      eventBody: { actor: parsed.actor, reason: parsed.reason },
+      eventAttributes: attributes
+    });
   }
 
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent {
     return this.write(() => {
       const event = this.appendAuditEvent(
-        createEvent("policy.decision", { ...input }, {
+        createEvent("policy.decided", { ...input }, {
           "work_item.id": input.workItemId,
           "action.hash": input.actionHash,
           "policy.decision": input.decision
@@ -240,10 +220,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
              reason = excluded.reason,
              created_at = excluded.created_at`
         )
-        .run(input.workItemId, input.actionHash, input.approvedBy, input.reason ?? null, createdAt);
+        .run(input.workItemId, input.actionHash, input.approvedBy, input.reason, createdAt);
       const event = this.appendAuditEvent(
         createEvent(
-          "approval.recorded",
+          "approval.granted",
           { ...input, createdAt },
           {
             "work_item.id": input.workItemId,
@@ -371,7 +351,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private transitionWithEvent(
     id: string,
     status: WorkItemStatus,
-    options: { workerId?: string; leaseMs?: number } = {}
+    options: {
+      workerId?: string;
+      leaseMs?: number;
+      eventBody?: Record<string, unknown>;
+      eventAttributes?: Record<string, string>;
+    } = {}
   ): WorkItem {
     return this.write(() => {
       const current = this.getRequired(id);
@@ -399,7 +384,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while transitioning: ${id}`);
       }
-      return { value: updated, events: [this.appendAuditEvent(workItemStatusEvent(updated))] };
+      return {
+        value: updated,
+        events: [this.appendAuditEvent(workItemStatusEvent(updated, options.eventBody, options.eventAttributes))]
+      };
     });
   }
 
@@ -453,32 +441,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.db.exec(`ALTER TABLE work_items ADD COLUMN ${definition}`);
     }
   }
-}
-
-export function createWorkItemTools(store: WorkItemStore) {
-  return {
-    create_work_item(input: unknown): WorkItem {
-      throw new ControlStackError("policy_required", "create_work_item must be wrapped by a policy-aware tool");
-    },
-    get_work_item(input: unknown): WorkItem | undefined {
-      const parsed = z.object({ id: z.string().min(1) }).parse(input);
-      return store.get(parsed.id);
-    },
-    list_work_items(input: unknown = {}): WorkItem[] {
-      return store.list(input);
-    },
-    approve_work_item(input: unknown): WorkItem {
-      const parsed = z.object({ id: z.string().min(1) }).merge(approvalRequestSchema).parse(input);
-      throw new ControlStackError("policy_required", "approve_work_item must be wrapped by a policy-aware tool");
-    },
-    cancel_work_item(input: unknown): WorkItem {
-      const parsed = z.object({ id: z.string().min(1) }).merge(cancelRequestSchema).parse(input);
-      return store.cancelWorkItem(parsed.id);
-    },
-    submit_work_result(input: unknown): WorkItem {
-      throw new ControlStackError("policy_required", "submit_work_result must be wrapped by a policy-aware tool");
-    }
-  };
 }
 
 function rowToWorkItem(row: WorkItemRow): WorkItem {

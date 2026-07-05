@@ -1,20 +1,33 @@
 import type { ServerResponse } from "node:http";
 import { renderDashboard } from "@agent-control-stack/control-ui";
+import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
-  approvalRequestSchema,
-  cancelRequestSchema,
+  createWorkItemSchema,
+  listWorkItemsSchema,
+  requesterSchema,
   SqliteWorkItemStore,
-  type StoredAuditEvent,
-  submitWorkResultSchema
+  type StoredAuditEvent
 } from "@agent-control-stack/work-items";
-import { ZodError } from "zod";
-import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { createGatewayWorkItemTools, workItemToolNames } from "./tools/work-items.js";
+import { z, ZodError } from "zod";
+import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+
+const approvalBodySchema = z.object({
+  reason: z.string().min(1),
+  actionHash: z.string().min(1).optional()
+});
+const cancelBodySchema = z.object({ reason: z.string().min(1).optional() });
+const unblockBodySchema = z.object({}).passthrough();
+
+export interface GatewayAuthOptions {
+  token: string;
+  actor: string;
+}
 
 export interface GatewayOptions {
   dbPath?: string;
   logger?: boolean;
+  auth?: GatewayAuthOptions;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -22,7 +35,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
-  const tools = createGatewayWorkItemTools(workItems);
+  const tools = createWorkItemTools(workItems, createPolicyEngine());
+  const auth = resolveAuth(options);
 
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -45,7 +59,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.get("/work-items", async (request, reply) => {
     try {
-      return { workItems: tools.list_work_items(request.query) };
+      return { workItems: tools.list_work_items(listWorkItemsSchema.parse(request.query)) };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -61,7 +75,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.post("/work-items", async (request, reply) => {
     try {
-      const workItem = tools.create_work_item(request.body);
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) {
+        return;
+      }
+      const workItem = tools.create_work_item(createWorkItemSchema.parse({ ...requestObject(request.body), requester: actor }));
       return reply.code(201).send(workItem);
     } catch (error) {
       return sendError(reply, error);
@@ -69,18 +87,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.post<{ Params: { id: string } }>("/work-items/:id/approve", async (request, reply) => {
-    const approval = approvalRequestSchema.safeParse(request.body);
-    if (!approval.success) {
-      return reply.code(400).send({ error: "invalid approval request" });
-    }
-
-    const workItem = workItems.get(request.params.id);
-    if (!workItem) {
-      return reply.code(404).send({ error: "work item not found" });
-    }
-
     try {
-      const result = tools.approve_work_item({ id: workItem.id, ...approval.data });
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) {
+        return;
+      }
+      const body = approvalBodySchema.parse(requestObject(request.body));
+      const workItem = tools.get_work_item({ id: request.params.id });
+      if (!workItem) {
+        return reply.code(404).send({ error: "work item not found" });
+      }
+      const result = tools.approve_work_item({ ...body, id: request.params.id, approvedBy: actor });
       return reply.code(result.decision.decision === "deny" ? 403 : 200).send(result);
     } catch (error) {
       return sendError(reply, error);
@@ -88,13 +105,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.post<{ Params: { id: string } }>("/work-items/:id/cancel", async (request, reply) => {
-    const cancel = cancelRequestSchema.safeParse(request.body ?? {});
-    if (!cancel.success) {
-      return reply.code(400).send({ error: "invalid cancel request" });
-    }
-
     try {
-      const cancelled = tools.cancel_work_item({ id: request.params.id, ...cancel.data });
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) {
+        return;
+      }
+      const body = cancelBodySchema.parse(requestObject(request.body));
+      const cancelled = tools.cancel_work_item({ ...body, id: request.params.id, actor });
       return { workItem: cancelled };
     } catch (error) {
       return sendError(reply, error);
@@ -103,26 +120,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.post<{ Params: { id: string } }>("/work-items/:id/unblock", async (request, reply) => {
     try {
-      const unblocked = tools.unblock_work_item({ id: request.params.id });
-      return { workItem: unblocked };
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) {
+        return;
+      }
+      unblockBodySchema.parse(requestObject(request.body));
+      const result = tools.unblock_work_item({ actor, id: request.params.id });
+      return reply.code(result.decision.decision === "deny" ? 403 : 200).send(result);
     } catch (error) {
       return sendError(reply, error);
     }
   });
 
   app.post<{ Params: { id: string } }>("/work-items/:id/results", async (request, reply) => {
-    const body = request.body && typeof request.body === "object" ? (request.body as Record<string, unknown>) : {};
-    const parsed = submitWorkResultSchema.safeParse({ ...body, id: request.params.id });
-    if (!parsed.success) {
-      return reply.code(400).send({ error: "invalid result request" });
-    }
-
-    try {
-      const completed = tools.submit_work_result(parsed.data);
-      return { workItem: completed };
-    } catch (error) {
-      return sendError(reply, error);
-    }
+    return reply.code(501).send({ error: "worker result submission requires a lease-bound worker API" });
   });
 
   app.get("/events", (request, reply) => {
@@ -155,6 +166,36 @@ function sendError(reply: FastifyReply, error: unknown) {
     return reply.code(status).send({ error: error.message, code: error.code });
   }
   throw error;
+}
+
+function requestObject(input: unknown): Record<string, unknown> {
+  return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+}
+
+function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
+  if (options.auth) {
+    return options.auth;
+  }
+  const token = process.env.ACS_GATEWAY_TOKEN;
+  const actor = requesterSchema.parse(process.env.ACS_GATEWAY_ACTOR ?? "user");
+  return token ? { token, actor } : undefined;
+}
+
+function requireMutationActor(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  if (!auth) {
+    reply.code(503).send({ error: "mutation auth is not configured" });
+    return undefined;
+  }
+  const authorization = request.headers.authorization;
+  if (authorization !== `Bearer ${auth.token}`) {
+    reply.code(401).send({ error: "unauthorized" });
+    return undefined;
+  }
+  return auth.actor;
 }
 
 export async function startGateway(): Promise<FastifyInstance> {

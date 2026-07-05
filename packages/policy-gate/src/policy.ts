@@ -3,6 +3,8 @@ import { z } from "zod";
 import { actionFingerprint } from "./fingerprint.js";
 import { evaluateRules } from "./rules.js";
 
+export const policyOperationSchema = z.enum(["create", "approve", "unblock", "claim"]);
+
 export const policyDecisionSchema = z.object({
   decision: z.enum(["allow", "deny", "require_approval"]),
   reason: z.string(),
@@ -15,6 +17,9 @@ export const policyDecisionSchema = z.object({
 export const policyContextSchema = z.object({
   workItemId: z.string().min(1),
   actor: z.string().min(1),
+  operation: policyOperationSchema,
+  requester: z.string().min(1),
+  risk: z.enum(["low", "medium", "high", "critical"]),
   action: z.object({
     kind: z.string().min(1),
     description: z.string().min(1),
@@ -30,6 +35,7 @@ export const policyContextSchema = z.object({
 
 export type PolicyDecision = z.infer<typeof policyDecisionSchema>;
 export type PolicyContext = z.infer<typeof policyContextSchema>;
+export type PolicyOperation = z.infer<typeof policyOperationSchema>;
 
 export interface PolicyEvaluation {
   action: ActionRequest;
@@ -38,14 +44,23 @@ export interface PolicyEvaluation {
   decision: PolicyDecision;
 }
 
+export interface PolicyEngine {
+  evaluateWorkItem(workItem: WorkItem, actor: string, operation: PolicyOperation): PolicyEvaluation[];
+  summarize(evaluations: PolicyEvaluation[]): PolicyDecision;
+}
+
 export function evaluatePolicy(input: unknown): PolicyDecision {
   const context = policyContextSchema.parse(input);
   return policyDecisionSchema.parse(evaluateRules(context));
 }
 
-export function evaluateWorkItemPolicy(workItem: WorkItem, actor: string): PolicyEvaluation[] {
+export function evaluateWorkItemPolicy(
+  workItem: WorkItem,
+  actor: string,
+  operation: PolicyOperation = "create"
+): PolicyEvaluation[] {
   return workItem.requestedActions.map((action) => {
-    const context = policyContextFromAction(workItem, action, actor);
+    const context = policyContextFromAction(workItem, action, actor, operation);
     return {
       action,
       actionHash: actionFingerprint(context),
@@ -55,20 +70,21 @@ export function evaluateWorkItemPolicy(workItem: WorkItem, actor: string): Polic
   });
 }
 
-export function policyContextFromAction(workItem: WorkItem, action: ActionRequest, actor: string): PolicyContext {
+export function policyContextFromAction(
+  workItem: WorkItem,
+  action: ActionRequest,
+  actor: string,
+  operation: PolicyOperation
+): PolicyContext {
   const params = action.params;
-  const command = stringArray(params.command);
-  const paths = stringArray(params.paths) ?? workItem.target.files;
   return policyContextSchema.parse({
     workItemId: workItem.id,
     actor,
-    action,
-    cwd: stringValue(params.cwd) ?? workItem.target.cwd,
-    command,
-    paths,
-    network: booleanValue(params.network),
-    write: booleanValue(params.write),
-    destructive: booleanValue(params.destructive)
+    operation,
+    requester: workItem.requester,
+    risk: workItem.risk,
+    action: canonicalAction(action),
+    ...normalizeAction(workItem, action)
   });
 }
 
@@ -91,6 +107,13 @@ export function summarizePolicy(evaluations: PolicyEvaluation[]): PolicyDecision
   };
 }
 
+export function createPolicyEngine(): PolicyEngine {
+  return {
+    evaluateWorkItem: evaluateWorkItemPolicy,
+    summarize: summarizePolicy
+  };
+}
+
 function stringArray(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) {
     return undefined;
@@ -104,4 +127,50 @@ function stringValue(value: unknown): string | undefined {
 
 function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
+}
+
+function normalizeAction(workItem: WorkItem, action: ActionRequest): Partial<PolicyContext> {
+  const params = action.params;
+  const kind = canonicalActionKind(action.kind);
+  const cwd = stringValue(params.cwd) ?? workItem.target.cwd;
+  const paths = stringArray(params.paths) ?? workItem.target.files;
+  const common = {
+    network: booleanValue(params.network),
+    write: booleanValue(params.write),
+    destructive: booleanValue(params.destructive)
+  };
+
+  if (kind === "fs.read") {
+    return { cwd, paths, ...common };
+  }
+  if (kind === "fs.write") {
+    return { cwd, paths, ...common, write: true };
+  }
+  if (kind === "shell") {
+    return {
+      cwd,
+      command: stringArray(params.command),
+      paths,
+      ...common
+    };
+  }
+
+  return { cwd, paths, ...common };
+}
+
+function canonicalAction(action: ActionRequest): ActionRequest {
+  return { ...action, kind: canonicalActionKind(action.kind) };
+}
+
+function canonicalActionKind(kind: string): string {
+  if (kind === "read" || kind === "inspect") {
+    return "fs.read";
+  }
+  if (kind === "edit" || kind === "write") {
+    return "fs.write";
+  }
+  if (kind === "command") {
+    return "shell";
+  }
+  return kind;
 }
