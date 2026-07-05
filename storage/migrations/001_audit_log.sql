@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS work_items (
   worker_id TEXT,
   started_at TEXT,
   lease_expires_at TEXT,
+  lease_token_hash TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );

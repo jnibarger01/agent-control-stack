@@ -1,9 +1,12 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
+
+const auth = { token: "test-token", actor: "user" };
+const authHeaders = { authorization: `Bearer ${auth.token}` };
 
 describe("gateway work-item routes", () => {
   it("returns 400 for malformed list filters", async () => {
@@ -16,20 +19,37 @@ describe("gateway work-item routes", () => {
       expect(response.statusCode).toBe(400);
     } finally {
       await app.close();
-      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires mutation auth", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { title: "Denied", intent: "missing auth", requestedActions: [{ kind: "read", description: "inspect" }] }
+      });
+
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await app.close();
     }
   });
 
   it("requires approval for writes and records exact action approval", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const dbPath = join(dir, "control.db");
-    const app = buildGateway({ dbPath, logger: false });
+    const app = buildGateway({ dbPath, logger: false, auth });
     let appClosed = false;
 
     try {
       const created = await app.inject({
         method: "POST",
         url: "/work-items",
+        headers: authHeaders,
         payload: {
           title: "Write work",
           requester: "user",
@@ -48,7 +68,8 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
-        payload: { approvedBy: "test", reason: "approve exact write" }
+        headers: authHeaders,
+        payload: { reason: "approve exact write" }
       });
 
       expect(approved.statusCode).toBe(200);
@@ -70,18 +91,18 @@ describe("gateway work-item routes", () => {
       if (!appClosed) {
         await app.close();
       }
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
   it("blocks denied work on create", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
 
     try {
       const created = await app.inject({
         method: "POST",
         url: "/work-items",
+        headers: authHeaders,
         payload: {
           title: "Denied work",
           requester: "user",
@@ -95,7 +116,6 @@ describe("gateway work-item routes", () => {
       expect(created.json().status).toBe("blocked");
     } finally {
       await app.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -111,13 +131,14 @@ describe("gateway work-item routes", () => {
       risk: "low"
     });
     setup.close();
-    const app = buildGateway({ dbPath, logger: false });
+    const app = buildGateway({ dbPath, logger: false, auth });
 
     try {
       const denied = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
-        payload: { approvedBy: "test" }
+        headers: authHeaders,
+        payload: { reason: "policy should deny" }
       });
 
       expect(denied.statusCode).toBe(403);
@@ -130,18 +151,18 @@ describe("gateway work-item routes", () => {
       }
     } finally {
       await app.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("unblocks blocked work", async () => {
+  it("re-denies blocked work on unblock", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
 
     try {
       const created = await app.inject({
         method: "POST",
         url: "/work-items",
+        headers: authHeaders,
         payload: {
           title: "Denied work",
           requester: "user",
@@ -153,14 +174,14 @@ describe("gateway work-item routes", () => {
 
       const unblocked = await app.inject({
         method: "POST",
-        url: `/work-items/${created.json().id}/unblock`
+        url: `/work-items/${created.json().id}/unblock`,
+        headers: authHeaders
       });
 
-      expect(unblocked.statusCode).toBe(200);
-      expect(unblocked.json().workItem.status).toBe("pending_policy");
+      expect(unblocked.statusCode).toBe(403);
+      expect(unblocked.json().workItem.status).toBe("blocked");
     } finally {
       await app.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 });

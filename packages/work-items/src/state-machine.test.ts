@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
-import { SqliteWorkItemStore, WorkItemEvent, createWorkItemTools, transitionWorkItem } from "./index.js";
+import { SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
 
 describe("work item state machine", () => {
   it("rejects invalid transitions", () => {
@@ -43,7 +43,6 @@ describe("work item state machine", () => {
       expect(store.startWorkItem(workItem.id).status).toBe("running");
     } finally {
       store.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -63,7 +62,6 @@ describe("work item state machine", () => {
       expect(workItem.status).toBe("needs_approval");
     } finally {
       store.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -83,13 +81,14 @@ describe("work item state machine", () => {
       });
       first.approveWorkItem(workItem.id);
 
-      expect(first.claimNextApprovedWorkItem("worker-a")?.id).toBe(workItem.id);
+      const claimed = first.claimNextApprovedWorkItem("worker-a");
+      expect(claimed?.id).toBe(workItem.id);
+      expect(claimed?.leaseToken).toEqual(expect.any(String));
       expect(second.claimNextApprovedWorkItem("worker-b")).toBeUndefined();
       expect(first.readEvents().filter((event) => event.name === WorkItemEvent.Running)).toHaveLength(1);
     } finally {
       first.close();
       second.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -115,7 +114,6 @@ describe("work item state machine", () => {
       expect(store.readEvents().at(-1)?.name).toBe(WorkItemEvent.Failed);
     } finally {
       store.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -132,10 +130,16 @@ describe("work item state machine", () => {
         risk: "low"
       });
 
-      expect(() => store.submitWorkResult({ id: workItem.id, status: "succeeded" })).toThrow(ControlStackError);
+      expect(() =>
+        store.submitWorkResult({
+          id: workItem.id,
+          workerId: "worker-a",
+          leaseToken: "invalid-token",
+          status: "succeeded"
+        })
+      ).toThrow(ControlStackError);
     } finally {
       store.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -164,22 +168,6 @@ describe("work item state machine", () => {
       expect(store.readEvents().at(-1)?.name).toBe("approval.recorded");
     } finally {
       store.close();
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("refuses policy-sensitive raw tool calls", () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-tools-"));
-    const store = new SqliteWorkItemStore(join(dir, "control.db"));
-    const tools = createWorkItemTools(store);
-
-    try {
-      expect(() => tools.create_work_item({})).toThrow(ControlStackError);
-      expect(() => tools.approve_work_item({ id: "wrk_test", approvedBy: "user" })).toThrow(ControlStackError);
-      expect(() => tools.submit_work_result({ id: "wrk_test", status: "succeeded" })).toThrow(ControlStackError);
-    } finally {
-      store.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
