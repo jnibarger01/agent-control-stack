@@ -5,13 +5,13 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import {
   approvalRequestSchema,
   cancelRequestSchema,
-  createWorkItemTools,
   SqliteWorkItemStore,
   type StoredAuditEvent,
   submitWorkResultSchema
 } from "@agent-control-stack/work-items";
 import { ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import { createGatewayWorkItemTools, workItemToolNames } from "./tools/work-items.js";
 
 export interface GatewayOptions {
   dbPath?: string;
@@ -23,7 +23,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
-  const tools = createWorkItemTools(workItems);
+  const tools = createGatewayWorkItemTools(workItems);
 
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -38,16 +38,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     reply.type("text/html").send(renderDashboard(workItems.list()));
   });
 
-  app.get("/mcp/tools", async () => ({
-    tools: [
-      "create_work_item",
-      "get_work_item",
-      "list_work_items",
-      "approve_work_item",
-      "cancel_work_item",
-      "submit_work_result"
-    ]
-  }));
+  app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
 
   app.get("/work-items", async (request, reply) => {
     try {

@@ -15,11 +15,14 @@
     "build": "tsc -b",
     "test": "vitest run",
     "check": "npm run build && npm test",
+    "dev:gateway": "tsx apps/gateway/src/index.ts",
+    "eval": "tsx packages/eval-harness/src/cli.ts",
     "start:gateway": "node apps/gateway/dist/cli.js",
     "start:worker": "node apps/worker/dist/cli.js"
   },
   "devDependencies": {
     "@types/node": "^24.0.10",
+    "tsx": "^4.23.0",
     "typescript": "^5.8.3",
     "vitest": "^3.2.4"
   }
