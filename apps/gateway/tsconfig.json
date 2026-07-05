@@ -1,0 +1,16 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../apps/control-ui" },
+    { "path": "../../packages/audit-log" },
+    { "path": "../../packages/policy-gate" },
+    { "path": "../../packages/shared" },
+    { "path": "../../packages/work-items" }
+  ]
+}

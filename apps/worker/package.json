@@ -1,0 +1,22 @@
+{
+  "name": "@agent-control-stack/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "bin": {
+    "acs-worker": "./dist/cli.js"
+  },
+  "dependencies": {
+    "@agent-control-stack/audit-log": "0.1.0",
+    "@agent-control-stack/sandbox": "0.1.0",
+    "@agent-control-stack/work-items": "0.1.0"
+  }
+}

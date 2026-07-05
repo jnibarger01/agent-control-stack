@@ -1,0 +1,18 @@
+{
+  "type": "business",
+  "primary_type": "business",
+  "secondary_types": [],
+  "confidence": 0.609,
+  "scan_incomplete": false,
+  "detected_at": "2026-07-05T15:01:30.502Z",
+  "signals": [
+    {
+      "kind": "dir_business",
+      "weight": 0.4,
+      "name": "runbooks"
+    }
+  ],
+  "fallback_reason": null,
+  "file_tree_hash": "d50757ff2bd0ea35",
+  "branch_hash": ""
+}

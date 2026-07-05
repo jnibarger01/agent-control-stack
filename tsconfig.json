@@ -1,0 +1,15 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/shared" },
+    { "path": "packages/audit-log" },
+    { "path": "packages/work-items" },
+    { "path": "packages/policy-gate" },
+    { "path": "packages/temporal-memory" },
+    { "path": "packages/sandbox" },
+    { "path": "packages/eval-harness" },
+    { "path": "apps/control-ui" },
+    { "path": "apps/gateway" },
+    { "path": "apps/worker" }
+  ]
+}
