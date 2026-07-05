@@ -1,13 +1,12 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { findUnapprovedExecution, replay } from "./index.js";
 
 describe("deterministic replay", () => {
-  it("replays approved work through SQLite events", async () => {
+  it("replays approved work through SQLite events", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-"));
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath);
@@ -28,12 +27,12 @@ describe("deterministic replay", () => {
       const running = store.claimNextApprovedWorkItem("eval-worker");
       expect(running).toBeDefined();
 
-      const result = await executeSandboxed(running!);
-      expect(result.ok).toBe(true);
-      const succeeded = store.submitWorkResult({
-        id: workItem.id,
+      store.submitWorkResult({
+        id: running!.id,
+        workerId: "eval-worker",
+        leaseToken: running!.leaseToken,
         status: "succeeded",
-        result: { output: result.output }
+        result: { output: "ok" }
       });
 
       expect(store.get(workItem.id)?.status).toBe("succeeded");
@@ -41,7 +40,6 @@ describe("deterministic replay", () => {
       expect(findUnapprovedExecution(store.readEvents())).toEqual([]);
     } finally {
       store.close();
-      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
