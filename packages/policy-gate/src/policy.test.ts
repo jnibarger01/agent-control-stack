@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createWorkItem } from "@agent-control-stack/work-items";
 import { evaluatePolicy, evaluateWorkItemPolicy } from "./policy.js";
+import { classifyPolicyRisk } from "./rules.js";
 
 const base = {
   workItemId: "wrk_test",
@@ -24,6 +25,21 @@ describe("policy gate", () => {
     expect(evaluatePolicy({ ...base, command: ["git", "status"] }).decision).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "diff"] }).decision).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).decision).toBe("allow");
+  });
+
+  it("classifies policy contexts into the connector risk model", () => {
+    expect(
+      classifyPolicyRisk({
+        ...base,
+        action: { kind: "fs.read", description: "read source", params: {} },
+        paths: ["src/index.ts"]
+      }).risk
+    ).toBe("read_only");
+    expect(classifyPolicyRisk({ ...base, write: true, paths: ["src/index.ts"] }).risk).toBe("requires_approval");
+    expect(classifyPolicyRisk({ ...base, command: ["rm", "-rf", "/"] }).risk).toBe("destructive");
+    expect(
+      classifyPolicyRisk({ ...base, action: { kind: "legacy", description: "unknown", params: {} } }).risk
+    ).toBe("forbidden");
   });
 
   it("denies path escapes, sudo, secrets, destructive commands, and network", () => {

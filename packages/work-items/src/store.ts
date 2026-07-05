@@ -90,6 +90,12 @@ export interface ApprovalGrant {
   event: StoredAuditEvent;
 }
 
+export interface ConsumeApprovalOptions {
+  now?: Date;
+  requestHash?: string;
+  approvalToken?: string;
+}
+
 export interface ClaimOptions {
   leaseMs?: number;
 }
@@ -112,7 +118,7 @@ export interface WorkItemStore {
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
   hasApproval(workItemId: string, actionHash: string): boolean;
-  consumeApproval(workItemId: string, actionHash: string, now?: Date): StoredAuditEvent;
+  consumeApproval(workItemId: string, actionHash: string, options?: Date | ConsumeApprovalOptions): StoredAuditEvent;
   startWorkItem(id: string, workerId?: string, options?: ClaimOptions): ClaimedWorkItem;
   claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
@@ -239,7 +245,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const expiresAt =
         input.expiresAt ?? new Date(Date.parse(createdAt) + (input.expiresInMs ?? 10 * 60 * 1000)).toISOString();
       const reason = input.reason ?? "approved";
-      const requestHash = input.requestHash ?? hashApprovalRequest(input.workItemId, input.actionHash);
+      const requestHash = input.requestHash ?? approvalRequestHash(input.workItemId, input.actionHash);
       const approvalToken = input.approvalToken ?? createApprovalToken();
       const tokenHash = hashApprovalToken(input.workItemId, input.actionHash, approvalToken);
       this.db
@@ -296,18 +302,35 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return Boolean(row);
   }
 
-  consumeApproval(workItemId: string, actionHash: string, now = new Date()): StoredAuditEvent {
+  consumeApproval(
+    workItemId: string,
+    actionHash: string,
+    options: Date | ConsumeApprovalOptions = {}
+  ): StoredAuditEvent {
     return this.write(() => {
+      const parsed = options instanceof Date ? { now: options } : options;
+      const now = parsed.now ?? new Date();
       const consumedAt = now.toISOString();
       const row = this.db
         .prepare(
-          `SELECT request_hash, status, expires_at FROM approval_records
+          `SELECT request_hash, approval_token_hash, status, expires_at FROM approval_records
            WHERE work_item_id = ? AND action_hash = ?`
         )
-        .get(workItemId, actionHash) as unknown as { request_hash: string; status: string; expires_at: string } | undefined;
+        .get(workItemId, actionHash) as unknown as
+        | { request_hash: string; approval_token_hash: string; status: string; expires_at: string }
+        | undefined;
 
       if (!row) {
         throw new ControlStackError("approval_missing", `approval missing for action hash: ${actionHash}`);
+      }
+      if (parsed.requestHash && row.request_hash !== parsed.requestHash) {
+        throw new ControlStackError("approval_request_mismatch", `approval request hash does not match: ${actionHash}`);
+      }
+      if (
+        parsed.approvalToken &&
+        row.approval_token_hash !== hashApprovalToken(workItemId, actionHash, parsed.approvalToken)
+      ) {
+        throw new ControlStackError("approval_token_mismatch", `approval token does not match: ${actionHash}`);
       }
       if (row.status !== "granted") {
         throw new ControlStackError("approval_not_granted", `approval is not granted for action hash: ${actionHash}`);
@@ -629,6 +652,6 @@ function hashApprovalToken(workItemId: string, actionHash: string, approvalToken
   return stableHash({ actionHash, approvalToken, workItemId });
 }
 
-function hashApprovalRequest(workItemId: string, actionHash: string): string {
+export function approvalRequestHash(workItemId: string, actionHash: string): string {
   return stableHash({ actionHash, workItemId });
 }

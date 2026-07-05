@@ -169,7 +169,16 @@ describe("work item state machine", () => {
       expect(store.hasApproval(workItem.id, "other_hash")).toBe(false);
       expect(store.readEvents().at(-1)?.name).toBe("approval.granted");
       expect(store.readEvents().at(-1)?.body).not.toHaveProperty("approvalToken");
-      store.consumeApproval(workItem.id, "hash_test");
+      expect(() => store.consumeApproval(workItem.id, "hash_test", { approvalToken: "wrong" })).toThrow(
+        ControlStackError
+      );
+      expect(() => store.consumeApproval(workItem.id, "hash_test", { requestHash: "wrong" })).toThrow(
+        ControlStackError
+      );
+      store.consumeApproval(workItem.id, "hash_test", {
+        approvalToken: grant.approvalToken,
+        requestHash: grant.requestHash
+      });
       expect(store.hasApproval(workItem.id, "hash_test")).toBe(false);
       expect(() => store.consumeApproval(workItem.id, "hash_test")).toThrow(ControlStackError);
     } finally {

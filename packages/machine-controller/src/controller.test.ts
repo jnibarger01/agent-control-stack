@@ -17,15 +17,21 @@ describe("machine controller", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-machine-"));
     const allowed = join(dir, "allowed");
     const outside = join(dir, "outside");
+    const deniedInside = join(allowed, "denied");
     mkdirSync(allowed);
     mkdirSync(outside);
+    mkdirSync(deniedInside);
     writeFileSync(join(outside, "secret.txt"), "secret");
+    writeFileSync(join(deniedInside, "secret.txt"), "secret");
+    writeFileSync(join(allowed, ".env"), "TOKEN=secret");
     symlinkSync(join(outside, "secret.txt"), join(allowed, "link.txt"));
-    const config = writeConfig(dir, allowed);
+    const config = writeConfig(dir, allowed, [outside, deniedInside]);
 
     try {
       expect(resolveSafePath(config, join(allowed, "."))).toMatchObject({ realPath: allowed });
       expect(() => resolveSafePath(config, join(allowed, "link.txt"))).toThrow(ControlStackError);
+      expect(() => resolveSafePath(config, join(deniedInside, "secret.txt"))).toThrow(ControlStackError);
+      expect(() => resolveSafePath(config, join(allowed, ".env"))).toThrow(ControlStackError);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -48,6 +54,28 @@ describe("machine controller", () => {
       expect(result.text).toContain("[redacted]");
       expect(result.text).not.toContain("sk-abcdefghijklmnopqrstuvwxyz");
       expect(readFileSync(config.audit.logPath, "utf8")).not.toContain("sk-abcdefghijklmnopqrstuvwxyz");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses oversized and binary reads", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-machine-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    writeFileSync(join(allowed, "big.txt"), "x".repeat(20));
+    writeFileSync(join(allowed, "bin.dat"), Buffer.from([0, 1, 2, 3]));
+    const config = writeConfig(dir, allowed);
+    config.security.maxOutputBytes = 4;
+    const controller = new MachineController(config);
+
+    try {
+      await expect(controller.callTool("fs.read", { path: join(allowed, "big.txt") })).rejects.toThrow(
+        ControlStackError
+      );
+      await expect(controller.callTool("fs.read", { path: join(allowed, "bin.dat") })).rejects.toThrow(
+        ControlStackError
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -91,12 +119,12 @@ describe("machine controller", () => {
   });
 });
 
-function writeConfig(dir: string, allowed: string) {
+function writeConfig(dir: string, allowed: string, deny = [join(dir, "outside")]) {
   const configPath = join(dir, "config.json");
   writeFileSync(
     configPath,
     JSON.stringify({
-      paths: { allow: [allowed], deny: [join(dir, "outside")] },
+      paths: { allow: [allowed], deny },
       commands: { allow_readonly: ["git", "npm", "node"], deny: ["rm", "sudo"] },
       audit: { log_path: join(dir, "audit.jsonl") }
     })

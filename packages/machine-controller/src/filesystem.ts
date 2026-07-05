@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import { z } from "zod";
@@ -25,7 +25,7 @@ const searchInputSchema = z.object({
 export function listFiles(config: MachineControllerConfig, input: unknown) {
   const parsed = listInputSchema.parse(input);
   const root = resolveSafePath(config, parsed.path).realPath;
-  const entries = walk(root, parsed.max_depth, 0).map((path) => describePath(path));
+  const entries = walk(config, root, parsed.max_depth, 0).map((path) => describePath(path));
   return { path: root, entries };
 }
 
@@ -66,7 +66,7 @@ export function searchNames(config: MachineControllerConfig, input: unknown) {
   const parsed = searchInputSchema.parse(input);
   const root = resolveSafePath(config, parsed.path).realPath;
   const matches: ReturnType<typeof describePath>[] = [];
-  for (const path of walk(root, parsed.max_depth, 0)) {
+  for (const path of walk(config, root, parsed.max_depth, 0)) {
     if (basename(path).toLowerCase().includes(parsed.query.toLowerCase())) {
       matches.push(describePath(path));
       if (matches.length >= parsed.limit) break;
@@ -75,22 +75,36 @@ export function searchNames(config: MachineControllerConfig, input: unknown) {
   return { path: root, query: parsed.query, matches };
 }
 
-function walk(path: string, maxDepth: number, depth: number): string[] {
-  const stat = statSync(path);
-  if (!stat.isDirectory() || depth > maxDepth) {
+function walk(config: MachineControllerConfig, path: string, maxDepth: number, depth: number): string[] {
+  try {
+    resolveSafePath(config, path);
+  } catch {
+    return [];
+  }
+  const stat = lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isDirectory() || depth > maxDepth) {
     return [path];
   }
   const entries = readdirSync(path, { withFileTypes: true })
     .map((entry) => join(path, entry.name))
     .sort((left, right) => left.localeCompare(right));
   if (depth === maxDepth) {
-    return entries;
+    return entries.filter((entry) => isSafeWalkEntry(config, entry));
   }
-  return entries.flatMap((entry) => walk(entry, maxDepth, depth + 1));
+  return entries.flatMap((entry) => walk(config, entry, maxDepth, depth + 1));
+}
+
+function isSafeWalkEntry(config: MachineControllerConfig, path: string): boolean {
+  try {
+    resolveSafePath(config, path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function describePath(path: string) {
-  const stat = statSync(path);
+  const stat = lstatSync(path);
   return {
     name: basename(path),
     path,

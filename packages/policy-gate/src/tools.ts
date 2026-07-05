@@ -1,6 +1,7 @@
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
   type ApprovalGrant,
+  approvalRequestHash,
   approvalRequestSchema,
   cancelRequestSchema,
   type ClaimedWorkItem,
@@ -149,7 +150,9 @@ export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, inpu
   if (decision.decision !== "deny" && !missing) {
     for (const evaluation of required) {
       try {
-        store.consumeApproval(running.id, evaluation.actionHash);
+        store.consumeApproval(running.id, evaluation.actionHash, {
+          requestHash: approvalRequestHash(running.id, evaluation.actionHash)
+        });
       } catch (error) {
         approvalFailure = error;
         break;

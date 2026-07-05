@@ -10,13 +10,16 @@ describe("MCP stdio server", () => {
   it("serves tool discovery and read-only calls over content-length framing", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
     const allowed = join(dir, "allowed");
+    const denied = join(allowed, "denied");
     mkdirSync(allowed);
+    mkdirSync(denied);
     writeFileSync(join(allowed, "package.json"), "{}\n");
+    writeFileSync(join(denied, "secret.txt"), "nope\n");
     const configPath = join(dir, "config.json");
     writeFileSync(
       configPath,
       JSON.stringify({
-        paths: { allow: [allowed], deny: [] },
+        paths: { allow: [allowed], deny: [denied] },
         commands: { allow_readonly: ["node", "git"], deny: ["rm", "sudo"] },
         audit: { log_path: join(dir, "audit.jsonl") }
       })
@@ -32,9 +35,30 @@ describe("MCP stdio server", () => {
       const tools = await request(input, output, { jsonrpc: "2.0", id: 2, method: "tools/list" });
       expect(tools.result.tools.map((tool: { name: string }) => tool.name)).toContain("fs.read");
 
-      const read = await request(input, output, {
+      const status = await request(input, output, {
         jsonrpc: "2.0",
         id: 3,
+        method: "tools/call",
+        params: { name: "system.status", arguments: {} }
+      });
+      expect(status.result.structuredContent.server.transport).toBe("stdio");
+
+      const listed = await request(input, output, {
+        jsonrpc: "2.0",
+        id: 4,
+        method: "tools/call",
+        params: { name: "fs.list", arguments: { path: allowed } }
+      });
+      expect(listed.result.structuredContent.entries.map((entry: { name: string }) => entry.name)).toContain(
+        "package.json"
+      );
+      expect(listed.result.structuredContent.entries.map((entry: { name: string }) => entry.name)).not.toContain(
+        "secret.txt"
+      );
+
+      const read = await request(input, output, {
+        jsonrpc: "2.0",
+        id: 5,
         method: "tools/call",
         params: { name: "fs.read", arguments: { path: join(allowed, "package.json") } }
       });
@@ -42,11 +66,27 @@ describe("MCP stdio server", () => {
 
       const preview = await request(input, output, {
         jsonrpc: "2.0",
-        id: 4,
+        id: 6,
         method: "tools/call",
         params: { name: "cmd.preview", arguments: { cwd: allowed, command: "rm", args: ["-rf", "/"] } }
       });
       expect(preview.result.structuredContent.risk).toBe("forbidden");
+
+      const refusedRun = await request(input, output, {
+        jsonrpc: "2.0",
+        id: 7,
+        method: "tools/call",
+        params: { name: "cmd.run", arguments: { cwd: allowed, command: "rm", args: ["-rf", "/"] } }
+      });
+      expect(refusedRun.error.message).toContain("command refused");
+
+      const deniedPath = await request(input, output, {
+        jsonrpc: "2.0",
+        id: 8,
+        method: "tools/call",
+        params: { name: "fs.read", arguments: { path: join(denied, "secret.txt") } }
+      });
+      expect(deniedPath.error.message).toContain("denied by config");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -72,7 +112,9 @@ async function readFrame(output: PassThrough): Promise<any> {
       const end = start + Number(match[1]);
       if (buffer.length < end) return;
       output.off("data", onData);
-      resolve(JSON.parse(buffer.subarray(start, end).toString("utf8")));
+      const body = buffer.subarray(start, end).toString("utf8");
+      buffer = buffer.subarray(end);
+      resolve(JSON.parse(body));
     });
   });
 }
