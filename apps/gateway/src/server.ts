@@ -29,6 +29,7 @@ export interface GatewayOptions {
   dbPath?: string;
   logger?: boolean;
   auth?: GatewayAuthOptions;
+  mcpAllowedOrigins?: string[];
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -38,6 +39,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const auth = resolveAuth(options);
+  const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
 
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -50,6 +52,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   }
 
+  app.setErrorHandler((error, request, reply) => {
+    if (request.url.split("?")[0] === "/mcp" && request.method === "POST" && isJsonParseError(error)) {
+      return reply.code(400).send(jsonRpcError(null, -32700, "parse error"));
+    }
+    return reply.send(error);
+  });
+
   app.get("/health", async () => ({ ok: true }));
 
   app.get("/", async (_request, reply) => {
@@ -58,7 +67,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
 
+  app.get("/mcp", async (_request, reply) => {
+    return reply.header("allow", "POST").code(405).send(jsonRpcError(null, -32000, "method not allowed"));
+  });
+
   app.post("/mcp", async (request, reply) => {
+    if (!isAllowedMcpOrigin(request.headers.origin, mcpAllowedOrigins)) {
+      return reply.code(403).send(jsonRpcError(null, -32002, "forbidden origin"));
+    }
     const result = handleMcpHttpRequest({
       body: request.body,
       headers: request.headers,
@@ -190,6 +206,36 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   const token = process.env.ACS_GATEWAY_TOKEN;
   const actor = requesterSchema.parse(process.env.ACS_GATEWAY_ACTOR ?? "user");
   return token ? { token, actor } : undefined;
+}
+
+function resolveMcpAllowedOrigins(options: GatewayOptions): string[] {
+  if (options.mcpAllowedOrigins) {
+    return options.mcpAllowedOrigins;
+  }
+  return (process.env.ACS_MCP_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function isAllowedMcpOrigin(origin: string | undefined, allowedOrigins: string[]): boolean {
+  if (!origin || allowedOrigins.length === 0) {
+    return true;
+  }
+  return allowedOrigins.includes(origin);
+}
+
+function isJsonParseError(error: unknown): boolean {
+  const candidate = error as { code?: string; statusCode?: number };
+  return candidate.code === "FST_ERR_CTP_INVALID_JSON_BODY" || candidate.statusCode === 400;
+}
+
+function jsonRpcError(id: string | number | null, code: number, message: string) {
+  return {
+    jsonrpc: "2.0" as const,
+    id,
+    error: { code, message }
+  };
 }
 
 function requireMutationActor(
