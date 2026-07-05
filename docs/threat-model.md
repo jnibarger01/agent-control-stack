@@ -23,3 +23,5 @@
 ## Deferred Hardening
 
 Layer 2 must bind approvals to authenticated approvers and result submission to worker identity. Real plugin or command execution also needs process isolation before enablement: firejail, nsjail, bubblewrap, Docker, or equivalent. Add that behind `packages/sandbox` instead of teaching callers about the runtime.
+
+Layer 2 should also move risk-based approval routing into `packages/policy-gate`, add lease renewal before live long-running execution, and add a true cross-process claim contention check.
