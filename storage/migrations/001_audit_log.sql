@@ -28,9 +28,14 @@ CREATE TABLE IF NOT EXISTS work_items (
 CREATE TABLE IF NOT EXISTS approval_records (
   work_item_id TEXT NOT NULL,
   action_hash TEXT NOT NULL,
+  request_hash TEXT NOT NULL DEFAULT '',
+  approval_token_hash TEXT NOT NULL DEFAULT '',
   approved_by TEXT NOT NULL,
   reason TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'granted',
   created_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z',
+  consumed_at TEXT,
   PRIMARY KEY (work_item_id, action_hash),
   FOREIGN KEY (work_item_id) REFERENCES work_items(id)
 );

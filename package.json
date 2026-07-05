@@ -17,6 +17,7 @@
     "check": "npm run build && npm test",
     "dev:gateway": "tsx apps/gateway/src/index.ts",
     "eval": "tsx packages/eval-harness/src/cli.ts",
+    "start:mcp": "node apps/mcp/dist/cli.js",
     "start:gateway": "node apps/gateway/dist/cli.js",
     "start:worker": "node apps/worker/dist/cli.js"
   },

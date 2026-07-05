@@ -156,16 +156,53 @@ describe("work item state machine", () => {
         risk: "low"
       });
 
-      store.recordApproval({
+      const grant = store.recordApproval({
         workItemId: workItem.id,
         actionHash: "hash_test",
         approvedBy: "user",
         reason: "exact action"
       });
 
+      expect(grant.approvalToken).toEqual(expect.any(String));
+      expect(grant.requestHash).toEqual(expect.any(String));
       expect(store.hasApproval(workItem.id, "hash_test")).toBe(true);
       expect(store.hasApproval(workItem.id, "other_hash")).toBe(false);
       expect(store.readEvents().at(-1)?.name).toBe("approval.granted");
+      expect(store.readEvents().at(-1)?.body).not.toHaveProperty("approvalToken");
+      store.consumeApproval(workItem.id, "hash_test");
+      expect(store.hasApproval(workItem.id, "hash_test")).toBe(false);
+      expect(() => store.consumeApproval(workItem.id, "hash_test")).toThrow(ControlStackError);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects expired approval records", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-approval-expired-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Expired approval item",
+        requester: "user",
+        intent: "verify approval expiry",
+        requestedActions: [{ kind: "edit", description: "write", params: { write: true } }],
+        risk: "low"
+      });
+
+      store.recordApproval({
+        workItemId: workItem.id,
+        actionHash: "hash_test",
+        approvedBy: "user",
+        reason: "expired",
+        createdAt: "2026-07-05T00:00:00.000Z",
+        expiresAt: "2026-07-05T00:00:01.000Z"
+      });
+
+      expect(store.hasApproval(workItem.id, "hash_test")).toBe(false);
+      expect(() => store.consumeApproval(workItem.id, "hash_test", new Date("2026-07-05T00:00:02.000Z"))).toThrow(
+        ControlStackError
+      );
     } finally {
       store.close();
     }

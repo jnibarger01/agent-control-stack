@@ -1,0 +1,44 @@
+server:
+  name: personal-machine-controller
+  transport: stdio
+
+security:
+  default_policy: deny
+  require_approval_for_mutations: true
+  redact_secrets: true
+  max_output_bytes: 200000
+  command_timeout_ms: 120000
+
+paths:
+  allow:
+    - /home/jacen/projects
+    - /home/jacen/agent-control-stack
+  deny:
+    - /home/jacen/.ssh
+    - /home/jacen/.gnupg
+    - /home/jacen/.config
+    - /etc
+    - /var
+
+commands:
+  allow_readonly:
+    - git
+    - npm
+    - node
+    - pnpm
+    - bun
+    - python3
+    - docker
+    - df
+    - free
+  deny:
+    - rm
+    - shred
+    - mkfs
+    - dd
+    - chmod
+    - chown
+    - sudo
+
+audit:
+  log_path: .acs/audit/mcp.jsonl

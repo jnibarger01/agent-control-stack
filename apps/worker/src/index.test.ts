@@ -99,6 +99,7 @@ describe("worker policy gate", () => {
         expect(result.executed).toBe(true);
         expect(check.get(workItem.id)?.status).toBe("succeeded");
         expect(events).toContain("approval.granted");
+        expect(events).toContain("approval.consumed");
         expect(events).toContain("work_item.succeeded");
       } finally {
         check.close();

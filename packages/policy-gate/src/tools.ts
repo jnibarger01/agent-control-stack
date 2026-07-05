@@ -1,5 +1,6 @@
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
+  type ApprovalGrant,
   approvalRequestSchema,
   cancelRequestSchema,
   type ClaimedWorkItem,
@@ -75,7 +76,7 @@ export function gateApproval(
   store: WorkItemStore,
   policy: PolicyEngine,
   input: unknown
-): { decision: PolicyDecision; workItem: WorkItem } {
+): { decision: PolicyDecision; workItem: WorkItem; approvals: ApprovalGrant[] } {
   const parsed = approvalInputSchema.parse(input);
   const workItem = store.get(parsed.id);
   if (!workItem) {
@@ -84,7 +85,7 @@ export function gateApproval(
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, workItem, parsed.approvedBy, "approve");
   if (decision.decision === "deny") {
-    return { decision, workItem };
+    return { decision, workItem, approvals: [] };
   }
 
   const required = approvalRequired(evaluations);
@@ -92,6 +93,7 @@ export function gateApproval(
   const requestedHashes = new Set(evaluations.map((evaluation) => evaluation.actionHash));
   const hashes = parsed.actionHash ? [parsed.actionHash] : [...requiredHashes];
 
+  const approvals: ApprovalGrant[] = [];
   for (const actionHash of hashes) {
     if (!requestedHashes.has(actionHash)) {
       throw new ControlStackError("approval_action_mismatch", `approval action hash does not match work item: ${actionHash}`);
@@ -99,15 +101,15 @@ export function gateApproval(
     if (!requiredHashes.has(actionHash)) {
       throw new ControlStackError("approval_not_required", `approval is not required for action hash: ${actionHash}`);
     }
-    store.recordApproval({
+    approvals.push(store.recordApproval({
       workItemId: workItem.id,
       actionHash,
       approvedBy: parsed.approvedBy,
       reason: parsed.reason
-    });
+    }));
   }
 
-  return { decision, workItem: workItem.status === "approved" ? workItem : store.approveWorkItem(workItem.id) };
+  return { decision, workItem: workItem.status === "approved" ? workItem : store.approveWorkItem(workItem.id), approvals };
 }
 
 export function gateUnblock(
@@ -141,14 +143,26 @@ export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, inpu
   }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, running, parsed.workerId, "claim");
-  const missing = approvalRequired(evaluations).find((evaluation) => !store.hasApproval(running.id, evaluation.actionHash));
-  if (decision.decision === "deny" || missing) {
+  const required = approvalRequired(evaluations);
+  const missing = required.find((evaluation) => !store.hasApproval(running.id, evaluation.actionHash));
+  let approvalFailure: unknown;
+  if (decision.decision !== "deny" && !missing) {
+    for (const evaluation of required) {
+      try {
+        store.consumeApproval(running.id, evaluation.actionHash);
+      } catch (error) {
+        approvalFailure = error;
+        break;
+      }
+    }
+  }
+  if (decision.decision === "deny" || missing || approvalFailure) {
     const blocked = store.submitWorkResult({
       id: running.id,
       workerId: parsed.workerId,
       leaseToken: running.leaseToken,
       status: "blocked",
-      result: { error: missing ? "approval missing for action hash" : decision.reason }
+      result: { error: missing ? "approval missing for action hash" : approvalFailure ? errorMessage(approvalFailure) : decision.reason }
     });
     return { ...blocked, leaseToken: running.leaseToken };
   }
@@ -170,7 +184,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
     list_work_items(input: unknown = {}): WorkItem[] {
       return store.list(input);
     },
-    approve_work_item(input: unknown): { decision: PolicyDecision; workItem: WorkItem } {
+    approve_work_item(input: unknown): { decision: PolicyDecision; workItem: WorkItem; approvals: ApprovalGrant[] } {
       return gateApproval(store, policy, input);
     },
     unblock_work_item(input: unknown): { decision: PolicyDecision; workItem: WorkItem } {
@@ -187,6 +201,10 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.submitWorkResult(input);
     }
   };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "approval validation failed";
 }
 
 function approvalRequired(evaluations: PolicyEvaluation[]): PolicyEvaluation[] {

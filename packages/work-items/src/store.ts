@@ -74,6 +74,20 @@ export interface ApprovalRecord {
   approvedBy: string;
   reason?: string;
   createdAt?: string;
+  expiresAt?: string;
+  expiresInMs?: number;
+  approvalToken?: string;
+  requestHash?: string;
+}
+
+export interface ApprovalGrant {
+  workItemId: string;
+  actionHash: string;
+  requestHash: string;
+  approvalToken: string;
+  expiresAt: string;
+  status: "granted";
+  event: StoredAuditEvent;
 }
 
 export interface ClaimOptions {
@@ -96,8 +110,9 @@ export interface WorkItemStore {
   unblockWorkItem(id: string): WorkItem;
   cancelWorkItem(id: string, input?: unknown): WorkItem;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
-  recordApproval(input: ApprovalRecord): StoredAuditEvent;
+  recordApproval(input: ApprovalRecord): ApprovalGrant;
   hasApproval(workItemId: string, actionHash: string): boolean;
+  consumeApproval(workItemId: string, actionHash: string, now?: Date): StoredAuditEvent;
   startWorkItem(id: string, workerId?: string, options?: ClaimOptions): ClaimedWorkItem;
   claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
@@ -124,6 +139,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.ensureWorkItemColumn("started_at", "started_at TEXT");
     this.ensureWorkItemColumn("lease_expires_at", "lease_expires_at TEXT");
     this.ensureWorkItemColumn("lease_token_hash", "lease_token_hash TEXT");
+    this.ensureApprovalColumn("request_hash", "request_hash TEXT NOT NULL DEFAULT ''");
+    this.ensureApprovalColumn("approval_token_hash", "approval_token_hash TEXT NOT NULL DEFAULT ''");
+    this.ensureApprovalColumn("status", "status TEXT NOT NULL DEFAULT 'granted'");
+    this.ensureApprovalColumn("expires_at", "expires_at TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'");
+    this.ensureApprovalColumn("consumed_at", "consumed_at TEXT");
   }
 
   create(input: unknown): WorkItem {
@@ -213,40 +233,113 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-  recordApproval(input: ApprovalRecord): StoredAuditEvent {
+  recordApproval(input: ApprovalRecord): ApprovalGrant {
     return this.write(() => {
       const createdAt = input.createdAt ?? new Date().toISOString();
+      const expiresAt =
+        input.expiresAt ?? new Date(Date.parse(createdAt) + (input.expiresInMs ?? 10 * 60 * 1000)).toISOString();
       const reason = input.reason ?? "approved";
+      const requestHash = input.requestHash ?? hashApprovalRequest(input.workItemId, input.actionHash);
+      const approvalToken = input.approvalToken ?? createApprovalToken();
+      const tokenHash = hashApprovalToken(input.workItemId, input.actionHash, approvalToken);
       this.db
         .prepare(
-          `INSERT INTO approval_records (work_item_id, action_hash, approved_by, reason, created_at)
-           VALUES (?, ?, ?, ?, ?)
+          `INSERT INTO approval_records
+           (work_item_id, action_hash, request_hash, approval_token_hash, approved_by, reason, status, created_at, expires_at, consumed_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'granted', ?, ?, NULL)
            ON CONFLICT(work_item_id, action_hash) DO UPDATE SET
+             request_hash = excluded.request_hash,
+             approval_token_hash = excluded.approval_token_hash,
              approved_by = excluded.approved_by,
              reason = excluded.reason,
-             created_at = excluded.created_at`
+             status = 'granted',
+             created_at = excluded.created_at,
+             expires_at = excluded.expires_at,
+             consumed_at = NULL`
         )
-        .run(input.workItemId, input.actionHash, input.approvedBy, reason, createdAt);
+        .run(input.workItemId, input.actionHash, requestHash, tokenHash, input.approvedBy, reason, createdAt, expiresAt);
+      const { approvalToken: _approvalToken, ...auditInput } = input;
       const event = this.appendAuditEvent(
         createEvent(
           "approval.granted",
-          { ...input, reason, createdAt },
+          { ...auditInput, reason, createdAt, expiresAt, requestHash, status: "granted" },
           {
             "work_item.id": input.workItemId,
             "action.hash": input.actionHash,
+            "approval.request_hash": requestHash,
             "approval.approved_by": input.approvedBy
           }
         )
       );
-      return { value: event, events: [event] };
+      return {
+        value: {
+          workItemId: input.workItemId,
+          actionHash: input.actionHash,
+          requestHash,
+          approvalToken,
+          expiresAt,
+          status: "granted",
+          event
+        },
+        events: [event]
+      };
     });
   }
 
   hasApproval(workItemId: string, actionHash: string): boolean {
     const row = this.db
-      .prepare(`SELECT 1 FROM approval_records WHERE work_item_id = ? AND action_hash = ?`)
-      .get(workItemId, actionHash);
+      .prepare(
+        `SELECT 1 FROM approval_records
+         WHERE work_item_id = ? AND action_hash = ? AND status = 'granted' AND expires_at > ?`
+      )
+      .get(workItemId, actionHash, new Date().toISOString());
     return Boolean(row);
+  }
+
+  consumeApproval(workItemId: string, actionHash: string, now = new Date()): StoredAuditEvent {
+    return this.write(() => {
+      const consumedAt = now.toISOString();
+      const row = this.db
+        .prepare(
+          `SELECT request_hash, status, expires_at FROM approval_records
+           WHERE work_item_id = ? AND action_hash = ?`
+        )
+        .get(workItemId, actionHash) as unknown as { request_hash: string; status: string; expires_at: string } | undefined;
+
+      if (!row) {
+        throw new ControlStackError("approval_missing", `approval missing for action hash: ${actionHash}`);
+      }
+      if (row.status !== "granted") {
+        throw new ControlStackError("approval_not_granted", `approval is not granted for action hash: ${actionHash}`);
+      }
+      if (row.expires_at <= consumedAt) {
+        throw new ControlStackError("approval_expired", `approval expired for action hash: ${actionHash}`);
+      }
+
+      const result = this.db
+        .prepare(
+          `UPDATE approval_records
+           SET status = 'consumed', consumed_at = ?
+           WHERE work_item_id = ? AND action_hash = ? AND status = 'granted'`
+        )
+        .run(consumedAt, workItemId, actionHash);
+      if (result.changes !== 1) {
+        throw new ControlStackError("approval_conflict", `approval changed while consuming: ${actionHash}`);
+      }
+
+      const event = this.appendAuditEvent(
+        createEvent(
+          "approval.consumed",
+          { workItemId, actionHash, requestHash: row.request_hash, consumedAt, status: "consumed" },
+          {
+            "work_item.id": workItemId,
+            "action.hash": actionHash,
+            "approval.request_hash": row.request_hash
+          }
+        )
+      );
+      return { value: event, events: [event] };
+    });
   }
 
   startWorkItem(id: string, workerId = "local-worker", options: ClaimOptions = {}): ClaimedWorkItem {
@@ -485,6 +578,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.db.exec(`ALTER TABLE work_items ADD COLUMN ${definition}`);
     }
   }
+
+  private ensureApprovalColumn(name: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(approval_records)`).all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === name)) {
+      this.db.exec(`ALTER TABLE approval_records ADD COLUMN ${definition}`);
+    }
+  }
 }
 
 function rowToWorkItem(row: WorkItemRow): WorkItem {
@@ -517,6 +617,18 @@ function createLeaseToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
+function createApprovalToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
 function hashLeaseToken(workItemId: string, workerId: string, leaseToken: string): string {
   return stableHash({ leaseToken, workItemId, workerId });
+}
+
+function hashApprovalToken(workItemId: string, actionHash: string, approvalToken: string): string {
+  return stableHash({ actionHash, approvalToken, workItemId });
+}
+
+function hashApprovalRequest(workItemId: string, actionHash: string): string {
+  return stableHash({ actionHash, workItemId });
 }
