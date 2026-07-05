@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -5,6 +6,7 @@ import {
   ControlStackError,
   controlPlaneMigrationSql,
   createEvent,
+  stableHash,
   type AuditEvent
 } from "@agent-control-stack/shared";
 import { transitionWorkItem } from "./state-machine.js";
@@ -16,6 +18,7 @@ import {
   workItemCreatedEvent,
   workItemSchema,
   workItemStatusEvent,
+  type ClaimedWorkItem,
   type Requester,
   type WorkItem,
   type WorkItemRisk,
@@ -35,6 +38,7 @@ interface WorkItemRow {
   worker_id: string | null;
   started_at: string | null;
   lease_expires_at: string | null;
+  lease_token_hash: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -68,7 +72,7 @@ export interface ApprovalRecord {
   workItemId: string;
   actionHash: string;
   approvedBy: string;
-  reason: string;
+  reason?: string;
   createdAt?: string;
 }
 
@@ -94,8 +98,8 @@ export interface WorkItemStore {
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): StoredAuditEvent;
   hasApproval(workItemId: string, actionHash: string): boolean;
-  startWorkItem(id: string, workerId?: string, options?: ClaimOptions): WorkItem;
-  claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): WorkItem | undefined;
+  startWorkItem(id: string, workerId?: string, options?: ClaimOptions): ClaimedWorkItem;
+  claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
   submitWorkResult(input: unknown): WorkItem;
 }
@@ -119,6 +123,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.ensureWorkItemColumn("worker_id", "worker_id TEXT");
     this.ensureWorkItemColumn("started_at", "started_at TEXT");
     this.ensureWorkItemColumn("lease_expires_at", "lease_expires_at TEXT");
+    this.ensureWorkItemColumn("lease_token_hash", "lease_token_hash TEXT");
   }
 
   create(input: unknown): WorkItem {
@@ -211,6 +216,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   recordApproval(input: ApprovalRecord): StoredAuditEvent {
     return this.write(() => {
       const createdAt = input.createdAt ?? new Date().toISOString();
+      const reason = input.reason ?? "approved";
       this.db
         .prepare(
           `INSERT INTO approval_records (work_item_id, action_hash, approved_by, reason, created_at)
@@ -220,11 +226,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
              reason = excluded.reason,
              created_at = excluded.created_at`
         )
-        .run(input.workItemId, input.actionHash, input.approvedBy, input.reason, createdAt);
+        .run(input.workItemId, input.actionHash, input.approvedBy, reason, createdAt);
       const event = this.appendAuditEvent(
         createEvent(
-          "approval.granted",
-          { ...input, createdAt },
+          "approval.recorded",
+          { ...input, reason, createdAt },
           {
             "work_item.id": input.workItemId,
             "action.hash": input.actionHash,
@@ -243,14 +249,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return Boolean(row);
   }
 
-  startWorkItem(id: string, workerId = "local-worker", options: ClaimOptions = {}): WorkItem {
-    return this.transitionWithEvent(id, "running", {
+  startWorkItem(id: string, workerId = "local-worker", options: ClaimOptions = {}): ClaimedWorkItem {
+    const leaseToken = createLeaseToken();
+    const workItem = this.transitionWithEvent(id, "running", {
       leaseMs: options.leaseMs,
+      leaseToken,
       workerId
     });
+    return { ...workItem, leaseToken };
   }
 
-  claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): WorkItem | undefined {
+  claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
     return this.write(() => {
       const row = this.db
         .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
@@ -263,18 +272,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const updated = transitionWorkItem(current, "running");
       const startedAt = updated.updatedAt;
       const leaseExpiresAt = new Date(Date.parse(startedAt) + (options.leaseMs ?? this.leaseMs)).toISOString();
+      const leaseToken = createLeaseToken();
+      const leaseHash = hashLeaseToken(updated.id, workerId, leaseToken);
       const result = this.db
         .prepare(
           `UPDATE work_items
-           SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?
+           SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, lease_token_hash = ?
            WHERE id = ? AND status = 'approved'`
         )
-        .run(updated.status, updated.updatedAt, workerId, startedAt, leaseExpiresAt, updated.id);
+        .run(updated.status, updated.updatedAt, workerId, startedAt, leaseExpiresAt, leaseHash, updated.id);
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while claiming: ${updated.id}`);
       }
 
-      return { value: updated, events: [this.appendAuditEvent(workItemStatusEvent(updated))] };
+      return { value: { ...updated, leaseToken }, events: [this.appendAuditEvent(workItemStatusEvent(updated))] };
     });
   }
 
@@ -297,7 +308,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         const result = this.db
           .prepare(
             `UPDATE work_items
-             SET status = ?, updated_at = ?, result_json = ?, lease_expires_at = NULL
+             SET status = ?, updated_at = ?, result_json = ?, lease_expires_at = NULL, lease_token_hash = NULL
              WHERE id = ? AND status = 'running' AND lease_expires_at = ?`
           )
           .run(
@@ -320,15 +331,32 @@ export class SqliteWorkItemStore implements WorkItemStore {
   submitWorkResult(input: unknown): WorkItem {
     const parsed = submitWorkResultSchema.parse(input);
     return this.write(() => {
-      const current = this.getRequired(parsed.id);
+      const row = this.getRowRequired(parsed.id);
+      const current = rowToWorkItem(row);
       const updated = transitionWorkItem(current, parsed.status);
+      const expectedLeaseHash = hashLeaseToken(parsed.id, parsed.workerId, parsed.leaseToken);
+
+      if (row.worker_id !== parsed.workerId || row.lease_token_hash !== expectedLeaseHash) {
+        throw new ControlStackError("worker_lease_mismatch", `worker lease does not match work item: ${parsed.id}`);
+      }
+      if (row.lease_expires_at && Date.parse(row.lease_expires_at) < Date.now()) {
+        throw new ControlStackError("worker_lease_expired", `worker lease expired for work item: ${parsed.id}`);
+      }
+
       const result = this.db
         .prepare(
           `UPDATE work_items
-           SET status = ?, updated_at = ?, result_json = ?, lease_expires_at = NULL
-           WHERE id = ? AND status = ?`
+           SET status = ?, updated_at = ?, result_json = ?, lease_expires_at = NULL, lease_token_hash = NULL
+           WHERE id = ? AND status = 'running' AND worker_id = ? AND lease_token_hash = ?`
         )
-        .run(updated.status, updated.updatedAt, JSON.stringify(parsed.result), parsed.id, current.status);
+        .run(
+          updated.status,
+          updated.updatedAt,
+          JSON.stringify(parsed.result),
+          parsed.id,
+          parsed.workerId,
+          expectedLeaseHash
+        );
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while submitting result: ${parsed.id}`);
       }
@@ -348,12 +376,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return workItem;
   }
 
+  private getRowRequired(id: string): WorkItemRow {
+    const row = this.db.prepare(`SELECT * FROM work_items WHERE id = ?`).get(id) as unknown as WorkItemRow | undefined;
+    if (!row) {
+      throw new ControlStackError("work_item_not_found", `work item not found: ${id}`);
+    }
+    return row;
+  }
+
   private transitionWithEvent(
     id: string,
     status: WorkItemStatus,
     options: {
       workerId?: string;
       leaseMs?: number;
+      leaseToken?: string;
       eventBody?: Record<string, unknown>;
       eventAttributes?: Record<string, string>;
     } = {}
@@ -366,7 +403,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           ? this.db
               .prepare(
                 `UPDATE work_items
-                 SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?
+                 SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, lease_token_hash = ?
                  WHERE id = ? AND status = ?`
               )
               .run(
@@ -375,11 +412,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
                 options.workerId ?? "local-worker",
                 updated.updatedAt,
                 new Date(Date.parse(updated.updatedAt) + (options.leaseMs ?? this.leaseMs)).toISOString(),
+                hashLeaseToken(id, options.workerId ?? "local-worker", options.leaseToken ?? ""),
                 id,
                 current.status
               )
           : this.db
-              .prepare(`UPDATE work_items SET status = ?, updated_at = ? WHERE id = ? AND status = ?`)
+              .prepare(
+                `UPDATE work_items
+                 SET status = ?, updated_at = ?,
+                     lease_expires_at = CASE WHEN status = 'running' THEN NULL ELSE lease_expires_at END,
+                     lease_token_hash = CASE WHEN status = 'running' THEN NULL ELSE lease_token_hash END
+                 WHERE id = ? AND status = ?`
+              )
               .run(updated.status, updated.updatedAt, id, current.status);
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while transitioning: ${id}`);
@@ -467,4 +511,12 @@ function rowToEvent(row: EventRow): StoredAuditEvent {
     attributes: JSON.parse(row.attributes) as StoredAuditEvent["attributes"],
     body: JSON.parse(row.body) as StoredAuditEvent["body"]
   };
+}
+
+function createLeaseToken(): string {
+  return randomBytes(32).toString("base64url");
+}
+
+function hashLeaseToken(workItemId: string, workerId: string, leaseToken: string): string {
+  return stableHash({ leaseToken, workItemId, workerId });
 }
