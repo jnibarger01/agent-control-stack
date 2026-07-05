@@ -22,6 +22,6 @@ SQLite is the local durability layer. `work_items` holds the current control-pla
 
 Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. Execution only starts by transitioning an approved work item to `running`.
 
-Policy decisions are recorded as audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated.
+Policy decisions are recorded as `policy.decided` audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated and records who approved it and why.
 
-Workers claim approved rows with a status compare-and-swap and a short lease. Worker startup marks expired running leases as failed before claiming new work, then re-checks policy and action-hash approvals before sandbox execution.
+Workers claim approved rows through the work-item tool seam with a status compare-and-swap and a short lease. Worker startup marks expired running leases as failed before claiming new work, then the claim tool re-checks policy and action-hash approvals before sandbox execution.

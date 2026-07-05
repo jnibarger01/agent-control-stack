@@ -18,9 +18,9 @@ CREATE TABLE IF NOT EXISTS work_items (
   risk TEXT NOT NULL,
   result_json TEXT,
   worker_id TEXT,
+  lease_token_hash TEXT,
   started_at TEXT,
   lease_expires_at TEXT,
-  lease_token_hash TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -29,7 +29,7 @@ CREATE TABLE IF NOT EXISTS approval_records (
   work_item_id TEXT NOT NULL,
   action_hash TEXT NOT NULL,
   approved_by TEXT NOT NULL,
-  reason TEXT,
+  reason TEXT NOT NULL,
   created_at TEXT NOT NULL,
   PRIMARY KEY (work_item_id, action_hash),
   FOREIGN KEY (work_item_id) REFERENCES work_items(id)

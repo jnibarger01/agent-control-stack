@@ -229,7 +229,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .run(input.workItemId, input.actionHash, input.approvedBy, reason, createdAt);
       const event = this.appendAuditEvent(
         createEvent(
-          "approval.recorded",
+          "approval.granted",
           { ...input, reason, createdAt },
           {
             "work_item.id": input.workItemId,

@@ -8,6 +8,9 @@ export function evaluateRules(context: PolicyContext): PolicyDecision {
   const command = context.command ?? [];
   const commandName = command[0] ?? "";
 
+  if (!isSupportedAction(context.action.kind)) {
+    return deny("unknown action kind is denied", ["deny:unknown-action"]);
+  }
   if (isSudo(command)) {
     return deny("sudo is denied by default", ["deny:sudo"]);
   }
@@ -17,8 +20,14 @@ export function evaluateRules(context: PolicyContext): PolicyDecision {
   if (readsCredentialPath(context)) {
     return deny("credential file reads are denied", ["deny:credential-path"]);
   }
-  if (context.write === true && hasPathEscape(context)) {
-    return deny("writes outside project root are denied", ["deny:path-escape"]);
+  if (hasPathEscape(context)) {
+    return deny("paths outside project root are denied", ["deny:path-escape"]);
+  }
+  if (isSelfApproval(context)) {
+    return deny("high-risk self-approval is denied", ["deny:self-approval"]);
+  }
+  if (requiresRiskApproval(context)) {
+    return requireApproval(`${context.risk} risk work requires approval`, ["approval:risk"]);
   }
 
   if (isPackageInstall(command)) {
@@ -80,6 +89,10 @@ function isSudo(command: string[]): boolean {
   return command[0] === "sudo" || command.includes("sudo");
 }
 
+function isSupportedAction(kind: string): boolean {
+  return kind === "fs.read" || kind === "fs.write" || kind === "shell";
+}
+
 function isRmRfRoot(command: string[]): boolean {
   if (command[0] !== "rm") {
     return false;
@@ -139,6 +152,14 @@ function isLongRunning(context: PolicyContext): boolean {
   return context.action.params.longRunning === true || timeoutMs > 120_000;
 }
 
+function isSelfApproval(context: PolicyContext): boolean {
+  return context.operation === "approve" && requiresRiskApproval(context) && context.actor === context.requester;
+}
+
+function requiresRiskApproval(context: PolicyContext): boolean {
+  return context.risk === "high" || context.risk === "critical";
+}
+
 function isAllowedGitRead(command: string[]): boolean {
   return command[0] === "git" && (command[1] === "status" || command[1] === "diff");
 }
@@ -156,7 +177,7 @@ function isReadOnlyInsideCwd(context: PolicyContext): boolean {
     return false;
   }
   if (!context.paths?.length) {
-    return context.action.kind === "inspect" || context.action.kind === "read" || context.action.kind === "fs.read";
+    return false;
   }
   if (!context.cwd) {
     return false;

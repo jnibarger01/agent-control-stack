@@ -1,18 +1,24 @@
 import { createHash } from "node:crypto";
 
 export function stableHash(value: unknown): string {
-  return createHash("sha256").update(stableStringify(value)).digest("hex");
+  return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
-function stableStringify(value: unknown): string {
+export function canonicalJson(value: unknown): string {
+  return JSON.stringify(normalizeJson(value)) ?? "undefined";
+}
+
+function normalizeJson(value: unknown): unknown {
   if (Array.isArray(value)) {
-    return `[${value.map(stableStringify).join(",")}]`;
+    return value.map((entry) => (entry === undefined ? null : normalizeJson(entry)));
   }
   if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
-      .join(",")}}`;
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, entry]) => entry !== undefined)
+        .sort(([left], [right]) => left.localeCompare(right))
+        .map(([key, entry]) => [key, normalizeJson(entry)])
+    );
   }
-  return JSON.stringify(value) ?? "undefined";
+  return value;
 }

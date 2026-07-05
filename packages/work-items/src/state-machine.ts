@@ -2,7 +2,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import type { WorkItem, WorkItemStatus } from "./work-item.js";
 
 const allowedTransitions: Record<WorkItemStatus, readonly WorkItemStatus[]> = {
-  draft: ["pending_policy", "cancelled"],
+  draft: ["pending_policy", "blocked", "cancelled"],
   pending_policy: ["needs_approval", "approved", "blocked", "cancelled"],
   needs_approval: ["approved", "blocked", "cancelled"],
   approved: ["running", "cancelled"],

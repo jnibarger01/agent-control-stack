@@ -6,7 +6,7 @@
 - Durable state is the SQLite audit log in `storage/local.db` by default.
 - Worker execution must only consume approved work-item events.
 - Sandbox execution is currently dry-run only.
-- Layer 1 has no HTTP authentication. `approvedBy` and result submission identity are caller-supplied local-dev fields until Layer 2 adds real approver and worker identity.
+- HTTP authentication is still deferred. Layer 2 records `approvedBy` and approval reasons at the tool seam, but caller identity is local-dev supplied until gateway or MCP hardening binds it to authenticated users.
 
 ## Controls
 
@@ -16,12 +16,14 @@
 - File writes, package installs, service restarts, git commits, and long-running commands require approval.
 - The worker only starts rows that are already `approved`; the sandbox only accepts `running` work items.
 - Work-item state changes and audit events are written in one SQLite transaction.
-- Policy decisions are audited; approvals are stored by work item and exact action hash.
+- Policy decisions are audited as `policy.decided`; approvals are stored by work item and exact action hash as `approval.granted` with approver and reason.
 - Running work has a worker lease; startup reaps expired leases as failed.
 - The eval harness checks for `work_item.running` events that appear before approval.
 
 ## Deferred Hardening
 
-Layer 2 must bind approvals to authenticated approvers and result submission to worker identity. Real plugin or command execution also needs process isolation before enablement: firejail, nsjail, bubblewrap, Docker, or equivalent. Add that behind `packages/sandbox` instead of teaching callers about the runtime.
+Gateway and MCP hardening must bind approvals to authenticated approvers and result submission to worker identity. Real plugin or command execution also needs process isolation before enablement: firejail, nsjail, bubblewrap, Docker, or equivalent. Add that behind `packages/sandbox` instead of teaching callers about the runtime.
 
-Layer 2 should also move risk-based approval routing into `packages/policy-gate`, add lease renewal before live long-running execution, and add a true cross-process claim contention check.
+Before live long-running execution, add lease renewal and a true cross-process claim contention check.
+
+Layer 2 should also treat `draft` as a reserved ingestion state until a draft creation endpoint exists.

@@ -165,7 +165,7 @@ describe("work item state machine", () => {
 
       expect(store.hasApproval(workItem.id, "hash_test")).toBe(true);
       expect(store.hasApproval(workItem.id, "other_hash")).toBe(false);
-      expect(store.readEvents().at(-1)?.name).toBe("approval.recorded");
+      expect(store.readEvents().at(-1)?.name).toBe("approval.granted");
     } finally {
       store.close();
     }

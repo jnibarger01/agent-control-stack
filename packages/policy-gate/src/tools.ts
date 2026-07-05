@@ -107,7 +107,7 @@ export function gateApproval(
     });
   }
 
-  return { decision, workItem: store.approveWorkItem(workItem.id) };
+  return { decision, workItem: workItem.status === "approved" ? workItem : store.approveWorkItem(workItem.id) };
 }
 
 export function gateUnblock(

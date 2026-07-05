@@ -3,6 +3,7 @@ import { auditEventSchema, type AttributeValue, type AuditEvent } from "./schema
 import { redactValue } from "./redact.js";
 
 export * from "./hash.js";
+export * from "./migration.js";
 export * from "./redact.js";
 export * from "./schema.js";
 
@@ -19,11 +20,12 @@ export function createEvent(
   body: Record<string, unknown> = {},
   attributes: Record<string, AttributeValue> = {}
 ): AuditEvent {
+  const redactedAttributes = redactValue(attributes) as Record<string, AttributeValue>;
   return auditEventSchema.parse({
     id: createId("evt"),
     name,
     timeUnixNano: nowUnixNano(),
-    attributes,
+    attributes: redactedAttributes,
     body: redactValue(body)
   });
 }

@@ -11,6 +11,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import { handleMcpHttpRequest } from "./mcp.js";
 
 const approvalBodySchema = z.object({
   reason: z.string().min(1),
@@ -56,6 +57,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
+
+  app.post("/mcp", async (request, reply) => {
+    const result = handleMcpHttpRequest({
+      body: request.body,
+      headers: request.headers,
+      tools,
+      bearerToken: auth?.token
+    });
+    return reply.code(result.statusCode).send(result.body);
+  });
 
   app.get("/work-items", async (request, reply) => {
     try {
