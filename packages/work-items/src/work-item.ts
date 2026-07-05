@@ -49,15 +49,19 @@ export const workItemSchema = createWorkItemSchema.extend({
 
 export const approvalRequestSchema = z.object({
   approvedBy: z.string().min(1),
-  reason: z.string().min(1).optional()
+  reason: z.string().min(1).optional(),
+  actionHash: z.string().min(1).optional()
 });
 
 export const cancelRequestSchema = z.object({
+  actor: z.string().min(1).default("system"),
   reason: z.string().min(1).optional()
 });
 
 export const submitWorkResultSchema = z.object({
   id: z.string().min(1),
+  workerId: z.string().min(1),
+  leaseToken: z.string().min(1),
   status: z.enum(["succeeded", "failed", "blocked"]),
   result: z.record(z.string(), z.unknown()).default({})
 });
@@ -75,6 +79,7 @@ export type WorkItem = z.infer<typeof workItemSchema>;
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
 export type CancelRequest = z.infer<typeof cancelRequestSchema>;
 export type SubmitWorkResultInput = z.infer<typeof submitWorkResultSchema>;
+export type ClaimedWorkItem = WorkItem & { leaseToken: string };
 
 export const WorkItemEvent = {
   Created: "work_item.created",
@@ -119,8 +124,12 @@ export function workItemCreatedEvent(workItem: WorkItem): AuditEvent {
   return createEvent(WorkItemEvent.Created, workItem, workItemAttributes(workItem));
 }
 
-export function workItemStatusEvent(workItem: WorkItem): AuditEvent {
-  return createEvent(statusEvents[workItem.status], workItem, workItemAttributes(workItem));
+export function workItemStatusEvent(
+  workItem: WorkItem,
+  body: Record<string, unknown> = {},
+  attributes: Record<string, string> = {}
+): AuditEvent {
+  return createEvent(statusEvents[workItem.status], { ...workItem, ...body }, { ...workItemAttributes(workItem), ...attributes });
 }
 
 export function projectWorkItems(events: AuditEvent[]): WorkItem[] {
