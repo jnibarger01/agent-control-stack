@@ -156,7 +156,7 @@ function isReadOnlyInsideCwd(context: PolicyContext): boolean {
     return false;
   }
   if (!context.paths?.length) {
-    return context.action.kind === "inspect" || context.action.kind === "read";
+    return context.action.kind === "inspect" || context.action.kind === "read" || context.action.kind === "fs.read";
   }
   if (!context.cwd) {
     return false;
