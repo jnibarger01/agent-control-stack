@@ -1,6 +1,5 @@
 import type { ServerResponse } from "node:http";
 import { renderDashboard } from "@agent-control-stack/control-ui";
-import { evaluateApproval } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
   approvalRequestSchema,
@@ -76,18 +75,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return reply.code(404).send({ error: "work item not found" });
     }
 
-    const decision = evaluateApproval(workItem, approval.data);
-    if (!decision.allowed) {
-      const blocked =
-        workItem.status === "pending_policy" || workItem.status === "needs_approval"
-          ? workItems.blockWorkItem(workItem.id)
-          : workItem;
-      return reply.code(403).send({ decision, workItem: blocked });
-    }
-
     try {
-      const approved = tools.approve_work_item({ id: workItem.id, ...approval.data });
-      return { decision, workItem: approved };
+      const result = tools.approve_work_item({ id: workItem.id, ...approval.data });
+      return reply.code(result.decision.decision === "deny" ? 403 : 200).send(result);
     } catch (error) {
       return sendError(reply, error);
     }

@@ -138,4 +138,33 @@ describe("work item state machine", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("stores approvals by work item and action hash", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-approval-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Approval item",
+        requester: "user",
+        intent: "verify approval records",
+        requestedActions: [{ kind: "edit", description: "write", params: { write: true } }],
+        risk: "low"
+      });
+
+      store.recordApproval({
+        workItemId: workItem.id,
+        actionHash: "hash_test",
+        approvedBy: "user",
+        reason: "exact action"
+      });
+
+      expect(store.hasApproval(workItem.id, "hash_test")).toBe(true);
+      expect(store.hasApproval(workItem.id, "other_hash")).toBe(false);
+      expect(store.readEvents().at(-1)?.name).toBe("approval.recorded");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

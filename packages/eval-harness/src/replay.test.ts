@@ -1,7 +1,6 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { evaluateApproval } from "@agent-control-stack/policy-gate";
 import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
@@ -18,12 +17,11 @@ describe("deterministic replay", () => {
         title: "Check policy path",
         requester: "user",
         intent: "Exercise approval and worker lifecycle",
-        requestedActions: [{ kind: "manual", description: "run dry execution" }],
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "read", description: "inspect source", params: { paths: ["src/index.ts"] } }],
         risk: "low"
       });
 
-      const decision = evaluateApproval(workItem, { approvedBy: "test", reason: "low-risk eval" });
-      expect(decision.allowed).toBe(true);
       const approved = store.approveWorkItem(workItem.id);
 
       expect(approved?.status).toBe("approved");

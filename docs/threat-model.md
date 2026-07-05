@@ -12,9 +12,11 @@
 
 - Zod validates public request bodies and event shapes.
 - Sensitive keys such as tokens, passwords, API keys, and secrets are redacted before audit events are created.
-- High-risk work requires an approval reason.
+- The policy gate fails closed for requested actions and denies sudo, destructive root removal, credential-file reads, unapproved network, and path-escape writes.
+- File writes, package installs, service restarts, git commits, and long-running commands require approval.
 - The worker only starts rows that are already `approved`; the sandbox only accepts `running` work items.
 - Work-item state changes and audit events are written in one SQLite transaction.
+- Policy decisions are audited; approvals are stored by work item and exact action hash.
 - Running work has a worker lease; startup reaps expired leases as failed.
 - The eval harness checks for `work_item.running` events that appear before approval.
 

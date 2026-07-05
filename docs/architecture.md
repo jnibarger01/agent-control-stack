@@ -6,7 +6,7 @@ Agent Control Stack is a single TypeScript monorepo. Apps depend inward on packa
 
 - `packages/shared`: IDs, redaction, errors, and OpenTelemetry-shaped event schemas.
 - `packages/work-items`: work-item model, lifecycle events, and event replay projection.
-- `packages/policy-gate`: approval decisions for pending work.
+- `packages/policy-gate`: fail-closed static policy decisions for requested actions.
 - `packages/audit-log`: append-only SQLite event storage.
 - `packages/temporal-memory`: source-backed memory events and projections.
 - `packages/sandbox`: dry-run execution boundary for approved work.
@@ -22,4 +22,6 @@ SQLite is the local durability layer. `work_items` holds the current control-pla
 
 Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. Execution only starts by transitioning an approved work item to `running`.
 
-Workers claim approved rows with a status compare-and-swap and a short lease. Worker startup marks expired running leases as failed before claiming new work.
+Policy decisions are recorded as audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated.
+
+Workers claim approved rows with a status compare-and-swap and a short lease. Worker startup marks expired running leases as failed before claiming new work, then re-checks policy and action-hash approvals before sandbox execution.

@@ -23,3 +23,13 @@ CREATE TABLE IF NOT EXISTS work_items (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS approval_records (
+  work_item_id TEXT NOT NULL,
+  action_hash TEXT NOT NULL,
+  approved_by TEXT NOT NULL,
+  reason TEXT,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (work_item_id, action_hash),
+  FOREIGN KEY (work_item_id) REFERENCES work_items(id)
+);

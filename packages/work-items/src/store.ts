@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ControlStackError, type AuditEvent } from "@agent-control-stack/shared";
+import { ControlStackError, createEvent, type AuditEvent } from "@agent-control-stack/shared";
 import { z } from "zod";
 import { transitionWorkItem } from "./state-machine.js";
 import {
@@ -49,6 +49,25 @@ interface EventRow {
   body: string;
 }
 
+export interface PolicyDecisionRecord {
+  workItemId: string;
+  actionHash: string;
+  decision: "allow" | "deny" | "require_approval";
+  reason: string;
+  matchedRules: string[];
+  requiredApprover?: "user";
+  maxRuntimeMs?: number;
+  allowedPaths?: string[];
+}
+
+export interface ApprovalRecord {
+  workItemId: string;
+  actionHash: string;
+  approvedBy: string;
+  reason?: string;
+  createdAt?: string;
+}
+
 export interface ClaimOptions {
   leaseMs?: number;
 }
@@ -67,6 +86,9 @@ export interface WorkItemStore {
   approveWorkItem(id: string): WorkItem;
   blockWorkItem(id: string): WorkItem;
   cancelWorkItem(id: string): WorkItem;
+  recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
+  recordApproval(input: ApprovalRecord): StoredAuditEvent;
+  hasApproval(workItemId: string, actionHash: string): boolean;
   startWorkItem(id: string, workerId?: string, options?: ClaimOptions): WorkItem;
   claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): WorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
@@ -110,6 +132,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
         lease_expires_at TEXT,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS approval_records (
+        work_item_id TEXT NOT NULL,
+        action_hash TEXT NOT NULL,
+        approved_by TEXT NOT NULL,
+        reason TEXT,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (work_item_id, action_hash),
+        FOREIGN KEY (work_item_id) REFERENCES work_items(id)
       );
     `);
     this.ensureWorkItemColumn("worker_id", "worker_id TEXT");
@@ -177,6 +208,54 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   cancelWorkItem(id: string): WorkItem {
     return this.transition(id, "cancelled");
+  }
+
+  recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent {
+    return this.write(() => {
+      const event = this.appendAuditEvent(
+        createEvent("policy.decision", { ...input }, {
+          "work_item.id": input.workItemId,
+          "action.hash": input.actionHash,
+          "policy.decision": input.decision
+        })
+      );
+      return { value: event, events: [event] };
+    });
+  }
+
+  recordApproval(input: ApprovalRecord): StoredAuditEvent {
+    return this.write(() => {
+      const createdAt = input.createdAt ?? new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO approval_records (work_item_id, action_hash, approved_by, reason, created_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(work_item_id, action_hash) DO UPDATE SET
+             approved_by = excluded.approved_by,
+             reason = excluded.reason,
+             created_at = excluded.created_at`
+        )
+        .run(input.workItemId, input.actionHash, input.approvedBy, input.reason ?? null, createdAt);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "approval.recorded",
+          { ...input, createdAt },
+          {
+            "work_item.id": input.workItemId,
+            "action.hash": input.actionHash,
+            "approval.approved_by": input.approvedBy
+          }
+        )
+      );
+      return { value: event, events: [event] };
+    });
+  }
+
+  hasApproval(workItemId: string, actionHash: string): boolean {
+    const row = this.db
+      .prepare(`SELECT 1 FROM approval_records WHERE work_item_id = ? AND action_hash = ?`)
+      .get(workItemId, actionHash);
+    return Boolean(row);
   }
 
   startWorkItem(id: string, workerId = "local-worker", options: ClaimOptions = {}): WorkItem {

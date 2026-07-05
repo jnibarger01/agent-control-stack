@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
 
@@ -19,7 +20,61 @@ describe("gateway work-item routes", () => {
     }
   });
 
-  it("blocks pending work when policy denies approval", async () => {
+  it("requires approval for writes and records exact action approval", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false });
+    let appClosed = false;
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Write work",
+          requester: "user",
+          intent: "verify approval path",
+          target: { cwd: "/repo" },
+          requestedActions: [
+            { kind: "edit", description: "write file", params: { write: true, paths: ["src/index.ts"] } }
+          ],
+          risk: "medium"
+        }
+      });
+      const workItem = created.json();
+
+      expect(workItem.status).toBe("needs_approval");
+
+      const approved = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItem.id}/approve`,
+        payload: { approvedBy: "test", reason: "approve exact write" }
+      });
+
+      expect(approved.statusCode).toBe(200);
+      expect(approved.json().workItem.status).toBe("approved");
+      expect(approved.json().decision.decision).toBe("require_approval");
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        const approvals = store.readEvents().filter((event) => event.name === "approval.recorded");
+        expect(approvals).toHaveLength(1);
+        expect(approvals[0]?.body).toMatchObject({ workItemId: workItem.id });
+        expect(typeof approvals[0]?.body.actionHash).toBe("string");
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks denied work on create", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
 
@@ -28,25 +83,16 @@ describe("gateway work-item routes", () => {
         method: "POST",
         url: "/work-items",
         payload: {
-          title: "High risk work",
+          title: "Denied work",
           requester: "user",
           intent: "verify deny path",
-          requestedActions: [{ kind: "manual", description: "review" }],
-          risk: "high"
+          requestedActions: [{ kind: "command", description: "sudo", params: { command: ["sudo", "whoami"] } }],
+          risk: "low"
         }
       });
-      const workItem = created.json();
 
-      expect(workItem.status).toBe("needs_approval");
-
-      const denied = await app.inject({
-        method: "POST",
-        url: `/work-items/${workItem.id}/approve`,
-        payload: { approvedBy: "test" }
-      });
-
-      expect(denied.statusCode).toBe(403);
-      expect(denied.json().workItem.status).toBe("blocked");
+      expect(created.statusCode).toBe(201);
+      expect(created.json().status).toBe("blocked");
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
