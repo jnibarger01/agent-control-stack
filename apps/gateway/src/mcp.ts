@@ -2,6 +2,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { ZodError, z } from "zod";
+import { authorizeMcpRequest, oauthDiscoveryChallenge, type McpAuthOptions, type McpScope } from "./auth.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
@@ -28,6 +29,7 @@ type JsonRpcFailure = {
 export type McpHttpResult = {
   statusCode: number;
   body: JsonRpcSuccess | JsonRpcFailure;
+  wwwAuthenticate?: string;
 };
 
 const jsonRpcRequestSchema = z.object({
@@ -46,8 +48,9 @@ export function handleMcpHttpRequest(input: {
   body: unknown;
   headers: IncomingHttpHeaders;
   tools: GatewayWorkItemTools;
-  bearerToken?: string;
-}): McpHttpResult {
+  auth?: McpAuthOptions;
+  resourceMetadataUrl?: string;
+}): Promise<McpHttpResult> | McpHttpResult {
   const request = jsonRpcRequestSchema.safeParse(input.body);
   if (!request.success) {
     return jsonRpcError(null, -32600, "invalid JSON-RPC request", 400);
@@ -70,7 +73,8 @@ export function handleMcpHttpRequest(input: {
         id: request.data.id,
         params: request.data.params,
         headers: input.headers,
-        bearerToken: input.bearerToken,
+        auth: input.auth,
+        resourceMetadataUrl: input.resourceMetadataUrl,
         tools: input.tools
       });
     default:
@@ -78,20 +82,26 @@ export function handleMcpHttpRequest(input: {
   }
 }
 
-function handleToolsCall(input: {
+async function handleToolsCall(input: {
   id: JsonRpcId;
   params: unknown;
   headers: IncomingHttpHeaders;
-  bearerToken?: string;
+  auth?: McpAuthOptions;
+  resourceMetadataUrl?: string;
   tools: GatewayWorkItemTools;
-}): McpHttpResult {
-  if (!isAuthorized(input.headers.authorization, input.bearerToken)) {
-    return jsonRpcError(input.id, -32001, "unauthorized MCP tools/call request", 401);
-  }
-
+}): Promise<McpHttpResult> {
   const parsed = toolsCallParamsSchema.safeParse(input.params);
   if (!parsed.success) {
     return jsonRpcError(input.id, -32602, "invalid tools/call params", 400);
+  }
+
+  const authorization = await authorizeMcpRequest({
+    headers: input.headers,
+    auth: input.auth,
+    requiredScopes: requiredScopes(parsed.data.name)
+  });
+  if (!authorization.ok) {
+    return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, requiredScopes(parsed.data.name));
   }
 
   try {
@@ -115,16 +125,46 @@ function callGatewayTool(tools: GatewayWorkItemTools, name: GatewayToolName, arg
   return handler(args);
 }
 
-function isAuthorized(authorization: string | undefined, bearerToken: string | undefined): boolean {
-  return Boolean(bearerToken) && authorization === `Bearer ${bearerToken}`;
-}
-
 function mcpToolDefinitions() {
   return workItemToolNames.map((name) => ({
     name,
     description: toolDescription(name),
-    inputSchema: toolInputSchema(name)
+    inputSchema: toolInputSchema(name),
+    securitySchemes: [{ type: "oauth2", scopes: requiredScopes(name) }],
+    _meta: {
+      securitySchemes: [{ type: "oauth2", scopes: requiredScopes(name) }]
+    },
+    annotations: toolAnnotations(name)
   }));
+}
+
+function requiredScopes(name: GatewayToolName): McpScope[] {
+  switch (name) {
+    case "create_work_item":
+      return ["acs:work:create"];
+    case "get_work_item":
+    case "list_work_items":
+      return ["acs:work:read"];
+    case "approve_work_item":
+    case "unblock_work_item":
+    case "cancel_work_item":
+      return ["acs:work:approve"];
+    case "claim_next_approved_work_item":
+    case "submit_work_result":
+      return ["acs:worker:claim"];
+  }
+}
+
+function toolAnnotations(name: GatewayToolName): Record<string, boolean> {
+  switch (name) {
+    case "get_work_item":
+    case "list_work_items":
+      return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+    case "cancel_work_item":
+      return { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
+    default:
+      return { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
+  }
 }
 
 function toolDescription(name: GatewayToolName): string {
@@ -243,6 +283,35 @@ function jsonRpcError(id: JsonRpcId, code: number, message: string, statusCode: 
         code,
         message,
         ...(data === undefined ? {} : { data })
+      }
+    }
+  };
+}
+
+function mcpAuthError(
+  id: JsonRpcId,
+  authorization: Exclude<Awaited<ReturnType<typeof authorizeMcpRequest>>, { ok: true }>,
+  resourceMetadataUrl: string | undefined,
+  scopes: McpScope[]
+): McpHttpResult {
+  const oauthError = authorization.error === "insufficient_scope" ? "insufficient_scope" : "invalid_token";
+  const challenge = resourceMetadataUrl
+    ? oauthDiscoveryChallenge(resourceMetadataUrl, oauthError, authorization.message)
+    : undefined;
+  return {
+    statusCode: authorization.statusCode,
+    ...(challenge ? { wwwAuthenticate: challenge } : {}),
+    body: {
+      jsonrpc: "2.0",
+      id,
+      result: {
+        content: [{ type: "text", text: `Authentication required: ${authorization.message}.` }],
+        structuredContent: {
+          authError: authorization.error,
+          requiredScopes: scopes
+        },
+        ...(challenge ? { _meta: { "mcp/www_authenticate": [challenge] } } : {}),
+        isError: true
       }
     }
   };

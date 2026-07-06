@@ -1,3 +1,4 @@
+import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,8 @@ import { describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
 
 const testAuth = { token: "t", actor: "user" };
+const oauthIssuer = "https://auth.example.test";
+const oauthResource = "https://acs.example.test/mcp";
 
 function buildTestGateway(options: Parameters<typeof buildGateway>[0]) {
   const app = buildGateway({ ...options, auth: testAuth });
@@ -74,12 +77,17 @@ describe("gateway MCP transport", () => {
           expect.objectContaining({
             name: "create_work_item",
             description: expect.any(String),
-            inputSchema: expect.objectContaining({ type: "object" })
+            inputSchema: expect.objectContaining({ type: "object" }),
+            securitySchemes: [{ type: "oauth2", scopes: ["acs:work:create"] }],
+            _meta: {
+              securitySchemes: [{ type: "oauth2", scopes: ["acs:work:create"] }]
+            }
           }),
           expect.objectContaining({
             name: "approve_work_item",
             description: expect.any(String),
-            inputSchema: expect.objectContaining({ type: "object" })
+            inputSchema: expect.objectContaining({ type: "object" }),
+            securitySchemes: [{ type: "oauth2", scopes: ["acs:work:approve"] }]
           })
         ])
       );
@@ -176,9 +184,12 @@ describe("gateway MCP transport", () => {
       expect(response.json()).toMatchObject({
         jsonrpc: "2.0",
         id: "unauthorized",
-        error: {
-          code: -32001,
-          message: "unauthorized MCP tools/call request"
+        result: {
+          isError: true,
+          structuredContent: {
+            authError: "missing_token",
+            requiredScopes: ["acs:work:create"]
+          }
         }
       });
 
@@ -197,6 +208,214 @@ describe("gateway MCP transport", () => {
       }
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("publishes OAuth protected resource metadata when configured", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
+    const oauth = createTestOAuth();
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      mcpAuth: { oauth: oauth.options }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/.well-known/oauth-protected-resource/mcp"
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        resource: oauthResource,
+        resource_name: "Agent Control Stack MCP Gateway",
+        authorization_servers: [oauthIssuer],
+        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:worker:claim"],
+        bearer_methods_supported: ["header"]
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a valid OAuth bearer JWT for tools/call", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
+    const dbPath = join(dir, "control.db");
+    const oauth = createTestOAuth();
+    const app = buildGateway({ dbPath, logger: false, mcpAuth: { oauth: oauth.options } });
+    let appClosed = false;
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:create" })}` },
+        payload: createWorkItemToolCall("oauth-valid")
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().result.structuredContent.title).toBe("oauth-valid");
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toHaveLength(1);
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps local ACS_MCP_BEARER_TOKEN-style fallback for tools/call", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-local-mcp-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: testAuth,
+      mcpAuth: { localBearerToken: "local-dev-token" }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer local-dev-token" },
+        payload: createWorkItemToolCall("local-fallback")
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().result.structuredContent.title).toBe("local-fallback");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps initialize and tools/list available without OAuth bearer auth", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
+    const oauth = createTestOAuth();
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, mcpAuth: { oauth: oauth.options } });
+
+    try {
+      const initialized = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: "init", method: "initialize" }
+      });
+      const tools = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" }
+      });
+
+      expect(initialized.statusCode).toBe(200);
+      expect(tools.statusCode).toBe(200);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for missing OAuth bearer JWT on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: {}
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(result.response.headers["www-authenticate"]).toContain("/.well-known/oauth-protected-resource/mcp");
+    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(authChallenge(result.response.json())).toContain("error_description=\"missing MCP bearer token\"");
+    expect(result.response.json().result.structuredContent).toMatchObject({
+      authError: "missing_token",
+      requiredScopes: ["acs:work:create"]
+    });
+    expect(result.workItems).toEqual([]);
+  });
+
+  it("fails closed for expired OAuth bearer JWT on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: { authorization: `Bearer ${oauth.token({ exp: 1 })}` }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
+    expect(result.workItems).toEqual([]);
+  });
+
+  it("fails closed for tampered OAuth bearer JWT signatures on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const [header, _claims, signature] = oauth.token({ scope: "acs:work:create" }).split(".");
+    const tampered = `${header}.${base64UrlJson({
+      iss: oauthIssuer,
+      aud: oauthResource,
+      exp: Math.floor(Date.now() / 1000) + 300,
+      scope: "acs:work:create",
+      tampered: true
+    })}.${signature}`;
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: { authorization: `Bearer ${tampered}` }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
+    expect(result.workItems).toEqual([]);
+  });
+
+  it("fails closed for wrong OAuth audience on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: { authorization: `Bearer ${oauth.token({ aud: "https://other.example.test" })}` }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
+    expect(result.workItems).toEqual([]);
+  });
+
+  it("fails closed for wrong OAuth issuer on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: { authorization: `Bearer ${oauth.token({ iss: "https://issuer.example.invalid" })}` }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
+    expect(result.workItems).toEqual([]);
+  });
+
+  it("fails closed for insufficient OAuth scope on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}` }
+    });
+
+    expect(result.response.statusCode).toBe(403);
+    expect(result.response.headers["www-authenticate"]).toContain("error=\"insufficient_scope\"");
+    expect(authChallenge(result.response.json())).toContain("error=\"insufficient_scope\"");
+    expect(result.response.json().result.structuredContent).toMatchObject({
+      authError: "insufficient_scope",
+      requiredScopes: ["acs:work:create"]
+    });
+    expect(result.workItems).toEqual([]);
   });
 });
 
@@ -570,3 +789,97 @@ describe("gateway work-item routes", () => {
     }
   });
 });
+
+function createWorkItemToolCall(title: string) {
+  return {
+    jsonrpc: "2.0",
+    id: `call-${title}`,
+    method: "tools/call",
+    params: {
+      name: "create_work_item",
+      arguments: {
+        title,
+        requester: "agent",
+        intent: "verify authenticated MCP tool call",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      }
+    }
+  };
+}
+
+function createTestOAuth() {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  const kid = "test-key";
+  const jwk = { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" };
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const options = {
+    issuer: oauthIssuer,
+    resource: oauthResource,
+    jwks: { keys: [jwk] },
+    authorizationServers: [oauthIssuer]
+  };
+
+  function token(overrides: Record<string, unknown> = {}): string {
+    const header = { alg: "RS256", typ: "JWT", kid };
+    const claims = {
+      iss: oauthIssuer,
+      aud: oauthResource,
+      exp: nowSeconds + 300,
+      iat: nowSeconds,
+      scope: "acs:work:create",
+      ...overrides
+    };
+    const signingInput = `${base64UrlJson(header)}.${base64UrlJson(claims)}`;
+    const signature = sign("RSA-SHA256", Buffer.from(signingInput), privateKey).toString("base64url");
+    return `${signingInput}.${signature}`;
+  }
+
+  return { options, token };
+}
+
+async function injectRejectedOAuthToolCall(input: {
+  oauth: ReturnType<typeof createTestOAuth>;
+  headers: Record<string, string>;
+}) {
+  const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-reject-"));
+  const dbPath = join(dir, "control.db");
+  const app = buildGateway({
+    dbPath,
+    logger: false,
+    mcpAuth: { oauth: input.oauth.options }
+  });
+  let appClosed = false;
+
+  try {
+    const response = await app.inject({
+      method: "POST",
+      url: "/mcp",
+      headers: input.headers,
+      payload: createWorkItemToolCall("rejected")
+    });
+
+    await app.close();
+    appClosed = true;
+    const store = new SqliteWorkItemStore(dbPath);
+    try {
+      return { response, workItems: store.list() };
+    } finally {
+      store.close();
+    }
+  } finally {
+    if (!appClosed) {
+      await app.close();
+    }
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+function base64UrlJson(value: unknown): string {
+  return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function authChallenge(body: { result: { _meta: { "mcp/www_authenticate": string[] } } }): string {
+  return body.result._meta["mcp/www_authenticate"][0];
+}

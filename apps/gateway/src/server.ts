@@ -11,6 +11,12 @@ import {
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import {
+  createProtectedResourceMetadata,
+  resolveMcpAuthOptions,
+  type McpAuthOptions,
+  type McpOAuthOptions
+} from "./auth.js";
 import { handleMcpHttpRequest } from "./mcp.js";
 
 const approvalBodySchema = z.object({
@@ -29,6 +35,8 @@ export interface GatewayOptions {
   dbPath?: string;
   logger?: boolean;
   auth?: GatewayAuthOptions;
+  mcpAuth?: McpAuthOptions;
+  mcpOAuth?: McpOAuthOptions;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -38,6 +46,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const auth = resolveAuth(options);
+  const mcpAuth = resolveMcpAuth(options);
 
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -59,13 +68,32 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
 
   app.post("/mcp", async (request, reply) => {
-    const result = handleMcpHttpRequest({
+    const resourceMetadataUrl = mcpResourceMetadataUrl(request, mcpAuth?.oauth);
+    const result = await handleMcpHttpRequest({
       body: request.body,
       headers: request.headers,
       tools,
-      bearerToken: auth?.token
+      auth: mcpAuth,
+      resourceMetadataUrl
     });
+    if (result.wwwAuthenticate) {
+      reply.header("WWW-Authenticate", result.wwwAuthenticate);
+    }
     return reply.code(result.statusCode).send(result.body);
+  });
+
+  app.get("/.well-known/oauth-protected-resource", async (_request, reply) => {
+    if (!mcpAuth?.oauth) {
+      return reply.code(404).send({ error: "MCP OAuth is not configured" });
+    }
+    return createProtectedResourceMetadata(mcpAuth.oauth);
+  });
+
+  app.get("/.well-known/oauth-protected-resource/mcp", async (_request, reply) => {
+    if (!mcpAuth?.oauth) {
+      return reply.code(404).send({ error: "MCP OAuth is not configured" });
+    }
+    return createProtectedResourceMetadata(mcpAuth.oauth);
   });
 
   app.get("/work-items", async (request, reply) => {
@@ -190,6 +218,28 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   const token = process.env.ACS_GATEWAY_TOKEN;
   const actor = requesterSchema.parse(process.env.ACS_GATEWAY_ACTOR ?? "user");
   return token ? { token, actor } : undefined;
+}
+
+function resolveMcpAuth(options: GatewayOptions): McpAuthOptions | undefined {
+  return resolveMcpAuthOptions({
+    localBearerToken: options.mcpAuth?.localBearerToken,
+    gatewayBearerToken: options.auth?.token ?? process.env.ACS_GATEWAY_TOKEN,
+    oauth: options.mcpAuth?.oauth ?? options.mcpOAuth
+  });
+}
+
+function mcpResourceMetadataUrl(request: FastifyRequest, oauth: McpOAuthOptions | undefined): string | undefined {
+  if (!oauth) return undefined;
+  const configured = process.env.ACS_MCP_RESOURCE_METADATA_URL;
+  if (configured) return configured;
+  const forwardedProto = firstHeader(request.headers["x-forwarded-proto"]);
+  const proto = forwardedProto ?? request.protocol;
+  const host = firstHeader(request.headers["x-forwarded-host"]) ?? request.headers.host;
+  return host ? `${proto}://${host}/.well-known/oauth-protected-resource/mcp` : undefined;
+}
+
+function firstHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? value[0] : value;
 }
 
 function requireMutationActor(
