@@ -3,6 +3,7 @@ import { auditEventSchema, type AttributeValue, type AuditEvent } from "./schema
 import { redactValue } from "./redact.js";
 
 export * from "./hash.js";
+export * from "./audit-chain.js";
 export * from "./migration.js";
 export * from "./redact.js";
 export * from "./schema.js";

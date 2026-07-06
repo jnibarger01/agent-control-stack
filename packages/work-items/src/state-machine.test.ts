@@ -1,6 +1,7 @@
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
@@ -21,6 +22,27 @@ describe("work item state machine", () => {
     };
 
     expect(() => transitionWorkItem(draft, "running")).toThrow(ControlStackError);
+  });
+
+  it("requires worker claim path before running persisted work", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-running-claim-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Claim-only running item",
+        requester: "agent",
+        intent: "verify running transition gate",
+        requestedActions: [{ kind: "manual", description: "claim" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id);
+
+      expectControlError(() => store.transition(workItem.id, "running"), "worker_claim_required");
+      expect(store.claimNextApprovedWorkItem("worker-a")?.status).toBe("running");
+    } finally {
+      store.close();
+    }
   });
 
   it("stores work items and blocks execution before approval", () => {
@@ -83,7 +105,9 @@ describe("work item state machine", () => {
 
       const claimed = first.claimNextApprovedWorkItem("worker-a");
       expect(claimed?.id).toBe(workItem.id);
+      expect(claimed?.workerId).toBe("worker-a");
       expect(claimed?.leaseToken).toEqual(expect.any(String));
+      expect(claimed?.leaseExpiresAt).toEqual(expect.any(String));
       expect(second.claimNextApprovedWorkItem("worker-b")).toBeUndefined();
       expect(first.readEvents().filter((event) => event.name === WorkItemEvent.Running)).toHaveLength(1);
     } finally {
@@ -117,6 +141,88 @@ describe("work item state machine", () => {
     }
   });
 
+  it("binds result submission to the claimed worker lease", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Lease-bound result",
+        requester: "agent",
+        intent: "verify worker lease",
+        requestedActions: [{ kind: "manual", description: "result" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id);
+      const claimed = store.claimNextApprovedWorkItem("worker-a");
+
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: workItem.id,
+            workerId: "worker-b",
+            leaseToken: claimed!.leaseToken,
+            status: "succeeded"
+          }),
+        "worker_lease_mismatch"
+      );
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: workItem.id,
+            workerId: "worker-a",
+            leaseToken: "wrong-token",
+            status: "succeeded"
+          }),
+        "worker_lease_mismatch"
+      );
+
+      expect(
+        store.submitWorkResult({
+          id: workItem.id,
+          workerId: "worker-a",
+          leaseToken: claimed!.leaseToken,
+          status: "succeeded",
+          result: { output: "ok" }
+        }).status
+      ).toBe("succeeded");
+      expect(JSON.stringify(store.readEvents())).not.toContain(claimed!.leaseToken);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects expired lease result submission", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-result-expired-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Expired result",
+        requester: "agent",
+        intent: "verify expired result gate",
+        requestedActions: [{ kind: "manual", description: "result" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id);
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: workItem.id,
+            workerId: "worker-a",
+            leaseToken: claimed!.leaseToken,
+            status: "succeeded"
+          }),
+        "worker_lease_expired"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("rejects result submission before running", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-result-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
@@ -130,14 +236,16 @@ describe("work item state machine", () => {
         risk: "low"
       });
 
-      expect(() =>
-        store.submitWorkResult({
-          id: workItem.id,
-          workerId: "worker-a",
-          leaseToken: "invalid-token",
-          status: "succeeded"
-        })
-      ).toThrow(ControlStackError);
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: workItem.id,
+            workerId: "worker-a",
+            leaseToken: "invalid-token",
+            status: "succeeded"
+          }),
+        "work_item_not_running"
+      );
     } finally {
       store.close();
     }
@@ -216,4 +324,56 @@ describe("work item state machine", () => {
       store.close();
     }
   });
+
+  it("detects audit event tampering", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-audit-chain-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+
+    try {
+      store.create({
+        title: "Audited item",
+        requester: "agent",
+        intent: "verify tamper evidence",
+        requestedActions: [{ kind: "manual", description: "audit" }],
+        risk: "low"
+      });
+      expect(store.verifyAuditChain()).toMatchObject({ ok: true, eventCount: 1 });
+      store.close();
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.prepare(`UPDATE audit_events SET body = ? WHERE sequence = 1`).run(JSON.stringify({ tampered: true }));
+      } finally {
+        db.close();
+      }
+
+      const reopened = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(reopened.verifyAuditChain()).toMatchObject({
+          ok: false,
+          failure: { sequence: 1, reason: "event_hash_mismatch" }
+        });
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // already closed in the tamper path
+      }
+    }
+  });
 });
+
+function expectControlError(run: () => unknown, code: string): void {
+  try {
+    run();
+  } catch (error) {
+    expect(error).toBeInstanceOf(ControlStackError);
+    expect((error as ControlStackError).code).toBe(code);
+    return;
+  }
+  throw new Error(`expected ControlStackError: ${code}`);
+}

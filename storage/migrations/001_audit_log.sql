@@ -4,7 +4,9 @@ CREATE TABLE IF NOT EXISTS audit_events (
   name TEXT NOT NULL,
   time_unix_nano TEXT NOT NULL,
   attributes TEXT NOT NULL,
-  body TEXT NOT NULL
+  body TEXT NOT NULL,
+  previous_hash TEXT NOT NULL DEFAULT '',
+  event_hash TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS work_items (

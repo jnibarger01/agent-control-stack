@@ -128,7 +128,37 @@ function isBinary(buffer: Buffer): boolean {
   return sample.length > 0 && suspicious / sample.length > 0.3;
 }
 
+const lineNumberPrefixPattern = /^(\d+:\s?)(.*)$/;
+const envSecretAssignmentPattern = /\b([A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|PASSWORD)[A-Z0-9_]*=)([^\s]+)/gi;
+const bearerSecretPattern = /\b(Bearer\s+)[A-Za-z0-9._~+/-]+=*\b/g;
+const githubTokenPattern = /\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]+\b/g;
+const openAiTokenPattern = /\bsk-[A-Za-z0-9_-]{20,}\b/g;
+const credentialUrlPattern = /([A-Za-z][A-Za-z0-9+.-]*:\/\/)[^\s/@]+:[^\s/@]+@/g;
+const privateKeyMarkerPattern = /-----BEGIN [A-Z ]*PRIVATE KEY-----|-----END [A-Z ]*PRIVATE KEY-----/;
+
 function redactLine(line: string): string {
-  const redacted = redactValue(line);
-  return typeof redacted === "string" ? redacted : String(redacted);
+  const match = lineNumberPrefixPattern.exec(line);
+  const prefix = match?.[1] ?? "";
+  const content = match?.[2] ?? line;
+  const redactedContent = redactLineContent(content);
+
+  if (redactedContent !== content) {
+    return `${prefix}${redactedContent}`;
+  }
+
+  const redacted = redactValue(content);
+  return `${prefix}${typeof redacted === "string" ? redacted : String(redacted)}`;
+}
+
+function redactLineContent(content: string): string {
+  if (privateKeyMarkerPattern.test(content)) {
+    return "[redacted]";
+  }
+
+  return content
+    .replace(envSecretAssignmentPattern, "$1[redacted]")
+    .replace(bearerSecretPattern, "$1[redacted]")
+    .replace(githubTokenPattern, "[redacted]")
+    .replace(openAiTokenPattern, "[redacted]")
+    .replace(credentialUrlPattern, "$1[redacted]@");
 }

@@ -79,7 +79,7 @@ export type WorkItem = z.infer<typeof workItemSchema>;
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
 export type CancelRequest = z.infer<typeof cancelRequestSchema>;
 export type SubmitWorkResultInput = z.infer<typeof submitWorkResultSchema>;
-export type ClaimedWorkItem = WorkItem & { leaseToken: string };
+export type ClaimedWorkItem = WorkItem & { workerId: string; leaseToken: string; leaseExpiresAt: string };
 
 export const WorkItemEvent = {
   Created: "work_item.created",

@@ -41,7 +41,8 @@ describe("machine controller", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-machine-"));
     const allowed = join(dir, "allowed");
     mkdirSync(allowed);
-    writeFileSync(join(allowed, "notes.txt"), "hello\nOPENAI_API_KEY=sk-abcdefghijklmnopqrstuvwxyz123456\nbye\n");
+    const fakeSecret = `sk-${"a".repeat(24)}`;
+    writeFileSync(join(allowed, "notes.txt"), `hello\nOPENAI_API_KEY=${fakeSecret}\nbye\n`);
     const config = writeConfig(dir, allowed);
     const controller = new MachineController(config);
 
@@ -51,9 +52,13 @@ describe("machine controller", () => {
       };
 
       expect(result.text).toContain("1: hello");
-      expect(result.text).toContain("[redacted]");
-      expect(result.text).not.toContain("sk-abcdefghijklmnopqrstuvwxyz");
-      expect(readFileSync(config.audit.logPath, "utf8")).not.toContain("sk-abcdefghijklmnopqrstuvwxyz");
+      expect(result.text).toContain("2: OPENAI_API_KEY=[redacted]");
+      expect(result.text).toContain("3: bye");
+      expect(result.text).not.toContain(fakeSecret);
+      const auditLog = readFileSync(config.audit.logPath, "utf8");
+      expect(auditLog).toContain("1: hello");
+      expect(auditLog).toContain("2: OPENAI_API_KEY=[redacted]");
+      expect(auditLog).not.toContain(fakeSecret);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

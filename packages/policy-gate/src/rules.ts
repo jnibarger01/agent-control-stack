@@ -1,4 +1,5 @@
-import { resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
 
 export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
@@ -13,6 +14,7 @@ export interface PolicyRiskClassification {
 
 const credentialPathPattern =
   /(^|\/)(\.env(\.|$)|id_rsa$|id_ed25519$|\.ssh(\/|$)|\.aws\/credentials$|credentials(\.json)?$|token(\.json)?$)/i;
+const shellMetaPattern = /[;&|`$<>]/;
 
 export function evaluateRules(context: PolicyContext): PolicyDecision {
   const classification = classifyPolicyRisk(context);
@@ -42,6 +44,9 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   }
   if (isRmRfRoot(command) || context.destructive === true) {
     return risk("destructive", "destructive command is denied", ["deny:destructive"]);
+  }
+  if (hasShellMetacharacter(command)) {
+    return risk("forbidden", "shell metacharacters are denied", ["deny:shell-metacharacter"]);
   }
   if (readsCredentialPath(context)) {
     return risk("forbidden", "credential file reads are denied", ["deny:credential-path"]);
@@ -166,8 +171,8 @@ function hasPathEscape(context: PolicyContext): boolean {
   if (!context.cwd || !context.paths?.length) {
     return false;
   }
-  const root = resolve(context.cwd);
-  return context.paths.some((path) => !isInside(root, resolve(root, path)));
+  const root = realpathForPolicy(resolve(context.cwd));
+  return context.paths.some((path) => !isInside(root, realpathForPolicy(resolve(root, path))));
 }
 
 function isInside(root: string, target: string): boolean {
@@ -181,6 +186,30 @@ function isPackageInstall(command: string[]): boolean {
     (command[0] === "pnpm" && command[1] === "add") ||
     (command[0] === "yarn" && (command[1] === "add" || command[1] === "install"))
   );
+}
+
+function hasShellMetacharacter(command: string[]): boolean {
+  return command.some((part) => shellMetaPattern.test(part));
+}
+
+function realpathForPolicy(path: string): string {
+  try {
+    if (existsSync(path)) {
+      return realpathSync(path);
+    }
+
+    let current = dirname(path);
+    while (current !== dirname(current)) {
+      if (existsSync(current)) {
+        return resolve(realpathSync(current), relative(current, path));
+      }
+      current = dirname(current);
+    }
+  } catch {
+    return resolve(path);
+  }
+
+  return resolve(path);
 }
 
 function isServiceRestart(command: string[]): boolean {

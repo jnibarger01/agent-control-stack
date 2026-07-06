@@ -4,9 +4,13 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   ControlStackError,
+  auditEventHash,
   controlPlaneMigrationSql,
   createEvent,
   stableHash,
+  verifyAuditChain,
+  type AuditChainEvent,
+  type AuditChainVerification,
   type AuditEvent
 } from "@agent-control-stack/shared";
 import { transitionWorkItem } from "./state-machine.js";
@@ -43,9 +47,7 @@ interface WorkItemRow {
   updated_at: string;
 }
 
-export interface StoredAuditEvent extends AuditEvent {
-  sequence: number;
-}
+export type StoredAuditEvent = AuditChainEvent;
 
 interface EventRow {
   sequence: number;
@@ -54,6 +56,8 @@ interface EventRow {
   time_unix_nano: string;
   attributes: string;
   body: string;
+  previous_hash: string;
+  event_hash: string;
 }
 
 export interface PolicyDecisionRecord {
@@ -90,6 +94,14 @@ export interface ApprovalGrant {
   event: StoredAuditEvent;
 }
 
+export interface ConnectorRequestRecord {
+  workItemId: string;
+  actor: string;
+  source: string;
+  route: string;
+  toolName: string;
+}
+
 export interface ConsumeApprovalOptions {
   now?: Date;
   requestHash?: string;
@@ -110,11 +122,13 @@ export interface WorkItemStore {
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
   readEvents(): StoredAuditEvent[];
+  verifyAuditChain(): AuditChainVerification;
   transition(id: string, status: WorkItemStatus): WorkItem;
   approveWorkItem(id: string): WorkItem;
   blockWorkItem(id: string): WorkItem;
   unblockWorkItem(id: string): WorkItem;
   cancelWorkItem(id: string, input?: unknown): WorkItem;
+  recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
   hasApproval(workItemId: string, actionHash: string): boolean;
@@ -145,11 +159,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.ensureWorkItemColumn("started_at", "started_at TEXT");
     this.ensureWorkItemColumn("lease_expires_at", "lease_expires_at TEXT");
     this.ensureWorkItemColumn("lease_token_hash", "lease_token_hash TEXT");
+    this.ensureAuditColumn("previous_hash", "previous_hash TEXT NOT NULL DEFAULT ''");
+    this.ensureAuditColumn("event_hash", "event_hash TEXT NOT NULL DEFAULT ''");
     this.ensureApprovalColumn("request_hash", "request_hash TEXT NOT NULL DEFAULT ''");
     this.ensureApprovalColumn("approval_token_hash", "approval_token_hash TEXT NOT NULL DEFAULT ''");
     this.ensureApprovalColumn("status", "status TEXT NOT NULL DEFAULT 'granted'");
     this.ensureApprovalColumn("expires_at", "expires_at TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'");
     this.ensureApprovalColumn("consumed_at", "consumed_at TEXT");
+    this.backfillAuditChain();
   }
 
   create(input: unknown): WorkItem {
@@ -198,7 +215,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
     );
   }
 
+  verifyAuditChain(): AuditChainVerification {
+    return verifyAuditChain(this.readEvents());
+  }
+
   transition(id: string, status: WorkItemStatus): WorkItem {
+    if (status === "running") {
+      throw new ControlStackError("worker_claim_required", "running work items must be claimed by a worker");
+    }
     return this.transitionWithEvent(id, status);
   }
 
@@ -223,6 +247,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.transitionWithEvent(id, "cancelled", {
       eventBody: { actor: parsed.actor, reason: parsed.reason },
       eventAttributes: attributes
+    });
+  }
+
+  recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent {
+    return this.write(() => {
+      const event = this.appendAuditEvent(
+        createEvent("connector.requested", { ...input }, {
+          "work_item.id": input.workItemId,
+          "connector.actor": input.actor,
+          "connector.source": input.source,
+          "connector.route": input.route,
+          "connector.tool": input.toolName
+        })
+      );
+      return { value: event, events: [event] };
     });
   }
 
@@ -367,12 +406,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   startWorkItem(id: string, workerId = "local-worker", options: ClaimOptions = {}): ClaimedWorkItem {
     const leaseToken = createLeaseToken();
+    const leaseMs = options.leaseMs ?? this.leaseMs;
     const workItem = this.transitionWithEvent(id, "running", {
-      leaseMs: options.leaseMs,
+      leaseMs,
       leaseToken,
-      workerId
+      workerId,
+      eventBody: { workerId },
+      eventAttributes: { "worker.id": workerId }
     });
-    return { ...workItem, leaseToken };
+    return { ...workItem, workerId, leaseToken, leaseExpiresAt: leaseExpiresAt(workItem.updatedAt, leaseMs) };
   }
 
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
@@ -401,7 +443,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("work_item_conflict", `work item changed while claiming: ${updated.id}`);
       }
 
-      return { value: { ...updated, leaseToken }, events: [this.appendAuditEvent(workItemStatusEvent(updated))] };
+      return {
+        value: { ...updated, workerId, leaseToken, leaseExpiresAt },
+        events: [
+          this.appendAuditEvent(
+            workItemStatusEvent(updated, { workerId, leaseExpiresAt }, { "worker.id": workerId })
+          )
+        ]
+      };
     });
   }
 
@@ -448,17 +497,26 @@ export class SqliteWorkItemStore implements WorkItemStore {
     const parsed = submitWorkResultSchema.parse(input);
     return this.write(() => {
       const row = this.getRowRequired(parsed.id);
-      const current = rowToWorkItem(row);
-      const updated = transitionWorkItem(current, parsed.status);
-      const expectedLeaseHash = hashLeaseToken(parsed.id, parsed.workerId, parsed.leaseToken);
-
-      if (row.worker_id !== parsed.workerId || row.lease_token_hash !== expectedLeaseHash) {
+      if (row.status !== "running") {
+        throw new ControlStackError("work_item_not_running", `work item is not running: ${parsed.id}`);
+      }
+      if (!row.worker_id || !row.lease_token_hash || !row.lease_expires_at) {
+        throw new ControlStackError("worker_lease_missing", `worker lease is missing for work item: ${parsed.id}`);
+      }
+      if (row.worker_id !== parsed.workerId) {
         throw new ControlStackError("worker_lease_mismatch", `worker lease does not match work item: ${parsed.id}`);
       }
-      if (row.lease_expires_at && Date.parse(row.lease_expires_at) < Date.now()) {
+      const expectedLeaseHash = hashLeaseToken(parsed.id, parsed.workerId, parsed.leaseToken);
+      if (row.lease_token_hash !== expectedLeaseHash) {
+        throw new ControlStackError("worker_lease_mismatch", `worker lease does not match work item: ${parsed.id}`);
+      }
+      const leaseExpiresAt = Date.parse(row.lease_expires_at);
+      if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.now()) {
         throw new ControlStackError("worker_lease_expired", `worker lease expired for work item: ${parsed.id}`);
       }
 
+      const current = rowToWorkItem(row);
+      const updated = transitionWorkItem(current, parsed.status);
       const result = this.db
         .prepare(
           `UPDATE work_items
@@ -552,12 +610,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   private appendAuditEvent(event: AuditEvent): StoredAuditEvent {
+    const previousHash = this.latestAuditHash();
     this.db
       .prepare(
-        `INSERT INTO audit_events (id, name, time_unix_nano, attributes, body)
-         VALUES (?, ?, ?, ?, ?)`
+        `INSERT INTO audit_events (id, name, time_unix_nano, attributes, body, previous_hash, event_hash)
+         VALUES (?, ?, ?, ?, ?, ?, '')`
       )
-      .run(event.id, event.name, event.timeUnixNano, JSON.stringify(event.attributes), JSON.stringify(event.body));
+      .run(
+        event.id,
+        event.name,
+        event.timeUnixNano,
+        JSON.stringify(event.attributes),
+        JSON.stringify(event.body),
+        previousHash
+      );
+    const inserted = this.findEventById(event.id);
+    this.db
+      .prepare(`UPDATE audit_events SET event_hash = ? WHERE sequence = ?`)
+      .run(auditEventHash(inserted), inserted.sequence);
     return this.findEventById(event.id);
   }
 
@@ -608,6 +678,34 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.db.exec(`ALTER TABLE approval_records ADD COLUMN ${definition}`);
     }
   }
+
+  private ensureAuditColumn(name: string, definition: string): void {
+    const columns = this.db.prepare(`PRAGMA table_info(audit_events)`).all() as Array<{ name: string }>;
+    if (!columns.some((column) => column.name === name)) {
+      this.db.exec(`ALTER TABLE audit_events ADD COLUMN ${definition}`);
+    }
+  }
+
+  private latestAuditHash(): string {
+    const row = this.db
+      .prepare(`SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1`)
+      .get() as { event_hash: string } | undefined;
+    return row?.event_hash ?? "";
+  }
+
+  private backfillAuditChain(): void {
+    const rows = this.db.prepare(`SELECT * FROM audit_events ORDER BY sequence ASC`).all() as unknown as EventRow[];
+    let previousHash = "";
+    for (const row of rows) {
+      const eventHash = row.event_hash || auditEventHash(rowToEvent({ ...row, previous_hash: previousHash }));
+      if (!row.event_hash) {
+        this.db
+          .prepare(`UPDATE audit_events SET previous_hash = ?, event_hash = ? WHERE sequence = ?`)
+          .run(previousHash, eventHash, row.sequence);
+      }
+      previousHash = eventHash;
+    }
+  }
 }
 
 function rowToWorkItem(row: WorkItemRow): WorkItem {
@@ -632,7 +730,9 @@ function rowToEvent(row: EventRow): StoredAuditEvent {
     name: row.name,
     timeUnixNano: row.time_unix_nano,
     attributes: JSON.parse(row.attributes) as StoredAuditEvent["attributes"],
-    body: JSON.parse(row.body) as StoredAuditEvent["body"]
+    body: JSON.parse(row.body) as StoredAuditEvent["body"],
+    previousHash: row.previous_hash,
+    eventHash: row.event_hash
   };
 }
 
@@ -646,6 +746,10 @@ function createApprovalToken(): string {
 
 function hashLeaseToken(workItemId: string, workerId: string, leaseToken: string): string {
   return stableHash({ leaseToken, workItemId, workerId });
+}
+
+function leaseExpiresAt(startedAt: string, leaseMs: number): string {
+  return new Date(Date.parse(startedAt) + leaseMs).toISOString();
 }
 
 function hashApprovalToken(workItemId: string, actionHash: string, approvalToken: string): string {

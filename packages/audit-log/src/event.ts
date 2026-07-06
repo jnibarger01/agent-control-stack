@@ -1,8 +1,6 @@
-import type { AuditEvent } from "@agent-control-stack/shared";
+import type { AuditChainEvent } from "@agent-control-stack/shared";
 
-export interface StoredAuditEvent extends AuditEvent {
-  sequence: number;
-}
+export type StoredAuditEvent = AuditChainEvent;
 
 export interface EventRow {
   sequence: number;
@@ -11,6 +9,8 @@ export interface EventRow {
   time_unix_nano: string;
   attributes: string;
   body: string;
+  previous_hash: string;
+  event_hash: string;
 }
 
 export function rowToEvent(row: EventRow): StoredAuditEvent {
@@ -20,6 +20,8 @@ export function rowToEvent(row: EventRow): StoredAuditEvent {
     name: row.name,
     timeUnixNano: row.time_unix_nano,
     attributes: JSON.parse(row.attributes) as StoredAuditEvent["attributes"],
-    body: JSON.parse(row.body) as StoredAuditEvent["body"]
+    body: JSON.parse(row.body) as StoredAuditEvent["body"],
+    previousHash: row.previous_hash,
+    eventHash: row.event_hash
   };
 }

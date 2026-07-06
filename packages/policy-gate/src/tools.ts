@@ -167,7 +167,12 @@ export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, inpu
       status: "blocked",
       result: { error: missing ? "approval missing for action hash" : approvalFailure ? errorMessage(approvalFailure) : decision.reason }
     });
-    return { ...blocked, leaseToken: running.leaseToken };
+    return {
+      ...blocked,
+      workerId: running.workerId,
+      leaseToken: running.leaseToken,
+      leaseExpiresAt: running.leaseExpiresAt
+    };
   }
 
   return running;

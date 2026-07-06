@@ -1,3 +1,6 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createWorkItem } from "@agent-control-stack/work-items";
 import { evaluatePolicy, evaluateWorkItemPolicy } from "./policy.js";
@@ -57,6 +60,46 @@ describe("policy gate", () => {
     expect(evaluatePolicy({ ...base, action: { kind: "legacy", description: "unknown", params: {} } }).matchedRules).toContain(
       "deny:unknown-action"
     );
+  });
+
+  it("denies shell metacharacters before command allow rules", () => {
+    expect(evaluatePolicy({ ...base, command: ["npm", "test", ";", "curl"] }).matchedRules).toContain(
+      "deny:shell-metacharacter"
+    );
+    expect(evaluatePolicy({ ...base, command: ["git", "status", "&&", "whoami"] }).matchedRules).toContain(
+      "deny:shell-metacharacter"
+    );
+  });
+
+  it("denies symlink path escapes under the requested cwd", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-policy-path-"));
+    const root = join(dir, "root");
+    const outside = join(dir, "outside");
+    mkdirSync(root);
+    mkdirSync(outside);
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    symlinkSync(outside, join(root, "link"), "dir");
+
+    try {
+      expect(
+        evaluatePolicy({
+          ...base,
+          action: { kind: "fs.read", description: "read through symlink", params: {} },
+          cwd: root,
+          paths: ["link/secret.txt"]
+        }).matchedRules
+      ).toContain("deny:path-escape");
+      expect(
+        evaluatePolicy({
+          ...base,
+          action: { kind: "fs.read", description: "read source", params: {} },
+          cwd: root,
+          paths: ["src/index.ts"]
+        }).decision
+      ).toBe("allow");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("requires approval for writes, package installs, service restarts, git commits, and long commands", () => {
