@@ -27,6 +27,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
   const events = model.events ?? [];
   const agents = model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date());
   const stats = summarize(model.workItems, agents);
+  const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
   const recentEvents = [...events].slice(-10).reverse();
 
   return `<!doctype html>
@@ -44,6 +45,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <a href="#overview" class="active">Overview</a>
         <a href="#agents">Agents</a>
         <a href="#queue">Work Queue</a>
+        <a href="#approvals">Approvals</a>
         <a href="#dispatch">New Task</a>
         <a href="#events">Events</a>
       </nav>
@@ -56,12 +58,19 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       </header>
       <section id="overview" class="cards">${overviewCards(stats)}</section>
       <section class="grid">
-        <article id="agents" class="panel wide"><div class="panel-head"><h2>Agent Roster</h2><span>${agents.length} observed</span></div>${agentTable(agents)}</article>
+        <article id="agents" class="panel wide"><div class="panel-head"><h2>Agent Roster</h2><span>${agents.length} observed</span></div>${agentTable(agents)}<pre id="agent-detail" class="detail">Select an agent for capabilities, endpoint metadata, recent events, and whatever else reality left behind.</pre></article>
         <article id="queue" class="panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems)}</article>
+      </section>
+      <section class="grid approvals-grid">
+        <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems)}</article>
+      </section>
+      <section class="grid lower">
+        <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(recentEvents)}</article>
+        <article id="system" class="panel"><div class="panel-head"><h2>System Health</h2><span>derived</span></div>${systemPanel(stats, agents)}</article>
       </section>
       <section class="grid lower">
         <article id="dispatch" class="panel composer"><div class="panel-head"><h2>New Task Composer</h2><span>requires bearer token</span></div>${composer()}</article>
-        <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(recentEvents)}</article>
+        <article class="panel"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approval and cancellation actions call authenticated backend routes and append audit events. No approve-all button, because one intact guardrail will not end civilization.</p></article>
       </section>
     </main>
     <script>${clientScript()}</script>
@@ -165,7 +174,7 @@ function agentTable(agents: MissionControlAgent[]): string {
   if (!agents.length) return `<p class="empty">No agents or connectors observed yet. This panel stays empty instead of lying to you.</p>`;
   return `<table><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody>${agents
     .map(
-      (agent) => `<tr><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(agent.lastError) : "—"}</td></tr>`
+      (agent) => `<tr data-agent="${escapeHtml(agent.id)}"><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(agent.lastError) : "—"}</td></tr>`
     )
     .join("")}</tbody></table>`;
 }
@@ -175,9 +184,43 @@ function workQueue(workItems: WorkItem[]): string {
   return `<div class="queue">${workItems
     .slice(0, 12)
     .map(
-      (item) => `<button class="queue-item" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small></button>`
+      (item) => `<button class="queue-item" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${workItemError(item)}</button>`
     )
     .join("")}</div><pre id="work-detail" class="detail">Select a work item for its persisted timeline.</pre>`;
+}
+
+function approvalsPanel(items: WorkItem[]): string {
+  if (!items.length) return `<p class="empty">No approvals or blocked work. Suspiciously civilized.</p>`;
+  return `<div class="approval-controls"><label>Operator token<input id="operator-token" type="password" autocomplete="off" placeholder="ACS_GATEWAY_TOKEN" /></label></div><div class="approvals-list">${items
+    .map((item) => {
+      const actions = item.requestedActions.map((action) => action.kind).join(", ") || "none";
+      const error = workItemResultError(item);
+      const reason = `<input data-reason="${escapeHtml(item.id)}" required placeholder="Reason required" />`;
+      const outcome = `<output id="approval-result-${escapeHtml(item.id)}"></output>`;
+      if (item.status === "blocked") {
+        return `<article class="approval-item"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions"><button type="button" data-unblock="${escapeHtml(item.id)}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}">Reject</button></div>${outcome}</article>`;
+      }
+      return `<article class="approval-item"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requester)} · Actions: ${escapeHtml(actions)}</small>${reason}<div class="approval-actions"><button type="button" data-approve="${escapeHtml(item.id)}">Approve</button><button type="button" data-reject="${escapeHtml(item.id)}">Reject</button></div>${outcome}</article>`;
+    })
+    .join("")}</div>`;
+}
+
+function workItemError(item: WorkItem): string {
+  const error = workItemResultError(item);
+  return error ? `<small class="error-line">${escapeHtml(error)}</small>` : "";
+}
+
+function workItemResultError(item: WorkItem): string | undefined {
+  const result = item.result;
+  return result && typeof result.error === "string" ? result.error : undefined;
+}
+
+function systemPanel(stats: ReturnType<typeof summarize>, agents: MissionControlAgent[]): string {
+  const unhealthy = agents.filter((agent) => agent.health === "unhealthy" || agent.status === "offline").length + stats.failed;
+  const warning = agents.filter((agent) => agent.health === "warning" || agent.status === "stale").length + stats.approvals;
+  const score = Math.max(0, 100 - unhealthy * 18 - warning * 6);
+  const label = score >= 90 ? "Healthy" : score >= 70 ? "Degraded" : "Unhealthy";
+  return `<div class="system-panel"><strong>${score}</strong><span>${escapeHtml(label)}</span><dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div></dl></div>`;
 }
 
 function eventTimeline(events: StoredAuditEvent[]): string {
@@ -185,7 +228,9 @@ function eventTimeline(events: StoredAuditEvent[]): string {
   return `<ol class="timeline">${events
     .map((event) => `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(JSON.stringify(event.attributes))}</small></li>`)
     .join("")}</ol>`;
-}function composer(): string {
+}
+
+function composer(): string {
   return `<form id="task-form">
     <label>Bearer token<input name="token" type="password" autocomplete="off" placeholder="ACS_GATEWAY_TOKEN" /></label>
     <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
@@ -202,9 +247,12 @@ function clientScript(): string {
 const source = new EventSource('/events');
 source.addEventListener('work_item.created', () => location.reload());
 source.addEventListener('work_item.needs_approval', () => location.reload());
+source.addEventListener('work_item.approved', () => location.reload());
 source.addEventListener('work_item.running', () => location.reload());
+source.addEventListener('work_item.blocked', () => location.reload());
 source.addEventListener('work_item.failed', () => location.reload());
 source.addEventListener('work_item.succeeded', () => location.reload());
+source.addEventListener('work_item.cancelled', () => location.reload());
 source.addEventListener('tunnel_session.heartbeat', () => location.reload());
 
 document.querySelectorAll('[data-work-item]').forEach((button) => {
@@ -215,6 +263,42 @@ document.querySelectorAll('[data-work-item]').forEach((button) => {
     target.textContent = JSON.stringify(await res.json(), null, 2);
   });
 });
+
+document.querySelectorAll('[data-agent]').forEach((row) => {
+  row.addEventListener('click', async () => {
+    const target = document.querySelector('#agent-detail');
+    target.textContent = 'Loading persisted agent detail...';
+    const res = await fetch('/agents/' + encodeURIComponent(row.dataset.agent));
+    target.textContent = JSON.stringify(await res.json(), null, 2);
+  });
+});
+
+let operatorToken = '';
+document.querySelector('#operator-token')?.addEventListener('input', (event) => {
+  operatorToken = event.currentTarget.value.trim();
+});
+
+document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
+    const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'cancel' : 'unblock';
+    const reasonInput = document.querySelector('[data-reason="' + id + '"]');
+    const reason = reasonInput ? reasonInput.value.trim() : '';
+    const output = document.querySelector('#approval-result-' + id);
+    if (action !== 'unblock' && !reason) {
+      output.textContent = 'Reason required';
+      return;
+    }
+    const headers = { 'content-type': 'application/json' };
+    if (operatorToken) headers.authorization = 'Bearer ' + operatorToken;
+    const payload = action === 'unblock' ? {} : { reason };
+    const res = await fetch('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
+    const body = await res.json();
+    output.textContent = res.ok ? action + ' accepted' : 'Rejected: ' + JSON.stringify(body);
+    if (res.ok) setTimeout(() => location.reload(), 500);
+  });
+});
+
 
 document.querySelector('#task-form')?.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -308,8 +392,28 @@ td small { display: block; color: #70859c; margin-top: 2px; }
 .queue { display: grid; }
 .queue-item { text-align: left; background: transparent; color: #d7e0ea; border: 0; border-bottom: 1px solid #122234; padding: 12px 14px; cursor: pointer; }
 .queue-item:hover { background: #0d1c2c; }
+.approval-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; }
+.approval-item > button { text-align: left; background: transparent; color: inherit; border: 0; cursor: pointer; }
+.approval-actions { display: flex; gap: 8px; }
+.approval-actions button { border: 1px solid #1c3148; background: #07111d; color: #dbeafe; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+.approval-actions button:last-child { color: #fca5a5; border-color: #7f1d1d; }
+.system-panel { padding: 18px; display: grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: start; }
+.system-panel strong { font-size: 44px; color: #86efac; }
+.system-panel span { color: #8ea3b8; margin-top: 52px; margin-left: -130px; }
+.system-panel dl { margin: 0; display: grid; gap: 8px; }
+.system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #122234; padding-bottom: 7px; }
+.system-panel dt { color: #8ea3b8; }
+.system-panel dd { margin: 0; color: #d7e0ea; }
 .queue-item strong, .queue-item small { display: block; margin-top: 6px; }
 .queue-item small { color: #8398ae; }
+.error-line { color: #fca5a5 !important; }
+.approvals-grid { grid-template-columns: 1fr; }
+.approval-controls { padding: 14px; border-bottom: 1px solid #122234; }
+.approvals-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 14px; }
+.approval-item { border: 1px solid #1b3148; border-radius: 10px; background: #07111d; padding: 12px; display: grid; gap: 9px; }
+.approval-item strong, .approval-item small { display: block; }
+.approval-actions { display: flex; gap: 8px; }
+.approval-actions button { background: #10233a; color: #dbeafe; border: 1px solid #264463; border-radius: 8px; padding: 8px 10px; cursor: pointer; }
 .detail { margin: 12px; padding: 12px; max-height: 260px; overflow: auto; background: #050b12; border: 1px solid #122234; border-radius: 10px; color: #a7f3d0; }
 form { display: grid; gap: 11px; padding: 14px; }
 label { display: grid; gap: 5px; color: #91a6bd; font-size: 12px; }

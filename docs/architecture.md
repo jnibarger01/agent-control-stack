@@ -24,4 +24,4 @@ Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval
 
 Policy decisions are recorded as `policy.decided` audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated and records who approved it and why.
 
-Workers claim approved rows through the work-item tool seam with a status compare-and-swap and a short lease. Worker startup marks expired running leases as failed before claiming new work, then the claim tool re-checks policy and action-hash approvals before sandbox execution.
+Workers claim approved rows through the work-item tool seam with a status compare-and-swap and a short lease. Worker startup marks expired running leases as failed before claiming new work, then the claim tool re-checks policy and action-hash approvals before sandbox execution. Terminal worker results are redacted at the store boundary, persisted on the work item, and mirrored into the terminal audit event.

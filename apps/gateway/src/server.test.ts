@@ -1,10 +1,11 @@
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
 import { buildGateway } from "./server.js";
 
@@ -139,6 +140,7 @@ describe("gateway MCP transport", () => {
   });
 
   it("routes tools/call through governed work-item creation", async () => {
+    vi.stubEnv("NODE_ENV", "test");
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const dbPath = join(dir, "control.db");
     const app = buildGateway({ dbPath, logger: false, auth: testAuth, mcpAuth: { localBearerToken: testAuth.token } });
@@ -190,6 +192,7 @@ describe("gateway MCP transport", () => {
       if (!appClosed) {
         await app.close();
       }
+      vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -324,6 +327,7 @@ describe("gateway MCP transport", () => {
   });
 
   it("keeps local ACS_MCP_BEARER_TOKEN-style fallback for tools/call", async () => {
+    vi.stubEnv("NODE_ENV", "test");
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-local-mcp-"));
     const dbPath = join(dir, "control.db");
     const app = buildGateway({
@@ -345,6 +349,7 @@ describe("gateway MCP transport", () => {
       expect(response.json().result.structuredContent.title).toBe("local-fallback");
     } finally {
       await app.close();
+      vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -1373,6 +1378,56 @@ describe("gateway work-item routes", () => {
     }
   });
 
+  it("exposes redacted worker results on the work item and audit timeline", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-results-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    const secret = `sk-${"x".repeat(24)}`;
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Readable result",
+        requester: "agent",
+        intent: "verify result exposure",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
+      expect(claimed?.id).toBe(workItem.id);
+
+      const submitted = tools.submit_work_result({
+        id: workItem.id,
+        workerId: "worker-a",
+        leaseToken: claimed?.leaseToken,
+        status: "succeeded",
+        result: { summary: "done", apiToken: secret }
+      });
+      expect(submitted).toMatchObject({ status: "succeeded", result: { summary: "done", apiToken: "[redacted]" } });
+
+      const app = buildTestGateway({ dbPath, logger: false });
+      try {
+        const detail = await app.inject({ method: "GET", url: `/work-items/${workItem.id}` });
+        expect(detail.statusCode).toBe(200);
+        expect(detail.json().workItem).toMatchObject({
+          status: "succeeded",
+          result: { summary: "done", apiToken: "[redacted]" }
+        });
+      } finally {
+        await app.close();
+      }
+
+      const succeededEvent = store.readEvents().find((event) => event.name === "work_item.succeeded");
+      expect(succeededEvent?.body).toMatchObject({ result: { summary: "done", apiToken: "[redacted]" } });
+      const raw = readRawWorkItemResult(dbPath, workItem.id);
+      expect(JSON.stringify(store.readEvents()) + JSON.stringify(raw)).not.toContain(secret);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("allows authenticated non-self high-risk approval through the policy engine", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const dbPath = join(dir, "control.db");
@@ -1469,6 +1524,15 @@ describe("gateway work-item routes", () => {
     }
   });
 });
+
+function readRawWorkItemResult(dbPath: string, workItemId: string): unknown {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return db.prepare(`SELECT result_json FROM work_items WHERE id = ?`).get(workItemId);
+  } finally {
+    db.close();
+  }
+}
 
 function createWorkItemToolCall(title: string) {
   return {

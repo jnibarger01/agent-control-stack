@@ -43,6 +43,7 @@ export const createWorkItemSchema = z.object({
 export const workItemSchema = createWorkItemSchema.extend({
   id: z.string().min(1),
   status: workItemStatusSchema,
+  result: z.record(z.string(), z.unknown()).optional(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1)
 });

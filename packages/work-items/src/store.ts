@@ -7,6 +7,7 @@ import {
   auditEventHash,
   controlPlaneMigrationSql,
   createEvent,
+  redactValue,
   stableHash,
   verifyAuditChain,
   type AuditChainEvent,
@@ -720,6 +721,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       for (const row of rows) {
         const current = rowToWorkItem(row);
         const updated = transitionWorkItem(current, "failed", nowIso);
+        const leaseFailureResult = { error: "worker lease expired" };
         const result = this.db
           .prepare(
             `UPDATE work_items
@@ -729,13 +731,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
           .run(
             updated.status,
             updated.updatedAt,
-            JSON.stringify({ error: "worker lease expired" }),
+            JSON.stringify(leaseFailureResult),
             updated.id,
             row.lease_expires_at
           );
         if (result.changes === 1) {
-          failed.push(updated);
-          events.push(this.appendAuditEvent(workItemStatusEvent(updated)));
+          const failedItem = { ...updated, result: leaseFailureResult };
+          failed.push(failedItem);
+          events.push(this.appendAuditEvent(workItemStatusEvent(failedItem, { result: leaseFailureResult })));
         }
       }
 
@@ -766,7 +769,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
 
       const current = rowToWorkItem(row);
-      const updated = transitionWorkItem(current, parsed.status);
+      const redactedResult = redactValue(parsed.result) as Record<string, unknown>;
+      const updated = { ...transitionWorkItem(current, parsed.status), result: redactedResult };
       const result = this.db
         .prepare(
           `UPDATE work_items
@@ -776,7 +780,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .run(
           updated.status,
           updated.updatedAt,
-          JSON.stringify(parsed.result),
+          JSON.stringify(redactedResult),
           parsed.id,
           parsed.workerId,
           expectedLeaseHash
@@ -784,7 +788,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while submitting result: ${parsed.id}`);
       }
-      return { value: updated, events: [this.appendAuditEvent(workItemStatusEvent(updated))] };
+      return { value: updated, events: [this.appendAuditEvent(workItemStatusEvent(updated, { result: redactedResult }))] };
     });
   }
 
@@ -991,6 +995,7 @@ function rowToWorkItem(row: WorkItemRow): WorkItem {
     target: JSON.parse(row.target_json),
     requestedActions: JSON.parse(row.requested_actions_json),
     risk: row.risk,
+    ...(row.result_json ? { result: JSON.parse(row.result_json) as Record<string, unknown> } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
