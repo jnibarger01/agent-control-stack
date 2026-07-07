@@ -17,7 +17,10 @@ const base = {
 };
 
 describe("policy gate", () => {
-  it("allows read-only repo inspection and local tests", () => {
+  it("allows prompt dispatch, read-only repo inspection, and local tests", () => {
+    expect(
+      evaluatePolicy({ ...base, action: { kind: "agent.prompt", description: "dispatch prompt", params: {} } }).decision
+    ).toBe("allow");
     expect(
       evaluatePolicy({
         ...base,
@@ -31,6 +34,9 @@ describe("policy gate", () => {
   });
 
   it("classifies policy contexts into the connector risk model", () => {
+    expect(classifyPolicyRisk({ ...base, action: { kind: "agent.prompt", description: "dispatch", params: {} } }).risk).toBe(
+      "safe_mutation"
+    );
     expect(
       classifyPolicyRisk({
         ...base,
@@ -124,6 +130,13 @@ describe("policy gate", () => {
   });
 
   it("requires risk approval and denies high-risk self-approval", () => {
+    expect(
+      evaluatePolicy({
+        ...base,
+        action: { kind: "agent.prompt", description: "dispatch high-risk prompt", params: {} },
+        risk: "critical"
+      }).matchedRules
+    ).toContain("approval:risk");
     expect(evaluatePolicy({ ...base, risk: "critical" }).matchedRules).toContain("approval:risk");
     expect(
       evaluatePolicy({ ...base, operation: "approve", requester: "agent", risk: "critical" }).matchedRules

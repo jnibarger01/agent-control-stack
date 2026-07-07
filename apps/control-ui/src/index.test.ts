@@ -23,6 +23,7 @@ describe("renderDashboard", () => {
     expect(html).toContain("No fake green lights");
     expect(html).toContain("New Task Composer");
     expect(html).toContain("requires bearer token");
+    expect(html).toContain("agent.prompt");
     expect(html).not.toContain("data-approve-all");
   });
 

@@ -72,6 +72,9 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
       allowedPaths: allowedPaths(context)
     });
   }
+  if (isAgentPrompt(context)) {
+    return risk("safe_mutation", "agent prompt dispatch is allowed", ["allow:agent-prompt"]);
+  }
   if (isServiceRestart(command)) {
     return risk("requires_approval", "service restart requires approval", ["approval:service-restart"]);
   }
@@ -144,6 +147,7 @@ function isSupportedAction(kind: string): boolean {
     kind === "fs.patch" ||
     kind === "fs.move" ||
     kind === "fs.delete" ||
+    kind === "agent.prompt" ||
     kind === "cmd.preview" ||
     kind === "cmd.run" ||
     kind === "service.restart" ||
@@ -210,6 +214,10 @@ function realpathForPolicy(path: string): string {
   }
 
   return resolve(path);
+}
+
+function isAgentPrompt(context: PolicyContext): boolean {
+  return context.action.kind === "agent.prompt";
 }
 
 function isServiceRestart(command: string[]): boolean {

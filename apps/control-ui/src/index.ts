@@ -191,8 +191,8 @@ function eventTimeline(events: StoredAuditEvent[]): string {
     <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
     <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
     <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
-    <label>Requested action kind<input name="actionKind" placeholder="shell.read, fs.write, external.call" /></label>
-    <label>Requested action description<input name="actionDescription" placeholder="Leave blank for prompt-only work" /></label>
+    <label>Requested action kind<input name="actionKind" placeholder="agent.prompt, fs.read, fs.write, shell" /></label>
+    <label>Requested action description<input name="actionDescription" placeholder="Defaults to prompt dispatch when blank" /></label>
     <button type="submit">Create Work Item</button><output id="task-result"></output>
   </form>`;
 }
@@ -227,7 +227,11 @@ document.querySelector('#task-form')?.addEventListener('submit', async (event) =
     intent: String(form.get('intent') || ''),
     risk: String(form.get('risk') || 'medium'),
     target: service ? { services: [service] } : {},
-    requestedActions: actionKind && actionDescription ? [{ kind: actionKind, description: actionDescription, params: {} }] : []
+    requestedActions: [{
+      kind: actionKind || 'agent.prompt',
+      description: actionDescription || 'Dispatch prompt to selected agent',
+      params: {}
+    }]
   };
   const headers = { 'content-type': 'application/json' };
   const token = String(form.get('token') || '').trim();
