@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -60,6 +60,34 @@ interface EventRow {
   event_hash: string;
 }
 
+interface ConnectorRow {
+  id: string;
+  display_name: string;
+  public_key_pem: string;
+  allowed_scopes_json: string;
+  status: "active" | "revoked";
+  created_at: string;
+  updated_at: string;
+}
+
+interface TunnelSessionRow {
+  connector_id: string;
+  tunnel_id: string;
+  session_id: string;
+  status: "active" | "revoked";
+  issued_at: string;
+  expires_at: string;
+  last_heartbeat_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TunnelSessionJoinRow extends TunnelSessionRow {
+  public_key_pem: string;
+  allowed_scopes_json: string;
+  connector_status: "active" | "revoked";
+}
+
 export interface PolicyDecisionRecord {
   workItemId: string;
   actionHash: string;
@@ -95,11 +123,71 @@ export interface ApprovalGrant {
 }
 
 export interface ConnectorRequestRecord {
-  workItemId: string;
+  workItemId?: string;
   actor: string;
   source: string;
   route: string;
   toolName: string;
+  requestId?: string;
+  authMethod?: string;
+  authSubject?: string;
+  authIssuer?: string;
+  authConnectorId?: string;
+  authTunnelId?: string;
+  authSessionId?: string;
+  authScopes?: string[];
+}
+
+export interface ConnectorRegistration {
+  id: string;
+  displayName?: string;
+  publicKeyPem: string;
+  allowedScopes: string[];
+  now?: Date;
+}
+
+export interface RegisteredConnector {
+  id: string;
+  displayName: string;
+  publicKeyPem: string;
+  allowedScopes: string[];
+  status: "active" | "revoked";
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TunnelSessionRegistration {
+  connectorId: string;
+  tunnelId: string;
+  sessionId: string;
+  issuedAt?: string;
+  expiresAt: string;
+  now?: Date;
+}
+
+export interface TunnelSessionRef {
+  connectorId: string;
+  tunnelId: string;
+  sessionId: string;
+  now?: Date;
+}
+
+export interface RegisteredTunnelSession {
+  connectorId: string;
+  tunnelId: string;
+  sessionId: string;
+  status: "active" | "revoked";
+  issuedAt: string;
+  expiresAt: string;
+  lastHeartbeatAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface TunnelSessionAuthorizationRecord extends RegisteredTunnelSession {
+  publicKeyPem: string;
+  scopes: string[];
+  connectorStatus: "active" | "revoked";
 }
 
 export interface ConsumeApprovalOptions {
@@ -128,6 +216,11 @@ export interface WorkItemStore {
   blockWorkItem(id: string): WorkItem;
   unblockWorkItem(id: string): WorkItem;
   cancelWorkItem(id: string, input?: unknown): WorkItem;
+  registerConnector(input: ConnectorRegistration): RegisteredConnector;
+  registerTunnelSession(input: TunnelSessionRegistration): RegisteredTunnelSession;
+  heartbeatTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession;
+  revokeTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession;
+  getTunnelSession(input: TunnelSessionRef): TunnelSessionAuthorizationRecord | undefined;
   recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
@@ -250,16 +343,173 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  registerConnector(input: ConnectorRegistration): RegisteredConnector {
+    return this.write(() => {
+      const now = (input.now ?? new Date()).toISOString();
+      const displayName = input.displayName ?? input.id;
+      const allowedScopes = uniqueNonEmpty(input.allowedScopes, "allowedScopes");
+      this.db
+        .prepare(
+          `INSERT INTO connector_records
+           (id, display_name, public_key_pem, allowed_scopes_json, status, created_at, updated_at)
+           VALUES (?, ?, ?, ?, 'active', ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             display_name = excluded.display_name,
+             public_key_pem = excluded.public_key_pem,
+             allowed_scopes_json = excluded.allowed_scopes_json,
+             status = 'active',
+             updated_at = excluded.updated_at`
+        )
+        .run(input.id, displayName, input.publicKeyPem, JSON.stringify(allowedScopes), now, now);
+      const connector = this.getConnectorRequired(input.id);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "connector.registered",
+          {
+            connectorId: connector.id,
+            displayName: connector.displayName,
+            allowedScopes: connector.allowedScopes,
+            publicKeyFingerprint: publicKeyFingerprint(connector.publicKeyPem),
+            status: connector.status
+          },
+          {
+            "connector.id": connector.id,
+            "connector.status": connector.status
+          }
+        )
+      );
+      return { value: connector, events: [event] };
+    });
+  }
+
+  registerTunnelSession(input: TunnelSessionRegistration): RegisteredTunnelSession {
+    return this.write(() => {
+      const connector = this.getConnectorRequired(input.connectorId);
+      if (connector.status !== "active") {
+        throw new ControlStackError("connector_revoked", `connector is not active: ${input.connectorId}`);
+      }
+      const now = (input.now ?? new Date()).toISOString();
+      const issuedAt = input.issuedAt ?? now;
+      assertFutureIso(input.expiresAt, now, "expiresAt");
+      this.db
+        .prepare(
+          `INSERT INTO tunnel_sessions
+           (connector_id, tunnel_id, session_id, status, issued_at, expires_at, last_heartbeat_at, created_at, updated_at)
+           VALUES (?, ?, ?, 'active', ?, ?, NULL, ?, ?)
+           ON CONFLICT(connector_id, tunnel_id, session_id) DO UPDATE SET
+             status = 'active',
+             issued_at = excluded.issued_at,
+             expires_at = excluded.expires_at,
+             last_heartbeat_at = NULL,
+             updated_at = excluded.updated_at`
+        )
+        .run(input.connectorId, input.tunnelId, input.sessionId, issuedAt, input.expiresAt, now, now);
+      const session = this.getTunnelSessionRequired(input);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "tunnel_session.registered",
+          { ...session },
+          {
+            "connector.id": session.connectorId,
+            "tunnel.id": session.tunnelId,
+            "tunnel.session_id": session.sessionId,
+            "tunnel.session_status": session.status
+          }
+        )
+      );
+      return { value: session, events: [event] };
+    });
+  }
+
+  heartbeatTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession {
+    return this.write(() => {
+      const now = (input.now ?? new Date()).toISOString();
+      const result = this.db
+        .prepare(
+          `UPDATE tunnel_sessions
+           SET last_heartbeat_at = ?, updated_at = ?
+           WHERE connector_id = ? AND tunnel_id = ? AND session_id = ? AND status = 'active' AND expires_at > ?`
+        )
+        .run(now, now, input.connectorId, input.tunnelId, input.sessionId, now);
+      if (result.changes !== 1) {
+        throw new ControlStackError("tunnel_session_not_active", `tunnel session is not active: ${input.sessionId}`);
+      }
+      const session = this.getTunnelSessionRequired(input);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "tunnel_session.heartbeat",
+          { ...session },
+          {
+            "connector.id": session.connectorId,
+            "tunnel.id": session.tunnelId,
+            "tunnel.session_id": session.sessionId
+          }
+        )
+      );
+      return { value: session, events: [event] };
+    });
+  }
+
+  revokeTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession {
+    return this.write(() => {
+      const now = (input.now ?? new Date()).toISOString();
+      const result = this.db
+        .prepare(
+          `UPDATE tunnel_sessions
+           SET status = 'revoked', updated_at = ?
+           WHERE connector_id = ? AND tunnel_id = ? AND session_id = ?`
+        )
+        .run(now, input.connectorId, input.tunnelId, input.sessionId);
+      if (result.changes !== 1) {
+        throw new ControlStackError("tunnel_session_not_found", `tunnel session not found: ${input.sessionId}`);
+      }
+      const session = this.getTunnelSessionRequired(input);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "tunnel_session.revoked",
+          { ...session },
+          {
+            "connector.id": session.connectorId,
+            "tunnel.id": session.tunnelId,
+            "tunnel.session_id": session.sessionId,
+            "tunnel.session_status": session.status
+          }
+        )
+      );
+      return { value: session, events: [event] };
+    });
+  }
+
+  getTunnelSession(input: TunnelSessionRef): TunnelSessionAuthorizationRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT s.*, c.public_key_pem, c.allowed_scopes_json, c.status AS connector_status
+         FROM tunnel_sessions s
+         JOIN connector_records c ON c.id = s.connector_id
+         WHERE s.connector_id = ? AND s.tunnel_id = ? AND s.session_id = ?`
+      )
+      .get(input.connectorId, input.tunnelId, input.sessionId) as unknown as TunnelSessionJoinRow | undefined;
+    return row ? rowToTunnelSessionAuthorization(row) : undefined;
+  }
+
   recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent {
     return this.write(() => {
+      const attributes: Record<string, string> = {
+        "connector.actor": input.actor,
+        "connector.source": input.source,
+        "connector.route": input.route,
+        "connector.tool": input.toolName
+      };
+      if (input.workItemId) attributes["work_item.id"] = input.workItemId;
+      if (input.requestId) attributes["connector.request_id"] = input.requestId;
+      if (input.authMethod) attributes["auth.method"] = input.authMethod;
+      if (input.authSubject) attributes["auth.subject"] = input.authSubject;
+      if (input.authIssuer) attributes["auth.issuer"] = input.authIssuer;
+      if (input.authConnectorId) attributes["auth.connector_id"] = input.authConnectorId;
+      if (input.authTunnelId) attributes["auth.tunnel_id"] = input.authTunnelId;
+      if (input.authSessionId) attributes["auth.session_id"] = input.authSessionId;
       const event = this.appendAuditEvent(
-        createEvent("connector.requested", { ...input }, {
-          "work_item.id": input.workItemId,
-          "connector.actor": input.actor,
-          "connector.source": input.source,
-          "connector.route": input.route,
-          "connector.tool": input.toolName
-        })
+        createEvent("connector.requested", { ...input }, attributes)
       );
       return { value: event, events: [event] };
     });
@@ -500,7 +750,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (row.status !== "running") {
         throw new ControlStackError("work_item_not_running", `work item is not running: ${parsed.id}`);
       }
-      if (!row.worker_id || !row.lease_token_hash || !row.lease_expires_at) {
+      if (!row.worker_id || !row.lease_expires_at || !isStoredLeaseHash(row.lease_token_hash)) {
         throw new ControlStackError("worker_lease_missing", `worker lease is missing for work item: ${parsed.id}`);
       }
       if (row.worker_id !== parsed.workerId) {
@@ -556,6 +806,29 @@ export class SqliteWorkItemStore implements WorkItemStore {
       throw new ControlStackError("work_item_not_found", `work item not found: ${id}`);
     }
     return row;
+  }
+
+  private getConnectorRequired(id: string): RegisteredConnector {
+    const row = this.db.prepare(`SELECT * FROM connector_records WHERE id = ?`).get(id) as unknown as
+      | ConnectorRow
+      | undefined;
+    if (!row) {
+      throw new ControlStackError("connector_not_found", `connector not found: ${id}`);
+    }
+    return rowToConnector(row);
+  }
+
+  private getTunnelSessionRequired(input: TunnelSessionRef): RegisteredTunnelSession {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM tunnel_sessions
+         WHERE connector_id = ? AND tunnel_id = ? AND session_id = ?`
+      )
+      .get(input.connectorId, input.tunnelId, input.sessionId) as unknown as TunnelSessionRow | undefined;
+    if (!row) {
+      throw new ControlStackError("tunnel_session_not_found", `tunnel session not found: ${input.sessionId}`);
+    }
+    return rowToTunnelSession(row);
   }
 
   private transitionWithEvent(
@@ -736,6 +1009,41 @@ function rowToEvent(row: EventRow): StoredAuditEvent {
   };
 }
 
+function rowToConnector(row: ConnectorRow): RegisteredConnector {
+  return {
+    id: row.id,
+    displayName: row.display_name,
+    publicKeyPem: row.public_key_pem,
+    allowedScopes: JSON.parse(row.allowed_scopes_json) as string[],
+    status: row.status,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function rowToTunnelSession(row: TunnelSessionRow): RegisteredTunnelSession {
+  return {
+    connectorId: row.connector_id,
+    tunnelId: row.tunnel_id,
+    sessionId: row.session_id,
+    status: row.status,
+    issuedAt: row.issued_at,
+    expiresAt: row.expires_at,
+    ...(row.last_heartbeat_at ? { lastHeartbeatAt: row.last_heartbeat_at } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at
+  };
+}
+
+function rowToTunnelSessionAuthorization(row: TunnelSessionJoinRow): TunnelSessionAuthorizationRecord {
+  return {
+    ...rowToTunnelSession(row),
+    publicKeyPem: row.public_key_pem,
+    scopes: JSON.parse(row.allowed_scopes_json) as string[],
+    connectorStatus: row.connector_status
+  };
+}
+
 function createLeaseToken(): string {
   return randomBytes(32).toString("base64url");
 }
@@ -748,6 +1056,10 @@ function hashLeaseToken(workItemId: string, workerId: string, leaseToken: string
   return stableHash({ leaseToken, workItemId, workerId });
 }
 
+function isStoredLeaseHash(value: string | null): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
 function leaseExpiresAt(startedAt: string, leaseMs: number): string {
   return new Date(Date.parse(startedAt) + leaseMs).toISOString();
 }
@@ -758,4 +1070,23 @@ function hashApprovalToken(workItemId: string, actionHash: string, approvalToken
 
 export function approvalRequestHash(workItemId: string, actionHash: string): string {
   return stableHash({ actionHash, workItemId });
+}
+
+function uniqueNonEmpty(values: string[], field: string): string[] {
+  const unique = [...new Set(values.map((value) => value.trim()).filter(Boolean))];
+  if (!unique.length) {
+    throw new ControlStackError("invalid_connector_registration", `${field} must not be empty`);
+  }
+  return unique;
+}
+
+function assertFutureIso(value: string, now: string, field: string): void {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp) || timestamp <= Date.parse(now)) {
+    throw new ControlStackError("invalid_tunnel_session", `${field} must be a future ISO timestamp`);
+  }
+}
+
+function publicKeyFingerprint(publicKeyPem: string): string {
+  return createHash("sha256").update(publicKeyPem).digest("base64url");
 }

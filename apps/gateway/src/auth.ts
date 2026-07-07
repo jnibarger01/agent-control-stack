@@ -1,25 +1,73 @@
-import { constants, createPublicKey, timingSafeEqual, verify, type JsonWebKey as CryptoJsonWebKey } from "node:crypto";
+import { createPublicKey, timingSafeEqual, verify as verifySignature } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
+import {
+  createLocalJWKSet,
+  createRemoteJWKSet,
+  jwtVerify,
+  type JSONWebKeySet,
+  type JWTPayload
+} from "jose";
 
-export type McpScope = "acs:work:create" | "acs:work:read" | "acs:work:approve" | "acs:worker:claim";
+export const MCP_SCOPES = ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:worker:claim"] as const;
+export type McpScope = (typeof MCP_SCOPES)[number];
+export type McpAuthMethod = "local_bearer" | "oauth_jwt" | "tunnel_id";
+
+export interface McpAuthenticatedRequest {
+  method: McpAuthMethod;
+  subject: string;
+  issuer: string;
+  connectorId?: string;
+  tunnelId?: string;
+  sessionId?: string;
+  issuedAt?: string;
+  scopes: string[];
+}
 
 export interface McpOAuthOptions {
   issuer: string;
-  resource: string;
-  jwksUrl?: string;
-  jwks?: JsonWebKeySet;
-  audience?: string;
+  audience: string;
+  resource?: string;
+  jwksUri?: string;
+  jwks?: JSONWebKeySet;
   authorizationServers?: string[];
   resourceName?: string;
+}
+
+export interface McpTunnelConnectorOptions {
+  id: string;
+  tunnelId: string;
+  scopes: McpScope[];
+}
+
+export interface McpTunnelSessionLookup {
+  connectorId: string;
+  tunnelId: string;
+  sessionId: string;
+}
+
+export interface McpTunnelSessionRecord extends McpTunnelSessionLookup {
+  publicKeyPem: string;
+  scopes: string[];
+  status: "active" | "revoked";
+  connectorStatus: "active" | "revoked";
+  expiresAt: string;
+}
+
+export interface McpTunnelOptions {
+  trustedProxies: string[];
+  connectors?: McpTunnelConnectorOptions[];
+  resolveSession?: (lookup: McpTunnelSessionLookup) => McpTunnelSessionRecord | undefined | Promise<McpTunnelSessionRecord | undefined>;
+  maxIssuedAgeMs?: number;
 }
 
 export interface McpAuthOptions {
   localBearerToken?: string;
   oauth?: McpOAuthOptions;
+  tunnel?: McpTunnelOptions;
 }
 
 export type McpAuthorizationResult =
-  | { ok: true }
+  | { ok: true; auth: McpAuthenticatedRequest }
   | { ok: false; statusCode: 401 | 403; error: "missing_token" | "invalid_token" | "insufficient_scope"; message: string };
 
 export interface ProtectedResourceMetadata {
@@ -30,19 +78,16 @@ export interface ProtectedResourceMetadata {
   bearer_methods_supported: ["header"];
 }
 
-export interface JsonWebKeySet {
-  keys: CryptoJsonWebKey[];
-}
-
-const SUPPORTED_SCOPES: McpScope[] = ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:worker:claim"];
-const jwksCache = new Map<string, { expiresAt: number; jwks: JsonWebKeySet }>();
+const DEFAULT_TUNNEL_SCOPES: McpScope[] = ["acs:work:create", "acs:work:read"];
+const DEFAULT_TUNNEL_MAX_ISSUED_AGE_MS = 60_000;
+const remoteJwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
 export function createProtectedResourceMetadata(oauth: McpOAuthOptions): ProtectedResourceMetadata {
   return {
-    resource: oauth.resource,
+    resource: oauthResource(oauth),
     resource_name: oauth.resourceName ?? "Agent Control Stack MCP Gateway",
     authorization_servers: oauth.authorizationServers?.length ? oauth.authorizationServers : [oauth.issuer],
-    scopes_supported: SUPPORTED_SCOPES,
+    scopes_supported: [...MCP_SCOPES],
     bearer_methods_supported: ["header"]
   };
 }
@@ -50,7 +95,8 @@ export function createProtectedResourceMetadata(oauth: McpOAuthOptions): Protect
 export function oauthDiscoveryChallenge(
   resourceMetadataUrl: string,
   error?: "invalid_token" | "insufficient_scope",
-  errorDescription?: string
+  errorDescription?: string,
+  scopes?: McpScope[]
 ): string {
   const params = [`resource_metadata="${quoteAuthParam(resourceMetadataUrl)}"`];
   if (error) {
@@ -59,69 +105,227 @@ export function oauthDiscoveryChallenge(
   if (errorDescription) {
     params.push(`error_description="${quoteAuthParam(errorDescription)}"`);
   }
+  if (scopes?.length) {
+    params.push(`scope="${quoteAuthParam(scopes.join(" "))}"`);
+  }
   return `Bearer ${params.join(", ")}`;
 }
 
 export function resolveMcpAuthOptions(input: {
   localBearerToken?: string;
-  gatewayBearerToken?: string;
   oauth?: McpOAuthOptions;
+  tunnel?: McpTunnelOptions;
   env?: NodeJS.ProcessEnv;
 }): McpAuthOptions | undefined {
   const env = input.env ?? process.env;
-  const localBearerToken = input.localBearerToken ?? env.ACS_MCP_BEARER_TOKEN ?? input.gatewayBearerToken;
+  const localBearerToken = env.NODE_ENV === "production" ? undefined : input.localBearerToken ?? env.ACS_MCP_BEARER_TOKEN;
   const oauth = input.oauth ?? resolveMcpOAuthFromEnv(env);
-  return localBearerToken || oauth ? { localBearerToken, oauth } : undefined;
+  const tunnel = input.tunnel ?? resolveMcpTunnelFromEnv(env);
+  return localBearerToken || oauth || tunnel ? { localBearerToken, oauth, tunnel } : undefined;
 }
 
 export async function authorizeMcpRequest(input: {
   headers: IncomingHttpHeaders;
   auth?: McpAuthOptions;
   requiredScopes: McpScope[];
+  remoteAddress?: string;
   now?: Date;
 }): Promise<McpAuthorizationResult> {
+  const tunnel = await authorizeTunnelRequest(input.headers, input.auth?.tunnel, input.remoteAddress, input.requiredScopes, input.now ?? new Date());
+  if (tunnel) {
+    return tunnel;
+  }
+
   const token = bearerToken(input.headers.authorization);
   if (!token) {
-    return { ok: false, statusCode: 401, error: "missing_token", message: "missing MCP bearer token" };
+    return { ok: false, statusCode: 401, error: "missing_token", message: "missing bearer token" };
   }
 
   if (input.auth?.localBearerToken && constantTimeEqual(token, input.auth.localBearerToken)) {
-    return { ok: true };
+    return {
+      ok: true,
+      auth: {
+        method: "local_bearer",
+        subject: "local-dev",
+        issuer: "local",
+        scopes: [...MCP_SCOPES]
+      }
+    };
   }
 
   if (!input.auth?.oauth) {
-    return { ok: false, statusCode: 401, error: "invalid_token", message: "invalid MCP bearer token" };
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "invalid bearer token" };
   }
 
   try {
-    const claims = await verifyJwt(token, input.auth.oauth, input.now ?? new Date());
-    if (!hasRequiredScopes(claimScopes(claims), input.requiredScopes)) {
-      return { ok: false, statusCode: 403, error: "insufficient_scope", message: "insufficient MCP OAuth scope" };
+    const auth = await verifyJwt(token, input.auth.oauth, input.now ?? new Date());
+    if (!hasRequiredScopes(new Set(auth.scopes), input.requiredScopes)) {
+      return { ok: false, statusCode: 403, error: "insufficient_scope", message: "insufficient scope" };
     }
-    return { ok: true };
+    return { ok: true, auth };
   } catch {
-    return { ok: false, statusCode: 401, error: "invalid_token", message: "invalid MCP OAuth token" };
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "invalid bearer token" };
   }
 }
 
 function resolveMcpOAuthFromEnv(env: NodeJS.ProcessEnv): McpOAuthOptions | undefined {
-  const issuer = env.ACS_MCP_OAUTH_ISSUER;
-  const resource = env.ACS_MCP_OAUTH_RESOURCE;
-  const jwksUrl = env.ACS_MCP_OAUTH_JWKS_URL;
-  if (!issuer && !resource && !jwksUrl) {
+  const issuer = env.ACS_OAUTH_ISSUER;
+  const audience = env.ACS_OAUTH_AUDIENCE;
+  const jwksUri = env.ACS_OAUTH_JWKS_URI;
+  if (!issuer && !audience && !jwksUri) {
     return undefined;
   }
-  if (!issuer || !resource || !jwksUrl) {
-    throw new Error("ACS_MCP_OAUTH_ISSUER, ACS_MCP_OAUTH_RESOURCE, and ACS_MCP_OAUTH_JWKS_URL must be set together");
+  if (!issuer || !audience || !jwksUri) {
+    throw new Error("ACS_OAUTH_ISSUER, ACS_OAUTH_AUDIENCE, and ACS_OAUTH_JWKS_URI must be set together");
   }
   return {
     issuer,
-    resource,
-    jwksUrl,
-    audience: env.ACS_MCP_OAUTH_AUDIENCE,
-    authorizationServers: csv(env.ACS_MCP_OAUTH_AUTHORIZATION_SERVERS) ?? [issuer],
-    resourceName: env.ACS_MCP_OAUTH_RESOURCE_NAME
+    audience,
+    resource: audience,
+    jwksUri,
+    authorizationServers: [issuer]
   };
+}
+
+function resolveMcpTunnelFromEnv(env: NodeJS.ProcessEnv): McpTunnelOptions | undefined {
+  if (env.ACS_AUTH_MODE !== "tunnel_id") {
+    return undefined;
+  }
+  const trustedProxies = csv(env.ACS_TRUSTED_TUNNEL_PROXY);
+  const connectorEntries = csv(env.ACS_ALLOWED_TUNNEL_IDS);
+  if (!trustedProxies) {
+    throw new Error("ACS_TRUSTED_TUNNEL_PROXY must be set when ACS_AUTH_MODE=tunnel_id");
+  }
+  const scopes = parseMcpScopes(env.ACS_TUNNEL_SCOPES) ?? DEFAULT_TUNNEL_SCOPES;
+  return {
+    trustedProxies,
+    connectors: connectorEntries?.map((entry) => tunnelConnector(entry, scopes)) ?? []
+  };
+}
+
+async function authorizeTunnelRequest(
+  headers: IncomingHttpHeaders,
+  tunnel: McpTunnelOptions | undefined,
+  remoteAddress: string | undefined,
+  requiredScopes: McpScope[],
+  now: Date
+): Promise<McpAuthorizationResult | undefined> {
+  if (!tunnel) {
+    return undefined;
+  }
+  const tunnelId = singleHeader(headers["x-acs-tunnel-id"]);
+  const connectorId = singleHeader(headers["x-acs-connector-id"]);
+  const sessionId = singleHeader(headers["x-acs-session-id"]);
+  const issuedAt = singleHeader(headers["x-acs-issued-at"]);
+  const signature = singleHeader(headers["x-acs-signature"]);
+  if (!tunnelId && !connectorId && !sessionId) {
+    return undefined;
+  }
+  if (!isTrustedTunnelProxy(remoteAddress, tunnel.trustedProxies)) {
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "untrusted tunnel proxy" };
+  }
+  if (tunnel.resolveSession || sessionId || issuedAt || signature) {
+    return authorizeSignedTunnelRequest({
+      tunnel,
+      connectorId,
+      tunnelId,
+      sessionId,
+      issuedAt,
+      signature,
+      requiredScopes,
+      now
+    });
+  }
+  if (!tunnelId) {
+    return { ok: false, statusCode: 401, error: "missing_token", message: "missing tunnel identity" };
+  }
+  const connector = tunnel.connectors?.find((candidate) => candidate.tunnelId === tunnelId);
+  if (!connector || (connectorId && connectorId !== connector.id)) {
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "unknown tunnel identity" };
+  }
+  if (!hasRequiredScopes(new Set(connector.scopes), requiredScopes)) {
+    return { ok: false, statusCode: 403, error: "insufficient_scope", message: "insufficient scope" };
+  }
+  return {
+    ok: true,
+    auth: {
+      method: "tunnel_id",
+      subject: `tunnel:${connector.tunnelId}`,
+      issuer: "trusted_tunnel_proxy",
+      connectorId: connector.id,
+      tunnelId: connector.tunnelId,
+      scopes: [...connector.scopes]
+    }
+  };
+}
+
+async function authorizeSignedTunnelRequest(input: {
+  tunnel: McpTunnelOptions;
+  connectorId?: string;
+  tunnelId?: string;
+  sessionId?: string;
+  issuedAt?: string;
+  signature?: string;
+  requiredScopes: McpScope[];
+  now: Date;
+}): Promise<McpAuthorizationResult> {
+  if (!input.connectorId || !input.tunnelId || !input.sessionId) {
+    return { ok: false, statusCode: 401, error: "missing_token", message: "missing tunnel session identity" };
+  }
+  if (!input.issuedAt || !input.signature) {
+    return { ok: false, statusCode: 401, error: "missing_token", message: "missing tunnel session signature" };
+  }
+  const session = await input.tunnel.resolveSession?.({
+    connectorId: input.connectorId,
+    tunnelId: input.tunnelId,
+    sessionId: input.sessionId
+  });
+  if (!session) {
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "unknown tunnel session" };
+  }
+  if (session.connectorStatus !== "active" || session.status !== "active") {
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "revoked tunnel session" };
+  }
+  if (Date.parse(session.expiresAt) <= input.now.getTime()) {
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "expired tunnel session" };
+  }
+  if (!isFreshIssuedAt(input.issuedAt, input.now, input.tunnel.maxIssuedAgeMs ?? DEFAULT_TUNNEL_MAX_ISSUED_AGE_MS)) {
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "stale tunnel assertion" };
+  }
+  if (!verifyTunnelSignature(session.publicKeyPem, input.signature, {
+    connectorId: input.connectorId,
+    tunnelId: input.tunnelId,
+    sessionId: input.sessionId,
+    issuedAt: input.issuedAt
+  })) {
+    return { ok: false, statusCode: 401, error: "invalid_token", message: "invalid tunnel signature" };
+  }
+  const scopes = parseMcpScopeList(session.scopes);
+  if (!scopes || !hasRequiredScopes(new Set(scopes), input.requiredScopes)) {
+    return { ok: false, statusCode: 403, error: "insufficient_scope", message: "insufficient scope" };
+  }
+  return {
+    ok: true,
+    auth: {
+      method: "tunnel_id",
+      subject: `tunnel:${input.tunnelId}`,
+      issuer: "trusted_tunnel_proxy",
+      connectorId: input.connectorId,
+      tunnelId: input.tunnelId,
+      sessionId: input.sessionId,
+      issuedAt: input.issuedAt,
+      scopes
+    }
+  };
+}
+
+export function createTunnelSignaturePayload(input: {
+  connectorId: string;
+  tunnelId: string;
+  sessionId: string;
+  issuedAt: string;
+}): string {
+  return `acs-tunnel-v1\n${input.connectorId}\n${input.tunnelId}\n${input.sessionId}\n${input.issuedAt}`;
 }
 
 function bearerToken(authorization: string | string[] | undefined): string | undefined {
@@ -130,109 +334,83 @@ function bearerToken(authorization: string | string[] | undefined): string | und
   return match?.[1];
 }
 
+function singleHeader(value: string | string[] | undefined): string | undefined {
+  return Array.isArray(value) ? undefined : value;
+}
+
+function isTrustedTunnelProxy(remoteAddress: string | undefined, trustedProxies: string[]): boolean {
+  const remote = normalizeAddress(remoteAddress);
+  return remote !== undefined && trustedProxies.some((proxy) => normalizeAddress(proxy) === remote);
+}
+
+function normalizeAddress(address: string | undefined): string | undefined {
+  return address?.startsWith("::ffff:") ? address.slice(7) : address;
+}
+
 function constantTimeEqual(left: string, right: string): boolean {
   const leftBuffer = Buffer.from(left);
   const rightBuffer = Buffer.from(right);
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-async function verifyJwt(token: string, oauth: McpOAuthOptions, now: Date): Promise<Record<string, unknown>> {
-  const parts = token.split(".");
-  if (parts.length !== 3) {
-    throw new Error("malformed JWT");
-  }
+async function verifyJwt(token: string, oauth: McpOAuthOptions, now: Date): Promise<McpAuthenticatedRequest> {
+  const { payload, protectedHeader } = await jwtVerify(token, jwks(oauth), {
+    issuer: oauth.issuer,
+    algorithms: ["RS256", "PS256"],
+    currentDate: now
+  });
 
-  const header = parseJwtPart(parts[0]) as Record<string, unknown>;
-  const claims = parseJwtPart(parts[1]) as Record<string, unknown>;
-  const alg = typeof header.alg === "string" ? header.alg : "";
-  if (alg !== "RS256" && alg !== "PS256") {
-    throw new Error("unsupported JWT alg");
-  }
-  if (header.typ !== undefined && header.typ !== "JWT" && header.typ !== "at+jwt") {
+  if (protectedHeader.typ !== undefined && protectedHeader.typ !== "JWT" && protectedHeader.typ !== "at+jwt") {
     throw new Error("unsupported JWT type");
   }
-
-  const jwk = await findSigningKey(oauth, header);
-  const key = createPublicKey({ key: jwk, format: "jwk" });
-  const signature = Buffer.from(parts[2], "base64url");
-  const validSignature = verify(
-    "RSA-SHA256",
-    Buffer.from(`${parts[0]}.${parts[1]}`),
-    alg === "PS256" ? { key, padding: constants.RSA_PKCS1_PSS_PADDING } : key,
-    signature
-  );
-  if (!validSignature) {
-    throw new Error("invalid JWT signature");
+  if (payload.exp === undefined) {
+    throw new Error("missing JWT expiration");
   }
-
-  const issuer = stringClaim(claims.iss);
-  if (issuer !== oauth.issuer) {
-    throw new Error("invalid JWT issuer");
-  }
-  if (!isAudienceValid(claims, oauth)) {
+  if (!isAudienceValid(payload, oauth)) {
     throw new Error("invalid JWT audience");
   }
 
-  const nowSeconds = Math.floor(now.getTime() / 1000);
-  const exp = numberClaim(claims.exp);
-  if (exp === undefined || exp <= nowSeconds) {
-    throw new Error("expired JWT");
-  }
-  const nbf = numberClaim(claims.nbf);
-  if (nbf !== undefined && nbf > nowSeconds) {
-    throw new Error("JWT not yet valid");
+  const subject = stringClaim(payload.sub) ?? stringClaim(payload.client_id);
+  if (!subject) {
+    throw new Error("missing JWT subject");
   }
 
-  return claims;
+  return {
+    method: "oauth_jwt",
+    subject,
+    issuer: oauth.issuer,
+    scopes: [...claimScopes(payload)]
+  };
 }
 
-async function findSigningKey(oauth: McpOAuthOptions, header: Record<string, unknown>): Promise<CryptoJsonWebKey> {
-  const kid = typeof header.kid === "string" ? header.kid : undefined;
-  const jwks = oauth.jwks ?? await fetchJwks(oauth);
-  const key = jwks.keys.find((candidate) => {
-    if (candidate.use && candidate.use !== "sig") return false;
-    if (candidate.kty !== "RSA") return false;
-    return kid ? candidate.kid === kid : true;
-  });
-  if (!key) {
-    throw new Error("JWT signing key not found");
+function jwks(oauth: McpOAuthOptions): ReturnType<typeof createLocalJWKSet> | ReturnType<typeof createRemoteJWKSet> {
+  if (oauth.jwks) {
+    return createLocalJWKSet(oauth.jwks);
   }
-  return key;
+  if (!oauth.jwksUri) {
+    throw new Error("JWKS URI is not configured");
+  }
+  let cached = remoteJwksCache.get(oauth.jwksUri);
+  if (!cached) {
+    cached = createRemoteJWKSet(new URL(oauth.jwksUri));
+    remoteJwksCache.set(oauth.jwksUri, cached);
+  }
+  return cached;
 }
 
-async function fetchJwks(oauth: McpOAuthOptions): Promise<JsonWebKeySet> {
-  if (!oauth.jwksUrl) {
-    throw new Error("JWKS URL is not configured");
-  }
-  const cached = jwksCache.get(oauth.jwksUrl);
-  if (cached && cached.expiresAt > Date.now()) {
-    return cached.jwks;
-  }
-  const response = await fetch(oauth.jwksUrl);
-  if (!response.ok) {
-    throw new Error(`JWKS fetch failed: ${response.status}`);
-  }
-  const jwks = await response.json() as JsonWebKeySet;
-  jwksCache.set(oauth.jwksUrl, { expiresAt: Date.now() + 300_000, jwks });
-  return jwks;
-}
-
-function parseJwtPart(part: string): unknown {
-  return JSON.parse(Buffer.from(part, "base64url").toString("utf8"));
-}
-
-function isAudienceValid(claims: Record<string, unknown>, oauth: McpOAuthOptions): boolean {
-  const expected = oauth.audience ?? oauth.resource;
+function isAudienceValid(claims: JWTPayload, oauth: McpOAuthOptions): boolean {
+  const expected = oauth.audience;
+  const resource = oauthResource(oauth);
   const audiences = stringListClaim(claims.aud);
   const resources = stringListClaim(claims.resource);
-  return audiences.includes(expected) || audiences.includes(oauth.resource) || resources.includes(oauth.resource);
+  return audiences.includes(expected) || audiences.includes(resource) || resources.includes(resource);
 }
 
 function hasRequiredScopes(actual: Set<string>, required: McpScope[]): boolean {
   return required.every((scope) => actual.has(scope));
 }
 
-function claimScopes(claims: Record<string, unknown>): Set<string> {
+function claimScopes(claims: JWTPayload): Set<string> {
   return new Set([
     ...scopeList(claims.scope),
     ...scopeList(claims.scp)
@@ -259,8 +437,58 @@ function stringClaim(input: unknown): string | undefined {
   return typeof input === "string" ? input : undefined;
 }
 
-function numberClaim(input: unknown): number | undefined {
-  return typeof input === "number" && Number.isFinite(input) ? input : undefined;
+function parseMcpScopes(input: string | undefined): McpScope[] | undefined {
+  const values = input?.split(/[,\s]+/).filter(Boolean);
+  return values ? parseMcpScopeList(values, true) : undefined;
+}
+
+function parseMcpScopeList(values: string[], throwOnInvalid = false): McpScope[] | undefined {
+  if (!values?.length) {
+    return undefined;
+  }
+  for (const value of values) {
+    if (!MCP_SCOPES.includes(value as McpScope)) {
+      if (throwOnInvalid) {
+        throw new Error(`unsupported MCP tunnel scope: ${value}`);
+      }
+      return undefined;
+    }
+  }
+  return values as McpScope[];
+}
+
+function isFreshIssuedAt(issuedAt: string, now: Date, maxIssuedAgeMs: number): boolean {
+  const issuedAtMs = Date.parse(issuedAt);
+  if (!Number.isFinite(issuedAtMs)) {
+    return false;
+  }
+  return Math.abs(now.getTime() - issuedAtMs) <= maxIssuedAgeMs;
+}
+
+function verifyTunnelSignature(
+  publicKeyPem: string,
+  signature: string,
+  payload: Parameters<typeof createTunnelSignaturePayload>[0]
+): boolean {
+  try {
+    const normalized = signature.startsWith("ed25519=") ? signature.slice("ed25519=".length) : signature;
+    return verifySignature(
+      null,
+      Buffer.from(createTunnelSignaturePayload(payload)),
+      createPublicKey(publicKeyPem),
+      Buffer.from(normalized, "base64url")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function tunnelConnector(entry: string, scopes: McpScope[]): McpTunnelConnectorOptions {
+  const [id, tunnelId] = entry.includes("=") ? entry.split("=", 2) : [entry, entry];
+  if (!id || !tunnelId) {
+    throw new Error("ACS_ALLOWED_TUNNEL_IDS entries must be tunnel_id or connector_id=tunnel_id");
+  }
+  return { id, tunnelId, scopes };
 }
 
 function csv(input: string | undefined): string[] | undefined {
@@ -270,4 +498,8 @@ function csv(input: string | undefined): string[] | undefined {
 
 function quoteAuthParam(value: string): string {
   return value.replace(/[\r\n]/g, "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+}
+
+function oauthResource(oauth: McpOAuthOptions): string {
+  return oauth.resource ?? oauth.audience;
 }

@@ -116,6 +116,43 @@ describe("work item state machine", () => {
     }
   });
 
+  it("stores only a lease token hash and hides lease material from reads and audit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-claim-hash-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+
+    try {
+      const workItem = store.create({
+        title: "Hash-only lease",
+        requester: "agent",
+        intent: "verify raw lease token is one-time material",
+        requestedActions: [{ kind: "manual", description: "claim" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id);
+
+      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      expect(claimed?.leaseToken).toEqual(expect.any(String));
+
+      const row = readLeaseRow(dbPath, workItem.id);
+      expect(row.worker_id).toBe("worker-a");
+      expect(row.lease_token_hash).toMatch(/^[a-f0-9]{64}$/);
+      expect(row.lease_token_hash).not.toBe(claimed!.leaseToken);
+      expect(row.lease_expires_at).toEqual(expect.any(String));
+
+      const publicSurface = JSON.stringify({
+        get: store.get(workItem.id),
+        list: store.list(),
+        events: store.readEvents()
+      });
+      expect(publicSurface).not.toContain(claimed!.leaseToken);
+      expect(publicSurface).not.toContain(row.lease_token_hash);
+      expect(publicSurface).not.toContain("lease_token_hash");
+    } finally {
+      store.close();
+    }
+  });
+
   it("fails stale running leases", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-lease-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
@@ -187,6 +224,136 @@ describe("work item state machine", () => {
         }).status
       ).toBe("succeeded");
       expect(JSON.stringify(store.readEvents())).not.toContain(claimed!.leaseToken);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects result submission when request omits worker lease fields", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-fields-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Lease field result",
+        requester: "agent",
+        intent: "verify required worker lease fields",
+        requestedActions: [{ kind: "manual", description: "result" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id);
+      const claimed = store.claimNextApprovedWorkItem("worker-a");
+
+      expect(() =>
+        store.submitWorkResult({
+          id: workItem.id,
+          leaseToken: claimed!.leaseToken,
+          status: "succeeded"
+        })
+      ).toThrow();
+      expect(() =>
+        store.submitWorkResult({
+          id: workItem.id,
+          workerId: "worker-a",
+          status: "succeeded"
+        })
+      ).toThrow();
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects result submission when stored lease hash is missing or malformed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-hash-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+
+    try {
+      const workItem = store.create({
+        title: "Stored lease hash result",
+        requester: "agent",
+        intent: "verify stored lease hash gate",
+        requestedActions: [{ kind: "manual", description: "result" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id);
+      const claimed = store.claimNextApprovedWorkItem("worker-a");
+
+      updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", null);
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: workItem.id,
+            workerId: "worker-a",
+            leaseToken: claimed!.leaseToken,
+            status: "succeeded"
+          }),
+        "worker_lease_missing"
+      );
+
+      updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", "not-a-sha256-hex-digest");
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: workItem.id,
+            workerId: "worker-a",
+            leaseToken: "wrong-token",
+            status: "succeeded"
+          }),
+        "worker_lease_missing"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects result submission when lease expiry is malformed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-expiry-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+
+    try {
+      const workItem = store.create({
+        title: "Malformed lease expiry result",
+        requester: "agent",
+        intent: "verify malformed lease expiry gate",
+        requestedActions: [{ kind: "manual", description: "result" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id);
+      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      updateWorkItemColumn(dbPath, workItem.id, "lease_expires_at", "not-an-iso-date");
+
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: workItem.id,
+            workerId: "worker-a",
+            leaseToken: claimed!.leaseToken,
+            status: "succeeded"
+          }),
+        "worker_lease_expired"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects result submission for missing work items", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-result-missing-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: "wrk_missing",
+            workerId: "worker-a",
+            leaseToken: "token",
+            status: "succeeded"
+          }),
+        "work_item_not_found"
+      );
     } finally {
       store.close();
     }
@@ -376,4 +543,32 @@ function expectControlError(run: () => unknown, code: string): void {
     return;
   }
   throw new Error(`expected ControlStackError: ${code}`);
+}
+
+function readLeaseRow(
+  dbPath: string,
+  workItemId: string
+): { worker_id: string | null; lease_token_hash: string | null; lease_expires_at: string | null } {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return db
+      .prepare(`SELECT worker_id, lease_token_hash, lease_expires_at FROM work_items WHERE id = ?`)
+      .get(workItemId) as { worker_id: string | null; lease_token_hash: string | null; lease_expires_at: string | null };
+  } finally {
+    db.close();
+  }
+}
+
+function updateWorkItemColumn(
+  dbPath: string,
+  workItemId: string,
+  column: "lease_expires_at" | "lease_token_hash",
+  value: string | null
+): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.prepare(`UPDATE work_items SET ${column} = ? WHERE id = ?`).run(value, workItemId);
+  } finally {
+    db.close();
+  }
 }

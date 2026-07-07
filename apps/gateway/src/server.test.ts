@@ -1,10 +1,11 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
+import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
 import { buildGateway } from "./server.js";
 
 const testAuth = { token: "t", actor: "user" };
@@ -18,6 +19,46 @@ function buildTestGateway(options: Parameters<typeof buildGateway>[0]) {
   });
   return app;
 }
+
+describe("mission control gateway", () => {
+  it("renders mission control from persisted work items and audit events", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+    const { publicKey } = generateKeyPairSync("ed25519");
+
+    try {
+      await app.inject({
+        method: "POST",
+        url: "/connectors",
+        payload: {
+          id: "chatgpt-prod",
+          displayName: "ChatGPT Desktop",
+          publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),
+          allowedScopes: ["acs:work:create", "acs:work:read"]
+        }
+      });
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { title: "Inspect route", intent: "verify mission control", target: { services: ["chatgpt-prod"] }, risk: "high" }
+      });
+      const workItemId = created.json().id;
+
+      const page = await app.inject({ method: "GET", url: "/" });
+      const agents = await app.inject({ method: "GET", url: "/agents" });
+      const detail = await app.inject({ method: "GET", url: `/work-items/${workItemId}` });
+
+      expect(page.statusCode).toBe(200);
+      expect(page.body).toContain("AgentOS Mission Control");
+      expect(page.body).toContain("Inspect route");
+      expect(agents.json().agents).toEqual(expect.arrayContaining([expect.objectContaining({ id: "chatgpt-prod" })]));
+      expect(detail.json().events.map((event: { name: string }) => event.name)).toContain("work_item.created");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("gateway MCP transport", () => {
   it("returns an MCP initialization response", async () => {
@@ -100,7 +141,7 @@ describe("gateway MCP transport", () => {
   it("routes tools/call through governed work-item creation", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const dbPath = join(dir, "control.db");
-    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth, mcpAuth: { localBearerToken: testAuth.token } });
     let appClosed = false;
 
     try {
@@ -247,10 +288,11 @@ describe("gateway MCP transport", () => {
     let appClosed = false;
 
     try {
+      const token = oauth.token({ scope: "acs:work:create" });
       const response = await app.inject({
         method: "POST",
         url: "/mcp",
-        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:create" })}` },
+        headers: { authorization: `Bearer ${token}` },
         payload: createWorkItemToolCall("oauth-valid")
       });
 
@@ -262,6 +304,14 @@ describe("gateway MCP transport", () => {
       const store = new SqliteWorkItemStore(dbPath);
       try {
         expect(store.list()).toHaveLength(1);
+        const authEvent = store.readEvents().find((event) => event.name === "connector.requested");
+        expect(authEvent?.attributes).toMatchObject({
+          "auth.method": "oauth_jwt",
+          "auth.subject": "user_123",
+          "auth.issuer": oauthIssuer
+        });
+        expect(authEvent?.body.authScopes).toEqual(["acs:work:create"]);
+        expect(JSON.stringify(authEvent)).not.toContain(token);
       } finally {
         store.close();
       }
@@ -299,6 +349,487 @@ describe("gateway MCP transport", () => {
     }
   });
 
+  it("publishes OAuth protected resource metadata without OAuth configuration", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-metadata-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false
+    });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/.well-known/oauth-protected-resource/mcp",
+        headers: { host: "127.0.0.1:3000" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        resource: "http://127.0.0.1:3000/mcp",
+        resource_name: "Agent Control Stack MCP Gateway",
+        authorization_servers: [],
+        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:worker:claim"],
+        bearer_methods_supported: ["header"]
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a trusted tunnel proxy identity for scoped MCP tools/call", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: {
+        tunnel: {
+          trustedProxies: ["127.0.0.1"],
+          connectors: [
+            { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
+          ]
+        }
+      }
+    });
+    let appClosed = false;
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: {
+          "x-acs-tunnel-id": "tunnel_abc123",
+          "x-acs-connector-id": "chatgpt-prod"
+        },
+        payload: createWorkItemToolCall("tunnel-valid")
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().result.structuredContent.title).toBe("tunnel-valid");
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        const authEvent = store.readEvents().find((event) => event.name === "connector.requested");
+        expect(authEvent?.attributes).toMatchObject({
+          "auth.method": "tunnel_id",
+          "auth.subject": "tunnel:tunnel_abc123",
+          "auth.issuer": "trusted_tunnel_proxy",
+          "auth.connector_id": "chatgpt-prod"
+        });
+        expect(authEvent?.body.authScopes).toEqual(["acs:work:create", "acs:work:read"]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects tunnel identity headers from untrusted remote addresses", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: {
+        tunnel: {
+          trustedProxies: ["127.0.0.1"],
+          connectors: [
+            { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
+          ]
+        }
+      }
+    });
+    let appClosed = false;
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "203.0.113.10",
+        headers: {
+          "x-acs-tunnel-id": "tunnel_abc123",
+          "x-acs-connector-id": "chatgpt-prod"
+        },
+        payload: createWorkItemToolCall("tunnel-rejected")
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().result.structuredContent.authError).toBe("invalid_token");
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toEqual([]);
+        expect(store.readEvents()).toEqual([]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not grant approval authority to tunnel identities without approval scope", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      mcpAuth: {
+        tunnel: {
+          trustedProxies: ["127.0.0.1"],
+          connectors: [
+            { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
+          ]
+        }
+      }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: {
+          "x-acs-tunnel-id": "tunnel_abc123",
+          "x-acs-connector-id": "chatgpt-prod"
+        },
+        payload: {
+          jsonrpc: "2.0",
+          id: "approve-through-tunnel",
+          method: "tools/call",
+          params: {
+            name: "approve_work_item",
+            arguments: { id: "wi_missing", approvedBy: "chatgpt-prod", reason: "should not reach tool" }
+          }
+        }
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json().result.structuredContent).toMatchObject({
+        authError: "insufficient_scope",
+        requiredScopes: ["acs:work:approve"]
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("registers persistent connectors and tunnel sessions through authenticated routes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const app = buildTestGateway({ dbPath, logger: false });
+    let appClosed = false;
+
+    try {
+      const connector = await app.inject({
+        method: "POST",
+        url: "/connectors",
+        payload: {
+          id: "chatgpt-prod",
+          displayName: "ChatGPT Desktop",
+          publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),
+          allowedScopes: ["acs:work:create", "acs:work:read"]
+        }
+      });
+      const session = await app.inject({
+        method: "POST",
+        url: "/connectors/chatgpt-prod/tunnel-sessions",
+        payload: {
+          tunnelId: "tunnel_abc123",
+          sessionId: "session_1",
+          expiresAt: new Date(Date.now() + 60_000).toISOString()
+        }
+      });
+
+      expect(connector.statusCode).toBe(201);
+      expect(session.statusCode).toBe(201);
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(
+          store.getTunnelSession({
+            connectorId: "chatgpt-prod",
+            tunnelId: "tunnel_abc123",
+            sessionId: "session_1"
+          })
+        ).toMatchObject({
+          connectorId: "chatgpt-prod",
+          tunnelId: "tunnel_abc123",
+          sessionId: "session_1",
+          status: "active",
+          scopes: ["acs:work:create", "acs:work:read"]
+        });
+        expect(store.readEvents().map((event) => event.name)).toEqual(
+          expect.arrayContaining(["connector.registered", "tunnel_session.registered"])
+        );
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts a signed persistent tunnel session and audits connector to tunnel to work item", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    const tunnel = seedSignedTunnelSession(dbPath, {
+      connectorId: "chatgpt-prod",
+      tunnelId: "tunnel_abc123",
+      sessionId: "session_1",
+      scopes: ["acs:work:create", "acs:work:read"]
+    });
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { tunnel: { trustedProxies: ["127.0.0.1"] } }
+    });
+    let appClosed = false;
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: signedTunnelHeaders(tunnel),
+        payload: createWorkItemToolCall("signed-tunnel-valid")
+      });
+
+      expect(response.statusCode).toBe(200);
+      const workItem = response.json().result.structuredContent;
+      expect(workItem.title).toBe("signed-tunnel-valid");
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        const authEvent = store.readEvents().find((event) => event.name === "connector.requested");
+        expect(authEvent?.attributes).toMatchObject({
+          "auth.method": "tunnel_id",
+          "auth.connector_id": "chatgpt-prod",
+          "auth.tunnel_id": "tunnel_abc123",
+          "auth.session_id": "session_1",
+          "work_item.id": workItem.id
+        });
+        expect(authEvent?.body).toMatchObject({
+          authConnectorId: "chatgpt-prod",
+          authTunnelId: "tunnel_abc123",
+          authSessionId: "session_1",
+          workItemId: workItem.id
+        });
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects signed tunnel sessions with invalid signatures", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    const tunnel = seedSignedTunnelSession(dbPath, {
+      connectorId: "chatgpt-prod",
+      tunnelId: "tunnel_abc123",
+      sessionId: "session_1",
+      scopes: ["acs:work:create", "acs:work:read"]
+    });
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { tunnel: { trustedProxies: ["127.0.0.1"] } }
+    });
+
+    try {
+      const headers = signedTunnelHeaders(tunnel);
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: { ...headers, "x-acs-signature": "ed25519=bad" },
+        payload: createWorkItemToolCall("bad-signature")
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().result.structuredContent.authError).toBe("invalid_token");
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toEqual([]);
+        expect(store.readEvents().some((event) => event.name === "connector.requested")).toBe(false);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects expired signed tunnel sessions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    const tunnel = seedSignedTunnelSession(dbPath, {
+      connectorId: "chatgpt-prod",
+      tunnelId: "tunnel_abc123",
+      sessionId: "session_1",
+      scopes: ["acs:work:create", "acs:work:read"],
+      now: new Date(Date.now() - 120_000),
+      expiresAt: new Date(Date.now() - 60_000).toISOString()
+    });
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { tunnel: { trustedProxies: ["127.0.0.1"] } }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: signedTunnelHeaders(tunnel),
+        payload: createWorkItemToolCall("expired-session")
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().result.structuredContent.authError).toBe("invalid_token");
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toEqual([]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects revoked signed tunnel sessions after heartbeat and revocation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    const tunnel = seedSignedTunnelSession(dbPath, {
+      connectorId: "chatgpt-prod",
+      tunnelId: "tunnel_abc123",
+      sessionId: "session_1",
+      scopes: ["acs:work:create", "acs:work:read"]
+    });
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: testAuth,
+      mcpAuth: { tunnel: { trustedProxies: ["127.0.0.1"] } }
+    });
+    app.addHook("onRequest", async (request) => {
+      request.headers.authorization ??= `Bearer ${testAuth.token}`;
+    });
+
+    try {
+      const heartbeat = await app.inject({
+        method: "POST",
+        url: "/connectors/chatgpt-prod/tunnels/tunnel_abc123/sessions/session_1/heartbeat"
+      });
+      const revoke = await app.inject({
+        method: "POST",
+        url: "/connectors/chatgpt-prod/tunnels/tunnel_abc123/sessions/session_1/revoke"
+      });
+      const rejected = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: signedTunnelHeaders(tunnel),
+        payload: createWorkItemToolCall("revoked-session")
+      });
+
+      expect(heartbeat.statusCode).toBe(200);
+      expect(revoke.statusCode).toBe(200);
+      expect(rejected.statusCode).toBe(401);
+      expect(rejected.json().result.structuredContent.authError).toBe("invalid_token");
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.readEvents().map((event) => event.name)).toEqual(
+          expect.arrayContaining(["tunnel_session.heartbeat", "tunnel_session.revoked"])
+        );
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps multiple signed connectors scoped independently", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    const desktop = seedSignedTunnelSession(dbPath, {
+      connectorId: "chatgpt-desktop",
+      tunnelId: "tunnel_desktop",
+      sessionId: "desktop_session",
+      scopes: ["acs:work:create", "acs:work:read"]
+    });
+    const mobile = seedSignedTunnelSession(dbPath, {
+      connectorId: "chatgpt-mobile",
+      tunnelId: "tunnel_mobile",
+      sessionId: "mobile_session",
+      scopes: ["acs:work:read"]
+    });
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { tunnel: { trustedProxies: ["127.0.0.1"] } }
+    });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: signedTunnelHeaders(desktop),
+        payload: createWorkItemToolCall("desktop-create")
+      });
+      const rejected = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: signedTunnelHeaders(mobile),
+        payload: createWorkItemToolCall("mobile-create")
+      });
+
+      expect(created.statusCode).toBe(200);
+      expect(rejected.statusCode).toBe(403);
+      expect(rejected.json().result.structuredContent).toMatchObject({
+        authError: "insufficient_scope",
+        requiredScopes: ["acs:work:create"]
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps initialize and tools/list available without OAuth bearer auth", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
     const oauth = createTestOAuth();
@@ -324,6 +855,63 @@ describe("gateway MCP transport", () => {
     }
   });
 
+  it("keeps ping and notifications public without OAuth bearer auth", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
+    const oauth = createTestOAuth();
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, mcpAuth: { oauth: oauth.options } });
+
+    try {
+      const ping = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: "ping", method: "ping" }
+      });
+      const notification = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: null, method: "notifications/initialized" }
+      });
+
+      expect(ping.statusCode).toBe(200);
+      expect(notification.statusCode).toBe(200);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires auth before rejecting unknown MCP methods", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      payload: { jsonrpc: "2.0", id: "unknown", method: "dangerous/unknown" },
+      headers: {}
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(result.response.json().result.structuredContent.authError).toBe("missing_token");
+    expect(result.workItems).toEqual([]);
+    expect(result.events).toEqual([]);
+  });
+
+  it("audits authenticated unknown MCP methods before rejecting them", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      payload: { jsonrpc: "2.0", id: "unknown-authed", method: "dangerous/unknown" },
+      headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}` }
+    });
+
+    expect(result.response.statusCode).toBe(404);
+    expect(result.workItems).toEqual([]);
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0].attributes).toMatchObject({
+      "connector.tool": "dangerous/unknown",
+      "auth.method": "oauth_jwt",
+      "auth.subject": "user_123"
+    });
+  });
+
   it("fails closed for missing OAuth bearer JWT on tools/call", async () => {
     const oauth = createTestOAuth();
     const result = await injectRejectedOAuthToolCall({
@@ -332,9 +920,10 @@ describe("gateway MCP transport", () => {
     });
 
     expect(result.response.statusCode).toBe(401);
-    expect(result.response.headers["www-authenticate"]).toContain("/.well-known/oauth-protected-resource/mcp");
-    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
-    expect(authChallenge(result.response.json())).toContain("error_description=\"missing MCP bearer token\"");
+    expect(result.response.headers["www-authenticate"]).toBe(authChallenge(result.response.json()));
+    expect(authChallenge(result.response.json())).toBe(
+      "Bearer resource_metadata=\"http://localhost:80/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"missing bearer token\", scope=\"acs:work:create\""
+    );
     expect(result.response.json().result.structuredContent).toMatchObject({
       authError: "missing_token",
       requiredScopes: ["acs:work:create"]
@@ -355,11 +944,44 @@ describe("gateway MCP transport", () => {
     expect(result.workItems).toEqual([]);
   });
 
+  it("fails closed for malformed OAuth bearer JWTs on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: { authorization: "Bearer not-a-jwt" }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
+    expect(result.workItems).toEqual([]);
+  });
+
+  it("fails closed for unsigned OAuth bearer JWTs on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const unsigned = `${base64UrlJson({ alg: "none", typ: "JWT" })}.${base64UrlJson({
+      iss: oauthIssuer,
+      sub: "user_123",
+      aud: oauthResource,
+      exp: Math.floor(Date.now() / 1000) + 300,
+      scope: "acs:work:create"
+    })}.`;
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: { authorization: `Bearer ${unsigned}` }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
+    expect(result.workItems).toEqual([]);
+  });
+
   it("fails closed for tampered OAuth bearer JWT signatures on tools/call", async () => {
     const oauth = createTestOAuth();
     const [header, _claims, signature] = oauth.token({ scope: "acs:work:create" }).split(".");
     const tampered = `${header}.${base64UrlJson({
       iss: oauthIssuer,
+      sub: "user_123",
       aud: oauthResource,
       exp: Math.floor(Date.now() / 1000) + 300,
       scope: "acs:work:create",
@@ -380,6 +1002,24 @@ describe("gateway MCP transport", () => {
     const result = await injectRejectedOAuthToolCall({
       oauth,
       headers: { authorization: `Bearer ${oauth.token({ aud: "https://other.example.test" })}` }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
+    expect(result.workItems).toEqual([]);
+  });
+
+  it("fails closed when OAuth audience and resource are both wrong on tools/call", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: {
+        authorization: `Bearer ${oauth.token({
+          aud: "https://other.example.test",
+          resource: "https://other.example.test/mcp"
+        })}`
+      }
     });
 
     expect(result.response.statusCode).toBe(401);
@@ -409,13 +1049,53 @@ describe("gateway MCP transport", () => {
     });
 
     expect(result.response.statusCode).toBe(403);
-    expect(result.response.headers["www-authenticate"]).toContain("error=\"insufficient_scope\"");
-    expect(authChallenge(result.response.json())).toContain("error=\"insufficient_scope\"");
+    expect(result.response.headers["www-authenticate"]).toBe(authChallenge(result.response.json()));
+    expect(authChallenge(result.response.json())).toBe(
+      "Bearer resource_metadata=\"http://localhost:80/.well-known/oauth-protected-resource/mcp\", error=\"insufficient_scope\", error_description=\"insufficient scope\", scope=\"acs:work:create\""
+    );
     expect(result.response.json().result.structuredContent).toMatchObject({
       authError: "insufficient_scope",
       requiredScopes: ["acs:work:create"]
     });
     expect(result.workItems).toEqual([]);
+  });
+
+  it("resolves local and OAuth MCP auth from the requested environment variables", () => {
+    expect(resolveMcpAuthOptions({ env: { ACS_MCP_BEARER_TOKEN: "local-dev" } })?.localBearerToken).toBe("local-dev");
+    expect(
+      resolveMcpAuthOptions({
+        env: {
+          ACS_OAUTH_ISSUER: oauthIssuer,
+          ACS_OAUTH_AUDIENCE: oauthResource,
+          ACS_OAUTH_JWKS_URI: "https://auth.example.test/.well-known/jwks.json"
+        }
+      })?.oauth
+    ).toMatchObject({
+      issuer: oauthIssuer,
+      audience: oauthResource,
+      resource: oauthResource,
+      jwksUri: "https://auth.example.test/.well-known/jwks.json"
+    });
+    expect(
+      resolveMcpAuthOptions({ env: { NODE_ENV: "production", ACS_MCP_BEARER_TOKEN: "local-dev" } })
+    ).toBeUndefined();
+    expect(
+      resolveMcpAuthOptions({ localBearerToken: "explicit-local", env: { NODE_ENV: "production" } })
+    ).toBeUndefined();
+    expect(
+      resolveMcpAuthOptions({
+        env: {
+          ACS_AUTH_MODE: "tunnel_id",
+          ACS_TRUSTED_TUNNEL_PROXY: "127.0.0.1,::1",
+          ACS_ALLOWED_TUNNEL_IDS: "chatgpt-prod=tunnel_abc123"
+        }
+      })?.tunnel
+    ).toEqual({
+      trustedProxies: ["127.0.0.1", "::1"],
+      connectors: [
+        { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
+      ]
+    });
   });
 });
 
@@ -809,6 +1489,65 @@ function createWorkItemToolCall(title: string) {
   };
 }
 
+function seedSignedTunnelSession(
+  dbPath: string,
+  input: {
+    connectorId: string;
+    tunnelId: string;
+    sessionId: string;
+    scopes: string[];
+    now?: Date;
+    expiresAt?: string;
+  }
+) {
+  const { privateKey, publicKey } = generateKeyPairSync("ed25519");
+  const store = new SqliteWorkItemStore(dbPath);
+  try {
+    store.registerConnector({
+      id: input.connectorId,
+      publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),
+      allowedScopes: input.scopes,
+      now: input.now
+    });
+    store.registerTunnelSession({
+      connectorId: input.connectorId,
+      tunnelId: input.tunnelId,
+      sessionId: input.sessionId,
+      expiresAt: input.expiresAt ?? new Date(Date.now() + 60_000).toISOString(),
+      now: input.now
+    });
+  } finally {
+    store.close();
+  }
+  return {
+    privateKey,
+    connectorId: input.connectorId,
+    tunnelId: input.tunnelId,
+    sessionId: input.sessionId
+  };
+}
+
+function signedTunnelHeaders(input: {
+  privateKey: KeyObject;
+  connectorId: string;
+  tunnelId: string;
+  sessionId: string;
+}) {
+  const issuedAt = new Date().toISOString();
+  const signature = sign(
+    null,
+    Buffer.from(createTunnelSignaturePayload({ ...input, issuedAt })),
+    input.privateKey
+  ).toString("base64url");
+  return {
+    "x-acs-connector-id": input.connectorId,
+    "x-acs-tunnel-id": input.tunnelId,
+    "x-acs-session-id": input.sessionId,
+    "x-acs-issued-at": issuedAt,
+    "x-acs-signature": `ed25519=${signature}`
+  };
+}
+
 function createTestOAuth() {
   const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
   const kid = "test-key";
@@ -816,6 +1555,7 @@ function createTestOAuth() {
   const nowSeconds = Math.floor(Date.now() / 1000);
   const options = {
     issuer: oauthIssuer,
+    audience: oauthResource,
     resource: oauthResource,
     jwks: { keys: [jwk] },
     authorizationServers: [oauthIssuer]
@@ -825,6 +1565,7 @@ function createTestOAuth() {
     const header = { alg: "RS256", typ: "JWT", kid };
     const claims = {
       iss: oauthIssuer,
+      sub: "user_123",
       aud: oauthResource,
       exp: nowSeconds + 300,
       iat: nowSeconds,
@@ -842,6 +1583,7 @@ function createTestOAuth() {
 async function injectRejectedOAuthToolCall(input: {
   oauth: ReturnType<typeof createTestOAuth>;
   headers: Record<string, string>;
+  payload?: unknown;
 }) {
   const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-reject-"));
   const dbPath = join(dir, "control.db");
@@ -857,14 +1599,14 @@ async function injectRejectedOAuthToolCall(input: {
       method: "POST",
       url: "/mcp",
       headers: input.headers,
-      payload: createWorkItemToolCall("rejected")
+      payload: input.payload ?? createWorkItemToolCall("rejected")
     });
 
     await app.close();
     appClosed = true;
     const store = new SqliteWorkItemStore(dbPath);
     try {
-      return { response, workItems: store.list() };
+      return { response, workItems: store.list(), events: store.readEvents() };
     } finally {
       store.close();
     }

@@ -72,7 +72,7 @@ Trust assumptions:
 - HTTP requests enter through `apps/gateway`.
 - Durable state is SQLite in `storage/local.db` by default.
 - Gateway HTTP mutations require configured bearer auth; if mutation auth is not configured, they fail closed with `503`.
-- MCP `tools/call` requests require bearer authorization. A local bearer token or OAuth/JWKS config can satisfy this; `initialize` and `tools/list` remain discovery methods.
+- MCP `tools/call` requests require bearer authorization or a signed tunnel-session assertion from a configured trusted local proxy. A local `ACS_MCP_BEARER_TOKEN` can satisfy this outside production; production uses OAuth/JWKS validation or `ACS_AUTH_MODE=tunnel_id` with persistent connector/session records. `initialize`, `ping`, `notifications/*`, and `tools/list` remain discovery methods.
 - Worker execution must only consume approved work-item events.
 - Sandbox execution is currently dry-run only.
 - Result submission is lease-bound in the work-item store; the public HTTP result route is not implemented.
@@ -114,6 +114,9 @@ Trust assumptions:
 - Sensitive keys such as tokens, passwords, API keys, secrets, and authorization headers are redacted before audit events are created.
 - The policy gate fails closed for requested actions.
 - The policy gate denies unknown action kinds, sudo, destructive root removal, credential-file reads, unapproved network, path-escape writes, and high-risk self-approval.
+- Tunnel connector records persist Ed25519 public keys and allowed MCP scopes in SQLite.
+- Tunnel session records persist connector id, tunnel id, session id, expiry, heartbeat, and revocation state.
+- Signed tunnel assertions are accepted only from allowlisted local proxy addresses and only while the connector and session are active and unexpired.
 - File writes, package installs, service restarts, git commits, system mutations, high-risk work, and long-running commands require approval.
 - The worker only starts rows that are already `approved`; the sandbox only accepts `running` work items.
 - Work-item state changes and audit events are written in one SQLite transaction.
@@ -142,7 +145,7 @@ Trust assumptions:
 | T12 | Audit write failure ignored | Mutation without evidence | Keep work-item state changes and audit events in the same transaction. |
 | T13 | Worker result forgery | Fake completion or data injection | Require worker id and valid lease token for result submission. |
 | T14 | Worker lease replay | Unauthorized result reuse | Store lease token hashes, expire leases, and allow one active lease per running item. |
-| T15 | Exposed unauthenticated endpoint | Remote unauthorized control | Require bearer/OAuth authorization for MCP `tools/call`; require gateway bearer auth for HTTP mutations. |
+| T15 | Exposed unauthenticated endpoint | Remote unauthorized control | Require bearer/OAuth authorization or signed tunnel-session assertions for MCP `tools/call`; require gateway bearer auth for HTTP mutations. |
 | T16 | Output flooding | Memory exhaustion or prompt flooding | Add output byte caps and truncation flags before live command mode. |
 | T17 | Long-running process abuse | Resource exhaustion | Require approval for long-running commands; add process-group termination before live command mode. |
 | T18 | Policy config tampering | Wider authority | Add config digesting and ownership checks before externalized policy config. |
@@ -163,6 +166,7 @@ These must remain true across releases:
 - Secret-looking data is redacted before returning to MCP and before audit persistence.
 - Audit write failure blocks mutation.
 - Worker result submission requires worker identity and a valid lease token.
+- Tunnel connector identity requires trusted local proxy source, valid signature, active connector, active unexpired session, and matching tool scope.
 - Remote connector exposure never grants more authority than local policy permits.
 
 ## Validation Plan
@@ -179,6 +183,7 @@ Minimum test groups:
 - Audit write failure tests.
 - Worker lease tests.
 - HTTPS authentication smoke tests.
+- Signed tunnel-session auth tests for signature failure, expiry, revocation, heartbeat, and per-connector scopes.
 - Redaction tests using fake canary secrets.
 
 ## Deferred Hardening

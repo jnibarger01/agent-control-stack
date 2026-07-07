@@ -41,3 +41,27 @@ CREATE TABLE IF NOT EXISTS approval_records (
   PRIMARY KEY (work_item_id, action_hash),
   FOREIGN KEY (work_item_id) REFERENCES work_items(id)
 );
+
+CREATE TABLE IF NOT EXISTS connector_records (
+  id TEXT PRIMARY KEY,
+  display_name TEXT NOT NULL,
+  public_key_pem TEXT NOT NULL,
+  allowed_scopes_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tunnel_sessions (
+  connector_id TEXT NOT NULL,
+  tunnel_id TEXT NOT NULL,
+  session_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active',
+  issued_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  last_heartbeat_at TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (connector_id, tunnel_id, session_id),
+  FOREIGN KEY (connector_id) REFERENCES connector_records(id)
+);

@@ -2,7 +2,13 @@ import type { IncomingHttpHeaders } from "node:http";
 import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { ZodError, z } from "zod";
-import { authorizeMcpRequest, oauthDiscoveryChallenge, type McpAuthOptions, type McpScope } from "./auth.js";
+import {
+  authorizeMcpRequest,
+  oauthDiscoveryChallenge,
+  type McpAuthenticatedRequest,
+  type McpAuthOptions,
+  type McpScope
+} from "./auth.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
@@ -25,6 +31,14 @@ type JsonRpcFailure = {
     data?: unknown;
   };
 };
+
+export interface AuthenticatedMcpRequestAudit {
+  requestId: string;
+  method: string;
+  toolName?: string;
+  workItemId?: string;
+  auth: McpAuthenticatedRequest;
+}
 
 export type McpHttpResult = {
   statusCode: number;
@@ -50,10 +64,17 @@ export function handleMcpHttpRequest(input: {
   tools: GatewayWorkItemTools;
   auth?: McpAuthOptions;
   resourceMetadataUrl?: string;
+  requestId?: string;
+  remoteAddress?: string;
+  auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
 }): Promise<McpHttpResult> | McpHttpResult {
   const request = jsonRpcRequestSchema.safeParse(input.body);
   if (!request.success) {
     return jsonRpcError(null, -32600, "invalid JSON-RPC request", 400);
+  }
+
+  if (request.data.method.startsWith("notifications/")) {
+    return jsonRpcResult(request.data.id, {});
   }
 
   switch (request.data.method) {
@@ -66,29 +87,46 @@ export function handleMcpHttpRequest(input: {
           version: "0.1.0"
         }
       });
+    case "ping":
+      return jsonRpcResult(request.data.id, {});
     case "tools/list":
       return jsonRpcResult(request.data.id, { tools: mcpToolDefinitions() });
     case "tools/call":
       return handleToolsCall({
         id: request.data.id,
+        requestId: input.requestId,
         params: request.data.params,
         headers: input.headers,
         auth: input.auth,
         resourceMetadataUrl: input.resourceMetadataUrl,
-        tools: input.tools
+        tools: input.tools,
+        remoteAddress: input.remoteAddress,
+        auditAuthenticatedRequest: input.auditAuthenticatedRequest
       });
     default:
-      return jsonRpcError(request.data.id, -32601, `unsupported MCP method: ${request.data.method}`, 404);
+      return handleProtectedUnsupportedMethod({
+        id: request.data.id,
+        requestId: input.requestId,
+        method: request.data.method,
+        headers: input.headers,
+        auth: input.auth,
+        resourceMetadataUrl: input.resourceMetadataUrl,
+        remoteAddress: input.remoteAddress,
+        auditAuthenticatedRequest: input.auditAuthenticatedRequest
+      });
   }
 }
 
 async function handleToolsCall(input: {
   id: JsonRpcId;
+  requestId?: string;
   params: unknown;
   headers: IncomingHttpHeaders;
   auth?: McpAuthOptions;
   resourceMetadataUrl?: string;
   tools: GatewayWorkItemTools;
+  remoteAddress?: string;
+  auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
 }): Promise<McpHttpResult> {
   const parsed = toolsCallParamsSchema.safeParse(input.params);
   if (!parsed.success) {
@@ -98,7 +136,8 @@ async function handleToolsCall(input: {
   const authorization = await authorizeMcpRequest({
     headers: input.headers,
     auth: input.auth,
-    requiredScopes: requiredScopes(parsed.data.name)
+    requiredScopes: requiredScopes(parsed.data.name),
+    remoteAddress: input.remoteAddress
   });
   if (!authorization.ok) {
     return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, requiredScopes(parsed.data.name));
@@ -106,6 +145,13 @@ async function handleToolsCall(input: {
 
   try {
     const result = callGatewayTool(input.tools, parsed.data.name, parsed.data.arguments ?? {});
+    input.auditAuthenticatedRequest?.({
+      requestId: input.requestId ?? String(input.id ?? ""),
+      method: "tools/call",
+      toolName: parsed.data.name,
+      workItemId: workItemIdFromToolResult(result),
+      auth: authorization.auth
+    });
     return jsonRpcResult(input.id, {
       content: [
         {
@@ -116,13 +162,57 @@ async function handleToolsCall(input: {
       structuredContent: result
     });
   } catch (error) {
+    input.auditAuthenticatedRequest?.({
+      requestId: input.requestId ?? String(input.id ?? ""),
+      method: "tools/call",
+      toolName: parsed.data.name,
+      auth: authorization.auth
+    });
     return jsonRpcError(input.id, errorCode(error), errorMessage(error), errorStatus(error));
   }
+}
+
+async function handleProtectedUnsupportedMethod(input: {
+  id: JsonRpcId;
+  requestId?: string;
+  method: string;
+  headers: IncomingHttpHeaders;
+  auth?: McpAuthOptions;
+  resourceMetadataUrl?: string;
+  remoteAddress?: string;
+  auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
+}): Promise<McpHttpResult> {
+  const authorization = await authorizeMcpRequest({
+    headers: input.headers,
+    auth: input.auth,
+    requiredScopes: [],
+    remoteAddress: input.remoteAddress
+  });
+  if (!authorization.ok) {
+    return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, []);
+  }
+  input.auditAuthenticatedRequest?.({
+    requestId: input.requestId ?? String(input.id ?? ""),
+    method: input.method,
+    auth: authorization.auth
+  });
+  return jsonRpcError(input.id, -32601, `unsupported MCP method: ${input.method}`, 404);
 }
 
 function callGatewayTool(tools: GatewayWorkItemTools, name: GatewayToolName, args: unknown): unknown {
   const handler = tools[name] as (input: unknown) => unknown;
   return handler(args);
+}
+
+function workItemIdFromToolResult(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined;
+  const record = result as Record<string, unknown>;
+  if (typeof record.id === "string") return record.id;
+  const workItem = record.workItem;
+  if (workItem && typeof workItem === "object" && typeof (workItem as Record<string, unknown>).id === "string") {
+    return (workItem as Record<string, string>).id;
+  }
+  return undefined;
 }
 
 function mcpToolDefinitions() {
@@ -296,7 +386,7 @@ function mcpAuthError(
 ): McpHttpResult {
   const oauthError = authorization.error === "insufficient_scope" ? "insufficient_scope" : "invalid_token";
   const challenge = resourceMetadataUrl
-    ? oauthDiscoveryChallenge(resourceMetadataUrl, oauthError, authorization.message)
+    ? oauthDiscoveryChallenge(resourceMetadataUrl, oauthError, authorization.message, scopes)
     : undefined;
   return {
     statusCode: authorization.statusCode,
