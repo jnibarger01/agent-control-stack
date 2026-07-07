@@ -1,75 +1,328 @@
-import type { WorkItem } from "@agent-control-stack/work-items";
+import type { StoredAuditEvent, WorkItem } from "@agent-control-stack/work-items";
 
-export function renderDashboard(workItems: WorkItem[]): string {
-  const rows = workItems.map(renderRow).join("");
+export interface MissionControlAgent {
+  id: string;
+  displayName: string;
+  kind: string;
+  status: "online" | "observed" | "stale" | "offline";
+  health: "healthy" | "warning" | "unhealthy" | "unknown";
+  currentTask?: string;
+  currentWorkItemId?: string;
+  lastHeartbeatAt?: string;
+  lastEventAt?: string;
+  lastError?: string;
+  capabilities: string[];
+  metadata: Record<string, string>;
+}
+
+export interface MissionControlViewModel {
+  workItems: WorkItem[];
+  events: StoredAuditEvent[];
+  agents?: MissionControlAgent[];
+  now?: Date;
+}
+
+export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
+  const model = Array.isArray(input) ? { workItems: input, events: [] } : input;
+  const events = model.events ?? [];
+  const agents = model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date());
+  const stats = summarize(model.workItems, agents);
+  const recentEvents = [...events].slice(-10).reverse();
 
   return `<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Agent Control Stack</title>
-    <style>
-      :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
-      body { margin: 0; background: #f7f8fb; color: #16181d; }
-      main { max-width: 1120px; margin: 0 auto; padding: 32px 20px; }
-      h1 { font-size: 28px; margin: 0 0 12px; }
-      .notice, table { width: 100%; background: #fff; border: 1px solid #d9dee8; border-radius: 8px; }
-      .notice { box-sizing: border-box; padding: 14px 16px; margin: 0 0 20px; color: #344054; }
-      table { border-collapse: collapse; overflow: hidden; }
-      th, td { padding: 12px; border-bottom: 1px solid #e6eaf0; text-align: left; vertical-align: top; }
-      th { font-size: 12px; color: #526071; text-transform: uppercase; }
-      tr:last-child td { border-bottom: 0; }
-      .status { font-weight: 700; }
-      .meta, .empty { color: #667085; }
-      code { background: #eef2f7; border-radius: 4px; padding: 1px 4px; }
-      @media (max-width: 860px) { table { font-size: 14px; } }
-    </style>
+    <title>AgentOS Mission Control</title>
+    <style>${styles()}</style>
   </head>
   <body>
+    <aside>
+      <div class="brand">AgentOS<span>MISSION CONTROL</span></div>
+      <nav>
+        <a href="#overview" class="active">Overview</a>
+        <a href="#agents">Agents</a>
+        <a href="#queue">Work Queue</a>
+        <a href="#dispatch">New Task</a>
+        <a href="#events">Events</a>
+      </nav>
+      <p class="rail-note">Local-first control plane. No fake green lights, because apparently standards are still allowed.</p>
+    </aside>
     <main>
-      <h1>Agent Control Stack</h1>
-      <p class="notice">Dashboard is read-only until session auth and CSRF protection exist. Mutations require the authenticated HTTP API.</p>
-      <table>
-        <thead>
-          <tr><th>Work item</th><th>Risk</th><th>Status</th><th>Requested actions</th></tr>
-        </thead>
-        <tbody>${rows || `<tr><td colspan="4" class="empty">No work items.</td></tr>`}</tbody>
-      </table>
+      <header>
+        <div><h1>Mission Control</h1><p>Unified operator cockpit for agents, work items, approvals, and audit events.</p></div>
+        <div class="live"><span></span> SSE ready</div>
+      </header>
+      <section id="overview" class="cards">${overviewCards(stats)}</section>
+      <section class="grid">
+        <article id="agents" class="panel wide"><div class="panel-head"><h2>Agent Roster</h2><span>${agents.length} observed</span></div>${agentTable(agents)}</article>
+        <article id="queue" class="panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems)}</article>
+      </section>
+      <section class="grid lower">
+        <article id="dispatch" class="panel composer"><div class="panel-head"><h2>New Task Composer</h2><span>requires bearer token</span></div>${composer()}</article>
+        <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(recentEvents)}</article>
+      </section>
     </main>
+    <script>${clientScript()}</script>
   </body>
 </html>`;
 }
 
-function renderRow(workItem: WorkItem): string {
-  const target = [workItem.target.cwd, ...(workItem.target.files ?? [])].filter(Boolean).join(", ");
-  const actions = workItem.requestedActions.map(renderAction).join("<br />") || "—";
+export function projectAgents(workItems: WorkItem[], events: StoredAuditEvent[], now = new Date()): MissionControlAgent[] {
+  const agents = new Map<string, MissionControlAgent>();
+  const touch = (id: string, patch: Partial<MissionControlAgent>) => {
+    const current = agents.get(id) ?? {
+      id,
+      displayName: id,
+      kind: "observed",
+      status: "observed" as const,
+      health: "unknown" as const,
+      capabilities: [],
+      metadata: {}
+    };
+    agents.set(id, { ...current, ...patch, metadata: { ...current.metadata, ...(patch.metadata ?? {}) } });
+  };
 
-  return `<tr>
-    <td>
-      <strong>${escapeHtml(workItem.title)}</strong>
-      <div>${escapeHtml(workItem.intent)}</div>
-      <div class="meta">${escapeHtml(workItem.requester)}${target ? ` · ${escapeHtml(target)}` : ""}</div>
-    </td>
-    <td>${escapeHtml(workItem.risk)}</td>
-    <td class="status">${escapeHtml(workItem.status)}</td>
-    <td>${actions}</td>
-  </tr>`;
+  for (const item of workItems) {
+    const target = item.target.services?.[0] ?? item.target.repo ?? item.target.cwd;
+    if (target) touch(target, { kind: "target", currentTask: item.title, currentWorkItemId: item.id });
+    if (item.requester === "agent") touch("agent", { kind: "requester" });
+  }
+
+  for (const event of events) {
+    const body = asRecord(event.body);
+    const attrs = event.attributes ?? {};
+    const ids = [attrs["worker.id"], attrs["connector.id"], attrs["auth.connector_id"], body.connectorId, body.workerId]
+      .filter((value): value is string => typeof value === "string" && value.length > 0);
+    for (const id of ids) {
+      touch(id, eventPatch(id, event, body));
+    }
+  }
+
+  return [...agents.values()]
+    .map((agent) => finalizeAgent(agent, now))
+    .sort((left, right) => statusRank(left.status) - statusRank(right.status) || left.displayName.localeCompare(right.displayName));
+}function eventPatch(id: string, event: StoredAuditEvent, body: Record<string, unknown>): Partial<MissionControlAgent> {
+  const patch: Partial<MissionControlAgent> = { lastEventAt: nanoToIso(event.timeUnixNano) };
+  if (typeof body.displayName === "string") patch.displayName = body.displayName;
+  if (event.name.includes("heartbeat")) patch.lastHeartbeatAt = patch.lastEventAt;
+  if (event.name.includes("revoked")) patch.status = "offline";
+  if (event.name.includes("failed") || event.name.includes("error")) {
+    patch.health = "unhealthy";
+    patch.lastError = typeof body.error === "string" ? body.error : event.name;
+  }
+  if (event.name === "connector.registered") {
+    patch.kind = "connector";
+    patch.status = "observed";
+    patch.capabilities = Array.isArray(body.allowedScopes) ? body.allowedScopes.filter(isString) : [];
+    patch.metadata = { connectorId: id };
+  }
+  if (event.name === "tunnel_session.heartbeat") {
+    patch.kind = "tunnel";
+    patch.status = "online";
+    patch.health = "healthy";
+  }
+  return patch;
 }
 
-function renderAction(action: WorkItem["requestedActions"][number]): string {
-  return `<code>${escapeHtml(action.kind)}</code> ${escapeHtml(action.description)}`;
+function finalizeAgent(agent: MissionControlAgent, now: Date): MissionControlAgent {
+  const heartbeatAgeMs = agent.lastHeartbeatAt ? now.getTime() - Date.parse(agent.lastHeartbeatAt) : Number.POSITIVE_INFINITY;
+  const eventAgeMs = agent.lastEventAt ? now.getTime() - Date.parse(agent.lastEventAt) : Number.POSITIVE_INFINITY;
+  let status = agent.status;
+  let health = agent.health;
+  if (agent.lastHeartbeatAt) {
+    status = heartbeatAgeMs <= 120_000 ? "online" : heartbeatAgeMs <= 900_000 ? "stale" : "offline";
+    health = status === "online" ? "healthy" : status === "stale" ? "warning" : health === "unhealthy" ? "unhealthy" : "unknown";
+  } else if (status !== "offline" && eventAgeMs > 900_000) {
+    status = "stale";
+  }
+  return { ...agent, status, health };
+}
+
+function summarize(workItems: WorkItem[], agents: MissionControlAgent[]) {
+  return {
+    totalAgents: agents.length,
+    onlineAgents: agents.filter((agent) => agent.status === "online").length,
+    running: workItems.filter((item) => item.status === "running").length,
+    approvals: workItems.filter((item) => item.status === "needs_approval").length,
+    failed: workItems.filter((item) => item.status === "failed" || item.status === "blocked").length
+  };
+}
+
+function overviewCards(stats: ReturnType<typeof summarize>): string {
+  const cards = [
+    ["Total Agents", stats.totalAgents, "Observed from persisted connector, tunnel, worker, and target events"],
+    ["Online Agents", stats.onlineAgents, "Only recent heartbeats count as online"],
+    ["Running Tasks", stats.running, "Lease-bound work currently running"],
+    ["Pending Approvals", stats.approvals, "Policy-gated work waiting on a human"],
+    ["Failed / Blocked", stats.failed, "Things that need attention, humanity's favorite subscription"]
+  ];
+  return cards.map(([label, value, help]) => `<article class="card"><span>${label}</span><strong>${value}</strong><p>${help}</p></article>`).join("");
+}
+
+function agentTable(agents: MissionControlAgent[]): string {
+  if (!agents.length) return `<p class="empty">No agents or connectors observed yet. This panel stays empty instead of lying to you.</p>`;
+  return `<table><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody>${agents
+    .map(
+      (agent) => `<tr><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(agent.lastError) : "—"}</td></tr>`
+    )
+    .join("")}</tbody></table>`;
+}
+
+function workQueue(workItems: WorkItem[]): string {
+  if (!workItems.length) return `<p class="empty">No work items. Peace, briefly.</p>`;
+  return `<div class="queue">${workItems
+    .slice(0, 12)
+    .map(
+      (item) => `<button class="queue-item" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small></button>`
+    )
+    .join("")}</div><pre id="work-detail" class="detail">Select a work item for its persisted timeline.</pre>`;
+}
+
+function eventTimeline(events: StoredAuditEvent[]): string {
+  if (!events.length) return `<p class="empty">No audit events recorded.</p>`;
+  return `<ol class="timeline">${events
+    .map((event) => `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(JSON.stringify(event.attributes))}</small></li>`)
+    .join("")}</ol>`;
+}function composer(): string {
+  return `<form id="task-form">
+    <label>Bearer token<input name="token" type="password" autocomplete="off" placeholder="ACS_GATEWAY_TOKEN" /></label>
+    <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
+    <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
+    <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
+    <label>Requested action kind<input name="actionKind" placeholder="shell.read, fs.write, external.call" /></label>
+    <label>Requested action description<input name="actionDescription" placeholder="Leave blank for prompt-only work" /></label>
+    <button type="submit">Create Work Item</button><output id="task-result"></output>
+  </form>`;
+}
+
+function clientScript(): string {
+  return `
+const source = new EventSource('/events');
+source.addEventListener('work_item.created', () => location.reload());
+source.addEventListener('work_item.needs_approval', () => location.reload());
+source.addEventListener('work_item.running', () => location.reload());
+source.addEventListener('work_item.failed', () => location.reload());
+source.addEventListener('work_item.succeeded', () => location.reload());
+source.addEventListener('tunnel_session.heartbeat', () => location.reload());
+
+document.querySelectorAll('[data-work-item]').forEach((button) => {
+  button.addEventListener('click', async () => {
+    const target = document.querySelector('#work-detail');
+    target.textContent = 'Loading persisted timeline...';
+    const res = await fetch('/work-items/' + button.dataset.workItem);
+    target.textContent = JSON.stringify(await res.json(), null, 2);
+  });
+});
+
+document.querySelector('#task-form')?.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = new FormData(event.currentTarget);
+  const actionKind = String(form.get('actionKind') || '').trim();
+  const actionDescription = String(form.get('actionDescription') || '').trim();
+  const service = String(form.get('service') || '').trim();
+  const payload = {
+    title: String(form.get('title') || ''),
+    intent: String(form.get('intent') || ''),
+    risk: String(form.get('risk') || 'medium'),
+    target: service ? { services: [service] } : {},
+    requestedActions: actionKind && actionDescription ? [{ kind: actionKind, description: actionDescription, params: {} }] : []
+  };
+  const headers = { 'content-type': 'application/json' };
+  const token = String(form.get('token') || '').trim();
+  if (token) headers.authorization = 'Bearer ' + token;
+  const res = await fetch('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
+  const body = await res.json();
+  document.querySelector('#task-result').textContent = res.ok ? 'Created ' + body.id : 'Rejected: ' + (body.error || res.status);
+  if (res.ok) setTimeout(() => location.reload(), 500);
+});`;
+}
+
+function pill(value: string): string {
+  return `<span class="pill ${escapeHtml(value)}">${escapeHtml(value)}</span>`;
+}
+
+function time(value: string): string {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? escapeHtml(value) : date.toLocaleString();
+}
+
+function nanoToIso(value: string): string {
+  const asNumber = Number(value);
+  return Number.isFinite(asNumber) ? new Date(Math.floor(asNumber / 1_000_000)).toISOString() : value;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === "string";
+}
+
+function statusRank(status: MissionControlAgent["status"]): number {
+  return { online: 0, observed: 1, stale: 2, offline: 3 }[status];
+}function styles(): string {
+  return `
+:root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #071019; color: #d7e0ea; }
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: radial-gradient(circle at 20% 0%, #12243a 0, #071019 35%, #05090f 100%); display: grid; grid-template-columns: 230px 1fr; }
+aside { border-right: 1px solid #1b2a3b; padding: 22px 16px; background: rgba(5, 10, 17, 0.82); position: sticky; top: 0; height: 100vh; }
+.brand { color: #67e8f9; font-size: 22px; font-weight: 800; letter-spacing: .02em; }
+.brand span { display: block; color: #8ea3b8; font-size: 11px; margin-top: 4px; }
+nav { display: grid; gap: 6px; margin-top: 30px; }
+nav a { color: #a8b3c2; text-decoration: none; padding: 10px 12px; border-radius: 9px; }
+nav a.active, nav a:hover { background: #0f2945; color: #dbeafe; }
+.rail-note { color: #6b7f94; font-size: 12px; position: absolute; bottom: 24px; left: 16px; right: 16px; }
+main { padding: 22px 24px 40px; min-width: 0; }
+header { display: flex; justify-content: space-between; align-items: start; margin-bottom: 18px; }
+h1 { margin: 0; font-size: 26px; }
+p { color: #8ea3b8; margin: 6px 0 0; }
+.live { border: 1px solid #18324d; border-radius: 999px; padding: 8px 12px; color: #9fb4c9; background: #0a1522; }
+.live span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #34d399; margin-right: 8px; }
+.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.card, .panel { border: 1px solid #17283a; background: rgba(10, 21, 34, 0.88); border-radius: 12px; box-shadow: 0 14px 40px rgba(0,0,0,.24); }
+.card { padding: 16px; min-height: 112px; }
+.card span, .panel-head span { color: #8aa0b8; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
+.card strong { display: block; font-size: 32px; margin-top: 10px; color: #f8fafc; }
+.card p { font-size: 12px; line-height: 1.35; }
+.grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(360px, .8fr); gap: 14px; margin-bottom: 14px; }
+.lower { grid-template-columns: minmax(440px, .9fr) minmax(0, 1.1fr); }
+.panel { min-width: 0; overflow: hidden; }
+.panel-head { display: flex; justify-content: space-between; align-items: center; padding: 14px 16px; border-bottom: 1px solid #17283a; }
+h2 { margin: 0; font-size: 16px; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid #122234; vertical-align: top; font-size: 13px; }
+th { color: #7f94aa; font-size: 11px; text-transform: uppercase; }
+td small { display: block; color: #70859c; margin-top: 2px; }
+.empty { padding: 18px; color: #8aa0b8; }
+.pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: #152235; color: #cbd5e1; border: 1px solid #20344d; }
+.online, .healthy, .succeeded, .approved, .low { color: #86efac; border-color: #14532d; background: #062315; }
+.stale, .warning, .needs_approval, .medium, .blocked { color: #facc15; border-color: #713f12; background: #281b06; }
+.offline, .unhealthy, .failed, .critical, .high, .cancelled { color: #fca5a5; border-color: #7f1d1d; background: #2b0b0b; }
+.queue { display: grid; }
+.queue-item { text-align: left; background: transparent; color: #d7e0ea; border: 0; border-bottom: 1px solid #122234; padding: 12px 14px; cursor: pointer; }
+.queue-item:hover { background: #0d1c2c; }
+.queue-item strong, .queue-item small { display: block; margin-top: 6px; }
+.queue-item small { color: #8398ae; }
+.detail { margin: 12px; padding: 12px; max-height: 260px; overflow: auto; background: #050b12; border: 1px solid #122234; border-radius: 10px; color: #a7f3d0; }
+form { display: grid; gap: 11px; padding: 14px; }
+label { display: grid; gap: 5px; color: #91a6bd; font-size: 12px; }
+input, textarea, select { width: 100%; background: #07111d; color: #dbeafe; border: 1px solid #1c3148; border-radius: 8px; padding: 10px; }
+.form-row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; }
+button[type=submit] { background: #2563eb; color: white; border: 0; border-radius: 9px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
+output { color: #93c5fd; min-height: 20px; }
+.timeline { list-style: none; margin: 0; padding: 10px 14px 14px; display: grid; gap: 10px; }
+.timeline li { border-left: 2px solid #2563eb; padding-left: 10px; }
+.timeline time, .timeline small { display: block; color: #7890a8; font-size: 11px; word-break: break-word; }
+@media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
+`;
 }
 
 function escapeHtml(value: string): string {
   return value.replace(/[&<>"']/g, (char) => {
-    const escapes: Record<string, string> = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;"
-    };
+    const escapes: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
     return escapes[char] ?? char;
   });
 }

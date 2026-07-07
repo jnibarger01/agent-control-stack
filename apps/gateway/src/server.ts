@@ -1,5 +1,5 @@
 import type { ServerResponse } from "node:http";
-import { renderDashboard } from "@agent-control-stack/control-ui";
+import { projectAgents, renderDashboard } from "@agent-control-stack/control-ui";
 import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
@@ -13,11 +13,12 @@ import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import {
   createProtectedResourceMetadata,
+  MCP_SCOPES,
   resolveMcpAuthOptions,
   type McpAuthOptions,
   type McpOAuthOptions
 } from "./auth.js";
-import { handleMcpHttpRequest } from "./mcp.js";
+import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit } from "./mcp.js";
 
 const approvalBodySchema = z.object({
   reason: z.string().min(1),
@@ -25,6 +26,19 @@ const approvalBodySchema = z.object({
 });
 const cancelBodySchema = z.object({ reason: z.string().min(1).optional() });
 const unblockBodySchema = z.object({}).passthrough();
+const mcpScopeSchema = z.enum(MCP_SCOPES);
+const connectorBodySchema = z.object({
+  id: z.string().min(1),
+  displayName: z.string().min(1).optional(),
+  publicKeyPem: z.string().min(1),
+  allowedScopes: z.array(mcpScopeSchema).min(1)
+});
+const tunnelSessionBodySchema = z.object({
+  tunnelId: z.string().min(1),
+  sessionId: z.string().min(1),
+  issuedAt: z.string().min(1).optional(),
+  expiresAt: z.string().min(1)
+});
 
 export interface GatewayAuthOptions {
   token: string;
@@ -46,7 +60,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const auth = resolveAuth(options);
-  const mcpAuth = resolveMcpAuth(options);
+  const mcpAuth = resolveMcpAuth(options, workItems);
+  if (!mcpAuth?.oauth && !mcpAuth?.tunnel && process.env.NODE_ENV === "production") {
+    app.log.warn("MCP OAuth/tunnel auth is disabled in production; set OAuth env or ACS_AUTH_MODE=tunnel_id");
+  }
 
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -62,10 +79,75 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/health", async () => ({ ok: true }));
 
   app.get("/", async (_request, reply) => {
-    reply.type("text/html").send(renderDashboard(workItems.list()));
+    const workItemList = workItems.list();
+    const events = workItems.readEvents();
+    reply.type("text/html").send(renderDashboard({ workItems: workItemList, events }));
   });
 
   app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
+
+  app.post("/connectors", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const connector = workItems.registerConnector(connectorBodySchema.parse(request.body));
+      return reply.code(201).send({ connector });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/connectors/:id/tunnel-sessions", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const body = tunnelSessionBodySchema.parse(request.body);
+      const session = workItems.registerTunnelSession({ ...body, connectorId: request.params.id });
+      return reply.code(201).send({ session });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string; tunnelId: string; sessionId: string } }>(
+    "/connectors/:id/tunnels/:tunnelId/sessions/:sessionId/heartbeat",
+    async (request, reply) => {
+      try {
+        if (!requireMutationActor(request, reply, auth)) {
+          return;
+        }
+        const session = workItems.heartbeatTunnelSession({
+          connectorId: request.params.id,
+          tunnelId: request.params.tunnelId,
+          sessionId: request.params.sessionId
+        });
+        return { session };
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string; tunnelId: string; sessionId: string } }>(
+    "/connectors/:id/tunnels/:tunnelId/sessions/:sessionId/revoke",
+    async (request, reply) => {
+      try {
+        if (!requireMutationActor(request, reply, auth)) {
+          return;
+        }
+        const session = workItems.revokeTunnelSession({
+          connectorId: request.params.id,
+          tunnelId: request.params.tunnelId,
+          sessionId: request.params.sessionId
+        });
+        return { session };
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
 
   app.post("/mcp", async (request, reply) => {
     const resourceMetadataUrl = mcpResourceMetadataUrl(request, mcpAuth?.oauth);
@@ -74,7 +156,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       headers: request.headers,
       tools,
       auth: mcpAuth,
-      resourceMetadataUrl
+      resourceMetadataUrl,
+      requestId: request.id,
+      remoteAddress: request.socket.remoteAddress ?? request.ip,
+      auditAuthenticatedRequest: recordAuthenticatedMcpRequest
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);
@@ -82,18 +167,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     return reply.code(result.statusCode).send(result.body);
   });
 
-  app.get("/.well-known/oauth-protected-resource", async (_request, reply) => {
-    if (!mcpAuth?.oauth) {
-      return reply.code(404).send({ error: "MCP OAuth is not configured" });
+  app.get("/.well-known/oauth-protected-resource", async (request, reply) => {
+    const metadata = protectedResourceMetadata(request, mcpAuth);
+    if (!metadata) {
+      return reply.code(404).send({ error: "MCP auth is not configured" });
     }
-    return createProtectedResourceMetadata(mcpAuth.oauth);
+    return metadata;
   });
 
-  app.get("/.well-known/oauth-protected-resource/mcp", async (_request, reply) => {
-    if (!mcpAuth?.oauth) {
-      return reply.code(404).send({ error: "MCP OAuth is not configured" });
+  app.get("/.well-known/oauth-protected-resource/mcp", async (request, reply) => {
+    const metadata = protectedResourceMetadata(request, mcpAuth);
+    if (!metadata) {
+      return reply.code(404).send({ error: "MCP auth is not configured" });
     }
-    return createProtectedResourceMetadata(mcpAuth.oauth);
+    return metadata;
   });
 
   app.get("/work-items", async (request, reply) => {
@@ -104,12 +191,26 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  app.get("/agents", async () => {
+    const agentList = projectAgents(workItems.list(), workItems.readEvents());
+    return { agents: agentList };
+  });
+
+  app.get<{ Params: { id: string } }>("/agents/:id", async (request, reply) => {
+    const events = workItems.readEvents();
+    const agent = projectAgents(workItems.list(), events).find((candidate) => candidate.id === request.params.id);
+    if (!agent) {
+      return reply.code(404).send({ error: "agent not found" });
+    }
+    return { agent, events: agentEvents(events, request.params.id) };
+  });
+
   app.get<{ Params: { id: string } }>("/work-items/:id", async (request, reply) => {
     const workItem = tools.get_work_item({ id: request.params.id });
     if (!workItem) {
       return reply.code(404).send({ error: "work item not found" });
     }
-    return { workItem };
+    return { workItem, events: workItemEvents(workItems.readEvents(), request.params.id) };
   });
 
   app.post("/work-items", async (request, reply) => {
@@ -193,7 +294,45 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     workItems.close();
   });
 
+  function recordAuthenticatedMcpRequest(event: AuthenticatedMcpRequestAudit): void {
+    workItems.recordConnectorRequest({
+      actor: event.auth.subject,
+      source: "mcp",
+      route: "/mcp",
+      toolName: event.toolName ?? event.method,
+      workItemId: event.workItemId,
+      requestId: event.requestId,
+      authMethod: event.auth.method,
+      authSubject: event.auth.subject,
+      authIssuer: event.auth.issuer,
+      authConnectorId: event.auth.connectorId,
+      authTunnelId: event.auth.tunnelId,
+      authSessionId: event.auth.sessionId,
+      authScopes: event.auth.scopes
+    });
+  }
+
   return app;
+}
+
+function workItemEvents(events: StoredAuditEvent[], workItemId: string): StoredAuditEvent[] {
+  return events.filter((event) => {
+    const body = event.body && typeof event.body === "object" ? (event.body as Record<string, unknown>) : {};
+    return event.attributes["work_item.id"] === workItemId || body.id === workItemId || body.workItemId === workItemId;
+  });
+}
+
+function agentEvents(events: StoredAuditEvent[], agentId: string): StoredAuditEvent[] {
+  return events.filter((event) => {
+    const body = event.body && typeof event.body === "object" ? (event.body as Record<string, unknown>) : {};
+    return (
+      event.attributes["worker.id"] === agentId ||
+      event.attributes["connector.id"] === agentId ||
+      event.attributes["auth.connector_id"] === agentId ||
+      body.connectorId === agentId ||
+      body.workerId === agentId
+    );
+  });
 }
 
 function sendError(reply: FastifyReply, error: unknown) {
@@ -220,12 +359,22 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   return token ? { token, actor } : undefined;
 }
 
-function resolveMcpAuth(options: GatewayOptions): McpAuthOptions | undefined {
-  return resolveMcpAuthOptions({
+function resolveMcpAuth(options: GatewayOptions, workItems: SqliteWorkItemStore): McpAuthOptions | undefined {
+  const resolved = resolveMcpAuthOptions({
     localBearerToken: options.mcpAuth?.localBearerToken,
-    gatewayBearerToken: options.auth?.token ?? process.env.ACS_GATEWAY_TOKEN,
-    oauth: options.mcpAuth?.oauth ?? options.mcpOAuth
+    oauth: options.mcpAuth?.oauth ?? options.mcpOAuth,
+    tunnel: options.mcpAuth?.tunnel
   });
+  if (resolved?.tunnel && !resolved.tunnel.resolveSession && !resolved.tunnel.connectors?.length) {
+    return {
+      ...resolved,
+      tunnel: {
+        ...resolved.tunnel,
+        resolveSession: (lookup) => workItems.getTunnelSession(lookup)
+      }
+    };
+  }
+  return resolved;
 }
 
 function mcpResourceMetadataUrl(request: FastifyRequest, oauth: McpOAuthOptions | undefined): string | undefined {
@@ -236,6 +385,25 @@ function mcpResourceMetadataUrl(request: FastifyRequest, oauth: McpOAuthOptions 
   const proto = forwardedProto ?? request.protocol;
   const host = firstHeader(request.headers["x-forwarded-host"]) ?? request.headers.host;
   return host ? `${proto}://${host}/.well-known/oauth-protected-resource/mcp` : undefined;
+}
+
+function protectedResourceMetadata(request: FastifyRequest, auth: McpAuthOptions | undefined) {
+  if (auth?.oauth) {
+    return createProtectedResourceMetadata(auth.oauth);
+  }
+  const forwardedProto = firstHeader(request.headers["x-forwarded-proto"]);
+  const proto = forwardedProto ?? request.protocol;
+  const host = firstHeader(request.headers["x-forwarded-host"]) ?? request.headers.host;
+  if (!host) {
+    return undefined;
+  }
+  return {
+    resource: `${proto}://${host}/mcp`,
+    resource_name: "Agent Control Stack MCP Gateway",
+    authorization_servers: [],
+    scopes_supported: [...MCP_SCOPES],
+    bearer_methods_supported: ["header"] as const
+  };
 }
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
