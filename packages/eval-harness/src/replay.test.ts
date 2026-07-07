@@ -5,6 +5,8 @@ import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { findUnapprovedExecution, replay } from "./index.js";
 
+const domainTransition = { via: "domain_service" } as const;
+
 describe("deterministic replay", () => {
   it("replays approved work through SQLite events", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-"));
@@ -21,7 +23,7 @@ describe("deterministic replay", () => {
         risk: "low"
       });
 
-      const approved = store.approveWorkItem(workItem.id);
+      const approved = store.approveWorkItem(workItem.id, domainTransition);
 
       expect(approved?.status).toBe("approved");
       const running = store.claimNextApprovedWorkItem("eval-worker");

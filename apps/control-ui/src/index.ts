@@ -1,4 +1,4 @@
-import type { StoredAuditEvent, WorkItem } from "@agent-control-stack/work-items";
+import type { RegistryAgentDetail, StoredAuditEvent, WorkItem } from "@agent-control-stack/work-items";
 
 export interface MissionControlAgent {
   id: string;
@@ -18,6 +18,7 @@ export interface MissionControlAgent {
 export interface MissionControlViewModel {
   workItems: WorkItem[];
   events: StoredAuditEvent[];
+  registeredAgents?: RegistryAgentDetail[];
   agents?: MissionControlAgent[];
   now?: Date;
 }
@@ -25,7 +26,7 @@ export interface MissionControlViewModel {
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
   const model = Array.isArray(input) ? { workItems: input, events: [] } : input;
   const events = model.events ?? [];
-  const agents = model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date());
+  const agents = model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date(), model.registeredAgents ?? []);
   const stats = summarize(model.workItems, agents);
   const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
   const recentEvents = [...events].slice(-10).reverse();
@@ -78,7 +79,12 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
 </html>`;
 }
 
-export function projectAgents(workItems: WorkItem[], events: StoredAuditEvent[], now = new Date()): MissionControlAgent[] {
+export function projectAgents(
+  workItems: WorkItem[],
+  events: StoredAuditEvent[],
+  now = new Date(),
+  registeredAgents: RegistryAgentDetail[] = []
+): MissionControlAgent[] {
   const agents = new Map<string, MissionControlAgent>();
   const touch = (id: string, patch: Partial<MissionControlAgent>) => {
     const current = agents.get(id) ?? {
@@ -90,8 +96,26 @@ export function projectAgents(workItems: WorkItem[], events: StoredAuditEvent[],
       capabilities: [],
       metadata: {}
     };
-    agents.set(id, { ...current, ...patch, metadata: { ...current.metadata, ...(patch.metadata ?? {}) } });
+    const capabilities = patch.capabilities
+      ? [...new Set([...current.capabilities, ...patch.capabilities])]
+      : current.capabilities;
+    agents.set(id, { ...current, ...patch, capabilities, metadata: { ...current.metadata, ...(patch.metadata ?? {}) } });
   };
+
+  for (const agent of registeredAgents) {
+    const projected = registryStatus(agent.status);
+    touch(agent.id, {
+      displayName: agent.name,
+      kind: agent.kind,
+      status: projected.status,
+      health: projected.health,
+      capabilities: agent.capabilities.map((capability) => capability.name),
+      lastHeartbeatAt: agent.lastHeartbeatAt,
+      lastEventAt: agent.lastHeartbeatAt ?? agent.updatedAt,
+      lastError: agent.lastError,
+      metadata: { registryStatus: agent.status, registered: "true" }
+    });
+  }
 
   for (const item of workItems) {
     const target = item.target.services?.[0] ?? item.target.repo ?? item.target.cwd;
@@ -351,7 +375,16 @@ function isString(value: unknown): value is string {
 
 function statusRank(status: MissionControlAgent["status"]): number {
   return { online: 0, observed: 1, stale: 2, offline: 3 }[status];
-}function styles(): string {
+}
+
+function registryStatus(status: RegistryAgentDetail["status"]): Pick<MissionControlAgent, "status" | "health"> {
+  if (status === "ERROR") return { status: "offline", health: "unhealthy" };
+  if (status === "OFFLINE") return { status: "offline", health: "unknown" };
+  if (status === "DEGRADED") return { status: "observed", health: "warning" };
+  return { status: "observed", health: "unknown" };
+}
+
+function styles(): string {
   return `
 :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #071019; color: #d7e0ea; }
 * { box-sizing: border-box; }

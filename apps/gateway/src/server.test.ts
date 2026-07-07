@@ -59,6 +59,186 @@ describe("mission control gateway", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("serves the attributed agent registry API", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-registry-api-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+    seed.close();
+    const app = buildTestGateway({ dbPath, logger: false });
+    const actorHeaders = { "x-acs-actor-id": "user" };
+
+    try {
+      const missingActor = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        payload: { id: "missing-actor", name: "Missing", kind: "cli" }
+      });
+      const unknownActor = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: { "x-acs-actor-id": "ghost" },
+        payload: { id: "ghost-agent", name: "Ghost", kind: "cli", acpRole: "IMPLEMENTATION_AGENT" }
+      });
+      const invalidCreateStatus = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: actorHeaders,
+        payload: { id: "bad-status", name: "Bad", kind: "cli", acpRole: "IMPLEMENTATION_AGENT", status: "GREAT" }
+      });
+      const created = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: actorHeaders,
+        payload: {
+          id: "api-agent",
+          name: "API Agent",
+          kind: "service",
+          acpRole: "ORCHESTRATION_LAYER",
+          provider: "openai",
+          model: "gpt-5",
+          endpoint: "http://127.0.0.1:9999/api"
+        }
+      });
+
+      expect(missingActor.statusCode).toBe(400);
+      expect(unknownActor.statusCode).toBe(400);
+      expect(invalidCreateStatus.statusCode).toBe(400);
+      expect(created.statusCode).toBe(201);
+      expect(created.json().agent).toMatchObject({
+        id: "api-agent",
+        provider: "openai",
+        model: "gpt-5",
+        endpoint: "http://127.0.0.1:9999/api",
+        createdByActorId: "user",
+        updatedByActorId: "user"
+      });
+
+      const capabilities = await app.inject({
+        method: "PUT",
+        url: "/api/agents/api-agent/capabilities",
+        headers: actorHeaders,
+        payload: {
+          capabilities: [
+            { name: "code:implement", inputSchema: { type: "object" } },
+            { name: "repo:inspect" }
+          ]
+        }
+      });
+      const replacedCapabilities = await app.inject({
+        method: "PUT",
+        url: "/api/agents/api-agent/capabilities",
+        headers: actorHeaders,
+        payload: { capabilities: [{ name: "repo:inspect" }] }
+      });
+      const malformedCapabilities = await app.inject({
+        method: "PUT",
+        url: "/api/agents/api-agent/capabilities",
+        headers: actorHeaders,
+        payload: { capabilities: [{ name: "bad", inputSchema: [] }] }
+      });
+      const capabilityMissingActor = await app.inject({
+        method: "PUT",
+        url: "/api/agents/api-agent/capabilities",
+        payload: { capabilities: [{ name: "repo:inspect" }] }
+      });
+      const capabilityUnknownActor = await app.inject({
+        method: "PUT",
+        url: "/api/agents/api-agent/capabilities",
+        headers: { "x-acs-actor-id": "ghost" },
+        payload: { capabilities: [{ name: "repo:inspect" }] }
+      });
+      const heartbeat = await app.inject({
+        method: "POST",
+        url: "/api/agents/api-agent/heartbeat",
+        headers: actorHeaders,
+        payload: { status: "AVAILABLE", currentTask: "idle" }
+      });
+      const heartbeatMissingActor = await app.inject({
+        method: "POST",
+        url: "/api/agents/api-agent/heartbeat",
+        payload: { status: "AVAILABLE" }
+      });
+      const heartbeatUnknownActor = await app.inject({
+        method: "POST",
+        url: "/api/agents/api-agent/heartbeat",
+        headers: { "x-acs-actor-id": "ghost" },
+        payload: { status: "AVAILABLE" }
+      });
+      const invalidStatus = await app.inject({
+        method: "POST",
+        url: "/api/agents/api-agent/heartbeat",
+        headers: actorHeaders,
+        payload: { status: "GREAT" }
+      });
+      const updated = await app.inject({
+        method: "PATCH",
+        url: "/api/agents/api-agent",
+        headers: actorHeaders,
+        payload: { model: "gpt-5-codex" }
+      });
+      const actors = await app.inject({ method: "GET", url: "/api/actors" });
+      const list = await app.inject({ method: "GET", url: "/api/agents" });
+      const detail = await app.inject({ method: "GET", url: "/api/agents/api-agent" });
+      const missingDetail = await app.inject({ method: "GET", url: "/api/agents/missing" });
+      const missingUpdate = await app.inject({
+        method: "PATCH",
+        url: "/api/agents/missing",
+        headers: actorHeaders,
+        payload: { status: "OFFLINE" }
+      });
+      const missingCapabilities = await app.inject({ method: "GET", url: "/api/agents/missing/capabilities" });
+      const missingCapabilityPut = await app.inject({
+        method: "PUT",
+        url: "/api/agents/missing/capabilities",
+        headers: actorHeaders,
+        payload: { capabilities: [] }
+      });
+      const missingHeartbeat = await app.inject({
+        method: "POST",
+        url: "/api/agents/missing/heartbeat",
+        headers: actorHeaders,
+        payload: { status: "OFFLINE" }
+      });
+
+      expect(capabilities.statusCode).toBe(200);
+      expect(replacedCapabilities.json().capabilities).toHaveLength(1);
+      expect(malformedCapabilities.statusCode).toBe(400);
+      expect(capabilityMissingActor.statusCode).toBe(400);
+      expect(capabilityUnknownActor.statusCode).toBe(400);
+      expect(heartbeat.statusCode).toBe(201);
+      expect(heartbeatMissingActor.statusCode).toBe(400);
+      expect(heartbeatUnknownActor.statusCode).toBe(400);
+      expect(invalidStatus.statusCode).toBe(400);
+      expect(updated.json().agent).toMatchObject({ id: "api-agent", model: "gpt-5-codex", updatedByActorId: "user" });
+      expect(actors.json().actors).toEqual(expect.arrayContaining([expect.objectContaining({ id: "user" })]));
+      expect(list.json().agents).toEqual(expect.arrayContaining([expect.objectContaining({ id: "api-agent" })]));
+      expect(detail.json().agent).toMatchObject({
+        id: "api-agent",
+        status: "AVAILABLE",
+        capabilities: [{ name: "repo:inspect" }],
+        latestHeartbeat: { actorId: "user", status: "AVAILABLE", currentTask: "idle" }
+      });
+      expect(missingDetail.statusCode).toBe(404);
+      expect(missingUpdate.statusCode).toBe(404);
+      expect(missingCapabilities.statusCode).toBe(404);
+      expect(missingCapabilityPut.statusCode).toBe(404);
+      expect(missingHeartbeat.statusCode).toBe(404);
+
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.readEvents().map((event) => event.name)).toEqual(
+          expect.arrayContaining(["agent.created", "agent.updated", "agent.capabilities_replaced", "agent.heartbeat"])
+        );
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("gateway MCP transport", () => {
@@ -528,6 +708,115 @@ describe("gateway MCP transport", () => {
       });
     } finally {
       await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds MCP approval, cancel, and unblock actors to the authenticated subject", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-mcp-actor-"));
+    const dbPath = join(dir, "control.db");
+    const setup = new SqliteWorkItemStore(dbPath);
+    const setupTools = createWorkItemTools(setup, createPolicyEngine());
+    const approvalItem = setupTools.create_work_item({
+      title: "MCP approval actor",
+      requester: "agent",
+      intent: "verify approval actor binding",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+      risk: "low"
+    });
+    const cancelItem = setup.create({
+      title: "MCP cancel actor",
+      requester: "agent",
+      intent: "verify cancel actor binding",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "fs.read", description: "read", params: { paths: ["src/index.ts"] } }],
+      risk: "low"
+    });
+    const unblockItem = setup.create({
+      title: "MCP unblock actor",
+      requester: "agent",
+      intent: "verify unblock actor binding",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "fs.read", description: "read", params: { paths: ["src/index.ts"] } }],
+      risk: "low"
+    });
+    setup.blockWorkItem(unblockItem.id);
+    setup.close();
+
+    const oauth = createTestOAuth();
+    const app = buildGateway({ dbPath, logger: false, mcpAuth: { oauth: oauth.options } });
+    let appClosed = false;
+
+    try {
+      const headers = { authorization: `Bearer ${oauth.token({ scope: "acs:work:approve" })}` };
+      const approved = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers,
+        payload: mcpToolCall("approve-spoof", "approve_work_item", {
+          id: approvalItem.id,
+          approvedBy: "attacker",
+          reason: "caller supplied identity must be ignored"
+        })
+      });
+      const cancelled = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers,
+        payload: mcpToolCall("cancel-spoof", "cancel_work_item", {
+          id: cancelItem.id,
+          actor: "attacker",
+          reason: "caller supplied identity must be ignored"
+        })
+      });
+      const unblocked = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers,
+        payload: mcpToolCall("unblock-spoof", "unblock_work_item", {
+          id: unblockItem.id,
+          actor: "attacker"
+        })
+      });
+
+      expect(approved.statusCode).toBe(200);
+      expect(cancelled.statusCode).toBe(200);
+      expect(unblocked.statusCode).toBe(200);
+
+      await app.close();
+      appClosed = true;
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        const events = check.readEvents();
+        const approval = events.find((event) => event.name === "approval.granted" && event.body.workItemId === approvalItem.id);
+        const cancellation = events.find((event) => event.name === "work_item.cancelled" && event.body.id === cancelItem.id);
+        const unblockDecision = events.find(
+          (event) =>
+            event.name === "policy.decided" &&
+            (event.body.context as { workItemId?: string; operation?: string } | undefined)?.workItemId === unblockItem.id &&
+            (event.body.context as { workItemId?: string; operation?: string } | undefined)?.operation === "unblock"
+        );
+        const connectorEvents = events.filter((event) => event.name === "connector.requested");
+
+        expect(approval?.body).toMatchObject({ approvedBy: "user_123" });
+        expect(cancellation?.body).toMatchObject({ actor: "user_123" });
+        expect(unblockDecision?.body.context).toMatchObject({ actor: "user_123" });
+        expect(connectorEvents).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              attributes: expect.objectContaining({ "connector.actor": "user_123", "auth.subject": "user_123" })
+            })
+          ])
+        );
+        expect(JSON.stringify([approval, cancellation, unblockDecision, connectorEvents])).not.toContain("attacker");
+      } finally {
+        check.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -1105,6 +1394,51 @@ describe("gateway MCP transport", () => {
 });
 
 describe("gateway work-item routes", () => {
+  it("rejects unauthenticated read routes in production when read auth is not configured", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-read-auth-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+    const routes = [
+      "/",
+      "/work-items",
+      "/work-items/wrk_missing",
+      "/agents",
+      "/agents/codex-cli",
+      "/api/agents",
+      "/api/agents/codex-cli",
+      "/events"
+    ];
+
+    try {
+      for (const url of routes) {
+        const response = await app.inject({ method: "GET", url });
+        expect(response.statusCode, url).toBe(503);
+        expect(response.json()).toMatchObject({ error: "read auth is not configured for production or exposed access" });
+      }
+    } finally {
+      await app.close();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects unauthenticated read routes from non-loopback development access", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-read-auth-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const response = await app.inject({ method: "GET", url: "/work-items", remoteAddress: "203.0.113.10" });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json()).toMatchObject({ error: "read auth is not configured for production or exposed access" });
+    } finally {
+      await app.close();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed for mutating routes when auth is not configured", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
@@ -1550,6 +1884,15 @@ function createWorkItemToolCall(title: string) {
         risk: "low"
       }
     }
+  };
+}
+
+function mcpToolCall(id: string, name: string, args: Record<string, unknown>) {
+  return {
+    jsonrpc: "2.0",
+    id,
+    method: "tools/call",
+    params: { name, arguments: args }
   };
 }
 

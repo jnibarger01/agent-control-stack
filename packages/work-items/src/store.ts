@@ -4,8 +4,9 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import {
   ControlStackError,
+  applyControlPlaneMigrations,
   auditEventHash,
-  controlPlaneMigrationSql,
+  createId,
   createEvent,
   redactValue,
   stableHash,
@@ -69,6 +70,68 @@ interface ConnectorRow {
   status: "active" | "revoked";
   created_at: string;
   updated_at: string;
+}
+
+export const acpRoles = [
+  "IMPLEMENTATION_AGENT",
+  "REVIEW_PLANNING_AGENT",
+  "RESEARCH_BROAD_SCAN_AGENT",
+  "LOCAL_CODING_AGENT",
+  "ORCHESTRATION_LAYER",
+  "DESKTOP_LOCAL_AGENT_BRIDGE"
+] as const;
+export const registryStatuses = ["UNKNOWN", "AVAILABLE", "BUSY", "DEGRADED", "OFFLINE", "ERROR"] as const;
+export const actorTypes = ["HUMAN", "SYSTEM", "AGENT", "SERVICE"] as const;
+
+export type AcpRole = (typeof acpRoles)[number];
+export type RegistryStatus = (typeof registryStatuses)[number];
+export type ActorType = (typeof actorTypes)[number];
+
+interface ActorRow {
+  id: string;
+  actor_type: ActorType;
+  display_name: string;
+  external_ref: string | null;
+  created_at: string;
+}
+
+interface AgentRow {
+  id: string;
+  name: string;
+  kind: string;
+  acp_role: AcpRole;
+  provider: string | null;
+  model: string | null;
+  endpoint: string | null;
+  status: RegistryStatus;
+  last_heartbeat_at: string | null;
+  last_error: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by_actor_id: string;
+  updated_by_actor_id: string;
+}
+
+interface CapabilityRow {
+  id: string;
+  agent_id: string;
+  name: string;
+  description: string | null;
+  input_schema: string | null;
+  created_at: string;
+  updated_at: string;
+  created_by_actor_id: string;
+  updated_by_actor_id: string;
+}
+
+interface HeartbeatRow {
+  id: number;
+  agent_id: string;
+  status: RegistryStatus;
+  current_task: string | null;
+  last_error: string | null;
+  observed_at: string;
+  actor_id: string;
 }
 
 interface TunnelSessionRow {
@@ -157,6 +220,103 @@ export interface RegisteredConnector {
   updatedAt: string;
 }
 
+export interface ActorRegistration {
+  id: string;
+  actorType: ActorType;
+  displayName: string;
+  externalRef?: string;
+  now?: Date;
+}
+
+export interface RegistryActor extends Omit<ActorRegistration, "now"> {
+  createdAt: string;
+}
+
+export interface RegistryAgentInput {
+  id: string;
+  name: string;
+  kind: string;
+  acpRole: AcpRole;
+  provider?: string;
+  model?: string;
+  endpoint?: string;
+  status?: RegistryStatus;
+  lastError?: string;
+  actorId: string;
+  now?: Date;
+}
+
+export interface RegistryAgentUpdate {
+  name?: string;
+  kind?: string;
+  acpRole?: AcpRole;
+  provider?: string | null;
+  model?: string | null;
+  endpoint?: string | null;
+  status?: RegistryStatus;
+  lastError?: string | null;
+  actorId: string;
+  now?: Date;
+}
+
+export interface RegistryCapabilityInput {
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+}
+
+export interface RegistryCapability {
+  id: string;
+  agentId: string;
+  name: string;
+  description?: string;
+  inputSchema?: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  createdByActorId: string;
+  updatedByActorId: string;
+}
+
+export interface RegistryHeartbeatInput {
+  status: RegistryStatus;
+  currentTask?: string;
+  lastError?: string;
+  actorId: string;
+  now?: Date;
+}
+
+export interface RegistryHeartbeat {
+  id: number;
+  agentId: string;
+  status: RegistryStatus;
+  currentTask?: string;
+  lastError?: string;
+  observedAt: string;
+  actorId: string;
+}
+
+export interface RegistryAgent {
+  id: string;
+  name: string;
+  kind: string;
+  acpRole: AcpRole;
+  provider?: string;
+  model?: string;
+  endpoint?: string;
+  status: RegistryStatus;
+  lastHeartbeatAt?: string;
+  lastError?: string;
+  createdAt: string;
+  updatedAt: string;
+  createdByActorId: string;
+  updatedByActorId: string;
+}
+
+export interface RegistryAgentDetail extends RegistryAgent {
+  capabilities: RegistryCapability[];
+  latestHeartbeat?: RegistryHeartbeat;
+}
+
 export interface TunnelSessionRegistration {
   connectorId: string;
   tunnelId: string;
@@ -201,6 +361,10 @@ export interface ClaimOptions {
   leaseMs?: number;
 }
 
+export interface PrivilegedTransitionOptions {
+  via: "policy_gate" | "domain_service";
+}
+
 export interface SqliteWorkItemStoreOptions {
   leaseMs?: number;
   onEvent?: (event: StoredAuditEvent) => void;
@@ -212,12 +376,21 @@ export interface WorkItemStore {
   list(input?: unknown): WorkItem[];
   readEvents(): StoredAuditEvent[];
   verifyAuditChain(): AuditChainVerification;
-  transition(id: string, status: WorkItemStatus): WorkItem;
-  approveWorkItem(id: string): WorkItem;
+  transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
+  approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
   blockWorkItem(id: string): WorkItem;
-  unblockWorkItem(id: string): WorkItem;
-  cancelWorkItem(id: string, input?: unknown): WorkItem;
+  unblockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
+  cancelWorkItem(id: string, input?: unknown, options?: PrivilegedTransitionOptions): WorkItem;
   registerConnector(input: ConnectorRegistration): RegisteredConnector;
+  registerActor(input: ActorRegistration): RegistryActor;
+  listActors(): RegistryActor[];
+  createRegistryAgent(input: RegistryAgentInput): RegistryAgentDetail;
+  updateRegistryAgent(id: string, input: RegistryAgentUpdate): RegistryAgentDetail;
+  listRegistryAgents(): RegistryAgentDetail[];
+  getRegistryAgent(id: string): RegistryAgentDetail | undefined;
+  replaceAgentCapabilities(agentId: string, capabilities: RegistryCapabilityInput[], actorId: string): RegistryCapability[];
+  listAgentCapabilities(agentId: string): RegistryCapability[];
+  recordAgentHeartbeat(agentId: string, input: RegistryHeartbeatInput): { agent: RegistryAgentDetail; heartbeat: RegistryHeartbeat };
   registerTunnelSession(input: TunnelSessionRegistration): RegisteredTunnelSession;
   heartbeatTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession;
   revokeTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession;
@@ -247,8 +420,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
-      ${controlPlaneMigrationSql()}
     `);
+    applyControlPlaneMigrations(this.db);
     this.ensureWorkItemColumn("worker_id", "worker_id TEXT");
     this.ensureWorkItemColumn("started_at", "started_at TEXT");
     this.ensureWorkItemColumn("lease_expires_at", "lease_expires_at TEXT");
@@ -309,30 +482,53 @@ export class SqliteWorkItemStore implements WorkItemStore {
     );
   }
 
+  listActors(): RegistryActor[] {
+    return (this.db.prepare(`SELECT * FROM actors ORDER BY display_name ASC`).all() as unknown as ActorRow[]).map(
+      rowToActor
+    );
+  }
+
+  listRegistryAgents(): RegistryAgentDetail[] {
+    return (this.db.prepare(`SELECT * FROM agents ORDER BY name ASC`).all() as unknown as AgentRow[]).map((row) =>
+      this.agentDetail(rowToAgent(row))
+    );
+  }
+
+  getRegistryAgent(id: string): RegistryAgentDetail | undefined {
+    const row = this.db.prepare(`SELECT * FROM agents WHERE id = ?`).get(id) as unknown as AgentRow | undefined;
+    return row ? this.agentDetail(rowToAgent(row)) : undefined;
+  }
+
   verifyAuditChain(): AuditChainVerification {
     return verifyAuditChain(this.readEvents());
   }
 
-  transition(id: string, status: WorkItemStatus): WorkItem {
+  transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem {
     if (status === "running") {
       throw new ControlStackError("worker_claim_required", "running work items must be claimed by a worker");
+    }
+    if (status === "approved" || status === "pending_policy" || status === "needs_approval" || status === "cancelled") {
+      requirePrivilegedTransition(options, status);
     }
     return this.transitionWithEvent(id, status);
   }
 
-  approveWorkItem(id: string): WorkItem {
-    return this.transition(id, "approved");
+  approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem {
+    requirePrivilegedTransition(options, "approve");
+    return this.transitionWithEvent(id, "approved");
   }
 
   blockWorkItem(id: string): WorkItem {
-    return this.transition(id, "blocked");
+    return this.transitionWithEvent(id, "blocked");
   }
 
-  unblockWorkItem(id: string): WorkItem {
-    return this.transition(id, "pending_policy");
+  unblockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem {
+    requirePrivilegedTransition(options, "unblock");
+    return this.transitionWithEvent(id, "pending_policy");
   }
 
-  cancelWorkItem(id: string, input: unknown = {}): WorkItem {
+  cancelWorkItem(id: string, input: unknown = {}, options?: PrivilegedTransitionOptions): WorkItem {
+    requirePrivilegedTransition(options, "cancel");
     const parsed = cancelRequestSchema.parse(input);
     const attributes: Record<string, string> = { "work_item.cancelled_by": parsed.actor };
     if (parsed.reason) {
@@ -380,6 +576,206 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
       );
       return { value: connector, events: [event] };
+    });
+  }
+
+  registerActor(input: ActorRegistration): RegistryActor {
+    return this.write(() => {
+      const now = (input.now ?? new Date()).toISOString();
+      assertOneOf(input.actorType, actorTypes, "actorType");
+      this.db
+        .prepare(
+          `INSERT INTO actors (id, actor_type, display_name, external_ref, created_at)
+           VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             actor_type = excluded.actor_type,
+             display_name = excluded.display_name,
+             external_ref = excluded.external_ref`
+        )
+        .run(
+          requiredString(input.id, "id"),
+          input.actorType,
+          requiredString(input.displayName, "displayName"),
+          optionalString(input.externalRef),
+          now
+        );
+      const actor = this.getActorRequired(input.id);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "actor.registered",
+          {
+            actorId: actor.id,
+            actorType: actor.actorType,
+            displayName: actor.displayName,
+            externalRef: actor.externalRef
+          },
+          {
+            "actor.id": actor.id,
+            "actor.type": actor.actorType
+          }
+        )
+      );
+      return { value: actor, events: [event] };
+    });
+  }
+
+  createRegistryAgent(input: RegistryAgentInput): RegistryAgentDetail {
+    return this.write(() => {
+      const now = (input.now ?? new Date()).toISOString();
+      this.getActorRequired(input.actorId);
+      assertOneOf(input.acpRole, acpRoles, "acpRole");
+      assertOneOf(input.status ?? "UNKNOWN", registryStatuses, "status");
+      if (this.getRegistryAgent(input.id)) {
+        throw new ControlStackError("agent_conflict", `agent already exists: ${input.id}`);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO agents
+           (id, name, kind, acp_role, provider, model, endpoint, status, last_heartbeat_at, last_error, created_at, updated_at, created_by_actor_id, updated_by_actor_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          requiredString(input.id, "id"),
+          requiredString(input.name, "name"),
+          requiredString(input.kind, "kind"),
+          input.acpRole,
+          optionalString(input.provider),
+          optionalString(input.model),
+          optionalString(input.endpoint),
+          input.status ?? "UNKNOWN",
+          optionalString(input.lastError),
+          now,
+          now,
+          input.actorId,
+          input.actorId
+        );
+      const agent = this.getRegistryAgentRequired(input.id);
+      const event = this.appendAuditEvent(
+        createEvent("agent.created", { ...agent }, { "agent.id": agent.id, "actor.id": input.actorId })
+      );
+      return { value: agent, events: [event] };
+    });
+  }
+
+  updateRegistryAgent(id: string, input: RegistryAgentUpdate): RegistryAgentDetail {
+    return this.write(() => {
+      const now = (input.now ?? new Date()).toISOString();
+      this.getActorRequired(input.actorId);
+      const current = this.getRegistryAgentRequired(id);
+      if (input.acpRole) assertOneOf(input.acpRole, acpRoles, "acpRole");
+      if (input.status) assertOneOf(input.status, registryStatuses, "status");
+      this.db
+        .prepare(
+          `UPDATE agents
+           SET name = ?, kind = ?, acp_role = ?, provider = ?, model = ?, endpoint = ?, status = ?, last_error = ?, updated_at = ?, updated_by_actor_id = ?
+           WHERE id = ?`
+        )
+        .run(
+          input.name === undefined ? current.name : requiredString(input.name, "name"),
+          input.kind === undefined ? current.kind : requiredString(input.kind, "kind"),
+          input.acpRole ?? current.acpRole,
+          input.provider === undefined ? current.provider ?? null : optionalString(input.provider),
+          input.model === undefined ? current.model ?? null : optionalString(input.model),
+          input.endpoint === undefined ? current.endpoint ?? null : optionalString(input.endpoint),
+          input.status ?? current.status,
+          input.lastError === undefined ? current.lastError ?? null : optionalString(input.lastError),
+          now,
+          input.actorId,
+          id
+        );
+      const agent = this.getRegistryAgentRequired(id);
+      const event = this.appendAuditEvent(
+        createEvent("agent.updated", { ...agent }, { "agent.id": agent.id, "actor.id": input.actorId })
+      );
+      return { value: agent, events: [event] };
+    });
+  }
+
+  replaceAgentCapabilities(agentId: string, capabilities: RegistryCapabilityInput[], actorId: string): RegistryCapability[] {
+    return this.write(() => {
+      const now = new Date().toISOString();
+      this.getActorRequired(actorId);
+      this.getRegistryAgentRequired(agentId);
+      const rows = capabilities.map((capability) => ({
+        id: createId("cap"),
+        name: requiredString(capability.name, "name"),
+        description: optionalString(capability.description),
+        inputSchema: normalizeInputSchema(capability.inputSchema)
+      }));
+      this.db.prepare(`DELETE FROM capabilities WHERE agent_id = ?`).run(agentId);
+      for (const capability of rows) {
+        this.db
+          .prepare(
+            `INSERT INTO capabilities
+             (id, agent_id, name, description, input_schema, created_at, updated_at, created_by_actor_id, updated_by_actor_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            capability.id,
+            agentId,
+            capability.name,
+            capability.description,
+            capability.inputSchema,
+            now,
+            now,
+            actorId,
+            actorId
+          );
+      }
+      this.db
+        .prepare(`UPDATE agents SET updated_at = ?, updated_by_actor_id = ? WHERE id = ?`)
+        .run(now, actorId, agentId);
+      const replaced = this.listAgentCapabilities(agentId);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "agent.capabilities_replaced",
+          { agentId, capabilities: replaced },
+          { "agent.id": agentId, "actor.id": actorId }
+        )
+      );
+      return { value: replaced, events: [event] };
+    });
+  }
+
+  listAgentCapabilities(agentId: string): RegistryCapability[] {
+    this.getRegistryAgentBaseRequired(agentId);
+    return this.capabilitiesForAgent(agentId);
+  }
+
+  recordAgentHeartbeat(agentId: string, input: RegistryHeartbeatInput): { agent: RegistryAgentDetail; heartbeat: RegistryHeartbeat } {
+    return this.write(() => {
+      const observedAt = (input.now ?? new Date()).toISOString();
+      this.getActorRequired(input.actorId);
+      this.getRegistryAgentRequired(agentId);
+      assertOneOf(input.status, registryStatuses, "status");
+      const lastError = optionalString(input.lastError);
+      const result = this.db
+        .prepare(
+          `INSERT INTO heartbeats (agent_id, status, current_task, last_error, observed_at, actor_id)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(agentId, input.status, optionalString(input.currentTask), lastError, observedAt, input.actorId);
+      this.db
+        .prepare(
+          `UPDATE agents
+           SET status = ?, last_heartbeat_at = ?,
+               last_error = CASE WHEN ? IS NULL THEN last_error ELSE ? END,
+               updated_at = ?, updated_by_actor_id = ?
+           WHERE id = ?`
+        )
+        .run(input.status, observedAt, lastError, lastError, observedAt, input.actorId, agentId);
+      const heartbeat = rowToHeartbeat(
+        this.db.prepare(`SELECT * FROM heartbeats WHERE id = ?`).get(result.lastInsertRowid) as unknown as HeartbeatRow
+      );
+      const agent = this.getRegistryAgentRequired(agentId);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "agent.heartbeat",
+          { agentId, heartbeat, status: agent.status, lastHeartbeatAt: agent.lastHeartbeatAt },
+          { "agent.id": agentId, "agent.status": agent.status, "actor.id": input.actorId }
+        )
+      );
+      return { value: { agent, heartbeat }, events: [event] };
     });
   }
 
@@ -822,6 +1218,43 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return rowToConnector(row);
   }
 
+  private getActorRequired(id: string): RegistryActor {
+    const row = this.db.prepare(`SELECT * FROM actors WHERE id = ?`).get(id) as unknown as ActorRow | undefined;
+    if (!row) {
+      throw new ControlStackError("actor_not_found", `actor not found: ${id}`);
+    }
+    return rowToActor(row);
+  }
+
+  private getRegistryAgentBaseRequired(id: string): RegistryAgent {
+    const row = this.db.prepare(`SELECT * FROM agents WHERE id = ?`).get(id) as unknown as AgentRow | undefined;
+    if (!row) {
+      throw new ControlStackError("agent_not_found", `agent not found: ${id}`);
+    }
+    return rowToAgent(row);
+  }
+
+  private getRegistryAgentRequired(id: string): RegistryAgentDetail {
+    return this.agentDetail(this.getRegistryAgentBaseRequired(id));
+  }
+
+  private agentDetail(agent: RegistryAgent): RegistryAgentDetail {
+    const heartbeat = this.db
+      .prepare(`SELECT * FROM heartbeats WHERE agent_id = ? ORDER BY observed_at DESC, id DESC LIMIT 1`)
+      .get(agent.id) as unknown as HeartbeatRow | undefined;
+    return {
+      ...agent,
+      capabilities: this.capabilitiesForAgent(agent.id),
+      ...(heartbeat ? { latestHeartbeat: rowToHeartbeat(heartbeat) } : {})
+    };
+  }
+
+  private capabilitiesForAgent(agentId: string): RegistryCapability[] {
+    return (this.db.prepare(`SELECT * FROM capabilities WHERE agent_id = ? ORDER BY name ASC`).all(agentId) as unknown as CapabilityRow[]).map(
+      rowToCapability
+    );
+  }
+
   private getTunnelSessionRequired(input: TunnelSessionRef): RegisteredTunnelSession {
     const row = this.db
       .prepare(
@@ -1026,6 +1459,61 @@ function rowToConnector(row: ConnectorRow): RegisteredConnector {
   };
 }
 
+function rowToActor(row: ActorRow): RegistryActor {
+  return {
+    id: row.id,
+    actorType: row.actor_type,
+    displayName: row.display_name,
+    ...(row.external_ref ? { externalRef: row.external_ref } : {}),
+    createdAt: row.created_at
+  };
+}
+
+function rowToAgent(row: AgentRow): RegistryAgent {
+  return {
+    id: row.id,
+    name: row.name,
+    kind: row.kind,
+    acpRole: row.acp_role,
+    ...(row.provider ? { provider: row.provider } : {}),
+    ...(row.model ? { model: row.model } : {}),
+    ...(row.endpoint ? { endpoint: row.endpoint } : {}),
+    status: row.status,
+    ...(row.last_heartbeat_at ? { lastHeartbeatAt: row.last_heartbeat_at } : {}),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdByActorId: row.created_by_actor_id,
+    updatedByActorId: row.updated_by_actor_id
+  };
+}
+
+function rowToCapability(row: CapabilityRow): RegistryCapability {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    name: row.name,
+    ...(row.description ? { description: row.description } : {}),
+    ...(row.input_schema ? { inputSchema: JSON.parse(row.input_schema) as Record<string, unknown> } : {}),
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    createdByActorId: row.created_by_actor_id,
+    updatedByActorId: row.updated_by_actor_id
+  };
+}
+
+function rowToHeartbeat(row: HeartbeatRow): RegistryHeartbeat {
+  return {
+    id: row.id,
+    agentId: row.agent_id,
+    status: row.status,
+    ...(row.current_task ? { currentTask: row.current_task } : {}),
+    ...(row.last_error ? { lastError: row.last_error } : {}),
+    observedAt: row.observed_at,
+    actorId: row.actor_id
+  };
+}
+
 function rowToTunnelSession(row: TunnelSessionRow): RegisteredTunnelSession {
   return {
     connectorId: row.connector_id,
@@ -1083,6 +1571,48 @@ function uniqueNonEmpty(values: string[], field: string): string[] {
     throw new ControlStackError("invalid_connector_registration", `${field} must not be empty`);
   }
   return unique;
+}
+
+function requiredString(value: string, field: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    throw new ControlStackError("invalid_agent_registration", `${field} must not be empty`);
+  }
+  return trimmed;
+}
+
+function optionalString(value: string | null | undefined): string | null {
+  if (value === null || value === undefined) return null;
+  const trimmed = value.trim();
+  return trimmed ? trimmed : null;
+}
+
+function normalizeInputSchema(value: Record<string, unknown> | undefined): string | null {
+  if (value === undefined) return null;
+  if (value === null || Array.isArray(value) || typeof value !== "object") {
+    throw new ControlStackError("invalid_agent_registration", "inputSchema must be a JSON object");
+  }
+  const serialized = JSON.stringify(value);
+  if (!serialized) {
+    throw new ControlStackError("invalid_agent_registration", "inputSchema must be JSON serializable");
+  }
+  JSON.parse(serialized);
+  return serialized;
+}
+
+function assertOneOf<T extends string>(value: string, allowed: readonly T[], field: string): asserts value is T {
+  if (!allowed.includes(value as T)) {
+    throw new ControlStackError("invalid_agent_registration", `${field} is not supported`);
+  }
+}
+
+function requirePrivilegedTransition(options: PrivilegedTransitionOptions | undefined, transition: string): void {
+  if (!options) {
+    throw new ControlStackError(
+      "policy_gate_required",
+      `${transition} transition requires a policy or domain service path`
+    );
+  }
 }
 
 function assertFutureIso(value: string, now: string, field: string): void {

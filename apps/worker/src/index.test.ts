@@ -6,6 +6,8 @@ import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { runWorkerOnce } from "./index.js";
 
+const domainTransition = { via: "domain_service" } as const;
+
 describe("worker policy gate", () => {
   it("executes approved read-only work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
@@ -51,7 +53,7 @@ describe("worker policy gate", () => {
         requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
       store.close();
 
       const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });

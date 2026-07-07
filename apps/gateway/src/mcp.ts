@@ -37,6 +37,7 @@ export interface AuthenticatedMcpRequestAudit {
   method: string;
   toolName?: string;
   workItemId?: string;
+  resolvedActor: string;
   auth: McpAuthenticatedRequest;
 }
 
@@ -143,13 +144,15 @@ async function handleToolsCall(input: {
     return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, requiredScopes(parsed.data.name));
   }
 
+  const actor = resolvedMcpActor(authorization.auth);
   try {
-    const result = callGatewayTool(input.tools, parsed.data.name, parsed.data.arguments ?? {});
+    const result = callGatewayTool(input.tools, parsed.data.name, parsed.data.arguments ?? {}, authorization.auth);
     input.auditAuthenticatedRequest?.({
       requestId: input.requestId ?? String(input.id ?? ""),
       method: "tools/call",
       toolName: parsed.data.name,
       workItemId: workItemIdFromToolResult(result),
+      resolvedActor: actor,
       auth: authorization.auth
     });
     return jsonRpcResult(input.id, {
@@ -166,6 +169,7 @@ async function handleToolsCall(input: {
       requestId: input.requestId ?? String(input.id ?? ""),
       method: "tools/call",
       toolName: parsed.data.name,
+      resolvedActor: actor,
       auth: authorization.auth
     });
     return jsonRpcError(input.id, errorCode(error), errorMessage(error), errorStatus(error));
@@ -194,14 +198,40 @@ async function handleProtectedUnsupportedMethod(input: {
   input.auditAuthenticatedRequest?.({
     requestId: input.requestId ?? String(input.id ?? ""),
     method: input.method,
+    resolvedActor: resolvedMcpActor(authorization.auth),
     auth: authorization.auth
   });
   return jsonRpcError(input.id, -32601, `unsupported MCP method: ${input.method}`, 404);
 }
 
-function callGatewayTool(tools: GatewayWorkItemTools, name: GatewayToolName, args: unknown): unknown {
+function callGatewayTool(
+  tools: GatewayWorkItemTools,
+  name: GatewayToolName,
+  args: unknown,
+  auth: McpAuthenticatedRequest
+): unknown {
   const handler = tools[name] as (input: unknown) => unknown;
-  return handler(args);
+  return handler(bindAuthenticatedActor(name, args, auth));
+}
+
+function bindAuthenticatedActor(name: GatewayToolName, args: unknown, auth: McpAuthenticatedRequest): unknown {
+  if (name !== "approve_work_item" && name !== "unblock_work_item" && name !== "cancel_work_item") {
+    return args;
+  }
+  const actor = resolvedMcpActor(auth);
+  const record = requestObject(args);
+  if (name === "approve_work_item") {
+    return { ...record, approvedBy: actor };
+  }
+  return { ...record, actor };
+}
+
+function resolvedMcpActor(auth: McpAuthenticatedRequest): string {
+  return auth.connectorId ?? auth.subject;
+}
+
+function requestObject(input: unknown): Record<string, unknown> {
+  return input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
 }
 
 function workItemIdFromToolResult(result: unknown): string | undefined {
@@ -307,10 +337,9 @@ function toolInputSchema(name: GatewayToolName): Record<string, unknown> {
     case "approve_work_item":
       return {
         type: "object",
-        required: ["id", "approvedBy", "reason"],
+        required: ["id", "reason"],
         properties: {
           id: { type: "string" },
-          approvedBy: { type: "string" },
           reason: { type: "string" },
           actionHash: { type: "string" }
         }
@@ -321,7 +350,6 @@ function toolInputSchema(name: GatewayToolName): Record<string, unknown> {
         required: ["id"],
         properties: {
           id: { type: "string" },
-          actor: { type: "string" },
           reason: { type: "string" }
         }
       };
@@ -352,8 +380,7 @@ function toolInputSchema(name: GatewayToolName): Record<string, unknown> {
         type: "object",
         required: ["id"],
         properties: {
-          id: { type: "string" },
-          actor: { type: "string" }
+          id: { type: "string" }
         }
       };
   }

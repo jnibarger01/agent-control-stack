@@ -5,6 +5,7 @@ import {
   approvalRequestSchema,
   cancelRequestSchema,
   type ClaimedWorkItem,
+  type PrivilegedTransitionOptions,
   type WorkItem,
   type WorkItemStore
 } from "@agent-control-stack/work-items";
@@ -30,6 +31,8 @@ const claimInputSchema = z.object({
 });
 const approvalInputSchema = idInputSchema.merge(approvalRequestSchema);
 const cancelInputSchema = idInputSchema.merge(cancelRequestSchema);
+const policyTransition = { via: "policy_gate" } satisfies PrivilegedTransitionOptions;
+const domainTransition = { via: "domain_service" } satisfies PrivilegedTransitionOptions;
 
 export function evaluateAndRecordPolicy(
   store: WorkItemStore,
@@ -66,11 +69,11 @@ export function applyPolicyStatus(store: WorkItemStore, workItem: WorkItem, deci
     return workItem.status === "blocked" ? workItem : store.blockWorkItem(workItem.id);
   }
 
-  const pending = workItem.status === "draft" ? store.transition(workItem.id, "pending_policy") : workItem;
+  const pending = workItem.status === "draft" ? store.transition(workItem.id, "pending_policy", policyTransition) : workItem;
   if (decision.decision === "require_approval") {
-    return pending.status === "needs_approval" ? pending : store.transition(pending.id, "needs_approval");
+    return pending.status === "needs_approval" ? pending : store.transition(pending.id, "needs_approval", policyTransition);
   }
-  return pending.status === "approved" ? pending : store.approveWorkItem(pending.id);
+  return pending.status === "approved" ? pending : store.approveWorkItem(pending.id, policyTransition);
 }
 
 export function gateApproval(
@@ -110,7 +113,11 @@ export function gateApproval(
     }));
   }
 
-  return { decision, workItem: workItem.status === "approved" ? workItem : store.approveWorkItem(workItem.id), approvals };
+  return {
+    decision,
+    workItem: workItem.status === "approved" ? workItem : store.approveWorkItem(workItem.id, policyTransition),
+    approvals
+  };
 }
 
 export function gateUnblock(
@@ -129,11 +136,17 @@ export function gateUnblock(
     return { decision, workItem: workItem.status === "blocked" ? workItem : store.blockWorkItem(workItem.id) };
   }
 
-  const pending = workItem.status === "blocked" ? store.unblockWorkItem(workItem.id) : workItem;
+  const pending = workItem.status === "blocked" ? store.unblockWorkItem(workItem.id, policyTransition) : workItem;
   if (decision.decision === "require_approval") {
-    return { decision, workItem: pending.status === "needs_approval" ? pending : store.transition(pending.id, "needs_approval") };
+    return {
+      decision,
+      workItem: pending.status === "needs_approval" ? pending : store.transition(pending.id, "needs_approval", policyTransition)
+    };
   }
-  return { decision, workItem: pending.status === "pending_policy" ? pending : store.transition(pending.id, "pending_policy") };
+  return {
+    decision,
+    workItem: pending.status === "pending_policy" ? pending : store.transition(pending.id, "pending_policy", policyTransition)
+  };
 }
 
 export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, input: unknown): ClaimedWorkItem | undefined {
@@ -200,7 +213,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
     },
     cancel_work_item(input: unknown): WorkItem {
       const parsed = cancelInputSchema.parse(input);
-      return store.cancelWorkItem(parsed.id, parsed);
+      return store.cancelWorkItem(parsed.id, parsed, domainTransition);
     },
     claim_next_approved_work_item(input: unknown): ClaimedWorkItem | undefined {
       return gateWorkerClaim(store, policy, input);

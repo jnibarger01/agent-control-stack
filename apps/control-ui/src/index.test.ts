@@ -64,4 +64,56 @@ describe("renderDashboard", () => {
       health: "healthy"
     });
   });
+
+  it("keeps registered local agents offline without heartbeat evidence", () => {
+    const agents = projectAgents([], [], new Date("2026-07-05T00:01:00.000Z"), [
+      {
+        id: "codex-cli",
+        name: "Codex CLI",
+        kind: "cli",
+        acpRole: "IMPLEMENTATION_AGENT",
+        capabilities: [
+          {
+            id: "cap_1",
+            agentId: "codex-cli",
+            name: "code:implement",
+            createdAt: "2026-07-05T00:00:00.000Z",
+            updatedAt: "2026-07-05T00:00:00.000Z",
+            createdByActorId: "user",
+            updatedByActorId: "user"
+          },
+          {
+            id: "cap_2",
+            agentId: "codex-cli",
+            name: "code:test",
+            createdAt: "2026-07-05T00:00:00.000Z",
+            updatedAt: "2026-07-05T00:00:00.000Z",
+            createdByActorId: "user",
+            updatedByActorId: "user"
+          },
+          {
+            id: "cap_3",
+            agentId: "codex-cli",
+            name: "repo:inspect",
+            createdAt: "2026-07-05T00:00:00.000Z",
+            updatedAt: "2026-07-05T00:00:00.000Z",
+            createdByActorId: "user",
+            updatedByActorId: "user"
+          }
+        ],
+        status: "OFFLINE",
+        createdAt: "2026-07-05T00:00:00.000Z",
+        updatedAt: "2026-07-05T00:00:00.000Z",
+        createdByActorId: "user",
+        updatedByActorId: "user"
+      }
+    ]);
+
+    expect(agents[0]).toMatchObject({
+      id: "codex-cli",
+      status: "offline",
+      health: "unknown",
+      capabilities: ["code:implement", "code:test", "repo:inspect"]
+    });
+  });
 });

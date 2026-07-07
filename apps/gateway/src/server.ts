@@ -7,6 +7,8 @@ import {
   listWorkItemsSchema,
   requesterSchema,
   SqliteWorkItemStore,
+  acpRoles,
+  registryStatuses,
   type StoredAuditEvent
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
@@ -39,6 +41,42 @@ const tunnelSessionBodySchema = z.object({
   issuedAt: z.string().min(1).optional(),
   expiresAt: z.string().min(1)
 });
+const acpRoleSchema = z.enum(acpRoles);
+const registryStatusSchema = z.enum(registryStatuses);
+const optionalStringSchema = z.string().min(1).optional();
+const nullableStringSchema = z.string().min(1).nullable().optional();
+const agentBodySchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1),
+  kind: z.string().min(1),
+  acpRole: acpRoleSchema,
+  provider: optionalStringSchema,
+  model: optionalStringSchema,
+  endpoint: optionalStringSchema,
+  status: registryStatusSchema.optional(),
+  lastError: optionalStringSchema
+});
+const agentPatchSchema = z.object({
+  name: optionalStringSchema,
+  kind: optionalStringSchema,
+  acpRole: acpRoleSchema.optional(),
+  provider: nullableStringSchema,
+  model: nullableStringSchema,
+  endpoint: nullableStringSchema,
+  status: registryStatusSchema.optional(),
+  lastError: nullableStringSchema
+});
+const capabilitySchema = z.object({
+  name: z.string().min(1),
+  description: optionalStringSchema,
+  inputSchema: z.record(z.string(), z.unknown()).optional()
+});
+const capabilitiesBodySchema = z.object({ capabilities: z.array(capabilitySchema) });
+const heartbeatBodySchema = z.object({
+  status: registryStatusSchema,
+  currentTask: optionalStringSchema,
+  lastError: optionalStringSchema
+});
 
 export interface GatewayAuthOptions {
   token: string;
@@ -61,6 +99,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
+  const requireRead = async (request: FastifyRequest, reply: FastifyReply) => {
+    if (!requireReadAccess(request, reply, auth)) {
+      return reply;
+    }
+  };
   if (!mcpAuth?.oauth && !mcpAuth?.tunnel && process.env.NODE_ENV === "production") {
     app.log.warn("MCP OAuth/tunnel auth is disabled in production; set OAuth env or ACS_AUTH_MODE=tunnel_id");
   }
@@ -78,10 +121,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.get("/health", async () => ({ ok: true }));
 
-  app.get("/", async (_request, reply) => {
+  app.get("/", { preHandler: requireRead }, async (_request, reply) => {
     const workItemList = workItems.list();
     const events = workItems.readEvents();
-    reply.type("text/html").send(renderDashboard({ workItems: workItemList, events }));
+    reply.type("text/html").send(renderDashboard({ workItems: workItemList, events, registeredAgents: workItems.listRegistryAgents() }));
   });
 
   app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
@@ -183,7 +226,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     return metadata;
   });
 
-  app.get("/work-items", async (request, reply) => {
+  app.get("/work-items", { preHandler: requireRead }, async (request, reply) => {
     try {
       return { workItems: tools.list_work_items(listWorkItemsSchema.parse(request.query)) };
     } catch (error) {
@@ -191,21 +234,109 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-  app.get("/agents", async () => {
-    const agentList = projectAgents(workItems.list(), workItems.readEvents());
-    return { agents: agentList };
+  const listActorsHandler = async () => ({ actors: workItems.listActors() });
+  app.get("/api/actors", { preHandler: requireRead }, listActorsHandler);
+  app.get("/actors", { preHandler: requireRead }, listActorsHandler);
+
+  app.get("/api/agents", { preHandler: requireRead }, async () => ({ agents: workItems.listRegistryAgents() }));
+
+  app.post("/api/agents", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const actorId = requireRegistryActorId(request, reply);
+      if (!actorId) {
+        return;
+      }
+      const agent = workItems.createRegistryAgent({ ...agentBodySchema.parse(request.body), actorId });
+      return reply.code(201).send({ agent });
+    } catch (error) {
+      return sendError(reply, error);
+    }
   });
 
-  app.get<{ Params: { id: string } }>("/agents/:id", async (request, reply) => {
+  app.get<{ Params: { id: string } }>("/api/agents/:id", { preHandler: requireRead }, async (request, reply) => {
+    const agent = workItems.getRegistryAgent(request.params.id);
+    if (!agent) {
+      return reply.code(404).send({ error: "agent not found" });
+    }
+    return { agent, events: agentEvents(workItems.readEvents(), request.params.id) };
+  });
+
+  app.patch<{ Params: { id: string } }>("/api/agents/:id", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const actorId = requireRegistryActorId(request, reply);
+      if (!actorId) {
+        return;
+      }
+      const agent = workItems.updateRegistryAgent(request.params.id, { ...agentPatchSchema.parse(request.body), actorId });
+      return { agent };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/api/agents/:id/capabilities", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      return { capabilities: workItems.listAgentCapabilities(request.params.id) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.put<{ Params: { id: string } }>("/api/agents/:id/capabilities", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const actorId = requireRegistryActorId(request, reply);
+      if (!actorId) {
+        return;
+      }
+      const body = capabilitiesBodySchema.parse(request.body);
+      const capabilities = workItems.replaceAgentCapabilities(request.params.id, body.capabilities, actorId);
+      return { capabilities };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/agents/:id/heartbeat", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const actorId = requireRegistryActorId(request, reply);
+      if (!actorId) {
+        return;
+      }
+      const result = workItems.recordAgentHeartbeat(request.params.id, { ...heartbeatBodySchema.parse(request.body), actorId });
+      return reply.code(201).send(result);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get("/agents", { preHandler: requireRead }, async () => ({
+    agents: projectAgents(workItems.list(), workItems.readEvents(), new Date(), workItems.listRegistryAgents())
+  }));
+
+  app.get<{ Params: { id: string } }>("/agents/:id", { preHandler: requireRead }, async (request, reply) => {
     const events = workItems.readEvents();
-    const agent = projectAgents(workItems.list(), events).find((candidate) => candidate.id === request.params.id);
+    const agent = projectAgents(workItems.list(), events, new Date(), workItems.listRegistryAgents()).find(
+      (candidate) => candidate.id === request.params.id
+    );
     if (!agent) {
       return reply.code(404).send({ error: "agent not found" });
     }
     return { agent, events: agentEvents(events, request.params.id) };
   });
 
-  app.get<{ Params: { id: string } }>("/work-items/:id", async (request, reply) => {
+  app.get<{ Params: { id: string } }>("/work-items/:id", { preHandler: requireRead }, async (request, reply) => {
     const workItem = tools.get_work_item({ id: request.params.id });
     if (!workItem) {
       return reply.code(404).send({ error: "work item not found" });
@@ -276,7 +407,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     return reply.code(501).send({ error: "worker result submission requires a lease-bound worker API" });
   });
 
-  app.get("/events", (request, reply) => {
+  app.get("/events", { preHandler: requireRead }, (request, reply) => {
     reply.hijack();
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream",
@@ -296,7 +427,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   function recordAuthenticatedMcpRequest(event: AuthenticatedMcpRequestAudit): void {
     workItems.recordConnectorRequest({
-      actor: event.auth.subject,
+      actor: event.resolvedActor,
       source: "mcp",
       route: "/mcp",
       toolName: event.toolName ?? event.method,
@@ -327,6 +458,7 @@ function agentEvents(events: StoredAuditEvent[], agentId: string): StoredAuditEv
     const body = event.body && typeof event.body === "object" ? (event.body as Record<string, unknown>) : {};
     return (
       event.attributes["worker.id"] === agentId ||
+      event.attributes["agent.id"] === agentId ||
       event.attributes["connector.id"] === agentId ||
       event.attributes["auth.connector_id"] === agentId ||
       body.connectorId === agentId ||
@@ -340,7 +472,12 @@ function sendError(reply: FastifyReply, error: unknown) {
     return reply.code(400).send({ error: "invalid request" });
   }
   if (error instanceof ControlStackError) {
-    const status = error.code === "work_item_not_found" ? 404 : 409;
+    const status =
+      error.code === "work_item_not_found" || error.code === "agent_not_found"
+        ? 404
+        : error.code === "actor_not_found" || error.code === "invalid_agent_registration"
+          ? 400
+          : 409;
     return reply.code(status).send({ error: error.message, code: error.code });
   }
   throw error;
@@ -425,6 +562,48 @@ function requireMutationActor(
     return undefined;
   }
   return auth.actor;
+}
+
+function requireReadAccess(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): boolean {
+  if (auth) {
+    if (request.headers.authorization !== `Bearer ${auth.token}`) {
+      reply.code(401).send({ error: "unauthorized" });
+      return false;
+    }
+    return true;
+  }
+  if (isDevelopmentLoopbackRequest(request)) {
+    return true;
+  }
+  reply.code(503).send({ error: "read auth is not configured for production or exposed access" });
+  return false;
+}
+
+function requireRegistryActorId(request: FastifyRequest, reply: FastifyReply): string | undefined {
+  const actorId = firstHeader(request.headers["x-acs-actor-id"]);
+  if (!actorId) {
+    reply.code(400).send({ error: "x-acs-actor-id is required" });
+    return undefined;
+  }
+  return actorId;
+}
+
+function isDevelopmentLoopbackRequest(request: FastifyRequest): boolean {
+  if (process.env.NODE_ENV === "production") {
+    return false;
+  }
+  if (process.env.HOST && !isLoopbackAddress(process.env.HOST)) {
+    return false;
+  }
+  return isLoopbackAddress(request.socket.remoteAddress ?? request.ip);
+}
+
+function isLoopbackAddress(address: string | undefined): boolean {
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1" || address === "localhost";
 }
 
 export async function startGateway(): Promise<FastifyInstance> {

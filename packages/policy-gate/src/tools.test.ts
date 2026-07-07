@@ -6,6 +6,8 @@ import { describe, expect, it } from "vitest";
 import { createPolicyEngine, type PolicyDecision, type PolicyEngine, type PolicyOperation } from "./policy.js";
 import { createWorkItemTools } from "./tools.js";
 
+const domainTransition = { via: "domain_service" } as const;
+
 describe("policy-gated work item tools", () => {
   it("routes created work through injected policy", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-risk-"));
@@ -42,7 +44,7 @@ describe("policy-gated work item tools", () => {
         requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
 
       const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
 

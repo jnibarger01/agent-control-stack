@@ -2,9 +2,11 @@ import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ControlStackError } from "@agent-control-stack/shared";
+import { ControlStackError, controlPlaneMigrations } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
+
+const domainTransition = { via: "domain_service" } as const;
 
 describe("work item state machine", () => {
   it("rejects invalid transitions", () => {
@@ -36,10 +38,33 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "claim" }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
 
       expectControlError(() => store.transition(workItem.id, "running"), "worker_claim_required");
       expect(store.claimNextApprovedWorkItem("worker-a")?.status).toBe("running");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects direct privileged transitions without a domain guard", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-privileged-transition-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Direct transition",
+        requester: "user",
+        intent: "verify policy bypass guard",
+        requestedActions: [{ kind: "manual", description: "guard" }],
+        risk: "low"
+      });
+      store.blockWorkItem(workItem.id);
+
+      expectControlError(() => store.approveWorkItem(workItem.id), "policy_gate_required");
+      expectControlError(() => store.unblockWorkItem(workItem.id), "policy_gate_required");
+      expectControlError(() => store.cancelWorkItem(workItem.id, { actor: "user" }), "policy_gate_required");
+      expectControlError(() => store.transition(workItem.id, "approved"), "policy_gate_required");
     } finally {
       store.close();
     }
@@ -61,7 +86,7 @@ describe("work item state machine", () => {
       expect(store.get(workItem.id)?.status).toBe("pending_policy");
       expect(store.readEvents().map((event) => event.name)).toEqual([WorkItemEvent.Created]);
       expect(() => store.startWorkItem(workItem.id)).toThrow(ControlStackError);
-      expect(store.approveWorkItem(workItem.id).status).toBe("approved");
+      expect(store.approveWorkItem(workItem.id, domainTransition).status).toBe("approved");
       expect(store.startWorkItem(workItem.id).status).toBe("running");
     } finally {
       store.close();
@@ -101,7 +126,7 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "claim" }],
         risk: "low"
       });
-      first.approveWorkItem(workItem.id);
+      first.approveWorkItem(workItem.id, domainTransition);
 
       const claimed = first.claimNextApprovedWorkItem("worker-a");
       expect(claimed?.id).toBe(workItem.id);
@@ -129,7 +154,7 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "claim" }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
 
       const claimed = store.claimNextApprovedWorkItem("worker-a");
       expect(claimed?.leaseToken).toEqual(expect.any(String));
@@ -165,7 +190,7 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "lease" }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
       store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
 
       const failed = store.failExpiredLeases(new Date(Date.now() + 1000));
@@ -190,7 +215,7 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "result" }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
       const claimed = store.claimNextApprovedWorkItem("worker-a");
 
       expectControlError(
@@ -241,7 +266,7 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "result" }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
       const claimed = store.claimNextApprovedWorkItem("worker-a");
 
       expect(() =>
@@ -276,7 +301,7 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "result" }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
       const claimed = store.claimNextApprovedWorkItem("worker-a");
 
       updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", null);
@@ -320,7 +345,7 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "result" }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
       const claimed = store.claimNextApprovedWorkItem("worker-a");
       updateWorkItemColumn(dbPath, workItem.id, "lease_expires_at", "not-an-iso-date");
 
@@ -371,7 +396,7 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "result" }],
         risk: "low"
       });
-      store.approveWorkItem(workItem.id);
+      store.approveWorkItem(workItem.id, domainTransition);
       const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
       await new Promise((resolve) => setTimeout(resolve, 10));
 
@@ -492,6 +517,231 @@ describe("work item state machine", () => {
     }
   });
 
+  it("bootstraps the registry schema and canonical roster through migrations", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-registry-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+
+    try {
+      const canonical = [
+        ["codex-cli", "Codex CLI", "IMPLEMENTATION_AGENT"],
+        ["claude-code", "Claude Code / Claude adapter", "REVIEW_PLANNING_AGENT"],
+        ["gemini-cli", "Gemini CLI", "RESEARCH_BROAD_SCAN_AGENT"],
+        ["opencode-local", "OpenCode", "LOCAL_CODING_AGENT"],
+        ["hermes-local", "Hermes Agent", "ORCHESTRATION_LAYER"],
+        ["openclaw-bridge", "OpenClaw", "DESKTOP_LOCAL_AGENT_BRIDGE"]
+      ] as const;
+
+      expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["actors", "agents", "capabilities", "heartbeats"]));
+      expect(migrationRows(dbPath)).toEqual([
+        { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
+        { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" }
+      ]);
+      expect(store.listActors()).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
+      );
+      expect(store.listRegistryAgents()).toEqual(
+        expect.arrayContaining(
+          canonical.map(([id, name, acpRole]) =>
+            expect.objectContaining({ id, name, acpRole, status: "UNKNOWN" })
+          )
+        )
+      );
+      expect(store.listRegistryAgents().every((agent) => agent.capabilities.length === 0 && !agent.latestHeartbeat)).toBe(
+        true
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("migrates a previous control-plane schema without reloading SQL blindly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-migration-previous-"));
+    const dbPath = join(dir, "control.db");
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.exec(controlPlaneMigrations()[0].sql);
+    } finally {
+      db.close();
+    }
+
+    const store = new SqliteWorkItemStore(dbPath);
+    try {
+      expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2]);
+      expect(store.listRegistryAgents()).toEqual(
+        expect.arrayContaining([expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" })])
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("records agent create and update actor attribution", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-attribution-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+      store.registerActor({ id: "service", actorType: "SERVICE", displayName: "Registry Service" });
+      const agent = store.createRegistryAgent({
+        id: "test-agent",
+        name: "Test Agent",
+        kind: "service",
+        acpRole: "ORCHESTRATION_LAYER",
+        status: "OFFLINE",
+        actorId: "service"
+      });
+      const updated = store.updateRegistryAgent("test-agent", {
+        status: "AVAILABLE",
+        actorId: "user"
+      });
+
+      expect(agent).toMatchObject({ createdByActorId: "service", updatedByActorId: "service" });
+      expect(updated).toMatchObject({ status: "AVAILABLE", updatedByActorId: "user" });
+      expectControlError(
+        () =>
+          store.createRegistryAgent({
+            id: "missing-actor-agent",
+            name: "Missing Actor Agent",
+            kind: "cli",
+            acpRole: "IMPLEMENTATION_AGENT",
+            actorId: "missing"
+          }),
+        "actor_not_found"
+      );
+      expectControlError(
+        () =>
+          store.createRegistryAgent({
+            id: "bad-status-agent",
+            name: "Bad Status Agent",
+            kind: "cli",
+            acpRole: "IMPLEMENTATION_AGENT",
+            status: "GREAT",
+            actorId: "user"
+          } as never),
+        "invalid_agent_registration"
+      );
+      expectControlError(
+        () => store.updateRegistryAgent("test-agent", { status: "GREAT", actorId: "user" } as never),
+        "invalid_agent_registration"
+      );
+      expectControlError(() => store.updateRegistryAgent("missing-agent", { actorId: "user" }), "agent_not_found");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("replaces capabilities atomically with actor attribution", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-capabilities-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+      store.createRegistryAgent({
+        id: "test-agent",
+        name: "Test Agent",
+        kind: "cli",
+        acpRole: "IMPLEMENTATION_AGENT",
+        actorId: "user"
+      });
+
+      const capabilities = store.replaceAgentCapabilities(
+        "test-agent",
+        [{ name: "repo:inspect", description: "Inspect repository", inputSchema: { type: "object" } }],
+        "user"
+      );
+
+      expect(capabilities).toEqual([
+        expect.objectContaining({ name: "repo:inspect", createdByActorId: "user", updatedByActorId: "user" })
+      ]);
+      expectControlError(
+        () => store.replaceAgentCapabilities("test-agent", [{ name: "bad", inputSchema: [] as never }], "user"),
+        "invalid_agent_registration"
+      );
+      expect(store.listAgentCapabilities("test-agent")).toEqual([
+        expect.objectContaining({ name: "repo:inspect" })
+      ]);
+      expectControlError(
+        () => store.replaceAgentCapabilities("test-agent", [{ name: "repo:write" }], "missing"),
+        "actor_not_found"
+      );
+      expectControlError(
+        () => store.replaceAgentCapabilities("missing-agent", [{ name: "repo:write" }], "user"),
+        "agent_not_found"
+      );
+    } finally {
+      store.close();
+    }
+  });
+
+  it("appends heartbeats and updates latest registry state", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-heartbeat-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+
+    try {
+      store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+      store.createRegistryAgent({
+        id: "test-agent",
+        name: "Test Agent",
+        kind: "cli",
+        acpRole: "IMPLEMENTATION_AGENT",
+        actorId: "user"
+      });
+
+      store.recordAgentHeartbeat("test-agent", {
+        actorId: "user",
+        status: "DEGRADED",
+        lastError: "warming"
+      });
+      const heartbeat = store.recordAgentHeartbeat("test-agent", {
+        actorId: "user",
+        status: "AVAILABLE",
+        currentTask: "idle"
+      });
+
+      expect(countRows(dbPath, "heartbeats")).toBe(2);
+      expect(heartbeat.agent).toMatchObject({
+        id: "test-agent",
+        status: "AVAILABLE",
+        lastError: "warming",
+        updatedByActorId: "user",
+        latestHeartbeat: { actorId: "user", status: "AVAILABLE", currentTask: "idle" }
+      });
+      expectControlError(
+        () =>
+          store.recordAgentHeartbeat("test-agent", {
+            actorId: "missing",
+            status: "AVAILABLE"
+          }),
+        "actor_not_found"
+      );
+      expectControlError(
+        () =>
+          store.recordAgentHeartbeat("test-agent", {
+            actorId: "user",
+            status: "GREAT"
+          } as never),
+        "invalid_agent_registration"
+      );
+      expectControlError(
+        () =>
+          store.recordAgentHeartbeat("missing-agent", {
+            actorId: "user",
+            status: "AVAILABLE"
+          }),
+        "agent_not_found"
+      );
+      expect(store.readEvents().map((event) => event.name)).toEqual(
+        expect.arrayContaining(["actor.registered", "agent.created", "agent.heartbeat"])
+      );
+      expect(store.verifyAuditChain()).toMatchObject({ ok: true });
+    } finally {
+      store.close();
+    }
+  });
+
   it("detects audit event tampering", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-audit-chain-"));
     const dbPath = join(dir, "control.db");
@@ -543,6 +793,37 @@ function expectControlError(run: () => unknown, code: string): void {
     return;
   }
   throw new Error(`expected ControlStackError: ${code}`);
+}
+
+function tableNames(dbPath: string): string[] {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map(
+      (row) => row.name
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function migrationRows(dbPath: string): Array<{ version: number; name: string; filename: string }> {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return db
+      .prepare(`SELECT version, name, filename FROM schema_migrations ORDER BY version ASC`)
+      .all() as Array<{ version: number; name: string; filename: string }>;
+  } finally {
+    db.close();
+  }
+}
+
+function countRows(dbPath: string, table: "heartbeats"): number {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
+  } finally {
+    db.close();
+  }
 }
 
 function readLeaseRow(
