@@ -13,6 +13,7 @@ import {
   requesterSchema,
   SqliteWorkItemStore,
   acpRoles,
+  actorTypes,
   registryStatuses,
   type StoredAuditEvent
 } from "@agent-control-stack/work-items";
@@ -77,6 +78,12 @@ const capabilitySchema = z.object({
   inputSchema: z.record(z.string(), z.unknown()).optional()
 });
 const capabilitiesBodySchema = z.object({ capabilities: z.array(capabilitySchema) });
+const actorBodySchema = z.object({
+  id: z.string().min(1),
+  actorType: z.enum(actorTypes),
+  displayName: z.string().min(1),
+  externalRef: optionalStringSchema
+});
 const heartbeatBodySchema = z.object({
   status: registryStatusSchema,
   currentTask: optionalStringSchema,
@@ -86,6 +93,8 @@ const heartbeatBodySchema = z.object({
 export interface GatewayAuthOptions {
   token: string;
   actor: string;
+  /** Registry actor ID this credential is bound to; registry mutations fail closed without it. */
+  actorId?: string;
 }
 
 export interface GatewayOptions {
@@ -259,6 +268,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/api/actors", { preHandler: requireRead }, listActorsHandler);
   app.get("/actors", { preHandler: requireRead }, listActorsHandler);
 
+  const registerActorHandler = async (request: FastifyRequest, reply: FastifyReply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const actor = workItems.registerActor(actorBodySchema.parse(request.body));
+      return reply.code(201).send({ actor });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  };
+  app.post("/api/actors", registerActorHandler);
+  app.post("/actors", registerActorHandler);
+
   app.get("/api/agents", { preHandler: requireRead }, async () => ({ agents: workItems.listRegistryAgents() }));
 
   app.post("/api/agents", async (request, reply) => {
@@ -266,7 +289,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!requireMutationActor(request, reply, auth)) {
         return;
       }
-      const actorId = requireRegistryActorId(request, reply);
+      const actorId = requireBoundActorId(request, reply, auth);
       if (!actorId) {
         return;
       }
@@ -290,7 +313,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!requireMutationActor(request, reply, auth)) {
         return;
       }
-      const actorId = requireRegistryActorId(request, reply);
+      const actorId = requireBoundActorId(request, reply, auth);
       if (!actorId) {
         return;
       }
@@ -314,7 +337,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!requireMutationActor(request, reply, auth)) {
         return;
       }
-      const actorId = requireRegistryActorId(request, reply);
+      const actorId = requireBoundActorId(request, reply, auth);
       if (!actorId) {
         return;
       }
@@ -331,7 +354,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!requireMutationActor(request, reply, auth)) {
         return;
       }
-      const actorId = requireRegistryActorId(request, reply);
+      const actorId = requireBoundActorId(request, reply, auth);
       if (!actorId) {
         return;
       }
@@ -522,7 +545,8 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   }
   const token = process.env.ACS_GATEWAY_TOKEN;
   const actor = requesterSchema.parse(process.env.ACS_GATEWAY_ACTOR ?? "user");
-  return token ? { token, actor } : undefined;
+  const actorId = process.env.ACS_GATEWAY_ACTOR_ID;
+  return token ? { token, actor, ...(actorId ? { actorId } : {}) } : undefined;
 }
 
 function resolveMcpAuth(options: GatewayOptions, workItems: SqliteWorkItemStore): McpAuthOptions | undefined {
@@ -612,13 +636,22 @@ function requireReadAccess(
   return false;
 }
 
-function requireRegistryActorId(request: FastifyRequest, reply: FastifyReply): string | undefined {
-  const actorId = firstHeader(request.headers["x-acs-actor-id"]);
-  if (!actorId) {
-    reply.code(400).send({ error: "x-acs-actor-id is required" });
+function requireBoundActorId(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  const boundActorId = auth?.actorId;
+  if (!boundActorId) {
+    reply.code(503).send({ error: "registry actor binding is not configured; set ACS_GATEWAY_ACTOR_ID" });
     return undefined;
   }
-  return actorId;
+  const claimedActorId = firstHeader(request.headers["x-acs-actor-id"]);
+  if (claimedActorId && claimedActorId !== boundActorId) {
+    reply.code(403).send({ error: "x-acs-actor-id does not match the credential-bound actor" });
+    return undefined;
+  }
+  return boundActorId;
 }
 
 function isDevelopmentLoopbackRequest(request: FastifyRequest): boolean {

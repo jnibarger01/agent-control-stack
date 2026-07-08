@@ -9,7 +9,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
 import { buildGateway } from "./server.js";
 
-const testAuth = { token: "t", actor: "user" };
+const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
 const oauthResource = "https://acs.example.test/mcp";
 
@@ -103,7 +103,7 @@ describe("mission control gateway", () => {
       });
 
       expect(missingActor.statusCode).toBe(400);
-      expect(unknownActor.statusCode).toBe(400);
+      expect(unknownActor.statusCode).toBe(403);
       expect(invalidCreateStatus.statusCode).toBe(400);
       expect(created.statusCode).toBe(201);
       expect(created.json().agent).toMatchObject({
@@ -158,7 +158,7 @@ describe("mission control gateway", () => {
       const heartbeatMissingActor = await app.inject({
         method: "POST",
         url: "/api/agents/api-agent/heartbeat",
-        payload: { status: "AVAILABLE" }
+        payload: { status: "AVAILABLE", currentTask: "idle" }
       });
       const heartbeatUnknownActor = await app.inject({
         method: "POST",
@@ -205,11 +205,11 @@ describe("mission control gateway", () => {
       expect(capabilities.statusCode).toBe(200);
       expect(replacedCapabilities.json().capabilities).toHaveLength(1);
       expect(malformedCapabilities.statusCode).toBe(400);
-      expect(capabilityMissingActor.statusCode).toBe(400);
-      expect(capabilityUnknownActor.statusCode).toBe(400);
+      expect(capabilityMissingActor.statusCode).toBe(200);
+      expect(capabilityUnknownActor.statusCode).toBe(403);
       expect(heartbeat.statusCode).toBe(201);
-      expect(heartbeatMissingActor.statusCode).toBe(400);
-      expect(heartbeatUnknownActor.statusCode).toBe(400);
+      expect(heartbeatMissingActor.statusCode).toBe(201);
+      expect(heartbeatUnknownActor.statusCode).toBe(403);
       expect(invalidStatus.statusCode).toBe(400);
       expect(updated.json().agent).toMatchObject({ id: "api-agent", model: "gpt-5-codex", updatedByActorId: "user" });
       expect(actors.json().actors).toEqual(expect.arrayContaining([expect.objectContaining({ id: "user" })]));
@@ -231,6 +231,104 @@ describe("mission control gateway", () => {
         expect(store.readEvents().map((event) => event.name)).toEqual(
           expect.arrayContaining(["agent.created", "agent.updated", "agent.capabilities_replaced", "agent.heartbeat"])
         );
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects registry mutations when x-acs-actor-id mismatches the credential-bound actor", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-actor-binding-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.registerActor({ id: "actor_jace", actorType: "HUMAN", displayName: "Jace" });
+    seed.close();
+    const app = buildGateway({ dbPath, logger: false, auth: { token: "t", actor: "user", actorId: "actor_jace" } });
+
+    try {
+      const spoofed = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: { authorization: "Bearer t", "x-acs-actor-id": "actor_system_bootstrap" },
+        payload: { id: "spoofed-agent", name: "Spoofed", kind: "cli", acpRole: "IMPLEMENTATION_AGENT" }
+      });
+      const spoofedHeartbeat = await app.inject({
+        method: "POST",
+        url: "/api/agents/codex-cli/heartbeat",
+        headers: { authorization: "Bearer t", "x-acs-actor-id": "actor_system_bootstrap" },
+        payload: { status: "AVAILABLE" }
+      });
+      const bound = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers: { authorization: "Bearer t" },
+        payload: { id: "bound-agent", name: "Bound", kind: "cli", acpRole: "IMPLEMENTATION_AGENT" }
+      });
+
+      expect(spoofed.statusCode).toBe(403);
+      expect(spoofedHeartbeat.statusCode).toBe(403);
+      expect(bound.statusCode).toBe(201);
+      expect(bound.json().agent).toMatchObject({ createdByActorId: "actor_jace", updatedByActorId: "actor_jace" });
+
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.getRegistryAgent("spoofed-agent")).toBeUndefined();
+        const heartbeat = store.getRegistryAgent("codex-cli")?.latestHeartbeat;
+        expect(heartbeat).toBeUndefined();
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for registry mutations when no actor binding is configured", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-actor-binding-missing-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: { token: "t", actor: "user" } });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/agents/codex-cli/heartbeat",
+        headers: { authorization: "Bearer t", "x-acs-actor-id": "actor_system_bootstrap" },
+        payload: { status: "AVAILABLE" }
+      });
+      expect(response.statusCode).toBe(503);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("registers actors through an authenticated audited route", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-actor-register-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/actors",
+        payload: { id: "actor_jace", actorType: "HUMAN", displayName: "Jace" }
+      });
+      const invalid = await app.inject({
+        method: "POST",
+        url: "/actors",
+        payload: { id: "actor_bad", actorType: "ROBOT_OVERLORD", displayName: "Nope" }
+      });
+
+      expect(created.statusCode).toBe(201);
+      expect(created.json().actor).toMatchObject({ id: "actor_jace", actorType: "HUMAN", displayName: "Jace" });
+      expect(invalid.statusCode).toBe(400);
+
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.readEvents().map((event) => event.name)).toContain("actor.registered");
       } finally {
         store.close();
       }
