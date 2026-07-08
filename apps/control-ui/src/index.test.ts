@@ -30,9 +30,9 @@ describe("renderDashboard", () => {
       now: new Date("2026-07-05T00:01:00.000Z")
     });
 
-    expect(html).toContain("AgentOS Mission Control");
+    expect(html).toContain("ACS Mission Control");
     expect(html).toContain("Inspect me");
-    expect(html).toContain("No fake green lights");
+    expect(html).toContain("Live state comes from the registry");
     expect(html).toContain("New Task Composer");
     expect(html).toContain("authenticated session");
     expect(html).not.toContain("ACS_GATEWAY_TOKEN");
@@ -46,6 +46,12 @@ describe("renderDashboard", () => {
     expect(html).toContain(`data-reason="wrk_test"`);
     expect(html).toContain("worker lease expired");
     expect(html).toContain(`data-agent="/repo"`);
+    expect(html).toContain(`data-agent-id="/repo"`);
+    expect(html).toContain("refreshAgentRoster()");
+    expect(html).toContain("fetchJson('/agents')");
+    expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8')");
+    expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities')");
+    expect(html).not.toContain("JSON.stringify(await res.json(), null, 2)");
     expect(html).not.toContain("data-approve-all");
   });
 

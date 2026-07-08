@@ -71,7 +71,7 @@ describe("mission control gateway", () => {
       const detail = await app.inject({ method: "GET", url: `/work-items/${workItemId}` });
 
       expect(page.statusCode).toBe(200);
-      expect(page.body).toContain("AgentOS Mission Control");
+      expect(page.body).toContain("ACS Mission Control");
       expect(page.body).toContain("Inspect route");
       expect(agents.json().agents).toEqual(expect.arrayContaining([expect.objectContaining({ id: "chatgpt-prod" })]));
       expect(detail.json().events.map((event: { name: string }) => event.name)).toContain("work_item.created");
@@ -2271,7 +2271,7 @@ describe("gateway dashboard sessions", () => {
 
       const page = await app.inject({ method: "GET", url: "/", headers: { cookie } });
       expect(page.statusCode).toBe(200);
-      expect(page.body).toContain("AgentOS Mission Control");
+      expect(page.body).toContain("ACS Mission Control");
       expect(page.body).not.toContain(dashboardAuth.token);
 
       const sse = await app.inject({ method: "GET", url: "/events", headers: { cookie }, payloadAsStream: true });
