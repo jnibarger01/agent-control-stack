@@ -1,10 +1,17 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { exec, fork, spawn } from "node:child_process";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { runWorkerOnce } from "./index.js";
+
+vi.mock("node:child_process", () => ({
+  exec: vi.fn(),
+  fork: vi.fn(),
+  spawn: vi.fn()
+}));
 
 const domainTransition = { via: "domain_service" } as const;
 
@@ -107,11 +114,18 @@ describe("worker policy gate", () => {
       const check = new SqliteWorkItemStore(dbPath);
       try {
         const events = check.readEvents().map((event) => event.name);
+        const succeededEvent = check.readEvents().find((event) => event.name === "work_item.succeeded");
         expect(result.executed).toBe(true);
+        expect(result.executionMode).toBe("dry_run");
         expect(check.get(workItem.id)?.status).toBe("succeeded");
         expect(events).toContain("approval.granted");
         expect(events).toContain("approval.consumed");
         expect(events).toContain("work_item.succeeded");
+        expect(succeededEvent?.body.result).toMatchObject({ execution_mode: "dry_run" });
+        expect(succeededEvent?.attributes).toMatchObject({ "execution.mode": "dry_run" });
+        expect(spawn).not.toHaveBeenCalled();
+        expect(exec).not.toHaveBeenCalled();
+        expect(fork).not.toHaveBeenCalled();
       } finally {
         check.close();
       }

@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
+import { auditEventHash } from "@agent-control-stack/shared";
 import { DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT, SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
@@ -152,7 +153,7 @@ describe("mission control gateway", () => {
     });
     seed.close();
     updateAuditBody(dbPath, 1, { tampered: true });
-    const app = buildTestGateway({ dbPath, logger: false });
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
 
     try {
       const health = await app.inject({ method: "GET", url: "/health" });
@@ -166,6 +167,44 @@ describe("mission control gateway", () => {
       });
       expect(health.body).not.toContain("Error:");
       expect(health.body).not.toContain("stack");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on writes after startup detects audit-chain tampering", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-write-audit-tamper-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.create({
+      title: "Tamper seed",
+      requester: "user",
+      intent: "seed audit row",
+      requestedActions: [{ kind: "manual", description: "seed" }],
+      risk: "low"
+    });
+    seed.close();
+    updateAuditBody(dbPath, 1, { tampered: true });
+    const auditRowsBefore = countAuditRows(dbPath);
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        headers: { authorization: `Bearer ${testAuth.token}` },
+        payload: {
+          title: "Should fail",
+          intent: "verify tamper fail closed",
+          requestedActions: [{ kind: "manual", description: "blocked" }],
+          risk: "low"
+        }
+      });
+
+      expect(created.statusCode).toBe(409);
+      expect(created.json()).toMatchObject({ code: "audit_chain_invalid" });
+      expect(countAuditRows(dbPath)).toBe(auditRowsBefore);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -3061,6 +3100,15 @@ function updateAuditBody(dbPath: string, sequence: number, body: Record<string, 
   }
 }
 
+function countAuditRows(dbPath: string): number {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return (db.prepare(`SELECT COUNT(*) AS count FROM audit_events`).get() as { count: number }).count;
+  } finally {
+    db.close();
+  }
+}
+
 function replaceRequestedActions(dbPath: string, workItemId: string, requestedActions: unknown[]): void {
   const db = new DatabaseSync(dbPath);
   try {
@@ -3078,20 +3126,40 @@ function seedAuditRows(dbPath: string, count: number, input: { workItemId: strin
   const db = new DatabaseSync(dbPath);
   try {
     db.exec("BEGIN IMMEDIATE");
+    let previousHash =
+      (
+        db.prepare(`SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1`).get() as
+          | { event_hash: string }
+          | undefined
+      )?.event_hash ?? "";
     const insert = db.prepare(
       `INSERT INTO audit_events (id, name, time_unix_nano, attributes, body, previous_hash, event_hash)
        VALUES (?, ?, ?, ?, ?, ?, ?)`
     );
     for (let index = 0; index < count; index += 1) {
+      const event = {
+        sequence:
+          ((db.prepare(`SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM audit_events`).get() as { sequence: number })
+            .sequence),
+        id: `evt_seed_${index}`,
+        name: `audit.seed.${index}`,
+        timeUnixNano: String((Date.now() + index) * 1_000_000),
+        attributes: { "work_item.id": input.workItemId, "agent.id": input.agentId },
+        body: { index },
+        previousHash,
+        eventHash: ""
+      };
+      const eventHash = auditEventHash(event);
       insert.run(
-        `evt_seed_${index}`,
-        `audit.seed.${index}`,
-        String((Date.now() + index) * 1_000_000),
-        JSON.stringify({ "work_item.id": input.workItemId, "agent.id": input.agentId }),
-        JSON.stringify({ index }),
-        `seed-prev-${index}`,
-        `seed-hash-${index}`
+        event.id,
+        event.name,
+        event.timeUnixNano,
+        JSON.stringify(event.attributes),
+        JSON.stringify(event.body),
+        event.previousHash,
+        eventHash
       );
+      previousHash = eventHash;
     }
     db.exec("COMMIT");
   } catch (error) {

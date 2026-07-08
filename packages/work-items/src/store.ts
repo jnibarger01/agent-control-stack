@@ -477,6 +477,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private readonly onEvent: (event: StoredAuditEvent) => void;
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
+  private auditChainValid = true;
 
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -490,6 +491,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     `);
     applyControlPlaneMigrations(this.db);
     this.backfillAuditChain();
+    this.auditChainValid = this.verifyAuditChain().ok;
   }
 
   create(input: unknown): WorkItem {
@@ -1427,7 +1429,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while submitting result: ${parsed.id}`);
       }
-      return { value: updated, events: [this.appendAuditEvent(workItemStatusEvent(updated, { result: redactedResult }))] };
+      return {
+        value: updated,
+        events: [
+          this.appendAuditEvent(workItemStatusEvent(updated, { result: redactedResult }, resultEventAttributes(redactedResult)))
+        ]
+      };
     });
   }
 
@@ -1668,10 +1675,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
     try {
       const verification = this.verifyAuditChain();
       if (verification.ok) {
+        this.auditChainValid = true;
         return okHealth();
       }
+      this.auditChainValid = false;
       return failHealth(`audit_chain_${verification.failure.reason}`);
     } catch {
+      this.auditChainValid = false;
       return failHealth("audit_chain_probe_failed");
     }
   }
@@ -1681,6 +1691,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   private write<T>(operation: () => { value: T; events: StoredAuditEvent[] }): T {
+    if (!this.auditChainValid) {
+      throw new ControlStackError("audit_chain_invalid", "audit chain is invalid; writes are disabled");
+    }
     if (this.transactionDepth > 0) {
       // Participate in the enclosing transaction; events are notified only if it commits.
       const nested = operation();
@@ -1779,6 +1792,10 @@ function normalizeEventLimit(limit: number | undefined): number {
     throw new ControlStackError("invalid_event_query", "limit must be a positive integer");
   }
   return Math.min(limit, MAX_EVENT_LIMIT);
+}
+
+function resultEventAttributes(result: Record<string, unknown>): Record<string, string> {
+  return typeof result.execution_mode === "string" ? { "execution.mode": result.execution_mode } : {};
 }
 
 function okHealth(): HealthCheck {
