@@ -202,6 +202,31 @@ export interface ConnectorRequestRecord {
   authScopes?: string[];
 }
 
+export const acpTimelineEventTypes = [
+  "initialized",
+  "message",
+  "plan",
+  "tool_call_proposed",
+  "diff",
+  "error",
+  "stop",
+  "client_method_rejected",
+  "disconnected"
+] as const;
+
+export type AcpTimelineEventType = (typeof acpTimelineEventTypes)[number];
+
+export interface AgentTimelineEventRecord {
+  agentId: string;
+  actorId: string;
+  eventType: AcpTimelineEventType;
+  method?: string;
+  messageId?: string;
+  sessionId?: string;
+  workItemId?: string;
+  body?: Record<string, unknown>;
+}
+
 export interface ConnectorRegistration {
   id: string;
   displayName?: string;
@@ -396,6 +421,7 @@ export interface WorkItemStore {
   revokeTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession;
   getTunnelSession(input: TunnelSessionRef): TunnelSessionAuthorizationRecord | undefined;
   recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent;
+  recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
   hasApproval(workItemId: string, actionHash: string): boolean;
@@ -907,6 +933,38 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (input.authSessionId) attributes["auth.session_id"] = input.authSessionId;
       const event = this.appendAuditEvent(
         createEvent("connector.requested", { ...input }, attributes)
+      );
+      return { value: event, events: [event] };
+    });
+  }
+
+  recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent {
+    return this.write(() => {
+      this.getActorRequired(input.actorId);
+      assertOneOf(input.eventType, acpTimelineEventTypes, "eventType");
+      const attributes: Record<string, string> = {
+        "agent.id": requiredString(input.agentId, "agentId"),
+        "actor.id": input.actorId,
+        "acp.event_type": input.eventType
+      };
+      if (input.method) attributes["acp.method"] = input.method;
+      if (input.messageId) attributes["acp.message_id"] = input.messageId;
+      if (input.sessionId) attributes["acp.session_id"] = input.sessionId;
+      if (input.workItemId) attributes["work_item.id"] = input.workItemId;
+      const event = this.appendAuditEvent(
+        createEvent(
+          `acp.${input.eventType}`,
+          {
+            agentId: input.agentId,
+            eventType: input.eventType,
+            method: input.method,
+            messageId: input.messageId,
+            sessionId: input.sessionId,
+            workItemId: input.workItemId,
+            ...(input.body ?? {})
+          },
+          attributes
+        )
       );
       return { value: event, events: [event] };
     });

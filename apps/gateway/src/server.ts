@@ -1,4 +1,9 @@
 import type { ServerResponse } from "node:http";
+import {
+  acpAdapterConfigFromEnv,
+  ReadonlyAcpAdapter,
+  type ReadonlyAcpAdapterConfig
+} from "@agent-control-stack/acp-adapter";
 import { projectAgents, renderDashboard } from "@agent-control-stack/control-ui";
 import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
@@ -89,6 +94,7 @@ export interface GatewayOptions {
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
+  acpAdapter?: ReadonlyAcpAdapterConfig | false;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -99,6 +105,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
+  const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
+  const acpAdapter = acpAdapterConfig === false || !acpAdapterConfig
+    ? undefined
+    : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
   const requireRead = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!requireReadAccess(request, reply, auth)) {
       return reply;
@@ -120,6 +130,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   }
 
   app.get("/health", async () => ({ ok: true }));
+
+  if (acpAdapter) {
+    app.addHook("onReady", async () => {
+      try {
+        await acpAdapter.start();
+      } catch (error) {
+        app.log.error({ err: error }, "ACP adapter failed to initialize");
+        throw error;
+      }
+    });
+  }
 
   app.get("/", { preHandler: requireRead }, async (_request, reply) => {
     const workItemList = workItems.list();
@@ -261,7 +282,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     if (!agent) {
       return reply.code(404).send({ error: "agent not found" });
     }
-    return { agent, events: agentEvents(workItems.readEvents(), request.params.id) };
+    return { agent, adapterStatus: adapterStatusFor(request.params.id), events: agentEvents(workItems.readEvents(), request.params.id) };
   });
 
   app.patch<{ Params: { id: string } }>("/api/agents/:id", async (request, reply) => {
@@ -333,7 +354,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     if (!agent) {
       return reply.code(404).send({ error: "agent not found" });
     }
-    return { agent, events: agentEvents(events, request.params.id) };
+    return { agent, adapterStatus: adapterStatusFor(request.params.id), events: agentEvents(events, request.params.id) };
   });
 
   app.get<{ Params: { id: string } }>("/work-items/:id", { preHandler: requireRead }, async (request, reply) => {
@@ -422,6 +443,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.addHook("onClose", async () => {
+    await acpAdapter?.stop();
     workItems.close();
   });
 
@@ -441,6 +463,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       authSessionId: event.auth.sessionId,
       authScopes: event.auth.scopes
     });
+  }
+
+  function adapterStatusFor(agentId: string) {
+    const status = acpAdapter?.getStatus();
+    return status?.agentId === agentId ? status : undefined;
   }
 
   return app;

@@ -9,6 +9,7 @@
   "references": [
     { "path": "../../apps/control-ui" },
     { "path": "../../packages/audit-log" },
+    { "path": "../../packages/acp-adapter" },
     { "path": "../../packages/policy-gate" },
     { "path": "../../packages/shared" },
     { "path": "../../packages/work-items" }

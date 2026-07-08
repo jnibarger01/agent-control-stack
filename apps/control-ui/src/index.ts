@@ -277,6 +277,13 @@ source.addEventListener('work_item.blocked', () => location.reload());
 source.addEventListener('work_item.failed', () => location.reload());
 source.addEventListener('work_item.succeeded', () => location.reload());
 source.addEventListener('work_item.cancelled', () => location.reload());
+source.addEventListener('agent.created', () => location.reload());
+source.addEventListener('agent.updated', () => location.reload());
+source.addEventListener('agent.heartbeat', () => location.reload());
+source.addEventListener('agent.capabilities_replaced', () => location.reload());
+source.addEventListener('acp.initialized', () => location.reload());
+source.addEventListener('acp.disconnected', () => location.reload());
+source.addEventListener('acp.error', () => location.reload());
 source.addEventListener('tunnel_session.heartbeat', () => location.reload());
 
 document.querySelectorAll('[data-work-item]').forEach((button) => {

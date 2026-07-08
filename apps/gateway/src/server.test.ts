@@ -239,6 +239,57 @@ describe("mission control gateway", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("exposes configured read-only ACP adapter status in Mission Control", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-acp-gateway-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      acpAdapter: {
+        agentId: "acp-ui-agent",
+        actorId: "acp-ui-actor",
+        command: process.execPath,
+        args: ["-e", gatewayFixtureAcpAgentScript()],
+        initializeTimeoutMs: 500
+      }
+    });
+
+    try {
+      const agents = await app.inject({ method: "GET", url: "/agents" });
+      const detail = await app.inject({ method: "GET", url: "/agents/acp-ui-agent" });
+
+      expect(agents.statusCode).toBe(200);
+      expect(agents.json().agents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "acp-ui-agent",
+            displayName: "Gateway Fixture ACP Agent",
+            kind: "acp-adapter",
+            status: "online",
+            health: "healthy",
+            capabilities: expect.arrayContaining(["acp.protocol.1.0", "acp.capability.plan"])
+          })
+        ])
+      );
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().adapterStatus).toMatchObject({
+        agentId: "acp-ui-agent",
+        connected: true,
+        processAlive: true,
+        initialized: true,
+        protocolVersion: "1.0",
+        agentName: "Gateway Fixture ACP Agent",
+        capabilities: ["plan"]
+      });
+      expect(detail.json().adapterStatus.lastMessageAt).toBeDefined();
+      expect(detail.json().events.map((event: { name: string }) => event.name)).toEqual(
+        expect.arrayContaining(["agent.created", "agent.heartbeat", "acp.initialized"])
+      );
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("gateway MCP transport", () => {
@@ -2027,6 +2078,60 @@ async function injectRejectedOAuthToolCall(input: {
 
 function base64UrlJson(value: unknown): string {
   return Buffer.from(JSON.stringify(value)).toString("base64url");
+}
+
+function gatewayFixtureAcpAgentScript(): string {
+  return `
+let buffer = Buffer.alloc(0);
+let initialized = false;
+
+function send(message) {
+  const body = JSON.stringify(message);
+  process.stdout.write('Content-Length: ' + Buffer.byteLength(body, 'utf8') + '\\r\\n\\r\\n' + body);
+}
+
+function handle(message) {
+  if (initialized) {
+    return;
+  }
+  if (!message || message.method !== 'initialize') {
+    process.exit(2);
+  }
+  initialized = true;
+  send({
+    jsonrpc: '2.0',
+    id: message.id,
+    result: {
+      protocolVersion: '1.0',
+      agent: { name: 'Gateway Fixture ACP Agent', version: '0.1.0' },
+      capabilities: { plan: true, filesystem: false, terminal: false },
+      authMethods: ['none'],
+      sessionFeatures: ['updates']
+    }
+  });
+}
+
+function tryRead() {
+  const headerEnd = buffer.indexOf('\\r\\n\\r\\n');
+  if (headerEnd === -1) return;
+  const header = buffer.subarray(0, headerEnd).toString('ascii');
+  const match = /content-length:\\s*(\\d+)/i.exec(header);
+  if (!match) process.exit(3);
+  const length = Number(match[1]);
+  const bodyStart = headerEnd + 4;
+  if (buffer.length < bodyStart + length) return;
+  const body = buffer.subarray(bodyStart, bodyStart + length).toString('utf8');
+  buffer = buffer.subarray(bodyStart + length);
+  handle(JSON.parse(body));
+}
+
+process.stdin.on('data', (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+  tryRead();
+});
+
+setInterval(() => undefined, 1000);
+`;
 }
 
 function authChallenge(body: { result: { _meta: { "mcp/www_authenticate": string[] } } }): string {
