@@ -8,7 +8,7 @@ import {
   type JWTPayload
 } from "jose";
 
-export const MCP_SCOPES = ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:worker:claim"] as const;
+export const MCP_SCOPES = ["acs:work:create", "acs:work:read", "acs:work:approve"] as const;
 export type McpScope = (typeof MCP_SCOPES)[number];
 export type McpAuthMethod = "local_bearer" | "oauth_jwt" | "tunnel_id";
 

@@ -254,7 +254,7 @@ export interface ConnectorRegistration {
   displayName?: string;
   publicKeyPem: string;
   allowedScopes: string[];
-  actorId?: string;
+  actorId: string;
   now?: Date;
 }
 
@@ -380,7 +380,7 @@ export interface TunnelSessionRegistration {
   sessionId: string;
   issuedAt?: string;
   expiresAt: string;
-  actorId?: string;
+  actorId: string;
   now?: Date;
 }
 
@@ -679,9 +679,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const now = (input.now ?? new Date()).toISOString();
       const displayName = input.displayName ?? input.id;
       const allowedScopes = uniqueNonEmpty(input.allowedScopes, "allowedScopes");
-      if (input.actorId) {
-        this.getActorRequired(input.actorId);
-      }
+      const actorId = requiredActorId(input.actorId);
+      this.getActorRequired(actorId);
       const existing = this.db
         .prepare(`SELECT public_key_pem FROM connector_records WHERE id = ?`)
         .get(input.id) as { public_key_pem: string } | undefined;
@@ -705,7 +704,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         "connector.id": connector.id,
         "connector.status": connector.status
       };
-      if (input.actorId) attributes["actor.id"] = input.actorId;
+      attributes["actor.id"] = actorId;
       const event = this.appendAuditEvent(
         createEvent(
           "connector.registered",
@@ -715,7 +714,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
             allowedScopes: connector.allowedScopes,
             publicKeyFingerprint: publicKeyFingerprint(connector.publicKeyPem),
             status: connector.status,
-            actorId: input.actorId
+            actorId
           },
           attributes
         )
@@ -972,9 +971,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (connector.status !== "active") {
         throw new ControlStackError("connector_revoked", `connector is not active: ${input.connectorId}`);
       }
-      if (input.actorId) {
-        this.getActorRequired(input.actorId);
-      }
+      const actorId = requiredActorId(input.actorId);
+      this.getActorRequired(actorId);
       const now = (input.now ?? new Date()).toISOString();
       const issuedAt = input.issuedAt ?? now;
       assertFutureIso(input.expiresAt, now, "expiresAt");
@@ -998,11 +996,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
         "tunnel.session_id": session.sessionId,
         "tunnel.session_status": session.status
       };
-      if (input.actorId) attributes["actor.id"] = input.actorId;
+      attributes["actor.id"] = actorId;
       const event = this.appendAuditEvent(
         createEvent(
           "tunnel_session.registered",
-          { ...session, actorId: input.actorId },
+          { ...session, actorId },
           attributes
         )
       );
@@ -1012,9 +1010,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   heartbeatTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession {
     return this.write(() => {
-      if (input.actorId) {
-        this.getActorRequired(input.actorId);
-      }
+      const actorId = requiredActorId(input.actorId);
+      this.getActorRequired(actorId);
       const now = (input.now ?? new Date()).toISOString();
       const result = this.db
         .prepare(
@@ -1032,11 +1029,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
         "tunnel.id": session.tunnelId,
         "tunnel.session_id": session.sessionId
       };
-      if (input.actorId) attributes["actor.id"] = input.actorId;
+      attributes["actor.id"] = actorId;
       const event = this.appendAuditEvent(
         createEvent(
           "tunnel_session.heartbeat",
-          { ...session, actorId: input.actorId },
+          { ...session, actorId },
           attributes
         )
       );
@@ -1046,9 +1043,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   revokeTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession {
     return this.write(() => {
-      if (input.actorId) {
-        this.getActorRequired(input.actorId);
-      }
+      const actorId = requiredActorId(input.actorId);
+      this.getActorRequired(actorId);
       const now = (input.now ?? new Date()).toISOString();
       const result = this.db
         .prepare(
@@ -1067,11 +1063,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
         "tunnel.session_id": session.sessionId,
         "tunnel.session_status": session.status
       };
-      if (input.actorId) attributes["actor.id"] = input.actorId;
+      attributes["actor.id"] = actorId;
       const event = this.appendAuditEvent(
         createEvent(
           "tunnel_session.revoked",
-          { ...session, actorId: input.actorId },
+          { ...session, actorId },
           attributes
         )
       );
@@ -1930,6 +1926,14 @@ function requiredString(value: string, field: string): string {
     throw new ControlStackError("invalid_agent_registration", `${field} must not be empty`);
   }
   return trimmed;
+}
+
+function requiredActorId(value: string | undefined): string {
+  const actorId = value?.trim();
+  if (!actorId) {
+    throw new ControlStackError("actor_required", "actorId is required");
+  }
+  return actorId;
 }
 
 function optionalString(value: string | null | undefined): string | null {

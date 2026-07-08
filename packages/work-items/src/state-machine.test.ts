@@ -892,6 +892,64 @@ describe("work item state machine", () => {
     }
   });
 
+  it("requires explicit actors for connector and tunnel session registry mutations", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-connector-attribution-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+      expectControlError(
+        () =>
+          store.registerConnector({
+            id: "chatgpt-prod",
+            publicKeyPem: "public-key",
+            allowedScopes: ["acs:work:create"]
+          } as never),
+        "actor_required"
+      );
+
+      store.registerConnector({
+        id: "chatgpt-prod",
+        publicKeyPem: "public-key",
+        allowedScopes: ["acs:work:create"],
+        actorId: "user"
+      });
+      expectControlError(
+        () =>
+          store.registerTunnelSession({
+            connectorId: "chatgpt-prod",
+            tunnelId: "tunnel_1",
+            sessionId: "session_1",
+            expiresAt: new Date(Date.now() + 60_000).toISOString()
+          } as never),
+        "actor_required"
+      );
+
+      store.registerTunnelSession({
+        connectorId: "chatgpt-prod",
+        tunnelId: "tunnel_1",
+        sessionId: "session_1",
+        expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        actorId: "user"
+      });
+      expectControlError(
+        () => store.revokeTunnelSession({ connectorId: "chatgpt-prod", tunnelId: "tunnel_1", sessionId: "session_1" } as never),
+        "actor_required"
+      );
+      store.revokeTunnelSession({ connectorId: "chatgpt-prod", tunnelId: "tunnel_1", sessionId: "session_1", actorId: "user" });
+
+      expect(store.readEvents()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ name: "connector.registered", attributes: expect.objectContaining({ "actor.id": "user" }) }),
+          expect.objectContaining({ name: "tunnel_session.registered", attributes: expect.objectContaining({ "actor.id": "user" }) }),
+          expect.objectContaining({ name: "tunnel_session.revoked", attributes: expect.objectContaining({ "actor.id": "user" }) })
+        ])
+      );
+    } finally {
+      store.close();
+    }
+  });
+
   it("replaces capabilities atomically with actor attribution", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-agent-capabilities-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

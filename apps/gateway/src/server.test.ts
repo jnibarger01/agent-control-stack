@@ -946,9 +946,10 @@ describe("gateway MCP transport", () => {
         resource: oauthResource,
         resource_name: "Agent Control Stack MCP Gateway",
         authorization_servers: [oauthIssuer],
-        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:worker:claim"],
+        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve"],
         bearer_methods_supported: ["header"]
       });
+      expect(response.json().scopes_supported).not.toContain("acs:worker:claim");
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -1188,9 +1189,10 @@ describe("gateway MCP transport", () => {
         resource: "http://127.0.0.1:3000/mcp",
         resource_name: "Agent Control Stack MCP Gateway",
         authorization_servers: [],
-        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:worker:claim"],
+        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve"],
         bearer_methods_supported: ["header"]
       });
+      expect(response.json().scopes_supported).not.toContain("acs:worker:claim");
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -3268,6 +3270,7 @@ function seedSignedTunnelSession(
       id: input.connectorId,
       publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),
       allowedScopes: input.scopes,
+      actorId: input.connectorId,
       now: input.now
     });
     store.registerTunnelSession({
@@ -3275,6 +3278,7 @@ function seedSignedTunnelSession(
       tunnelId: input.tunnelId,
       sessionId: input.sessionId,
       expiresAt: input.expiresAt ?? new Date(Date.now() + 60_000).toISOString(),
+      actorId: input.connectorId,
       now: input.now
     });
   } finally {
