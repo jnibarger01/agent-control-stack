@@ -71,6 +71,7 @@ describe("policy-gated work item tools", () => {
       });
       const before = store.readEvents().filter((event) => event.name === "policy.decided").length;
 
+      expect(() => tools.unblock_work_item({ id: workItem.id })).toThrow();
       const unblocked = tools.unblock_work_item({ id: workItem.id, actor: "operator" });
       const decisions = store.readEvents().filter((event) => event.name === "policy.decided");
 

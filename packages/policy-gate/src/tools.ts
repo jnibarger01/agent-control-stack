@@ -24,7 +24,7 @@ export const workItemToolNames = [
 ] as const;
 
 const idInputSchema = z.object({ id: z.string().min(1) });
-const unblockInputSchema = idInputSchema.extend({ actor: z.string().min(1).default("system") });
+const unblockInputSchema = idInputSchema.extend({ actor: z.string().min(1) });
 const claimInputSchema = z.object({
   workerId: z.string().min(1),
   leaseMs: z.number().int().positive().optional()
