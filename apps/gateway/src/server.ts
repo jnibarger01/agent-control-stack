@@ -35,6 +35,7 @@ import {
   type McpOAuthOptions
 } from "./auth.js";
 import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit } from "./mcp.js";
+import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
 
 const approvalBodySchema = z.object({
   reason: z.string().min(1),
@@ -133,6 +134,7 @@ export interface GatewayOptions {
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
   acpAdapter?: ReadonlyAcpAdapterConfig | false;
+  moa?: MoaGatewayOverrides | false;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -160,6 +162,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   };
   if (!mcpAuth?.oauth && !mcpAuth?.tunnel && process.env.NODE_ENV === "production") {
     app.log.warn("MCP OAuth/tunnel auth is disabled in production; set OAuth env or ACS_AUTH_MODE=tunnel_id");
+  }
+  if (options.moa !== false) {
+    app.register(async (instance) => {
+      await registerMoaGateway(instance, {
+        dbPath,
+        store: workItems,
+        authenticate: async (moaRequest) =>
+          auth && (hasBearerAuth(moaRequest, auth) || hasSessionCookie(moaRequest, auth)) ? { actor: auth.actor } : null,
+        ...(options.moa ? { overrides: options.moa } : {})
+      });
+    });
   }
 
   function broadcast(event: StoredAuditEvent): void {

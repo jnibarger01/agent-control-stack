@@ -17,6 +17,7 @@
   "dependencies": {
     "@agent-control-stack/acp-adapter": "0.1.0",
     "@agent-control-stack/control-ui": "0.1.0",
+    "@agent-control-stack/moa-orchestrator": "0.1.0",
     "@agent-control-stack/policy-gate": "0.1.0",
     "@agent-control-stack/shared": "0.1.0",
     "@agent-control-stack/work-items": "0.1.0",

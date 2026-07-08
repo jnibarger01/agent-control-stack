@@ -9,6 +9,7 @@
     { "path": "packages/temporal-memory" },
     { "path": "packages/sandbox" },
     { "path": "packages/eval-harness" },
+    { "path": "packages/moa-orchestrator" },
     { "path": "apps/control-ui" },
     { "path": "apps/mcp" },
     { "path": "apps/gateway" },
