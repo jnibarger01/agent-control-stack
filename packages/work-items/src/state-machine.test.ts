@@ -814,6 +814,34 @@ describe("work item state machine", () => {
     }
   });
 
+  it("redacts secrets from heartbeat and agent lastError before storage", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-heartbeat-redact-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const secretError = "Error calling API with Bearer sk-proj-abc123token";
+
+    try {
+      const { agent, heartbeat } = store.recordAgentHeartbeat("codex-cli", {
+        status: "ERROR",
+        lastError: secretError,
+        actorId: "actor_system_bootstrap"
+      });
+
+      expect(heartbeat.lastError).not.toContain("sk-proj");
+      expect(agent.lastError).not.toContain("sk-proj");
+
+      const updated = store.updateRegistryAgent("codex-cli", {
+        lastError: secretError,
+        actorId: "actor_system_bootstrap"
+      });
+      expect(updated.lastError).not.toContain("sk-proj");
+
+      expect(JSON.stringify(store.readEvents())).not.toContain("sk-proj");
+      expect(JSON.stringify(store.getRegistryAgent("codex-cli"))).not.toContain("sk-proj");
+    } finally {
+      store.close();
+    }
+  });
+
   it("detects audit event tampering", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-audit-chain-"));
     const dbPath = join(dir, "control.db");

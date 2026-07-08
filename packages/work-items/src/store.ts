@@ -675,7 +675,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           optionalString(input.model),
           optionalString(input.endpoint),
           input.status ?? "UNKNOWN",
-          optionalString(input.lastError),
+          redactedOptionalString(input.lastError),
           now,
           now,
           input.actorId,
@@ -710,7 +710,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           input.model === undefined ? current.model ?? null : optionalString(input.model),
           input.endpoint === undefined ? current.endpoint ?? null : optionalString(input.endpoint),
           input.status ?? current.status,
-          input.lastError === undefined ? current.lastError ?? null : optionalString(input.lastError),
+          input.lastError === undefined ? current.lastError ?? null : redactedOptionalString(input.lastError),
           now,
           input.actorId,
           id
@@ -780,7 +780,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.getActorRequired(input.actorId);
       this.getRegistryAgentRequired(agentId);
       assertOneOf(input.status, registryStatuses, "status");
-      const lastError = optionalString(input.lastError);
+      const lastError = redactedOptionalString(input.lastError);
       const result = this.db
         .prepare(
           `INSERT INTO heartbeats (agent_id, status, current_task, last_error, observed_at, actor_id)
@@ -1676,6 +1676,13 @@ function optionalString(value: string | null | undefined): string | null {
   if (value === null || value === undefined) return null;
   const trimmed = value.trim();
   return trimmed ? trimmed : null;
+}
+
+function redactedOptionalString(value: string | null | undefined): string | null {
+  const normalized = optionalString(value);
+  if (normalized === null) return null;
+  const redacted = redactValue(normalized);
+  return typeof redacted === "string" ? redacted : "[redacted]";
 }
 
 function normalizeInputSchema(value: Record<string, unknown> | undefined): string | null {
