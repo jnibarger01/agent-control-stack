@@ -12,7 +12,8 @@ export const workItemStatusSchema = z.enum([
   "succeeded",
   "failed",
   "blocked",
-  "cancelled"
+  "cancelled",
+  "rejected"
 ]);
 
 export const targetSchema = z
@@ -52,13 +53,14 @@ export const workItemSchema = createWorkItemSchema.extend({
 export const approvalRequestSchema = z.object({
   approvedBy: z.string().min(1),
   reason: z.string().min(1).optional(),
-  actionHash: z.string().min(1).optional()
+  actionHash: z.string().min(1)
 });
 
 export const cancelRequestSchema = z.object({
   actor: z.string().min(1).default("system"),
   reason: z.string().min(1).optional()
 });
+export const rejectRequestSchema = cancelRequestSchema;
 
 export const submitWorkResultSchema = z.object({
   id: z.string().min(1),
@@ -80,6 +82,7 @@ export type CreateWorkItemInput = z.infer<typeof createWorkItemSchema>;
 export type WorkItem = z.infer<typeof workItemSchema>;
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
 export type CancelRequest = z.infer<typeof cancelRequestSchema>;
+export type RejectRequest = z.infer<typeof rejectRequestSchema>;
 export type SubmitWorkResultInput = z.infer<typeof submitWorkResultSchema>;
 export type ClaimedWorkItem = WorkItem & { workerId: string; leaseToken: string; leaseExpiresAt: string };
 
@@ -92,7 +95,8 @@ export const WorkItemEvent = {
   Succeeded: "work_item.succeeded",
   Failed: "work_item.failed",
   Blocked: "work_item.blocked",
-  Cancelled: "work_item.cancelled"
+  Cancelled: "work_item.cancelled",
+  Rejected: "work_item.rejected"
 } as const;
 
 const statusEvents: Record<WorkItemStatus, (typeof WorkItemEvent)[keyof typeof WorkItemEvent]> = {
@@ -104,7 +108,8 @@ const statusEvents: Record<WorkItemStatus, (typeof WorkItemEvent)[keyof typeof W
   succeeded: WorkItemEvent.Succeeded,
   failed: WorkItemEvent.Failed,
   blocked: WorkItemEvent.Blocked,
-  cancelled: WorkItemEvent.Cancelled
+  cancelled: WorkItemEvent.Cancelled,
+  rejected: WorkItemEvent.Rejected
 };
 
 export function createWorkItem(input: unknown, now = new Date().toISOString()): WorkItem {

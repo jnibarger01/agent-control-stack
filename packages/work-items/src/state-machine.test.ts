@@ -2,7 +2,7 @@ import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ControlStackError, controlPlaneMigrations } from "@agent-control-stack/shared";
+import { ControlStackError, applyControlPlaneMigrations, controlPlaneMigrations } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_EVENT_LIMIT, SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
 
@@ -176,7 +176,34 @@ describe("work item state machine", () => {
       expectControlError(() => store.approveWorkItem(workItem.id), "policy_gate_required");
       expectControlError(() => store.unblockWorkItem(workItem.id), "policy_gate_required");
       expectControlError(() => store.cancelWorkItem(workItem.id, { actor: "user" }), "policy_gate_required");
+      expectControlError(() => store.rejectWorkItem(workItem.id, { actor: "user" }), "policy_gate_required");
       expectControlError(() => store.transition(workItem.id, "approved"), "policy_gate_required");
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rejects approval-requested work with a distinct terminal state and event", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-reject-state-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Reject item",
+        requester: "user",
+        intent: "verify rejection is not cancellation",
+        requestedActions: [{ kind: "manual", description: "reject" }],
+        risk: "high"
+      });
+
+      const rejected = store.rejectWorkItem(workItem.id, { actor: "operator", reason: "denied" }, domainTransition);
+
+      expect(rejected.status).toBe("rejected");
+      expect(store.get(workItem.id)?.status).toBe("rejected");
+      expect(store.readEvents().map((event) => event.name)).toContain(WorkItemEvent.Rejected);
+      expect(store.readEvents().map((event) => event.name)).not.toContain(WorkItemEvent.Cancelled);
+      expectControlError(() => store.approveWorkItem(workItem.id, domainTransition), "invalid_work_item_transition");
+      expect(store.claimNextApprovedWorkItem("worker-a")).toBeUndefined();
     } finally {
       store.close();
     }
@@ -199,7 +226,8 @@ describe("work item state machine", () => {
       expect(store.readEvents().map((event) => event.name)).toEqual([WorkItemEvent.Created]);
       expect(() => store.startWorkItem(workItem.id)).toThrow(ControlStackError);
       expect(store.approveWorkItem(workItem.id, domainTransition).status).toBe("approved");
-      expect(store.startWorkItem(workItem.id).status).toBe("running");
+      expectControlError(() => store.startWorkItem(workItem.id), "worker_claim_required");
+      expect(store.startWorkItem(workItem.id, "test-worker", { allowDirectStartForTests: true }).status).toBe("running");
     } finally {
       store.close();
     }
@@ -740,6 +768,28 @@ describe("work item state machine", () => {
     }
   });
 
+  it("applies runtime-required columns from migrations before store construction", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-migration-columns-"));
+    const dbPath = join(dir, "control.db");
+    const db = new DatabaseSync(dbPath);
+
+    try {
+      applyControlPlaneMigrations(db);
+    } finally {
+      db.close();
+    }
+
+    expect(tableColumns(dbPath, "work_items")).toEqual(
+      expect.arrayContaining(["requester_subject", "worker_id", "started_at", "lease_expires_at", "lease_token_hash"])
+    );
+    expect(tableColumns(dbPath, "audit_events")).toEqual(
+      expect.arrayContaining(["previous_hash", "event_hash"])
+    );
+    expect(tableColumns(dbPath, "approval_records")).toEqual(
+      expect.arrayContaining(["request_hash", "approval_token_hash", "status", "expires_at", "consumed_at"])
+    );
+  });
+
   it("migrates a previous control-plane schema without reloading SQL blindly", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-migration-previous-"));
     const dbPath = join(dir, "control.db");
@@ -1051,6 +1101,15 @@ function tableNames(dbPath: string): string[] {
     return (db.prepare(`SELECT name FROM sqlite_master WHERE type = 'table'`).all() as Array<{ name: string }>).map(
       (row) => row.name
     );
+  } finally {
+    db.close();
+  }
+}
+
+function tableColumns(dbPath: string, table: string): string[] {
+  const db = new DatabaseSync(dbPath);
+  try {
+    return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map((row) => row.name);
   } finally {
     db.close();
   }

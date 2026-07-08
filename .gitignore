@@ -5,3 +5,17 @@ storage/*.db
 storage/*.db-*
 .env
 .ijfw/
+
+# Local agent/editor state
+.agents/
+.claude/
+.codex/
+.cursor/
+.vscode/
+.windsurfrules
+.github/copilot-instructions.md
+
+# Generated/review artifacts kept out of release commits
+agentos/
+reviews/
+IDEA.md

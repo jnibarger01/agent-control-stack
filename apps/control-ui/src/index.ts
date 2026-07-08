@@ -277,6 +277,7 @@ const source = new EventSource('/events');
   'work_item.failed',
   'work_item.succeeded',
   'work_item.cancelled',
+  'work_item.rejected',
   'agent.created',
   'agent.updated',
   'agent.heartbeat',
@@ -337,7 +338,7 @@ document.querySelectorAll('[data-agent]').forEach((row) => {
 document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
   button.addEventListener('click', async () => {
     const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
-    const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'cancel' : 'unblock';
+    const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'reject' : 'unblock';
     const reasonInput = document.querySelector('[data-reason="' + id + '"]');
     const reason = reasonInput ? reasonInput.value.trim() : '';
     const output = document.querySelector('#approval-result-' + id);
@@ -450,7 +451,7 @@ td small { display: block; color: #70859c; margin-top: 2px; }
 .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: #152235; color: #cbd5e1; border: 1px solid #20344d; }
 .online, .healthy, .succeeded, .approved, .low { color: #86efac; border-color: #14532d; background: #062315; }
 .stale, .warning, .needs_approval, .medium, .blocked { color: #facc15; border-color: #713f12; background: #281b06; }
-.offline, .unhealthy, .failed, .critical, .high, .cancelled { color: #fca5a5; border-color: #7f1d1d; background: #2b0b0b; }
+.offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: #fca5a5; border-color: #7f1d1d; background: #2b0b0b; }
 .queue { display: grid; }
 .queue-item { text-align: left; background: transparent; color: #d7e0ea; border: 0; border-bottom: 1px solid #122234; padding: 12px 14px; cursor: pointer; }
 .queue-item:hover { background: #0d1c2c; }

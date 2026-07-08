@@ -1,3 +1,5 @@
+ALTER TABLE work_items ADD COLUMN requester_subject TEXT;
+
 CREATE INDEX IF NOT EXISTS idx_audit_events_sequence ON audit_events(sequence);
 CREATE INDEX IF NOT EXISTS idx_audit_events_time ON audit_events(time_unix_nano);
 CREATE INDEX IF NOT EXISTS idx_audit_events_name ON audit_events(name);

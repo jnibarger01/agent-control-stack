@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
-import { previewCommand } from "./command.js";
+import { previewCommand, subprocessEnv } from "./command.js";
 import { loadMachineControllerConfig } from "./config.js";
 import { MachineController } from "./controller.js";
 import { resolveSafePath } from "./path.js";
@@ -99,6 +99,47 @@ describe("machine controller", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("rejects command cwd symlink escapes using real paths", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-machine-cwd-"));
+    const allowed = join(dir, "allowed");
+    const outside = join(dir, "outside");
+    const cwdLink = join(allowed, "cwd-link");
+    mkdirSync(allowed);
+    mkdirSync(outside);
+    symlinkSync(outside, cwdLink);
+    const config = writeConfig(dir, allowed);
+
+    try {
+      expect(() => previewCommand(config, { cwd: cwdLink, command: "git", args: ["status"] })).toThrow(
+        ControlStackError
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("builds subprocess environments from an explicit allowlist", () => {
+    const env = subprocessEnv({
+      HOME: "/home/test",
+      PATH: "/bin",
+      SHELL: "/bin/bash",
+      TMPDIR: "/tmp",
+      USER: "test",
+      ACS_ADMIN_TOKEN: "secret",
+      OPENAI_API_KEY: "secret"
+    });
+
+    expect(env).toEqual({
+      HOME: "/home/test",
+      PATH: "/bin",
+      SHELL: "/bin/bash",
+      TMPDIR: "/tmp",
+      USER: "test"
+    });
+    expect(env).not.toHaveProperty("ACS_ADMIN_TOKEN");
+    expect(env).not.toHaveProperty("OPENAI_API_KEY");
   });
 
   it("runs only read-only commands", async () => {

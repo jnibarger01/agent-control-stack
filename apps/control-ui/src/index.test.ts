@@ -45,7 +45,15 @@ describe("renderDashboard", () => {
     const html = renderDashboard({ workItems: [workItem], events: [], now: new Date("2026-07-05T00:01:00.000Z") });
 
     expect(html).toContain("new EventSource('/events')");
+    expect(html).toContain("'work_item.rejected'");
     expect(html).not.toContain("location.reload");
+  });
+
+  it("posts reject actions to the reject route instead of cancellation", () => {
+    const html = renderDashboard({ workItems: [workItem], events: [], now: new Date("2026-07-05T00:01:00.000Z") });
+
+    expect(html).toContain("button.dataset.reject ? 'reject'");
+    expect(html).not.toContain("button.dataset.reject ? 'cancel'");
   });
 
   it("projects online status only from recent heartbeat events", () => {

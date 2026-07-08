@@ -4,6 +4,7 @@ import {
   approvalRequestHash,
   approvalRequestSchema,
   cancelRequestSchema,
+  rejectRequestSchema,
   type ClaimedWorkItem,
   type PrivilegedTransitionOptions,
   type WorkItem,
@@ -18,6 +19,7 @@ export const workItemToolNames = [
   "list_work_items",
   "approve_work_item",
   "unblock_work_item",
+  "reject_work_item",
   "cancel_work_item",
   "claim_next_approved_work_item",
   "submit_work_result"
@@ -31,6 +33,7 @@ const claimInputSchema = z.object({
 });
 const approvalInputSchema = idInputSchema.merge(approvalRequestSchema);
 const cancelInputSchema = idInputSchema.merge(cancelRequestSchema);
+const rejectInputSchema = idInputSchema.merge(rejectRequestSchema);
 const policyTransition = { via: "policy_gate" } satisfies PrivilegedTransitionOptions;
 const domainTransition = { via: "domain_service" } satisfies PrivilegedTransitionOptions;
 
@@ -103,7 +106,7 @@ function gateApprovalInTransaction(
   const required = approvalRequired(evaluations);
   const requiredHashes = new Set(required.map((evaluation) => evaluation.actionHash));
   const requestedHashes = new Set(evaluations.map((evaluation) => evaluation.actionHash));
-  const hashes = parsed.actionHash ? [parsed.actionHash] : [...requiredHashes];
+  const hashes = [parsed.actionHash];
 
   const approvals: ApprovalGrant[] = [];
   for (const actionHash of hashes) {
@@ -236,6 +239,10 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
     },
     unblock_work_item(input: unknown): { decision: PolicyDecision; workItem: WorkItem } {
       return gateUnblock(store, policy, input);
+    },
+    reject_work_item(input: unknown): WorkItem {
+      const parsed = rejectInputSchema.parse(input);
+      return store.rejectWorkItem(parsed.id, parsed, domainTransition);
     },
     cancel_work_item(input: unknown): WorkItem {
       const parsed = cancelInputSchema.parse(input);

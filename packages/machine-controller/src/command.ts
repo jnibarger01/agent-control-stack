@@ -32,6 +32,7 @@ export interface CommandRunResult {
 
 const defaultDeniedCommands = new Set(["rm", "shred", "mkfs", "dd", "chmod", "chown", "sudo"]);
 const shellMetaPattern = /[;&|`$<>]/;
+export const subprocessEnvAllowlist = ["HOME", "PATH", "SHELL", "TMPDIR", "USER"] as const;
 
 export function previewCommand(config: MachineControllerConfig, input: unknown): CommandPreview {
   const parsed = commandInputSchema.parse(input);
@@ -69,7 +70,7 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
   return await new Promise((resolvePromise) => {
     const child = spawn(preview.command, preview.args, {
       cwd: preview.cwd,
-      env: filteredEnv(),
+      env: subprocessEnv(),
       shell: false,
       stdio: ["ignore", "pipe", "pipe"]
     });
@@ -146,14 +147,8 @@ function appendCapped(current: string, next: string, maxBytes: number): string {
   return Buffer.byteLength(combined, "utf8") <= maxBytes ? combined : combined.slice(0, maxBytes) + "\n[truncated]";
 }
 
-function filteredEnv(): NodeJS.ProcessEnv {
-  return {
-    HOME: process.env.HOME,
-    PATH: process.env.PATH,
-    SHELL: process.env.SHELL,
-    TMPDIR: process.env.TMPDIR,
-    USER: process.env.USER
-  };
+export function subprocessEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  return Object.fromEntries(subprocessEnvAllowlist.map((name) => [name, source[name]]));
 }
 
 function redactText(value: string): string {

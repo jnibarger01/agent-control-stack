@@ -6,6 +6,7 @@ import {
   ControlStackError,
   applyControlPlaneMigrations,
   auditEventHash,
+  controlPlaneMigrations,
   createId,
   createEvent,
   redactValue,
@@ -20,6 +21,7 @@ import {
   cancelRequestSchema,
   createWorkItem,
   listWorkItemsSchema,
+  rejectRequestSchema,
   submitWorkResultSchema,
   workItemCreatedEvent,
   workItemSchema,
@@ -59,6 +61,18 @@ export interface ReadEventsOptions {
   afterSequence?: number;
   workItemId?: string;
   agentId?: string;
+}
+
+export type HealthCheck = { ok: true } | { ok: false; code: string };
+
+export interface StoreHealth {
+  ok: boolean;
+  checks: {
+    read: HealthCheck;
+    write: HealthCheck;
+    migrations: HealthCheck;
+    auditChain: HealthCheck;
+  };
 }
 
 interface EventRow {
@@ -242,6 +256,15 @@ export interface ConnectorRegistration {
   displayName?: string;
   publicKeyPem: string;
   allowedScopes: string[];
+  actorId?: string;
+  now?: Date;
+}
+
+export interface ConnectorKeyRotation {
+  id: string;
+  publicKeyPem: string;
+  reason: string;
+  actorId: string;
   now?: Date;
 }
 
@@ -358,6 +381,7 @@ export interface TunnelSessionRegistration {
   sessionId: string;
   issuedAt?: string;
   expiresAt: string;
+  actorId?: string;
   now?: Date;
 }
 
@@ -365,6 +389,7 @@ export interface TunnelSessionRef {
   connectorId: string;
   tunnelId: string;
   sessionId: string;
+  actorId?: string;
   now?: Date;
 }
 
@@ -394,6 +419,7 @@ export interface ConsumeApprovalOptions {
 
 export interface ClaimOptions {
   leaseMs?: number;
+  allowDirectStartForTests?: true;
 }
 
 export interface PrivilegedTransitionOptions {
@@ -411,15 +437,19 @@ export interface WorkItemStore {
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
+  health(): StoreHealth;
   verifyAuditChain(): AuditChainVerification;
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
   approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
   blockWorkItem(id: string): WorkItem;
   unblockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
   cancelWorkItem(id: string, input?: unknown, options?: PrivilegedTransitionOptions): WorkItem;
+  rejectWorkItem(id: string, input?: unknown, options?: PrivilegedTransitionOptions): WorkItem;
   registerConnector(input: ConnectorRegistration): RegisteredConnector;
+  rotateConnectorKey(input: ConnectorKeyRotation): RegisteredConnector;
   registerActor(input: ActorRegistration): RegistryActor;
   listActors(): RegistryActor[];
+  resolveActorId(candidates: string[]): string | undefined;
   createRegistryAgent(input: RegistryAgentInput): RegistryAgentDetail;
   updateRegistryAgent(id: string, input: RegistryAgentUpdate): RegistryAgentDetail;
   listRegistryAgents(): RegistryAgentDetail[];
@@ -461,18 +491,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       PRAGMA foreign_keys = ON;
     `);
     applyControlPlaneMigrations(this.db);
-    this.ensureWorkItemColumn("requester_subject", "requester_subject TEXT");
-    this.ensureWorkItemColumn("worker_id", "worker_id TEXT");
-    this.ensureWorkItemColumn("started_at", "started_at TEXT");
-    this.ensureWorkItemColumn("lease_expires_at", "lease_expires_at TEXT");
-    this.ensureWorkItemColumn("lease_token_hash", "lease_token_hash TEXT");
-    this.ensureAuditColumn("previous_hash", "previous_hash TEXT NOT NULL DEFAULT ''");
-    this.ensureAuditColumn("event_hash", "event_hash TEXT NOT NULL DEFAULT ''");
-    this.ensureApprovalColumn("request_hash", "request_hash TEXT NOT NULL DEFAULT ''");
-    this.ensureApprovalColumn("approval_token_hash", "approval_token_hash TEXT NOT NULL DEFAULT ''");
-    this.ensureApprovalColumn("status", "status TEXT NOT NULL DEFAULT 'granted'");
-    this.ensureApprovalColumn("expires_at", "expires_at TEXT NOT NULL DEFAULT '9999-12-31T23:59:59.999Z'");
-    this.ensureApprovalColumn("consumed_at", "consumed_at TEXT");
     this.backfillAuditChain();
   }
 
@@ -562,6 +580,19 @@ export class SqliteWorkItemStore implements WorkItemStore {
     );
   }
 
+  resolveActorId(candidates: string[]): string | undefined {
+    const normalized = [...new Set(candidates.map((candidate) => candidate.trim()).filter(Boolean))];
+    for (const candidate of normalized) {
+      const row = this.db
+        .prepare(`SELECT id FROM actors WHERE id = ? OR external_ref = ? ORDER BY id ASC LIMIT 1`)
+        .get(candidate, candidate) as { id: string } | undefined;
+      if (row) {
+        return row.id;
+      }
+    }
+    return undefined;
+  }
+
   listRegistryAgents(): RegistryAgentDetail[] {
     return (this.db.prepare(`SELECT * FROM agents ORDER BY name ASC`).all() as unknown as AgentRow[]).map((row) =>
       this.agentDetail(rowToAgent(row))
@@ -577,11 +608,27 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return verifyAuditChain(this.readAllEvents());
   }
 
+  health(): StoreHealth {
+    const checks = {
+      read: this.readHealth(),
+      write: this.writeHealth(),
+      migrations: this.migrationHealth(),
+      auditChain: this.auditChainHealth()
+    };
+    return { ok: Object.values(checks).every((check) => check.ok), checks };
+  }
+
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem {
     if (status === "running") {
       throw new ControlStackError("worker_claim_required", "running work items must be claimed by a worker");
     }
-    if (status === "approved" || status === "pending_policy" || status === "needs_approval" || status === "cancelled") {
+    if (
+      status === "approved" ||
+      status === "pending_policy" ||
+      status === "needs_approval" ||
+      status === "cancelled" ||
+      status === "rejected"
+    ) {
       requirePrivilegedTransition(options, status);
     }
     return this.transitionWithEvent(id, status);
@@ -614,11 +661,33 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  rejectWorkItem(id: string, input: unknown = {}, options?: PrivilegedTransitionOptions): WorkItem {
+    requirePrivilegedTransition(options, "reject");
+    const parsed = rejectRequestSchema.parse(input);
+    const attributes: Record<string, string> = { "work_item.rejected_by": parsed.actor };
+    if (parsed.reason) {
+      attributes["work_item.reject_reason"] = parsed.reason;
+    }
+    return this.transitionWithEvent(id, "rejected", {
+      eventBody: { actor: parsed.actor, reason: parsed.reason },
+      eventAttributes: attributes
+    });
+  }
+
   registerConnector(input: ConnectorRegistration): RegisteredConnector {
     return this.write(() => {
       const now = (input.now ?? new Date()).toISOString();
       const displayName = input.displayName ?? input.id;
       const allowedScopes = uniqueNonEmpty(input.allowedScopes, "allowedScopes");
+      if (input.actorId) {
+        this.getActorRequired(input.actorId);
+      }
+      const existing = this.db
+        .prepare(`SELECT public_key_pem FROM connector_records WHERE id = ?`)
+        .get(input.id) as { public_key_pem: string } | undefined;
+      if (existing && existing.public_key_pem !== input.publicKeyPem) {
+        throw new ControlStackError("connector_key_rotation_required", `connector key rotation requires /connectors/${input.id}/rotate-key`);
+      }
       this.db
         .prepare(
           `INSERT INTO connector_records
@@ -626,13 +695,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
            VALUES (?, ?, ?, ?, 'active', ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              display_name = excluded.display_name,
-             public_key_pem = excluded.public_key_pem,
              allowed_scopes_json = excluded.allowed_scopes_json,
              status = 'active',
              updated_at = excluded.updated_at`
         )
         .run(input.id, displayName, input.publicKeyPem, JSON.stringify(allowedScopes), now, now);
       const connector = this.getConnectorRequired(input.id);
+      const attributes: Record<string, string> = {
+        "connector.id": connector.id,
+        "connector.status": connector.status
+      };
+      if (input.actorId) attributes["actor.id"] = input.actorId;
       const event = this.appendAuditEvent(
         createEvent(
           "connector.registered",
@@ -641,11 +714,43 @@ export class SqliteWorkItemStore implements WorkItemStore {
             displayName: connector.displayName,
             allowedScopes: connector.allowedScopes,
             publicKeyFingerprint: publicKeyFingerprint(connector.publicKeyPem),
-            status: connector.status
+            status: connector.status,
+            actorId: input.actorId
+          },
+          attributes
+        )
+      );
+      return { value: connector, events: [event] };
+    });
+  }
+
+  rotateConnectorKey(input: ConnectorKeyRotation): RegisteredConnector {
+    return this.write(() => {
+      const now = (input.now ?? new Date()).toISOString();
+      this.getActorRequired(input.actorId);
+      const before = this.getConnectorRequired(input.id);
+      const beforeFingerprint = publicKeyFingerprint(before.publicKeyPem);
+      const afterFingerprint = publicKeyFingerprint(input.publicKeyPem);
+      if (beforeFingerprint === afterFingerprint) {
+        throw new ControlStackError("connector_key_unchanged", `connector key is unchanged: ${input.id}`);
+      }
+      this.db
+        .prepare(`UPDATE connector_records SET public_key_pem = ?, updated_at = ? WHERE id = ?`)
+        .run(input.publicKeyPem, now, input.id);
+      const connector = this.getConnectorRequired(input.id);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "connector.key_rotated",
+          {
+            connectorId: connector.id,
+            reason: input.reason,
+            actorId: input.actorId,
+            beforePublicKeyFingerprint: beforeFingerprint,
+            publicKeyFingerprint: afterFingerprint
           },
           {
             "connector.id": connector.id,
-            "connector.status": connector.status
+            "actor.id": input.actorId
           }
         )
       );
@@ -859,6 +964,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (connector.status !== "active") {
         throw new ControlStackError("connector_revoked", `connector is not active: ${input.connectorId}`);
       }
+      if (input.actorId) {
+        this.getActorRequired(input.actorId);
+      }
       const now = (input.now ?? new Date()).toISOString();
       const issuedAt = input.issuedAt ?? now;
       assertFutureIso(input.expiresAt, now, "expiresAt");
@@ -876,16 +984,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
         .run(input.connectorId, input.tunnelId, input.sessionId, issuedAt, input.expiresAt, now, now);
       const session = this.getTunnelSessionRequired(input);
+      const attributes: Record<string, string> = {
+        "connector.id": session.connectorId,
+        "tunnel.id": session.tunnelId,
+        "tunnel.session_id": session.sessionId,
+        "tunnel.session_status": session.status
+      };
+      if (input.actorId) attributes["actor.id"] = input.actorId;
       const event = this.appendAuditEvent(
         createEvent(
           "tunnel_session.registered",
-          { ...session },
-          {
-            "connector.id": session.connectorId,
-            "tunnel.id": session.tunnelId,
-            "tunnel.session_id": session.sessionId,
-            "tunnel.session_status": session.status
-          }
+          { ...session, actorId: input.actorId },
+          attributes
         )
       );
       return { value: session, events: [event] };
@@ -894,6 +1004,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   heartbeatTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession {
     return this.write(() => {
+      if (input.actorId) {
+        this.getActorRequired(input.actorId);
+      }
       const now = (input.now ?? new Date()).toISOString();
       const result = this.db
         .prepare(
@@ -906,15 +1019,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("tunnel_session_not_active", `tunnel session is not active: ${input.sessionId}`);
       }
       const session = this.getTunnelSessionRequired(input);
+      const attributes: Record<string, string> = {
+        "connector.id": session.connectorId,
+        "tunnel.id": session.tunnelId,
+        "tunnel.session_id": session.sessionId
+      };
+      if (input.actorId) attributes["actor.id"] = input.actorId;
       const event = this.appendAuditEvent(
         createEvent(
           "tunnel_session.heartbeat",
-          { ...session },
-          {
-            "connector.id": session.connectorId,
-            "tunnel.id": session.tunnelId,
-            "tunnel.session_id": session.sessionId
-          }
+          { ...session, actorId: input.actorId },
+          attributes
         )
       );
       return { value: session, events: [event] };
@@ -923,6 +1038,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   revokeTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession {
     return this.write(() => {
+      if (input.actorId) {
+        this.getActorRequired(input.actorId);
+      }
       const now = (input.now ?? new Date()).toISOString();
       const result = this.db
         .prepare(
@@ -935,16 +1053,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("tunnel_session_not_found", `tunnel session not found: ${input.sessionId}`);
       }
       const session = this.getTunnelSessionRequired(input);
+      const attributes: Record<string, string> = {
+        "connector.id": session.connectorId,
+        "tunnel.id": session.tunnelId,
+        "tunnel.session_id": session.sessionId,
+        "tunnel.session_status": session.status
+      };
+      if (input.actorId) attributes["actor.id"] = input.actorId;
       const event = this.appendAuditEvent(
         createEvent(
           "tunnel_session.revoked",
-          { ...session },
-          {
-            "connector.id": session.connectorId,
-            "tunnel.id": session.tunnelId,
-            "tunnel.session_id": session.sessionId,
-            "tunnel.session_status": session.status
-          }
+          { ...session, actorId: input.actorId },
+          attributes
         )
       );
       return { value: session, events: [event] };
@@ -1167,6 +1287,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   startWorkItem(id: string, workerId = "local-worker", options: ClaimOptions = {}): ClaimedWorkItem {
+    if (options.allowDirectStartForTests !== true) {
+      throw new ControlStackError("worker_claim_required", "direct startWorkItem is test-only; use claimNextApprovedWorkItem");
+    }
     const leaseToken = createLeaseToken();
     const leaseMs = options.leaseMs ?? this.leaseMs;
     const workItem = this.transitionWithEvent(id, "running", {
@@ -1470,6 +1593,84 @@ export class SqliteWorkItemStore implements WorkItemStore {
     );
   }
 
+  private readHealth(): HealthCheck {
+    try {
+      this.db.prepare(`SELECT 1 AS ok`).get();
+      return okHealth();
+    } catch {
+      return failHealth("db_read_failed");
+    }
+  }
+
+  private writeHealth(): HealthCheck {
+    try {
+      this.db.exec("PRAGMA busy_timeout = 50");
+      this.db.exec("SAVEPOINT acs_health_write");
+      try {
+        this.db
+          .prepare(
+            `UPDATE schema_migrations
+             SET applied_at = applied_at
+             WHERE version = (SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1)`
+          )
+          .run();
+        this.db.exec("ROLLBACK TO acs_health_write");
+        this.db.exec("RELEASE acs_health_write");
+        return okHealth();
+      } catch (error) {
+        try {
+          this.db.exec("ROLLBACK TO acs_health_write");
+          this.db.exec("RELEASE acs_health_write");
+        } catch {
+          // best effort; a failed write probe may already have ended the savepoint.
+        }
+        throw error;
+      }
+    } catch {
+      return failHealth("db_write_failed");
+    } finally {
+      try {
+        this.db.exec("PRAGMA busy_timeout = 5000");
+      } catch {
+        // health checks should report the probe failure, not cleanup details.
+      }
+    }
+  }
+
+  private migrationHealth(): HealthCheck {
+    try {
+      const expected = controlPlaneMigrations();
+      const rows = this.db
+        .prepare(`SELECT version, name, filename FROM schema_migrations ORDER BY version ASC`)
+        .all() as Array<{ version: number; name: string; filename: string }>;
+      const byVersion = new Map(rows.map((row) => [row.version, row]));
+      for (const migration of expected) {
+        const row = byVersion.get(migration.version);
+        if (!row) {
+          return failHealth("migration_missing");
+        }
+        if (row.name !== migration.name || row.filename !== migration.filename) {
+          return failHealth("migration_mismatch");
+        }
+      }
+      return okHealth();
+    } catch {
+      return failHealth("migration_probe_failed");
+    }
+  }
+
+  private auditChainHealth(): HealthCheck {
+    try {
+      const verification = this.verifyAuditChain();
+      if (verification.ok) {
+        return okHealth();
+      }
+      return failHealth(`audit_chain_${verification.failure.reason}`);
+    } catch {
+      return failHealth("audit_chain_probe_failed");
+    }
+  }
+
   withTransaction<T>(operation: () => T): T {
     return this.write(() => ({ value: operation(), events: [] }));
   }
@@ -1511,27 +1712,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     }
 
     return result.value;
-  }
-
-  private ensureWorkItemColumn(name: string, definition: string): void {
-    const columns = this.db.prepare(`PRAGMA table_info(work_items)`).all() as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === name)) {
-      this.db.exec(`ALTER TABLE work_items ADD COLUMN ${definition}`);
-    }
-  }
-
-  private ensureApprovalColumn(name: string, definition: string): void {
-    const columns = this.db.prepare(`PRAGMA table_info(approval_records)`).all() as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === name)) {
-      this.db.exec(`ALTER TABLE approval_records ADD COLUMN ${definition}`);
-    }
-  }
-
-  private ensureAuditColumn(name: string, definition: string): void {
-    const columns = this.db.prepare(`PRAGMA table_info(audit_events)`).all() as Array<{ name: string }>;
-    if (!columns.some((column) => column.name === name)) {
-      this.db.exec(`ALTER TABLE audit_events ADD COLUMN ${definition}`);
-    }
   }
 
   private latestAuditHash(): string {
@@ -1594,6 +1774,14 @@ function normalizeEventLimit(limit: number | undefined): number {
     throw new ControlStackError("invalid_event_query", "limit must be a positive integer");
   }
   return Math.min(limit, MAX_EVENT_LIMIT);
+}
+
+function okHealth(): HealthCheck {
+  return { ok: true };
+}
+
+function failHealth(code: string): HealthCheck {
+  return { ok: false, code };
 }
 
 function rowToConnector(row: ConnectorRow): RegisteredConnector {

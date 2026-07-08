@@ -19,6 +19,8 @@ import {
   actorTypes,
   registryStatuses,
   type ReadEventsOptions,
+  type RegistryAgentDetail,
+  type RegistryStatus,
   type StoredAuditEvent
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
@@ -27,6 +29,7 @@ import {
   createProtectedResourceMetadata,
   MCP_SCOPES,
   resolveMcpAuthOptions,
+  type McpAuthenticatedRequest,
   type McpAuthOptions,
   type McpOAuthOptions
 } from "./auth.js";
@@ -34,7 +37,7 @@ import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit } from "./mcp.j
 
 const approvalBodySchema = z.object({
   reason: z.string().min(1),
-  actionHash: z.string().min(1).optional()
+  actionHash: z.string().min(1)
 });
 const cancelBodySchema = z.object({ reason: z.string().min(1).optional() });
 const unblockBodySchema = z.object({}).passthrough();
@@ -44,6 +47,10 @@ const connectorBodySchema = z.object({
   displayName: z.string().min(1).optional(),
   publicKeyPem: z.string().min(1),
   allowedScopes: z.array(mcpScopeSchema).min(1)
+});
+const connectorKeyRotationBodySchema = z.object({
+  publicKeyPem: z.string().min(1),
+  reason: z.string().min(1)
 });
 const tunnelSessionBodySchema = z.object({
   tunnelId: z.string().min(1),
@@ -102,6 +109,14 @@ const eventQuerySchema = z
 const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
+const sessionCookiePayloadSchema = z.object({
+  v: z.literal(1),
+  actor: z.string().min(1),
+  actorId: z.string().min(1).optional(),
+  iat: z.number().int().nonnegative(),
+  exp: z.number().int().nonnegative()
+});
+const agentFreshnessWindowMs = 15 * 60 * 1000;
 
 export interface GatewayAuthOptions {
   token: string;
@@ -156,7 +171,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   }
 
-  app.get("/health", async () => ({ ok: true }));
+  app.get("/health", async (request, reply) => {
+    const health = workItems.health();
+    return reply.code(health.ok ? 200 : 503).send(health);
+  });
 
   app.post("/session/login", async (request, reply) => {
     try {
@@ -204,8 +222,29 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!requireMutationActor(request, reply, auth)) {
         return;
       }
-      const connector = workItems.registerConnector(connectorBodySchema.parse(request.body));
+      const actorId = requireBoundActorId(request, reply, auth);
+      if (!actorId) {
+        return;
+      }
+      const connector = workItems.registerConnector({ ...connectorBodySchema.parse(request.body), actorId });
       return reply.code(201).send({ connector });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/connectors/:id/rotate-key", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const actorId = requireBoundActorId(request, reply, auth);
+      if (!actorId) {
+        return;
+      }
+      const body = connectorKeyRotationBodySchema.parse(request.body);
+      const connector = workItems.rotateConnectorKey({ id: request.params.id, ...body, actorId });
+      return { connector };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -216,8 +255,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!requireMutationActor(request, reply, auth)) {
         return;
       }
+      const actorId = requireBoundActorId(request, reply, auth);
+      if (!actorId) {
+        return;
+      }
       const body = tunnelSessionBodySchema.parse(request.body);
-      const session = workItems.registerTunnelSession({ ...body, connectorId: request.params.id });
+      const session = workItems.registerTunnelSession({ ...body, connectorId: request.params.id, actorId });
       return reply.code(201).send({ session });
     } catch (error) {
       return sendError(reply, error);
@@ -231,10 +274,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         if (!requireMutationActor(request, reply, auth)) {
           return;
         }
+        const actorId = requireBoundActorId(request, reply, auth);
+        if (!actorId) {
+          return;
+        }
         const session = workItems.heartbeatTunnelSession({
           connectorId: request.params.id,
           tunnelId: request.params.tunnelId,
-          sessionId: request.params.sessionId
+          sessionId: request.params.sessionId,
+          actorId
         });
         return { session };
       } catch (error) {
@@ -250,10 +298,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         if (!requireMutationActor(request, reply, auth)) {
           return;
         }
+        const actorId = requireBoundActorId(request, reply, auth);
+        if (!actorId) {
+          return;
+        }
         const session = workItems.revokeTunnelSession({
           connectorId: request.params.id,
           tunnelId: request.params.tunnelId,
-          sessionId: request.params.sessionId
+          sessionId: request.params.sessionId,
+          actorId
         });
         return { session };
       } catch (error) {
@@ -272,7 +325,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       resourceMetadataUrl,
       requestId: request.id,
       remoteAddress: request.socket.remoteAddress ?? request.ip,
-      auditAuthenticatedRequest: recordAuthenticatedMcpRequest
+      auditAuthenticatedRequest: recordAuthenticatedMcpRequest,
+      resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth)
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);
@@ -322,7 +376,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.post("/api/actors", registerActorHandler);
   app.post("/actors", registerActorHandler);
 
-  app.get("/api/agents", { preHandler: requireRead }, async () => ({ agents: workItems.listRegistryAgents() }));
+  app.get("/api/agents", { preHandler: requireRead }, async () => ({
+    agents: workItems.listRegistryAgents().map(projectRegistryFreshness)
+  }));
 
   app.post("/api/agents", async (request, reply) => {
     try {
@@ -347,7 +403,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return reply.code(404).send({ error: "agent not found" });
       }
       return {
-        agent,
+        agent: projectRegistryFreshness(agent),
         adapterStatus: adapterStatusFor(request.params.id),
         events: workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }))
       };
@@ -496,6 +552,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  app.post<{ Params: { id: string } }>("/work-items/:id/reject", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) {
+        return;
+      }
+      const body = cancelBodySchema.parse(requestObject(request.body));
+      const rejected = tools.reject_work_item({ ...body, id: request.params.id, actor });
+      return { workItem: rejected };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/work-items/:id/unblock", async (request, reply) => {
     try {
       const actor = requireMutationActor(request, reply, auth);
@@ -588,6 +658,23 @@ function eventReadOptions(query: unknown, filters: Pick<ReadEventsOptions, "work
   };
 }
 
+function projectRegistryFreshness(agent: RegistryAgentDetail): RegistryAgentDetail & {
+  effectiveStatus: RegistryStatus;
+  heartbeatAgeMs: number | null;
+  isStale: boolean;
+} {
+  const heartbeatTime = agent.lastHeartbeatAt ? Date.parse(agent.lastHeartbeatAt) : Number.NaN;
+  const heartbeatAgeMs = Number.isFinite(heartbeatTime) ? Math.max(0, Date.now() - heartbeatTime) : null;
+  const freshnessStatus = agent.status === "AVAILABLE" || agent.status === "BUSY" || agent.status === "DEGRADED";
+  const isStale = freshnessStatus && (heartbeatAgeMs === null || heartbeatAgeMs > agentFreshnessWindowMs);
+  return {
+    ...agent,
+    effectiveStatus: isStale ? "OFFLINE" : agent.status,
+    heartbeatAgeMs,
+    isStale
+  };
+}
+
 function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   if (options.auth) {
     return options.auth;
@@ -614,6 +701,20 @@ function resolveMcpAuth(options: GatewayOptions, workItems: SqliteWorkItemStore)
     };
   }
   return resolved;
+}
+
+function resolveMcpActorId(
+  workItems: SqliteWorkItemStore,
+  request: McpAuthenticatedRequest,
+  gatewayAuth: GatewayAuthOptions | undefined
+): string | undefined {
+  const candidates = [
+    request.connectorId,
+    request.subject,
+    `${request.method}:${request.connectorId ?? request.subject}`,
+    request.method === "local_bearer" ? gatewayAuth?.actorId : undefined
+  ].filter((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+  return workItems.resolveActorId(candidates);
 }
 
 function mcpResourceMetadataUrl(request: FastifyRequest, oauth: McpOAuthOptions | undefined): string | undefined {
@@ -704,7 +805,7 @@ function hasBearerAuth(request: FastifyRequest, auth: GatewayAuthOptions): boole
 
 function hasSessionCookie(request: FastifyRequest, auth: GatewayAuthOptions): boolean {
   const value = cookies(request.headers.cookie)[sessionCookieName];
-  return value ? constantTimeEqual(value, sessionCookieValue(auth)) : false;
+  return value ? verifySessionCookie(value, auth) : false;
 }
 
 function sessionCookie(auth: GatewayAuthOptions, secure: boolean): string {
@@ -721,10 +822,44 @@ function sessionCookie(auth: GatewayAuthOptions, secure: boolean): string {
   return parts.join("; ");
 }
 
-function sessionCookieValue(auth: GatewayAuthOptions): string {
-  return createHmac("sha256", auth.token)
-    .update(`acs-session-v1:${auth.actor}:${auth.actorId ?? ""}`)
-    .digest("base64url");
+function sessionCookieValue(auth: GatewayAuthOptions, now = new Date()): string {
+  const iat = Math.floor(now.getTime() / 1000);
+  const payload = Buffer.from(
+    JSON.stringify({
+      v: 1,
+      actor: auth.actor,
+      ...(auth.actorId ? { actorId: auth.actorId } : {}),
+      iat,
+      exp: iat + sessionCookieMaxAgeSeconds
+    })
+  ).toString("base64url");
+  return `${payload}.${sessionSignature(auth, payload)}`;
+}
+
+function verifySessionCookie(value: string, auth: GatewayAuthOptions, now = new Date()): boolean {
+  const [payload, signature, extra] = value.split(".");
+  if (!payload || !signature || extra !== undefined) {
+    return false;
+  }
+  if (!constantTimeEqual(signature, sessionSignature(auth, payload))) {
+    return false;
+  }
+  try {
+    const parsed = sessionCookiePayloadSchema.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
+    const nowSeconds = Math.floor(now.getTime() / 1000);
+    return (
+      parsed.actor === auth.actor &&
+      (parsed.actorId ?? "") === (auth.actorId ?? "") &&
+      parsed.iat <= nowSeconds &&
+      parsed.exp > nowSeconds
+    );
+  } catch {
+    return false;
+  }
+}
+
+function sessionSignature(auth: GatewayAuthOptions, payload: string): string {
+  return createHmac("sha256", auth.token).update(`acs-session-v2:${payload}`).digest("base64url");
 }
 
 function cookies(header: string | undefined): Record<string, string> {

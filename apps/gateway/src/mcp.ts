@@ -68,6 +68,7 @@ export function handleMcpHttpRequest(input: {
   requestId?: string;
   remoteAddress?: string;
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
+  resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
 }): Promise<McpHttpResult> | McpHttpResult {
   const request = jsonRpcRequestSchema.safeParse(input.body);
   if (!request.success) {
@@ -102,7 +103,8 @@ export function handleMcpHttpRequest(input: {
         resourceMetadataUrl: input.resourceMetadataUrl,
         tools: input.tools,
         remoteAddress: input.remoteAddress,
-        auditAuthenticatedRequest: input.auditAuthenticatedRequest
+        auditAuthenticatedRequest: input.auditAuthenticatedRequest,
+        resolveActorId: input.resolveActorId
       });
     default:
       return handleProtectedUnsupportedMethod({
@@ -128,6 +130,7 @@ async function handleToolsCall(input: {
   tools: GatewayWorkItemTools;
   remoteAddress?: string;
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
+  resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
 }): Promise<McpHttpResult> {
   const parsed = toolsCallParamsSchema.safeParse(input.params);
   if (!parsed.success) {
@@ -144,9 +147,14 @@ async function handleToolsCall(input: {
     return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, requiredScopes(parsed.data.name));
   }
 
-  const actor = resolvedMcpActor(authorization.auth);
+  const actor = isMutatingTool(parsed.data.name)
+    ? input.resolveActorId?.(authorization.auth)
+    : resolvedMcpActor(authorization.auth);
+  if (!actor) {
+    return jsonRpcError(input.id, -32001, "MCP actor is not registered", 403);
+  }
   try {
-    const result = callGatewayTool(input.tools, parsed.data.name, parsed.data.arguments ?? {}, authorization.auth);
+    const result = callGatewayTool(input.tools, parsed.data.name, parsed.data.arguments ?? {}, authorization.auth, actor);
     input.auditAuthenticatedRequest?.({
       requestId: input.requestId ?? String(input.id ?? ""),
       method: "tools/call",
@@ -208,30 +216,31 @@ function callGatewayTool(
   tools: GatewayWorkItemTools,
   name: GatewayToolName,
   args: unknown,
-  auth: McpAuthenticatedRequest
+  auth: McpAuthenticatedRequest,
+  actor: string
 ): unknown {
   const handler = tools[name] as (input: unknown) => unknown;
-  return handler(bindAuthenticatedActor(name, args, auth));
+  return handler(bindAuthenticatedActor(name, args, auth, actor));
 }
 
-function bindAuthenticatedActor(name: GatewayToolName, args: unknown, auth: McpAuthenticatedRequest): unknown {
+function bindAuthenticatedActor(name: GatewayToolName, args: unknown, auth: McpAuthenticatedRequest, actor: string): unknown {
   if (name === "create_work_item") {
     // MCP identities are agents; caller-supplied requester/requesterSubject are untrusted.
-    return { ...requestObject(args), requester: "agent", requesterSubject: mcpRequesterSubject(auth) };
+    return { ...requestObject(args), requester: "agent", requesterSubject: actor };
   }
-  if (name !== "approve_work_item" && name !== "unblock_work_item" && name !== "cancel_work_item") {
+  if (
+    name !== "approve_work_item" &&
+    name !== "unblock_work_item" &&
+    name !== "reject_work_item" &&
+    name !== "cancel_work_item"
+  ) {
     return args;
   }
-  const actor = resolvedMcpActor(auth);
   const record = requestObject(args);
   if (name === "approve_work_item") {
     return { ...record, approvedBy: actor };
   }
   return { ...record, actor };
-}
-
-function mcpRequesterSubject(auth: McpAuthenticatedRequest): string {
-  return `${auth.method}:${resolvedMcpActor(auth)}`;
 }
 
 function resolvedMcpActor(auth: McpAuthenticatedRequest): string {
@@ -275,6 +284,7 @@ function requiredScopes(name: GatewayToolName): McpScope[] {
       return ["acs:work:read"];
     case "approve_work_item":
     case "unblock_work_item":
+    case "reject_work_item":
     case "cancel_work_item":
       return ["acs:work:approve"];
     case "claim_next_approved_work_item":
@@ -283,12 +293,17 @@ function requiredScopes(name: GatewayToolName): McpScope[] {
   }
 }
 
+function isMutatingTool(name: GatewayToolName): boolean {
+  return !["get_work_item", "list_work_items"].includes(name);
+}
+
 function toolAnnotations(name: GatewayToolName): Record<string, boolean> {
   switch (name) {
     case "get_work_item":
     case "list_work_items":
       return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
     case "cancel_work_item":
+    case "reject_work_item":
       return { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
     default:
       return { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
@@ -307,6 +322,8 @@ function toolDescription(name: GatewayToolName): string {
       return "Record user approval for the exact policy-evaluated action hash on a work item.";
     case "unblock_work_item":
       return "Move a blocked work item back to pending policy evaluation.";
+    case "reject_work_item":
+      return "Reject a work item through a distinct terminal denial state.";
     case "cancel_work_item":
       return "Cancel a work item through the work-item state machine.";
     case "claim_next_approved_work_item":
@@ -338,20 +355,32 @@ function toolInputSchema(name: GatewayToolName): Record<string, unknown> {
         properties: {
           status: {
             type: "string",
-            enum: ["draft", "pending_policy", "needs_approval", "approved", "running", "succeeded", "failed", "blocked", "cancelled"]
+            enum: [
+              "draft",
+              "pending_policy",
+              "needs_approval",
+              "approved",
+              "running",
+              "succeeded",
+              "failed",
+              "blocked",
+              "cancelled",
+              "rejected"
+            ]
           }
         }
       };
     case "approve_work_item":
       return {
         type: "object",
-        required: ["id", "reason"],
+        required: ["id", "reason", "actionHash"],
         properties: {
           id: { type: "string" },
           reason: { type: "string" },
           actionHash: { type: "string" }
         }
       };
+    case "reject_work_item":
     case "cancel_work_item":
       return {
         type: "object",

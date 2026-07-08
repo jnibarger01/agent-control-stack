@@ -1,10 +1,10 @@
-import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
+import { createHmac, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
-import { DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT, SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT, SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
 import { buildGateway } from "./server.js";
@@ -13,12 +13,32 @@ const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
 const oauthResource = "https://acs.example.test/mcp";
 
-function buildTestGateway(options: Parameters<typeof buildGateway>[0]) {
+function buildTestGateway(options: NonNullable<Parameters<typeof buildGateway>[0]>) {
+  if (options.dbPath) {
+    seedActor(options.dbPath, testAuth.actorId, `local_bearer:local-dev`);
+  }
   const app = buildGateway({ ...options, auth: testAuth });
   app.addHook("onRequest", async (request) => {
     request.headers.authorization ??= `Bearer ${testAuth.token}`;
   });
   return app;
+}
+
+function seedActor(dbPath: string, id: string, externalRef?: string): void {
+  const store = new SqliteWorkItemStore(dbPath);
+  try {
+    store.registerActor({ id, actorType: "HUMAN", displayName: id, externalRef });
+  } finally {
+    store.close();
+  }
+}
+
+function approvalActionHash(workItem: WorkItem, actor: string = testAuth.actorId): string {
+  const decision = createPolicyEngine().evaluateWorkItem(workItem, actor, "approve")[0];
+  if (!decision?.actionHash) {
+    throw new Error(`missing approval action hash for ${workItem.id}`);
+  }
+  return decision.actionHash;
 }
 
 describe("mission control gateway", () => {
@@ -93,13 +113,17 @@ describe("mission control gateway", () => {
       seed.recordAgentHeartbeat("api-agent", { status: "AVAILABLE", currentTask: `task-${index}`, actorId: "user" });
     }
     seed.close();
+    seedAuditRows(dbPath, 10_000, { workItemId: workItem.id, agentId: "api-agent" });
     const app = buildTestGateway({ dbPath, logger: false });
 
     try {
+      const dashboard = await app.inject({ method: "GET", url: "/" });
       const defaultWorkItem = await app.inject({ method: "GET", url: `/work-items/${workItem.id}` });
       const limitedWorkItem = await app.inject({ method: "GET", url: `/work-items/${workItem.id}?limit=5` });
       const limitedAgent = await app.inject({ method: "GET", url: "/api/agents/api-agent?limit=4" });
 
+      expect(dashboard.statusCode).toBe(200);
+      expect(dashboard.body).not.toContain("audit.seed.0");
       expect(defaultWorkItem.json().events).toHaveLength(DEFAULT_EVENT_LIMIT);
       expect(limitedWorkItem.json().events).toHaveLength(5);
       expect(limitedWorkItem.json().events.every((event: { attributes: Record<string, string> }) => event.attributes["work_item.id"] === workItem.id)).toBe(
@@ -109,6 +133,114 @@ describe("mission control gateway", () => {
       expect(limitedAgent.json().events.every((event: { attributes: Record<string, string> }) => event.attributes["agent.id"] === "api-agent")).toBe(
         true
       );
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports unhealthy health when the audit chain is tampered without leaking internals", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-health-audit-tamper-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.create({
+      title: "Health tamper",
+      requester: "user",
+      intent: "verify health audit probe",
+      requestedActions: [{ kind: "manual", description: "health" }],
+      risk: "low"
+    });
+    seed.close();
+    updateAuditBody(dbPath, 1, { tampered: true });
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const health = await app.inject({ method: "GET", url: "/health" });
+
+      expect(health.statusCode).toBe(503);
+      expect(health.json()).toMatchObject({
+        ok: false,
+        checks: {
+          auditChain: { ok: false, code: "audit_chain_event_hash_mismatch" }
+        }
+      });
+      expect(health.body).not.toContain("Error:");
+      expect(health.body).not.toContain("stack");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports unhealthy health when the DB write path is locked without leaking SQLite details", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-health-write-lock-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildTestGateway({ dbPath, logger: false });
+    const lock = new DatabaseSync(dbPath);
+
+    try {
+      lock.exec("BEGIN IMMEDIATE");
+      const health = await app.inject({ method: "GET", url: "/health" });
+
+      expect(health.statusCode).toBe(503);
+      expect(health.json()).toMatchObject({
+        ok: false,
+        checks: {
+          write: { ok: false, code: "db_write_failed" }
+        }
+      });
+      expect(health.body).not.toContain("SQLITE_BUSY");
+      expect(health.body).not.toContain("database is locked");
+    } finally {
+      lock.exec("ROLLBACK");
+      lock.close();
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("projects stale AVAILABLE registry agents as effectively offline at the API boundary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-api-agent-freshness-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+    seed.createRegistryAgent({
+      id: "stale-agent",
+      name: "Stale Agent",
+      kind: "cli",
+      acpRole: "IMPLEMENTATION_AGENT",
+      actorId: "user"
+    });
+    seed.recordAgentHeartbeat("stale-agent", {
+      status: "AVAILABLE",
+      actorId: "user",
+      now: new Date(Date.now() - 901_000)
+    });
+    seed.close();
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const list = await app.inject({ method: "GET", url: "/api/agents" });
+      const detail = await app.inject({ method: "GET", url: "/api/agents/stale-agent" });
+
+      expect(list.json().agents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "stale-agent",
+            status: "AVAILABLE",
+            effectiveStatus: "OFFLINE",
+            isStale: true,
+            heartbeatAgeMs: expect.any(Number)
+          })
+        ])
+      );
+      expect(detail.json().agent).toMatchObject({
+        id: "stale-agent",
+        status: "AVAILABLE",
+        effectiveStatus: "OFFLINE",
+        isStale: true
+      });
+      expect(detail.json().agent.heartbeatAgeMs).toBeGreaterThan(900_000);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -564,6 +696,7 @@ describe("gateway MCP transport", () => {
     vi.stubEnv("NODE_ENV", "test");
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const dbPath = join(dir, "control.db");
+    seedActor(dbPath, testAuth.actorId, "local_bearer:local-dev");
     const app = buildGateway({ dbPath, logger: false, auth: testAuth, mcpAuth: { localBearerToken: testAuth.token } });
     let appClosed = false;
 
@@ -708,6 +841,7 @@ describe("gateway MCP transport", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
     const dbPath = join(dir, "control.db");
     const oauth = createTestOAuth();
+    seedActor(dbPath, "oauth-user", "oauth_jwt:user_123");
     const app = buildGateway({ dbPath, logger: false, mcpAuth: { oauth: oauth.options } });
     let appClosed = false;
 
@@ -730,6 +864,7 @@ describe("gateway MCP transport", () => {
         expect(store.list()).toHaveLength(1);
         const authEvent = store.readEvents().find((event) => event.name === "connector.requested");
         expect(authEvent?.attributes).toMatchObject({
+          "connector.actor": "oauth-user",
           "auth.method": "oauth_jwt",
           "auth.subject": "user_123",
           "auth.issuer": oauthIssuer
@@ -747,10 +882,40 @@ describe("gateway MCP transport", () => {
     }
   });
 
+  it("fails closed for valid OAuth MCP auth when no registry actor resolves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-no-actor-"));
+    const dbPath = join(dir, "control.db");
+    const oauth = createTestOAuth();
+    seedActor(dbPath, "somebody-else", "oauth_jwt:somebody_else");
+    const app = buildGateway({ dbPath, logger: false, mcpAuth: { oauth: oauth.options } });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:create" })}` },
+        payload: createWorkItemToolCall("oauth-no-actor")
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json().error.message).toBe("MCP actor is not registered");
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toEqual([]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("binds MCP work item requester to the authenticated identity", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
     const dbPath = join(dir, "control.db");
     const oauth = createTestOAuth();
+    seedActor(dbPath, "oauth-user", "oauth_jwt:user_123");
     const app = buildGateway({ dbPath, logger: false, mcpAuth: { oauth: oauth.options } });
     let appClosed = false;
 
@@ -773,7 +938,7 @@ describe("gateway MCP transport", () => {
       expect(response.statusCode).toBe(200);
       const structured = response.json().result.structuredContent;
       expect(structured.requester).toBe("agent");
-      expect(structured.requesterSubject).toBe("oauth_jwt:user_123");
+      expect(structured.requesterSubject).toBe("oauth-user");
 
       await app.close();
       appClosed = true;
@@ -781,10 +946,10 @@ describe("gateway MCP transport", () => {
       try {
         const [workItem] = store.list();
         expect(workItem.requester).toBe("agent");
-        expect(workItem.requesterSubject).toBe("oauth_jwt:user_123");
+        expect(workItem.requesterSubject).toBe("oauth-user");
         const created = store.readEvents().find((event) => event.name === "work_item.created");
-        expect(created?.body).toMatchObject({ requester: "agent", requesterSubject: "oauth_jwt:user_123" });
-        expect(created?.attributes["work_item.requester_subject"]).toBe("oauth_jwt:user_123");
+        expect(created?.body).toMatchObject({ requester: "agent", requesterSubject: "oauth-user" });
+        expect(created?.attributes["work_item.requester_subject"]).toBe("oauth-user");
       } finally {
         store.close();
       }
@@ -827,6 +992,7 @@ describe("gateway MCP transport", () => {
     vi.stubEnv("NODE_ENV", "test");
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-local-mcp-"));
     const dbPath = join(dir, "control.db");
+    seedActor(dbPath, testAuth.actorId, "local_bearer:local-dev");
     const app = buildGateway({
       dbPath,
       logger: false,
@@ -844,6 +1010,40 @@ describe("gateway MCP transport", () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().result.structuredContent.title).toBe("local-fallback");
+    } finally {
+      await app.close();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for local MCP bearer auth when no registry actor resolves", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-local-mcp-no-actor-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: testAuth,
+      mcpAuth: { localBearerToken: "local-dev-token" }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer local-dev-token" },
+        payload: createWorkItemToolCall("local-no-actor")
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json().error.message).toBe("MCP actor is not registered");
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toEqual([]);
+      } finally {
+        store.close();
+      }
     } finally {
       await app.close();
       vi.unstubAllEnvs();
@@ -882,6 +1082,7 @@ describe("gateway MCP transport", () => {
   it("accepts a trusted tunnel proxy identity for scoped MCP tools/call", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
     const dbPath = join(dir, "control.db");
+    seedActor(dbPath, "chatgpt-prod", "tunnel_id:chatgpt-prod");
     const app = buildGateway({
       dbPath,
       logger: false,
@@ -917,6 +1118,7 @@ describe("gateway MCP transport", () => {
       try {
         const authEvent = store.readEvents().find((event) => event.name === "connector.requested");
         expect(authEvent?.attributes).toMatchObject({
+          "connector.actor": "chatgpt-prod",
           "auth.method": "tunnel_id",
           "auth.subject": "tunnel:tunnel_abc123",
           "auth.issuer": "trusted_tunnel_proxy",
@@ -930,6 +1132,48 @@ describe("gateway MCP transport", () => {
       if (!appClosed) {
         await app.close();
       }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for trusted tunnel MCP auth when no registry actor resolves", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-no-actor-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: {
+        tunnel: {
+          trustedProxies: ["127.0.0.1"],
+          connectors: [
+            { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
+          ]
+        }
+      }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: {
+          "x-acs-tunnel-id": "tunnel_abc123",
+          "x-acs-connector-id": "chatgpt-prod"
+        },
+        payload: createWorkItemToolCall("tunnel-no-actor")
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json().error.message).toBe("MCP actor is not registered");
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toEqual([]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -1058,6 +1302,7 @@ describe("gateway MCP transport", () => {
       requestedActions: [{ kind: "fs.read", description: "read", params: { paths: ["src/index.ts"] } }],
       risk: "low"
     });
+    setup.registerActor({ id: "oauth-user", actorType: "HUMAN", displayName: "OAuth User", externalRef: "oauth_jwt:user_123" });
     setup.blockWorkItem(unblockItem.id);
     setup.close();
 
@@ -1074,7 +1319,8 @@ describe("gateway MCP transport", () => {
         payload: mcpToolCall("approve-spoof", "approve_work_item", {
           id: approvalItem.id,
           approvedBy: "attacker",
-          reason: "caller supplied identity must be ignored"
+          reason: "caller supplied identity must be ignored",
+          actionHash: approvalActionHash(approvalItem, "oauth-user")
         })
       });
       const cancelled = await app.inject({
@@ -1116,13 +1362,13 @@ describe("gateway MCP transport", () => {
         );
         const connectorEvents = events.filter((event) => event.name === "connector.requested");
 
-        expect(approval?.body).toMatchObject({ approvedBy: "user_123" });
-        expect(cancellation?.body).toMatchObject({ actor: "user_123" });
-        expect(unblockDecision?.body.context).toMatchObject({ actor: "user_123" });
+        expect(approval?.body).toMatchObject({ approvedBy: "oauth-user" });
+        expect(cancellation?.body).toMatchObject({ actor: "oauth-user" });
+        expect(unblockDecision?.body.context).toMatchObject({ actor: "oauth-user" });
         expect(connectorEvents).toEqual(
           expect.arrayContaining([
             expect.objectContaining({
-              attributes: expect.objectContaining({ "connector.actor": "user_123", "auth.subject": "user_123" })
+              attributes: expect.objectContaining({ "connector.actor": "oauth-user", "auth.subject": "user_123" })
             })
           ])
         );
@@ -1189,6 +1435,18 @@ describe("gateway MCP transport", () => {
         expect(store.readEvents().map((event) => event.name)).toEqual(
           expect.arrayContaining(["connector.registered", "tunnel_session.registered"])
         );
+        expect(store.readEvents()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              name: "connector.registered",
+              attributes: expect.objectContaining({ "actor.id": testAuth.actorId })
+            }),
+            expect.objectContaining({
+              name: "tunnel_session.registered",
+              attributes: expect.objectContaining({ "actor.id": testAuth.actorId })
+            })
+          ])
+        );
       } finally {
         store.close();
       }
@@ -1196,6 +1454,63 @@ describe("gateway MCP transport", () => {
       if (!appClosed) {
         await app.close();
       }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires explicit audited connector key rotation instead of silent overwrite", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-connector-rotate-"));
+    const dbPath = join(dir, "control.db");
+    const firstKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" });
+    const secondKey = generateKeyPairSync("ed25519").publicKey.export({ type: "spki", format: "pem" });
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/connectors",
+        payload: {
+          id: "chatgpt-prod",
+          publicKeyPem: String(firstKey),
+          allowedScopes: ["acs:work:create"]
+        }
+      });
+      const overwritten = await app.inject({
+        method: "POST",
+        url: "/connectors",
+        payload: {
+          id: "chatgpt-prod",
+          publicKeyPem: String(secondKey),
+          allowedScopes: ["acs:work:create"]
+        }
+      });
+      const rotated = await app.inject({
+        method: "POST",
+        url: "/connectors/chatgpt-prod/rotate-key",
+        payload: { publicKeyPem: String(secondKey), reason: "scheduled rotation" }
+      });
+
+      expect(created.statusCode).toBe(201);
+      expect(overwritten.statusCode).toBe(409);
+      expect(rotated.statusCode).toBe(200);
+      expect(rotated.json().connector.publicKeyPem).toBe(String(secondKey));
+
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.readEvents()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              name: "connector.key_rotated",
+              attributes: expect.objectContaining({ "actor.id": testAuth.actorId, "connector.id": "chatgpt-prod" }),
+              body: expect.objectContaining({ actorId: testAuth.actorId, reason: "scheduled rotation" })
+            })
+          ])
+        );
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -1209,6 +1524,7 @@ describe("gateway MCP transport", () => {
       sessionId: "session_1",
       scopes: ["acs:work:create", "acs:work:read"]
     });
+    seedActor(dbPath, testAuth.actorId, "local_bearer:local-dev");
     const app = buildGateway({
       dbPath,
       logger: false,
@@ -1267,6 +1583,7 @@ describe("gateway MCP transport", () => {
       sessionId: "session_1",
       scopes: ["acs:work:create", "acs:work:read"]
     });
+    seedActor(dbPath, testAuth.actorId, "local_bearer:local-dev");
     const app = buildGateway({
       dbPath,
       logger: false,
@@ -1347,6 +1664,7 @@ describe("gateway MCP transport", () => {
       sessionId: "session_1",
       scopes: ["acs:work:create", "acs:work:read"]
     });
+    seedActor(dbPath, testAuth.actorId, "local_bearer:local-dev");
     const app = buildGateway({
       dbPath,
       logger: false,
@@ -1822,9 +2140,128 @@ describe("gateway dashboard sessions", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("rejects expired dashboard session cookies on SSE, work creation, approval, and rejection routes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-expiry-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
+
+    try {
+      const cookie = signedSessionCookie(dashboardAuth, {
+        iat: Math.floor(Date.now() / 1000) - 10_000,
+        exp: Math.floor(Date.now() / 1000) - 1
+      });
+
+      const events = await app.inject({ method: "GET", url: "/events", headers: { cookie }, payloadAsStream: true });
+      if (events.statusCode === 200) events.stream().destroy();
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        headers: { cookie },
+        payload: { title: "Expired", intent: "must reject", risk: "low" }
+      });
+      const approved = await app.inject({
+        method: "POST",
+        url: "/work-items/wrk_missing/approve",
+        headers: { cookie },
+        payload: { reason: "expired" }
+      });
+      const rejected = await app.inject({
+        method: "POST",
+        url: "/work-items/wrk_missing/reject",
+        headers: { cookie },
+        payload: { reason: "expired" }
+      });
+
+      expect(events.statusCode).toBe(401);
+      expect(created.statusCode).toBe(401);
+      expect(approved.statusCode).toBe(401);
+      expect(rejected.statusCode).toBe(401);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects dashboard session cookies with tampered exp, actor, actorId, or signature", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-tamper-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
+
+    try {
+      const { cookie } = await loginSession(app);
+      const sessionValue = cookie.split("=")[1] ?? "";
+      expect(sessionValue.split(".")).toHaveLength(2);
+      const tamperedCookies = [
+        tamperSessionCookie(cookie, (payload) => ({ ...payload, exp: payload.exp + 3600 })),
+        tamperSessionCookie(cookie, (payload) => ({ ...payload, actor: "attacker" })),
+        tamperSessionCookie(cookie, (payload) => ({ ...payload, actorId: "attacker" })),
+        tamperSessionSignature(cookie)
+      ];
+
+      for (const tampered of tamperedCookies) {
+        const response = await app.inject({ method: "GET", url: "/events", headers: { cookie: tampered }, payloadAsStream: true });
+        if (response.statusCode === 200) response.stream().destroy();
+        expect(response.statusCode).toBe(401);
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("gateway work-item routes", () => {
+  it("rejects a needs-approval item through a distinct terminal route", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-work-item-reject-route-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    const workItem = seed.create({
+      title: "Reject through route",
+      requester: "agent",
+      intent: "operator denies the request",
+      requestedActions: [{ kind: "fs.write", description: "write file", params: { paths: ["src/index.ts"] } }],
+      target: { cwd: "/repo" },
+      risk: "high"
+    });
+    seed.close();
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItem.id}/reject`,
+        payload: { reason: "denied by operator" }
+      });
+      const approvedLater = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItem.id}/approve`,
+        payload: { reason: "too late", actionHash: approvalActionHash(workItem) }
+      });
+
+      expect(workItem.status).toBe("needs_approval");
+      expect(rejected.statusCode).toBe(200);
+      expect(rejected.json().workItem).toMatchObject({ id: workItem.id, status: "rejected" });
+      expect(approvedLater.statusCode).toBe(409);
+
+      await app.close();
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.get(workItem.id)?.status).toBe("rejected");
+        expect(store.claimNextApprovedWorkItem("worker-a")).toBeUndefined();
+        expect(store.readEvents().map((event) => event.name)).toContain("work_item.rejected");
+        expect(store.readEvents().map((event) => event.name)).not.toContain("work_item.cancelled");
+      } finally {
+        store.close();
+      }
+    } finally {
+      try {
+        await app.close();
+      } catch {
+        // already closed for direct store inspection
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects unauthenticated read routes in production when read auth is not configured", async () => {
     vi.stubEnv("NODE_ENV", "production");
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-read-auth-"));
@@ -1937,7 +2374,7 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
-        payload: { approvedBy: "test", reason: "approve exact write" }
+        payload: { reason: "approve exact write", actionHash: approvalActionHash(workItem) }
       });
 
       expect(approved.statusCode).toBe(200);
@@ -1985,7 +2422,12 @@ describe("gateway work-item routes", () => {
         }
       });
       const id = created.json().id;
-      const approved = await app.inject({ method: "POST", url: `/work-items/${id}/approve`, payload: { reason: "ok" } });
+      const workItem = created.json();
+      const approved = await app.inject({
+        method: "POST",
+        url: `/work-items/${id}/approve`,
+        payload: { reason: "ok", actionHash: approvalActionHash(workItem) }
+      });
       expect(approved.statusCode).toBe(200);
       const actionHash = approved.json().approvals[0].actionHash;
 
@@ -1997,7 +2439,11 @@ describe("gateway work-item routes", () => {
         expect(store.hasApproval(id, actionHash)).toBe(false);
 
         const eventCountBefore = store.readEvents().length;
-        const replay = await app.inject({ method: "POST", url: `/work-items/${id}/approve`, payload: { reason: "again" } });
+        const replay = await app.inject({
+          method: "POST",
+          url: `/work-items/${id}/approve`,
+          payload: { reason: "again", actionHash }
+        });
 
         expect(replay.statusCode).toBe(409);
         expect(store.hasApproval(id, actionHash)).toBe(false);
@@ -2110,7 +2556,7 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${first.json().id}/approve`,
-        payload: { id: second.json().id, approvedBy: "test", reason: "path id must win" }
+        payload: { id: second.json().id, reason: "path id must win", actionHash: approvalActionHash(first.json()) }
       });
 
       expect(approved.statusCode).toBe(200);
@@ -2188,6 +2634,43 @@ describe("gateway work-item routes", () => {
     }
   });
 
+  it("rejects stale approval hashes after the work item action changes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-stale-hash-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Stale hash work",
+          requester: "user",
+          intent: "verify stale hash rejection",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write old", params: { paths: ["src/old.ts"] } }],
+          risk: "low"
+        }
+      });
+      const staleHash = approvalActionHash(created.json());
+      replaceRequestedActions(dbPath, created.json().id, [
+        { kind: "fs.write", description: "write new", params: { paths: ["src/new.ts"] } }
+      ]);
+
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/work-items/${created.json().id}/approve`,
+        payload: { reason: "stale hash", actionHash: staleHash }
+      });
+
+      expect(rejected.statusCode).toBe(409);
+      expect(rejected.json().error).toContain("approval action hash does not match work item");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("exposes redacted worker results on the work item and audit timeline", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-results-"));
     const dbPath = join(dir, "control.db");
@@ -2258,7 +2741,7 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
-        payload: { approvedBy: "not-the-agent", reason: "body identity must not matter" }
+        payload: { reason: "body identity must not matter", actionHash: approvalActionHash(workItem) }
       });
 
       expect(approved.statusCode).toBe(200);
@@ -2272,7 +2755,9 @@ describe("gateway work-item routes", () => {
   it("rejects high-risk self-approval at the authenticated HTTP boundary", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const token = "a";
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: { token, actor: "agent" } });
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, auth: { token, actor: "agent", actorId: "agent" } });
+    seedActor(dbPath, "agent");
     app.addHook("onRequest", async (request) => {
       request.headers.authorization ??= `Bearer ${token}`;
     });
@@ -2294,7 +2779,7 @@ describe("gateway work-item routes", () => {
       const denied = await app.inject({
         method: "POST",
         url: `/work-items/${created.json().id}/approve`,
-        payload: { approvedBy: "ignored", reason: "self approval must not pass" }
+        payload: { reason: "self approval must not pass", actionHash: approvalActionHash(created.json(), "agent") }
       });
 
       expect(denied.statusCode).toBe(403);
@@ -2322,7 +2807,8 @@ describe("gateway work-item routes", () => {
       const denied = tools.approve_work_item({
         id: workItem.id,
         approvedBy: "agent",
-        reason: "self approve"
+        reason: "self approve",
+        actionHash: approvalActionHash(workItem, "agent")
       });
 
       expect(denied.decision.decision).toBe("deny");
@@ -2342,6 +2828,102 @@ function readRawWorkItemResult(dbPath: string, workItemId: string): unknown {
   } finally {
     db.close();
   }
+}
+
+function updateAuditBody(dbPath: string, sequence: number, body: Record<string, unknown>): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.prepare(`UPDATE audit_events SET body = ? WHERE sequence = ?`).run(JSON.stringify(body), sequence);
+  } finally {
+    db.close();
+  }
+}
+
+function replaceRequestedActions(dbPath: string, workItemId: string, requestedActions: unknown[]): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.prepare(`UPDATE work_items SET requested_actions_json = ?, updated_at = ? WHERE id = ?`).run(
+      JSON.stringify(requestedActions),
+      new Date().toISOString(),
+      workItemId
+    );
+  } finally {
+    db.close();
+  }
+}
+
+function seedAuditRows(dbPath: string, count: number, input: { workItemId: string; agentId: string }): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec("BEGIN IMMEDIATE");
+    const insert = db.prepare(
+      `INSERT INTO audit_events (id, name, time_unix_nano, attributes, body, previous_hash, event_hash)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    );
+    for (let index = 0; index < count; index += 1) {
+      insert.run(
+        `evt_seed_${index}`,
+        `audit.seed.${index}`,
+        String((Date.now() + index) * 1_000_000),
+        JSON.stringify({ "work_item.id": input.workItemId, "agent.id": input.agentId }),
+        JSON.stringify({ index }),
+        `seed-prev-${index}`,
+        `seed-hash-${index}`
+      );
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // best effort; the transaction may already be closed.
+    }
+    throw error;
+  } finally {
+    db.close();
+  }
+}
+
+interface SessionCookiePayload {
+  v: number;
+  actor: string;
+  actorId?: string;
+  iat: number;
+  exp: number;
+}
+
+function tamperSessionCookie(
+  cookie: string,
+  mutate: (payload: SessionCookiePayload) => SessionCookiePayload
+): string {
+  const [name, value] = cookie.split("=");
+  const [payloadPart, signature] = (value ?? "").split(".");
+  const payload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8")) as SessionCookiePayload;
+  const tamperedPayload = Buffer.from(JSON.stringify(mutate(payload))).toString("base64url");
+  return `${name}=${tamperedPayload}.${signature}`;
+}
+
+function tamperSessionSignature(cookie: string): string {
+  const [name, value] = cookie.split("=");
+  const [payloadPart] = (value ?? "").split(".");
+  return `${name}=${payloadPart}.tampered`;
+}
+
+function signedSessionCookie(
+  auth: { token: string; actor: string; actorId?: string },
+  input: { iat: number; exp: number }
+): string {
+  const payload = Buffer.from(
+    JSON.stringify({
+      v: 1,
+      actor: auth.actor,
+      ...(auth.actorId ? { actorId: auth.actorId } : {}),
+      iat: input.iat,
+      exp: input.exp
+    })
+  ).toString("base64url");
+  const signature = createHmac("sha256", auth.token).update(`acs-session-v2:${payload}`).digest("base64url");
+  return `acs_session=${payload}.${signature}`;
 }
 
 function createWorkItemToolCall(title: string) {
@@ -2386,6 +2968,12 @@ function seedSignedTunnelSession(
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   const store = new SqliteWorkItemStore(dbPath);
   try {
+    store.registerActor({
+      id: input.connectorId,
+      actorType: "SERVICE",
+      displayName: input.connectorId,
+      externalRef: `tunnel_id:${input.connectorId}`
+    });
     store.registerConnector({
       id: input.connectorId,
       publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),

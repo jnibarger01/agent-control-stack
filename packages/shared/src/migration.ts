@@ -13,6 +13,7 @@ interface SqliteLike {
   exec(sql: string): void;
   prepare(sql: string): {
     all(...params: unknown[]): unknown[];
+    get(...params: unknown[]): unknown;
     run(...params: unknown[]): unknown;
   };
 }
@@ -53,7 +54,7 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
     }
     db.exec("BEGIN IMMEDIATE");
     try {
-      db.exec(migration.sql);
+      db.exec(migrationSqlForCurrentSchema(db, migration));
       db
         .prepare(
           `INSERT INTO schema_migrations (version, name, filename, applied_at)
@@ -70,4 +71,16 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       throw error;
     }
   }
+}
+
+function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMigration): string {
+  if (migration.version === 3 && hasColumn(db, "work_items", "requester_subject")) {
+    return migration.sql.replace(/^\s*ALTER TABLE work_items ADD COLUMN requester_subject TEXT;\s*/u, "");
+  }
+  return migration.sql;
+}
+
+function hasColumn(db: SqliteLike, table: string, column: string): boolean {
+  const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+  return rows.some((row) => row.name === column);
 }

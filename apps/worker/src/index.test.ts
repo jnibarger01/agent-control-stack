@@ -2,11 +2,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
-import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { runWorkerOnce } from "./index.js";
 
 const domainTransition = { via: "domain_service" } as const;
+
+function approvalActionHash(workItem: WorkItem, actor: string): string {
+  const decision = createPolicyEngine().evaluateWorkItem(workItem, actor, "approve")[0];
+  if (!decision?.actionHash) {
+    throw new Error(`missing approval action hash for ${workItem.id}`);
+  }
+  return decision.actionHash;
+}
 
 describe("worker policy gate", () => {
   it("executes approved read-only work", async () => {
@@ -89,7 +97,8 @@ describe("worker policy gate", () => {
       const approval = tools.approve_work_item({
         id: workItem.id,
         approvedBy: "user",
-        reason: "approve exact write action"
+        reason: "approve exact write action",
+        actionHash: approvalActionHash(workItem, "user")
       });
       expect(approval.workItem.status).toBe("approved");
       store.close();
