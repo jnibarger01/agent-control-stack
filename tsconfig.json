@@ -2,7 +2,6 @@
   "files": [],
   "references": [
     { "path": "packages/shared" },
-    { "path": "packages/audit-log" },
     { "path": "packages/work-items" },
     { "path": "packages/acp-adapter" },
     { "path": "packages/policy-gate" },

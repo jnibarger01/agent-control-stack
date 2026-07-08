@@ -15,7 +15,6 @@
     "acs-gateway": "./dist/cli.js"
   },
   "dependencies": {
-    "@agent-control-stack/audit-log": "0.1.0",
     "@agent-control-stack/acp-adapter": "0.1.0",
     "@agent-control-stack/control-ui": "0.1.0",
     "@agent-control-stack/policy-gate": "0.1.0",

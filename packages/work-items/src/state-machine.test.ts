@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -880,6 +880,43 @@ describe("work item state machine", () => {
       } catch {
         // already closed in the tamper path
       }
+    }
+  });
+
+  it("keeps the work item store as the only active audit chain implementation", () => {
+    const repoRoot = process.cwd();
+    const duplicateAuditPackageName = "@agent-control-stack/" + "audit-log";
+    const staleReferenceFiles = [
+      "package-lock.json",
+      "tsconfig.json",
+      "apps/gateway/package.json",
+      "apps/gateway/tsconfig.json",
+      "apps/worker/package.json",
+      "apps/worker/tsconfig.json",
+      "packages/eval-harness/package.json",
+      "packages/eval-harness/tsconfig.json"
+    ];
+    const dir = mkdtempSync(join(tmpdir(), "acs-work-items-audit-only-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Audit owner",
+        requester: "user",
+        intent: "prove audit events append through the real store",
+        requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+
+      expect(existsSync(join(repoRoot, "packages/audit-log"))).toBe(false);
+      for (const file of staleReferenceFiles) {
+        expect(readFileSync(join(repoRoot, file), "utf8")).not.toContain(duplicateAuditPackageName);
+      }
+      expect(store.readEvents()).toEqual([expect.objectContaining({ name: WorkItemEvent.Created })]);
+      expect(store.verifyAuditChain()).toMatchObject({ ok: true, eventCount: 1 });
+      expect(store.get(workItem.id)?.id).toBe(workItem.id);
+    } finally {
+      store.close();
     }
   });
 });

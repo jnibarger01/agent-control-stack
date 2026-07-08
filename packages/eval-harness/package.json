@@ -12,7 +12,6 @@
     }
   },
   "dependencies": {
-    "@agent-control-stack/audit-log": "0.1.0",
     "@agent-control-stack/policy-gate": "0.1.0",
     "@agent-control-stack/sandbox": "0.1.0",
     "@agent-control-stack/shared": "0.1.0",
