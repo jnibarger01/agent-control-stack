@@ -8,9 +8,9 @@ In scope:
 
 - MCP tool calls.
 - Local filesystem access.
-- Command execution.
+- Future command execution.
 - Service and process control.
-- Work-item creation and execution.
+- Work-item creation and dry-run worker simulation.
 - Policy decisions.
 - Human approvals.
 - Audit and event logging.
@@ -73,10 +73,10 @@ Trust assumptions:
 - Durable state is SQLite in `storage/local.db` by default.
 - Gateway HTTP mutations require configured bearer auth; if mutation auth is not configured, they fail closed with `503`.
 - MCP `tools/call` requests require bearer authorization or a signed tunnel-session assertion from a configured trusted local proxy. A local `ACS_MCP_BEARER_TOKEN` can satisfy this outside production; production uses OAuth/JWKS validation or `ACS_AUTH_MODE=tunnel_id` with persistent connector/session records. `initialize`, `ping`, `notifications/*`, and `tools/list` remain discovery methods.
-- Worker execution must only consume approved work-item events.
+- Worker simulation must only consume approved work-item events.
 - Sandbox execution is currently dry-run only.
 - Result submission is lease-bound in the work-item store; the public HTTP result route is not implemented.
-- Approval identity is currently an application-level actor string, not a fully bound user identity.
+- Approval and registry mutation identity is resolved to a canonical registry actor id where authenticated mutation paths are implemented.
 - Audit entries are transactional, append-only in SQLite, hash-chained, and locally verifiable. They are not OS-protected against local tampering.
 
 ## Actors
@@ -95,7 +95,7 @@ Trust assumptions:
 
 - MCP request parsing.
 - Tool schema validation.
-- Command execution.
+- Future command execution.
 - Filesystem path handling.
 - Symlinks and path traversal.
 - Secret-bearing file reads.
@@ -122,7 +122,7 @@ Trust assumptions:
 - Work-item state changes and audit events are written in one SQLite transaction.
 - Policy decisions are audited as `policy.decided`.
 - Approvals are stored by work item and exact action hash, with request hashes, expiry, and consumed status. The dormant `approval_token_hash` column remains for compatibility but is not an authorization artifact.
-- Audit rows store previous and current event hashes so tampering is detectable by verification.
+- Audit rows store previous and current event hashes so tampering is detectable by verification; detected invalid chains disable future store writes until repaired out of band.
 - Running work has a worker lease; startup reaps expired leases as failed.
 - Result submission requires matching work item id, worker id, lease token, and an unexpired lease.
 - The eval harness checks for `work_item.running` events that appear before approval.

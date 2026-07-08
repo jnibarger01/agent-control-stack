@@ -46,7 +46,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         workerId,
         leaseToken: running.leaseToken,
         status: "failed",
-        result: { error: result.error ?? "sandbox execution failed", execution_mode: result.executionMode }
+        result: { error: result.error ?? "dry-run sandbox simulation failed", execution_mode: result.executionMode }
       });
     }
 

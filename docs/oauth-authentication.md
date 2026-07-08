@@ -41,8 +41,8 @@ The `resource` metadata value is `ACS_OAUTH_AUDIENCE`. `authorization_servers` c
 | `approve_work_item` | `acs:work:approve` |
 | `unblock_work_item` | `acs:work:approve` |
 | `cancel_work_item` | `acs:work:approve` |
-| `claim_next_approved_work_item` | `acs:worker:claim` |
-| `submit_work_result` | `acs:worker:claim` |
+
+Worker claim and result submission tools are not exposed on the public MCP gateway in `v0.1.0-alpha`. They remain local worker/store paths only.
 
 ## Local Development
 
@@ -84,7 +84,7 @@ POST /connectors/:id/tunnels/:tunnelId/sessions/:sessionId/revoke
 
 The connector registration stores an Ed25519 public key and allowed MCP scopes. The tunnel proxy signs `acs-tunnel-v1`, `connector_id`, `tunnel_id`, `session_id`, and `issued_at` joined by newlines. ACS verifies that the request came from `ACS_TRUSTED_TUNNEL_PROXY`, the signature matches the registered connector key, the session exists, the connector and session are active, the session has not expired, and the requested tool is covered by the connector scopes.
 
-`ACS_ALLOWED_TUNNEL_IDS` is still accepted as a legacy compatibility allowlist for local experiments. Prefer persistent connector records for production. Do not grant `acs:work:approve` or `acs:worker:claim` to ChatGPT connector tunnels unless a separate operational review says those protections are no longer needed.
+`ACS_ALLOWED_TUNNEL_IDS` is still accepted as a legacy compatibility allowlist for local experiments when explicitly enabled outside production. Prefer persistent connector records for production. Do not grant `acs:work:approve` to ChatGPT connector tunnels unless a separate operational review says those protections are no longer needed.
 
 Only use tunnel ID mode when the gateway is bound to a local interface and the tunnel proxy is the sole external ingress. Public clients must not be able to send `X-ACS-Tunnel-ID` directly.
 

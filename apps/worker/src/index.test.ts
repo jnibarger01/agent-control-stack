@@ -24,7 +24,7 @@ function approvalActionHash(workItem: WorkItem, actor: string): string {
 }
 
 describe("worker policy gate", () => {
-  it("executes approved read-only work", async () => {
+  it("simulates approved read-only work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath);
@@ -84,7 +84,7 @@ describe("worker policy gate", () => {
     }
   });
 
-  it("executes approved write work with a matching action approval", async () => {
+  it("simulates approved write work with a matching action approval", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath);

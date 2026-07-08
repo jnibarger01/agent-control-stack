@@ -30,4 +30,4 @@ For protected MCP tool calls in local development, set `ACS_MCP_BEARER_TOKEN` an
 ACS_DB_PATH=storage/local.db npm run start:worker
 ```
 
-The worker executes one approved work item and records start/completion events.
+The worker simulates one approved work item and records start/completion events with `execution_mode: "dry_run"`.

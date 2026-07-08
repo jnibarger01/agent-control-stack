@@ -17,6 +17,6 @@ export async function executeSandboxed(workItem: WorkItem): Promise<SandboxResul
   return {
     ok: true,
     executionMode: "dry_run",
-    output: `dry-run executed ${workItem.id}`
+    output: `dry-run simulated ${workItem.id}`
   };
 }
