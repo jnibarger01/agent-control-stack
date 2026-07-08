@@ -552,10 +552,43 @@ describe("mission control gateway", () => {
 
       const store = new SqliteWorkItemStore(dbPath);
       try {
-        expect(store.readEvents().map((event) => event.name)).toContain("actor.registered");
+        expect(store.readEvents()).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              name: "actor.registered",
+              attributes: expect.objectContaining({ "actor.id": testAuth.actorId }),
+              body: expect.objectContaining({ registeredByActorId: testAuth.actorId })
+            })
+          ])
+        );
       } finally {
         store.close();
       }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for connector registration without a bound actor", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-connector-no-bound-actor-"));
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: { token: "t", actor: "user" } });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/connectors",
+        headers: { authorization: "Bearer t" },
+        payload: {
+          id: "chatgpt-prod",
+          publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),
+          allowedScopes: ["acs:work:create"]
+        }
+      });
+
+      expect(response.statusCode).toBe(503);
+      expect(response.json().error).toContain("registry actor binding is not configured");
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

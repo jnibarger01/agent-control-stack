@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -206,6 +206,36 @@ describe("work item state machine", () => {
       expect(store.claimNextApprovedWorkItem("worker-a")).toBeUndefined();
     } finally {
       store.close();
+    }
+  });
+
+  it("requires explicit actors for cancel and reject store transitions", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-terminal-actor-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const cancelled = store.create({
+        title: "Cancel requires actor",
+        requester: "user",
+        intent: "verify explicit cancel actor",
+        requestedActions: [{ kind: "manual", description: "cancel" }],
+        risk: "low"
+      });
+      const rejected = store.create({
+        title: "Reject requires actor",
+        requester: "user",
+        intent: "verify explicit reject actor",
+        requestedActions: [{ kind: "manual", description: "reject" }],
+        risk: "high"
+      });
+
+      expect(() => store.cancelWorkItem(cancelled.id, {}, domainTransition)).toThrow();
+      expect(() => store.rejectWorkItem(rejected.id, {}, domainTransition)).toThrow();
+      expect(store.get(cancelled.id)?.status).toBe("pending_policy");
+      expect(store.get(rejected.id)?.status).toBe("needs_approval");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

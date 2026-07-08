@@ -57,7 +57,7 @@ export const approvalRequestSchema = z.object({
 });
 
 export const cancelRequestSchema = z.object({
-  actor: z.string().min(1).default("system"),
+  actor: z.string().min(1),
   reason: z.string().min(1).optional()
 });
 export const rejectRequestSchema = cancelRequestSchema;

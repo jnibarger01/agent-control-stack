@@ -367,7 +367,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!requireMutationActor(request, reply, auth)) {
         return;
       }
-      const actor = workItems.registerActor(actorBodySchema.parse(request.body));
+      const registeredByActorId = requireBoundActorId(request, reply, auth);
+      if (!registeredByActorId) {
+        return;
+      }
+      const actor = workItems.registerActor({ ...actorBodySchema.parse(request.body), registeredByActorId });
       return reply.code(201).send({ actor });
     } catch (error) {
       return sendError(reply, error);

@@ -85,6 +85,37 @@ describe("policy-gated work item tools", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("requires explicit actors for cancel and reject tool calls", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-terminal-tool-actor-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      const cancelled = store.create({
+        title: "Cancel tool requires actor",
+        requester: "user",
+        intent: "verify explicit cancel actor",
+        requestedActions: [{ kind: "manual", description: "cancel" }],
+        risk: "low"
+      });
+      const rejected = store.create({
+        title: "Reject tool requires actor",
+        requester: "user",
+        intent: "verify explicit reject actor",
+        requestedActions: [{ kind: "manual", description: "reject" }],
+        risk: "high"
+      });
+
+      expect(() => tools.cancel_work_item({ id: cancelled.id })).toThrow();
+      expect(() => tools.reject_work_item({ id: rejected.id })).toThrow();
+      expect(store.get(cancelled.id)?.status).toBe("pending_policy");
+      expect(store.get(rejected.id)?.status).toBe("needs_approval");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 function fakePolicy(decision: PolicyDecision["decision"]): PolicyEngine {

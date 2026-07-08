@@ -283,10 +283,11 @@ export interface ActorRegistration {
   actorType: ActorType;
   displayName: string;
   externalRef?: string;
+  registeredByActorId?: string;
   now?: Date;
 }
 
-export interface RegistryActor extends Omit<ActorRegistration, "now"> {
+export interface RegistryActor extends Omit<ActorRegistration, "now" | "registeredByActorId"> {
   createdAt: string;
 }
 
@@ -762,6 +763,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => {
       const now = (input.now ?? new Date()).toISOString();
       assertOneOf(input.actorType, actorTypes, "actorType");
+      let registeredByActor: RegistryActor | undefined;
+      if (input.registeredByActorId) {
+        registeredByActor = this.getActorRequired(input.registeredByActorId);
+      }
       this.db
         .prepare(
           `INSERT INTO actors (id, actor_type, display_name, external_ref, created_at)
@@ -779,6 +784,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           now
         );
       const actor = this.getActorRequired(input.id);
+      const auditActor = registeredByActor ?? actor;
       const event = this.appendAuditEvent(
         createEvent(
           "actor.registered",
@@ -786,11 +792,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
             actorId: actor.id,
             actorType: actor.actorType,
             displayName: actor.displayName,
-            externalRef: actor.externalRef
+            externalRef: actor.externalRef,
+            registeredByActorId: input.registeredByActorId
           },
           {
-            "actor.id": actor.id,
-            "actor.type": actor.actorType
+            "actor.id": auditActor.id,
+            "actor.type": auditActor.actorType,
+            "registered_actor.id": actor.id,
+            "registered_actor.type": actor.actorType
           }
         )
       );
