@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -89,6 +90,9 @@ const heartbeatBodySchema = z.object({
   currentTask: optionalStringSchema,
   lastError: optionalStringSchema
 });
+const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
+const sessionCookieName = "acs_session";
+const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
 
 export interface GatewayAuthOptions {
   token: string;
@@ -119,7 +123,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     ? undefined
     : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
   const requireRead = async (request: FastifyRequest, reply: FastifyReply) => {
-    if (!requireReadAccess(request, reply, auth)) {
+    if (!hasReadAccess(request, auth)) {
+      if (request.routeOptions.url === "/" && auth) {
+        reply.code(401).type("text/html").send(renderLoginPage());
+        return reply;
+      }
+      sendReadAccessError(reply, auth);
       return reply;
     }
   };
@@ -139,6 +148,24 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   }
 
   app.get("/health", async () => ({ ok: true }));
+
+  app.post("/session/login", async (request, reply) => {
+    try {
+      if (!auth) {
+        return reply.code(503).send({ error: "dashboard auth is not configured" });
+      }
+      const body = sessionLoginBodySchema.parse(request.body);
+      if (!constantTimeEqual(body.token, auth.token)) {
+        return reply.code(401).send({ error: "unauthorized" });
+      }
+      return reply
+        .header("set-cookie", sessionCookie(auth, process.env.NODE_ENV === "production"))
+        .code(204)
+        .send();
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 
   if (acpAdapter) {
     app.addHook("onReady", async () => {
@@ -609,31 +636,26 @@ function requireMutationActor(
     reply.code(503).send({ error: "mutation auth is not configured" });
     return undefined;
   }
-  const authorization = request.headers.authorization;
-  if (authorization !== `Bearer ${auth.token}`) {
+  if (!hasBearerAuth(request, auth) && !hasSessionCookie(request, auth)) {
     reply.code(401).send({ error: "unauthorized" });
     return undefined;
   }
   return auth.actor;
 }
 
-function requireReadAccess(
-  request: FastifyRequest,
-  reply: FastifyReply,
-  auth: GatewayAuthOptions | undefined
-): boolean {
+function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {
   if (auth) {
-    if (request.headers.authorization !== `Bearer ${auth.token}`) {
-      reply.code(401).send({ error: "unauthorized" });
-      return false;
-    }
-    return true;
+    return hasBearerAuth(request, auth) || hasSessionCookie(request, auth);
   }
-  if (isDevelopmentLoopbackRequest(request)) {
-    return true;
+  return isDevelopmentLoopbackRequest(request);
+}
+
+function sendReadAccessError(reply: FastifyReply, auth: GatewayAuthOptions | undefined): void {
+  if (auth) {
+    reply.code(401).send({ error: "unauthorized" });
+    return;
   }
   reply.code(503).send({ error: "read auth is not configured for production or exposed access" });
-  return false;
 }
 
 function requireBoundActorId(
@@ -652,6 +674,97 @@ function requireBoundActorId(
     return undefined;
   }
   return boundActorId;
+}
+
+function hasBearerAuth(request: FastifyRequest, auth: GatewayAuthOptions): boolean {
+  return request.headers.authorization === `Bearer ${auth.token}`;
+}
+
+function hasSessionCookie(request: FastifyRequest, auth: GatewayAuthOptions): boolean {
+  const value = cookies(request.headers.cookie)[sessionCookieName];
+  return value ? constantTimeEqual(value, sessionCookieValue(auth)) : false;
+}
+
+function sessionCookie(auth: GatewayAuthOptions, secure: boolean): string {
+  const parts = [
+    `${sessionCookieName}=${sessionCookieValue(auth)}`,
+    "Path=/",
+    "HttpOnly",
+    "SameSite=Strict",
+    `Max-Age=${sessionCookieMaxAgeSeconds}`
+  ];
+  if (secure) {
+    parts.push("Secure");
+  }
+  return parts.join("; ");
+}
+
+function sessionCookieValue(auth: GatewayAuthOptions): string {
+  return createHmac("sha256", auth.token)
+    .update(`acs-session-v1:${auth.actor}:${auth.actorId ?? ""}`)
+    .digest("base64url");
+}
+
+function cookies(header: string | undefined): Record<string, string> {
+  if (!header) return {};
+  return Object.fromEntries(
+    header
+      .split(";")
+      .map((entry) => entry.trim())
+      .filter(Boolean)
+      .map((entry) => {
+        const index = entry.indexOf("=");
+        return index === -1 ? [entry, ""] : [entry.slice(0, index), entry.slice(index + 1)];
+      })
+  );
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  const leftBuffer = Buffer.from(left);
+  const rightBuffer = Buffer.from(right);
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
+}
+
+function renderLoginPage(): string {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AgentOS Mission Control Login</title>
+    <style>
+      :root { color-scheme: dark; font-family: Inter, ui-sans-serif, system-ui, sans-serif; background: #071019; color: #d7e0ea; }
+      body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #071019; }
+      form { width: min(360px, calc(100vw - 32px)); display: grid; gap: 12px; border: 1px solid #17283a; background: #0a1522; padding: 18px; border-radius: 8px; }
+      h1 { margin: 0 0 4px; font-size: 20px; }
+      label { display: grid; gap: 6px; color: #91a6bd; font-size: 13px; }
+      input { background: #07111d; color: #dbeafe; border: 1px solid #1c3148; border-radius: 8px; padding: 10px; }
+      button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 10px 12px; font-weight: 700; cursor: pointer; }
+      output { min-height: 20px; color: #fca5a5; }
+    </style>
+  </head>
+  <body>
+    <form id="login-form">
+      <h1>Mission Control</h1>
+      <label>Operator token<input name="token" type="password" autocomplete="off" autofocus /></label>
+      <button type="submit">Sign in</button>
+      <output></output>
+    </form>
+    <script>
+      document.querySelector('#login-form').addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const form = new FormData(event.currentTarget);
+        const res = await fetch('/session/login', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ token: String(form.get('token') || '') })
+        });
+        if (res.ok) location.reload();
+        else document.querySelector('output').textContent = 'Unauthorized';
+      });
+    </script>
+  </body>
+</html>`;
 }
 
 function isDevelopmentLoopbackRequest(request: FastifyRequest): boolean {

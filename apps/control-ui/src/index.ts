@@ -70,7 +70,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="system" class="panel"><div class="panel-head"><h2>System Health</h2><span>derived</span></div>${systemPanel(stats, agents)}</article>
       </section>
       <section class="grid lower">
-        <article id="dispatch" class="panel composer"><div class="panel-head"><h2>New Task Composer</h2><span>requires bearer token</span></div>${composer()}</article>
+        <article id="dispatch" class="panel composer"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
         <article class="panel"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approval and cancellation actions call authenticated backend routes and append audit events. No approve-all button, because one intact guardrail will not end civilization.</p></article>
       </section>
     </main>
@@ -215,7 +215,7 @@ function workQueue(workItems: WorkItem[]): string {
 
 function approvalsPanel(items: WorkItem[]): string {
   if (!items.length) return `<p class="empty">No approvals or blocked work. Suspiciously civilized.</p>`;
-  return `<div class="approval-controls"><label>Operator token<input id="operator-token" type="password" autocomplete="off" placeholder="ACS_GATEWAY_TOKEN" /></label></div><div class="approvals-list">${items
+  return `<div class="approvals-list">${items
     .map((item) => {
       const actions = item.requestedActions.map((action) => action.kind).join(", ") || "none";
       const error = workItemResultError(item);
@@ -256,7 +256,6 @@ function eventTimeline(events: StoredAuditEvent[]): string {
 
 function composer(): string {
   return `<form id="task-form">
-    <label>Bearer token<input name="token" type="password" autocomplete="off" placeholder="ACS_GATEWAY_TOKEN" /></label>
     <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
     <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
     <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
@@ -304,11 +303,6 @@ document.querySelectorAll('[data-agent]').forEach((row) => {
   });
 });
 
-let operatorToken = '';
-document.querySelector('#operator-token')?.addEventListener('input', (event) => {
-  operatorToken = event.currentTarget.value.trim();
-});
-
 document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
   button.addEventListener('click', async () => {
     const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
@@ -321,7 +315,6 @@ document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach
       return;
     }
     const headers = { 'content-type': 'application/json' };
-    if (operatorToken) headers.authorization = 'Bearer ' + operatorToken;
     const payload = action === 'unblock' ? {} : { reason };
     const res = await fetch('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
     const body = await res.json();
@@ -349,8 +342,6 @@ document.querySelector('#task-form')?.addEventListener('submit', async (event) =
     }]
   };
   const headers = { 'content-type': 'application/json' };
-  const token = String(form.get('token') || '').trim();
-  if (token) headers.authorization = 'Bearer ' + token;
   const res = await fetch('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
   const body = await res.json();
   document.querySelector('#task-result').textContent = res.ok ? 'Created ' + body.id : 'Rejected: ' + (body.error || res.status);

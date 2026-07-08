@@ -1618,6 +1618,120 @@ describe("gateway MCP transport", () => {
   });
 });
 
+describe("gateway dashboard sessions", () => {
+  const dashboardAuth = { token: "super-secret-dashboard-token", actor: "user", actorId: "user" } as const;
+
+  async function loginSession(app: ReturnType<typeof buildGateway>, token = dashboardAuth.token) {
+    const login = await app.inject({ method: "POST", url: "/session/login", payload: { token } });
+    const setCookie = String(login.headers["set-cookie"] ?? "");
+    return { login, cookie: setCookie.split(";")[0] };
+  }
+
+  it("issues a hardened session cookie for a valid operator token and rejects bad tokens", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-login-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
+
+    try {
+      const { login } = await loginSession(app);
+      const rejected = await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong" } });
+
+      expect(login.statusCode).toBe(204);
+      const cookie = String(login.headers["set-cookie"]);
+      expect(cookie).toMatch(/HttpOnly/i);
+      expect(cookie).toMatch(/SameSite=Strict/i);
+      expect(cookie).not.toContain(dashboardAuth.token);
+      expect(rejected.statusCode).toBe(401);
+      expect(rejected.headers["set-cookie"]).toBeUndefined();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("marks dashboard session cookies secure in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-production-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
+
+    try {
+      const { login } = await loginSession(app);
+      expect(login.statusCode).toBe(204);
+      expect(String(login.headers["set-cookie"])).toMatch(/Secure/i);
+    } finally {
+      await app.close();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves the dashboard and SSE stream to an authenticated session", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-dashboard-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
+
+    try {
+      const { cookie } = await loginSession(app);
+
+      const page = await app.inject({ method: "GET", url: "/", headers: { cookie } });
+      expect(page.statusCode).toBe(200);
+      expect(page.body).toContain("AgentOS Mission Control");
+      expect(page.body).not.toContain(dashboardAuth.token);
+
+      const sse = await app.inject({ method: "GET", url: "/events", headers: { cookie }, payloadAsStream: true });
+      expect(sse.statusCode).toBe(200);
+      expect(String(sse.headers["content-type"])).toContain("text/event-stream");
+      sse.stream().destroy();
+
+      const denied = await app.inject({ method: "GET", url: "/events" });
+      expect(denied.statusCode).toBe(401);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a login page instead of the dashboard when unauthenticated", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-loginpage-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
+
+    try {
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.statusCode).toBe(401);
+      expect(String(page.headers["content-type"])).toContain("text/html");
+      expect(page.body).toContain("login-form");
+      expect(page.body).not.toContain("Agent Roster");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts session-authenticated operator mutations", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-mutation-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
+
+    try {
+      const { cookie } = await loginSession(app);
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        headers: { cookie },
+        payload: {
+          title: "Session created",
+          intent: "session mutation",
+          requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
+          target: { cwd: "/repo" },
+          risk: "low"
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      expect(created.json().requester).toBe("user");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("gateway work-item routes", () => {
   it("rejects unauthenticated read routes in production when read auth is not configured", async () => {
     vi.stubEnv("NODE_ENV", "production");

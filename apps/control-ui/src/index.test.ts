@@ -29,7 +29,8 @@ describe("renderDashboard", () => {
     expect(html).toContain("Inspect me");
     expect(html).toContain("No fake green lights");
     expect(html).toContain("New Task Composer");
-    expect(html).toContain("requires bearer token");
+    expect(html).toContain("authenticated session");
+    expect(html).not.toContain("ACS_GATEWAY_TOKEN");
     expect(html).toContain("agent.prompt");
     expect(html).toContain(`data-approve="wrk_test"`);
     expect(html).toContain(`data-reject="wrk_test"`);
