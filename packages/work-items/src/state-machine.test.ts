@@ -486,6 +486,78 @@ describe("work item state machine", () => {
     }
   });
 
+  it("refuses to silently regrant a consumed approval", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-approval-replay-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Replay item",
+        requester: "user",
+        intent: "verify consumed approvals stay consumed",
+        requestedActions: [{ kind: "edit", description: "write", params: { write: true } }],
+        risk: "low"
+      });
+
+      const grant = store.recordApproval({
+        workItemId: workItem.id,
+        actionHash: "hash_replay",
+        approvedBy: "user",
+        reason: "first grant"
+      });
+      store.consumeApproval(workItem.id, "hash_replay", {
+        approvalToken: grant.approvalToken,
+        requestHash: grant.requestHash
+      });
+
+      expect(() =>
+        store.recordApproval({
+          workItemId: workItem.id,
+          actionHash: "hash_replay",
+          approvedBy: "user",
+          reason: "replay attempt"
+        })
+      ).toThrow(ControlStackError);
+      expect(store.hasApproval(workItem.id, "hash_replay")).toBe(false);
+      expect(store.readEvents().filter((event) => event.name === "approval.granted")).toHaveLength(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("rolls back nested writes inside a failed transaction", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-approval-atomic-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Atomic item",
+        requester: "user",
+        intent: "verify transactional gates",
+        requestedActions: [{ kind: "edit", description: "write", params: { write: true } }],
+        risk: "low"
+      });
+      const eventCount = store.readEvents().length;
+
+      expect(() =>
+        store.withTransaction(() => {
+          store.recordApproval({
+            workItemId: workItem.id,
+            actionHash: "hash_atomic",
+            approvedBy: "user",
+            reason: "must roll back"
+          });
+          throw new Error("boom");
+        })
+      ).toThrow("boom");
+
+      expect(store.hasApproval(workItem.id, "hash_atomic")).toBe(false);
+      expect(store.readEvents()).toHaveLength(eventCount);
+    } finally {
+      store.close();
+    }
+  });
+
   it("rejects expired approval records", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-approval-expired-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

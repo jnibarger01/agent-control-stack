@@ -397,6 +397,7 @@ export interface SqliteWorkItemStoreOptions {
 }
 
 export interface WorkItemStore {
+  withTransaction<T>(operation: () => T): T;
   create(input: unknown): WorkItem;
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
@@ -437,6 +438,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private readonly db: DatabaseSync;
   private readonly leaseMs: number;
   private readonly onEvent: (event: StoredAuditEvent) => void;
+  private transactionDepth = 0;
+  private pendingEvents: StoredAuditEvent[] = [];
 
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -988,6 +991,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   recordApproval(input: ApprovalRecord): ApprovalGrant {
     return this.write(() => {
+      const existing = this.db
+        .prepare(`SELECT status FROM approval_records WHERE work_item_id = ? AND action_hash = ?`)
+        .get(input.workItemId, input.actionHash) as { status: string } | undefined;
+      if (existing?.status === "consumed") {
+        throw new ControlStackError(
+          "approval_already_consumed",
+          `approval was already consumed for action hash: ${input.actionHash}`
+        );
+      }
       const createdAt = input.createdAt ?? new Date().toISOString();
       const expiresAt =
         input.expiresAt ?? new Date(Date.parse(createdAt) + (input.expiresInMs ?? 10 * 60 * 1000)).toISOString();
@@ -1410,8 +1422,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return rowToEvent(row);
   }
 
+  withTransaction<T>(operation: () => T): T {
+    return this.write(() => ({ value: operation(), events: [] }));
+  }
+
   private write<T>(operation: () => { value: T; events: StoredAuditEvent[] }): T {
+    if (this.transactionDepth > 0) {
+      // Participate in the enclosing transaction; events are notified only if it commits.
+      const nested = operation();
+      this.pendingEvents.push(...nested.events);
+      return nested.value;
+    }
+
     this.db.exec("BEGIN IMMEDIATE");
+    this.transactionDepth = 1;
     let result: { value: T; events: StoredAuditEvent[] };
     try {
       result = operation();
@@ -1422,10 +1446,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
       } catch {
         // best effort; the transaction may already have been closed by SQLite.
       }
+      this.pendingEvents = [];
       throw error;
+    } finally {
+      this.transactionDepth = 0;
     }
 
-    for (const event of result.events) {
+    const events = [...this.pendingEvents, ...result.events];
+    this.pendingEvents = [];
+    for (const event of events) {
       try {
         this.onEvent(event);
       } catch {

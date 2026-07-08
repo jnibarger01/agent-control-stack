@@ -1761,6 +1761,51 @@ describe("gateway work-item routes", () => {
     }
   });
 
+  it("leaves no approval or audit side effects when approving a running work item", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-approve-running-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Write file",
+          intent: "approval-gated write",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write file", params: { paths: ["src/index.ts"] } }],
+          risk: "medium"
+        }
+      });
+      const id = created.json().id;
+      const approved = await app.inject({ method: "POST", url: `/work-items/${id}/approve`, payload: { reason: "ok" } });
+      expect(approved.statusCode).toBe(200);
+      const actionHash = approved.json().approvals[0].actionHash;
+
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        const tools = createWorkItemTools(store, createPolicyEngine());
+        const claimed = tools.claim_next_approved_work_item({ workerId: "worker-1" });
+        expect(claimed?.status).toBe("running");
+        expect(store.hasApproval(id, actionHash)).toBe(false);
+
+        const eventCountBefore = store.readEvents().length;
+        const replay = await app.inject({ method: "POST", url: `/work-items/${id}/approve`, payload: { reason: "again" } });
+
+        expect(replay.statusCode).toBe(409);
+        expect(store.hasApproval(id, actionHash)).toBe(false);
+        expect(store.get(id)?.status).toBe("running");
+        expect(store.readEvents()).toHaveLength(eventCountBefore);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("blocks denied work on create", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });

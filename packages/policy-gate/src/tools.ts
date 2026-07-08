@@ -82,6 +82,14 @@ export function gateApproval(
   input: unknown
 ): { decision: PolicyDecision; workItem: WorkItem; approvals: ApprovalGrant[] } {
   const parsed = approvalInputSchema.parse(input);
+  return store.withTransaction(() => gateApprovalInTransaction(store, policy, parsed));
+}
+
+function gateApprovalInTransaction(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  parsed: z.infer<typeof approvalInputSchema>
+): { decision: PolicyDecision; workItem: WorkItem; approvals: ApprovalGrant[] } {
   const workItem = store.get(parsed.id);
   if (!workItem) {
     throw new ControlStackError("work_item_not_found", `work item not found: ${parsed.id}`);
@@ -126,6 +134,14 @@ export function gateUnblock(
   input: unknown
 ): { decision: PolicyDecision; workItem: WorkItem } {
   const parsed = unblockInputSchema.parse(input);
+  return store.withTransaction(() => gateUnblockInTransaction(store, policy, parsed));
+}
+
+function gateUnblockInTransaction(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  parsed: z.infer<typeof unblockInputSchema>
+): { decision: PolicyDecision; workItem: WorkItem } {
   const workItem = store.get(parsed.id);
   if (!workItem) {
     throw new ControlStackError("work_item_not_found", `work item not found: ${parsed.id}`);
@@ -151,6 +167,14 @@ export function gateUnblock(
 
 export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, input: unknown): ClaimedWorkItem | undefined {
   const parsed = claimInputSchema.parse(input);
+  return store.withTransaction(() => gateWorkerClaimInTransaction(store, policy, parsed));
+}
+
+function gateWorkerClaimInTransaction(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  parsed: z.infer<typeof claimInputSchema>
+): ClaimedWorkItem | undefined {
   const running = store.claimNextApprovedWorkItem(parsed.workerId, { leaseMs: parsed.leaseMs });
   if (!running) {
     return undefined;
@@ -194,9 +218,11 @@ export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, inpu
 export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) {
   return {
     create_work_item(input: unknown): WorkItem {
-      const workItem = store.create(input);
-      const { decision } = evaluateAndRecordPolicy(store, policy, workItem, workItem.requester, "create");
-      return applyPolicyStatus(store, workItem, decision);
+      return store.withTransaction(() => {
+        const workItem = store.create(input);
+        const { decision } = evaluateAndRecordPolicy(store, policy, workItem, workItem.requester, "create");
+        return applyPolicyStatus(store, workItem, decision);
+      });
     },
     get_work_item(input: unknown): WorkItem | undefined {
       const parsed = idInputSchema.parse(input);
