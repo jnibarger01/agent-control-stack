@@ -35,6 +35,7 @@ interface WorkItemRow {
   id: string;
   title: string;
   requester: Requester;
+  requester_subject: string | null;
   status: WorkItemStatus;
   intent: string;
   target_json: string;
@@ -448,6 +449,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       PRAGMA foreign_keys = ON;
     `);
     applyControlPlaneMigrations(this.db);
+    this.ensureWorkItemColumn("requester_subject", "requester_subject TEXT");
     this.ensureWorkItemColumn("worker_id", "worker_id TEXT");
     this.ensureWorkItemColumn("started_at", "started_at TEXT");
     this.ensureWorkItemColumn("lease_expires_at", "lease_expires_at TEXT");
@@ -468,13 +470,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.db
         .prepare(
           `INSERT INTO work_items
-           (id, title, requester, status, intent, target_json, requested_actions_json, risk, result_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`
+           (id, title, requester, requester_subject, status, intent, target_json, requested_actions_json, risk, result_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`
         )
         .run(
           workItem.id,
           workItem.title,
           workItem.requester,
+          workItem.requesterSubject ?? null,
           workItem.status,
           workItem.intent,
           JSON.stringify(workItem.target),
@@ -1481,6 +1484,7 @@ function rowToWorkItem(row: WorkItemRow): WorkItem {
     id: row.id,
     title: row.title,
     requester: row.requester,
+    ...(row.requester_subject ? { requesterSubject: row.requester_subject } : {}),
     status: row.status,
     intent: row.intent,
     target: JSON.parse(row.target_json),

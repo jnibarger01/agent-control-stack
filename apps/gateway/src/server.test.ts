@@ -557,6 +557,82 @@ describe("gateway MCP transport", () => {
     }
   });
 
+  it("binds MCP work item requester to the authenticated identity", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
+    const dbPath = join(dir, "control.db");
+    const oauth = createTestOAuth();
+    const app = buildGateway({ dbPath, logger: false, mcpAuth: { oauth: oauth.options } });
+    let appClosed = false;
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:create" })}` },
+        payload: mcpToolCall("spoofed-requester", "create_work_item", {
+          title: "spoofed requester",
+          requester: "user",
+          requesterSubject: "oauth_jwt:fake-human",
+          intent: "attempt to appear human-originated",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
+          risk: "high"
+        })
+      });
+
+      expect(response.statusCode).toBe(200);
+      const structured = response.json().result.structuredContent;
+      expect(structured.requester).toBe("agent");
+      expect(structured.requesterSubject).toBe("oauth_jwt:user_123");
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        const [workItem] = store.list();
+        expect(workItem.requester).toBe("agent");
+        expect(workItem.requesterSubject).toBe("oauth_jwt:user_123");
+        const created = store.readEvents().find((event) => event.name === "work_item.created");
+        expect(created?.body).toMatchObject({ requester: "agent", requesterSubject: "oauth_jwt:user_123" });
+        expect(created?.attributes["work_item.requester_subject"]).toBe("oauth_jwt:user_123");
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("ignores caller-supplied requesterSubject on HTTP work item creation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-http-subject-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "http spoof attempt",
+          intent: "requesterSubject must not be caller-controlled",
+          requesterSubject: "oauth_jwt:fake-human",
+          requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
+          target: { cwd: "/repo" },
+          risk: "low"
+        }
+      });
+
+      expect(created.statusCode).toBe(201);
+      expect(created.json().requester).toBe("user");
+      expect(created.json().requesterSubject).toBeUndefined();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps local ACS_MCP_BEARER_TOKEN-style fallback for tools/call", async () => {
     vi.stubEnv("NODE_ENV", "test");
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-local-mcp-"));

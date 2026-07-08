@@ -371,7 +371,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!actor) {
         return;
       }
-      const workItem = tools.create_work_item(createWorkItemSchema.parse({ ...requestObject(request.body), requester: actor }));
+      const workItem = tools.create_work_item(
+        createWorkItemSchema.parse({ ...requestObject(request.body), requester: actor, requesterSubject: undefined })
+      );
       return reply.code(201).send(workItem);
     } catch (error) {
       return sendError(reply, error);

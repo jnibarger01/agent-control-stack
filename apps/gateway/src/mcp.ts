@@ -215,6 +215,10 @@ function callGatewayTool(
 }
 
 function bindAuthenticatedActor(name: GatewayToolName, args: unknown, auth: McpAuthenticatedRequest): unknown {
+  if (name === "create_work_item") {
+    // MCP identities are agents; caller-supplied requester/requesterSubject are untrusted.
+    return { ...requestObject(args), requester: "agent", requesterSubject: mcpRequesterSubject(auth) };
+  }
   if (name !== "approve_work_item" && name !== "unblock_work_item" && name !== "cancel_work_item") {
     return args;
   }
@@ -224,6 +228,10 @@ function bindAuthenticatedActor(name: GatewayToolName, args: unknown, auth: McpA
     return { ...record, approvedBy: actor };
   }
   return { ...record, actor };
+}
+
+function mcpRequesterSubject(auth: McpAuthenticatedRequest): string {
+  return `${auth.method}:${resolvedMcpActor(auth)}`;
 }
 
 function resolvedMcpActor(auth: McpAuthenticatedRequest): string {

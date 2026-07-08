@@ -33,6 +33,7 @@ export const actionRequestSchema = z.object({
 export const createWorkItemSchema = z.object({
   title: z.string().min(1),
   requester: requesterSchema,
+  requesterSubject: z.string().min(1).optional(),
   status: z.enum(["draft", "pending_policy"]).default("pending_policy"),
   intent: z.string().min(1),
   target: targetSchema,
@@ -151,6 +152,7 @@ function workItemAttributes(workItem: WorkItem): Record<string, string> {
     "work_item.id": workItem.id,
     "work_item.status": workItem.status,
     "work_item.risk": workItem.risk,
-    "work_item.requester": workItem.requester
+    "work_item.requester": workItem.requester,
+    ...(workItem.requesterSubject ? { "work_item.requester_subject": workItem.requesterSubject } : {})
   };
 }
