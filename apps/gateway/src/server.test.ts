@@ -1,5 +1,5 @@
 import { createHmac, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -2525,6 +2525,7 @@ describe("gateway work-item routes", () => {
       });
 
       expect(approved.statusCode).toBe(200);
+      expect(JSON.stringify(approved.json())).not.toContain("approvalToken");
       expect(approved.json().workItem.status).toBe("approved");
       expect(approved.json().decision.decision).toBe("require_approval");
 
@@ -2539,6 +2540,7 @@ describe("gateway work-item routes", () => {
           approvedBy: "user",
           reason: "approve exact write"
         });
+        expect(JSON.stringify(approvals)).not.toContain("approvalToken");
         expect(typeof approvals[0]?.body.actionHash).toBe("string");
       } finally {
         store.close();
@@ -2657,11 +2659,52 @@ describe("gateway work-item routes", () => {
       });
 
       expect(denied.statusCode).toBe(400);
+      expect(denied.json().error).toContain("approval_action_hash_required");
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(check.get(workItem.id)?.status).toBe("needs_approval");
       } finally {
         check.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not document or emit approvalToken", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-no-approval-token-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "No token work",
+          requester: "user",
+          intent: "verify token removal",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+          risk: "low"
+        }
+      });
+      const workItem = created.json();
+      const approved = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItem.id}/approve`,
+        payload: { reason: "approve without token", actionHash: approvalActionHash(workItem) }
+      });
+
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(approved.statusCode).toBe(200);
+        expect(JSON.stringify(approved.json())).not.toContain("approvalToken");
+        expect(JSON.stringify(store.readEvents())).not.toContain("approvalToken");
+        expect(readFileSync(join(process.cwd(), "docs/threat-model.md"), "utf8")).not.toContain("approvalToken");
+      } finally {
+        store.close();
       }
     } finally {
       await app.close();
@@ -2744,6 +2787,38 @@ describe("gateway work-item routes", () => {
 
       expect(unblocked.statusCode).toBe(200);
       expect(unblocked.json().workItem.status).toBe("pending_policy");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects approval without actionHash", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Missing hash work",
+          requester: "user",
+          intent: "verify missing hash rejection",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+          risk: "low"
+        }
+      });
+
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/work-items/${created.json().id}/approve`,
+        payload: { reason: "no action hash" }
+      });
+
+      expect(rejected.statusCode).toBe(400);
+      expect(rejected.json()).toMatchObject({ code: "approval_action_hash_required" });
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

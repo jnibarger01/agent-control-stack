@@ -20,6 +20,7 @@ export interface MissionControlViewModel {
   events: StoredAuditEvent[];
   registeredAgents?: RegistryAgentDetail[];
   agents?: MissionControlAgent[];
+  approvalActionHashesByWorkItem?: Record<string, string[]>;
   now?: Date;
 }
 
@@ -63,7 +64,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="queue" class="panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems)}</article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems)}</article>
+        <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
       </section>
       <section class="grid lower">
         <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(recentEvents)}</article>
@@ -213,7 +214,7 @@ function workQueue(workItems: WorkItem[]): string {
     .join("")}</div><pre id="work-detail" class="detail">Select a work item for its persisted timeline.</pre>`;
 }
 
-function approvalsPanel(items: WorkItem[]): string {
+function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Record<string, string[]>): string {
   if (!items.length) return `<p class="empty">No approvals or blocked work. Suspiciously civilized.</p>`;
   return `<div class="approvals-list">${items
     .map((item) => {
@@ -221,12 +222,25 @@ function approvalsPanel(items: WorkItem[]): string {
       const error = workItemResultError(item);
       const reason = `<input data-reason="${escapeHtml(item.id)}" required placeholder="Reason required" />`;
       const outcome = `<output id="approval-result-${escapeHtml(item.id)}"></output>`;
+      const approvalButtons = approvalButtonsFor(item, approvalActionHashesByWorkItem[item.id] ?? []);
       if (item.status === "blocked") {
         return `<article class="approval-item"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions"><button type="button" data-unblock="${escapeHtml(item.id)}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article class="approval-item"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requester)} · Actions: ${escapeHtml(actions)}</small>${reason}<div class="approval-actions"><button type="button" data-approve="${escapeHtml(item.id)}">Approve</button><button type="button" data-reject="${escapeHtml(item.id)}">Reject</button></div>${outcome}</article>`;
+      return `<article class="approval-item"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requester)} · Actions: ${escapeHtml(actions)}</small>${reason}<div class="approval-actions">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
+}
+
+function approvalButtonsFor(item: WorkItem, hashes: string[]): string {
+  if (!hashes.length) {
+    return `<button type="button" data-approve="${escapeHtml(item.id)}" disabled>Approval hash unavailable</button>`;
+  }
+  return hashes
+    .map(
+      (hash, index) =>
+        `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(hash)}">Approve ${index + 1}</button>`
+    )
+    .join("");
 }
 
 function workItemError(item: WorkItem): string {
@@ -348,6 +362,13 @@ document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach
     }
     const headers = { 'content-type': 'application/json' };
     const payload = action === 'unblock' ? {} : { reason };
+    if (action === 'approve') {
+      if (!button.dataset.actionHash) {
+        output.textContent = 'Approval action hash unavailable';
+        return;
+      }
+      payload.actionHash = button.dataset.actionHash;
+    }
     const res = await fetch('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
     const body = await res.json();
     output.textContent = res.ok ? action + ' accepted' : 'Rejected: ' + JSON.stringify(body);

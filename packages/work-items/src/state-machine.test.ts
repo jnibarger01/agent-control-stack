@@ -633,20 +633,16 @@ describe("work item state machine", () => {
         reason: "exact action"
       });
 
-      expect(grant.approvalToken).toEqual(expect.any(String));
+      expect(grant).not.toHaveProperty("approvalToken");
       expect(grant.requestHash).toEqual(expect.any(String));
       expect(store.hasApproval(workItem.id, "hash_test")).toBe(true);
       expect(store.hasApproval(workItem.id, "other_hash")).toBe(false);
       expect(store.readEvents().at(-1)?.name).toBe("approval.granted");
       expect(store.readEvents().at(-1)?.body).not.toHaveProperty("approvalToken");
-      expect(() => store.consumeApproval(workItem.id, "hash_test", { approvalToken: "wrong" })).toThrow(
-        ControlStackError
-      );
       expect(() => store.consumeApproval(workItem.id, "hash_test", { requestHash: "wrong" })).toThrow(
         ControlStackError
       );
       store.consumeApproval(workItem.id, "hash_test", {
-        approvalToken: grant.approvalToken,
         requestHash: grant.requestHash
       });
       expect(store.hasApproval(workItem.id, "hash_test")).toBe(false);
@@ -676,7 +672,6 @@ describe("work item state machine", () => {
         reason: "first grant"
       });
       store.consumeApproval(workItem.id, "hash_replay", {
-        approvalToken: grant.approvalToken,
         requestHash: grant.requestHash
       });
 

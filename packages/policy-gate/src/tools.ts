@@ -82,6 +82,9 @@ export function gateApproval(
   policy: PolicyEngine,
   input: unknown
 ): { decision: PolicyDecision; workItem: WorkItem; approvals: ApprovalGrant[] } {
+  if (!hasActionHash(input)) {
+    throw new ControlStackError("approval_action_hash_required", "approval_action_hash_required: actionHash is required");
+  }
   const parsed = approvalInputSchema.parse(input);
   return store.withTransaction(() => gateApprovalInTransaction(store, policy, parsed));
 }
@@ -122,11 +125,22 @@ function gateApprovalInTransaction(
     }));
   }
 
+  const missingApproval = required.find((evaluation) => !store.hasApproval(workItem.id, evaluation.actionHash));
+
   return {
     decision,
-    workItem: workItem.status === "approved" ? workItem : store.approveWorkItem(workItem.id, policyTransition),
+    workItem: missingApproval || workItem.status === "approved" ? workItem : store.approveWorkItem(workItem.id, policyTransition),
     approvals
   };
+}
+
+function hasActionHash(input: unknown): boolean {
+  return (
+    !!input &&
+    typeof input === "object" &&
+    typeof (input as { actionHash?: unknown }).actionHash === "string" &&
+    (input as { actionHash: string }).actionHash.trim().length > 0
+  );
 }
 
 export function gateUnblock(

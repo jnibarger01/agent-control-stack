@@ -21,7 +21,8 @@ import {
   type ReadEventsOptions,
   type RegistryAgentDetail,
   type RegistryStatus,
-  type StoredAuditEvent
+  type StoredAuditEvent,
+  type WorkItem
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
@@ -139,7 +140,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
-  const tools = createWorkItemTools(workItems, createPolicyEngine());
+  const policy = createPolicyEngine();
+  const tools = createWorkItemTools(workItems, policy);
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
@@ -209,7 +211,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const workItemList = workItems.list();
       const events = workItems.readEvents(eventReadOptions(request.query));
-      reply.type("text/html").send(renderDashboard({ workItems: workItemList, events, registeredAgents: workItems.listRegistryAgents() }));
+      reply.type("text/html").send(renderDashboard({
+        workItems: workItemList,
+        events,
+        registeredAgents: workItems.listRegistryAgents(),
+        approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(policy, workItemList, auth?.actor)
+      }));
     } catch (error) {
       return sendError(reply, error);
     }
@@ -530,7 +537,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!actor) {
         return;
       }
-      const body = approvalBodySchema.parse(requestObject(request.body));
+      const bodyObject = requestObject(request.body);
+      requireApprovalActionHash(bodyObject);
+      const body = approvalBodySchema.parse(bodyObject);
       const workItem = tools.get_work_item({ id: request.params.id });
       if (!workItem) {
         return reply.code(404).send({ error: "work item not found" });
@@ -641,7 +650,10 @@ function sendError(reply: FastifyReply, error: unknown) {
     const status =
       error.code === "work_item_not_found" || error.code === "agent_not_found"
         ? 404
-        : error.code === "actor_not_found" || error.code === "invalid_agent_registration" || error.code === "invalid_event_query"
+        : error.code === "actor_not_found" ||
+            error.code === "invalid_agent_registration" ||
+            error.code === "invalid_event_query" ||
+            error.code === "approval_action_hash_required"
           ? 400
           : 409;
     return reply.code(status).send({ error: error.message, code: error.code });
@@ -651,6 +663,34 @@ function sendError(reply: FastifyReply, error: unknown) {
 
 function requestObject(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+}
+
+function requireApprovalActionHash(input: Record<string, unknown>): void {
+  if (typeof input.actionHash !== "string" || input.actionHash.trim().length === 0) {
+    throw new ControlStackError("approval_action_hash_required", "approval_action_hash_required: actionHash is required");
+  }
+}
+
+function approvalActionHashesByWorkItem(
+  policy: ReturnType<typeof createPolicyEngine>,
+  workItems: WorkItem[],
+  actor: string | undefined
+): Record<string, string[]> {
+  if (!actor) {
+    return {};
+  }
+  return Object.fromEntries(
+    workItems
+      .filter((workItem) => workItem.status === "needs_approval")
+      .map((workItem) => [
+        workItem.id,
+        policy
+          .evaluateWorkItem(workItem, actor, "approve")
+          .filter((evaluation) => evaluation.decision.decision === "require_approval")
+          .map((evaluation) => evaluation.actionHash)
+      ])
+      .filter(([, hashes]) => hashes.length > 0)
+  );
 }
 
 function eventReadOptions(query: unknown, filters: Pick<ReadEventsOptions, "workItemId" | "agentId"> = {}): ReadEventsOptions {

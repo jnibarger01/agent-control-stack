@@ -100,7 +100,7 @@ Trust assumptions:
 - Symlinks and path traversal.
 - Secret-bearing file reads.
 - Output redaction.
-- Approval grants and token storage.
+- Approval grants and request-hash storage.
 - Audit-log integrity.
 - Worker lease lifecycle.
 - HTTPS or tunnel ingress.
@@ -121,7 +121,7 @@ Trust assumptions:
 - The worker only starts rows that are already `approved`; the sandbox only accepts `running` work items.
 - Work-item state changes and audit events are written in one SQLite transaction.
 - Policy decisions are audited as `policy.decided`.
-- Approvals are stored by work item and exact action hash, with request hashes, token hashes, expiry, and consumed status.
+- Approvals are stored by work item and exact action hash, with request hashes, expiry, and consumed status. The dormant `approval_token_hash` column remains for compatibility but is not an authorization artifact.
 - Audit rows store previous and current event hashes so tampering is detectable by verification.
 - Running work has a worker lease; startup reaps expired leases as failed.
 - Result submission requires matching work item id, worker id, lease token, and an unexpired lease.
@@ -160,7 +160,7 @@ These must remain true across releases:
 - No mutating operation executes without a policy decision.
 - No approval-gated action executes without request-bound approval.
 - Approval is bound to exact canonical action content.
-- Approval tokens are one-time use and expiring.
+- Approval grants are exact-action and request-hash bound, expiring, and consumed once.
 - Denylisted paths override allowlisted paths.
 - Symlink escapes are blocked before live filesystem execution.
 - Secret-looking data is redacted before returning to MCP and before audit persistence.
@@ -188,7 +188,7 @@ Minimum test groups:
 
 ## Deferred Hardening
 
-Layer 2 must bind approvals to authenticated approvers and bind remote result submission to worker identity. Real plugin or command execution also needs process isolation before enablement: firejail, nsjail, bubblewrap, Docker, or equivalent. Add that behind `packages/sandbox` instead of teaching callers about the runtime.
+The execution slice authorization artifact will be an Ed25519-signed approval grant per the locked PDP contract. Do not add a parallel approval bearer token. Real plugin or command execution also needs process isolation before enablement: firejail, nsjail, bubblewrap, Docker, or equivalent. Add that behind `packages/sandbox` instead of teaching callers about the runtime.
 
 Layer 2 should also move risk-based approval routing into `packages/policy-gate`, add lease renewal before live long-running execution, add a true cross-process claim contention check, and treat `draft` as a reserved ingestion state until a draft creation endpoint exists.
 

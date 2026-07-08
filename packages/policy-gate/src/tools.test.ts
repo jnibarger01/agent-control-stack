@@ -116,6 +116,54 @@ describe("policy-gated work item tools", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("keeps multi-action work unclaimable until every required action hash is approved", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-tools-multi-approval-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, fakePolicy("require_approval"));
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Multi-action work",
+        requester: "user",
+        intent: "verify per-action approvals",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          { kind: "fs.write", description: "write first", params: { paths: ["src/one.ts"] } },
+          { kind: "fs.write", description: "write second", params: { paths: ["src/two.ts"] } }
+        ],
+        risk: "high"
+      });
+
+      expect(() =>
+        tools.approve_work_item({ id: workItem.id, approvedBy: "approver", reason: "missing hash" })
+      ).toThrow("approval_action_hash_required");
+
+      const first = tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "approver",
+        reason: "approve one",
+        actionHash: "hash_0"
+      });
+
+      expect(first.approvals).toHaveLength(1);
+      expect(first.workItem.status).toBe("needs_approval");
+      expect(tools.claim_next_approved_work_item({ workerId: "worker-a" })).toBeUndefined();
+
+      const second = tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "approver",
+        reason: "approve two",
+        actionHash: "hash_1"
+      });
+
+      expect(second.approvals).toHaveLength(1);
+      expect(second.workItem.status).toBe("approved");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 function fakePolicy(decision: PolicyDecision["decision"]): PolicyEngine {

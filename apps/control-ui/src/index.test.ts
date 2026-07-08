@@ -23,7 +23,12 @@ describe("renderDashboard", () => {
   };
 
   it("renders mission control without inventing agent health", () => {
-    const html = renderDashboard({ workItems: [workItem, blockedItem], events: [], now: new Date("2026-07-05T00:01:00.000Z") });
+    const html = renderDashboard({
+      workItems: [workItem, blockedItem],
+      events: [],
+      approvalActionHashesByWorkItem: { wrk_test: ["hash-one", "hash-two"] },
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
 
     expect(html).toContain("AgentOS Mission Control");
     expect(html).toContain("Inspect me");
@@ -33,6 +38,9 @@ describe("renderDashboard", () => {
     expect(html).not.toContain("ACS_GATEWAY_TOKEN");
     expect(html).toContain("agent.prompt");
     expect(html).toContain(`data-approve="wrk_test"`);
+    expect(html).toContain(`data-action-hash="hash-one"`);
+    expect(html).toContain(`data-action-hash="hash-two"`);
+    expect(html).toContain("payload.actionHash = button.dataset.actionHash;");
     expect(html).toContain(`data-reject="wrk_test"`);
     expect(html).toContain(`data-unblock="wrk_blocked"`);
     expect(html).toContain(`data-reason="wrk_test"`);
