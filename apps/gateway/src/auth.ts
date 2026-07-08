@@ -196,10 +196,11 @@ function resolveMcpTunnelFromEnv(env: NodeJS.ProcessEnv): McpTunnelOptions | und
   if (!trustedProxies) {
     throw new Error("ACS_TRUSTED_TUNNEL_PROXY must be set when ACS_AUTH_MODE=tunnel_id");
   }
+  const allowUnsignedTunnelId = env.NODE_ENV !== "production" && env.ACS_ALLOW_UNSIGNED_TUNNEL_ID_DEV === "1";
   const scopes = parseMcpScopes(env.ACS_TUNNEL_SCOPES) ?? DEFAULT_TUNNEL_SCOPES;
   return {
     trustedProxies,
-    connectors: connectorEntries?.map((entry) => tunnelConnector(entry, scopes)) ?? []
+    connectors: allowUnsignedTunnelId ? connectorEntries?.map((entry) => tunnelConnector(entry, scopes)) ?? [] : []
   };
 }
 

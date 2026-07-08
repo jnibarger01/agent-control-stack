@@ -686,6 +686,52 @@ describe("gateway MCP transport", () => {
           })
         ])
       );
+      expect(response.json().result.tools.map((tool: { name: string }) => tool.name)).not.toEqual(
+        expect.arrayContaining(["claim_next_approved_work_item", "submit_work_result"])
+      );
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects remote MCP worker claim tools and does not leak lease tokens", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-worker-tool-lockdown-"));
+    const dbPath = join(dir, "control.db");
+    const oauth = createTestOAuth();
+    const seed = new SqliteWorkItemStore(dbPath);
+    const seedTools = createWorkItemTools(seed, createPolicyEngine());
+    seed.registerActor({ id: "oauth-user", actorType: "HUMAN", displayName: "OAuth User", externalRef: "oauth_jwt:user_123" });
+    const workItem = seedTools.create_work_item({
+      title: "Approved remote claim target",
+      requester: "user",
+      intent: "verify remote worker claim lockdown",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
+      risk: "low"
+    });
+    seed.close();
+    const app = buildGateway({ dbPath, logger: false, mcpAuth: { oauth: oauth.options } });
+
+    try {
+      expect(workItem.status).toBe("approved");
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:worker:claim" })}` },
+        payload: mcpToolCall("remote-worker-claim", "claim_next_approved_work_item", { workerId: "remote-worker" })
+      });
+
+      expect(response.statusCode).not.toBe(200);
+      expect(JSON.stringify(response.json())).not.toContain("leaseToken");
+
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.get(workItem.id)?.status).toBe("approved");
+        expect(JSON.stringify(store.readEvents())).not.toContain("leaseToken");
+      } finally {
+        store.close();
+      }
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -1132,6 +1178,47 @@ describe("gateway MCP transport", () => {
       if (!appClosed) {
         await app.close();
       }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses unsigned tunnel-id MCP auth in production even when env allowlists a tunnel", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("ACS_AUTH_MODE", "tunnel_id");
+    vi.stubEnv("ACS_TRUSTED_TUNNEL_PROXY", "127.0.0.1");
+    vi.stubEnv("ACS_ALLOWED_TUNNEL_IDS", "chatgpt-prod=tunnel_abc123");
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-prod-unsigned-tunnel-"));
+    const dbPath = join(dir, "control.db");
+    seedActor(dbPath, "chatgpt-prod", "tunnel_id:chatgpt-prod");
+    const precheck = new SqliteWorkItemStore(dbPath);
+    const eventCountBefore = precheck.readEvents().length;
+    precheck.close();
+    const app = buildGateway({ dbPath, logger: false });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        remoteAddress: "127.0.0.1",
+        headers: {
+          "x-acs-tunnel-id": "tunnel_abc123",
+          "x-acs-connector-id": "chatgpt-prod"
+        },
+        payload: createWorkItemToolCall("prod-unsigned-tunnel")
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json().result.structuredContent.authError).toMatch(/missing_token|invalid_token/);
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toEqual([]);
+        expect(store.readEvents()).toHaveLength(eventCountBefore);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      vi.unstubAllEnvs();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -2017,6 +2104,33 @@ describe("gateway MCP transport", () => {
           ACS_AUTH_MODE: "tunnel_id",
           ACS_TRUSTED_TUNNEL_PROXY: "127.0.0.1,::1",
           ACS_ALLOWED_TUNNEL_IDS: "chatgpt-prod=tunnel_abc123"
+        }
+      })?.tunnel
+    ).toEqual({
+      trustedProxies: ["127.0.0.1", "::1"],
+      connectors: []
+    });
+    expect(
+      resolveMcpAuthOptions({
+        env: {
+          NODE_ENV: "production",
+          ACS_AUTH_MODE: "tunnel_id",
+          ACS_TRUSTED_TUNNEL_PROXY: "127.0.0.1,::1",
+          ACS_ALLOWED_TUNNEL_IDS: "chatgpt-prod=tunnel_abc123",
+          ACS_ALLOW_UNSIGNED_TUNNEL_ID_DEV: "1"
+        }
+      })?.tunnel
+    ).toEqual({
+      trustedProxies: ["127.0.0.1", "::1"],
+      connectors: []
+    });
+    expect(
+      resolveMcpAuthOptions({
+        env: {
+          ACS_AUTH_MODE: "tunnel_id",
+          ACS_TRUSTED_TUNNEL_PROXY: "127.0.0.1,::1",
+          ACS_ALLOWED_TUNNEL_IDS: "chatgpt-prod=tunnel_abc123",
+          ACS_ALLOW_UNSIGNED_TUNNEL_ID_DEV: "1"
         }
       })?.tunnel
     ).toEqual({

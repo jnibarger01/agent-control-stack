@@ -20,9 +20,7 @@ export const workItemToolNames = [
   "approve_work_item",
   "unblock_work_item",
   "reject_work_item",
-  "cancel_work_item",
-  "claim_next_approved_work_item",
-  "submit_work_result"
+  "cancel_work_item"
 ] as const;
 
 const idInputSchema = z.object({ id: z.string().min(1) });

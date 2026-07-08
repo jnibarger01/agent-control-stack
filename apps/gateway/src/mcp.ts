@@ -287,9 +287,6 @@ function requiredScopes(name: GatewayToolName): McpScope[] {
     case "reject_work_item":
     case "cancel_work_item":
       return ["acs:work:approve"];
-    case "claim_next_approved_work_item":
-    case "submit_work_result":
-      return ["acs:worker:claim"];
   }
 }
 
@@ -326,10 +323,6 @@ function toolDescription(name: GatewayToolName): string {
       return "Reject a work item through a distinct terminal denial state.";
     case "cancel_work_item":
       return "Cancel a work item through the work-item state machine.";
-    case "claim_next_approved_work_item":
-      return "Claim the next approved work item through the lease-bound worker path.";
-    case "submit_work_result":
-      return "Submit a worker result with matching worker id and lease token.";
   }
 }
 
@@ -388,27 +381,6 @@ function toolInputSchema(name: GatewayToolName): Record<string, unknown> {
         properties: {
           id: { type: "string" },
           reason: { type: "string" }
-        }
-      };
-    case "claim_next_approved_work_item":
-      return {
-        type: "object",
-        required: ["workerId"],
-        properties: {
-          workerId: { type: "string" },
-          leaseMs: { type: "number" }
-        }
-      };
-    case "submit_work_result":
-      return {
-        type: "object",
-        required: ["id", "workerId", "leaseToken", "status"],
-        properties: {
-          id: { type: "string" },
-          workerId: { type: "string" },
-          leaseToken: { type: "string" },
-          status: { type: "string", enum: ["succeeded", "failed", "blocked"] },
-          result: { type: "object" }
         }
       };
     case "get_work_item":
