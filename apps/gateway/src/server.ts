@@ -13,9 +13,12 @@ import {
   listWorkItemsSchema,
   requesterSchema,
   SqliteWorkItemStore,
+  DEFAULT_EVENT_LIMIT,
+  MAX_EVENT_LIMIT,
   acpRoles,
   actorTypes,
   registryStatuses,
+  type ReadEventsOptions,
   type StoredAuditEvent
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
@@ -90,6 +93,12 @@ const heartbeatBodySchema = z.object({
   currentTask: optionalStringSchema,
   lastError: optionalStringSchema
 });
+const eventQuerySchema = z
+  .object({
+    limit: z.coerce.number().int().positive().optional(),
+    afterSequence: z.coerce.number().int().nonnegative().optional()
+  })
+  .passthrough();
 const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
@@ -178,10 +187,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   }
 
-  app.get("/", { preHandler: requireRead }, async (_request, reply) => {
-    const workItemList = workItems.list();
-    const events = workItems.readEvents();
-    reply.type("text/html").send(renderDashboard({ workItems: workItemList, events, registeredAgents: workItems.listRegistryAgents() }));
+  app.get("/", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      const workItemList = workItems.list();
+      const events = workItems.readEvents(eventReadOptions(request.query));
+      reply.type("text/html").send(renderDashboard({ workItems: workItemList, events, registeredAgents: workItems.listRegistryAgents() }));
+    } catch (error) {
+      return sendError(reply, error);
+    }
   });
 
   app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
@@ -328,11 +341,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.get<{ Params: { id: string } }>("/api/agents/:id", { preHandler: requireRead }, async (request, reply) => {
-    const agent = workItems.getRegistryAgent(request.params.id);
-    if (!agent) {
-      return reply.code(404).send({ error: "agent not found" });
+    try {
+      const agent = workItems.getRegistryAgent(request.params.id);
+      if (!agent) {
+        return reply.code(404).send({ error: "agent not found" });
+      }
+      return {
+        agent,
+        adapterStatus: adapterStatusFor(request.params.id),
+        events: workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }))
+      };
+    } catch (error) {
+      return sendError(reply, error);
     }
-    return { agent, adapterStatus: adapterStatusFor(request.params.id), events: agentEvents(workItems.readEvents(), request.params.id) };
   });
 
   app.patch<{ Params: { id: string } }>("/api/agents/:id", async (request, reply) => {
@@ -392,27 +413,40 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-  app.get("/agents", { preHandler: requireRead }, async () => ({
-    agents: projectAgents(workItems.list(), workItems.readEvents(), new Date(), workItems.listRegistryAgents())
-  }));
+  app.get("/agents", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      const events = workItems.readEvents(eventReadOptions(request.query));
+      return { agents: projectAgents(workItems.list(), events, new Date(), workItems.listRegistryAgents()) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
 
   app.get<{ Params: { id: string } }>("/agents/:id", { preHandler: requireRead }, async (request, reply) => {
-    const events = workItems.readEvents();
-    const agent = projectAgents(workItems.list(), events, new Date(), workItems.listRegistryAgents()).find(
-      (candidate) => candidate.id === request.params.id
-    );
-    if (!agent) {
-      return reply.code(404).send({ error: "agent not found" });
+    try {
+      const events = workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }));
+      const agent = projectAgents(workItems.list(), events, new Date(), workItems.listRegistryAgents()).find(
+        (candidate) => candidate.id === request.params.id
+      );
+      if (!agent) {
+        return reply.code(404).send({ error: "agent not found" });
+      }
+      return { agent, adapterStatus: adapterStatusFor(request.params.id), events };
+    } catch (error) {
+      return sendError(reply, error);
     }
-    return { agent, adapterStatus: adapterStatusFor(request.params.id), events: agentEvents(events, request.params.id) };
   });
 
   app.get<{ Params: { id: string } }>("/work-items/:id", { preHandler: requireRead }, async (request, reply) => {
-    const workItem = tools.get_work_item({ id: request.params.id });
-    if (!workItem) {
-      return reply.code(404).send({ error: "work item not found" });
+    try {
+      const workItem = tools.get_work_item({ id: request.params.id });
+      if (!workItem) {
+        return reply.code(404).send({ error: "work item not found" });
+      }
+      return { workItem, events: workItems.readEvents(eventReadOptions(request.query, { workItemId: request.params.id })) };
+    } catch (error) {
+      return sendError(reply, error);
     }
-    return { workItem, events: workItemEvents(workItems.readEvents(), request.params.id) };
   });
 
   app.post("/work-items", async (request, reply) => {
@@ -525,27 +559,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   return app;
 }
 
-function workItemEvents(events: StoredAuditEvent[], workItemId: string): StoredAuditEvent[] {
-  return events.filter((event) => {
-    const body = event.body && typeof event.body === "object" ? (event.body as Record<string, unknown>) : {};
-    return event.attributes["work_item.id"] === workItemId || body.id === workItemId || body.workItemId === workItemId;
-  });
-}
-
-function agentEvents(events: StoredAuditEvent[], agentId: string): StoredAuditEvent[] {
-  return events.filter((event) => {
-    const body = event.body && typeof event.body === "object" ? (event.body as Record<string, unknown>) : {};
-    return (
-      event.attributes["worker.id"] === agentId ||
-      event.attributes["agent.id"] === agentId ||
-      event.attributes["connector.id"] === agentId ||
-      event.attributes["auth.connector_id"] === agentId ||
-      body.connectorId === agentId ||
-      body.workerId === agentId
-    );
-  });
-}
-
 function sendError(reply: FastifyReply, error: unknown) {
   if (error instanceof ZodError) {
     return reply.code(400).send({ error: "invalid request" });
@@ -554,7 +567,7 @@ function sendError(reply: FastifyReply, error: unknown) {
     const status =
       error.code === "work_item_not_found" || error.code === "agent_not_found"
         ? 404
-        : error.code === "actor_not_found" || error.code === "invalid_agent_registration"
+        : error.code === "actor_not_found" || error.code === "invalid_agent_registration" || error.code === "invalid_event_query"
           ? 400
           : 409;
     return reply.code(status).send({ error: error.message, code: error.code });
@@ -564,6 +577,15 @@ function sendError(reply: FastifyReply, error: unknown) {
 
 function requestObject(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+}
+
+function eventReadOptions(query: unknown, filters: Pick<ReadEventsOptions, "workItemId" | "agentId"> = {}): ReadEventsOptions {
+  const parsed = eventQuerySchema.parse(query ?? {});
+  return {
+    ...filters,
+    limit: parsed.limit === undefined ? DEFAULT_EVENT_LIMIT : Math.min(parsed.limit, MAX_EVENT_LIMIT),
+    ...(parsed.afterSequence === undefined ? {} : { afterSequence: parsed.afterSequence })
+  };
 }
 
 function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
@@ -759,7 +781,7 @@ function renderLoginPage(): string {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ token: String(form.get('token') || '') })
         });
-        if (res.ok) location.reload();
+        if (res.ok) location.assign('/');
         else document.querySelector('output').textContent = 'Unauthorized';
       });
     </script>

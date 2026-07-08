@@ -4,11 +4,123 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { ControlStackError, controlPlaneMigrations } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
-import { SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
+import { DEFAULT_EVENT_LIMIT, SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
 
 const domainTransition = { via: "domain_service" } as const;
 
 describe("work item state machine", () => {
+  it("reads audit events with bounded pagination filters", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-event-pagination-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        store.recordConnectorRequest({
+          actor: "user",
+          source: "test",
+          route: "/mcp",
+          toolName: `tool-${index}`
+        });
+      }
+
+      const limited = store.readEvents({ limit: 2 });
+      expect(limited).toHaveLength(2);
+      expect(limited.map((event) => event.sequence)).toEqual([2, 3]);
+      expect(store.readEvents({ afterSequence: 1 }).map((event) => event.sequence)).toEqual([2, 3]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("applies a default audit event limit", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-event-default-limit-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      for (let index = 0; index < DEFAULT_EVENT_LIMIT + 5; index += 1) {
+        store.recordConnectorRequest({
+          actor: "user",
+          source: "test",
+          route: "/mcp",
+          toolName: `tool-${index}`
+        });
+      }
+
+      const events = store.readEvents();
+      expect(events).toHaveLength(DEFAULT_EVENT_LIMIT);
+      expect(events[0]?.sequence).toBe(6);
+      expect(events.at(-1)?.sequence).toBe(DEFAULT_EVENT_LIMIT + 5);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("reads only events for the requested work item or agent", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-event-filter-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+      const first = store.create({
+        title: "First filtered item",
+        requester: "user",
+        intent: "verify item filtering",
+        requestedActions: [{ kind: "manual", description: "filter" }],
+        risk: "low"
+      });
+      const second = store.create({
+        title: "Second filtered item",
+        requester: "user",
+        intent: "verify item filtering",
+        requestedActions: [{ kind: "manual", description: "filter" }],
+        risk: "low"
+      });
+      store.recordPolicyDecision({
+        workItemId: first.id,
+        actionHash: "hash-first",
+        decision: "allow",
+        reason: "test",
+        matchedRules: [],
+        context: {}
+      });
+      store.recordPolicyDecision({
+        workItemId: second.id,
+        actionHash: "hash-second",
+        decision: "allow",
+        reason: "test",
+        matchedRules: [],
+        context: {}
+      });
+
+      store.createRegistryAgent({
+        id: "agent-one",
+        name: "Agent One",
+        kind: "cli",
+        acpRole: "IMPLEMENTATION_AGENT",
+        actorId: "user"
+      });
+      store.createRegistryAgent({
+        id: "agent-two",
+        name: "Agent Two",
+        kind: "cli",
+        acpRole: "IMPLEMENTATION_AGENT",
+        actorId: "user"
+      });
+      store.recordAgentHeartbeat("agent-one", { status: "AVAILABLE", actorId: "user" });
+      store.recordAgentHeartbeat("agent-two", { status: "AVAILABLE", actorId: "user" });
+
+      const workItemEvents = store.readEvents({ workItemId: first.id, limit: 10 });
+      expect(workItemEvents).toHaveLength(2);
+      expect(workItemEvents.every((event) => event.attributes["work_item.id"] === first.id)).toBe(true);
+
+      const agentEvents = store.readEvents({ agentId: "agent-one", limit: 10 });
+      expect(agentEvents).toHaveLength(2);
+      expect(agentEvents.every((event) => event.attributes["agent.id"] === "agent-one")).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
   it("rejects invalid transitions", () => {
     const draft = {
       id: "wrk_test",
@@ -607,7 +719,8 @@ describe("work item state machine", () => {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["actors", "agents", "capabilities", "heartbeats"]));
       expect(migrationRows(dbPath)).toEqual([
         { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
-        { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" }
+        { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
+        { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -640,7 +753,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2]);
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" })])
       );

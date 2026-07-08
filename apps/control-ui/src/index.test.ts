@@ -41,6 +41,13 @@ describe("renderDashboard", () => {
     expect(html).not.toContain("data-approve-all");
   });
 
+  it("does not hard-reload the dashboard for SSE audit events", () => {
+    const html = renderDashboard({ workItems: [workItem], events: [], now: new Date("2026-07-05T00:01:00.000Z") });
+
+    expect(html).toContain("new EventSource('/events')");
+    expect(html).not.toContain("location.reload");
+  });
+
   it("projects online status only from recent heartbeat events", () => {
     const model: MissionControlViewModel = {
       workItems: [],

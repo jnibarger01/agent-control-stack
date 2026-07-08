@@ -268,22 +268,53 @@ function composer(): string {
 function clientScript(): string {
   return `
 const source = new EventSource('/events');
-source.addEventListener('work_item.created', () => location.reload());
-source.addEventListener('work_item.needs_approval', () => location.reload());
-source.addEventListener('work_item.approved', () => location.reload());
-source.addEventListener('work_item.running', () => location.reload());
-source.addEventListener('work_item.blocked', () => location.reload());
-source.addEventListener('work_item.failed', () => location.reload());
-source.addEventListener('work_item.succeeded', () => location.reload());
-source.addEventListener('work_item.cancelled', () => location.reload());
-source.addEventListener('agent.created', () => location.reload());
-source.addEventListener('agent.updated', () => location.reload());
-source.addEventListener('agent.heartbeat', () => location.reload());
-source.addEventListener('agent.capabilities_replaced', () => location.reload());
-source.addEventListener('acp.initialized', () => location.reload());
-source.addEventListener('acp.disconnected', () => location.reload());
-source.addEventListener('acp.error', () => location.reload());
-source.addEventListener('tunnel_session.heartbeat', () => location.reload());
+[
+  'work_item.created',
+  'work_item.needs_approval',
+  'work_item.approved',
+  'work_item.running',
+  'work_item.blocked',
+  'work_item.failed',
+  'work_item.succeeded',
+  'work_item.cancelled',
+  'agent.created',
+  'agent.updated',
+  'agent.heartbeat',
+  'agent.capabilities_replaced',
+  'acp.initialized',
+  'acp.disconnected',
+  'acp.error',
+  'tunnel_session.heartbeat'
+].forEach((name) => source.addEventListener(name, appendAuditEvent));
+
+function appendAuditEvent(event) {
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch {
+    return;
+  }
+  const panel = document.querySelector('#events');
+  if (!panel) return;
+  panel.querySelector('.empty')?.remove();
+  let list = panel.querySelector('.timeline');
+  if (!list) {
+    list = document.createElement('ol');
+    list.className = 'timeline';
+    panel.appendChild(list);
+  }
+  const item = document.createElement('li');
+  const time = document.createElement('time');
+  const name = document.createElement('strong');
+  const attrs = document.createElement('small');
+  const nanos = Number(data.timeUnixNano);
+  time.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
+  name.textContent = data.name || event.type;
+  attrs.textContent = JSON.stringify(data.attributes || {});
+  item.append(time, name, attrs);
+  list.prepend(item);
+  while (list.children.length > 10) list.lastElementChild?.remove();
+}
 
 document.querySelectorAll('[data-work-item]').forEach((button) => {
   button.addEventListener('click', async () => {
@@ -319,7 +350,7 @@ document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach
     const res = await fetch('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
     const body = await res.json();
     output.textContent = res.ok ? action + ' accepted' : 'Rejected: ' + JSON.stringify(body);
-    if (res.ok) setTimeout(() => location.reload(), 500);
+    if (res.ok) setTimeout(() => location.assign(location.href), 500);
   });
 });
 
@@ -345,7 +376,7 @@ document.querySelector('#task-form')?.addEventListener('submit', async (event) =
   const res = await fetch('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
   const body = await res.json();
   document.querySelector('#task-result').textContent = res.ok ? 'Created ' + body.id : 'Rejected: ' + (body.error || res.status);
-  if (res.ok) setTimeout(() => location.reload(), 500);
+  if (res.ok) setTimeout(() => location.assign(location.href), 500);
 });`;
 }
 

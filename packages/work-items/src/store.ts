@@ -51,6 +51,15 @@ interface WorkItemRow {
 }
 
 export type StoredAuditEvent = AuditChainEvent;
+export const DEFAULT_EVENT_LIMIT = 100;
+export const MAX_EVENT_LIMIT = 500;
+
+export interface ReadEventsOptions {
+  limit?: number;
+  afterSequence?: number;
+  workItemId?: string;
+  agentId?: string;
+}
 
 interface EventRow {
   sequence: number;
@@ -401,7 +410,7 @@ export interface WorkItemStore {
   create(input: unknown): WorkItem;
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
-  readEvents(): StoredAuditEvent[];
+  readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
   verifyAuditChain(): AuditChainVerification;
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
   approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
@@ -508,10 +517,43 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return rows.map(rowToWorkItem);
   }
 
-  readEvents(): StoredAuditEvent[] {
-    return (this.db.prepare(`SELECT * FROM audit_events ORDER BY sequence ASC`).all() as unknown as EventRow[]).map(
-      rowToEvent
-    );
+  readEvents(options: ReadEventsOptions = {}): StoredAuditEvent[] {
+    const limit = normalizeEventLimit(options.limit);
+    const where: string[] = [];
+    const params: Array<number | string> = [];
+
+    if (options.afterSequence !== undefined) {
+      if (!Number.isInteger(options.afterSequence) || options.afterSequence < 0) {
+        throw new ControlStackError("invalid_event_query", "afterSequence must be a non-negative integer");
+      }
+      where.push("sequence > ?");
+      params.push(options.afterSequence);
+    }
+    if (options.workItemId) {
+      where.push(`json_extract(attributes, '$."work_item.id"') = ?`);
+      params.push(options.workItemId);
+    }
+    if (options.agentId) {
+      where.push(
+        `(
+          json_extract(attributes, '$."agent.id"') = ?
+          OR json_extract(attributes, '$."worker.id"') = ?
+          OR json_extract(attributes, '$."connector.id"') = ?
+          OR json_extract(attributes, '$."auth.connector_id"') = ?
+        )`
+      );
+      params.push(options.agentId, options.agentId, options.agentId, options.agentId);
+    }
+
+    const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+    if (options.afterSequence !== undefined) {
+      return (this.db
+        .prepare(`SELECT * FROM audit_events ${whereSql} ORDER BY sequence ASC LIMIT ?`)
+        .all(...params, limit) as unknown as EventRow[]).map(rowToEvent);
+    }
+    return (this.db
+      .prepare(`SELECT * FROM (SELECT * FROM audit_events ${whereSql} ORDER BY sequence DESC LIMIT ?) ORDER BY sequence ASC`)
+      .all(...params, limit) as unknown as EventRow[]).map(rowToEvent);
   }
 
   listActors(): RegistryActor[] {
@@ -532,7 +574,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   verifyAuditChain(): AuditChainVerification {
-    return verifyAuditChain(this.readEvents());
+    return verifyAuditChain(this.readAllEvents());
   }
 
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem {
@@ -1422,6 +1464,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return rowToEvent(row);
   }
 
+  private readAllEvents(): StoredAuditEvent[] {
+    return (this.db.prepare(`SELECT * FROM audit_events ORDER BY sequence ASC`).all() as unknown as EventRow[]).map(
+      rowToEvent
+    );
+  }
+
   withTransaction<T>(operation: () => T): T {
     return this.write(() => ({ value: operation(), events: [] }));
   }
@@ -1536,6 +1584,16 @@ function rowToEvent(row: EventRow): StoredAuditEvent {
     previousHash: row.previous_hash,
     eventHash: row.event_hash
   };
+}
+
+function normalizeEventLimit(limit: number | undefined): number {
+  if (limit === undefined) {
+    return DEFAULT_EVENT_LIMIT;
+  }
+  if (!Number.isInteger(limit) || limit <= 0) {
+    throw new ControlStackError("invalid_event_query", "limit must be a positive integer");
+  }
+  return Math.min(limit, MAX_EVENT_LIMIT);
 }
 
 function rowToConnector(row: ConnectorRow): RegisteredConnector {

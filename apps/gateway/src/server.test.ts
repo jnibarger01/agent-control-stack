@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
-import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT, SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
 import { buildGateway } from "./server.js";
@@ -54,6 +54,98 @@ describe("mission control gateway", () => {
       expect(page.body).toContain("Inspect route");
       expect(agents.json().agents).toEqual(expect.arrayContaining([expect.objectContaining({ id: "chatgpt-prod" })]));
       expect(detail.json().events.map((event: { name: string }) => event.name)).toContain("work_item.created");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds work-item and agent detail audit events", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-detail-event-limit-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+    const workItem = seed.create({
+      title: "Bounded detail",
+      requester: "user",
+      intent: "verify bounded detail events",
+      requestedActions: [{ kind: "manual", description: "bound" }],
+      risk: "low"
+    });
+    for (let index = 0; index < DEFAULT_EVENT_LIMIT + 10; index += 1) {
+      seed.recordPolicyDecision({
+        workItemId: workItem.id,
+        actionHash: `hash-${index}`,
+        decision: "allow",
+        reason: "test",
+        matchedRules: [],
+        context: {}
+      });
+    }
+    seed.createRegistryAgent({
+      id: "api-agent",
+      name: "API Agent",
+      kind: "service",
+      acpRole: "ORCHESTRATION_LAYER",
+      actorId: "user"
+    });
+    for (let index = 0; index < 12; index += 1) {
+      seed.recordAgentHeartbeat("api-agent", { status: "AVAILABLE", currentTask: `task-${index}`, actorId: "user" });
+    }
+    seed.close();
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const defaultWorkItem = await app.inject({ method: "GET", url: `/work-items/${workItem.id}` });
+      const limitedWorkItem = await app.inject({ method: "GET", url: `/work-items/${workItem.id}?limit=5` });
+      const limitedAgent = await app.inject({ method: "GET", url: "/api/agents/api-agent?limit=4" });
+
+      expect(defaultWorkItem.json().events).toHaveLength(DEFAULT_EVENT_LIMIT);
+      expect(limitedWorkItem.json().events).toHaveLength(5);
+      expect(limitedWorkItem.json().events.every((event: { attributes: Record<string, string> }) => event.attributes["work_item.id"] === workItem.id)).toBe(
+        true
+      );
+      expect(limitedAgent.json().events).toHaveLength(4);
+      expect(limitedAgent.json().events.every((event: { attributes: Record<string, string> }) => event.attributes["agent.id"] === "api-agent")).toBe(
+        true
+      );
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects invalid event limits and caps overlarge limits", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-event-limit-validation-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    const workItem = seed.create({
+      title: "Limit validation",
+      requester: "user",
+      intent: "verify limit validation",
+      requestedActions: [{ kind: "manual", description: "bound" }],
+      risk: "low"
+    });
+    for (let index = 0; index < MAX_EVENT_LIMIT + 20; index += 1) {
+      seed.recordPolicyDecision({
+        workItemId: workItem.id,
+        actionHash: `hash-${index}`,
+        decision: "allow",
+        reason: "test",
+        matchedRules: [],
+        context: {}
+      });
+    }
+    seed.close();
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const invalid = await app.inject({ method: "GET", url: `/work-items/${workItem.id}?limit=abc` });
+      const overlarge = await app.inject({ method: "GET", url: `/work-items/${workItem.id}?limit=999999` });
+
+      expect(invalid.statusCode).toBe(400);
+      expect(overlarge.statusCode).toBe(200);
+      expect(overlarge.json().events).toHaveLength(MAX_EVENT_LIMIT);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

@@ -19,7 +19,8 @@ interface SqliteLike {
 
 const migrationFiles = [
   { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
-  { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" }
+  { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
+  { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
