@@ -1,0 +1,12 @@
+{
+  "name": "acs",
+  "displayName": "Agent Control Stack",
+  "description": "Claude Code integration helpers for Agent Control Stack.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Jace Nibarger"
+  },
+  "homepage": "https://github.com/jnibarger01/agent-control-stack",
+  "repository": "https://github.com/jnibarger01/agent-control-stack",
+  "license": "MIT"
+}
