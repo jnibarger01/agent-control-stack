@@ -1,7 +1,7 @@
 {
   "$schema": "https://json.schemastore.org/claude-code-marketplace.json",
   "name": "agent-control-stack",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "description": "Claude Code plugins for Agent Control Stack, a local approval, policy, audit, and execution control plane for agents.",
   "owner": {
     "name": "Jace Nibarger"
@@ -12,6 +12,7 @@
       "displayName": "Agent Control Stack",
       "description": "Skills, agents, and MCP integration helpers for working with Agent Control Stack.",
       "source": "./plugins/acs",
+      "version": "0.1.0",
       "category": "development",
       "repository": "https://github.com/jnibarger01/agent-control-stack",
       "keywords": [
