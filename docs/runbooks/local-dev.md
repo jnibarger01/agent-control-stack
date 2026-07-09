@@ -22,7 +22,7 @@ ACS_DB_PATH=storage/local.db npm run start:gateway
 
 Open `http://127.0.0.1:3000`.
 
-For protected MCP tool calls in local development, set `ACS_MCP_BEARER_TOKEN` and send it as `Authorization: Bearer <token>`. OAuth, WorkOS, and tunnel ID setup are documented in `docs/oauth-authentication.md`.
+For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send it as `Authorization: Bearer <token>` on `/mcp` requests. OAuth and tunnel ID setup are documented in `docs/oauth-authentication.md`.
 
 ## Run Worker Once
 

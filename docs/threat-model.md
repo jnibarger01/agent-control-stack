@@ -72,7 +72,7 @@ Trust assumptions:
 - HTTP requests enter through `apps/gateway`.
 - Durable state is SQLite in `storage/local.db` by default.
 - Gateway HTTP mutations require configured bearer auth; if mutation auth is not configured, they fail closed with `503`.
-- MCP `tools/call` requests require bearer authorization or a signed tunnel-session assertion from a configured trusted local proxy. A local `ACS_MCP_BEARER_TOKEN` can satisfy this outside production; production uses OAuth/JWKS validation or `ACS_AUTH_MODE=tunnel_id` with persistent connector/session records. `initialize`, `ping`, `notifications/*`, and `tools/list` remain discovery methods.
+- MCP `tools/call` requests require bearer authorization or a signed tunnel-session assertion from a configured trusted local proxy. A local `ACS_MCP_BEARER_TOKEN` can satisfy this outside production; production uses OAuth/JWKS validation or `ACS_AUTH_MODE=tunnel_id` with persistent connector/session records. `initialize`, `ping`, `notifications/*`, and `tools/list` are unauthenticated only for loopback local development when MCP auth is not configured.
 - Worker simulation must only consume approved work-item events.
 - Sandbox execution is currently dry-run only.
 - Result submission is lease-bound in the work-item store; the public HTTP result route is not implemented.
@@ -145,7 +145,7 @@ Trust assumptions:
 | T12 | Audit write failure ignored | Mutation without evidence | Keep work-item state changes and audit events in the same transaction. |
 | T13 | Worker result forgery | Fake completion or data injection | Require worker id and valid lease token for result submission. |
 | T14 | Worker lease replay | Unauthorized result reuse | Store lease token hashes, expire leases, and allow one active lease per running item. |
-| T15 | Exposed unauthenticated endpoint | Remote unauthorized control | Require bearer/OAuth authorization or signed tunnel-session assertions for MCP `tools/call`; require gateway bearer auth for HTTP mutations. |
+| T15 | Exposed unauthenticated endpoint | Remote unauthorized control | Require bearer/OAuth authorization or signed tunnel-session assertions for exposed `/mcp`; require gateway bearer auth for HTTP mutations. |
 | T16 | Output flooding | Memory exhaustion or prompt flooding | Add output byte caps and truncation flags before live command mode. |
 | T17 | Long-running process abuse | Resource exhaustion | Require approval for long-running commands; add process-group termination before live command mode. |
 | T18 | Policy config tampering | Wider authority | Add config digesting and ownership checks before externalized policy config. |
@@ -210,5 +210,5 @@ Before remote ChatGPT connector mode is considered usable:
 - Audit log is hash-chained and verifiable.
 - Secret redaction tests pass.
 - Worker leases are enforced.
-- HTTPS endpoint requires auth.
+- HTTPS or tunneled `/mcp` endpoint requires auth.
 - A live smoke test proves unauthenticated mutation fails.

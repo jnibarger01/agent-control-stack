@@ -38,3 +38,20 @@ npm run start:gateway
 ```
 
 Use the gateway and worker only as a dry-run control-plane loop until the execution slice adds real sandboxing and passes its own release gate.
+
+## MCP Plugin Configuration
+
+Public marketplace/plugin config should point at the local loopback gateway only:
+
+```json
+{
+  "mcpServers": {
+    "acs": {
+      "transport": "http",
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+To use a remote ACS instance, replace the URL with your own authenticated endpoint. Do not point this at someone else's tunnel, and do not expose ACS publicly without OAuth, bearer, or signed tunnel-session auth.

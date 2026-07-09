@@ -6,6 +6,11 @@ import {
   type ReadonlyAcpAdapterConfig
 } from "@agent-control-stack/acp-adapter";
 import { projectAgents, renderDashboard } from "@agent-control-stack/control-ui";
+import {
+  MachineController,
+  loadMachineControllerConfig,
+  type DirectAgentRunner
+} from "@agent-control-stack/machine-controller";
 import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
@@ -34,7 +39,7 @@ import {
   type McpAuthOptions,
   type McpOAuthOptions
 } from "./auth.js";
-import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit } from "./mcp.js";
+import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit, type GatewayDirectAgentController } from "./mcp.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
 
 const approvalBodySchema = z.object({
@@ -133,6 +138,9 @@ export interface GatewayOptions {
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
+  machineControllerConfigPath?: string;
+  directAgentRunner?: DirectAgentRunner;
+  directAgentController?: GatewayDirectAgentController;
   acpAdapter?: ReadonlyAcpAdapterConfig | false;
   moa?: MoaGatewayOverrides | false;
 }
@@ -146,6 +154,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const tools = createWorkItemTools(workItems, policy);
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
+  const directAgentController = resolveDirectAgentController(options);
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
   const acpAdapter = acpAdapterConfig === false || !acpAdapterConfig
     ? undefined
@@ -341,7 +350,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       body: request.body,
       headers: request.headers,
       tools,
+      directAgentController,
       auth: mcpAuth,
+      requireAuthentication: requiresMcpAuthentication(request, mcpAuth),
       resourceMetadataUrl,
       requestId: request.id,
       remoteAddress: request.socket.remoteAddress ?? request.ip,
@@ -742,6 +753,13 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   return token ? { token, actor, ...(actorId ? { actorId } : {}) } : undefined;
 }
 
+function resolveDirectAgentController(options: GatewayOptions): GatewayDirectAgentController | undefined {
+  if (options.directAgentController) return options.directAgentController;
+  const configPath = options.machineControllerConfigPath ?? process.env.ACS_MACHINE_CONTROLLER_CONFIG;
+  if (!configPath) return undefined;
+  return new MachineController(loadMachineControllerConfig(configPath), { directAgentRunner: options.directAgentRunner });
+}
+
 function resolveMcpAuth(options: GatewayOptions, workItems: SqliteWorkItemStore): McpAuthOptions | undefined {
   const resolved = resolveMcpAuthOptions({
     localBearerToken: options.mcpAuth?.localBearerToken,
@@ -801,6 +819,10 @@ function protectedResourceMetadata(request: FastifyRequest, auth: McpAuthOptions
     scopes_supported: [...MCP_SCOPES],
     bearer_methods_supported: ["header"] as const
   };
+}
+
+function requiresMcpAuthentication(request: FastifyRequest, auth: McpAuthOptions | undefined): boolean {
+  return Boolean(auth) || !isDevelopmentLoopbackRequest(request);
 }
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
@@ -988,11 +1010,27 @@ function isDevelopmentLoopbackRequest(request: FastifyRequest): boolean {
   if (process.env.HOST && !isLoopbackAddress(process.env.HOST)) {
     return false;
   }
-  return isLoopbackAddress(request.socket.remoteAddress ?? request.ip);
+  return (
+    isLoopbackAddress(request.socket.remoteAddress ?? request.ip) &&
+    isLoopbackHost(request.headers["x-forwarded-host"] ?? request.headers.host)
+  );
 }
 
 function isLoopbackAddress(address: string | undefined): boolean {
   return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1" || address === "localhost";
+}
+
+function isLoopbackHost(value: string | string[] | undefined): boolean {
+  const host = firstHeader(value);
+  if (!host) {
+    return false;
+  }
+  try {
+    const hostname = new URL(`http://${host}`).hostname.replace(/^\[|\]$/g, "");
+    return isLoopbackAddress(hostname);
+  } catch {
+    return false;
+  }
 }
 
 export async function startGateway(): Promise<FastifyInstance> {

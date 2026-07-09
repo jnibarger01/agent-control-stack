@@ -1,25 +1,25 @@
 # MCP Connector Authentication
 
-The gateway is an OAuth 2.1 resource server for MCP clients. WorkOS AuthKit is the authorization server. The gateway does not implement an authorization server or issue tokens.
+The gateway is an OAuth 2.1 resource server for MCP clients. An external OAuth/OIDC provider is the authorization server. The gateway does not implement an authorization server, issue tokens, or store connector client secrets.
 
 ## Runtime Model
 
-- Public MCP methods: `initialize`, `ping`, `notifications/*`, and `tools/list`.
-- Protected MCP methods: every other method requires bearer authentication or a configured trusted tunnel identity.
+- Local-only development can use unauthenticated MCP discovery when the gateway is bound to loopback and MCP auth is not configured.
+- Remote, production, tunneled, or MCP-authenticated gateway requests require bearer authentication or a configured trusted tunnel identity for all `/mcp` methods, including `initialize`, `ping`, `notifications/*`, and `tools/list`.
 - `tools/call` also requires the scope mapped to the requested tool.
 - Local development can use `ACS_MCP_BEARER_TOKEN` when `NODE_ENV` is not `production`.
 - Production uses OAuth bearer JWTs verified with `jose` and a remote JWKS, or signed tunnel-session assertions from a trusted local tunnel proxy.
 
 Authentication order is signed tunnel session, local bearer token, then OAuth JWT. Tokens or tunnel sessions that do not match a configured path are rejected.
 
-## WorkOS AuthKit
+## OAuth Provider
 
-Configure a WorkOS AuthKit application for the ChatGPT MCP connector client. Use the gateway MCP URL as the resource indicator/audience, for example:
+Configure an OAuth/OIDC application for the MCP connector client. WorkOS AuthKit is one supported provider; any provider that issues JWT access tokens and publishes a JWKS can work. Use the public gateway MCP URL as the resource indicator/audience, for example:
 
 ```sh
-ACS_OAUTH_ISSUER=<WorkOS AuthKit issuer>
+ACS_OAUTH_ISSUER=<OAuth issuer>
 ACS_OAUTH_AUDIENCE=https://gateway.example.com/mcp
-ACS_OAUTH_JWKS_URI=<WorkOS JWKS URI>
+ACS_OAUTH_JWKS_URI=<OAuth JWKS URI>
 ```
 
 The gateway publishes protected resource metadata at:
@@ -53,6 +53,23 @@ npm run start:gateway
 ```
 
 Use `Authorization: Bearer local-dev-token` for protected MCP tool calls. Do not set `NODE_ENV=production` for local bearer testing; production ignores the local bearer path.
+
+## Public Plugin Configuration
+
+Public marketplace/plugin config should ship with the local loopback URL:
+
+```json
+{
+  "mcpServers": {
+    "acs": {
+      "transport": "http",
+      "url": "http://127.0.0.1:3000/mcp"
+    }
+  }
+}
+```
+
+To use a remote ACS instance, replace the URL with your own authenticated endpoint. Do not point this at someone else's tunnel. Do not expose ACS publicly without auth.
 
 ## Signed Tunnel Session Mode
 
@@ -91,23 +108,56 @@ Only use tunnel ID mode when the gateway is bound to a local interface and the t
 ## Production Deployment
 
 ```sh
+npm run build
+
 NODE_ENV=production \
 ACS_DB_PATH=/var/lib/agent-control-stack/control.db \
-ACS_OAUTH_ISSUER=<WorkOS AuthKit issuer> \
+ACS_OAUTH_ISSUER=<OAuth issuer> \
 ACS_OAUTH_AUDIENCE=https://gateway.example.com/mcp \
-ACS_OAUTH_JWKS_URI=<WorkOS JWKS URI> \
+ACS_OAUTH_JWKS_URI=<OAuth JWKS URI> \
 npm run start:gateway
 ```
 
 If OAuth and tunnel auth are both missing in production, startup logs a warning and protected MCP calls fail closed. Never put bearer tokens, JWTs, tunnel IDs, session IDs, signatures, or private keys in logs.
 
-## ChatGPT MCP Connector
+## Claude Custom Connector
 
 1. Expose the gateway over HTTPS.
-2. Configure WorkOS AuthKit for the connector client and scopes above.
+2. Configure an OAuth/OIDC client for Claude and the scopes above.
 3. Set the gateway production OAuth environment variables.
-4. Register the MCP endpoint as `https://gateway.example.com/mcp`.
-5. Let the client discover `/.well-known/oauth-protected-resource/mcp`.
+4. In Claude, add a custom connector with:
+   - Name: `acs`
+   - Remote MCP server URL: `https://gateway.example.com/mcp`
+   - OAuth Client ID: the client id from your OAuth provider
+   - OAuth Client Secret: the client secret from your OAuth provider
+5. Let Claude discover `/.well-known/oauth-protected-resource/mcp`.
 6. Request the narrowest tool scopes needed by the connector.
+
+Do not use `http://127.0.0.1:3000/mcp` in Claude. Claude needs a public HTTPS URL. Do not use `ACS_MCP_BEARER_TOKEN` for Claude custom connectors unless Claude exposes a way to send `Authorization: Bearer`; that variable is only a local development fallback outside production.
+
+Check the local MCP endpoint with POST JSON-RPC, not GET:
+
+```sh
+curl -fsS -X POST http://127.0.0.1:3000/mcp \
+  -H 'content-type: application/json' \
+  -H 'authorization: Bearer local-dev-token' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+```
+
+Check the public metadata endpoint before adding the connector:
+
+```sh
+curl -fsS https://gateway.example.com/.well-known/oauth-protected-resource/mcp
+```
+
+For tunnel-based local exposure, use the tunnel's public HTTPS domain in Claude:
+
+```text
+https://<your-public-tunnel-domain>/mcp
+```
+
+## ChatGPT MCP Connector
+
+Use the same OAuth resource-server setup as Claude. Register the MCP endpoint as `https://gateway.example.com/mcp` and let the client discover `/.well-known/oauth-protected-resource/mcp`.
 
 Authenticated MCP requests are written to the audit chain as `connector.requested` events with auth method, subject, issuer, connector id, tunnel id, session id, scopes, request id, and work item id when a tool call creates or returns one. The gateway never stores bearer tokens or JWTs.

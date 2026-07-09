@@ -767,6 +767,81 @@ describe("gateway MCP transport", () => {
     }
   });
 
+  it("treats direct agent MCP runs as approval-scoped mutating calls", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-direct-agent-"));
+    const dbPath = join(dir, "control.db");
+    const oauth = createTestOAuth();
+    seedActor(dbPath, "oauth-user", "oauth_jwt:user_123");
+    const directAgentController = {
+      callTool: vi.fn(async () => ({
+        ok: true,
+        agent: "codex",
+        stdout: "review ok",
+        stderr: "",
+        exitCode: 0,
+        durationMs: 1,
+        error: null
+      }))
+    };
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { oauth: oauth.options },
+      directAgentController
+    });
+    const directRunPayload = mcpToolCall("direct-agent", "test.agent.run", {
+      agent: "codex",
+      prompt: "Inspect only",
+      cwd: "/repo"
+    });
+
+    try {
+      const listed = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}` },
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" }
+      });
+      const directTool = listed.json().result.tools.find((tool: { name: string }) => tool.name === "test.agent.run");
+      const readScoped = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}` },
+        payload: directRunPayload
+      });
+
+      expect(directTool).toMatchObject({
+        name: "test.agent.run",
+        securitySchemes: [{ type: "oauth2", scopes: ["acs:work:approve"] }],
+        annotations: { readOnlyHint: false, openWorldHint: true }
+      });
+      expect(readScoped.statusCode).toBe(403);
+      expect(readScoped.json().result.structuredContent).toMatchObject({
+        authError: "insufficient_scope",
+        requiredScopes: ["acs:work:approve"]
+      });
+      expect(directAgentController.callTool).not.toHaveBeenCalled();
+
+      const approvalScoped = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:approve" })}` },
+        payload: directRunPayload
+      });
+
+      expect(approvalScoped.statusCode).toBe(200);
+      expect(approvalScoped.json().result.structuredContent).toMatchObject({ ok: true, agent: "codex" });
+      expect(directAgentController.callTool).toHaveBeenCalledWith("test.agent.run", {
+        agent: "codex",
+        prompt: "Inspect only",
+        cwd: "/repo"
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects remote MCP worker claim tools and does not leak lease tokens", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-worker-tool-lockdown-"));
     const dbPath = join(dir, "control.db");
@@ -1920,7 +1995,7 @@ describe("gateway MCP transport", () => {
     }
   });
 
-  it("keeps initialize and tools/list available without OAuth bearer auth", async () => {
+  it("rejects unauthenticated initialize and tools/list when OAuth auth is configured", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
     const oauth = createTestOAuth();
     const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, mcpAuth: { oauth: oauth.options } });
@@ -1936,16 +2011,23 @@ describe("gateway MCP transport", () => {
         url: "/mcp",
         payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" }
       });
+      const authenticatedTools = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}` },
+        payload: { jsonrpc: "2.0", id: "tools-authenticated", method: "tools/list" }
+      });
 
-      expect(initialized.statusCode).toBe(200);
-      expect(tools.statusCode).toBe(200);
+      expect(initialized.statusCode).toBe(401);
+      expect(tools.statusCode).toBe(401);
+      expect(authenticatedTools.statusCode).toBe(200);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("keeps ping and notifications public without OAuth bearer auth", async () => {
+  it("rejects unauthenticated ping and notifications when OAuth auth is configured", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-"));
     const oauth = createTestOAuth();
     const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, mcpAuth: { oauth: oauth.options } });
@@ -1962,8 +2044,8 @@ describe("gateway MCP transport", () => {
         payload: { jsonrpc: "2.0", id: null, method: "notifications/initialized" }
       });
 
-      expect(ping.statusCode).toBe(200);
-      expect(notification.statusCode).toBe(200);
+      expect(ping.statusCode).toBe(401);
+      expect(notification.statusCode).toBe(401);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
