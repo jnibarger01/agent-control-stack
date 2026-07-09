@@ -9,6 +9,7 @@
   "references": [
     { "path": "../../apps/control-ui" },
     { "path": "../../packages/acp-adapter" },
+    { "path": "../../packages/machine-controller" },
     { "path": "../../packages/moa-orchestrator" },
     { "path": "../../packages/policy-gate" },
     { "path": "../../packages/shared" },

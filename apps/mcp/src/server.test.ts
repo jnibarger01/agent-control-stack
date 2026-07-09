@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { MachineController, loadMachineControllerConfig } from "@agent-control-stack/machine-controller";
+import { MachineController, loadMachineControllerConfig, type DirectAgentRunner } from "@agent-control-stack/machine-controller";
 import { describe, expect, it } from "vitest";
 import { McpStdioServer, frameMessage } from "./server.js";
 
@@ -24,16 +24,78 @@ describe("MCP stdio server", () => {
         audit: { log_path: join(dir, "audit.jsonl") }
       })
     );
+    const directAgentCalls: Array<{ cwd: string; timeoutMs: number; permissionMode: string; args: string[] }> = [];
+    const directAgentRunner: DirectAgentRunner = async (request) => {
+      directAgentCalls.push({
+        cwd: request.cwd,
+        timeoutMs: request.timeoutMs,
+        permissionMode: request.permissionMode,
+        args: request.args
+      });
+      return { stdout: "mcp review ok", stderr: "", exitCode: 0, durationMs: 7 };
+    };
     const input = new PassThrough();
     const output = new PassThrough();
-    new McpStdioServer(input, output, new MachineController(loadMachineControllerConfig(configPath))).start();
+    new McpStdioServer(
+      input,
+      output,
+      new MachineController(loadMachineControllerConfig(configPath), { directAgentRunner })
+    ).start();
 
     try {
       const initialized = await request(input, output, { jsonrpc: "2.0", id: 1, method: "initialize" });
       expect(initialized.result.capabilities.tools).toEqual({});
 
       const tools = await request(input, output, { jsonrpc: "2.0", id: 2, method: "tools/list" });
-      expect(tools.result.tools.map((tool: { name: string }) => tool.name)).toContain("fs.read");
+      const toolNames = tools.result.tools.map((tool: { name: string }) => tool.name);
+      expect(toolNames).toContain("fs.read");
+      expect(toolNames).toContain("test.agent.run");
+
+      const directRun = await request(input, output, {
+        jsonrpc: "2.0",
+        id: 21,
+        method: "tools/call",
+        params: {
+          name: "test.agent.run",
+          arguments: {
+            agent: "codex",
+            prompt: "Review apps/gateway/src/server.ts for auth bugs. Do not modify files.",
+            cwd: allowed,
+            timeoutSeconds: 120,
+            permissionMode: "read-only"
+          }
+        }
+      });
+      expect(directRun.result.structuredContent).toMatchObject({
+        ok: true,
+        agent: "codex",
+        stdout: "mcp review ok",
+        stderr: "",
+        exitCode: 0
+      });
+      expect(typeof directRun.result.structuredContent.durationMs).toBe("number");
+      expect(directAgentCalls).toHaveLength(1);
+      expect(directAgentCalls[0]).toMatchObject({
+        cwd: allowed,
+        timeoutMs: 120_000,
+        permissionMode: "read-only"
+      });
+      expect(directAgentCalls[0]?.args.at(-1)).toBe("Review apps/gateway/src/server.ts for auth bugs. Do not modify files.");
+
+      const unknownAgent = await request(input, output, {
+        jsonrpc: "2.0",
+        id: 22,
+        method: "tools/call",
+        params: {
+          name: "test.agent.run",
+          arguments: {
+            agent: "ghost",
+            prompt: "Inspect only",
+            cwd: allowed
+          }
+        }
+      });
+      expect(unknownAgent.error.message).toContain("invalid test.agent.run payload");
 
       const status = await request(input, output, {
         jsonrpc: "2.0",
