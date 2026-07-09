@@ -18,5 +18,6 @@ style.formality: casual
 style.energy: measured
 style.terseness: expansive
 style.emoji_use: rare
+expertise.typescript: novice
 </ijfw-profile>
 <!-- IJFW-MEMORY-END -->
