@@ -78,6 +78,7 @@
   ],
   "independentAudit": {
     "agent": "prompt01_final_audit",
-    "status": "LEDGER_PASS_STATE_CLOSEOUT_PENDING"
+    "status": "PASS",
+    "evidence": "15/15 ledger rows and 9/9 appendix seeds passed; STATE.md records the artifact commit and no longer carries the stale appendix failure."
   }
 }

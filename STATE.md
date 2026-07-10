@@ -2,29 +2,21 @@
 
 ## Objective
 
-Close out the completed repository reconciliation by proving local and GitHub
-parity, recording preservation and cleanup evidence, retaining unresolved audit
-failures, and leaving a reproducible session handoff.
+Complete Prompt 01 by reconciling the controlling plan appendix into the live,
+officially sourced platform-facts ledger and proving the result without
+executing any later numbered prompt.
 
 ## Acceptance criteria
 
-- Inspect `main` and all four named cleanup paths; record branch, dirty or
-  untracked files, commits absent from `main`, and preservation status.
-- Preserve every uncommitted or unmerged change before cleanup.
-- Reconcile intended changes into `main` while excluding generated or
-  superseded work.
-- Run the relevant tests, type checks, builds, and repository validations.
-- Commit legitimate remaining changes with clear messages.
-- Fetch and reconcile the remote without force-pushing or rewriting shared
-  history.
-- Push `main` and every branch still needed to preserve unique work.
-- Prove local `main` equals GitHub `main`, the pushed commit exists remotely,
-  and the working tree is clean.
-- Remove the four named paths only after preservation and remote verification;
-  use Git worktree removal for registered worktrees.
-- Prune stale worktree metadata.
-- Delete local worktree branches only after merge or exact remote-SHA proof.
-- Finish with a concrete commit, test, branch, SHA, worktree, and risk receipt.
+- Re-verify every appendix row against live official Claude or Anthropic
+  sources and record `CONFIRMED`, `CHANGED`, or `NOT FOUND` truthfully.
+- Keep every required model, refusal, Claude Code, workflow, routine, Outcomes,
+  and managed-agent row current; every `CONFIRMED` row must cite an official
+  URL and every `NOT FOUND` row must provide a fail-closed fallback.
+- Phrase no unsupported item as fact and state an exact 30-day refresh cadence.
+- Run the platform-facts checker, the file-scoped diff check, manual semantic
+  review, the relevant repository regression gate, and end-session validation.
+- Commit and push Prompt 01 only; do not implement Prompt 02 through Prompt 15.
 
 ## General rules
 
@@ -43,8 +35,65 @@ failures, and leaving a reproducible session handoff.
 - `independent-verification` — `skills/independent-verification/SKILL.md`
 - `bounded-orchestration` — `skills/bounded-orchestration/SKILL.md`
 
+## Build sequence
+
+| Prompt | Status | Deliverables | Acceptance evidence | Commit SHA | Resume pointer |
+| --- | --- | --- | --- | --- | --- |
+| 01 | `PASS` | `docs/platform-facts.md` | 15/15 rows and 9/9 appendix seeds passed live semantic review; checker, mutations, hashes, cadence, and regressions passed. | `e2ac9aaf00b7db98bd1d63df81c887ee6f39f24b` | No action. |
+| 02 | `PASS` | Scaffold, `STATE.md`, session scripts | `bash scripts/bootstrap-acceptance.test.sh` passed; clean bootstrap commit inspected. | `3c925504109328cb7844b4299f170892bde37711` | No action. |
+| 03 | `NOT_STARTED` | `docs/architecture.md` compound-stack map | Live audit found no four-layer diagram, prompt/path map, or arrow traceability. | — | This is the next numbered prompt after Prompt 01 passes. |
+| 04 | `NOT_STARTED` | Routing policy and cost model | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after Prompt 03 passes. |
+| 05 | `NOT_STARTED` | Eval corpus, graders, two baselines | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after prior prompts pass. |
+| 06 | `NOT_STARTED` | Maker-verifier primitive and traces | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after prior prompts pass. |
+| 07 | `NOT_STARTED` | Goal-loop templates and run | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after prior prompts pass. |
+| 08 | `NOT_STARTED` | Three bounded orchestration patterns | Historical artifacts exist; acceptance was not re-proven past the Prompt 03 gate. | — | Resume only after prior prompts pass. |
+| 09 | `NOT_STARTED` | Worktree-isolation conventions and proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
+| 10 | `NOT_STARTED` | Routine configs and unattended-run proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
+| 11 | `NOT_STARTED` | Failure-to-rule loop and enforcement proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
+| 12 | `NOT_STARTED` | Skill-memory workflow and comparison traces | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
+| 13 | `NOT_STARTED` | Vision self-verification proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
+| 14 | `NOT_STARTED` | Refusal fallback and halt proof | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
+| 15 | `NOT_STARTED` | Capstone audit and SOP | Not evaluated because Prompt 03 is the next sequential gate. | — | Resume only after prior prompts pass. |
+
 ## Verified facts
 
+- Prompt 01 was selected because the restored controlling appendix made the
+  old "appendix absent" ledger statement false; no later prompt was executed.
+- `fable5-build-prompts-v2.md` is now the tracked controlling plan. Its SHA-256
+  is `9b1c4b9bea826a51f008669f71dc6e0e7aeac41307c529fddea8e522487570e8`,
+  and all nine appendix seed rows map explicitly into the 15-row ledger.
+- The 2026-07-10 semantic review covers 15/15 rows: 11 `CONFIRMED`, 3
+  `CHANGED`, and 1 `NOT FOUND`. It checked the current model, pricing,
+  lifecycle, Fable availability/retention/refusal, Claude Code, workflows,
+  Routines, Outcomes, and Claude Managed Agents sources. The current
+  first-party inventory remains 11 callable models, and the Mythos Preview
+  conflict remains resolved in favor of the lifecycle-specific retirement
+  source.
+- All 30 unique official links returned HTTP 200 after redirects. Every row is
+  dated 2026-07-10; the next due date is 2026-08-09, exactly 30 days later.
+- The Fable availability row now records the appendix's previously missing
+  30-day retention/no-ZDR contract and the current paid-plan usage-credit
+  access. The refusal row now records the documented fallback-credit scope.
+- `bash .codex/skills/verify-platform-facts/scripts/check-platform-facts.sh`
+  passed. Mutation probes proved that it rejects both the stale appendix claim
+  and an incorrect due date. `git diff --check -- docs/platform-facts.md`
+  passed.
+- The updated repo-local `verify-platform-facts` skill passed
+  `quick_validate.py` and now requires the controlling appendix to be re-read
+  before any inherited absence limitation is accepted.
+- `runs/2026-07-10-prompt-01-platform-facts-verification.json` passed its `jq`
+  schema and source-hash checks and binds the plan and facts files to the
+  semantic receipt.
+- The post-change repository regression passed `npm run check`: 33 test files
+  and 276 tests passed. `scripts/bootstrap-acceptance.test.sh` also remains
+  green.
+- Prompt 02 was independently re-proven with the live bootstrap acceptance
+  script and clean bootstrap commit
+  `3c925504109328cb7844b4299f170892bde37711`.
+- Prompt 03 is the next sequential gate. A read-only audit proved that its
+  current architecture document lacks the required four-layer diagram,
+  prompt/path mapping, build dependencies, and arrow traceability; it was not
+  implemented in this session.
 - `docs/platform-facts.md` exists and contains every feature family explicitly
   named in the supplied objective.
 - The 2026-07-09 manual semantic review used the AEO Foundations Architect, AI
@@ -223,13 +272,6 @@ failures, and leaving a reproducible session handoff.
   and
   `packages/work-items/src/state-machine.test.ts > work item state machine > writes a verifiable audit hash chain`.
   The branch is preserved remotely and was not merged into `main`.
-- The appendix table referenced by the objective is absent from the repository
-  and was not recoverable from the current tree or the live IJFW session files.
-  Exact appendix-to-table parity therefore remains unverified. The document is
-  seeded from every row explicitly named in the supplied objective. Three
-  consecutive live-state audits reached the same result. This remains an open
-  provenance gap, but the supplied full objective now permits work on the
-  explicitly named repository phases without inferring additional rows.
 - Two discarded baseline attempts produced no result artifact: the first CLI
   process exited 1 after task 3 with a `$0.05` per-call cap; the second returned
   a non-success envelope at task 9 with a `$0.10` cap. The exact remote cause
@@ -253,6 +295,11 @@ failures, and leaving a reproducible session handoff.
 
 ## Lessons learned
 
+- Re-check the controlling build plan before inheriting any `STATE.md` claim
+  that a seed appendix is absent. A source artifact can appear between sessions,
+  and a structural/link checker will miss the stale provenance statement unless
+  it has a negative appendix-presence test. This rule and its mutation check are
+  now encoded in the active `verify-platform-facts` skill.
 - Use the official `llms.txt` indexes plus direct Markdown pages for exhaustive
   term searches and repeatable negative-evidence checks.
 - Resolve documentation drift by assigning authority per fact type: current
@@ -316,14 +363,15 @@ failures, and leaving a reproducible session handoff.
 
 ## Last session
 
-On 2026-07-10, the Fable 5 closeout verified the completed worktree cleanup,
-recorded every preservation and archive ref, retained the two MCP audit-chain
-test failures, archived the authored Phase-0 source before deleting generated
-ISO state, and added a remote-SHA cleanup rule to the bounded-orchestration
-skill. The main repository passed its build, 276-test Vitest gate, 48 AgentOS
-Node tests, and bootstrap acceptance check. Independent cross-audit coverage
-remains open at Prompt 11 because Codex authentication was stale and Gemini
-failed under `TERM=dumb`. Resume pointer: start from `origin/main`, read
-`docs/worktree-cleanup-closeout-2026-07-10.md`, then resolve Prompt 11 by
-restoring both auditors and rerunning the audit; do not reopen the completed
-Git reconciliation or remove the unrelated worktrees.
+On 2026-07-10, the sequential build audit selected and completed Prompt 01 only.
+It tracked the controlling plan, reconciled all nine appendix seeds, refreshed
+all 15 platform rows from live official sources, added the missing Fable
+retention/ZDR and paid-plan access facts, hardened the checker against stale
+appendix and cadence claims, and recorded the result in
+`runs/2026-07-10-prompt-01-platform-facts-verification.json`. The artifact
+commit is `e2ac9aaf00b7db98bd1d63df81c887ee6f39f24b`; the live checker, semantic
+probe matrix, mutation checks, skill validator, bootstrap acceptance, and
+33-file/276-test repository gate passed. Existing unrelated open failures remain
+recorded above. Resume pointer: begin a new session at Prompt 03, read its exact
+contract from `fable5-build-prompts-v2.md`, and build the four-layer architecture
+map; do not reopen Prompt 01 or execute Prompt 04 in that session.
