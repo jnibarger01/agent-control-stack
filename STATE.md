@@ -37,6 +37,8 @@ objective.
 - `skill-creator` — `/home/jacen/.codex/skills/.system/skill-creator/SKILL.md`
 - `verify-platform-facts` — `.codex/skills/verify-platform-facts/SKILL.md`
 - `eval-baseline` — `skills/eval-baseline/SKILL.md`
+- `independent-verification` — `skills/independent-verification/SKILL.md`
+- `bounded-orchestration` — `skills/bounded-orchestration/SKILL.md`
 
 ## Verified facts
 
@@ -83,7 +85,7 @@ objective.
   and cost suite passed 24 tests.
 - The additive Claude CLI provider records requested and exact models, token
   usage, stop reason, refusals, duration, and actual cost without changing the
-  existing MoA `ModelCaller` port. Its six focused tests passed, and live
+  existing MoA `ModelCaller` port. Its seven focused tests passed, and live
   structured-output probes succeeded with tools disabled and no session
   persistence.
 - The fixed eval corpus contains 10 tasks across all seven routing classes and
@@ -99,6 +101,61 @@ objective.
 - The integrated post-eval repository gate passed `npm run check`: 23 test
   files and 225 tests passed. The `eval-baseline` skill passed validation and
   an independent forward test accepted the two-run evidence pair.
+- Phase 6 provides a reusable `makerVerifier(task, rubric, maxIters)` with
+  isolated maker/verifier provider calls, structured-only retry failures,
+  stable criterion-ID schemas, duplicate-failure escalation through `route()`,
+  fail-closed parsing, and full model/cost/token/timing traces. Nine focused
+  primitive tests and three evidence tests passed. Each evidence envelope now
+  includes the eval-task SHA-256 and rubric snapshot; the validator reconciles
+  criterion parity, failures, timestamps, duration, per-model usage/cost, and
+  aggregate usage/cost.
+- Three committed maker-verifier traces cover `audit-replay-invariant`,
+  `redaction-repair`, and `work-item-lifecycle`. Their total live cost is
+  `$0.1009503`; live calls used dated Haiku 4.5 and Sonnet 5. The lifecycle
+  trace explicitly labels its first maker response as a seeded fixture and
+  proves `selfAssessment.pass=true` while the fresh live verifier fails the
+  same iteration, followed by a verified live retry.
+- Phase 7 documents the official `/goal` contract, three repository templates,
+  and the `/goal`/`/loop`/Stop-hook/auto/routine decision table. The Outcomes
+  adapter emits the documented `user.define_outcome` event through an injected
+  transport with an inline Markdown rubric and a 1-20 iteration bound.
+- `runs/2026-07-09-goal-policy-action-classification.json` records a real
+  tool-less non-interactive `/goal` run. It surfaced exactly `action: read` and
+  `risk: low` in one turn using dated Haiku 4.5 at `$0.005086`. A same-session
+  `/goal` query then returned `No goal set`; no clear command was issued, so
+  under the cited platform contract the evaluator cleared the condition. The
+  repository trace retains both raw CLI envelopes, platform session IDs, exact
+  argv, CLI version, timestamps, workspace-status hashes, and SHA-256 receipt
+  bindings; tamper tests reject fabricated sessions and changed raw envelopes.
+- Phase 8 implements `fanOutSynthesize`, `adversarial`, and `loopUntilDone`
+  with isolated role payloads, a dedup/conflict/coverage synthesis barrier,
+  output-only adversarial judging, structured verifier failures, and hard
+  token, wall-clock, iteration, and spend checks. Eleven focused pattern tests
+  pass.
+- Deterministic evidence covers all three orchestration patterns and records a
+  deliberately non-passing loop stopped after two iterations and four calls
+  with `failureCode=iteration_cap`. Separate live headless traces cover all
+  three patterns against fixed eval tasks using dated Haiku 4.5. Their combined
+  predicted cost is `$0.017500`; actual cost is `$0.117018`. Content checks
+  require the fan-out approval result to deny execution, name `abc`/`def`,
+  require new approval, and audit the block; adversarial and loop results must
+  equal the two-line classifier oracle. The critic now declares `refute` or
+  `concede`, and the validator forbids selecting a conceding critic.
+- Claude Code `2.1.205` accepted `ultracode`, but two bounded dynamic-workflow
+  attempts did not complete. The first requested `$0.30` and ended at
+  `$0.390117` after attempting `Write`; the second requested `$0.50`, started
+  two Agent tasks, and ended at `$1.751095`. `ANTHROPIC_API_KEY` was unset.
+  `runs/2026-07-09-dynamic-workflow-attempts.json` records the failures and the
+  explicit headless fallback without claiming dynamic-workflow success.
+- Shared trace redaction now preserves token-accounting fields, distinguishes
+  repeated references from actual cycles, extracts sensitive values from
+  embedded JSON with trailing punctuation, and redacts those values from model
+  prose before persistence. Five focused redaction tests and credential scans
+  over the new evidence passed.
+- The final integrated gate passed `npm run check`: 31 test files and 264 tests
+  passed. The eval corpus hash remains
+  `7a1f3122f1c7aaab099595659e8c2f33f276aa788bc8e87e0ab5c73e8ae0f83c`,
+  with no diff in `evals/tasks/` or either committed baseline JSON.
 - Existing user modifications in `CLAUDE.md`, `package.json`, and
   `package-lock.json` were not changed by this session.
 
@@ -111,8 +168,6 @@ objective.
   consecutive live-state audits reached the same result. This remains an open
   provenance gap, but the supplied full objective now permits work on the
   explicitly named repository phases without inferring additional rows.
-- The maker-verifier, goal-template/decision-table/Outcomes, and three
-  orchestration-pattern acceptance gates are not yet implemented.
 - Two discarded baseline attempts produced no result artifact: the first CLI
   process exited 1 after task 3 with a `$0.05` per-call cap; the second returned
   a non-success envelope at task 9 with a `$0.10` cap. The exact remote cause
@@ -122,6 +177,12 @@ objective.
   The current linkage is the matching hash receipt above plus unchanged task
   files. Embedding the hash in future result schema revisions would make each
   run independently provenance-complete.
+- The hosted dynamic-workflow path is confirmed available at the command level
+  but remains unverified end to end in this environment. Both bounded attempts
+  terminated with `error_max_budget_usd` after reported actual cost exceeded
+  the requested outer cap, and the generated Node path had no API key. The
+  tested headless Claude CLI fallback is complete; a future hosted retry should
+  wait for an explicit cost policy and a working workflow credential/runtime.
 
 ## Lessons learned
 
@@ -144,16 +205,47 @@ objective.
   spend also includes its execution context and internal calls. Always print
   and retain both values instead of presenting the estimate as a billing
   receipt.
+- Constrain stable rubric IDs in the response JSON schema. Prompt wording alone
+  allowed live verifiers to return descriptive labels, which correctly failed
+  parsing but prevented otherwise usable evidence.
+- Redact explicit sensitive values from model prose before persistence, but do
+  not treat token-accounting metrics as credentials. Traverse ancestor paths
+  for cycle detection so repeated object references do not become false
+  `[circular]` sentinels. This procedure is recorded in the active
+  `independent-verification` skill and its changelog.
+- A platform command being available does not prove a bounded workflow can
+  complete in the current runtime. Record failed attempts and receipts, then
+  take the documented fallback instead of repeatedly increasing caps.
+- A structurally completed orchestration is not automatically a passed eval.
+  Add content-level acceptance checks against the task rubric; they caught an
+  underspecified fan-out slice and a judge that returned analysis instead of a
+  corrected final answer.
+- In parallel fan-out failure paths, await every worker settlement before
+  emitting the failed spend event. Otherwise a fast rejection can hide later
+  sibling receipts. This rule is recorded in the active
+  `bounded-orchestration` skill and its changelog.
+- Evidence validators must bind normalized projections back to source receipts:
+  raw-envelope hashes for external CLI state, task hashes and rubric snapshots
+  for eval traces, and deep equality plus aggregate/cap/role recomputation for
+  orchestration spend logs. Internal field agreement alone does not establish
+  provenance.
+- For `/goal`, retain the initial result and query the same persisted session.
+  `No goal set` after no manual clear is stronger evaluator-pass evidence than
+  a maker's completion statement.
 
 ## Last session
 
-On 2026-07-09, the session completed the clean bootstrap, deterministic routing
-and cost policy, usage-aware tool-less Claude CLI adapter, 10-task fixed corpus,
-independent grader boundary, full eval runner, validated `eval-baseline` skill,
-and two live baselines while
-preserving unrelated changes in `CLAUDE.md`, `package.json`, and
-`package-lock.json`. The baselines agreed within the documented variance bound,
-and the integrated 223-test gate passed. Resume at phase 6: implement
-`makerVerifier(task, rubric, maxIters)`, prove fresh verifier context,
-structured-only failure feedback, no-progress escalation, and commit evidence
-from three eval tasks with at least one independent-verifier catch.
+On 2026-07-09, the session completed phases 6-8: independent maker-verifier
+loops with three live-task traces and a labeled seeded fault, the cited `/goal`
+and Outcomes entry points with a real same-session evaluator-clear receipt,
+three budgeted orchestration patterns with deterministic cap evidence and live
+headless receipts, and a validated `independent-verification` skill. Two
+bounded hosted dynamic-workflow attempts failed and are preserved as negative
+evidence; the documented headless fallback completed instead. Shared redaction
+was hardened after live evidence exposed stable-ID, secret-echo, token-metric,
+and shared-reference edge cases. `npm run check` passed 31 files and 264 tests,
+the fixed corpus and baselines remained unchanged, and unrelated modifications
+in `CLAUDE.md`, `package.json`, and `package-lock.json` remained unowned. Resume
+pointer: start from the final phase-6-to-8 commit, re-read this file and both
+active repository skills, then address only the open appendix provenance,
+baseline corpus-hash embedding, or hosted-workflow runtime/cost gaps.

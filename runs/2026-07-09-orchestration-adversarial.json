@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "kind": "orchestration-pattern-evidence",
+  "recordedAt": "2026-07-10T04:39:23.444Z",
+  "executionMode": "headless-deterministic-fixture",
+  "platformFact": "docs/platform-facts.md:52",
+  "pattern": "adversarial",
+  "taskIds": [
+    "approval-binding-check"
+  ],
+  "caps": {
+    "maxTokens": 10000,
+    "maxWallClockMs": 10000,
+    "maxSpendUsd": 1
+  },
+  "expectedFailure": null,
+  "result": {
+    "makerOutput": "Approval is valid when the request ID matches.",
+    "criticPosition": "refute",
+    "criticRefutation": "Request ID alone is insufficient; actor and action hash must also match.",
+    "verdict": "critic",
+    "output": "Require request ID, canonical actor, and exact action hash to match before execution.",
+    "justification": "The refutation identifies two material binding requirements omitted by the maker.",
+    "spend": {
+      "predictedCostUsd": 0.00105,
+      "actualCostUsd": 0,
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0
+      },
+      "exactModels": [
+        "fixture:claude-haiku-4-5-20251001"
+      ],
+      "calls": [
+        {
+          "role": "maker",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "fixture:claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00035,
+          "actualCostUsd": 0,
+          "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "critic",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "fixture:claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00035,
+          "actualCostUsd": 0,
+          "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "judge",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "fixture:claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00035,
+          "actualCostUsd": 0,
+          "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "spendLog": {
+    "predictedCostUsd": 0.00105,
+    "actualCostUsd": 0,
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    },
+    "exactModels": [
+      "fixture:claude-haiku-4-5-20251001"
+    ],
+    "calls": [
+      {
+        "role": "maker",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "critic",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "judge",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      }
+    ],
+    "pattern": "adversarial",
+    "status": "completed"
+  }
+}

@@ -1,0 +1,177 @@
+{
+  "schemaVersion": 1,
+  "kind": "orchestration-pattern-evidence",
+  "recordedAt": "2026-07-10T04:39:23.443Z",
+  "executionMode": "headless-deterministic-fixture",
+  "platformFact": "docs/platform-facts.md:52",
+  "pattern": "fanOutSynthesize",
+  "taskIds": [
+    "approval-binding-check",
+    "audit-replay-invariant"
+  ],
+  "caps": {
+    "maxTokens": 10000,
+    "maxWallClockMs": 10000,
+    "maxSpendUsd": 1
+  },
+  "expectedFailure": null,
+  "result": {
+    "workerOutputs": [
+      {
+        "subtaskId": "approval-binding-check",
+        "output": "Approval is bound to the exact action hash."
+      },
+      {
+        "subtaskId": "audit-replay-invariant",
+        "output": "Replay fails because w1 ran before approval."
+      }
+    ],
+    "synthesis": {
+      "output": "Approval binding and replay ordering are distinct enforced invariants.",
+      "deduplicatedClaims": [
+        "exact action-hash binding",
+        "running requires prior approval"
+      ],
+      "conflicts": [],
+      "rubric": [
+        {
+          "criterionId": "deduplicate",
+          "pass": true,
+          "justification": "All fixture slices are represented without conflict."
+        },
+        {
+          "criterionId": "resolve-conflicts",
+          "pass": true,
+          "justification": "All fixture slices are represented without conflict."
+        },
+        {
+          "criterionId": "preserve-coverage",
+          "pass": true,
+          "justification": "All fixture slices are represented without conflict."
+        }
+      ]
+    },
+    "spend": {
+      "predictedCostUsd": 0.00105,
+      "actualCostUsd": 0,
+      "usage": {
+        "inputTokens": 0,
+        "outputTokens": 0,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0
+      },
+      "exactModels": [
+        "fixture:claude-haiku-4-5-20251001"
+      ],
+      "calls": [
+        {
+          "role": "worker:approval-binding-check",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "fixture:claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00035,
+          "actualCostUsd": 0,
+          "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "worker:audit-replay-invariant",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "fixture:claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00035,
+          "actualCostUsd": 0,
+          "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "synthesizer",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "fixture:claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00035,
+          "actualCostUsd": 0,
+          "usage": {
+            "inputTokens": 0,
+            "outputTokens": 0,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "spendLog": {
+    "predictedCostUsd": 0.00105,
+    "actualCostUsd": 0,
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    },
+    "exactModels": [
+      "fixture:claude-haiku-4-5-20251001"
+    ],
+    "calls": [
+      {
+        "role": "worker:approval-binding-check",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "worker:audit-replay-invariant",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "synthesizer",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      }
+    ],
+    "pattern": "fanOutSynthesize",
+    "status": "completed"
+  }
+}

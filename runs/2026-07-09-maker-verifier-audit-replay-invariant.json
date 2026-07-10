@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 2,
+  "kind": "maker-verifier-evidence",
+  "recordedAt": "2026-07-10T04:42:49.061Z",
+  "taskFile": "evals/tasks/audit-replay-invariant.json",
+  "taskSha256": "663810afb0734aa92e43974f6ea99c9bc335ed1e702ad47bdd18788f8cbd1525",
+  "rubric": [
+    {
+      "id": "work-id",
+      "description": "Identifies w1.",
+      "expected": "w1"
+    },
+    {
+      "id": "violation",
+      "description": "Names running-before-approved.",
+      "expected": "Unapproved execution invariant violation."
+    },
+    {
+      "id": "verdict",
+      "description": "Returns a failing replay verdict.",
+      "expected": "Replay fails or flags w1."
+    },
+    {
+      "id": "no-repair",
+      "description": "Does not let later success erase the violation.",
+      "expected": "Historical violation remains."
+    }
+  ],
+  "provider": "claude-cli",
+  "faultInjection": null,
+  "trace": {
+    "schemaVersion": 1,
+    "taskId": "audit-replay-invariant",
+    "taskClass": "bulk_worker",
+    "startedAt": "2026-07-10T04:42:20.063Z",
+    "completedAt": "2026-07-10T04:42:49.060Z",
+    "maxIters": 1,
+    "stoppedBy": "verified",
+    "iterations": [
+      {
+        "iteration": 1,
+        "maker": {
+          "completedAt": "2026-07-10T04:42:35.674Z",
+          "output": "**Work item: w1**\n\n**Invariant violated:** Approval-before-execution (unapproved execution invariant).\nThe audit log shows w1 transitioned to `running` with no prior `approved` event for that work item. The state machine requires `approved → running`, so this is an out-of-order/unauthorized state transition — w1 began executing without authorization.\n\n**Replay verdict: FAIL (reject w1).**\nReplaying the event sequence for w1 must halt/flag at the `running` event, since the required precondition (a prior `approved` event) was not satisfied. The verdict is a hard failure — w1's execution history is invalid from that point forward.\n\n**No repair by later success:** The subsequent `succeeded` event does not retroactively satisfy the missing approval. Success is a downstream outcome, not evidence of authorization, so it cannot cure the invariant violation. The historical violation on w1 remains permanently recorded and must be surfaced by the replay — the correct verdict is that **replay for w1 fails/is flagged as invalid**, even though it later reported success.",
+          "selfAssessment": {
+            "pass": true,
+            "summary": "Identified w1's running-before-approved invariant violation and issued a failing replay verdict that is not overridden by the later success event."
+          },
+          "receipt": {
+            "requestedModel": "claude-sonnet-5",
+            "exactModels": [
+              "claude-haiku-4-5-20251001",
+              "claude-sonnet-5"
+            ],
+            "stopReason": "tool_use",
+            "refused": false,
+            "costUsd": 0.025490799999999997,
+            "durationMs": 14961,
+            "usage": {
+              "inputTokens": 2360,
+              "outputTokens": 1311,
+              "cacheReadInputTokens": 1086,
+              "cacheCreationInputTokens": 0
+            },
+            "modelUsage": [
+              {
+                "model": "claude-haiku-4-5-20251001",
+                "inputTokens": 710,
+                "outputTokens": 16,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.00079
+              },
+              {
+                "model": "claude-sonnet-5",
+                "inputTokens": 1650,
+                "outputTokens": 1295,
+                "cacheReadInputTokens": 1086,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.0247008
+              }
+            ]
+          }
+        },
+        "verifier": {
+          "completedAt": "2026-07-10T04:42:49.060Z",
+          "pass": true,
+          "criteria": [
+            {
+              "criterion": "work-id",
+              "pass": true,
+              "observed": "w1 is clearly identified at the start of the response"
+            },
+            {
+              "criterion": "violation",
+              "pass": true,
+              "observed": "Approval-before-execution (unapproved execution invariant) is correctly named, with explanation that w1 transitioned to running without prior approved event"
+            },
+            {
+              "criterion": "verdict",
+              "pass": true,
+              "observed": "FAIL (reject w1) verdict is returned; replay must halt/flag at running event; verdict explicitly states replay fails/is flagged as invalid"
+            },
+            {
+              "criterion": "no-repair",
+              "pass": true,
+              "observed": "Explicitly states subsequent success does not satisfy missing approval and historical violation remains permanently recorded; success cannot cure the invariant violation"
+            }
+          ],
+          "receipt": {
+            "requestedModel": "claude-haiku-4-5-20251001",
+            "exactModels": [
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "tool_use",
+            "refused": false,
+            "costUsd": 0.010336,
+            "durationMs": 12604,
+            "usage": {
+              "inputTokens": 3611,
+              "outputTokens": 1345,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "modelUsage": [
+              {
+                "model": "claude-haiku-4-5-20251001",
+                "inputTokens": 3611,
+                "outputTokens": 1345,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.010336
+              }
+            ]
+          }
+        },
+        "failures": [],
+        "normalizedFailureSet": "[]"
+      }
+    ],
+    "escalations": [],
+    "totalCostUsd": 0.0358268,
+    "totalUsage": {
+      "inputTokens": 5971,
+      "outputTokens": 2656,
+      "cacheReadInputTokens": 1086,
+      "cacheCreationInputTokens": 0
+    }
+  }
+}

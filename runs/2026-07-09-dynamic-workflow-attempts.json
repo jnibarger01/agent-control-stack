@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "kind": "dynamic-workflow-attempt-evidence",
+  "recordedAt": "2026-07-09T23:18:00-05:00",
+  "platformFact": "docs/platform-facts.md:52",
+  "claudeCodeVersion": "2.1.205",
+  "availabilityCheck": "Set effort level to ultracode (this session only): xhigh + dynamic workflow orchestration",
+  "apiKeyPresent": false,
+  "attempts": [
+    {
+      "name": "agent-only-tools",
+      "requestedBudgetUsd": 0.3,
+      "actualCostUsd": 0.390117,
+      "resultSubtype": "error_max_budget_usd",
+      "completed": false,
+      "observedToolEvents": [
+        "Write"
+      ],
+      "taskStartedCount": 0,
+      "exactModels": [
+        "claude-sonnet-5"
+      ],
+      "blocker": "The dynamic workflow attempted to materialize its JavaScript harness with Write, which was unavailable under the agent-only tool policy, then terminated on the outer budget check."
+    },
+    {
+      "name": "scoped-write-agent-node",
+      "requestedBudgetUsd": 0.5,
+      "actualCostUsd": 1.751095,
+      "resultSubtype": "error_max_budget_usd",
+      "completed": false,
+      "observedToolEvents": [
+        "Bash",
+        "Agent",
+        "task_started"
+      ],
+      "taskStartedCount": 2,
+      "exactModels": [
+        "claude-haiku-4-5-20251001",
+        "claude-sonnet-5"
+      ],
+      "blocker": "The generated Node path found no API key, fell back to Agent calls, started two tasks, and terminated on the outer budget check before completing any of the three patterns."
+    }
+  ],
+  "fallbackDecision": {
+    "mode": "headless-claude-cli",
+    "dynamicWorkflowCompleted": false,
+    "reason": "Two bounded dynamic attempts failed and both exceeded their requested outer budget before a pattern completed; no further dynamic retry was authorized by the repository cost discipline."
+  }
+}

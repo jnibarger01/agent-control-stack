@@ -1,0 +1,150 @@
+{
+  "schemaVersion": 2,
+  "kind": "maker-verifier-evidence",
+  "recordedAt": "2026-07-10T04:42:36.724Z",
+  "taskFile": "evals/tasks/redaction-repair.json",
+  "taskSha256": "ddbf6d2d9c1f67339d9a6faeae50d584998c0c55713c98b8a7ef8d6ac3e7c65b",
+  "rubric": [
+    {
+      "id": "valid-json",
+      "description": "Returns a valid JSON object.",
+      "expected": "Parseable JSON."
+    },
+    {
+      "id": "token-redacted",
+      "description": "Redacts the token.",
+      "expected": "token is [REDACTED]."
+    },
+    {
+      "id": "password-redacted",
+      "description": "Redacts the password.",
+      "expected": "password is [REDACTED]."
+    },
+    {
+      "id": "operational-fields",
+      "description": "Preserves operation and status.",
+      "expected": "fetch and denied remain."
+    }
+  ],
+  "provider": "claude-cli",
+  "faultInjection": null,
+  "trace": {
+    "schemaVersion": 1,
+    "taskId": "redaction-repair",
+    "taskClass": "bulk_worker",
+    "startedAt": "2026-07-10T04:42:19.850Z",
+    "completedAt": "2026-07-10T04:42:36.724Z",
+    "maxIters": 1,
+    "stoppedBy": "verified",
+    "iterations": [
+      {
+        "iteration": 1,
+        "maker": {
+          "completedAt": "2026-07-10T04:42:26.445Z",
+          "output": "{\"operation\": \"fetch\", \"token\": \"[REDACTED]\", \"password\": \"[REDACTED]\", \"status\": \"denied\"}",
+          "selfAssessment": {
+            "pass": true,
+            "summary": "Produced a valid JSON object redacting token and password while preserving operation and status fields."
+          },
+          "receipt": {
+            "requestedModel": "claude-sonnet-5",
+            "exactModels": [
+              "claude-haiku-4-5-20251001",
+              "claude-sonnet-5"
+            ],
+            "stopReason": "tool_use",
+            "refused": false,
+            "costUsd": 0.0144725,
+            "durationMs": 5891,
+            "usage": {
+              "inputTokens": 2374,
+              "outputTokens": 574,
+              "cacheReadInputTokens": 1115,
+              "cacheCreationInputTokens": 0
+            },
+            "modelUsage": [
+              {
+                "model": "claude-haiku-4-5-20251001",
+                "inputTokens": 722,
+                "outputTokens": 15,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.000797
+              },
+              {
+                "model": "claude-sonnet-5",
+                "inputTokens": 1652,
+                "outputTokens": 559,
+                "cacheReadInputTokens": 1115,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.0136755
+              }
+            ]
+          }
+        },
+        "verifier": {
+          "completedAt": "2026-07-10T04:42:36.724Z",
+          "pass": true,
+          "criteria": [
+            {
+              "criterion": "valid-json",
+              "pass": true,
+              "observed": "Output is syntactically valid JSON: {\"operation\": \"fetch\", \"token\": \"[REDACTED]\", \"password\": \"[REDACTED]\", \"status\": \"denied\"}"
+            },
+            {
+              "criterion": "token-redacted",
+              "pass": true,
+              "observed": "token field value changed from '[redacted]' to '[REDACTED]'"
+            },
+            {
+              "criterion": "password-redacted",
+              "pass": true,
+              "observed": "password field value changed from '[redacted]' to '[REDACTED]'"
+            },
+            {
+              "criterion": "operational-fields",
+              "pass": true,
+              "observed": "operation: 'fetch' and status: 'denied' both preserved as original values"
+            }
+          ],
+          "receipt": {
+            "requestedModel": "claude-haiku-4-5-20251001",
+            "exactModels": [
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "tool_use",
+            "refused": false,
+            "costUsd": 0.008651,
+            "durationMs": 9519,
+            "usage": {
+              "inputTokens": 3206,
+              "outputTokens": 1089,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "modelUsage": [
+              {
+                "model": "claude-haiku-4-5-20251001",
+                "inputTokens": 3206,
+                "outputTokens": 1089,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.008651
+              }
+            ]
+          }
+        },
+        "failures": [],
+        "normalizedFailureSet": "[]"
+      }
+    ],
+    "escalations": [],
+    "totalCostUsd": 0.023123499999999998,
+    "totalUsage": {
+      "inputTokens": 5580,
+      "outputTokens": 1663,
+      "cacheReadInputTokens": 1115,
+      "cacheCreationInputTokens": 0
+    }
+  }
+}

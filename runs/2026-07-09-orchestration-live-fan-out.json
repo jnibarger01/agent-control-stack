@@ -1,0 +1,183 @@
+{
+  "schemaVersion": 1,
+  "kind": "orchestration-pattern-evidence",
+  "recordedAt": "2026-07-10T04:27:49.603Z",
+  "executionMode": "headless-claude-cli",
+  "platformFact": "docs/platform-facts.md:52",
+  "pattern": "fanOutSynthesize",
+  "taskIds": [
+    "approval-binding-check"
+  ],
+  "caps": {
+    "maxTokens": 100000,
+    "maxWallClockMs": 180000,
+    "maxSpendUsd": 0.2
+  },
+  "expectedFailure": null,
+  "result": {
+    "workerOutputs": [
+      {
+        "subtaskId": "approval-action-binding",
+        "output": "{\n  \"decision\": \"deny\",\n  \"execution_permitted\": false,\n  \"reasons\": {\n    \"primary\": \"action-hash-mismatch\",\n    \"detail\": \"The approved action hash 'abc' does not equal the claimed action hash 'def'. Approvals are bound to the exact action hash, not the work-item ID alone.\"\n  },\n  \"hash_analysis\": {\n    \"approved_hash\": \"abc\",\n    \"claimed_hash\": \"def\",\n    \"match\": false,\n    \"reason_for_denial\": \"abc does not equal def\"\n  },\n  \"next_action\": \"new-approval-required\",\n  \"next_action_detail\": \"If the changed action (hash def) is intended, a new exact-action approval request must be submitted and approved before execution can proceed.\",\n  \"audit_event\": {\n    \"event_type\": \"execution_blocked\",\n    \"reason\": \"action_hash_mismatch\",\n    \"approved_hash\": \"abc\",\n    \"claimed_hash\": \"def\",\n    \"outcome\": \"blocked_without_execution\",\n    \"note\": \"Redacted blocked attempt audit record - no secrets or sensitive work-item details included\"\n  }\n}"
+      },
+      {
+        "subtaskId": "approval-remediation-audit",
+        "output": "{\n  \"decision\": \"deny\",\n  \"reasoning\": [\n    {\n      \"id\": \"deny\",\n      \"status\": \"satisfied\",\n      \"detail\": \"Execution does not proceed. The hash mismatch prevents authorization.\"\n    },\n    {\n      \"id\": \"hash-reason\",\n      \"status\": \"satisfied\",\n      \"detail\": \"Action-hash mismatch is the binding reason for denial: approved hash 'abc' does not equal claimed hash 'def'. Approvals are bound to exact action hashes; work-item ID match alone is insufficient.\"\n    },\n    {\n      \"id\": \"new-approval\",\n      \"status\": \"satisfied\",\n      \"detail\": \"If the changed action (hash def) is intended, a new approval request must be submitted with the exact action hash 'def' and undergo independent approval workflow.\"\n    },\n    {\n      \"id\": \"audit\",\n      \"status\": \"satisfied\",\n      \"detail\": \"Blocked-attempt audit event recorded: Worker claim with hash 'def' rejected for work-item ID [redacted]. Reason: hash mismatch with approved hash 'abc'. No action secrets, credentials, or work-item details logged.\"\n    }\n  ],\n  \"next_action\": \"Reject execution. Notify requester of hash mismatch. Direct to resubmit with matching action hash or new approval workflow.\"\n}"
+      }
+    ],
+    "synthesis": {
+      "output": "Execution denied. Approved action hash 'abc' does not match claimed action hash 'def'. Approvals bind to exact action hashes, not work-item IDs. Requester must submit new approval request with action hash 'def' if the changed action is intended. Blocked execution attempt recorded in audit trail without sensitive details.",
+      "deduplicatedClaims": [
+        "Execution decision: deny",
+        "Primary reason: action-hash-mismatch",
+        "Approved action hash: abc",
+        "Claimed action hash: def",
+        "Hash match result: false",
+        "Binding principle: approvals bound to exact action hashes, not work-item ID alone",
+        "Next required action: new-approval-required",
+        "New approval must include exact action hash: def",
+        "Audit outcome: execution blocked, attempt recorded without exposing secrets or sensitive work-item details"
+      ],
+      "conflicts": [],
+      "rubric": [
+        {
+          "criterionId": "deduplicate",
+          "pass": true,
+          "justification": "Both worker outputs present identical core claims with different perspectives (binding vs. audit). Merged as single coherent synthesis: hash mismatch denial + audit requirement. No source information dropped."
+        },
+        {
+          "criterionId": "resolve-conflicts",
+          "pass": true,
+          "justification": "No material contradictions identified. Both outputs agree on: deny decision, abc≠def as disqualifying reason, new-approval as remedy, and audit recording requirement. Consistent across all factual assertions."
+        },
+        {
+          "criterionId": "preserve-coverage",
+          "pass": true,
+          "justification": "All worker slices represented: approval-action-binding output (denial, hash mismatch, hash analysis, next-action) and approval-remediation-audit output (deny reasoning, hash-reason, new-approval pathway, audit event) both fully synthesized into output and deduplicatedClaims."
+        }
+      ]
+    },
+    "spend": {
+      "predictedCostUsd": 0.00525,
+      "actualCostUsd": 0.043785,
+      "usage": {
+        "inputTokens": 10835,
+        "outputTokens": 6590,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0
+      },
+      "exactModels": [
+        "claude-haiku-4-5-20251001"
+      ],
+      "calls": [
+        {
+          "role": "worker:approval-remediation-audit",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.007864000000000001,
+          "usage": {
+            "inputTokens": 3164,
+            "outputTokens": 940,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "worker:approval-action-binding",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.014184999999999998,
+          "usage": {
+            "inputTokens": 3160,
+            "outputTokens": 2205,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "synthesizer",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.021736,
+          "usage": {
+            "inputTokens": 4511,
+            "outputTokens": 3445,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "spendLog": {
+    "predictedCostUsd": 0.00525,
+    "actualCostUsd": 0.043785,
+    "usage": {
+      "inputTokens": 10835,
+      "outputTokens": 6590,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    },
+    "exactModels": [
+      "claude-haiku-4-5-20251001"
+    ],
+    "calls": [
+      {
+        "role": "worker:approval-remediation-audit",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.007864000000000001,
+        "usage": {
+          "inputTokens": 3164,
+          "outputTokens": 940,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "worker:approval-action-binding",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.014184999999999998,
+        "usage": {
+          "inputTokens": 3160,
+          "outputTokens": 2205,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "synthesizer",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.021736,
+        "usage": {
+          "inputTokens": 4511,
+          "outputTokens": 3445,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      }
+    ],
+    "pattern": "fanOutSynthesize",
+    "status": "completed"
+  }
+}

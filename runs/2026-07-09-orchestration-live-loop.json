@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "kind": "orchestration-pattern-evidence",
+  "recordedAt": "2026-07-10T04:24:47.491Z",
+  "executionMode": "headless-claude-cli",
+  "platformFact": "docs/platform-facts.md:52",
+  "pattern": "loopUntilDone",
+  "taskIds": [
+    "policy-action-classification"
+  ],
+  "caps": {
+    "maxTokens": 100000,
+    "maxWallClockMs": 180000,
+    "maxSpendUsd": 0.2,
+    "maxIterations": 2
+  },
+  "expectedFailure": null,
+  "result": {
+    "output": "action: read\nrisk: low",
+    "iterations": 2,
+    "verified": true,
+    "spend": {
+      "predictedCostUsd": 0.007,
+      "actualCostUsd": 0.030123999999999995,
+      "usage": {
+        "inputTokens": 11469,
+        "outputTokens": 3731,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0
+      },
+      "exactModels": [
+        "claude-haiku-4-5-20251001"
+      ],
+      "calls": [
+        {
+          "role": "maker:1",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.010296999999999999,
+          "usage": {
+            "inputTokens": 2662,
+            "outputTokens": 1527,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "verifier:1",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.008878,
+          "usage": {
+            "inputTokens": 3053,
+            "outputTokens": 1165,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "maker:2",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.005153,
+          "usage": {
+            "inputTokens": 2818,
+            "outputTokens": 467,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "verifier:2",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.005796,
+          "usage": {
+            "inputTokens": 2936,
+            "outputTokens": 572,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "spendLog": {
+    "predictedCostUsd": 0.007,
+    "actualCostUsd": 0.030123999999999995,
+    "usage": {
+      "inputTokens": 11469,
+      "outputTokens": 3731,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    },
+    "exactModels": [
+      "claude-haiku-4-5-20251001"
+    ],
+    "calls": [
+      {
+        "role": "maker:1",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.010296999999999999,
+        "usage": {
+          "inputTokens": 2662,
+          "outputTokens": 1527,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "verifier:1",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.008878,
+        "usage": {
+          "inputTokens": 3053,
+          "outputTokens": 1165,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "maker:2",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.005153,
+        "usage": {
+          "inputTokens": 2818,
+          "outputTokens": 467,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "verifier:2",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.005796,
+        "usage": {
+          "inputTokens": 2936,
+          "outputTokens": 572,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      }
+    ],
+    "pattern": "loopUntilDone",
+    "status": "completed"
+  }
+}

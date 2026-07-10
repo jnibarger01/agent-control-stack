@@ -1,0 +1,147 @@
+{
+  "schemaVersion": 1,
+  "kind": "orchestration-pattern-evidence",
+  "recordedAt": "2026-07-10T04:40:40.750Z",
+  "executionMode": "headless-claude-cli",
+  "platformFact": "docs/platform-facts.md:52",
+  "pattern": "adversarial",
+  "taskIds": [
+    "policy-action-classification"
+  ],
+  "caps": {
+    "maxTokens": 100000,
+    "maxWallClockMs": 180000,
+    "maxSpendUsd": 0.2
+  },
+  "expectedFailure": null,
+  "result": {
+    "makerOutput": "{\"action\": \"read\", \"risk\": \"low\"}",
+    "criticPosition": "refute",
+    "criticRefutation": "The makerOutput provides the correct action and risk classification (read; low), but violates the format constraint specified in the rubric. The rubric explicitly expects \"exactly two labeled lines\" in the format \"action: read\" and \"risk: low\" (plain text with colon-separated labels). The actual output is JSON format {\"action\": \"read\", \"risk\": \"low\"}, which does not match the expected plain text line format described in the rubric's expected outputs and the \"two-lines\" criterion.",
+    "verdict": "critic",
+    "output": "action: read\nrisk: low",
+    "justification": "The maker correctly classified the action as \"read\" and risk as \"low,\" providing materially accurate content. However, the task explicitly constrains output to \"exactly two labeled lines\" in plain text format, as shown in the rubric's expected output. The JSON format violates this material format requirement. While the information content is correct, explicit output format constraints are integral to task satisfaction, not stylistic preferences. The critic correctly identified the constraint violation; the output must be formatted as two plain text lines as specified.",
+    "spend": {
+      "predictedCostUsd": 0.00525,
+      "actualCostUsd": 0.043109,
+      "usage": {
+        "inputTokens": 9424,
+        "outputTokens": 6737,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0
+      },
+      "exactModels": [
+        "claude-haiku-4-5-20251001"
+      ],
+      "calls": [
+        {
+          "role": "maker",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.005542,
+          "usage": {
+            "inputTokens": 2967,
+            "outputTokens": 515,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "critic",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.009066000000000001,
+          "usage": {
+            "inputTokens": 3071,
+            "outputTokens": 1199,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "judge",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.028501000000000002,
+          "usage": {
+            "inputTokens": 3386,
+            "outputTokens": 5023,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "spendLog": {
+    "predictedCostUsd": 0.00525,
+    "actualCostUsd": 0.043109,
+    "usage": {
+      "inputTokens": 9424,
+      "outputTokens": 6737,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    },
+    "exactModels": [
+      "claude-haiku-4-5-20251001"
+    ],
+    "calls": [
+      {
+        "role": "maker",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.005542,
+        "usage": {
+          "inputTokens": 2967,
+          "outputTokens": 515,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "critic",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.009066000000000001,
+        "usage": {
+          "inputTokens": 3071,
+          "outputTokens": 1199,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "judge",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.028501000000000002,
+        "usage": {
+          "inputTokens": 3386,
+          "outputTokens": 5023,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      }
+    ],
+    "pattern": "adversarial",
+    "status": "completed"
+  }
+}
