@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "outDir": "dist/compounding",
+    "tsBuildInfoFile": "dist/compounding/.tsbuildinfo"
+  },
+  "include": ["harness/**/*.ts", "evals/**/*.ts"]
+}

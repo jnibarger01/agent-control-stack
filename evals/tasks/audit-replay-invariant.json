@@ -1,0 +1,17 @@
+{
+  "id": "audit-replay-invariant",
+  "taskClass": "bulk_worker",
+  "input": "Audit events show work item w1 entered running before any approved event, then later succeeded. Identify the invariant violation and the correct replay verdict.",
+  "context": {
+    "facts": ["A running event requires a prior approved event for the same work item.", "Later success does not repair earlier unauthorized execution."],
+    "constraints": ["Name w1.", "Give one violation and one verdict."]
+  },
+  "rubric": [
+    { "id": "work-id", "description": "Identifies w1.", "expected": "w1" },
+    { "id": "violation", "description": "Names running-before-approved.", "expected": "Unapproved execution invariant violation." },
+    { "id": "verdict", "description": "Returns a failing replay verdict.", "expected": "Replay fails or flags w1." },
+    { "id": "no-repair", "description": "Does not let later success erase the violation.", "expected": "Historical violation remains." }
+  ],
+  "reference": { "kind": "rules", "content": "Flag w1 as unapproved execution and fail the replay check; the later succeeded event does not erase the earlier violation." },
+  "tokenEstimate": { "inputTokens": 180, "outputTokens": 100 }
+}

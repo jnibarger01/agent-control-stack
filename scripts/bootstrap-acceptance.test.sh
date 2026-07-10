@@ -12,7 +12,8 @@ for path in \
   harness/routing.ts \
   harness/orchestration.ts \
   evals/runner.ts \
-  evals/tasks/.gitkeep \
+  evals/task-schema.ts \
+  evals/tasks/auth-boundary-review.json \
   evals/graders/.gitkeep \
   skills/_templates/SKILL.md \
   runs/.gitignore \
@@ -46,7 +47,7 @@ fi
 rg -q 'Refusing to finish: STATE.md Last session is empty' "$TMP_DIR/end-session.out"
 
 "$ROOT/scripts/run-evals" > "$TMP_DIR/run-evals.out"
-rg -q 'run-evals: STUB' "$TMP_DIR/run-evals.out"
+rg -q '^Usage: scripts/run-evals ' "$TMP_DIR/run-evals.out"
 
 git -C "$ROOT" check-ignore -q --no-index runs/artifacts/large.bin
 

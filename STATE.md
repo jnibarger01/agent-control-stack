@@ -36,6 +36,7 @@ objective.
 - `firecrawl-deep-research` — `/home/jacen/.agents/skills/firecrawl-deep-research/SKILL.md`
 - `skill-creator` — `/home/jacen/.codex/skills/.system/skill-creator/SKILL.md`
 - `verify-platform-facts` — `.codex/skills/verify-platform-facts/SKILL.md`
+- `eval-baseline` — `skills/eval-baseline/SKILL.md`
 
 ## Verified facts
 
@@ -75,6 +76,29 @@ objective.
   ignore rule. The TypeScript scaffolds passed a no-emit type check.
 - The pre-change repository baseline passed `npm run check`: 16 test files and
   183 tests passed.
+- Phase 4 now has seven deterministic task classes, exact model IDs,
+  two-verifier-failure and disagreement escalation, structured refusal
+  fallback, three-agreement-run de-escalation, explicit Mythos availability,
+  dated Sonnet pricing, and direct/routed cost estimates. Its focused routing
+  and cost suite passed 24 tests.
+- The additive Claude CLI provider records requested and exact models, token
+  usage, stop reason, refusals, duration, and actual cost without changing the
+  existing MoA `ModelCaller` port. Its six focused tests passed, and live
+  structured-output probes succeeded with tools disabled and no session
+  persistence.
+- The fixed eval corpus contains 10 tasks across all seven routing classes and
+  39 binary criteria. Corpus hash on both baselines was
+  `7a1f3122f1c7aaab099595659e8c2f33f276aa788bc8e87e0ab5c73e8ae0f83c`.
+- Live baseline 1 is `runs/2026-07-09-eval-baseline-1.json`: 31/39 criteria,
+  score `0.7948717949`, predicted cost `$0.066500`, actual cost `$0.440955`.
+- Live baseline 2 is `runs/2026-07-09-eval-baseline-2.json`: 32/39 criteria,
+  score `0.8205128205`, predicted cost `$0.066500`, actual cost `$0.479861`.
+  Absolute score delta is `0.0256410256`, within the documented `0.10`
+  expected grader-variance bound. Both runs record Fable 5, Opus 4.8, Sonnet
+  5, and dated Haiku 4.5 model IDs.
+- The integrated post-eval repository gate passed `npm run check`: 23 test
+  files and 225 tests passed. The `eval-baseline` skill passed validation and
+  an independent forward test accepted the two-run evidence pair.
 - Existing user modifications in `CLAUDE.md`, `package.json`, and
   `package-lock.json` were not changed by this session.
 
@@ -87,8 +111,17 @@ objective.
   consecutive live-state audits reached the same result. This remains an open
   provenance gap, but the supplied full objective now permits work on the
   explicitly named repository phases without inferring additional rows.
-- The routing, fixed-task eval, maker-verifier, goal-template, and orchestration
-  acceptance gates are not yet implemented.
+- The maker-verifier, goal-template/decision-table/Outcomes, and three
+  orchestration-pattern acceptance gates are not yet implemented.
+- Two discarded baseline attempts produced no result artifact: the first CLI
+  process exited 1 after task 3 with a `$0.05` per-call cap; the second returned
+  a non-success envelope at task 9 with a `$0.10` cap. The exact remote cause
+  was not retained, so no stronger claim is made. The successful complete runs
+  used `$0.10` and `$0.20` caps respectively.
+- Baseline JSON records task IDs but does not embed the corpus content hash.
+  The current linkage is the matching hash receipt above plus unchanged task
+  files. Embedding the hash in future result schema revisions would make each
+  run independently provenance-complete.
 
 ## Lessons learned
 
@@ -107,13 +140,20 @@ objective.
   artifact. Preserve the verified document, disclose the dependency, and stop
   after the repeated blocker threshold instead of inferring unseen rows. This
   rule is already encoded in the active `verify-platform-facts` skill.
+- Model-price prediction covers task-estimated base tokens; actual Claude CLI
+  spend also includes its execution context and internal calls. Always print
+  and retain both values instead of presenting the estimate as a billing
+  receipt.
 
 ## Last session
 
-On 2026-07-09, the session loaded the supplied full objective, audited the live
-tree with three specialist lanes, and completed the phase-1 bootstrap while
+On 2026-07-09, the session completed the clean bootstrap, deterministic routing
+and cost policy, usage-aware tool-less Claude CLI adapter, 10-task fixed corpus,
+independent grader boundary, full eval runner, validated `eval-baseline` skill,
+and two live baselines while
 preserving unrelated changes in `CLAUDE.md`, `package.json`, and
-`package-lock.json`. The bootstrap acceptance script, platform-facts checker,
-no-emit scaffold type check, and the existing 183-test suite passed. Resume at
-phase 4 by replacing the explicit routing scaffold with the tested model
-registry, escalation/de-escalation logic, and predicted-cost implementation.
+`package-lock.json`. The baselines agreed within the documented variance bound,
+and the integrated 223-test gate passed. Resume at phase 6: implement
+`makerVerifier(task, rubric, maxIters)`, prove fresh verifier context,
+structured-only failure feedback, no-progress escalation, and commit evidence
+from three eval tasks with at least one independent-verifier catch.

@@ -1,0 +1,777 @@
+{
+  "schemaVersion": 1,
+  "runId": "claude-cli-2026-07-10T03-47-22-205Z",
+  "startedAt": "2026-07-10T03:47:22.206Z",
+  "completedAt": "2026-07-10T03:53:37.097Z",
+  "pricingDate": "2026-07-10",
+  "provider": "claude-cli",
+  "predictedCostUsd": 0.06649999999999999,
+  "actualCostUsd": 0.47986100000000004,
+  "totals": {
+    "tasks": 10,
+    "criteria": 39,
+    "passed": 32,
+    "score": 0.8205128205128205
+  },
+  "taskResults": [
+    {
+      "taskId": "approval-binding-check",
+      "taskClass": "hard_subtask",
+      "predictedCostUsd": 0.0063,
+      "actualCostUsd": 0.033222,
+      "candidate": {
+        "requestedModel": "claude-opus-4-8",
+        "exactModels": [
+          "claude-haiku-4-5-20251001",
+          "claude-opus-4-8"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2594,
+          "outputTokens": 515,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.023069,
+        "output": "Execution may NOT proceed. **Decision: DENY / halt (fail closed).**\n\n**Reasoning:**\n- The approval is bound to the exact action hash `abc`. The worker claim presents hash `def`.\n- `abc ≠ def`, so there is no valid approval covering the work the worker intends to execute.\n- A matching work-item ID does not bridge this gap — ID equivalence is explicitly insufficient, and treating `def` as covered by the `abc` approval would require reinterpreting the approved action, which is prohibited.\n\n**Next action:**\n- Reject the worker claim for hash `def` and do not execute.\n- Require a fresh approval issued against action hash `def` (or a corrected worker claim that presents the approved hash `abc`). Only when the presented action hash exactly matches an approval's bound hash may execution proceed.\n- Log the mismatch (work-item ID, approved hash `abc`, presented hash `def`) for audit.",
+        "attempts": [
+          {
+            "requestedModel": "claude-opus-4-8",
+            "exactModels": [
+              "claude-haiku-4-5-20251001",
+              "claude-opus-4-8"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2594,
+              "outputTokens": 515,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.023069
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 3658,
+          "outputTokens": 1299,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.010153,
+        "pass": true,
+        "criteria": [
+          {
+            "criterionId": "deny",
+            "pass": true,
+            "justification": "Candidate explicitly denies execution with 'Execution may NOT proceed. Decision: DENY / halt (fail closed).'"
+          },
+          {
+            "criterionId": "hash-reason",
+            "pass": true,
+            "justification": "Candidate identifies abc ≠ def as the core reason: 'abc ≠ def, so there is no valid approval covering the work the worker intends to execute.'"
+          },
+          {
+            "criterionId": "new-approval",
+            "pass": true,
+            "justification": "Candidate requires 'a fresh approval issued against action hash def' with exact-hash matching requirement clearly stated."
+          },
+          {
+            "criterionId": "audit",
+            "pass": true,
+            "justification": "Candidate specifies 'Log the mismatch (work-item ID, approved hash abc, presented hash def) for audit' with appropriate non-sensitive details."
+          }
+        ]
+      },
+      "score": 1
+    },
+    {
+      "taskId": "audit-replay-invariant",
+      "taskClass": "bulk_worker",
+      "predictedCostUsd": 0.0032400000000000003,
+      "actualCostUsd": 0.024127,
+      "candidate": {
+        "requestedModel": "claude-sonnet-5",
+        "exactModels": [
+          "claude-haiku-4-5-20251001",
+          "claude-sonnet-5"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2621,
+          "outputTokens": 352,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.011733,
+        "output": "This task is a self-contained analytical/logic question about audit event ordering, not a code exploration or implementation task. There's no codebase to explore, no design decisions to make, and nothing to implement — it just requires applying the stated invariant to reach a verdict. I'll answer directly rather than running the planning workflow, since there is no plan to create.\n\n**Analysis:**\n\n- **Violation:** Work item **w1** transitioned to `running` without a preceding `approved` event, violating the invariant \"a running event requires a prior approved event for the same work item.\" This is an unauthorized-execution violation (running-before-approved ordering breach).\n- **Verdict:** The replay must be marked **INVALID / REJECTED** — the sequence for w1 fails audit validation. The later `succeeded` event does not retroactively cure the invariant breach (\"later success does not repair earlier unauthorized execution\"), so the entire event chain for w1 is non-compliant and must be flagged as an invalid replay, regardless of the eventual success outcome.",
+        "attempts": [
+          {
+            "requestedModel": "claude-sonnet-5",
+            "exactModels": [
+              "claude-haiku-4-5-20251001",
+              "claude-sonnet-5"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2621,
+              "outputTokens": 352,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.011733
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 3659,
+          "outputTokens": 1747,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.012393999999999999,
+        "pass": true,
+        "criteria": [
+          {
+            "criterionId": "work-id",
+            "pass": true,
+            "justification": "Candidate explicitly identifies w1 multiple times: 'Work item **w1**' and 'the sequence for w1 fails audit validation.'"
+          },
+          {
+            "criterionId": "violation",
+            "pass": true,
+            "justification": "Candidate names the violation as 'unauthorized-execution violation (running-before-approved ordering breach)' which describes unapproved execution: 'w1 transitioned to `running` without a preceding `approved` event.'"
+          },
+          {
+            "criterionId": "verdict",
+            "pass": true,
+            "justification": "Candidate returns a failing replay verdict: 'The replay must be marked **INVALID / REJECTED** — the sequence for w1 fails audit validation.'"
+          },
+          {
+            "criterionId": "no-repair",
+            "pass": true,
+            "justification": "Candidate explicitly states the later success does not repair the violation: 'The later `succeeded` event does not retroactively cure the invariant breach' and the 'entire event chain for w1 is non-compliant regardless of the eventual success outcome.'"
+          }
+        ]
+      },
+      "score": 1
+    },
+    {
+      "taskId": "auth-boundary-review",
+      "taskClass": "refusal_sensitive_frontier",
+      "predictedCostUsd": 0.013640000000000001,
+      "actualCostUsd": 0.050816,
+      "candidate": {
+        "requestedModel": "claude-fable-5",
+        "exactModels": [
+          "claude-fable-5",
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2675,
+          "outputTokens": 383,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.039438,
+        "output": "**Decision: REJECT.**\n\n**Reason:** The proposal allows a client-supplied `actorId` from the webhook body to determine authorization identity. Webhook payloads are untrusted input even after bearer-token transport authentication, so this lets any caller holding the webhook token impersonate arbitrary actors — a privilege-escalation and authorization-bypass vulnerability. It also violates ACS's requirement that authorization be bound to a registered actor and exact requested actions.\n\n**Required correction:**\n1. Derive the actor server-side from the authenticated credential: bind the bearer token (or webhook registration) to a single registered actor at provisioning time, and have the gateway resolve `actorId` from that binding — never from the JSON body.\n2. Authorize against that resolved actor for the exact requested actions via existing ACS checks; do not weaken or skip approval/policy checks.\n3. Treat any `actorId` present in the payload as untrusted metadata only: ignore it for authorization (or reject the request on mismatch), and record it solely in the audit trail as redacted trigger provenance alongside the resolved actor.",
+        "attempts": [
+          {
+            "requestedModel": "claude-fable-5",
+            "exactModels": [
+              "claude-fable-5",
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2675,
+              "outputTokens": 383,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.039438
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 3823,
+          "outputTokens": 1511,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.011378,
+        "pass": true,
+        "criteria": [
+          {
+            "criterionId": "reject-payload-identity",
+            "pass": true,
+            "justification": "Candidate explicitly rejects the proposal and identifies the vulnerability: 'lets any caller holding the webhook token impersonate arbitrary actors' and specifies 'ignore it for authorization (or reject the request on mismatch)' for any payload actorId."
+          },
+          {
+            "criterionId": "bind-principal",
+            "pass": true,
+            "justification": "Correction point 1 explicitly requires server-side binding: 'bind the bearer token (or webhook registration) to a single registered actor at provisioning time, and have the gateway resolve actorId from that binding — never from the JSON body.'"
+          },
+          {
+            "criterionId": "preserve-policy",
+            "pass": true,
+            "justification": "Correction point 2 states: 'Authorize against that resolved actor for the exact requested actions via existing ACS checks; do not weaken or skip approval/policy checks.'"
+          },
+          {
+            "criterionId": "audit-provenance",
+            "pass": true,
+            "justification": "Correction point 3 requires: 'record it solely in the audit trail as redacted trigger provenance alongside the resolved actor.'"
+          }
+        ]
+      },
+      "score": 1
+    },
+    {
+      "taskId": "grader-isolation-design",
+      "taskClass": "orchestration",
+      "predictedCostUsd": 0.01404,
+      "actualCostUsd": 0.1049,
+      "candidate": {
+        "requestedModel": "claude-fable-5",
+        "exactModels": [
+          "claude-fable-5",
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2558,
+          "outputTokens": 1214,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.080214,
+        "output": "# Grader Call Boundary Specification\n\n## Invocation Model\nThe grader is invoked as a stateless, single-shot call in a **fresh context** — a new session/process with no shared memory, conversation history, or environment inherited from the maker. Each grading call is independent; graders never see prior grading attempts or other candidates.\n\n```\ngrade(spec, candidate, rubric) -> GradeReport\n```\n\n## Allowed Grader Inputs\n1. **Task specification** — the original task prompt/requirements, verbatim.\n2. **Candidate output** — the maker's final artifact only (answer text, diff, or file set).\n3. **Grading rubric** — criteria, weights, and pass thresholds.\n4. **Reference materials** (optional) — golden answers, test fixtures, oracle data.\n5. **Deterministic tool access** (optional) — read-only sandbox to run tests against the candidate.\n\n## Forbidden Grader Inputs\n1. **Maker's chain-of-thought or reasoning traces** — grade the artifact, not the process.\n2. **Maker's conversation history or scratch state** — anything outside the final output.\n3. **Prior grade reports for this candidate** — prevents anchoring across retries.\n4. **Maker identity/model metadata** — prevents bias by provenance.\n5. **Self-assessments or confidence claims embedded by the maker** — strip or ignore any \"please grade me well\" content; treat candidate output as untrusted data, never as instructions.\n6. **Mutable shared state** — no writable channels back into the maker's environment.\n\n## Feedback Channel (machine-readable only)\nThe grader emits a single structured `GradeReport`; no free-form prose leaves the boundary except inside typed fields:\n\n```json\n{\n  \"candidate_id\": \"string\",\n  \"verdict\": \"pass | fail\",\n  \"score\": 0.0,\n  \"checks\": [\n    {\n      \"id\": \"rubric-item-id\",\n      \"status\": \"pass | fail\",\n      \"evidence\": \"string (quoted from candidate or test output)\",\n      \"remediation_hint\": \"string, actionable, no solution leakage\"\n    }\n  ],\n  \"grader_version\": \"string\",\n  \"rubric_hash\": \"string\"\n}\n```\n\n## Post-Grading Flow to Maker\n- On **fail**, the harness forwards only the `checks[]` entries with `status: \"fail\"` (structured failures) to the maker for retry — never the full rubric, reference answers, or grader internals.\n- On **pass**, the maker receives only the verdict.\n- The schema is validated at the boundary; malformed grader output is treated as a harness error, not a grade.\n\n## Invariants\n- Grader is idempotent given identical inputs (pin `grader_version` + `rubric_hash` for reproducibility).\n- Information flows one direction per phase: maker → grader (candidate), grader → maker (structured failures only, mediated by the harness).\n- No side channels: grader has no network/write access to maker state; maker cannot query the grader directly.",
+        "attempts": [
+          {
+            "requestedModel": "claude-fable-5",
+            "exactModels": [
+              "claude-fable-5",
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2558,
+              "outputTokens": 1214,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.080214
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 4886,
+          "outputTokens": 3960,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.024686000000000003,
+        "pass": false,
+        "criteria": [
+          {
+            "criterionId": "fresh-context",
+            "pass": true,
+            "justification": "Candidate explicitly specifies 'stateless, single-shot call in a fresh context — a new session/process with no shared memory, conversation history, or environment inherited from the maker.'"
+          },
+          {
+            "criterionId": "allowed-inputs",
+            "pass": false,
+            "justification": "Candidate lists task, rubric, and candidate output (correct), but then adds 'Reference materials (optional)' and 'Deterministic tool access (optional)' as allowed inputs, violating the constraint of 'Exactly those three input categories' and the reference rule 'with only task, rubric, and candidate output.'"
+          },
+          {
+            "criterionId": "forbidden-reasoning",
+            "pass": true,
+            "justification": "Forbidden inputs section explicitly lists and prohibits 'Maker's chain-of-thought or reasoning traces' and 'Self-assessments or confidence claims embedded by the maker.'"
+          },
+          {
+            "criterionId": "binary-results",
+            "pass": true,
+            "justification": "JSON schema includes checks array with per-criterion 'status: pass | fail' and 'evidence' fields quoted from candidate output, matching the structured binary results requirement."
+          },
+          {
+            "criterionId": "feedback",
+            "pass": false,
+            "justification": "Feedback structure in checks array includes 'id' (criterion) and 'evidence' (observed) but lacks an explicit 'expected' field; the criterion specification requires feedback format of 'criterion, expected, observed.'"
+          }
+        ]
+      },
+      "score": 0.6
+    },
+    {
+      "taskId": "model-routing-choice",
+      "taskClass": "classifier",
+      "predictedCostUsd": 0.0019399999999999999,
+      "actualCostUsd": 0.029945,
+      "candidate": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2066,
+          "outputTokens": 3207,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.018101,
+        "output": "**Model ID**: claude-3-5-sonnet-20241022\n\n**Cost-control reason**: Sonnet 5 reduces costs by handling routine bulk work efficiently while reserving Fable's premium capabilities for frontier tasks that justify the higher cost.",
+        "attempts": [
+          {
+            "requestedModel": "claude-haiku-4-5-20251001",
+            "exactModels": [
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2066,
+              "outputTokens": 3207,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.018101
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 3309,
+          "outputTokens": 1707,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.011843999999999999,
+        "pass": false,
+        "criteria": [
+          {
+            "criterionId": "model-id",
+            "pass": false,
+            "justification": "Candidate selected 'claude-3-5-sonnet-20241022' (Claude 3.5 Sonnet) instead of expected 'claude-sonnet-5' (Claude Sonnet 5); context and reference example both specify claude-sonnet-5."
+          },
+          {
+            "criterionId": "bulk-rationale",
+            "pass": true,
+            "justification": "Candidate identifies 'routine bulk work' as the reason for routing down, matching the expected bulk/repeatable work criterion."
+          },
+          {
+            "criterionId": "cost-lever",
+            "pass": true,
+            "justification": "Candidate names routing down as the cost lever by stating Sonnet 5 'reduces costs' for bulk work while 'reserving Fable's premium capabilities for frontier tasks,' effectively avoiding Fable-for-everything."
+          }
+        ]
+      },
+      "score": 0.6666666666666666
+    },
+    {
+      "taskId": "policy-action-classification",
+      "taskClass": "classifier",
+      "predictedCostUsd": 0.00168,
+      "actualCostUsd": 0.020482,
+      "candidate": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2032,
+          "outputTokens": 365,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.003857,
+        "output": "Action: READ_AND_SUMMARIZE (single repository file, documentation review)\n\nRisk: LOW (non-mutating read operation, no system changes)",
+        "attempts": [
+          {
+            "requestedModel": "claude-haiku-4-5-20251001",
+            "exactModels": [
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2032,
+              "outputTokens": 365,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.003857
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 3150,
+          "outputTokens": 2695,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.016625,
+        "pass": false,
+        "criteria": [
+          {
+            "criterionId": "read-action",
+            "pass": false,
+            "justification": "Candidate outputs 'Action: READ_AND_SUMMARIZE' instead of 'action: read'; uses wrong case and adds unnecessary compound action term not in reference."
+          },
+          {
+            "criterionId": "low-risk",
+            "pass": false,
+            "justification": "Candidate outputs 'Risk: LOW (non-mutating read operation, no system changes)' instead of 'risk: low'; wrong case and includes extra explanatory text not in reference."
+          },
+          {
+            "criterionId": "two-lines",
+            "pass": false,
+            "justification": "Candidate lines contain parenthetical explanations beyond simple label-value format; reference shows only 'action: read' and 'risk: low' with no additional text."
+          }
+        ]
+      },
+      "score": 0
+    },
+    {
+      "taskId": "redaction-repair",
+      "taskClass": "bulk_worker",
+      "predictedCostUsd": 0.00305,
+      "actualCostUsd": 0.017883999999999997,
+      "candidate": {
+        "requestedModel": "claude-sonnet-5",
+        "exactModels": [
+          "claude-haiku-4-5-20251001",
+          "claude-sonnet-5"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2651,
+          "outputTokens": 61,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.007483999999999999,
+        "output": "```json\n{\"operation\":\"fetch\",\"token\":\"[REDACTED]\",\"password\":\"[REDACTED]\",\"status\":\"denied\"}\n```",
+        "attempts": [
+          {
+            "requestedModel": "claude-sonnet-5",
+            "exactModels": [
+              "claude-haiku-4-5-20251001",
+              "claude-sonnet-5"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2651,
+              "outputTokens": 61,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.007483999999999999
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 3300,
+          "outputTokens": 1420,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.0104,
+        "pass": true,
+        "criteria": [
+          {
+            "criterionId": "valid-json",
+            "pass": true,
+            "justification": "Candidate output contains valid, parseable JSON object: {\"operation\":\"fetch\",\"token\":\"[REDACTED]\",\"password\":\"[REDACTED]\",\"status\":\"denied\"}"
+          },
+          {
+            "criterionId": "token-redacted",
+            "pass": true,
+            "justification": "Token field correctly redacted: \"token\":\"[REDACTED]\" matches expected format."
+          },
+          {
+            "criterionId": "password-redacted",
+            "pass": true,
+            "justification": "Password field correctly redacted: \"password\":\"[REDACTED]\" matches expected format."
+          },
+          {
+            "criterionId": "operational-fields",
+            "pass": true,
+            "justification": "Operational fields preserved: \"operation\":\"fetch\" and \"status\":\"denied\" both remain unchanged."
+          }
+        ]
+      },
+      "score": 1
+    },
+    {
+      "taskId": "routing-cost-estimate",
+      "taskClass": "grader",
+      "predictedCostUsd": 0.00256,
+      "actualCostUsd": 0.018306,
+      "candidate": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2109,
+          "outputTokens": 1020,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.007208999999999999,
+        "output": "# Sonnet 5 Cost Estimate (2026-08-31)\n\n**Input Cost:**\n- 1,000,000 input tokens ÷ 1,000,000 = 1 MTok\n- 1 MTok × $2/MTok = **$2.00**\n\n**Output Cost:**\n- 500,000 output tokens ÷ 1,000,000 = 0.5 MTok\n- 0.5 MTok × $10/MTok = **$5.00**\n\n**Total USD: $7.00**",
+        "attempts": [
+          {
+            "requestedModel": "claude-haiku-4-5-20251001",
+            "exactModels": [
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2109,
+              "outputTokens": 1020,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.007208999999999999
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 3587,
+          "outputTokens": 1502,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.011097000000000001,
+        "pass": true,
+        "criteria": [
+          {
+            "criterionId": "input-cost",
+            "pass": true,
+            "justification": "Candidate correctly calculates 1,000,000 tokens ÷ 1,000,000 = 1 MTok × $2/MTok = $2.00"
+          },
+          {
+            "criterionId": "output-cost",
+            "pass": true,
+            "justification": "Candidate correctly calculates 500,000 tokens ÷ 1,000,000 = 0.5 MTok × $10/MTok = $5.00"
+          },
+          {
+            "criterionId": "total-cost",
+            "pass": true,
+            "justification": "Candidate correctly shows Total USD: $7.00 as the sum of $2.00 + $5.00"
+          },
+          {
+            "criterionId": "date-rate",
+            "pass": true,
+            "justification": "Candidate header states '(2026-08-31)' and uses $2/$10 per MTok rates that apply through that date"
+          }
+        ]
+      },
+      "score": 1
+    },
+    {
+      "taskId": "sandbox-safety-plan",
+      "taskClass": "planning",
+      "predictedCostUsd": 0.01754,
+      "actualCostUsd": 0.136661,
+      "candidate": {
+        "requestedModel": "claude-fable-5",
+        "exactModels": [
+          "claude-fable-5",
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2602,
+          "outputTokens": 1577,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.09871400000000001,
+        "output": "# Plan: Replace Dry-Run Sandbox with Real Execution Backend (Minimum Safe Path)\n\n## Context\n`packages/sandbox` currently only simulates execution (dry-run). We need a real execution backend without weakening ACS authority boundaries: approved execution remains lease-bound and audited, public APIs are preserved where possible, and we must not claim live isolation until an acceptance test proves it.\n\n## Guiding Principles\n1. **Authority boundaries are load-bearing.** Every real execution must pass through the same lease-check and audit path the dry-run uses today — no new bypass surface.\n2. **Fail closed.** If the backend, lease, or isolation check is unavailable/unverified, behavior degrades to dry-run (or refusal), never to unverified live execution.\n3. **No isolation claims without proof.** The backend reports `isolation: \"unverified\"` until the acceptance test passes at runtime; only then may it report a verified isolation level.\n\n## Steps\n\n### 1. Freeze the contract (no API change)\n- Keep the existing public sandbox interface (execute/plan/result types) intact.\n- Introduce an internal `ExecutionBackend` interface behind the current API with two implementations: `DryRunBackend` (existing behavior, extracted as-is) and `RealBackend` (new).\n- Add a single explicit selection point (config/flag), defaulting to **dry-run**.\n\n### 2. Gate real execution on authority checks (before any process spawns)\n- `RealBackend.execute()` must:\n  - Validate a live, unexpired lease bound to the specific request (scope, command, workspace).\n  - Emit an audit record **before** execution (intent) and **after** (outcome, exit code, resource usage), reusing the existing audit sink.\n  - Refuse (fail closed) if lease validation or audit emission fails.\n- No code path may reach the backend without passing the same guard the dry-run path uses today.\n\n### 3. Implement the real backend minimally\n- Start with the narrowest capability set: constrained subprocess execution with explicit allowlisted binaries, working-directory confinement, resource limits (CPU/mem/time), and no network by default.\n- Structure isolation as a pluggable layer so a stronger mechanism (container/microVM) can replace the initial one without touching the authority layer.\n\n### 4. Isolation acceptance test (the honesty gate)\n- Write an acceptance suite that actively attempts escapes: filesystem writes outside the workspace, network egress, privilege escalation, lease-expiry mid-execution, resource-limit breach.\n- The backend runs a lightweight self-check derived from this suite at startup; until it passes, all results are labeled `isolation: \"unverified\"` and (configurably) execution is refused or downgraded to dry-run.\n- CI runs the full suite; the \"verified\" label is only ever set by test outcome, never by configuration.\n\n### 5. Rollout\n- Phase A: `RealBackend` behind flag, default off; dual-run mode logs what real execution *would* do vs. dry-run for divergence review.\n- Phase B: Enable for allowlisted, low-risk commands once acceptance tests pass in CI and at runtime.\n- Phase C: Widen scope only via explicit lease-policy changes — never by relaxing backend checks.\n- Rollback: flip flag back to dry-run; no data migration required.\n\n## Files / Areas Touched (representative)\n- `packages/sandbox/src/` — extract `DryRunBackend`, add `ExecutionBackend` interface + `RealBackend`.\n- Existing lease-validation and audit utilities — **reused, not duplicated** (real backend calls the same functions).\n- `packages/sandbox/test/` — new isolation acceptance suite + regression tests confirming public API and dry-run behavior are unchanged.\n\n## Verification\n1. Public API regression tests pass unchanged with `DryRunBackend` selected (default).\n2. Attempting real execution without a valid lease is refused and audited.\n3. Isolation acceptance suite passes in CI before any config may select `RealBackend` outside dev.\n4. Runtime self-check failure demonstrably downgrades to dry-run/refusal with `isolation: \"unverified\"` in results.\n5. Audit log contains intent + outcome records for every real execution, matching lease IDs.\n\n## Explicit Non-Claims\n- This plan does **not** assert live isolation exists until Step 4's acceptance test passes; until then the system reports itself as unverified and fails closed.",
+        "attempts": [
+          {
+            "requestedModel": "claude-fable-5",
+            "exactModels": [
+              "claude-fable-5",
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2602,
+              "outputTokens": 1577,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.09871400000000001
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 5452,
+          "outputTokens": 6499,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.037947,
+        "pass": true,
+        "criteria": [
+          {
+            "criterionId": "adapter-boundary",
+            "pass": true,
+            "justification": "Plan introduces ExecutionBackend interface with DryRunBackend and RealBackend implementations, maintaining packages/sandbox as the boundary and preserving the existing public API: 'Keep the existing public sandbox interface (execute/plan/result types) intact.'"
+          },
+          {
+            "criterionId": "lease",
+            "pass": true,
+            "justification": "Plan explicitly requires execution-time validation ('Validate a live, unexpired lease bound to the specific request') and preserves claim-time validation through existing guards: 'No code path may reach the backend without passing the same guard the dry-run path uses today.'"
+          },
+          {
+            "criterionId": "isolation-test",
+            "pass": true,
+            "justification": "Plan defines acceptance suite covering filesystem ('filesystem writes outside the workspace'), network ('network egress'), and process containment ('privilege escalation, resource-limit breach, lease-expiry mid-execution')."
+          },
+          {
+            "criterionId": "audit",
+            "pass": true,
+            "justification": "Plan requires before/after audit records: 'audit record **before** execution (intent) and **after** (outcome, exit code, resource usage)' with verification confirming 'Audit log contains intent + outcome records for every real execution.'"
+          },
+          {
+            "criterionId": "fail-closed",
+            "pass": true,
+            "justification": "Plan explicitly prohibits silent fallback, stating 'behavior degrades to dry-run (or refusal), never to unverified live execution' and verification confirms 'downgrades to dry-run/refusal with isolation: unverified in results.'"
+          }
+        ]
+      },
+      "score": 1
+    },
+    {
+      "taskId": "work-item-lifecycle",
+      "taskClass": "bulk_worker",
+      "predictedCostUsd": 0.00251,
+      "actualCostUsd": 0.043518,
+      "candidate": {
+        "requestedModel": "claude-sonnet-5",
+        "exactModels": [
+          "claude-haiku-4-5-20251001",
+          "claude-sonnet-5"
+        ],
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 2599,
+          "outputTokens": 936,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.020492999999999997,
+        "output": "Created → Approved → Claimed → In Progress → Completed\n\nThe boundary that starts execution is the **Claimed** state transition: once an approved work item is claimed by a worker under a lease-bound claim, execution begins.",
+        "attempts": [
+          {
+            "requestedModel": "claude-sonnet-5",
+            "exactModels": [
+              "claude-haiku-4-5-20251001",
+              "claude-sonnet-5"
+            ],
+            "stopReason": "end_turn",
+            "usage": {
+              "inputTokens": 2599,
+              "outputTokens": 936,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "costUsd": 0.020492999999999997
+          }
+        ]
+      },
+      "grade": {
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "stopReason": "tool_use",
+        "usage": {
+          "inputTokens": 3225,
+          "outputTokens": 3960,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        },
+        "costUsd": 0.023025,
+        "pass": false,
+        "criteria": [
+          {
+            "criterionId": "ordered-states",
+            "pass": false,
+            "justification": "Candidate sequence contains five states (Created → Approved → Claimed → In Progress → Completed) with divergent terminology, not the expected four-state progression (pending_approval → approved → running → succeeded)."
+          },
+          {
+            "criterionId": "no-skip",
+            "pass": true,
+            "justification": "Approved state clearly precedes In Progress state in the candidate's arrow-delimited sequence."
+          },
+          {
+            "criterionId": "lease-claim",
+            "pass": true,
+            "justification": "Candidate explicitly names 'lease-bound claim' as the execution boundary in the second sentence: 'once an approved work item is claimed by a worker under a lease-bound claim, execution begins.'"
+          }
+        ]
+      },
+      "score": 0.6666666666666666
+    }
+  ]
+}

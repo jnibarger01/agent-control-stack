@@ -1,6 +1,7 @@
 {
   "files": [],
   "references": [
+    { "path": "./tsconfig.compounding.json" },
     { "path": "packages/shared" },
     { "path": "packages/work-items" },
     { "path": "packages/acp-adapter" },
