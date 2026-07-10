@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+STATE_FILE="${STATE_FILE:-$ROOT/STATE.md}"
+
+if [[ ! -f "$STATE_FILE" ]]; then
+  echo "required session file not found: $STATE_FILE" >&2
+  exit 1
+fi
+
+echo "Update STATE.md before finishing: Verified facts, Open failures, Lessons learned, and Last session."
+
+last_session="$({
+  awk '
+    /^## Last session[[:space:]]*$/ { in_section = 1; next }
+    in_section && /^## / { exit }
+    in_section { print }
+  ' "$STATE_FILE" | sed '/^[[:space:]]*$/d'
+} || true)"
+
+if [[ -z "$last_session" ]]; then
+  echo "Refusing to finish: STATE.md Last session is empty." >&2
+  exit 1
+fi
+
+printf "Confirm STATE.md is current and acceptance evidence is recorded [y/N]: "
+if ! read -r answer; then
+  answer=""
+fi
+
+case "$answer" in
+  y|Y|yes|YES)
+    ;;
+  *)
+    echo "Refusing to finish without explicit confirmation." >&2
+    exit 1
+    ;;
+esac
+
+git -C "$ROOT" worktree prune
+echo "Session handoff accepted; stale worktree metadata pruned."

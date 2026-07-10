@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "run-evals: STUB — the fixed task runner is delivered in phase 5."
