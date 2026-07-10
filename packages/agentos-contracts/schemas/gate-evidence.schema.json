@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/gate-evidence/1.0",
+  "title": "codex-swarm Promotion Gate Evidence",
+  "type": "object",
+  "required": [
+    "head_sha_verified", "worktree_clean", "tests_passed", "typecheck_passed",
+    "lint_passed", "secret_scan_passed", "unexpected_diff", "reviewer_approved",
+    "approval_recorded", "trace_recorded"
+  ],
+  "properties": {
+    "head_sha_verified": { "type": "boolean" },
+    "worktree_clean": { "type": "boolean" },
+    "tests_passed": { "type": "boolean" },
+    "typecheck_passed": { "type": "boolean" },
+    "lint_passed": { "type": "boolean" },
+    "secret_scan_passed": { "type": "boolean" },
+    "unexpected_diff": { "type": "boolean" },
+    "reviewer_approved": { "type": "boolean" },
+    "approval_recorded": { "type": "boolean" },
+    "trace_recorded": { "type": "boolean" },
+    "head_sha_expected": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "head_sha_actual": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+    "tests_exit_code": { "type": "integer" },
+    "typecheck_exit_code": { "type": "integer" },
+    "lint_exit_code": { "type": "integer" },
+    "trace_id": { "type": "string", "minLength": 6 }
+  },
+  "additionalProperties": true
+}

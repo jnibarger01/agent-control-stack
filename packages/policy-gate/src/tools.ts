@@ -11,6 +11,7 @@ import {
   type WorkItemStore
 } from "@agent-control-stack/work-items";
 import { z } from "zod";
+import { evaluateContractAdmission } from "./contracts.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
 
 export const workItemToolNames = [
@@ -234,6 +235,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
   return {
     create_work_item(input: unknown): WorkItem {
       return store.withTransaction(() => {
+        evaluateContractAdmission(input);
         const workItem = store.create(input);
         const { decision } = evaluateAndRecordPolicy(store, policy, workItem, workItem.requester, "create");
         return applyPolicyStatus(store, workItem, decision);

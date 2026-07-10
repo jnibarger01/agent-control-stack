@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/task-envelope/1.0",
+  "title": "AgentOS Task Envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "task_id", "goal", "origin", "task_type", "allowed_tools",
+    "workspace", "risk_level", "approval_required", "success_criteria",
+    "timeout_seconds", "trace_required", "rollback_required", "network_access", "human_notes"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "task_id": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{6,128}$" },
+    "goal": { "type": "string", "minLength": 1, "maxLength": 4000 },
+    "origin": { "enum": ["cli", "telegram", "imessage", "dashboard", "openclaw", "hermes", "api"] },
+    "task_type": { "enum": ["coding", "research", "memory_lookup", "browser_scrape", "deal_analysis", "system_admin", "unknown"] },
+    "allowed_tools": { "type": "array", "items": { "type": "string" } },
+    "workspace": { "type": "string" },
+    "risk_level": { "enum": ["read_only", "draft", "write", "destructive"] },
+    "approval_required": { "type": "boolean" },
+    "success_criteria": { "type": "array", "items": { "type": "string" } },
+    "timeout_seconds": { "type": "integer", "minimum": 1, "maximum": 86400 },
+    "trace_required": { "type": "boolean" },
+    "rollback_required": { "type": "boolean" },
+    "network_access": { "enum": ["none", "declared", "unrestricted"] },
+    "human_notes": { "type": "string", "maxLength": 4000 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "risk_level": { "enum": ["write", "destructive"] } } },
+      "then": {
+        "properties": {
+          "trace_required": { "const": true },
+          "approval_required": { "const": true },
+          "success_criteria": { "minItems": 1 }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "risk_level": { "const": "destructive" } } },
+      "then": { "properties": { "rollback_required": { "const": true } } }
+    },
+    {
+      "if": { "properties": { "task_type": { "const": "coding" } } },
+      "then": { "properties": { "workspace": { "minLength": 1 } } }
+    }
+  ]
+}

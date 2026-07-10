@@ -9,6 +9,29 @@ import { createWorkItemTools } from "./tools.js";
 const domainTransition = { via: "domain_service" } as const;
 
 describe("policy-gated work item tools", () => {
+  it("rejects invalid contract envelopes before creating work items", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-contract-invalid-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      expect(() =>
+        tools.create_work_item({
+          title: "Delete without rollback",
+          requester: "agent",
+          intent: "verify contract admission happens before persistence",
+          requestedActions: [{ kind: "fs.delete", description: "delete", params: { paths: ["dist"], destructive: true } }],
+          risk: "low"
+        })
+      ).toThrow("contract envelope invalid");
+      expect(store.list()).toEqual([]);
+      expect(store.readEvents()).toEqual([]);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("routes created work through injected policy", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-risk-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

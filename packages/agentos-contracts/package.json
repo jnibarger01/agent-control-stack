@@ -1,0 +1,17 @@
+{
+  "name": "agentos-contracts",
+  "version": "0.1.0",
+  "description": "Shared contract kernel for mission-router + LoopTrace + codex-swarm gated coding loop. Task envelope, router policy, trace event model, promotion gate, failure taxonomy. Zero dependencies.",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "src/index.d.ts",
+  "scripts": {
+    "test": "node --test test/*.test.js",
+    "smoke": "node examples/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "license": "UNLICENSED",
+  "private": true
+}
