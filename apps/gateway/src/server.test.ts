@@ -5,6 +5,9 @@ import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
 
+const auth = { token: "test-token", actor: "user" };
+const authHeaders = { authorization: `Bearer ${auth.token}` };
+
 describe("gateway work-item routes", () => {
   it("returns 400 for malformed list filters", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
@@ -23,13 +26,14 @@ describe("gateway work-item routes", () => {
   it("requires approval for writes and records exact action approval", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const dbPath = join(dir, "control.db");
-    const app = buildGateway({ dbPath, logger: false });
+    const app = buildGateway({ dbPath, logger: false, auth });
     let appClosed = false;
 
     try {
       const created = await app.inject({
         method: "POST",
         url: "/work-items",
+        headers: authHeaders,
         payload: {
           title: "Write work",
           requester: "user",
@@ -48,7 +52,8 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
-        payload: { approvedBy: "test", reason: "approve exact write" }
+        headers: authHeaders,
+        payload: { reason: "approve exact write" }
       });
 
       expect(approved.statusCode).toBe(200);
@@ -76,12 +81,13 @@ describe("gateway work-item routes", () => {
 
   it("blocks denied work on create", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
 
     try {
       const created = await app.inject({
         method: "POST",
         url: "/work-items",
+        headers: authHeaders,
         payload: {
           title: "Denied work",
           requester: "user",
@@ -111,13 +117,14 @@ describe("gateway work-item routes", () => {
       risk: "low"
     });
     setup.close();
-    const app = buildGateway({ dbPath, logger: false });
+    const app = buildGateway({ dbPath, logger: false, auth });
 
     try {
       const denied = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
-        payload: { approvedBy: "test" }
+        headers: authHeaders,
+        payload: {}
       });
 
       expect(denied.statusCode).toBe(403);
@@ -136,12 +143,13 @@ describe("gateway work-item routes", () => {
 
   it("unblocks blocked work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
 
     try {
       const created = await app.inject({
         method: "POST",
         url: "/work-items",
+        headers: authHeaders,
         payload: {
           title: "Denied work",
           requester: "user",
@@ -153,11 +161,210 @@ describe("gateway work-item routes", () => {
 
       const unblocked = await app.inject({
         method: "POST",
-        url: `/work-items/${created.json().id}/unblock`
+        url: `/work-items/${created.json().id}/unblock`,
+        headers: authHeaders
       });
 
       expect(unblocked.statusCode).toBe(200);
       expect(unblocked.json().workItem.status).toBe("pending_policy");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("MCP transport", () => {
+  it("initializes with tools capability", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { capabilities: { tools: {} }, serverInfo: { name: "agent-control-stack-gateway" } }
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("accepts initialized notification without a body", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", method: "notifications/initialized" }
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(response.body).toBe("");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists tools with JSON schemas", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" }
+      });
+      const createTool = response.json().result.tools.find((tool: { name: string }) => tool.name === "create_work_item");
+
+      expect(response.statusCode).toBe(200);
+      expect(createTool).toMatchObject({
+        name: "create_work_item",
+        inputSchema: { type: "object", properties: { requestedActions: { type: "array" } } }
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("calls the existing policy-aware tool path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: authHeaders,
+        payload: {
+          jsonrpc: "2.0",
+          id: 2,
+          method: "tools/call",
+          params: {
+            name: "create_work_item",
+            arguments: {
+              title: "Inspect source",
+              intent: "verify MCP call path",
+              target: { cwd: "/repo" },
+              requestedActions: [{ kind: "read", description: "read source", params: { paths: ["src/index.ts"] } }],
+              risk: "low"
+            }
+          }
+        }
+      });
+      const text = response.json().result.content[0].text;
+
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(text)).toMatchObject({ requester: "user", status: "approved" });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on mutating tool calls without bearer auth", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: {
+          jsonrpc: "2.0",
+          id: 3,
+          method: "tools/call",
+          params: { name: "create_work_item", arguments: { title: "x", intent: "y" } }
+        }
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({ error: { code: -32001, message: "unauthorized" } });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects bad Origin", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { origin: "https://evil.example" },
+        payload: { jsonrpc: "2.0", id: 4, method: "initialize" }
+      });
+
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toEqual({ error: "forbidden origin" });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns method-not-found for unsupported methods", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: 5, method: "missing/method" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({ error: { code: -32601, message: "method not found" } });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns controlled errors for malformed requests", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: 6 }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({ error: { code: -32600, message: "invalid request" } });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns 405 for GET /mcp", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const response = await app.inject({ method: "GET", url: "/mcp" });
+
+      expect(response.statusCode).toBe(405);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
