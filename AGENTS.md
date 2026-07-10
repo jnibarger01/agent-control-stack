@@ -1,15 +1,28 @@
 ---
 ijfw_version: 1.3.2
 ijfw_schema: 1
-type: business
-primary_type: business
-secondary_types: []
-confidence: 0.609
-detected_at: 2026-07-05T15:01:30.502Z
+type: mixed
+primary_type: mixed
+secondary_types:
+  - software
+  - business
+confidence: 0.808
+detected_at: 2026-07-10T15:09:49.728Z
 signals:
+  - kind: agents_md_frontmatter
+    weight: 0.9
+    value: business
+  - kind: manifest
+    weight: 0.9
+    manifests: [package.json, package.json, package.json, package.json, package.json, package.json]
   - kind: dir_business
     weight: 0.4
     name: runbooks
+  - kind: file_extension_ratio
+    weight: 0.7
+    domain: software
+    ratio: 1
+    count: 34
 ---
 # Repository Guidelines
 
