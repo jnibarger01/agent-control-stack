@@ -2,26 +2,29 @@
 
 ## Objective
 
-Build the repository's compounding-agent skeleton, routing and cost model,
-fixed evaluation harness, independent maker-verifier loop, proof-oriented goal
-entry points, and budget-capped orchestration patterns from the supplied goal
-objective.
+Close out the completed repository reconciliation by proving local and GitHub
+parity, recording preservation and cleanup evidence, retaining unresolved audit
+failures, and leaving a reproducible session handoff.
 
 ## Acceptance criteria
 
-- Track the required top-level tree and ship runnable `new-session`,
-  `end-session`, and `run-evals` entry points in a clean bootstrap commit.
-- Test every routing class, escalation path, and predicted/actual cost receipt.
-- Keep 10–20 fixed eval tasks, isolate grader context, document the results
-  schema, and record two comparable baseline runs.
-- Bound maker-verifier and orchestration loops by iterations, time, and tokens;
-  commit the required evidence traces.
-- Encode the verified goal-loop contract, three goal templates, the feature
-  decision table, and the confirmed managed Outcomes integration.
-- Keep platform facts live-cited in `docs/platform-facts.md`; use no
-  memory-derived platform claim.
-- Preserve unrelated worktree changes and satisfy every acceptance gate from
-  the supplied objective before claiming completion.
+- Inspect `main` and all four named cleanup paths; record branch, dirty or
+  untracked files, commits absent from `main`, and preservation status.
+- Preserve every uncommitted or unmerged change before cleanup.
+- Reconcile intended changes into `main` while excluding generated or
+  superseded work.
+- Run the relevant tests, type checks, builds, and repository validations.
+- Commit legitimate remaining changes with clear messages.
+- Fetch and reconcile the remote without force-pushing or rewriting shared
+  history.
+- Push `main` and every branch still needed to preserve unique work.
+- Prove local `main` equals GitHub `main`, the pushed commit exists remotely,
+  and the working tree is clean.
+- Remove the four named paths only after preservation and remote verification;
+  use Git worktree removal for registered worktrees.
+- Prune stale worktree metadata.
+- Delete local worktree branches only after merge or exact remote-SHA proof.
+- Finish with a concrete commit, test, branch, SHA, worktree, and risk receipt.
 
 ## General rules
 
@@ -164,9 +167,62 @@ objective.
   with no diff in `evals/tasks/` or either committed baseline JSON.
 - Existing user modifications in `CLAUDE.md`, `package.json`, and
   `package-lock.json` were not changed by this session.
+- The 2026-07-10 worktree cleanup inspected `main` plus
+  `hermes/agentos-contracts-slice`, `hermes/lease-bound-results`, and
+  `hermes/mcp-transport`. Their dirty files and unique commits were committed
+  and pushed before removal. The non-Git Phase-0 artifact path was classified
+  separately before deletion.
+- AgentOS contract work was preserved at
+  `6633abc552ffae7fe17163948ebd2fd8702b201f` and integrated into `main` as
+  `e38a004c03e5f8881a9499c8c8cd542b9e7146ca`. Lease-result work is preserved
+  at `45c7830388966012d2fd8aadb7d39b5dd1778c88`; the older MCP hardening slice
+  is preserved at `3ef51925b84ef01a93744dc3ef8cb6c7e425e8b5` and was not merged.
+- Preexisting `CLAUDE.md`, `package.json`, and `package-lock.json` changes were
+  preserved on `preserve/main-working-tree-20260710`, whose verified remote tip
+  is `3eb8b6f8a5b2a8b5d6ab5d62813a97ac5e40b6e8`.
+- Before the documentation-only closeout, local `main`, `origin/main`, and the
+  GitHub API all resolved to
+  `e38a004c03e5f8881a9499c8c8cd542b9e7146ca`; divergence was `0 0`, the tree
+  was clean, and GitHub contained all five preservation/archive refs.
+- The integrated `main` gate passed `npm run check` with 33 test files and 276
+  tests, the AgentOS Node suite passed 48 tests, and
+  `scripts/bootstrap-acceptance.test.sh` passed. The AgentOS and lease
+  worktrees also passed their focused tests and TypeScript builds before
+  preservation.
+- The registered worktrees at
+  `/home/jacen/agent-control-stack-agentos-contracts-slice`,
+  `/home/jacen/agent-control-stack-lease-results`, and
+  `/home/jacen/agent-control-stack-mcp-transport` were removed without force
+  after their remote SHA checks. Worktree metadata was pruned; unrelated
+  preexisting worktrees were left untouched.
+- `/home/jacen/agent-control-stack-phase0-artifacts-20260708-0212` was not a
+  Git worktree. Its authored AgentOS source, idea brief, and reviews were pushed
+  to `archive/agentos-phase0-20260708` at
+  `eb58b8d301b9642c49c88364cfce07b6e35be6ef`; the generated ISO, chroot,
+  package caches, boot files, and duplicate documentation archive were then
+  deleted.
+- The complete cleanup acceptance receipt and artifact inventory are recorded
+  in `docs/worktree-cleanup-closeout-2026-07-10.md`.
 
 ## Open failures
 
+- **Prompt 11 — Stage: `OPEN_FAILURE`**
+  - Status: `UNRESOLVED`.
+  - Failure: the required independent cross-audit produced no independent
+    verdict. The MCP attempt timed out after 30 seconds; the CLI retry exited 3
+    because the Codex authentication token was stale and Gemini failed under
+    `TERM=dumb`.
+  - Evidence: IJFW reported that neither auditor contributed and that lineage
+    diversity was reduced. “No findings” is therefore not a PASS.
+  - Resume: refresh Codex authentication, run Gemini under a compatible
+    terminal, and rerun the cross-audit against the final closeout range.
+- The preserved `hermes/mcp-transport` branch remains test-red at
+  `3ef51925b84ef01a93744dc3ef8cb6c7e425e8b5`. Its focused run passed 21 tests
+  and failed these two audit-chain tests:
+  `packages/eval-harness/src/replay.test.ts > deterministic replay > replays approved work through SQLite events`
+  and
+  `packages/work-items/src/state-machine.test.ts > work item state machine > writes a verifiable audit hash chain`.
+  The branch is preserved remotely and was not merged into `main`.
 - The appendix table referenced by the objective is absent from the repository
   and was not recoverable from the current tree or the live IJFW session files.
   Exact appendix-to-table parity therefore remains unverified. The document is
@@ -251,21 +307,23 @@ objective.
 - For `/goal`, retain the initial result and query the same persisted session.
   `No goal set` after no manual clear is stronger evaluator-pass evidence than
   a maker's completion statement.
+- Before removing a worktree, inventory dirty and untracked files plus commits
+  absent from `main`, preserve intended state on a branch, and require the
+  local branch SHA to equal the remote SHA. Remove the worktree only after that
+  proof, and delete its local branch only after merge or remote preservation.
+  This 2026-07-10 lesson is encoded and testable in
+  `skills/bounded-orchestration/SKILL.md`.
 
 ## Last session
 
-On 2026-07-09, the session completed phases 6-8: three live maker-verifier
-traces with a labeled seeded fault, cited `/goal` and Outcomes entry points with
-a same-session evaluator-clear receipt, and three budgeted orchestration
-patterns with deterministic cap evidence and live headless receipts. A
-post-commit independent audit then exposed four receipt-binding gaps and a
-terminal wall-clock bypass; all five were fixed, covered by tamper tests,
-folded into the two active repository skills, and rechecked across 31 files and
-267 tests. Two bounded hosted dynamic-workflow attempts remain preserved as
-negative evidence, and `/goal` platform-origin authentication remains limited
-to self-contained hashes plus current-machine transcript corroboration. The
-fixed corpus and baselines stayed unchanged, while unrelated modifications in
-`CLAUDE.md`, `package.json`, and `package-lock.json` remained unowned. Resume
-pointer: start from the corrective evidence-binding commit, re-read this file
-and both active repository skills, then address only the documented appendix,
-baseline corpus-hash, hosted-workflow, or external receipt-authentication gaps.
+On 2026-07-10, the Fable 5 closeout verified the completed worktree cleanup,
+recorded every preservation and archive ref, retained the two MCP audit-chain
+test failures, archived the authored Phase-0 source before deleting generated
+ISO state, and added a remote-SHA cleanup rule to the bounded-orchestration
+skill. The main repository passed its build, 276-test Vitest gate, 48 AgentOS
+Node tests, and bootstrap acceptance check. Independent cross-audit coverage
+remains open at Prompt 11 because Codex authentication was stale and Gemini
+failed under `TERM=dumb`. Resume pointer: start from `origin/main`, read
+`docs/worktree-cleanup-closeout-2026-07-10.md`, then resolve Prompt 11 by
+restoring both auditors and rerunning the audit; do not reopen the completed
+Git reconciliation or remove the unrelated worktrees.

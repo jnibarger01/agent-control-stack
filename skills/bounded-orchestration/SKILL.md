@@ -41,6 +41,12 @@ and task-level correctness.
    headless fallback instead of silently raising caps.
 8. Check final outputs against the eval rubric. A structurally completed
    orchestration is not necessarily a correct answer.
+9. Before removing an orchestration worktree, inventory its branch, dirty and
+   untracked files, and commits absent from `main`. Preserve intended dirty
+   state in a commit, push every unique commit to a remote branch, and require
+   the local branch SHA to equal the remote SHA before `git worktree remove`.
+   Delete the local branch only when it is merged or its exact tip is verified
+   on the remote.
 
 ## Acceptance check
 
@@ -52,6 +58,13 @@ jq -e '.expectedFailure == "iteration_cap" and .spendLog.failureCode == "iterati
 
 Confirm the three live traces use non-fixture exact models, retain predicted
 and actual spend, and pass their task-level content assertions.
+
+For a worktree cleanup, also require this check to succeed before removal:
+
+```bash
+test "$(git rev-parse "$WORKTREE_BRANCH")" = \
+  "$(git ls-remote origin "refs/heads/$WORKTREE_BRANCH" | awk '{print $1}')"
+```
 
 ## Changelog
 
@@ -71,3 +84,6 @@ and actual spend, and pass their task-level content assertions.
 - 2026-07-09: Added a final receipt cap check after a controlled-clock audit
   exposed a terminal parsing window between the last provider check and the
   completed result.
+- 2026-07-10: Added the remote-SHA worktree-removal gate after the cleanup
+  session found unique commits and dirty files that would have been lost by
+  removing worktrees before preservation.
