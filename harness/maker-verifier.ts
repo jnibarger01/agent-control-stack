@@ -104,7 +104,8 @@ export interface MakerVerifierResult {
 
 export interface CreateMakerVerifierOptions {
   makerProvider: ModelProvider;
-  verifierProvider: ModelProvider;
+  /** Called once per iteration; each result must have no prior conversation state. */
+  createVerifierProvider: () => ModelProvider;
   maxBudgetUsd: number;
   timeoutMs: number;
   availableModelIds?: readonly ModelId[];
@@ -156,6 +157,7 @@ export function createMakerVerifier(options: CreateMakerVerifierOptions): MakerV
   }
 
   const now = options.now ?? (() => new Date().toISOString());
+  const usedVerifierProviders = new WeakSet<ModelProvider>();
 
   return async function makerVerifier(
     task: MakerVerifierTask,
@@ -192,7 +194,15 @@ export function createMakerVerifier(options: CreateMakerVerifierOptions): MakerV
       const makerResult = parseMakerResponse(makerReceipt.text);
       receipts.push(makerReceipt);
 
-      const verifierReceipt = await options.verifierProvider.complete(
+      const verifierProvider = options.createVerifierProvider();
+      if (!verifierProvider || typeof verifierProvider.complete !== "function") {
+        throw new Error("createVerifierProvider must return a model provider");
+      }
+      if (verifierProvider === options.makerProvider || usedVerifierProviders.has(verifierProvider)) {
+        throw new Error("createVerifierProvider must return a new provider with no prior context");
+      }
+      usedVerifierProviders.add(verifierProvider);
+      const verifierReceipt = await verifierProvider.complete(
         verifierRequest(
           task,
           rubric,

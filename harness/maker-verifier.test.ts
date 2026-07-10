@@ -63,14 +63,18 @@ class ScriptedProvider implements ModelProvider {
   }
 }
 
-function factory(makerProvider: ModelProvider, verifierProvider: ModelProvider) {
+function factory(makerProvider: ModelProvider, createVerifierProvider: () => ModelProvider) {
   return createMakerVerifier({
     makerProvider,
-    verifierProvider,
+    createVerifierProvider,
     maxBudgetUsd: 0.1,
     timeoutMs: 1_000,
     now: sequenceClock()
   });
+}
+
+function freshVerifier(delegate: ModelProvider): () => ModelProvider {
+  return () => ({ complete: (request) => delegate.complete(request) });
 }
 
 describe("makerVerifier", () => {
@@ -78,7 +82,7 @@ describe("makerVerifier", () => {
     const makerProvider = new ScriptedProvider([maker("operator read; no bypass")], 0.01, 100, 20);
     const verifierProvider = new ScriptedProvider([verification()], 0.002, 80, 10);
 
-    const result = await factory(makerProvider, verifierProvider)(task, rubric, 1);
+    const result = await factory(makerProvider, freshVerifier(verifierProvider))(task, rubric, 1);
 
     expect(result.pass).toBe(true);
     expect(makerProvider.requests).toHaveLength(1);
@@ -105,9 +109,14 @@ describe("makerVerifier", () => {
     );
     const verifierProvider = new ScriptedProvider([verification(["actor"]), verification()], 0.002, 80, 10);
 
-    const result = await factory(makerProvider, verifierProvider)(task, rubric, 2);
+    let verifierCalls = 0;
+    const result = await factory(makerProvider, () => {
+      verifierCalls += 1;
+      return { complete: (request) => verifierProvider.complete(request) };
+    })(task, rubric, 2);
 
     expect(result.pass).toBe(true);
+    expect(verifierCalls).toBe(2);
     const retry = JSON.parse(makerProvider.requests[1]!.prompt);
     expect(Object.keys(retry)).toEqual(["task", "failures"]);
     expect(retry.task).toEqual({ input: task.input, context: task.context });
@@ -133,7 +142,7 @@ describe("makerVerifier", () => {
       10
     );
 
-    const result = await factory(makerProvider, verifierProvider)(task, rubric, 3);
+    const result = await factory(makerProvider, freshVerifier(verifierProvider))(task, rubric, 3);
 
     expect(makerProvider.requests.map((request) => request.model)).toEqual([
       MODEL_IDS.sonnet,
@@ -159,7 +168,7 @@ describe("makerVerifier", () => {
       10
     );
 
-    const result = await factory(makerProvider, verifierProvider)(task, rubric, 2);
+    const result = await factory(makerProvider, freshVerifier(verifierProvider))(task, rubric, 2);
 
     expect(result).toMatchObject({ pass: false, stoppedBy: "max_iters", iterations: 2 });
     expect(result.trace.iterations).toHaveLength(2);
@@ -171,7 +180,7 @@ describe("makerVerifier", () => {
     const makerProvider = new ScriptedProvider(['{"output":"answer"}'], 0.01, 100, 20);
     const verifierProvider = new ScriptedProvider([verification()], 0.002, 80, 10);
 
-    await expect(factory(makerProvider, verifierProvider)(task, rubric, 1)).rejects.toThrow("maker response");
+    await expect(factory(makerProvider, freshVerifier(verifierProvider))(task, rubric, 1)).rejects.toThrow("maker response");
     expect(verifierProvider.requests).toHaveLength(0);
   });
 
@@ -179,14 +188,14 @@ describe("makerVerifier", () => {
     const makerProvider = new ScriptedProvider([maker("answer")], 0.01, 100, 20);
     const verifierProvider = new ScriptedProvider(['{"criteria":[]}'], 0.002, 80, 10);
 
-    await expect(factory(makerProvider, verifierProvider)(task, rubric, 1)).rejects.toThrow("verifier response");
+    await expect(factory(makerProvider, freshVerifier(verifierProvider))(task, rubric, 1)).rejects.toThrow("verifier response");
   });
 
   it("records evidence when maker self-critique passes but independent verification fails", async () => {
     const makerProvider = new ScriptedProvider([maker("confident but incomplete", true)], 0.01, 100, 20);
     const verifierProvider = new ScriptedProvider([verification(["approval"])], 0.002, 80, 10);
 
-    const result = await factory(makerProvider, verifierProvider)(task, rubric, 1);
+    const result = await factory(makerProvider, freshVerifier(verifierProvider))(task, rubric, 1);
 
     expect(result.pass).toBe(false);
     expect(result.trace.iterations[0]!.maker.selfAssessment.pass).toBe(true);
@@ -200,7 +209,7 @@ describe("makerVerifier", () => {
     const makerProvider = new ScriptedProvider([maker("bad"), maker("good")], 0.01, 100, 20);
     const verifierProvider = new ScriptedProvider([verification(["actor"]), verification()], 0.002, 80, 10);
 
-    const result = await factory(makerProvider, verifierProvider)(task, rubric, 2);
+    const result = await factory(makerProvider, freshVerifier(verifierProvider))(task, rubric, 2);
 
     expect(result.trace).toMatchObject({
       schemaVersion: 1,
@@ -229,8 +238,19 @@ describe("makerVerifier", () => {
     const makerProvider = new ScriptedProvider([], 0.01, 100, 20);
     const verifierProvider = new ScriptedProvider([], 0.002, 80, 10);
 
-    await expect(factory(makerProvider, verifierProvider)(task, rubric, 0)).rejects.toThrow("maxIters");
+    await expect(factory(makerProvider, freshVerifier(verifierProvider))(task, rubric, 0)).rejects.toThrow("maxIters");
     expect(makerProvider.requests).toHaveLength(0);
+  });
+
+  it("rejects a verifier provider that carries maker or prior-verifier context", async () => {
+    const makerProvider = new ScriptedProvider([maker("bad"), maker("still bad")], 0.01, 100, 20);
+    const reusedVerifier = new ScriptedProvider([verification(["actor"])], 0.002, 80, 10);
+
+    await expect(factory(makerProvider, () => reusedVerifier)(task, rubric, 2)).rejects.toThrow("no prior context");
+    expect(reusedVerifier.requests).toHaveLength(1);
+
+    const sharedProvider = new ScriptedProvider([maker("answer")], 0.01, 100, 20);
+    await expect(factory(sharedProvider, () => sharedProvider)(task, rubric, 1)).rejects.toThrow("no prior context");
   });
 });
 

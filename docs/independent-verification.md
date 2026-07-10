@@ -13,8 +13,8 @@ both the answer and the assessment. This repository calls that failure mode
 **self-preferential bias**. These labels are local design rationale, not
 empirical claims about a platform.
 
-`createMakerVerifier(options)` injects separate maker and verifier providers
-and returns exactly this callable shape:
+`createMakerVerifier(options)` injects a maker provider and a verifier-provider
+factory, then returns exactly this callable shape:
 
 ```ts
 makerVerifier(task, rubric, maxIters)
@@ -43,7 +43,8 @@ It must return exactly:
 }
 ```
 
-Every verifier request is a new provider call containing only:
+Every verifier request is sent through a newly constructed provider containing
+only:
 
 ```json
 {
@@ -55,6 +56,8 @@ Every verifier request is a new provider call containing only:
 
 The verifier never receives the maker's self-assessment, prior model messages,
 or hidden reasoning. It returns one binary result for every rubric criterion.
+The harness rejects a verifier provider object that was used earlier or is also
+the maker provider.
 The response schema constrains `criterion` to the rubric's stable ID enum and
 constrains the array length to the rubric length; descriptive labels cannot be
 silently accepted as IDs.

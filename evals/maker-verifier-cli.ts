@@ -40,10 +40,9 @@ async function main(): Promise<void> {
   const makerProvider = options.seededMissingCriterion
     ? new SeededFirstMakerProvider(liveMaker, options.seededMissingCriterion)
     : liveMaker;
-  const verifierProvider = new ClaudeCliProvider({ cwd });
   const makerVerifier = createMakerVerifier({
     makerProvider,
-    verifierProvider,
+    createVerifierProvider: () => new ClaudeCliProvider({ cwd }),
     maxBudgetUsd: options.maxBudgetUsd,
     timeoutMs: options.timeoutMs
   });
