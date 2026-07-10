@@ -27,10 +27,14 @@ and task-level correctness.
    Return only structured failures to the next maker. Stop on verifier pass or
    a typed cap failure; never return an unverified last candidate as success.
 6. Log every completed or failed invocation with per-call predicted/actual
-   cost, token usage, exact models, and the failure code. Validate receipt sums
-   before persistence. Bind a completed result's spend object to its spend log,
-   recompute aggregate usage/models/cost, enforce caps, and validate the exact
-   role sequence.
+   cost, token usage, exact models, measured elapsed milliseconds, and the
+   failure code. Validate receipt sums before persistence. Bind a completed
+   result's spend object to its spend log, recompute aggregate
+   usage/models/cost, enforce spend/token/wall caps, and validate the exact role
+   sequence. For a completed loop, require exactly two provider calls per
+   iteration in maker/verifier order. Validate the single final receipt again
+   immediately before emitting or returning success so terminal parsing cannot
+   cross the wall cap after the last provider check.
 7. Label deterministic fixtures, headless live calls, and hosted dynamic runs
    distinctly. A command-level availability check is not a hosted-workflow
    pass. After bounded hosted failures, record the receipts and use the cited
@@ -61,3 +65,9 @@ and actual spend, and pass their task-level content assertions.
 - 2026-07-09: Added structured critic `refute`/`concede` positions and deep
   result/spend/cap/role validation after a tamper audit and a live judge chose
   a critic that had found no material flaw.
+- 2026-07-09: Added measured elapsed-time receipts and loop iteration-to-call
+  reconciliation after a second independent audit found that declared wall and
+  iteration caps were not yet bound to completed evidence.
+- 2026-07-09: Added a final receipt cap check after a controlled-clock audit
+  exposed a terminal parsing window between the last provider check and the
+  completed result.

@@ -47,8 +47,10 @@ export function assertOrchestrationEvidence(value: unknown): asserts value is Or
   if (log.status !== "completed" && log.status !== "failed") throw new Error("spendLog.status is invalid");
   const predictedCostUsd = positive(log.predictedCostUsd, "spendLog.predictedCostUsd");
   const actualCostUsd = nonNegative(log.actualCostUsd, "spendLog.actualCostUsd");
+  const elapsedMs = nonNegative(log.elapsedMs, "spendLog.elapsedMs");
   if (predictedCostUsd > maxSpendUsd + 1e-9) throw new Error("predicted spend exceeds cap");
   if (actualCostUsd > maxSpendUsd + 1e-9) throw new Error("actual spend exceeds cap");
+  if (elapsedMs > (caps.maxWallClockMs as number)) throw new Error("elapsed wall time exceeds cap");
   const aggregateUsage = validateUsage(log.usage, "spendLog.usage");
   if (tokenTotal(aggregateUsage) > maxTokens) throw new Error("actual token usage exceeds cap");
   const aggregateModels = stringArray(log.exactModels, "spendLog.exactModels");
@@ -94,7 +96,7 @@ export function assertOrchestrationEvidence(value: unknown): asserts value is Or
     if (JSON.stringify(resultSpend) !== JSON.stringify(spendProjection(log))) {
       throw new Error("result.spend must equal spendLog receipt");
     }
-    validateCompletedResult(pattern, result, maxIterations);
+    validateCompletedResult(pattern, result, maxIterations, roles.length);
   } else {
     equal(evidence.expectedFailure, "iteration_cap", "expectedFailure");
     equal(pattern, "loopUntilDone", "pattern");
@@ -132,7 +134,8 @@ function validateRoles(
 function validateCompletedResult(
   pattern: PatternSpendLog["pattern"],
   result: Record<string, unknown>,
-  maxIterations: number | undefined
+  maxIterations: number | undefined,
+  callCount: number
 ): void {
   if (pattern === "fanOutSynthesize") {
     if (!Array.isArray(result.workerOutputs) || result.workerOutputs.length < 1) throw new Error("fan-out result lacks workers");
@@ -154,6 +157,7 @@ function validateCompletedResult(
   equal(result.verified, true, "result.verified");
   const iterations = positiveInteger(result.iterations, "result.iterations");
   if (iterations > (maxIterations as number)) throw new Error("result.iterations exceeds cap");
+  equal(callCount, iterations * 2, "loop call count");
   nonEmpty(result.output, "result.output");
 }
 
@@ -161,6 +165,7 @@ function spendProjection(log: Record<string, unknown>): PatternSpendReceipt {
   return {
     predictedCostUsd: log.predictedCostUsd as number,
     actualCostUsd: log.actualCostUsd as number,
+    elapsedMs: log.elapsedMs as number,
     usage: log.usage as ModelTokenUsage,
     exactModels: log.exactModels as string[],
     calls: log.calls as PatternSpendReceipt["calls"]

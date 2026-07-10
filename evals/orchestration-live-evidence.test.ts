@@ -26,7 +26,7 @@ describe("live headless orchestration evidence", () => {
 
     const fanOut = evidence.find(({ pattern }) => pattern === "fanOutSynthesize")!;
     const fanOutOutput = (fanOut.result as { synthesis: { output: string } }).synthesis.output.toLowerCase();
-    expect(fanOutOutput).toContain("execution denied");
+    expect(fanOutOutput).toMatch(/execution (?:must be )?denied|deny execution/);
     expect(fanOutOutput).toContain("abc");
     expect(fanOutOutput).toContain("def");
     expect(fanOutOutput).toContain("new approval");

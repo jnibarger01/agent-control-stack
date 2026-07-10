@@ -31,10 +31,12 @@ separate trust boundaries.
    model, token, cost, duration, and stop receipts. Mark any fault injection
    explicitly; never represent a seeded answer as a live model result.
 8. Validate the full traces and scan them for secrets before treating them as
-   evidence. Bind each trace to the task-file hash and rubric snapshot, then
-   reconcile criterion failures, timestamps, durations, per-model receipts,
-   aggregate usage, and aggregate cost. A maker-only success receipt is
-   insufficient.
+   evidence. Reread the source task, recompute its raw file hash, parse it, and
+   require exact task ID and rubric equality. Then reconcile criterion
+   failures, timestamps, per-model receipts, aggregate usage, and aggregate
+   cost. Require every reported model duration to fit its enclosing timestamps
+   within the documented clock tolerance. A maker-only success receipt or an
+   internally consistent detached rubric is insufficient.
 
 ## Acceptance check
 
@@ -60,3 +62,6 @@ iteration.
 - 2026-07-09: Added task-file hashes, rubric snapshots, and full receipt
   reconciliation after an independent tamper audit showed that internally
   plausible but corrupted aggregate fields could pass the first validator.
+- 2026-07-09: Bound task hashes and rubric snapshots back to the parsed source
+  file and reconciled durations with timestamps after a second independent
+  audit found coherent detached-rubric and impossible-duration receipts.

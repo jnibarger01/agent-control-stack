@@ -96,8 +96,11 @@ explicitly injects one incomplete first maker response whose receipt model is
 `fixture:seeded-maker-error`; its fresh verifier and the retry are live calls.
 The trace does not misrepresent the injected output as a model response.
 Each evidence envelope binds the trace to the source eval-task SHA-256 and
-rubric snapshot. Its validator recomputes criterion parity, structured
-failures, timestamps, per-model cost/usage, and run aggregates.
+rubric snapshot. Its validator rereads the exact task file, recomputes the raw
+SHA-256, parses and matches the task ID and rubric exactly, and then recomputes
+criterion parity, structured failures, per-model cost/usage, and run
+aggregates. Each model-reported duration must also fit its enclosing receipt
+timestamp interval, within the documented clock tolerance.
 
 ## Acceptance check
 

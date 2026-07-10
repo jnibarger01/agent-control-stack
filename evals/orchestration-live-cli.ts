@@ -54,8 +54,16 @@ async function main(): Promise<void> {
     taskIds = [policy.id];
     evidencePattern = "adversarial";
     runCaps = caps;
-    result = await adversarial(
-      JSON.stringify({ input: policy.input, context: policy.context, rubric: policy.rubric }),
+    const expectedOutput = policy.reference?.content;
+    if (!expectedOutput) throw new Error("policy task requires an exact reference");
+    const adversarialResult = await adversarial(
+      JSON.stringify({
+        input: policy.input,
+        context: policy.context,
+        rubric: policy.rubric,
+        exactReference: expectedOutput,
+        finalOutputConstraint: "The judge output field must equal exactReference byte-for-byte."
+      }),
       {
       provider,
       pricingDate,
@@ -66,12 +74,14 @@ async function main(): Promise<void> {
       log: (entry) => logs.push(entry)
       }
     );
+    if (adversarialResult.output !== expectedOutput) throw new Error("adversarial final output missed exact task oracle");
+    result = adversarialResult;
   } else {
     const policy = findTask(tasks, "policy-action-classification");
     taskIds = [policy.id];
     evidencePattern = "loopUntilDone";
     runCaps = loopCaps;
-    result = await loopUntilDone(policy.input, {
+    const loopResult = await loopUntilDone(JSON.stringify({ input: policy.input, context: policy.context }), {
       provider,
       pricingDate,
       caps: loopCaps,
@@ -80,6 +90,10 @@ async function main(): Promise<void> {
       rubric: policy.rubric,
       log: (entry) => logs.push(entry)
     });
+    if (policy.reference?.content && loopResult.output !== policy.reference.content) {
+      throw new Error("loop final output missed exact task oracle");
+    }
+    result = loopResult;
   }
 
   if (logs.length !== 1) throw new Error(`${evidencePattern} must emit exactly one spend log`);

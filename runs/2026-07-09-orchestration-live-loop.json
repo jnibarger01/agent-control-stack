@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "kind": "orchestration-pattern-evidence",
-  "recordedAt": "2026-07-10T04:24:47.491Z",
+  "recordedAt": "2026-07-10T04:56:31.657Z",
   "executionMode": "headless-claude-cli",
   "platformFact": "docs/platform-facts.md:52",
   "pattern": "loopUntilDone",
@@ -21,10 +21,11 @@
     "verified": true,
     "spend": {
       "predictedCostUsd": 0.007,
-      "actualCostUsd": 0.030123999999999995,
+      "actualCostUsd": 0.028163,
+      "elapsedMs": 35118,
       "usage": {
-        "inputTokens": 11469,
-        "outputTokens": 3731,
+        "inputTokens": 12293,
+        "outputTokens": 3174,
         "cacheReadInputTokens": 0,
         "cacheCreationInputTokens": 0
       },
@@ -39,10 +40,10 @@
             "claude-haiku-4-5-20251001"
           ],
           "predictedCostUsd": 0.00175,
-          "actualCostUsd": 0.010296999999999999,
+          "actualCostUsd": 0.006438,
           "usage": {
-            "inputTokens": 2662,
-            "outputTokens": 1527,
+            "inputTokens": 2783,
+            "outputTokens": 731,
             "cacheReadInputTokens": 0,
             "cacheCreationInputTokens": 0
           }
@@ -54,10 +55,10 @@
             "claude-haiku-4-5-20251001"
           ],
           "predictedCostUsd": 0.00175,
-          "actualCostUsd": 0.008878,
+          "actualCostUsd": 0.010235000000000001,
           "usage": {
-            "inputTokens": 3053,
-            "outputTokens": 1165,
+            "inputTokens": 3270,
+            "outputTokens": 1393,
             "cacheReadInputTokens": 0,
             "cacheCreationInputTokens": 0
           }
@@ -69,10 +70,10 @@
             "claude-haiku-4-5-20251001"
           ],
           "predictedCostUsd": 0.00175,
-          "actualCostUsd": 0.005153,
+          "actualCostUsd": 0.005154000000000001,
           "usage": {
-            "inputTokens": 2818,
-            "outputTokens": 467,
+            "inputTokens": 3019,
+            "outputTokens": 427,
             "cacheReadInputTokens": 0,
             "cacheCreationInputTokens": 0
           }
@@ -84,10 +85,10 @@
             "claude-haiku-4-5-20251001"
           ],
           "predictedCostUsd": 0.00175,
-          "actualCostUsd": 0.005796,
+          "actualCostUsd": 0.006336,
           "usage": {
-            "inputTokens": 2936,
-            "outputTokens": 572,
+            "inputTokens": 3221,
+            "outputTokens": 623,
             "cacheReadInputTokens": 0,
             "cacheCreationInputTokens": 0
           }
@@ -97,10 +98,11 @@
   },
   "spendLog": {
     "predictedCostUsd": 0.007,
-    "actualCostUsd": 0.030123999999999995,
+    "actualCostUsd": 0.028163,
+    "elapsedMs": 35118,
     "usage": {
-      "inputTokens": 11469,
-      "outputTokens": 3731,
+      "inputTokens": 12293,
+      "outputTokens": 3174,
       "cacheReadInputTokens": 0,
       "cacheCreationInputTokens": 0
     },
@@ -115,10 +117,10 @@
           "claude-haiku-4-5-20251001"
         ],
         "predictedCostUsd": 0.00175,
-        "actualCostUsd": 0.010296999999999999,
+        "actualCostUsd": 0.006438,
         "usage": {
-          "inputTokens": 2662,
-          "outputTokens": 1527,
+          "inputTokens": 2783,
+          "outputTokens": 731,
           "cacheReadInputTokens": 0,
           "cacheCreationInputTokens": 0
         }
@@ -130,10 +132,10 @@
           "claude-haiku-4-5-20251001"
         ],
         "predictedCostUsd": 0.00175,
-        "actualCostUsd": 0.008878,
+        "actualCostUsd": 0.010235000000000001,
         "usage": {
-          "inputTokens": 3053,
-          "outputTokens": 1165,
+          "inputTokens": 3270,
+          "outputTokens": 1393,
           "cacheReadInputTokens": 0,
           "cacheCreationInputTokens": 0
         }
@@ -145,10 +147,10 @@
           "claude-haiku-4-5-20251001"
         ],
         "predictedCostUsd": 0.00175,
-        "actualCostUsd": 0.005153,
+        "actualCostUsd": 0.005154000000000001,
         "usage": {
-          "inputTokens": 2818,
-          "outputTokens": 467,
+          "inputTokens": 3019,
+          "outputTokens": 427,
           "cacheReadInputTokens": 0,
           "cacheCreationInputTokens": 0
         }
@@ -160,10 +162,10 @@
           "claude-haiku-4-5-20251001"
         ],
         "predictedCostUsd": 0.00175,
-        "actualCostUsd": 0.005796,
+        "actualCostUsd": 0.006336,
         "usage": {
-          "inputTokens": 2936,
-          "outputTokens": 572,
+          "inputTokens": 3221,
+          "outputTokens": 623,
           "cacheReadInputTokens": 0,
           "cacheCreationInputTokens": 0
         }

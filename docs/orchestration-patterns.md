@@ -28,7 +28,12 @@ a required logger callback:
 
 Evidence validation deep-compares the completed result's spend receipt with
 the emitted log, recomputes aggregate models/tokens/cost from calls, enforces
-the recorded caps, and checks the exact role shape for each pattern.
+the recorded caps, checks measured `elapsedMs` against the wall-clock cap, and
+checks the exact role shape for each pattern. For a completed loop, its
+iteration count must correspond to exactly one maker and one verifier receipt
+per iteration. The runtime validates the same single final receipt against all
+caps immediately before it emits or returns a completed result, including time
+spent parsing and validating the terminal model response.
 
 The committed acceptance runner persists one logger event per invocation under
 `runs/`. Its deterministic evidence is labeled `headless-deterministic-fixture`,

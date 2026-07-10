@@ -9,7 +9,7 @@ import {
   type MakerVerifierTask
 } from "../harness/maker-verifier.js";
 import type { CompletionRequest, CompletionResult, ModelProvider } from "../harness/model-provider.js";
-import type { MakerVerifierEvidence } from "./maker-verifier-evidence.js";
+import { assertMakerVerifierEvidence, type MakerVerifierEvidence } from "./maker-verifier-evidence.js";
 import { loadEvalTaskFile } from "./task-schema.js";
 
 interface CliOptions {
@@ -29,8 +29,9 @@ async function main(): Promise<void> {
   assertInside(resolve(cwd, "evals", "tasks"), taskPath, "task");
   assertInside(resolve(cwd, "runs"), outputPath, "output");
 
+  const taskSource = readFileSync(taskPath, "utf8");
   const task = loadEvalTaskFile(taskPath);
-  const taskSha256 = createHash("sha256").update(readFileSync(taskPath)).digest("hex");
+  const taskSha256 = createHash("sha256").update(taskSource, "utf8").digest("hex");
   if (options.seededMissingCriterion && !task.rubric.some(({ id }) => id === options.seededMissingCriterion)) {
     throw new Error(`unknown seeded criterion ${options.seededMissingCriterion}`);
   }
@@ -73,6 +74,7 @@ async function main(): Promise<void> {
   const taskTexts = [task.input, ...task.context.facts, ...task.context.constraints];
   const taskSecrets = [...new Set(taskTexts.flatMap(collectSensitiveJsonValuesFromText))];
   const sanitizedEvidence = redactValue(evidence, taskSecrets) as MakerVerifierEvidence;
+  assertMakerVerifierEvidence(sanitizedEvidence, taskSource);
   writeFileSync(outputPath, `${JSON.stringify(sanitizedEvidence, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
   process.stdout.write(`${JSON.stringify({ output: relative(cwd, outputPath), pass: result.pass, stoppedBy: result.stoppedBy, iterations: result.iterations, actualCostUsd: result.trace.totalCostUsd })}\n`);
 }

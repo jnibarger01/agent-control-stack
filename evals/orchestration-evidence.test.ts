@@ -47,4 +47,20 @@ describe("orchestration pattern evidence", () => {
     value.spendLog.usage.inputTokens += 1;
     expect(() => assertOrchestrationEvidence(value)).toThrow();
   });
+
+  it("rejects loop call-count and wall-clock tampering", () => {
+    const value = JSON.parse(
+      readFileSync(new URL("../runs/2026-07-09-orchestration-loop-until-done.json", import.meta.url), "utf8")
+    ) as OrchestrationEvidence;
+    (value.result as { iterations: number }).iterations = 1;
+    expect(() => assertOrchestrationEvidence(value)).toThrow("loop call count");
+
+    const fresh = JSON.parse(
+      readFileSync(new URL("../runs/2026-07-09-orchestration-loop-until-done.json", import.meta.url), "utf8")
+    ) as OrchestrationEvidence;
+    fresh.caps.maxWallClockMs = 1;
+    fresh.spendLog.elapsedMs = 2;
+    (fresh.result as { spend: { elapsedMs: number } }).spend.elapsedMs = 2;
+    expect(() => assertOrchestrationEvidence(fresh)).toThrow("elapsed wall time");
+  });
 });

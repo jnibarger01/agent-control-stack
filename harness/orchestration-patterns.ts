@@ -54,6 +54,7 @@ export interface PatternCallReceipt {
 export interface PatternSpendReceipt {
   predictedCostUsd: number;
   actualCostUsd: number;
+  elapsedMs: number;
   usage: ModelTokenUsage;
   exactModels: string[];
   calls: PatternCallReceipt[];
@@ -422,6 +423,7 @@ class RunMeter {
 
   complete(): PatternSpendReceipt {
     const receipt = this.receipt();
+    this.assertReceiptWithinCaps(receipt);
     this.emit({ ...receipt, pattern: this.pattern, status: "completed" });
     return receipt;
   }
@@ -449,14 +451,18 @@ class RunMeter {
   }
 
   private assertAfterCall(): void {
-    if (this.actualCostUsd > this.runtime.caps.maxSpendUsd) {
+    this.assertReceiptWithinCaps(this.receipt());
+  }
+
+  private assertReceiptWithinCaps(receipt: PatternSpendReceipt): void {
+    if (receipt.actualCostUsd > this.runtime.caps.maxSpendUsd) {
       throw new OrchestrationPatternError("spend_cap", "model receipts exceeded the hard spend cap");
     }
-    if (tokenTotal(this.usage) > this.runtime.caps.maxTokens) {
+    if (tokenTotal(receipt.usage) > this.runtime.caps.maxTokens) {
       throw new OrchestrationPatternError("token_cap", "model receipts exceeded the hard token cap");
     }
-    if (this.now() - this.startedAt > this.runtime.caps.maxWallClockMs) {
-      throw new OrchestrationPatternError("wall_clock_cap", "model call exceeded the hard wall-clock cap");
+    if (receipt.elapsedMs > this.runtime.caps.maxWallClockMs) {
+      throw new OrchestrationPatternError("wall_clock_cap", "run exceeded the hard wall-clock cap");
     }
   }
 
@@ -464,6 +470,7 @@ class RunMeter {
     return {
       predictedCostUsd: this.predictedCostUsd,
       actualCostUsd: this.actualCostUsd,
+      elapsedMs: Math.max(0, this.now() - this.startedAt),
       usage: { ...this.usage },
       exactModels: [...new Set(this.calls.flatMap((call) => call.exactModels))].sort(),
       calls: this.calls.map((call) => ({ ...call, exactModels: [...call.exactModels], usage: { ...call.usage } }))
@@ -750,14 +757,18 @@ function verifierSchema(rubric: readonly VerificationCriterion[]): Record<string
       failures: {
         type: "array",
         maxItems: rubric.length,
-        items: closedObject(
-          {
-            criterion: { type: "string", enum: rubric.map(({ id }) => id) },
-            expected: stringField,
-            observed: stringField
-          },
-          ["criterion", "expected", "observed"]
-        )
+        items: {
+          oneOf: rubric.map((criterion) =>
+            closedObject(
+              {
+                criterion: { type: "string", const: criterion.id },
+                expected: { type: "string", const: criterion.expected },
+                observed: stringField
+              },
+              ["criterion", "expected", "observed"]
+            )
+          )
+        }
       }
     },
     ["pass", "failures"]

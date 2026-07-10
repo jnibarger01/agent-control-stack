@@ -133,6 +133,7 @@ describe("fanOutSynthesize", () => {
     expect(result.synthesis.output).toBe("combined");
     expect(result.spend.actualCostUsd).toBeCloseTo(0.03);
     expect(result.spend.predictedCostUsd).toBeGreaterThan(0);
+    expect(result.spend.elapsedMs).toBeGreaterThanOrEqual(0);
     expect(logs).toMatchObject([{ pattern: "fanOutSynthesize", status: "completed", actualCostUsd: 0.03 }]);
   });
 
@@ -237,9 +238,14 @@ describe("loopUntilDone", () => {
 
     expect(provider.requests[1]!.prompt).toContain("candidate-v1");
     expect(provider.requests[1]!.prompt).toContain(criterion.expected);
-    expect(JSON.stringify(provider.requests[1]!.jsonSchema)).toContain(
-      `"enum":[${auditTask.rubric.map(({ id }) => `"${id}"`).join(",")}]`
-    );
+    for (const rubricCriterion of auditTask.rubric) {
+      expect(JSON.stringify(provider.requests[1]!.jsonSchema)).toContain(
+        `"criterion":{"type":"string","const":"${rubricCriterion.id}"}`
+      );
+      expect(JSON.stringify(provider.requests[1]!.jsonSchema)).toContain(
+        `"expected":{"type":"string","const":"${rubricCriterion.expected}"}`
+      );
+    }
     expect(provider.requests[2]!.prompt).toContain("Returned 5.");
     expect(provider.requests[2]!.prompt).not.toContain("candidate-v1");
     expect(result).toMatchObject({ output: "candidate-v2", iterations: 2, verified: true });
@@ -302,6 +308,30 @@ describe("loopUntilDone", () => {
         })
       )
     ).rejects.toMatchObject({ code: "wall_clock_cap" });
+  });
+
+  it("fails closed when final parsing crosses the wall-clock cap", async () => {
+    let clockReads = 0;
+    const provider = new FixtureProvider([
+      JSON.stringify({ candidate: "on time" }),
+      JSON.stringify({ pass: true, failures: [] })
+    ]);
+    const logs: PatternSpendLog[] = [];
+
+    await expect(
+      loopUntilDone(
+        "terminal time boundary",
+        loopOptions(provider, {
+          caps: { ...caps, maxIterations: 1, maxWallClockMs: 100 },
+          now: () => (clockReads++ < 7 ? 0 : 101),
+          log: (entry) => logs.push(entry)
+        })
+      )
+    ).rejects.toMatchObject({ code: "wall_clock_cap" });
+
+    expect(logs).toMatchObject([
+      { status: "failed", failureCode: "wall_clock_cap", elapsedMs: 101 }
+    ]);
   });
 
   it("fails closed when actual receipts cross the spend cap", async () => {

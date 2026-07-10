@@ -105,10 +105,11 @@ objective.
   isolated maker/verifier provider calls, structured-only retry failures,
   stable criterion-ID schemas, duplicate-failure escalation through `route()`,
   fail-closed parsing, and full model/cost/token/timing traces. Nine focused
-  primitive tests and three evidence tests passed. Each evidence envelope now
-  includes the eval-task SHA-256 and rubric snapshot; the validator reconciles
-  criterion parity, failures, timestamps, duration, per-model usage/cost, and
-  aggregate usage/cost.
+  primitive tests and four evidence tests passed. Each evidence envelope now
+  includes the eval-task SHA-256 and rubric snapshot; the validator rereads and
+  parses the source task, recomputes its raw SHA-256, requires exact task ID and
+  rubric equality, reconciles criterion failures and receipt aggregates, and
+  checks each reported duration against its enclosing wall-clock timestamps.
 - Three committed maker-verifier traces cover `audit-replay-invariant`,
   `redaction-repair`, and `work-item-lifecycle`. Their total live cost is
   `$0.1009503`; live calls used dated Haiku 4.5 and Sonnet 5. The lifecycle
@@ -126,17 +127,22 @@ objective.
   under the cited platform contract the evaluator cleared the condition. The
   repository trace retains both raw CLI envelopes, platform session IDs, exact
   argv, CLI version, timestamps, workspace-status hashes, and SHA-256 receipt
-  bindings; tamper tests reject fabricated sessions and changed raw envelopes.
+  bindings; tamper tests reject inconsistent session fabrication and changed
+  raw envelopes.
 - Phase 8 implements `fanOutSynthesize`, `adversarial`, and `loopUntilDone`
   with isolated role payloads, a dedup/conflict/coverage synthesis barrier,
   output-only adversarial judging, structured verifier failures, and hard
-  token, wall-clock, iteration, and spend checks. Eleven focused pattern tests
-  pass.
+  token, wall-clock, iteration, and spend checks. Twelve focused pattern tests
+  pass. Each spend receipt includes measured elapsed milliseconds; evidence
+  validation enforces the wall-clock cap and binds completed loop iterations to
+  exactly one maker and one verifier call per iteration. The runtime rechecks
+  one final receipt immediately before returning success, closing the terminal
+  parsing window after the last provider call.
 - Deterministic evidence covers all three orchestration patterns and records a
   deliberately non-passing loop stopped after two iterations and four calls
   with `failureCode=iteration_cap`. Separate live headless traces cover all
   three patterns against fixed eval tasks using dated Haiku 4.5. Their combined
-  predicted cost is `$0.017500`; actual cost is `$0.117018`. Content checks
+  predicted cost is `$0.017500`; actual cost is `$0.111717`. Content checks
   require the fan-out approval result to deny execution, name `abc`/`def`,
   require new approval, and audit the block; adversarial and loop results must
   equal the two-line classifier oracle. The critic now declares `refute` or
@@ -152,7 +158,7 @@ objective.
   embedded JSON with trailing punctuation, and redacts those values from model
   prose before persistence. Five focused redaction tests and credential scans
   over the new evidence passed.
-- The final integrated gate passed `npm run check`: 31 test files and 264 tests
+- The final integrated gate passed `npm run check`: 31 test files and 267 tests
   passed. The eval corpus hash remains
   `7a1f3122f1c7aaab099595659e8c2f33f276aa788bc8e87e0ab5c73e8ae0f83c`,
   with no diff in `evals/tasks/` or either committed baseline JSON.
@@ -183,6 +189,11 @@ objective.
   the requested outer cap, and the generated Node path had no API key. The
   tested headless Claude CLI fallback is complete; a future hosted retry should
   wait for an explicit cost policy and a working workflow credential/runtime.
+- The `/goal` evidence is internally bound by raw-envelope and workspace-state
+  SHA-256 hashes and is corroborated on this machine by the captured CLI
+  transcript, but those hashes are self-contained rather than externally
+  signed. A future clone can detect partial tampering but cannot independently
+  authenticate the receipts as platform-originated evidence.
 
 ## Lessons learned
 
@@ -229,23 +240,32 @@ objective.
   for eval traces, and deep equality plus aggregate/cap/role recomputation for
   orchestration spend logs. Internal field agreement alone does not establish
   provenance.
+- Receipt validation must also bind semantic inputs and time/loop budgets:
+  reread the hashed source task, require exact rubric equality, reconcile model
+  durations with enclosing timestamps, record measured orchestration elapsed
+  time, and derive completed loop call counts from iteration count. Otherwise a
+  coherent but impossible receipt can remain internally consistent.
+- A provider-level post-call cap check does not cover terminal response parsing.
+  Compute one final receipt, enforce every cap against it, and only then emit or
+  return success; otherwise the runtime and its persisted evidence can disagree.
 - For `/goal`, retain the initial result and query the same persisted session.
   `No goal set` after no manual clear is stronger evaluator-pass evidence than
   a maker's completion statement.
 
 ## Last session
 
-On 2026-07-09, the session completed phases 6-8: independent maker-verifier
-loops with three live-task traces and a labeled seeded fault, the cited `/goal`
-and Outcomes entry points with a real same-session evaluator-clear receipt,
-three budgeted orchestration patterns with deterministic cap evidence and live
-headless receipts, and a validated `independent-verification` skill. Two
-bounded hosted dynamic-workflow attempts failed and are preserved as negative
-evidence; the documented headless fallback completed instead. Shared redaction
-was hardened after live evidence exposed stable-ID, secret-echo, token-metric,
-and shared-reference edge cases. `npm run check` passed 31 files and 264 tests,
-the fixed corpus and baselines remained unchanged, and unrelated modifications
-in `CLAUDE.md`, `package.json`, and `package-lock.json` remained unowned. Resume
-pointer: start from the final phase-6-to-8 commit, re-read this file and both
-active repository skills, then address only the open appendix provenance,
-baseline corpus-hash embedding, or hosted-workflow runtime/cost gaps.
+On 2026-07-09, the session completed phases 6-8: three live maker-verifier
+traces with a labeled seeded fault, cited `/goal` and Outcomes entry points with
+a same-session evaluator-clear receipt, and three budgeted orchestration
+patterns with deterministic cap evidence and live headless receipts. A
+post-commit independent audit then exposed four receipt-binding gaps and a
+terminal wall-clock bypass; all five were fixed, covered by tamper tests,
+folded into the two active repository skills, and rechecked across 31 files and
+267 tests. Two bounded hosted dynamic-workflow attempts remain preserved as
+negative evidence, and `/goal` platform-origin authentication remains limited
+to self-contained hashes plus current-machine transcript corroboration. The
+fixed corpus and baselines stayed unchanged, while unrelated modifications in
+`CLAUDE.md`, `package.json`, and `package-lock.json` remained unowned. Resume
+pointer: start from the corrective evidence-binding commit, re-read this file
+and both active repository skills, then address only the documented appendix,
+baseline corpus-hash, hosted-workflow, or external receipt-authentication gaps.

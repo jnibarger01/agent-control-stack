@@ -6,6 +6,8 @@ import type {
   VerificationCriterionResult
 } from "../harness/maker-verifier.js";
 import type { ModelTokenUsage } from "../harness/model-provider.js";
+import { createHash } from "node:crypto";
+import { parseEvalTask } from "./task-schema.js";
 
 export interface MakerVerifierEvidence {
   schemaVersion: 2;
@@ -23,21 +25,36 @@ export interface MakerVerifierEvidence {
   trace: MakerVerifierTrace;
 }
 
-export function assertMakerVerifierEvidence(value: unknown): asserts value is MakerVerifierEvidence {
+export function assertMakerVerifierEvidence(
+  value: unknown,
+  taskSource: string
+): asserts value is MakerVerifierEvidence {
   const evidence = record(value, "maker-verifier evidence");
   equal(evidence.schemaVersion, 2, "schemaVersion");
   equal(evidence.kind, "maker-verifier-evidence", "kind");
   isoTimestamp(evidence.recordedAt, "recordedAt");
   const taskFile = nonEmpty(evidence.taskFile, "taskFile");
-  sha256(evidence.taskSha256, "taskSha256");
+  const taskHash = sha256(evidence.taskSha256, "taskSha256");
+  equal(taskHash, createHash("sha256").update(taskSource, "utf8").digest("hex"), "taskSha256");
+  let rawTask: unknown;
+  try {
+    rawTask = JSON.parse(taskSource) as unknown;
+  } catch {
+    throw new Error("taskSource must be valid JSON");
+  }
+  const sourceTask = parseEvalTask(rawTask, taskFile);
   equal(evidence.provider, "claude-cli", "provider");
   const rubric = validateRubric(evidence.rubric);
+  if (JSON.stringify(rubric) !== JSON.stringify(sourceTask.rubric)) {
+    throw new Error("evidence rubric must equal source task rubric");
+  }
   const rubricIds = rubric.map(({ id }) => id);
   const rubricById = new Map(rubric.map((criterion) => [criterion.id, criterion]));
 
   const trace = record(evidence.trace, "trace");
   equal(trace.schemaVersion, 1, "trace.schemaVersion");
   const taskId = nonEmpty(trace.taskId, "trace.taskId");
+  equal(taskId, sourceTask.id, "trace.taskId");
   equal(taskFile, `evals/tasks/${taskId}.json`, "taskFile");
   const startedAt = isoTimestamp(trace.startedAt, "trace.startedAt");
   const completedAt = isoTimestamp(trace.completedAt, "trace.completedAt");
@@ -67,6 +84,7 @@ export function assertMakerVerifierEvidence(value: unknown): asserts value is Ma
     const summary = nonEmpty(selfAssessment.summary, `${label}.maker.selfAssessment.summary`);
     if (/\r|\n/.test(summary)) throw new Error(`${label}.maker.selfAssessment.summary must be one line`);
     const makerReceipt = validateReceipt(maker.receipt, `${label}.maker.receipt`);
+    validateDuration(makerReceipt, previousTime, makerTime, `${label}.maker.receipt.durationMs`);
 
     const verifier = record(iteration.verifier, `${label}.verifier`);
     const verifierTime = isoTimestamp(verifier.completedAt, `${label}.verifier.completedAt`);
@@ -76,6 +94,7 @@ export function assertMakerVerifierEvidence(value: unknown): asserts value is Ma
     const criteria = validateCriteria(verifier.criteria, rubricIds, `${label}.verifier.criteria`);
     equal(verifier.pass, criteria.every(({ pass }) => pass), `${label}.verifier.pass`);
     const verifierReceipt = validateReceipt(verifier.receipt, `${label}.verifier.receipt`);
+    validateDuration(verifierReceipt, makerTime, verifierTime, `${label}.verifier.receipt.durationMs`);
 
     const failures = validateFailures(iteration.failures, criteria, rubricById, `${label}.failures`);
     equal(iteration.normalizedFailureSet, normalizeFailureSet(failures), `${label}.normalizedFailureSet`);
@@ -202,6 +221,18 @@ function validateReceipt(value: unknown, label: string): ModelCallTraceReceipt {
     if (JSON.stringify(modelTokens) !== JSON.stringify(usage)) throw new Error(`${label}.usage must equal modelUsage tokens`);
   }
   return receipt as unknown as ModelCallTraceReceipt;
+}
+
+function validateDuration(
+  receipt: ModelCallTraceReceipt,
+  startedAt: string,
+  completedAt: string,
+  label: string
+): void {
+  const elapsedMs = Date.parse(completedAt) - Date.parse(startedAt);
+  const fixture = receipt.exactModels.every((model) => model.startsWith("fixture:"));
+  if (!fixture && receipt.durationMs <= 0) throw new Error(`${label} must be positive for live calls`);
+  if (receipt.durationMs > elapsedMs + 2_000) throw new Error(`${label} exceeds timestamp interval`);
 }
 
 function validateUsage(value: unknown, label: string): ModelTokenUsage {

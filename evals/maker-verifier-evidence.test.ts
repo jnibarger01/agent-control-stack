@@ -15,7 +15,9 @@ const files = [
 
 function load(file: string): MakerVerifierEvidence {
   const value: unknown = JSON.parse(readFileSync(new URL(`../runs/${file}`, import.meta.url), "utf8"));
-  assertMakerVerifierEvidence(value);
+  const taskFile = (value as MakerVerifierEvidence).taskFile;
+  const taskSource = readFileSync(new URL(`../${taskFile}`, import.meta.url), "utf8");
+  assertMakerVerifierEvidence(value, taskSource);
   return value;
 }
 
@@ -45,6 +47,22 @@ describe("maker-verifier acceptance evidence", () => {
       readFileSync(new URL(`../runs/${files[0]}`, import.meta.url), "utf8")
     ) as MakerVerifierEvidence;
     value.trace.totalUsage.inputTokens += 1;
-    expect(() => assertMakerVerifierEvidence(value)).toThrow("totalUsage");
+    const taskSource = readFileSync(new URL(`../${value.taskFile}`, import.meta.url), "utf8");
+    expect(() => assertMakerVerifierEvidence(value, taskSource)).toThrow("totalUsage");
+  });
+
+  it("rejects a forged rubric and an impossible call duration", () => {
+    const value = JSON.parse(
+      readFileSync(new URL(`../runs/${files[0]}`, import.meta.url), "utf8")
+    ) as MakerVerifierEvidence;
+    const taskSource = readFileSync(new URL(`../${value.taskFile}`, import.meta.url), "utf8");
+    value.rubric[0]!.expected = "forged expectation";
+    expect(() => assertMakerVerifierEvidence(value, taskSource)).toThrow("source task rubric");
+
+    const fresh = JSON.parse(
+      readFileSync(new URL(`../runs/${files[0]}`, import.meta.url), "utf8")
+    ) as MakerVerifierEvidence;
+    fresh.trace.iterations[0]!.maker.receipt.durationMs = 1_000_000;
+    expect(() => assertMakerVerifierEvidence(fresh, taskSource)).toThrow("timestamp interval");
   });
 });

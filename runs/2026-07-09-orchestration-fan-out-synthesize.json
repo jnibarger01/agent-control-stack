@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "kind": "orchestration-pattern-evidence",
-  "recordedAt": "2026-07-10T04:39:23.443Z",
+  "recordedAt": "2026-07-10T04:52:55.690Z",
   "executionMode": "headless-deterministic-fixture",
   "platformFact": "docs/platform-facts.md:52",
   "pattern": "fanOutSynthesize",
@@ -54,6 +54,7 @@
     "spend": {
       "predictedCostUsd": 0.00105,
       "actualCostUsd": 0,
+      "elapsedMs": 0,
       "usage": {
         "inputTokens": 0,
         "outputTokens": 0,
@@ -115,6 +116,7 @@
   "spendLog": {
     "predictedCostUsd": 0.00105,
     "actualCostUsd": 0,
+    "elapsedMs": 0,
     "usage": {
       "inputTokens": 0,
       "outputTokens": 0,
