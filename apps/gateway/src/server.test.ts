@@ -5,6 +5,190 @@ import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
 
+describe("gateway MCP transport", () => {
+  it("returns an MCP initialization response", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, mcpBearerToken: "test-token" });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: {
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "test", version: "0.0.0" }
+          }
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toMatchObject({
+        jsonrpc: "2.0",
+        id: 1,
+        result: {
+          protocolVersion: "2024-11-05",
+          capabilities: { tools: {} },
+          serverInfo: { name: "agent-control-stack-gateway", version: "0.1.0" }
+        }
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("lists gateway tools in MCP-compatible shape", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, mcpBearerToken: "test-token" });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: {
+          jsonrpc: "2.0",
+          id: "tools",
+          method: "tools/list"
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().result.tools).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "create_work_item",
+            description: expect.any(String),
+            inputSchema: expect.objectContaining({ type: "object" })
+          }),
+          expect.objectContaining({
+            name: "approve_work_item",
+            description: expect.any(String),
+            inputSchema: expect.objectContaining({ type: "object" })
+          })
+        ])
+      );
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("routes tools/call through governed work-item creation", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, mcpBearerToken: "test-token" });
+    let appClosed = false;
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer test-token" },
+        payload: {
+          jsonrpc: "2.0",
+          id: "call-create",
+          method: "tools/call",
+          params: {
+            name: "create_work_item",
+            arguments: {
+              title: "MCP write request",
+              requester: "agent",
+              intent: "verify MCP governed tool call",
+              target: { cwd: "/repo" },
+              requestedActions: [
+                { kind: "edit", description: "write file", params: { write: true, paths: ["src/index.ts"] } }
+              ],
+              risk: "medium"
+            }
+          }
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      const structured = response.json().result.structuredContent;
+      expect(structured.status).toBe("needs_approval");
+      expect(structured.requestedActions).toHaveLength(1);
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        const events = store.readEvents();
+        expect(events.map((event) => event.name)).toEqual(
+          expect.arrayContaining(["work_item.created", "policy.decision", "work_item.needs_approval"])
+        );
+        expect(store.list()).toHaveLength(1);
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for unauthorized tools/call requests", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, mcpBearerToken: "test-token" });
+    let appClosed = false;
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: {
+          jsonrpc: "2.0",
+          id: "unauthorized",
+          method: "tools/call",
+          params: {
+            name: "create_work_item",
+            arguments: {
+              title: "Unauthorized MCP write request",
+              requester: "agent",
+              intent: "must not mutate",
+              requestedActions: [{ kind: "inspect", description: "read repo", params: {} }],
+              risk: "low"
+            }
+          }
+        }
+      });
+
+      expect(response.statusCode).toBe(401);
+      expect(response.json()).toMatchObject({
+        jsonrpc: "2.0",
+        id: "unauthorized",
+        error: {
+          code: -32001,
+          message: "unauthorized MCP tools/call request"
+        }
+      });
+
+      await app.close();
+      appClosed = true;
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toEqual([]);
+        expect(store.readEvents()).toEqual([]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("gateway work-item routes", () => {
   it("returns 400 for malformed list filters", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));

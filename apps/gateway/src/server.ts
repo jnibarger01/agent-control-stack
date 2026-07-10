@@ -10,11 +10,13 @@ import {
 } from "@agent-control-stack/work-items";
 import { ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
+import { handleMcpHttpRequest } from "./mcp.js";
 import { createGatewayWorkItemTools, workItemToolNames } from "./tools/work-items.js";
 
 export interface GatewayOptions {
   dbPath?: string;
   logger?: boolean;
+  mcpBearerToken?: string;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -23,6 +25,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const sseClients = new Set<ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
   const tools = createGatewayWorkItemTools(workItems);
+  const mcpBearerToken =
+    options.mcpBearerToken ?? process.env.ACS_MCP_BEARER_TOKEN ?? process.env.ACS_GATEWAY_MUTATION_TOKEN;
 
   function broadcast(event: StoredAuditEvent): void {
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
@@ -42,6 +46,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
+
+  app.post("/mcp", async (request, reply) => {
+    const result = handleMcpHttpRequest({
+      body: request.body,
+      headers: request.headers,
+      tools,
+      bearerToken: mcpBearerToken
+    });
+    return reply.code(result.statusCode).send(result.body);
+  });
 
   app.get("/work-items", async (request, reply) => {
     try {
