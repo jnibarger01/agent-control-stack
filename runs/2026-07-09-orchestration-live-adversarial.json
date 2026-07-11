@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "kind": "orchestration-pattern-evidence",
+  "recordedAt": "2026-07-10T04:58:21.672Z",
+  "executionMode": "headless-claude-cli",
+  "platformFact": "docs/platform-facts.md:52",
+  "pattern": "adversarial",
+  "taskIds": [
+    "policy-action-classification"
+  ],
+  "caps": {
+    "maxTokens": 100000,
+    "maxWallClockMs": 180000,
+    "maxSpendUsd": 0.2
+  },
+  "expectedFailure": null,
+  "result": {
+    "makerOutput": "action: read\nrisk: low",
+    "criticPosition": "concede",
+    "criticRefutation": "The maker's output correctly classifies the action as \"read\" and risk as \"low.\" The task explicitly states reading a document is non-mutating and low-risk. The output matches the exact reference format (two labeled lines) byte-for-byte. No material flaws exist.",
+    "verdict": "maker",
+    "output": "action: read\nrisk: low",
+    "justification": "The maker's output is materially correct and matches the exact reference byte-for-byte. All three rubric criteria are satisfied: action is classified as \"read\", risk is classified as \"low\", and the output consists of exactly two labeled lines as required. The critic's concession is justified—there are no flaws in the maker's response.",
+    "spend": {
+      "predictedCostUsd": 0.00525,
+      "actualCostUsd": 0.021965,
+      "elapsedMs": 28090,
+      "usage": {
+        "inputTokens": 9505,
+        "outputTokens": 2492,
+        "cacheReadInputTokens": 0,
+        "cacheCreationInputTokens": 0
+      },
+      "exactModels": [
+        "claude-haiku-4-5-20251001"
+      ],
+      "calls": [
+        {
+          "role": "maker",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.007362,
+          "usage": {
+            "inputTokens": 3042,
+            "outputTokens": 864,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "critic",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.006131999999999999,
+          "usage": {
+            "inputTokens": 3122,
+            "outputTokens": 602,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        },
+        {
+          "role": "judge",
+          "requestedModel": "claude-haiku-4-5-20251001",
+          "exactModels": [
+            "claude-haiku-4-5-20251001"
+          ],
+          "predictedCostUsd": 0.00175,
+          "actualCostUsd": 0.008471000000000001,
+          "usage": {
+            "inputTokens": 3341,
+            "outputTokens": 1026,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0
+          }
+        }
+      ]
+    }
+  },
+  "spendLog": {
+    "predictedCostUsd": 0.00525,
+    "actualCostUsd": 0.021965,
+    "elapsedMs": 28090,
+    "usage": {
+      "inputTokens": 9505,
+      "outputTokens": 2492,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    },
+    "exactModels": [
+      "claude-haiku-4-5-20251001"
+    ],
+    "calls": [
+      {
+        "role": "maker",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.007362,
+        "usage": {
+          "inputTokens": 3042,
+          "outputTokens": 864,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "critic",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.006131999999999999,
+        "usage": {
+          "inputTokens": 3122,
+          "outputTokens": 602,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "judge",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00175,
+        "actualCostUsd": 0.008471000000000001,
+        "usage": {
+          "inputTokens": 3341,
+          "outputTokens": 1026,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      }
+    ],
+    "pattern": "adversarial",
+    "status": "completed"
+  }
+}

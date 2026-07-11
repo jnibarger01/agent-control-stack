@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SOP_FILE="${SOP_FILE:-$ROOT/docs/sop.md}"
+STATE_FILE="${STATE_FILE:-$ROOT/STATE.md}"
+
+for required in "$SOP_FILE" "$STATE_FILE"; do
+  if [[ ! -f "$required" ]]; then
+    echo "required session file not found: $required" >&2
+    exit 1
+  fi
+done
+
+echo "=== Session contract ==="
+awk '
+  /<!-- SESSION-CONTRACT-START -->/ { printing = 1; next }
+  /<!-- SESSION-CONTRACT-END -->/ { printing = 0 }
+  printing
+' "$SOP_FILE"
+
+echo
+echo "=== STATE.md ==="
+cat "$STATE_FILE"

@@ -1,0 +1,16 @@
+{
+  "id": "model-routing-choice",
+  "taskClass": "classifier",
+  "input": "Choose the default exact model ID for a bulk_worker task with no failures and explain the cost-control reason in one sentence.",
+  "context": {
+    "facts": ["harness/routing.md routes bulk_worker to Sonnet 5.", "Fable is reserved for frontier planning, orchestration, and evidence-based escalation."],
+    "constraints": ["Use one exact model ID.", "Do not call every task a frontier task."]
+  },
+  "rubric": [
+    { "id": "model-id", "description": "Chooses the exact Sonnet 5 ID.", "expected": "claude-sonnet-5" },
+    { "id": "bulk-rationale", "description": "Identifies bulk work as the reason for routing down.", "expected": "Bulk or repeatable work." },
+    { "id": "cost-lever", "description": "Names routing down as the cost lever.", "expected": "Avoid Fable-for-everything." }
+  ],
+  "reference": { "kind": "example", "content": "claude-sonnet-5 — bulk work routes below Fable so frontier pricing is paid only after evidence-based escalation." },
+  "tokenEstimate": { "inputTokens": 160, "outputTokens": 70 }
+}

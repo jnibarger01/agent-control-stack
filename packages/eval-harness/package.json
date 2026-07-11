@@ -12,11 +12,11 @@
     }
   },
   "dependencies": {
-    "@agent-control-stack/audit-log": "0.1.0",
     "@agent-control-stack/policy-gate": "0.1.0",
     "@agent-control-stack/sandbox": "0.1.0",
     "@agent-control-stack/shared": "0.1.0",
     "@agent-control-stack/temporal-memory": "0.1.0",
-    "@agent-control-stack/work-items": "0.1.0"
+    "@agent-control-stack/work-items": "0.1.0",
+    "agentos-contracts": "0.1.0"
   }
 }

@@ -1,25 +1,54 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { evaluatePolicy } from "./policy.js";
+import { createWorkItem } from "@agent-control-stack/work-items";
+import { evaluatePolicy, evaluateWorkItemPolicy } from "./policy.js";
+import { classifyPolicyRisk } from "./rules.js";
 
 const base = {
   workItemId: "wrk_test",
   actor: "agent",
-  action: { kind: "command", description: "run", params: {} },
+  operation: "create" as const,
+  requester: "user",
+  risk: "low" as const,
+  action: { kind: "shell", description: "run", params: {} },
   cwd: "/repo"
 };
 
 describe("policy gate", () => {
-  it("allows read-only repo inspection and local tests", () => {
+  it("allows prompt dispatch, read-only repo inspection, and local tests", () => {
+    expect(
+      evaluatePolicy({ ...base, action: { kind: "agent.prompt", description: "dispatch prompt", params: {} } }).decision
+    ).toBe("allow");
     expect(
       evaluatePolicy({
         ...base,
-        action: { kind: "read", description: "read source", params: {} },
+        action: { kind: "fs.read", description: "read source", params: {} },
         paths: ["src/index.ts"]
       }).decision
     ).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "status"] }).decision).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "diff"] }).decision).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).decision).toBe("allow");
+  });
+
+  it("classifies policy contexts into the connector risk model", () => {
+    expect(classifyPolicyRisk({ ...base, action: { kind: "agent.prompt", description: "dispatch", params: {} } }).risk).toBe(
+      "safe_mutation"
+    );
+    expect(
+      classifyPolicyRisk({
+        ...base,
+        action: { kind: "fs.read", description: "read source", params: {} },
+        paths: ["src/index.ts"]
+      }).risk
+    ).toBe("read_only");
+    expect(classifyPolicyRisk({ ...base, write: true, paths: ["src/index.ts"] }).risk).toBe("requires_approval");
+    expect(classifyPolicyRisk({ ...base, command: ["rm", "-rf", "/"] }).risk).toBe("destructive");
+    expect(
+      classifyPolicyRisk({ ...base, action: { kind: "legacy", description: "unknown", params: {} } }).risk
+    ).toBe("forbidden");
   });
 
   it("denies path escapes, sudo, secrets, destructive commands, and network", () => {
@@ -29,11 +58,54 @@ describe("policy gate", () => {
     expect(evaluatePolicy({ ...base, command: ["sudo", "systemctl", "restart", "x"] }).matchedRules).toContain(
       "deny:sudo"
     );
-    expect(evaluatePolicy({ ...base, action: { kind: "read", description: "env", params: {} }, paths: [".env"] }).matchedRules).toContain(
+    expect(evaluatePolicy({ ...base, action: { kind: "fs.read", description: "env", params: {} }, paths: [".env"] }).matchedRules).toContain(
       "deny:credential-path"
     );
     expect(evaluatePolicy({ ...base, command: ["rm", "-rf", "/"] }).matchedRules).toContain("deny:destructive");
     expect(evaluatePolicy({ ...base, network: true }).matchedRules).toContain("deny:network");
+    expect(evaluatePolicy({ ...base, action: { kind: "legacy", description: "unknown", params: {} } }).matchedRules).toContain(
+      "deny:unknown-action"
+    );
+  });
+
+  it("denies shell metacharacters before command allow rules", () => {
+    expect(evaluatePolicy({ ...base, command: ["npm", "test", ";", "curl"] }).matchedRules).toContain(
+      "deny:shell-metacharacter"
+    );
+    expect(evaluatePolicy({ ...base, command: ["git", "status", "&&", "whoami"] }).matchedRules).toContain(
+      "deny:shell-metacharacter"
+    );
+  });
+
+  it("denies symlink path escapes under the requested cwd", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-policy-path-"));
+    const root = join(dir, "root");
+    const outside = join(dir, "outside");
+    mkdirSync(root);
+    mkdirSync(outside);
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    symlinkSync(outside, join(root, "link"), "dir");
+
+    try {
+      expect(
+        evaluatePolicy({
+          ...base,
+          action: { kind: "fs.read", description: "read through symlink", params: {} },
+          cwd: root,
+          paths: ["link/secret.txt"]
+        }).matchedRules
+      ).toContain("deny:path-escape");
+      expect(
+        evaluatePolicy({
+          ...base,
+          action: { kind: "fs.read", description: "read source", params: {} },
+          cwd: root,
+          paths: ["src/index.ts"]
+        }).decision
+      ).toBe("allow");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("requires approval for writes, package installs, service restarts, git commits, and long commands", () => {
@@ -52,12 +124,87 @@ describe("policy gate", () => {
     expect(
       evaluatePolicy({
         ...base,
-        action: { kind: "command", description: "watch", params: { longRunning: true } }
+        action: { kind: "shell", description: "watch", params: { longRunning: true } }
       }).matchedRules
     ).toContain("approval:long-running");
   });
 
+  it("requires risk approval and denies high-risk self-approval", () => {
+    expect(
+      evaluatePolicy({
+        ...base,
+        action: { kind: "agent.prompt", description: "dispatch high-risk prompt", params: {} },
+        risk: "critical"
+      }).matchedRules
+    ).toContain("approval:risk");
+    expect(evaluatePolicy({ ...base, risk: "critical" }).matchedRules).toContain("approval:risk");
+    expect(
+      evaluatePolicy({ ...base, operation: "approve", requester: "agent", risk: "critical" }).matchedRules
+    ).toContain("deny:self-approval");
+  });
+
   it("fails closed when no allow rule matches", () => {
     expect(evaluatePolicy(base).matchedRules).toContain("deny:fail-closed");
+  });
+
+  it("denies read requests without explicit paths", () => {
+    expect(
+      evaluatePolicy({
+        ...base,
+        action: { kind: "fs.read", description: "read unspecified", params: {} }
+      }).matchedRules
+    ).toContain("deny:fail-closed");
+  });
+
+  it("normalizes legacy action kinds before evaluating policy", () => {
+    const workItem = createWorkItem({
+      title: "Legacy read",
+      requester: "user",
+      intent: "support durable pre-rename actions",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "read", description: "read source", params: { paths: ["src/index.ts"] } }],
+      risk: "low"
+    });
+    const evaluation = evaluateWorkItemPolicy(workItem, "user", "create")[0];
+
+    expect(evaluation?.decision.decision).toBe("allow");
+    expect(evaluation?.context.action.kind).toBe("fs.read");
+  });
+
+  it("keeps action hashes stable across lifecycle actors", () => {
+    const workItem = createWorkItem({
+      title: "Write source",
+      requester: "user",
+      intent: "update source file",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+      risk: "low"
+    });
+
+    const hashes = [
+      evaluateWorkItemPolicy(workItem, "user", "create")[0]?.actionHash,
+      evaluateWorkItemPolicy(workItem, "approver", "approve")[0]?.actionHash,
+      evaluateWorkItemPolicy(workItem, "worker-a", "claim")[0]?.actionHash
+    ];
+    const renamed = createWorkItem({
+      title: "Write source",
+      requester: "user",
+      intent: "update source file",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "fs.write", description: "different wording", params: { paths: ["src/index.ts"] } }],
+      risk: "low"
+    });
+    const higherRisk = createWorkItem({
+      title: "Write source",
+      requester: "user",
+      intent: "update source file",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+      risk: "high"
+    });
+
+    expect(new Set(hashes).size).toBe(1);
+    expect(evaluateWorkItemPolicy(renamed, "user", "create")[0]?.actionHash).not.toBe(hashes[0]);
+    expect(evaluateWorkItemPolicy(higherRisk, "user", "create")[0]?.actionHash).not.toBe(hashes[0]);
   });
 });

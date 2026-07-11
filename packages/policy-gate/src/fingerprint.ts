@@ -1,10 +1,15 @@
 import { stableHash } from "@agent-control-stack/shared";
-import type { ActionRequest } from "@agent-control-stack/work-items";
 import type { PolicyContext } from "./policy.js";
 
 export function actionFingerprint(context: PolicyContext): string {
   return stableHash({
-    action: context.action,
+    requester: context.requester,
+    risk: context.risk,
+    action: {
+      kind: context.action.kind,
+      description: context.action.description,
+      params: context.action.params
+    },
     command: context.command,
     cwd: context.cwd,
     destructive: context.destructive,
@@ -12,8 +17,4 @@ export function actionFingerprint(context: PolicyContext): string {
     paths: context.paths,
     write: context.write
   });
-}
-
-export function actionRequestFingerprint(action: ActionRequest): string {
-  return stableHash(action);
 }

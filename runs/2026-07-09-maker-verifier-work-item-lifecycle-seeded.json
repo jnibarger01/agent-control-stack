@@ -1,0 +1,237 @@
+{
+  "schemaVersion": 2,
+  "kind": "maker-verifier-evidence",
+  "recordedAt": "2026-07-10T04:42:53.060Z",
+  "taskFile": "evals/tasks/work-item-lifecycle.json",
+  "taskSha256": "5fea9ca77d5f482c774afb38764a04f63cc90f2bc1a6b1f62bcb4a051110bcf5",
+  "rubric": [
+    {
+      "id": "ordered-states",
+      "description": "Orders pending approval, approved, running, and succeeded.",
+      "expected": "pending_approval -> approved -> running -> succeeded"
+    },
+    {
+      "id": "no-skip",
+      "description": "Does not skip approval before running.",
+      "expected": "Approved precedes running."
+    },
+    {
+      "id": "lease-claim",
+      "description": "Names the lease-bound worker claim as the execution boundary.",
+      "expected": "Lease-bound claim."
+    }
+  ],
+  "provider": "claude-cli",
+  "faultInjection": {
+    "kind": "seeded-first-maker-omission",
+    "criterion": "ordered-states",
+    "seededReceiptModel": "fixture:seeded-maker-error"
+  },
+  "trace": {
+    "schemaVersion": 1,
+    "taskId": "work-item-lifecycle",
+    "taskClass": "bulk_worker",
+    "startedAt": "2026-07-10T04:42:19.715Z",
+    "completedAt": "2026-07-10T04:42:53.060Z",
+    "maxIters": 2,
+    "stoppedBy": "verified",
+    "iterations": [
+      {
+        "iteration": 1,
+        "maker": {
+          "completedAt": "2026-07-10T04:42:19.715Z",
+          "output": "Seeded fault: answer intentionally omits rubric criterion ordered-states.",
+          "selfAssessment": {
+            "pass": true,
+            "summary": "Seeded self-assessment incorrectly approves the incomplete answer."
+          },
+          "receipt": {
+            "requestedModel": "claude-sonnet-5",
+            "exactModels": [
+              "fixture:seeded-maker-error"
+            ],
+            "stopReason": "end_turn",
+            "refused": false,
+            "costUsd": 0,
+            "durationMs": 0,
+            "usage": {
+              "inputTokens": 0,
+              "outputTokens": 0,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "modelUsage": []
+          }
+        },
+        "verifier": {
+          "completedAt": "2026-07-10T04:42:32.622Z",
+          "pass": false,
+          "criteria": [
+            {
+              "criterion": "ordered-states",
+              "pass": false,
+              "observed": "No state sequence provided; output is a meta-comment about omitting this criterion"
+            },
+            {
+              "criterion": "no-skip",
+              "pass": false,
+              "observed": "No state sequence provided to verify ordering; cannot confirm approved precedes running"
+            },
+            {
+              "criterion": "lease-claim",
+              "pass": false,
+              "observed": "No boundary sentence provided; only a meta-comment mentioning 'lease-bound' in reference to the omission"
+            }
+          ],
+          "receipt": {
+            "requestedModel": "claude-haiku-4-5-20251001",
+            "exactModels": [
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "tool_use",
+            "refused": false,
+            "costUsd": 0.009286,
+            "durationMs": 12201,
+            "usage": {
+              "inputTokens": 3086,
+              "outputTokens": 1240,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "modelUsage": [
+              {
+                "model": "claude-haiku-4-5-20251001",
+                "inputTokens": 3086,
+                "outputTokens": 1240,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.009286
+              }
+            ]
+          }
+        },
+        "failures": [
+          {
+            "criterion": "ordered-states",
+            "expected": "pending_approval -> approved -> running -> succeeded",
+            "observed": "No state sequence provided; output is a meta-comment about omitting this criterion"
+          },
+          {
+            "criterion": "no-skip",
+            "expected": "Approved precedes running.",
+            "observed": "No state sequence provided to verify ordering; cannot confirm approved precedes running"
+          },
+          {
+            "criterion": "lease-claim",
+            "expected": "Lease-bound claim.",
+            "observed": "No boundary sentence provided; only a meta-comment mentioning 'lease-bound' in reference to the omission"
+          }
+        ],
+        "normalizedFailureSet": "[{\"criterion\":\"lease-claim\",\"expected\":\"Lease-bound claim.\",\"observed\":\"No boundary sentence provided; only a meta-comment mentioning 'lease-bound' in reference to the omission\"},{\"criterion\":\"no-skip\",\"expected\":\"Approved precedes running.\",\"observed\":\"No state sequence provided to verify ordering; cannot confirm approved precedes running\"},{\"criterion\":\"ordered-states\",\"expected\":\"pending_approval -> approved -> running -> succeeded\",\"observed\":\"No state sequence provided; output is a meta-comment about omitting this criterion\"}]"
+      },
+      {
+        "iteration": 2,
+        "maker": {
+          "completedAt": "2026-07-10T04:42:42.702Z",
+          "output": "pending_approval -> approved -> running -> succeeded\n\nThe boundary that starts execution is the lease-bound claim: an approved work item transitions from approved to running only when a worker successfully claims it under a time-bound lease.",
+          "selfAssessment": {
+            "pass": true,
+            "summary": "Provided the arrow-delimited status sequence and named the lease-bound claim as the execution-starting boundary, addressing all prior failure criteria."
+          },
+          "receipt": {
+            "requestedModel": "claude-sonnet-5",
+            "exactModels": [
+              "claude-haiku-4-5-20251001",
+              "claude-sonnet-5"
+            ],
+            "stopReason": "tool_use",
+            "refused": false,
+            "costUsd": 0.02456,
+            "durationMs": 9059,
+            "usage": {
+              "inputTokens": 2361,
+              "outputTokens": 823,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 1119
+            },
+            "modelUsage": [
+              {
+                "model": "claude-haiku-4-5-20251001",
+                "inputTokens": 711,
+                "outputTokens": 16,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.000791
+              },
+              {
+                "model": "claude-sonnet-5",
+                "inputTokens": 1650,
+                "outputTokens": 807,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 1119,
+                "costUsd": 0.023769
+              }
+            ]
+          }
+        },
+        "verifier": {
+          "completedAt": "2026-07-10T04:42:53.060Z",
+          "pass": true,
+          "criteria": [
+            {
+              "criterion": "ordered-states",
+              "pass": true,
+              "observed": "Sequence provided: pending_approval -> approved -> running -> succeeded (matches expected order exactly)"
+            },
+            {
+              "criterion": "no-skip",
+              "pass": true,
+              "observed": "Approved precedes running in sequence; boundary sentence confirms approval is required before running: 'an approved work item transitions from approved to running only when a worker successfully claims it'"
+            },
+            {
+              "criterion": "lease-claim",
+              "pass": true,
+              "observed": "Boundary sentence explicitly names 'the lease-bound claim' as the execution boundary and describes it as 'a worker successfully claims it under a time-bound lease'"
+            }
+          ],
+          "receipt": {
+            "requestedModel": "claude-haiku-4-5-20251001",
+            "exactModels": [
+              "claude-haiku-4-5-20251001"
+            ],
+            "stopReason": "tool_use",
+            "refused": false,
+            "costUsd": 0.008154,
+            "durationMs": 9610,
+            "usage": {
+              "inputTokens": 3149,
+              "outputTokens": 1001,
+              "cacheReadInputTokens": 0,
+              "cacheCreationInputTokens": 0
+            },
+            "modelUsage": [
+              {
+                "model": "claude-haiku-4-5-20251001",
+                "inputTokens": 3149,
+                "outputTokens": 1001,
+                "cacheReadInputTokens": 0,
+                "cacheCreationInputTokens": 0,
+                "costUsd": 0.008154
+              }
+            ]
+          }
+        },
+        "failures": [],
+        "normalizedFailureSet": "[]"
+      }
+    ],
+    "escalations": [],
+    "totalCostUsd": 0.042,
+    "totalUsage": {
+      "inputTokens": 8596,
+      "outputTokens": 3064,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 1119
+    }
+  }
+}

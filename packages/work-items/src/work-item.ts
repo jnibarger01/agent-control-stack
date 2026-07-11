@@ -12,7 +12,8 @@ export const workItemStatusSchema = z.enum([
   "succeeded",
   "failed",
   "blocked",
-  "cancelled"
+  "cancelled",
+  "rejected"
 ]);
 
 export const targetSchema = z
@@ -33,6 +34,7 @@ export const actionRequestSchema = z.object({
 export const createWorkItemSchema = z.object({
   title: z.string().min(1),
   requester: requesterSchema,
+  requesterSubject: z.string().min(1).optional(),
   status: z.enum(["draft", "pending_policy"]).default("pending_policy"),
   intent: z.string().min(1),
   target: targetSchema,
@@ -43,6 +45,7 @@ export const createWorkItemSchema = z.object({
 export const workItemSchema = createWorkItemSchema.extend({
   id: z.string().min(1),
   status: workItemStatusSchema,
+  result: z.record(z.string(), z.unknown()).optional(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1)
 });
@@ -50,13 +53,14 @@ export const workItemSchema = createWorkItemSchema.extend({
 export const approvalRequestSchema = z.object({
   approvedBy: z.string().min(1),
   reason: z.string().min(1).optional(),
-  actionHash: z.string().min(1).optional()
+  actionHash: z.string().min(1)
 });
 
 export const cancelRequestSchema = z.object({
-  actor: z.string().min(1).default("system"),
+  actor: z.string().min(1),
   reason: z.string().min(1).optional()
 });
+export const rejectRequestSchema = cancelRequestSchema;
 
 export const submitWorkResultSchema = z.object({
   id: z.string().min(1),
@@ -78,8 +82,9 @@ export type CreateWorkItemInput = z.infer<typeof createWorkItemSchema>;
 export type WorkItem = z.infer<typeof workItemSchema>;
 export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
 export type CancelRequest = z.infer<typeof cancelRequestSchema>;
+export type RejectRequest = z.infer<typeof rejectRequestSchema>;
 export type SubmitWorkResultInput = z.infer<typeof submitWorkResultSchema>;
-export type ClaimedWorkItem = WorkItem & { leaseToken: string };
+export type ClaimedWorkItem = WorkItem & { workerId: string; leaseToken: string; leaseExpiresAt: string };
 
 export const WorkItemEvent = {
   Created: "work_item.created",
@@ -90,7 +95,8 @@ export const WorkItemEvent = {
   Succeeded: "work_item.succeeded",
   Failed: "work_item.failed",
   Blocked: "work_item.blocked",
-  Cancelled: "work_item.cancelled"
+  Cancelled: "work_item.cancelled",
+  Rejected: "work_item.rejected"
 } as const;
 
 const statusEvents: Record<WorkItemStatus, (typeof WorkItemEvent)[keyof typeof WorkItemEvent]> = {
@@ -102,7 +108,8 @@ const statusEvents: Record<WorkItemStatus, (typeof WorkItemEvent)[keyof typeof W
   succeeded: WorkItemEvent.Succeeded,
   failed: WorkItemEvent.Failed,
   blocked: WorkItemEvent.Blocked,
-  cancelled: WorkItemEvent.Cancelled
+  cancelled: WorkItemEvent.Cancelled,
+  rejected: WorkItemEvent.Rejected
 };
 
 export function createWorkItem(input: unknown, now = new Date().toISOString()): WorkItem {
@@ -150,6 +157,7 @@ function workItemAttributes(workItem: WorkItem): Record<string, string> {
     "work_item.id": workItem.id,
     "work_item.status": workItem.status,
     "work_item.risk": workItem.risk,
-    "work_item.requester": workItem.requester
+    "work_item.requester": workItem.requester,
+    ...(workItem.requesterSubject ? { "work_item.requester_subject": workItem.requesterSubject } : {})
   };
 }

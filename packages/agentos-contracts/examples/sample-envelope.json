@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "task_id": "task-cs-headsha-0001",
+  "goal": "Implement verified head_sha promotion in codex-swarm promoter; merge by SHA, never branch name",
+  "origin": "cli",
+  "task_type": "coding",
+  "allowed_tools": ["read_file", "search", "apply_patch", "run_command:test", "git_commit"],
+  "workspace": "/home/jacen/dev/codex-swarm",
+  "risk_level": "write",
+  "approval_required": true,
+  "success_criteria": [
+    "promoter compares head_sha_expected vs re-resolved head_sha_actual at merge time",
+    "mismatch aborts merge with unexpected_diff",
+    "gate tests pass"
+  ],
+  "timeout_seconds": 1800,
+  "trace_required": true,
+  "rollback_required": false,
+  "network_access": "none",
+  "human_notes": "This is the fix that lets mission-router leave dry-run default."
+}

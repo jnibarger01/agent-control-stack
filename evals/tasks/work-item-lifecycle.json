@@ -1,0 +1,16 @@
+{
+  "id": "work-item-lifecycle",
+  "taskClass": "bulk_worker",
+  "input": "Give the valid status sequence for a successful approved work item from creation through completion and name the boundary that starts execution.",
+  "context": {
+    "facts": ["Work starts only after an approved item is claimed by a worker.", "The claim is lease-bound."],
+    "constraints": ["Use one arrow-delimited sequence and one boundary sentence."]
+  },
+  "rubric": [
+    { "id": "ordered-states", "description": "Orders pending approval, approved, running, and succeeded.", "expected": "pending_approval -> approved -> running -> succeeded" },
+    { "id": "no-skip", "description": "Does not skip approval before running.", "expected": "Approved precedes running." },
+    { "id": "lease-claim", "description": "Names the lease-bound worker claim as the execution boundary.", "expected": "Lease-bound claim." }
+  ],
+  "reference": { "kind": "exact", "content": "pending_approval -> approved -> running -> succeeded\nExecution starts at the lease-bound worker claim." },
+  "tokenEstimate": { "inputTokens": 180, "outputTokens": 70 }
+}

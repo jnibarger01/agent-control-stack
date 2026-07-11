@@ -1,0 +1,17 @@
+{
+  "id": "routing-cost-estimate",
+  "taskClass": "grader",
+  "input": "On 2026-08-31, estimate base model cost for a Sonnet 5 task with 1,000,000 input tokens and 500,000 output tokens. Show input, output, and total USD.",
+  "context": {
+    "facts": ["docs/platform-facts.md records Sonnet 5 introductory rates of $2 input and $10 output per MTok through 2026-08-31."],
+    "constraints": ["Use base token rates only.", "Show the arithmetic."]
+  },
+  "rubric": [
+    { "id": "input-cost", "description": "Computes input cost correctly.", "expected": "$2.00" },
+    { "id": "output-cost", "description": "Computes output cost correctly.", "expected": "$5.00" },
+    { "id": "total-cost", "description": "Computes total cost correctly.", "expected": "$7.00" },
+    { "id": "date-rate", "description": "Uses the through-2026-08-31 introductory rate.", "expected": "$2/$10 per MTok." }
+  ],
+  "reference": { "kind": "exact", "content": "Input: 1.0 x $2 = $2.00; output: 0.5 x $10 = $5.00; total: $7.00." },
+  "tokenEstimate": { "inputTokens": 180, "outputTokens": 100 }
+}

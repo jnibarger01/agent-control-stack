@@ -1,0 +1,4 @@
+interface:
+  display_name: "Independent Verification"
+  short_description: "Run isolated maker-verifier evidence loops"
+  default_prompt: "Use $independent-verification to run a fresh-context verifier loop and persist redacted evidence."

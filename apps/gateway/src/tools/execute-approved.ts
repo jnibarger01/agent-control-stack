@@ -1,5 +1,5 @@
-import { evaluateWorkItemPolicy, summarizePolicy } from "@agent-control-stack/policy-gate";
-import type { WorkItem, WorkItemStore } from "@agent-control-stack/work-items";
+import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
+import { type WorkItem, type WorkItemStore } from "@agent-control-stack/work-items";
 
 export interface ExecutionResult {
   ok: boolean;
@@ -14,39 +14,21 @@ export interface ExecuteApprovedOptions {
 }
 
 export async function executeApprovedWorkItem(options: ExecuteApprovedOptions) {
+  const tools = createWorkItemTools(options.store, createPolicyEngine());
   options.store.failExpiredLeases();
-  const running = options.store.claimNextApprovedWorkItem(options.workerId);
+  const running = tools.claim_next_approved_work_item({ workerId: options.workerId });
   if (!running) {
     return { executed: false, reason: "no approved work item" };
   }
-
-  const evaluations = evaluateWorkItemPolicy(running, options.workerId);
-  for (const evaluation of evaluations) {
-    options.store.recordPolicyDecision({
-      workItemId: running.id,
-      actionHash: evaluation.actionHash,
-      ...evaluation.decision
-    });
-  }
-
-  const decision = summarizePolicy(evaluations);
-  const missingApproval = evaluations.find(
-    (evaluation) =>
-      evaluation.decision.decision === "require_approval" &&
-      !options.store.hasApproval(running.id, evaluation.actionHash)
-  );
-  if (decision.decision === "deny" || missingApproval) {
-    options.store.submitWorkResult({
-      id: running.id,
-      status: "blocked",
-      result: { error: missingApproval ? "approval missing for action hash" : decision.reason }
-    });
-    return { executed: false, workItemId: running.id, reason: missingApproval ? "approval missing" : decision.reason };
+  if (running.status === "blocked") {
+    return { executed: false, workItemId: running.id, reason: "policy blocked claim" };
   }
 
   const result = await options.execute(running);
-  options.store.submitWorkResult({
+  tools.submit_work_result({
     id: running.id,
+    workerId: options.workerId,
+    leaseToken: running.leaseToken,
     status: result.ok ? "succeeded" : "failed",
     result: result.ok ? { output: result.output ?? "" } : { error: result.error ?? "execution failed" }
   });

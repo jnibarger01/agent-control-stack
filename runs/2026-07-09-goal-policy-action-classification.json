@@ -1,0 +1,216 @@
+{
+  "schemaVersion": 2,
+  "kind": "claude-goal-evidence",
+  "recordedAt": "2026-07-10T04:38:45.842Z",
+  "claudeCodeVersion": "2.1.205 (Claude Code)",
+  "taskId": "policy-action-classification",
+  "sessionId": "71ca37a5-fa52-4854-97ba-a6cffe6c5ffb",
+  "condition": "Complete eval task policy-action-classification. The task is: classify the requested action and risk for reading docs/architecture.md and summarizing it without changing files. Success requires the surfaced answer to be exactly two lines: action: read then risk: low. The transcript itself must show those two lines. Do not modify files, do not call tools, and stop after 4 turns if the evaluator does not pass.",
+  "platformFact": "docs/platform-facts.md:48",
+  "invocation": {
+    "mode": "claude -p",
+    "requestedModel": "claude-haiku-4-5-20251001",
+    "toolsDisabled": true,
+    "permissionMode": "plan",
+    "hooksEnabled": true,
+    "maxTurns": 4,
+    "maxBudgetUsd": 0.1
+  },
+  "result": {
+    "exitCode": 0,
+    "subtype": "success",
+    "output": "action: read\nrisk: low",
+    "expectedOutput": "action: read\nrisk: low",
+    "numTurns": 1,
+    "terminalReason": "completed",
+    "stopReason": "end_turn",
+    "actualCostUsd": 0.005085999999999999,
+    "exactModels": [
+      "claude-haiku-4-5-20251001"
+    ],
+    "usage": {
+      "inputTokens": 3271,
+      "outputTokens": 363,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    }
+  },
+  "statusQuery": {
+    "sessionId": "71ca37a5-fa52-4854-97ba-a6cffe6c5ffb",
+    "command": "/goal",
+    "exitCode": 0,
+    "output": "No goal set. Usage: `/goal <condition>`",
+    "actualCostUsd": 0
+  },
+  "rawReceipts": {
+    "initial": {
+      "binary": "claude",
+      "argv": [
+        "-p",
+        "--session-id",
+        "71ca37a5-fa52-4854-97ba-a6cffe6c5ffb",
+        "--setting-sources",
+        "project",
+        "--output-format",
+        "json",
+        "--model",
+        "claude-haiku-4-5-20251001",
+        "--tools",
+        "",
+        "--permission-mode",
+        "plan",
+        "--prompt-suggestions",
+        "false",
+        "--max-budget-usd",
+        "0.1",
+        "--max-turns",
+        "4",
+        "--system-prompt",
+        "Complete the supplied evaluation task. Do not call tools. Output only the two required labeled lines, with no preface, explanation, code fence, or completion claim.",
+        "/goal Complete eval task policy-action-classification. The task is: classify the requested action and risk for reading docs/architecture.md and summarizing it without changing files. Success requires the surfaced answer to be exactly two lines: action: read then risk: low. The transcript itself must show those two lines. Do not modify files, do not call tools, and stop after 4 turns if the evaluator does not pass."
+      ],
+      "startedAt": "2026-07-10T04:38:33.042Z",
+      "completedAt": "2026-07-10T04:38:41.933Z",
+      "exitCode": 0,
+      "stderrBytes": 157,
+      "envelope": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "api_error_status": null,
+        "duration_ms": 5086,
+        "duration_api_ms": 6032,
+        "ttft_ms": 3478,
+        "ttft_stream_ms": 721,
+        "time_to_request_ms": 22,
+        "num_turns": 1,
+        "result": "action: read\nrisk: low",
+        "stop_reason": "end_turn",
+        "session_id": "71ca37a5-fa52-4854-97ba-a6cffe6c5ffb",
+        "total_cost_usd": 0.005085999999999999,
+        "usage": {
+          "input_tokens": 1429,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 281,
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "not_available",
+          "iterations": [
+            {
+              "input_tokens": 1429,
+              "output_tokens": 281,
+              "cache_read_input_tokens": 0,
+              "cache_creation_input_tokens": 0,
+              "cache_creation": {
+                "ephemeral_5m_input_tokens": 0,
+                "ephemeral_1h_input_tokens": 0
+              },
+              "type": "message"
+            }
+          ],
+          "speed": "standard"
+        },
+        "modelUsage": {
+          "claude-haiku-4-5-20251001": {
+            "inputTokens": 3271,
+            "outputTokens": 363,
+            "cacheReadInputTokens": 0,
+            "cacheCreationInputTokens": 0,
+            "webSearchRequests": 0,
+            "costUSD": 0.005085999999999999,
+            "contextWindow": 200000,
+            "maxOutputTokens": 32000
+          }
+        },
+        "permission_denials": [],
+        "terminal_reason": "completed",
+        "fast_mode_state": "off",
+        "uuid": "3977e3d0-588c-4e49-820b-bfa8579b941f"
+      },
+      "envelopeSha256": "5a3ee34ea37cc8f9d2983fa0532075f36e2408eb5d47ff9d16eaba81a56d9c3d"
+    },
+    "status": {
+      "binary": "claude",
+      "argv": [
+        "-p",
+        "--resume",
+        "71ca37a5-fa52-4854-97ba-a6cffe6c5ffb",
+        "--setting-sources",
+        "project",
+        "--output-format",
+        "json",
+        "--model",
+        "claude-haiku-4-5-20251001",
+        "--tools",
+        "",
+        "--permission-mode",
+        "plan",
+        "--prompt-suggestions",
+        "false",
+        "--max-budget-usd",
+        "0.02",
+        "--max-turns",
+        "2",
+        "/goal"
+      ],
+      "startedAt": "2026-07-10T04:38:41.933Z",
+      "completedAt": "2026-07-10T04:38:45.837Z",
+      "exitCode": 0,
+      "stderrBytes": 157,
+      "envelope": {
+        "type": "result",
+        "subtype": "success",
+        "is_error": false,
+        "duration_ms": 119,
+        "duration_api_ms": 0,
+        "num_turns": 0,
+        "result": "No goal set. Usage: `/goal <condition>`",
+        "stop_reason": null,
+        "session_id": "71ca37a5-fa52-4854-97ba-a6cffe6c5ffb",
+        "total_cost_usd": 0,
+        "usage": {
+          "input_tokens": 0,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0,
+          "output_tokens": 0,
+          "server_tool_use": {
+            "web_search_requests": 0,
+            "web_fetch_requests": 0
+          },
+          "service_tier": "standard",
+          "cache_creation": {
+            "ephemeral_1h_input_tokens": 0,
+            "ephemeral_5m_input_tokens": 0
+          },
+          "inference_geo": "",
+          "iterations": [],
+          "speed": "standard"
+        },
+        "modelUsage": {},
+        "permission_denials": [],
+        "fast_mode_state": "off",
+        "uuid": "d4e98b28-1a96-4098-bcc3-1ca5c70bdded"
+      },
+      "envelopeSha256": "d948a2133db69cc4174a0c1c09478fdfc122081a69375f01107fcda3375423b2"
+    }
+  },
+  "workspaceStatus": {
+    "beforeSha256": "7a910ec66505592aeb6b0ec9c530503769c02c8e186cbd44313e34e718e7fa7e",
+    "afterSha256": "7a910ec66505592aeb6b0ec9c530503769c02c8e186cbd44313e34e718e7fa7e",
+    "unchanged": true
+  },
+  "proof": {
+    "manualClearIssued": false,
+    "evaluatorClearedGoal": true,
+    "filesModifiedByInvocation": [],
+    "method": "The initial raw envelope records the goal result and platform session ID. With no clear command in either retained argv, the same-session raw status envelope reports no active goal. The cited contract states evaluator pass clears the goal."
+  }
+}

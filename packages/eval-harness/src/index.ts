@@ -1,3 +1,4 @@
+export * from "./promotion-gate.js";
 import type { AuditEvent } from "@agent-control-stack/shared";
 import { projectMemories } from "@agent-control-stack/temporal-memory";
 import { WorkItemEvent, projectWorkItems, workItemSchema } from "@agent-control-stack/work-items";
