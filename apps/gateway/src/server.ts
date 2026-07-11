@@ -138,6 +138,7 @@ export interface GatewayOptions {
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
+  mcpAllowedOrigins?: string[];
   machineControllerConfigPath?: string;
   directAgentRunner?: DirectAgentRunner;
   directAgentController?: GatewayDirectAgentController;
@@ -154,6 +155,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const tools = createWorkItemTools(workItems, policy);
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
+  const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
   const directAgentController = resolveDirectAgentController(options);
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
   const acpAdapter = acpAdapterConfig === false || !acpAdapterConfig
@@ -194,6 +196,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
     }
   }
+
+  // Fastify error handlers are instance-wide; preserve the default path for every non-MCP error.
+  app.setErrorHandler((error, request, reply) => {
+    if (request.url.split("?")[0] === "/mcp" && request.method === "POST" && isJsonParseError(error)) {
+      return reply.code(400).send(jsonRpcError(null, -32700, "parse error"));
+    }
+    return reply.send(error);
+  });
 
   app.get("/health", async (request, reply) => {
     const health = workItems.health();
@@ -344,7 +354,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
 
+  app.get("/mcp", async (_request, reply) => {
+    return reply.header("allow", "POST").code(405).send(jsonRpcError(null, -32000, "method not allowed"));
+  });
+
   app.post("/mcp", async (request, reply) => {
+    if (!isAllowedMcpOrigin(request.headers.origin, mcpAllowedOrigins)) {
+      return reply.code(403).send(jsonRpcError(null, -32002, "forbidden origin"));
+    }
     const resourceMetadataUrl = mcpResourceMetadataUrl(request, mcpAuth?.oauth);
     const result = await handleMcpHttpRequest({
       body: request.body,
@@ -776,6 +793,35 @@ function resolveMcpAuth(options: GatewayOptions, workItems: SqliteWorkItemStore)
     };
   }
   return resolved;
+}
+
+function resolveMcpAllowedOrigins(options: GatewayOptions): string[] {
+  if (options.mcpAllowedOrigins) {
+    return options.mcpAllowedOrigins;
+  }
+  return (process.env.ACS_MCP_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+}
+
+function isAllowedMcpOrigin(origin: string | undefined, allowedOrigins: string[]): boolean {
+  if (!origin) {
+    return true;
+  }
+  return allowedOrigins.includes(origin);
+}
+
+function isJsonParseError(error: unknown): boolean {
+  return (error as { code?: string }).code === "FST_ERR_CTP_INVALID_JSON_BODY";
+}
+
+function jsonRpcError(id: string | number | null, code: number, message: string) {
+  return {
+    jsonrpc: "2.0" as const,
+    id,
+    error: { code, message }
+  };
 }
 
 function resolveMcpActorId(
