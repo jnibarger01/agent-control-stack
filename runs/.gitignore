@@ -1,0 +1,10 @@
+artifacts/
+*.bin
+*.blob
+*.tar
+*.tar.gz
+*.zip
+*.tmp
+*.ndjson
+
+!.gitignore

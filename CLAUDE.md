@@ -16,7 +16,8 @@ Project memory at .ijfw/memory/. Call `ijfw_memory_prelude` for full context.
 Your portable working profile (derived from what you've said/edited; style + expertise only):
 style.formality: casual
 style.energy: measured
-style.terseness: moderate
+style.terseness: expansive
 style.emoji_use: rare
+expertise.typescript: novice
 </ijfw-profile>
 <!-- IJFW-MEMORY-END -->

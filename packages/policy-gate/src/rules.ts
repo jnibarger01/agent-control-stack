@@ -1,68 +1,106 @@
-import { resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { dirname, relative, resolve } from "node:path";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
+
+export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
+
+export interface PolicyRiskClassification {
+  risk: PolicyRiskLevel;
+  reason: string;
+  matchedRules: string[];
+  maxRuntimeMs?: number;
+  allowedPaths?: string[];
+}
 
 const credentialPathPattern =
   /(^|\/)(\.env(\.|$)|id_rsa$|id_ed25519$|\.ssh(\/|$)|\.aws\/credentials$|credentials(\.json)?$|token(\.json)?$)/i;
+const shellMetaPattern = /[;&|`$<>]/;
 
 export function evaluateRules(context: PolicyContext): PolicyDecision {
+  const classification = classifyPolicyRisk(context);
+  const extra = {
+    maxRuntimeMs: classification.maxRuntimeMs,
+    allowedPaths: classification.allowedPaths
+  };
+
+  if (classification.risk === "read_only" || classification.risk === "safe_mutation") {
+    return allow(classification.reason, classification.matchedRules, extra);
+  }
+  if (classification.risk === "requires_approval") {
+    return requireApproval(classification.reason, classification.matchedRules, extra);
+  }
+  return deny(classification.reason, classification.matchedRules);
+}
+
+export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassification {
   const command = context.command ?? [];
   const commandName = command[0] ?? "";
 
   if (!isSupportedAction(context.action.kind)) {
-    return deny("unknown action kind is denied", ["deny:unknown-action"]);
+    return risk("forbidden", "unknown action kind is denied", ["deny:unknown-action"]);
   }
   if (isSudo(command)) {
-    return deny("sudo is denied by default", ["deny:sudo"]);
+    return risk("forbidden", "sudo is denied by default", ["deny:sudo"]);
   }
   if (isRmRfRoot(command) || context.destructive === true) {
-    return deny("destructive command is denied", ["deny:destructive"]);
+    return risk("destructive", "destructive command is denied", ["deny:destructive"]);
+  }
+  if (hasShellMetacharacter(command)) {
+    return risk("forbidden", "shell metacharacters are denied", ["deny:shell-metacharacter"]);
   }
   if (readsCredentialPath(context)) {
-    return deny("credential file reads are denied", ["deny:credential-path"]);
+    return risk("forbidden", "credential file reads are denied", ["deny:credential-path"]);
   }
   if (hasPathEscape(context)) {
-    return deny("paths outside project root are denied", ["deny:path-escape"]);
+    return risk("forbidden", "paths outside project root are denied", ["deny:path-escape"]);
   }
   if (isSelfApproval(context)) {
-    return deny("high-risk self-approval is denied", ["deny:self-approval"]);
+    return risk("forbidden", "high-risk self-approval is denied", ["deny:self-approval"]);
   }
   if (requiresRiskApproval(context)) {
-    return requireApproval(`${context.risk} risk work requires approval`, ["approval:risk"]);
+    return risk("requires_approval", `${context.risk} risk work requires approval`, ["approval:risk"]);
   }
 
   if (isPackageInstall(command)) {
-    return requireApproval("package install requires approval", ["approval:package-install"]);
+    return risk("requires_approval", "package install requires approval", ["approval:package-install"]);
   }
   if (context.network === true && !explicitlyAllowsNetwork(context)) {
-    return deny("outbound network is denied by default", ["deny:network"]);
+    return risk("forbidden", "outbound network is denied by default", ["deny:network"]);
   }
   if (context.write === true) {
-    return requireApproval("file writes require approval", ["approval:write"], { allowedPaths: allowedPaths(context) });
+    return risk("requires_approval", "file writes require approval", ["approval:write"], {
+      allowedPaths: allowedPaths(context)
+    });
+  }
+  if (isAgentPrompt(context)) {
+    return risk("safe_mutation", "agent prompt dispatch is allowed", ["allow:agent-prompt"]);
   }
   if (isServiceRestart(command)) {
-    return requireApproval("service restart requires approval", ["approval:service-restart"]);
+    return risk("requires_approval", "service restart requires approval", ["approval:service-restart"]);
   }
   if (isGitCommit(command)) {
-    return requireApproval("git commit requires approval", ["approval:git-commit"]);
+    return risk("requires_approval", "git commit requires approval", ["approval:git-commit"]);
   }
   if (isSystemMutation(commandName)) {
-    return requireApproval("system mutation requires approval", ["approval:system-mutation"]);
+    return risk("requires_approval", "system mutation requires approval", ["approval:system-mutation"]);
   }
   if (isLongRunning(context)) {
-    return requireApproval("long-running command requires approval", ["approval:long-running"]);
+    return risk("requires_approval", "long-running command requires approval", ["approval:long-running"]);
   }
 
   if (isAllowedGitRead(command)) {
-    return allow("git inspection is allowed", ["allow:git-read"], { maxRuntimeMs: 30_000 });
+    return risk("read_only", "git inspection is allowed", ["allow:git-read"], { maxRuntimeMs: 30_000 });
   }
   if (isAllowedTestCommand(command)) {
-    return allow("test command is allowed", ["allow:test"], { maxRuntimeMs: 120_000 });
+    return risk("read_only", "test command is allowed", ["allow:test"], { maxRuntimeMs: 120_000 });
   }
   if (isReadOnlyInsideCwd(context)) {
-    return allow("read-only repo inspection is allowed", ["allow:read-only"], { allowedPaths: allowedPaths(context) });
+    return risk("read_only", "read-only repo inspection is allowed", ["allow:read-only"], {
+      allowedPaths: allowedPaths(context)
+    });
   }
 
-  return deny("no policy rule matched", ["deny:fail-closed"]);
+  return risk("forbidden", "no policy rule matched", ["deny:fail-closed"]);
 }
 
 function allow(
@@ -85,12 +123,36 @@ function requireApproval(
   return { decision: "require_approval", reason, matchedRules, requiredApprover: "user", ...extra };
 }
 
+function risk(
+  risk: PolicyRiskLevel,
+  reason: string,
+  matchedRules: string[],
+  extra: Pick<PolicyRiskClassification, "allowedPaths" | "maxRuntimeMs"> = {}
+): PolicyRiskClassification {
+  return { risk, reason, matchedRules, ...extra };
+}
+
 function isSudo(command: string[]): boolean {
   return command[0] === "sudo" || command.includes("sudo");
 }
 
 function isSupportedAction(kind: string): boolean {
-  return kind === "fs.read" || kind === "fs.write" || kind === "shell";
+  return (
+    kind === "system.status" ||
+    kind === "fs.list" ||
+    kind === "fs.stat" ||
+    kind === "fs.read" ||
+    kind === "fs.search_name" ||
+    kind === "fs.write" ||
+    kind === "fs.patch" ||
+    kind === "fs.move" ||
+    kind === "fs.delete" ||
+    kind === "agent.prompt" ||
+    kind === "cmd.preview" ||
+    kind === "cmd.run" ||
+    kind === "service.restart" ||
+    kind === "shell"
+  );
 }
 
 function isRmRfRoot(command: string[]): boolean {
@@ -113,8 +175,8 @@ function hasPathEscape(context: PolicyContext): boolean {
   if (!context.cwd || !context.paths?.length) {
     return false;
   }
-  const root = resolve(context.cwd);
-  return context.paths.some((path) => !isInside(root, resolve(root, path)));
+  const root = realpathForPolicy(resolve(context.cwd));
+  return context.paths.some((path) => !isInside(root, realpathForPolicy(resolve(root, path))));
 }
 
 function isInside(root: string, target: string): boolean {
@@ -128,6 +190,34 @@ function isPackageInstall(command: string[]): boolean {
     (command[0] === "pnpm" && command[1] === "add") ||
     (command[0] === "yarn" && (command[1] === "add" || command[1] === "install"))
   );
+}
+
+function hasShellMetacharacter(command: string[]): boolean {
+  return command.some((part) => shellMetaPattern.test(part));
+}
+
+function realpathForPolicy(path: string): string {
+  try {
+    if (existsSync(path)) {
+      return realpathSync(path);
+    }
+
+    let current = dirname(path);
+    while (current !== dirname(current)) {
+      if (existsSync(current)) {
+        return resolve(realpathSync(current), relative(current, path));
+      }
+      current = dirname(current);
+    }
+  } catch {
+    return resolve(path);
+  }
+
+  return resolve(path);
+}
+
+function isAgentPrompt(context: PolicyContext): boolean {
+  return context.action.kind === "agent.prompt";
 }
 
 function isServiceRestart(command: string[]): boolean {

@@ -1,6 +1,10 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { createWorkItem } from "@agent-control-stack/work-items";
 import { evaluatePolicy, evaluateWorkItemPolicy } from "./policy.js";
+import { classifyPolicyRisk } from "./rules.js";
 
 const base = {
   workItemId: "wrk_test",
@@ -13,7 +17,10 @@ const base = {
 };
 
 describe("policy gate", () => {
-  it("allows read-only repo inspection and local tests", () => {
+  it("allows prompt dispatch, read-only repo inspection, and local tests", () => {
+    expect(
+      evaluatePolicy({ ...base, action: { kind: "agent.prompt", description: "dispatch prompt", params: {} } }).decision
+    ).toBe("allow");
     expect(
       evaluatePolicy({
         ...base,
@@ -24,6 +31,24 @@ describe("policy gate", () => {
     expect(evaluatePolicy({ ...base, command: ["git", "status"] }).decision).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "diff"] }).decision).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).decision).toBe("allow");
+  });
+
+  it("classifies policy contexts into the connector risk model", () => {
+    expect(classifyPolicyRisk({ ...base, action: { kind: "agent.prompt", description: "dispatch", params: {} } }).risk).toBe(
+      "safe_mutation"
+    );
+    expect(
+      classifyPolicyRisk({
+        ...base,
+        action: { kind: "fs.read", description: "read source", params: {} },
+        paths: ["src/index.ts"]
+      }).risk
+    ).toBe("read_only");
+    expect(classifyPolicyRisk({ ...base, write: true, paths: ["src/index.ts"] }).risk).toBe("requires_approval");
+    expect(classifyPolicyRisk({ ...base, command: ["rm", "-rf", "/"] }).risk).toBe("destructive");
+    expect(
+      classifyPolicyRisk({ ...base, action: { kind: "legacy", description: "unknown", params: {} } }).risk
+    ).toBe("forbidden");
   });
 
   it("denies path escapes, sudo, secrets, destructive commands, and network", () => {
@@ -41,6 +66,46 @@ describe("policy gate", () => {
     expect(evaluatePolicy({ ...base, action: { kind: "legacy", description: "unknown", params: {} } }).matchedRules).toContain(
       "deny:unknown-action"
     );
+  });
+
+  it("denies shell metacharacters before command allow rules", () => {
+    expect(evaluatePolicy({ ...base, command: ["npm", "test", ";", "curl"] }).matchedRules).toContain(
+      "deny:shell-metacharacter"
+    );
+    expect(evaluatePolicy({ ...base, command: ["git", "status", "&&", "whoami"] }).matchedRules).toContain(
+      "deny:shell-metacharacter"
+    );
+  });
+
+  it("denies symlink path escapes under the requested cwd", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-policy-path-"));
+    const root = join(dir, "root");
+    const outside = join(dir, "outside");
+    mkdirSync(root);
+    mkdirSync(outside);
+    writeFileSync(join(outside, "secret.txt"), "secret");
+    symlinkSync(outside, join(root, "link"), "dir");
+
+    try {
+      expect(
+        evaluatePolicy({
+          ...base,
+          action: { kind: "fs.read", description: "read through symlink", params: {} },
+          cwd: root,
+          paths: ["link/secret.txt"]
+        }).matchedRules
+      ).toContain("deny:path-escape");
+      expect(
+        evaluatePolicy({
+          ...base,
+          action: { kind: "fs.read", description: "read source", params: {} },
+          cwd: root,
+          paths: ["src/index.ts"]
+        }).decision
+      ).toBe("allow");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("requires approval for writes, package installs, service restarts, git commits, and long commands", () => {
@@ -65,6 +130,13 @@ describe("policy gate", () => {
   });
 
   it("requires risk approval and denies high-risk self-approval", () => {
+    expect(
+      evaluatePolicy({
+        ...base,
+        action: { kind: "agent.prompt", description: "dispatch high-risk prompt", params: {} },
+        risk: "critical"
+      }).matchedRules
+    ).toContain("approval:risk");
     expect(evaluatePolicy({ ...base, risk: "critical" }).matchedRules).toContain("approval:risk");
     expect(
       evaluatePolicy({ ...base, operation: "approve", requester: "agent", risk: "critical" }).matchedRules

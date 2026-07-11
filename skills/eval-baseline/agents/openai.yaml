@@ -1,0 +1,4 @@
+interface:
+  display_name: "Eval Baseline"
+  short_description: "Run repeatable costed eval baselines"
+  default_prompt: "Use $eval-baseline to run and compare two fixed-corpus baselines."

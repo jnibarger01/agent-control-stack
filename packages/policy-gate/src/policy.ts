@@ -140,13 +140,13 @@ function normalizeAction(workItem: WorkItem, action: ActionRequest): Partial<Pol
     destructive: booleanValue(params.destructive)
   };
 
-  if (kind === "fs.read") {
+  if (kind === "fs.read" || kind === "fs.list" || kind === "fs.stat" || kind === "fs.search_name") {
     return { cwd, paths, ...common };
   }
-  if (kind === "fs.write") {
+  if (kind === "fs.write" || kind === "fs.patch" || kind === "fs.move" || kind === "fs.delete") {
     return { cwd, paths, ...common, write: true };
   }
-  if (kind === "shell") {
+  if (kind === "shell" || kind === "cmd.preview" || kind === "cmd.run" || kind === "service.restart") {
     return {
       cwd,
       command: stringArray(params.command),
@@ -171,6 +171,9 @@ function canonicalActionKind(kind: string): string {
   }
   if (kind === "command") {
     return "shell";
+  }
+  if (kind === "cmd.preview" || kind === "cmd.run") {
+    return kind;
   }
   return kind;
 }

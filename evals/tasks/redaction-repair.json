@@ -1,0 +1,17 @@
+{
+  "id": "redaction-repair",
+  "taskClass": "bulk_worker",
+  "input": "Rewrite this audit payload safely: {\"operation\":\"fetch\",\"token\":\"secret-token\",\"password\":\"hunter2\",\"status\":\"denied\"}.",
+  "context": {
+    "facts": ["Audit output must not contain secrets.", "Operational fields needed for diagnosis should remain."],
+    "constraints": ["Return one JSON object.", "Use the literal value [REDACTED] for secret fields."]
+  },
+  "rubric": [
+    { "id": "valid-json", "description": "Returns a valid JSON object.", "expected": "Parseable JSON." },
+    { "id": "token-redacted", "description": "Redacts the token.", "expected": "token is [REDACTED]." },
+    { "id": "password-redacted", "description": "Redacts the password.", "expected": "password is [REDACTED]." },
+    { "id": "operational-fields", "description": "Preserves operation and status.", "expected": "fetch and denied remain." }
+  ],
+  "reference": { "kind": "exact", "content": "{\"operation\":\"fetch\",\"token\":\"[REDACTED]\",\"password\":\"[REDACTED]\",\"status\":\"denied\"}" },
+  "tokenEstimate": { "inputTokens": 190, "outputTokens": 80 }
+}

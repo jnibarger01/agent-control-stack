@@ -49,6 +49,52 @@ describe("gateway MCP edge hardening", () => {
     }
   });
 
+  it("preserves default malformed JSON handling on non-MCP routes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/session/login",
+        headers: { "content-type": "application/json" },
+        payload: '{"token":'
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).not.toHaveProperty("jsonrpc");
+      expect(response.json()).toMatchObject({ code: "FST_ERR_CTP_INVALID_JSON_BODY" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("rejects browser origins by default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+
+    try {
+      const blocked = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { origin: "https://blocked.example" },
+        payload: { jsonrpc: "2.0", id: "origin", method: "initialize" }
+      });
+      const nonBrowser = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        payload: { jsonrpc: "2.0", id: "no-origin", method: "initialize" }
+      });
+
+      expect(blocked.statusCode).toBe(403);
+      expect(blocked.json()).toMatchObject({ error: { code: -32002, message: "forbidden origin" } });
+      expect(nonBrowser.statusCode).toBe(200);
+      expect(nonBrowser.json().id).toBe("no-origin");
+    } finally {
+      await app.close();
+    }
+  });
+
   it("rejects disallowed MCP origins when an origin allowlist is configured", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
     const app = buildGateway({

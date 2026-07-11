@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "prompt": "01",
+  "title": "Grounding: verified platform fact sheet",
+  "verifiedAt": "2026-07-10T12:43:18-05:00",
+  "sourcePlan": {
+    "path": "fable5-build-prompts-v2.md",
+    "sha256": "9b1c4b9bea826a51f008669f71dc6e0e7aeac41307c529fddea8e522487570e8",
+    "appendixRows": 9,
+    "reconciled": true
+  },
+  "facts": {
+    "path": "docs/platform-facts.md",
+    "sha256": "0d6e71da5802f5d6a5084d70dd1f7d1a9c94e6220f2f6030451a32fdf245f95e",
+    "rows": 15,
+    "statuses": {
+      "CONFIRMED": 11,
+      "CHANGED": 3,
+      "NOT_FOUND": 1
+    },
+    "uniqueOfficialUrls": 30,
+    "verifiedDate": "2026-07-10",
+    "nextDueDate": "2026-08-09",
+    "cadenceDays": 30
+  },
+  "resolvedDrift": [
+    "Removed the stale claim that the controlling appendix was absent.",
+    "Recorded Fable 5's required 30-day retention and lack of ZDR availability.",
+    "Recorded current paid-plan access through usage credits after 2026-07-07.",
+    "Recorded fallback credit as a prompt-cache-cost refund when switching models."
+  ],
+  "manualSemanticReview": {
+    "reviewer": "Codex",
+    "result": "PASS",
+    "coveredRows": [
+      "Latest general Claude lineup",
+      "Claude Fable 5 availability",
+      "Claude Fable 5 refusal contract",
+      "Claude Mythos 5",
+      "Other callable first-party models",
+      "Claude Mythos Preview lifecycle",
+      "/goal",
+      "/loop",
+      "Stop hooks",
+      "Auto mode",
+      "Dynamic workflows",
+      "Schedule/API/GitHub triggers for dynamic workflows",
+      "Routines",
+      "Outcomes",
+      "CMA / managed-agents product name and access"
+    ],
+    "negativeEvidence": "The current Dynamic workflows reference does not document schedule, authenticated API POST, or GitHub-event triggers; the Routines reference does."
+  },
+  "checks": [
+    {
+      "command": "bash .codex/skills/verify-platform-facts/scripts/check-platform-facts.sh",
+      "result": "PASS",
+      "evidence": "Structure, appendix reconciliation, fallbacks, dates, exact cadence, required rows, and all live links passed."
+    },
+    {
+      "command": "git diff --check -- docs/platform-facts.md",
+      "result": "PASS"
+    },
+    {
+      "command": "live official Markdown/news curl+rg semantic probe matrix",
+      "result": "PASS",
+      "evidence": "15 probes passed for models, pricing, lifecycle, Fable retention/plans/refusal, /goal, /loop, hooks, auto mode, workflows, routines, Outcomes, Managed Agents, and workflow-trigger negative evidence."
+    },
+    {
+      "command": "platform-facts checker mutation probes",
+      "result": "PASS",
+      "evidence": "The checker rejected both a restored stale-appendix claim and a due date that was not exactly 30 days after verification."
+    },
+    {
+      "command": "/usr/bin/python3 /home/jacen/.codex/skills/.system/skill-creator/scripts/quick_validate.py .codex/skills/verify-platform-facts",
+      "result": "PASS"
+    }
+  ],
+  "independentAudit": {
+    "agent": "prompt01_final_audit",
+    "status": "PASS",
+    "evidence": "15/15 ledger rows and 9/9 appendix seeds passed; STATE.md records the artifact commit and no longer carries the stale appendix failure."
+  }
+}

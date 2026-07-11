@@ -1,0 +1,18 @@
+{
+  "id": "grader-isolation-design",
+  "taskClass": "orchestration",
+  "input": "Specify the call boundary for an independent grader in the reusable eval harness.",
+  "context": {
+    "facts": ["The grader must run in a fresh context.", "The maker may receive structured failures after grading."],
+    "constraints": ["List grader inputs and forbidden inputs.", "Keep the feedback channel machine-readable."]
+  },
+  "rubric": [
+    { "id": "fresh-context", "description": "Requires a fresh grader context.", "expected": "Separate stateless model call." },
+    { "id": "allowed-inputs", "description": "Limits inputs to task, rubric, and candidate output.", "expected": "Exactly those three input categories." },
+    { "id": "forbidden-reasoning", "description": "Excludes maker reasoning and self-assessment.", "expected": "No chain-of-thought or self-score." },
+    { "id": "binary-results", "description": "Returns pass or fail per criterion with one-line evidence.", "expected": "Structured criterion results." },
+    { "id": "feedback", "description": "Returns only structured failures to the maker.", "expected": "criterion, expected, observed." }
+  ],
+  "reference": { "kind": "rules", "content": "Start a stateless grader call with only task, rubric, and candidate output; exclude maker reasoning and self-assessment; return binary criterion results, and send only structured failures back to the maker." },
+  "tokenEstimate": { "inputTokens": 260, "outputTokens": 180 }
+}

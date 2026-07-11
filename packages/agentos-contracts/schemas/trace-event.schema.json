@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agentos://schemas/trace-event/1.0",
+  "title": "LoopTrace Event",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["run_id", "seq", "ts", "type", "payload", "redacted", "prev_hash", "hash"],
+  "properties": {
+    "run_id": { "type": "string", "pattern": "^[A-Za-z0-9._:-]{6,128}$" },
+    "seq": { "type": "integer", "minimum": 0 },
+    "ts": { "type": "string", "format": "date-time" },
+    "type": {
+      "enum": [
+        "task_received", "task_validated", "risk_classified", "route_selected",
+        "approval_requested", "approval_decision", "rollback_checkpoint_created",
+        "agent_started", "tool_call_started", "tool_call_finished",
+        "file_diff_detected", "verification_started", "verification_finished",
+        "promotion_blocked", "promotion_completed", "run_failed", "run_completed",
+        "run_replay_started", "replay_divergence_detected", "trace_sealed"
+      ]
+    },
+    "payload": { "type": "object" },
+    "redacted": { "type": "boolean" },
+    "prev_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

@@ -1,0 +1,102 @@
+# Platform facts
+
+This file is the repository's single source of truth for Claude and Anthropic
+platform claims. Later plans, code, and documentation must cite a row here
+instead of relying on memory.
+
+## Verification policy
+
+- **Evidence:** only live official pages on `docs.claude.com`,
+  `code.claude.com/docs`, `claude.com/blog`, and `anthropic.com/news` count as
+  platform evidence. No claim below is sourced from model memory or prior
+  session memory.
+- **Status:** `CONFIRMED` means the current official source states the claim;
+  `CHANGED` means the seed name or assumption has been superseded by the
+  current official name or contract; `NOT FOUND` means the searched official
+  sources do not document the claim, so the row supplies a local fallback.
+- **Source precedence:** a feature's current reference page wins over an older
+  launch post. The model lifecycle page wins for retirement state, the pricing
+  page wins for rates, and dated news is used for availability chronology.
+- **Appendix source:** Prompt 01's nine-row seed is present in
+  `fable5-build-prompts-v2.md` under `Appendix — feature status as of
+  2026-07-09`. This edition reconciles every seed row; later refreshes must
+  re-read that appendix before changing the inventory.
+- **Cadence:** re-verify every **30 days**. This edition was verified on
+  **2026-07-10** and is due again by **2026-08-09**. Re-verify sooner after a
+  model launch, retirement notice, pricing change, Claude Code feature change,
+  or preview-access change. In particular, re-check the documented Sonnet 5
+  price transition before 2026-09-01.
+
+## Appendix reconciliation
+
+Every appendix seed is represented in the ledger below:
+
+- `Fable 5` maps to `Latest general Claude lineup` and `Claude Fable 5
+  availability`; the latter now carries the seed's retention, ZDR, and
+  paid-plan access checks.
+- `Fable 5 refusal contract` maps to `Claude Fable 5 refusal contract`.
+- `/goal` maps to `/goal`.
+- `/loop, Stop hooks, auto mode` is split into `/loop`, `Stop hooks`, and
+  `Auto mode` so each control surface can be refreshed independently.
+- `Dynamic workflows` maps to `Dynamic workflows`; its unsupported external
+  trigger assumption is isolated in `Schedule/API/GitHub triggers for dynamic
+  workflows` with a fail-closed local fallback.
+- `Routines (cloud scheduled runs)` maps to `Routines`.
+- `"Outcomes" (rubric-graded feature)` maps to `Outcomes` after first-party
+  documentation resolved the seed's uncertainty.
+- `"CMA" (Claude Managed Agents)` maps to `CMA / managed-agents product name
+  and access`, which records the official name instead of the seed shorthand.
+- `Model lineup for routing` maps to `Latest general Claude lineup`, `Other
+  callable first-party models`, and both Mythos lifecycle rows.
+
+`MTok` means one million tokens. Prices below are USD per MTok and list
+standard base input / output rates unless a dated introductory rate is stated.
+
+## Models, pricing, availability, and refusal behavior
+
+| feature | status | spec | source or fallback plan | verified date |
+| --- | --- | --- | --- | --- |
+| Latest general Claude lineup | CHANGED | Sonnet 4.6 is no longer the latest Sonnet. The latest general lineup is: **Claude Fable 5** — `claude-fable-5`, 1M context, 128k max output, **$10 / $50**; **Claude Opus 4.8** — `claude-opus-4-8`, 1M, 128k, **$5 / $25**; **Claude Sonnet 5** — `claude-sonnet-5`, 1M, 128k, **$2 / $10 through 2026-08-31**, then **$3 / $15**; **Claude Haiku 4.5** — `claude-haiku-4-5-20251001` (alias `claude-haiku-4-5`), 200k, 64k, **$1 / $5**. IDs from the 4.6 generation onward are pinned snapshots even when dateless. | [Models overview](https://docs.claude.com/en/docs/about-claude/models/overview), [pricing](https://docs.claude.com/en/docs/about-claude/pricing), and [ID/version rules](https://docs.claude.com/en/docs/about-claude/models/model-ids-and-versions). | 2026-07-10 |
+| Claude Fable 5 availability | CONFIRMED | Fable 5 became generally available on 2026-06-09 through the Claude API, Claude Platform on AWS, Amazon Bedrock, Google Cloud, and Microsoft Foundry. After the June suspension, Anthropic announced global user access starting 2026-07-01 on Claude Platform, Claude.ai, Claude Code, and Claude Cowork. Pro, Max, Team, and select Enterprise plans included Fable 5 for up to 50% of weekly usage through 2026-07-07; after that date it is available through usage credits. Fable 5 requires 30-day data retention and is not available under zero data retention. | [Fable 5 model guide](https://docs.claude.com/en/docs/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5), [current redeployment notice](https://www.anthropic.com/news/redeploying-fable-5), and [API data retention](https://docs.claude.com/en/manage-claude/api-and-data-retention). | 2026-07-10 |
+| Claude Fable 5 refusal contract | CONFIRMED | A classifier refusal is a successful HTTP 200 response with `stop_reason: "refusal"`, not an API error. A pre-output refusal has empty content; `stop_details` may carry a category and explanation. Refusals can also occur mid-stream, and partial output must be discarded. Branch on `stop_reason`, not content or `stop_details`. Pre-output refusals are unbilled and do not count against rate limits; mid-stream refusals bill input and already-streamed output normally. Bare API calls do not fall back automatically: configure beta server-side fallback where supported, SDK middleware, or a manual retry. Fallback credit refunds the prompt-cache cost of switching to the fallback model. | [Refusals and fallback](https://docs.claude.com/en/docs/build-with-claude/refusals-and-fallback) and [Fable 5 model guide](https://docs.claude.com/en/docs/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5). | 2026-07-10 |
+| Claude Mythos 5 | CONFIRMED | `claude-mythos-5`; same 1M context, 128k max output, and **$10 / $50** pricing as Fable 5, without Fable's safety classifiers. Availability is limited to approved Project Glasswing customers; there is no self-serve sign-up. Use the canonical ID exactly. | [Models overview](https://docs.claude.com/en/docs/about-claude/models/overview), [Fable/Mythos model guide](https://docs.claude.com/en/docs/about-claude/models/introducing-claude-fable-5-and-claude-mythos-5), and [pricing](https://docs.claude.com/en/docs/about-claude/pricing). | 2026-07-10 |
+| Other callable first-party models | CONFIRMED | The overview's still-available legacy set is: **Opus 4.7** `claude-opus-4-7`, 1M/128k, **$5 / $25**; **Opus 4.6** `claude-opus-4-6`, 1M/128k, **$5 / $25**; **Sonnet 4.6** `claude-sonnet-4-6`, 1M/128k, **$3 / $15**; **Sonnet 4.5** `claude-sonnet-4-5-20250929` (alias `claude-sonnet-4-5`), 200k/64k, **$3 / $15**; **Opus 4.5** `claude-opus-4-5-20251101` (alias `claude-opus-4-5`), 200k/64k, **$5 / $25**; and deprecated **Opus 4.1** `claude-opus-4-1-20250805` (alias `claude-opus-4-1`), 200k/32k, **$15 / $75**, scheduled to retire 2026-08-05. Retired, partner-platform-only remnants are not part of this first-party lineup. | [Models overview](https://docs.claude.com/en/docs/about-claude/models/overview), [pricing](https://docs.claude.com/en/docs/about-claude/pricing), and [model lifecycle](https://docs.claude.com/en/docs/about-claude/model-deprecations). | 2026-07-10 |
+| Claude Mythos Preview lifecycle | CHANGED | Do not treat `claude-mythos-preview` as current. The overview still mentions it, but the lifecycle-specific page assigns retirement on 2026-06-30 and directs migrations to `claude-mythos-5`; this file follows the lifecycle source. | [Model lifecycle](https://docs.claude.com/en/docs/about-claude/model-deprecations) and the conflicting [models overview](https://docs.claude.com/en/docs/about-claude/models/overview). | 2026-07-10 |
+
+## Claude Code and managed-agent features
+
+| feature | status | spec | source or fallback plan | verified date |
+| --- | --- | --- | --- | --- |
+| `/goal` | CONFIRMED | Exact slash command; Claude Code v2.1.139+. One condition, up to 4,000 characters, can be active per session. After each turn, a small fast model (Haiku by default) evaluates transcript evidence without calling tools and either continues or clears the goal. It works interactively, with `-p`, in Desktop, and through Remote Control. It requires a trusted workspace and enabled hooks. Evaluator tokens are billed on the configured small model. | [`/goal` reference](https://code.claude.com/docs/en/goal) and [commands reference](https://code.claude.com/docs/en/commands). | 2026-07-10 |
+| `/loop` | CONFIRMED | Exact bundled skill (alias `/proactive`); Claude Code v2.1.72+. It runs a supplied or built-in prompt on a fixed interval or a self-paced 1-minute-to-1-hour delay while the session remains open. Tasks are session-scoped, restore on resume only while unexpired, and recurring tasks expire after seven days. Explicit intervals work across providers; Bedrock, Google Cloud's Agent Platform, and Foundry use a fixed 10-minute interval when no interval is supplied and do not provide the bare maintenance loop. Each repeated prompt consumes ordinary model usage; for some polling work, the documented Monitor tool can be more token-efficient. | [Scheduled tasks and `/loop`](https://code.claude.com/docs/en/scheduled-tasks), [commands reference](https://code.claude.com/docs/en/commands), [feature availability](https://code.claude.com/docs/en/feature-availability), and [costs](https://code.claude.com/docs/en/costs). | 2026-07-10 |
+| Stop hooks | CONFIRMED | `Stop` is a hook lifecycle event. It fires when the main agent finishes normally, not on user interruption; API failures fire `StopFailure`. A handler can return `decision: "block"` with a required `reason` to continue the conversation. It must use `stop_hook_active` to avoid recursion; Claude Code ends the turn after eight consecutive continuations by default. Prompt handlers invoke a model (Haiku by default); command, HTTP, and MCP-tool handlers execute their configured command or service. | [Hooks reference](https://code.claude.com/docs/en/hooks) and [hooks guide](https://code.claude.com/docs/en/hooks-guide). | 2026-07-10 |
+| Auto mode | CONFIRMED | The control is the `auto` permission-mode value, selected through the mode controls, `claude --permission-mode auto`, or user/managed `permissions.defaultMode`. Claude Code v2.1.83+; research preview; available on all plans, with Owner enablement on Team and Enterprise. On the Anthropic API it supports Opus 4.6+ or Sonnet 4.6+. Bedrock, Google Cloud's Agent Platform, Foundry, and signed-in Claude apps gateway sessions support only Sonnet 5, Opus 4.7, and Opus 4.8 and require `CLAUDE_CODE_ENABLE_AUTO_MODE=1`. A separate classifier reviews non-routine actions; classifier calls count toward token usage and add latency. Auto mode reduces prompts but is not a safety guarantee. | [Permission modes](https://code.claude.com/docs/en/permission-modes), [auto-mode configuration](https://code.claude.com/docs/en/auto-mode-config), and [launch context](https://claude.com/blog/auto-mode). | 2026-07-10 |
+| Dynamic workflows | CONFIRMED | JavaScript orchestration scripts written by Claude and run in a background runtime. Activate them by directly asking for a workflow or using `ultracode`, enable automatic selection with `/effort ultracode`, invoke bundled `/deep-research`, or run a saved `/<name>` workflow. Requires Claude Code v2.1.154+; `/effort ultracode` and the large-run warning require v2.1.203+. Available on Pro, Max, Team, Enterprise, Anthropic API, Bedrock, Google Cloud's Agent Platform, and Foundry; Pro users enable it in `/config`. A run can use materially more tokens, counts against normal usage/rate limits, permits up to 16 concurrent and 1,000 total agents, and shows an advisory large-run warning above 25 agents or 1.5M projected tokens. | [Dynamic workflows](https://code.claude.com/docs/en/workflows). | 2026-07-10 |
+| Schedule/API/GitHub triggers for dynamic workflows | NOT FOUND | Current workflow docs document prompt, effort, bundled-command, and saved-command activation, but not schedule, API, or GitHub-event triggers. Those external triggers are documented for Routines instead. | **Fallback plan:** build an **ACS external-trigger adapter** for cron, GitHub Actions, and authenticated and authorized webhooks. Every trigger must bind its verified principal to a canonical registered actor and reject payload-supplied actor identity. Add a dedicated workflow-run action and policy rule; do not proxy execution through the currently safe `agent.prompt` action. Policy must allow the exact action, and every request/action-hash approval it requires must be granted, rechecked, and consumed during the lease-bound worker claim. The current worker and `packages/sandbox` are dry-run only, so live execution remains unimplemented; a future runner must stay behind that sandbox boundary and transactionally record redacted trigger provenance and results. Do not label the adapter a Claude platform feature. Search evidence: [dynamic workflows](https://code.claude.com/docs/en/workflows), [Routines triggers](https://code.claude.com/docs/en/routines), the [Claude Code documentation index](https://code.claude.com/docs/llms.txt), and the local [authority boundary](./architecture.md). | 2026-07-10 |
+| Routines | CONFIRMED | Research preview; Anthropic-managed cloud sessions triggered by a schedule, authenticated API POST, or GitHub pull-request/release events. Available on Pro, Max, Team, and Enterprise with Claude Code on the web enabled. Each matching GitHub event starts a separate session; session reuse is not available. The selected cloud environment controls network access, environment variables, and setup scripts. Connected claude.ai MCP connectors are included by default and can write without a Claude Code tool-permission prompt; that platform permission neither grants nor bypasses ACS work-item approval. Locally added CLI MCP servers do not carry over unless added as a connector or committed in `.mcp.json`. Runs consume subscription usage and a live per-account daily allowance; one-off runs are daily-cap-exempt but still consume subscription usage. | [Routines](https://code.claude.com/docs/en/routines), [cloud environments](https://code.claude.com/docs/en/claude-code-on-the-web), and the local [authority boundary](./architecture.md). | 2026-07-10 |
+| Outcomes | CONFIRMED | A Claude Managed Agents capability. A required Markdown rubric defines independently scored criteria. Sending `user.define_outcome` starts work; the harness provisions a grader in a separate context window and sends criterion feedback back for revision. The default is three iterations and the maximum is 20. This is distinct from `/goal` and dynamic-workflow verification. | [Define outcomes](https://docs.claude.com/en/docs/managed-agents/define-outcomes) and [availability announcement](https://claude.com/blog/new-in-claude-managed-agents). | 2026-07-10 |
+| `CMA` / managed-agents product name and access | CHANGED | Use the official name **Claude Managed Agents**; the searched official corpus does not use `CMA` as the product name. It is a managed agent harness for long-running and asynchronous work. Base beta access is enabled by default for all Claude API accounts and requires an API key plus the `managed-agents-2026-04-01` beta header (SDKs set it automatically). The launch announcement directs developers to Claude Console or the CLI to deploy a first agent. MCP tunnels and dreaming remain limited research previews that require separate access. Billing is standard model token rates plus **$0.08 per active session-hour**; web search has its documented per-search charge. | [Managed Agents overview and access](https://docs.claude.com/en/docs/managed-agents/overview), [Managed Agents pricing](https://docs.claude.com/en/docs/about-claude/pricing#claude-managed-agents-pricing), and [launch announcement](https://claude.com/blog/claude-managed-agents). | 2026-07-10 |
+
+## Re-verification procedure
+
+1. Re-read Prompt 01 and its appendix in `fable5-build-prompts-v2.md`. Reconcile
+   every seed row before changing this ledger; never carry forward an appendix
+   limitation without checking the controlling file again.
+2. Fetch the live [Claude Platform documentation index](https://docs.claude.com/llms.txt),
+   [Claude Code documentation index](https://code.claude.com/docs/llms.txt),
+   [Claude blog](https://claude.com/blog), and
+   [Anthropic news](https://www.anthropic.com/news).
+3. Re-open every linked row source and follow redirects to its official
+   canonical page. Replace stale specifications rather than preserving them as
+   historical facts.
+4. Re-check the latest model table, lifecycle table, and pricing table as a
+   unit. Record introductory-price end dates and retirements explicitly.
+5. Search the full official indexes for every `NOT FOUND` term. Keep the status
+   and fallback unless an official page now documents the feature.
+6. Update each row's verified date and the edition-level due date. A row without
+   a live official URL cannot be `CONFIRMED`.
+
+`NOT FOUND` describes the official evidence available on the verified date; it
+does not claim that an undocumented capability is technically impossible. Its
+fallback is the only behavior this repository may plan or build until a later
+verification changes the row.

@@ -3,6 +3,7 @@ import { z } from "zod";
 
 export const sandboxResultSchema = z.object({
   ok: z.boolean(),
+  executionMode: z.literal("dry_run"),
   output: z.string(),
   error: z.string().optional()
 });
@@ -15,6 +16,7 @@ export async function executeSandboxed(workItem: WorkItem): Promise<SandboxResul
   // ponytail: dry-run only; swap in firejail/nsjail/bubblewrap when executing untrusted commands.
   return {
     ok: true,
-    output: `dry-run executed ${workItem.id}`
+    executionMode: "dry_run",
+    output: `dry-run simulated ${workItem.id}`
   };
 }

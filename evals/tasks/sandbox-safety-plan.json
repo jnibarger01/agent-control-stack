@@ -1,0 +1,18 @@
+{
+  "id": "sandbox-safety-plan",
+  "taskClass": "planning",
+  "input": "Propose the minimum safe plan to replace the current dry-run sandbox with a real execution backend without weakening ACS authority boundaries.",
+  "context": {
+    "facts": ["packages/sandbox is currently dry-run.", "Approved execution is lease-bound and audited."],
+    "constraints": ["Preserve public APIs where possible.", "Do not claim live isolation before an acceptance test proves it."]
+  },
+  "rubric": [
+    { "id": "adapter-boundary", "description": "Places the real runner behind packages/sandbox.", "expected": "Sandbox adapter remains the boundary." },
+    { "id": "lease", "description": "Preserves lease-bound execution.", "expected": "Validate lease at claim and execution." },
+    { "id": "isolation-test", "description": "Defines an isolation escape acceptance test.", "expected": "Filesystem, network, and process containment test." },
+    { "id": "audit", "description": "Records redacted start, result, and failure evidence.", "expected": "Audited lifecycle." },
+    { "id": "fail-closed", "description": "Keeps dry-run or refusal when the backend is unavailable.", "expected": "No silent local fallback." }
+  ],
+  "reference": { "kind": "rules", "content": "Add a sandbox adapter, bind it to lease-validated claims, prove containment with escape tests, record redacted lifecycle events, and fail closed when isolation is unavailable." },
+  "tokenEstimate": { "inputTokens": 300, "outputTokens": 240 }
+}

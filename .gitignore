@@ -3,5 +3,37 @@ dist/
 *.tsbuildinfo
 storage/*.db
 storage/*.db-*
+
 .env
+.env.*
+!.env.example
+
+*.pem
+*.key
+*.p12
+*.pfx
+
+client_secret*.json
+oauth_client*.json
+credentials*.json
+token*.json
+
+.cloudflared/
+*.log
 .ijfw/
+
+# Local agent/editor state
+.agents/
+.claude/
+.codex/
+.cursor/
+.vscode/
+.windsurfrules
+.github/copilot-instructions.md
+
+# Generated/review artifacts kept out of release commits
+agentos/
+reviews/
+IDEA.md
+logs/
+tunnel_*

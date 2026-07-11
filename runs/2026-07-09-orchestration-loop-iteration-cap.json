@@ -1,0 +1,98 @@
+{
+  "schemaVersion": 1,
+  "kind": "orchestration-pattern-evidence",
+  "recordedAt": "2026-07-10T04:52:55.691Z",
+  "executionMode": "headless-deterministic-fixture",
+  "platformFact": "docs/platform-facts.md:52",
+  "pattern": "loopUntilDone",
+  "taskIds": [
+    "audit-replay-invariant"
+  ],
+  "caps": {
+    "maxTokens": 10000,
+    "maxWallClockMs": 10000,
+    "maxSpendUsd": 1,
+    "maxIterations": 2
+  },
+  "expectedFailure": "iteration_cap",
+  "result": null,
+  "spendLog": {
+    "predictedCostUsd": 0.0014,
+    "actualCostUsd": 0,
+    "elapsedMs": 0,
+    "usage": {
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "cacheReadInputTokens": 0,
+      "cacheCreationInputTokens": 0
+    },
+    "exactModels": [
+      "fixture:claude-haiku-4-5-20251001"
+    ],
+    "calls": [
+      {
+        "role": "maker:1",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "verifier:1",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "maker:2",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      },
+      {
+        "role": "verifier:2",
+        "requestedModel": "claude-haiku-4-5-20251001",
+        "exactModels": [
+          "fixture:claude-haiku-4-5-20251001"
+        ],
+        "predictedCostUsd": 0.00035,
+        "actualCostUsd": 0,
+        "usage": {
+          "inputTokens": 0,
+          "outputTokens": 0,
+          "cacheReadInputTokens": 0,
+          "cacheCreationInputTokens": 0
+        }
+      }
+    ],
+    "pattern": "loopUntilDone",
+    "status": "failed",
+    "failureCode": "iteration_cap"
+  }
+}

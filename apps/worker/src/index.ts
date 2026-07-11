@@ -9,6 +9,7 @@ export interface WorkerOptions {
 
 export interface WorkerResult {
   executed: boolean;
+  executionMode?: "dry_run";
   workItemId?: string;
   reason?: string;
 }
@@ -37,7 +38,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         workerId,
         leaseToken: running.leaseToken,
         status: "succeeded",
-        result: { output: result.output }
+        result: { output: result.output, execution_mode: result.executionMode }
       });
     } else {
       tools.submit_work_result({
@@ -45,11 +46,11 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         workerId,
         leaseToken: running.leaseToken,
         status: "failed",
-        result: { error: result.error ?? "sandbox execution failed" }
+        result: { error: result.error ?? "dry-run sandbox simulation failed", execution_mode: result.executionMode }
       });
     }
 
-    return { executed: true, workItemId: running.id, reason: workerId };
+    return { executed: true, executionMode: result.executionMode, workItemId: running.id, reason: workerId };
   } finally {
     workItems.close();
   }

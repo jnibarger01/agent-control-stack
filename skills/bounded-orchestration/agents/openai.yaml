@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bounded Orchestration"
+  short_description: "Run budgeted multi-agent patterns safely"
+  default_prompt: "Use $bounded-orchestration to run isolated multi-agent patterns with hard caps and complete receipts."
