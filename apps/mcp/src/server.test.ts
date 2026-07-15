@@ -39,7 +39,10 @@ describe("MCP stdio server", () => {
     new McpStdioServer(
       input,
       output,
-      new MachineController(loadMachineControllerConfig(configPath), { directAgentRunner })
+      new MachineController(loadMachineControllerConfig(configPath), {
+        directAgentRunner,
+        enableTestAgentRunForLocalDevelopment: true
+      })
     ).start();
 
     try {
@@ -49,7 +52,7 @@ describe("MCP stdio server", () => {
       const tools = await request(input, output, { jsonrpc: "2.0", id: 2, method: "tools/list" });
       const toolNames = tools.result.tools.map((tool: { name: string }) => tool.name);
       expect(toolNames).toContain("fs.read");
-      expect(toolNames).toContain("test.agent.run");
+      expect(toolNames).not.toContain("test.agent.run");
 
       const directRun = await request(input, output, {
         jsonrpc: "2.0",
@@ -66,36 +69,10 @@ describe("MCP stdio server", () => {
           }
         }
       });
-      expect(directRun.result.structuredContent).toMatchObject({
-        ok: true,
-        agent: "codex",
-        stdout: "mcp review ok",
-        stderr: "",
-        exitCode: 0
+      expect(directRun).toMatchObject({
+        error: { code: -32602 }
       });
-      expect(typeof directRun.result.structuredContent.durationMs).toBe("number");
-      expect(directAgentCalls).toHaveLength(1);
-      expect(directAgentCalls[0]).toMatchObject({
-        cwd: allowed,
-        timeoutMs: 120_000,
-        permissionMode: "read-only"
-      });
-      expect(directAgentCalls[0]?.args.at(-1)).toBe("Review apps/gateway/src/server.ts for auth bugs. Do not modify files.");
-
-      const unknownAgent = await request(input, output, {
-        jsonrpc: "2.0",
-        id: 22,
-        method: "tools/call",
-        params: {
-          name: "test.agent.run",
-          arguments: {
-            agent: "ghost",
-            prompt: "Inspect only",
-            cwd: allowed
-          }
-        }
-      });
-      expect(unknownAgent.error.message).toContain("invalid test.agent.run payload");
+      expect(directAgentCalls).toHaveLength(0);
 
       const status = await request(input, output, {
         jsonrpc: "2.0",

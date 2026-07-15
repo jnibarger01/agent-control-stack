@@ -4,6 +4,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import { ZodError, z } from "zod";
 
 const protocolVersion = "2024-11-05";
+const standaloneMcpToolNames = machineToolNames.filter((name) => name !== "test.agent.run");
 
 type JsonRpcId = string | number | null;
 
@@ -15,7 +16,7 @@ const requestSchema = z.object({
 });
 
 const toolsCallSchema = z.object({
-  name: z.enum(machineToolNames),
+  name: z.enum(standaloneMcpToolNames),
   arguments: z.unknown().default({})
 });
 
@@ -119,7 +120,7 @@ function errorMessage(error: unknown): string {
 }
 
 function toolDefinitions() {
-  return machineToolNames.map((name) => ({
+  return standaloneMcpToolNames.map((name) => ({
     name,
     description: toolDescription(name),
     inputSchema: toolInputSchema(name)

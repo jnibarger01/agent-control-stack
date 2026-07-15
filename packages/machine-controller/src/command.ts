@@ -116,10 +116,7 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
 function isKnownReadonly(command: string, args: string[]): boolean {
   return (
     (command === "git" && ["status", "diff", "log", "show"].includes(args[0] ?? "")) ||
-    (command === "npm" && args[0] === "test") ||
-    (command === "npm" && args[0] === "run" && ["test", "check", "typecheck"].includes(args[1] ?? "")) ||
-    (command === "pnpm" && ["test", "run"].includes(args[0] ?? "")) ||
-    (command === "bun" && ["test", "--version"].includes(args[0] ?? "")) ||
+    (command === "bun" && args[0] === "--version") ||
     (command === "node" && ["--version", "-v"].includes(args[0] ?? "")) ||
     (command === "python3" && ["--version", "-V"].includes(args[0] ?? "")) ||
     (command === "docker" && args[0] === "ps") ||
@@ -130,6 +127,9 @@ function isKnownReadonly(command: string, args: string[]): boolean {
 
 function isMutation(command: string, args: string[]): boolean {
   return (
+    (command === "npm" && (args[0] === "test" || args[0] === "run")) ||
+    (command === "pnpm" && (args[0] === "test" || args[0] === "run")) ||
+    (command === "bun" && args[0] === "test") ||
     (command === "npm" && ["install", "i", "update"].includes(args[0] ?? "")) ||
     (command === "pnpm" && ["add", "install", "update"].includes(args[0] ?? "")) ||
     (command === "git" && ["commit", "push", "merge", "rebase", "checkout", "switch"].includes(args[0] ?? "")) ||

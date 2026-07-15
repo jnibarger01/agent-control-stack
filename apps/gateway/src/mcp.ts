@@ -19,6 +19,7 @@ const directAgentToolName = "test.agent.run" as const;
 type DirectAgentToolName = typeof directAgentToolName;
 const mcpToolNames = [...workItemToolNames, directAgentToolName] as const;
 type McpToolName = (typeof mcpToolNames)[number];
+const remoteMcpToolNames = workItemToolNames.filter((name) => name !== "approve_work_item");
 type JsonRpcId = string | number | null;
 
 export interface GatewayDirectAgentController {
@@ -52,7 +53,7 @@ export interface AuthenticatedMcpRequestAudit {
 
 export type McpHttpResult = {
   statusCode: number;
-  body: JsonRpcSuccess | JsonRpcFailure;
+  body?: JsonRpcSuccess | JsonRpcFailure;
   wwwAuthenticate?: string;
 };
 
@@ -100,7 +101,7 @@ export async function handleMcpHttpRequest(input: {
   }
 
   if (request.data.method.startsWith("notifications/")) {
-    return jsonRpcResult(request.data.id, {});
+    return { statusCode: 202 };
   }
 
   switch (request.data.method) {
@@ -193,6 +194,18 @@ async function handleToolsCall(input: {
     return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, requiredScopes(parsed.data.name));
   }
 
+  if (parsed.data.name === "approve_work_item") {
+    const actor = resolvedMcpActor(authorization.auth);
+    input.auditAuthenticatedRequest?.({
+      requestId: input.requestId ?? String(input.id ?? ""),
+      method: "tools/call",
+      toolName: parsed.data.name,
+      resolvedActor: actor,
+      auth: authorization.auth
+    });
+    return jsonRpcError(input.id, -32002, "MCP identities cannot grant approval", 403);
+  }
+
   const actor = isMutatingTool(parsed.data.name)
     ? input.resolveActorId?.(authorization.auth)
     : resolvedMcpActor(authorization.auth);
@@ -223,7 +236,7 @@ async function handleToolsCall(input: {
           text: `${parsed.data.name} completed through the gateway MCP path.`
         }
       ],
-      structuredContent: result
+      structuredContent: asStructuredContent(result)
     });
   } catch (error) {
     input.auditAuthenticatedRequest?.({
@@ -235,6 +248,12 @@ async function handleToolsCall(input: {
     });
     return jsonRpcError(input.id, errorCode(error), errorMessage(error), errorStatus(error));
   }
+}
+
+function asStructuredContent(result: unknown): Record<string, unknown> {
+  return result !== null && typeof result === "object" && !Array.isArray(result)
+    ? (result as Record<string, unknown>)
+    : { result };
 }
 
 async function handleProtectedUnsupportedMethod(input: {
@@ -334,7 +353,9 @@ function workItemIdFromToolResult(result: unknown): string | undefined {
 }
 
 function mcpToolDefinitions(includeDirectAgent: boolean) {
-  const toolNames: McpToolName[] = includeDirectAgent ? [...workItemToolNames, directAgentToolName] : [...workItemToolNames];
+  const toolNames: McpToolName[] = includeDirectAgent
+    ? [...remoteMcpToolNames, directAgentToolName]
+    : [...remoteMcpToolNames];
   return toolNames.map((name) => ({
     name,
     description: toolDescription(name),

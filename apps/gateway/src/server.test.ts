@@ -1,5 +1,5 @@
 import { createHmac, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -138,7 +138,7 @@ describe("mission control gateway", () => {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("reports unhealthy health when the audit chain is tampered without leaking internals", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-health-audit-tamper-"));
@@ -168,6 +168,26 @@ describe("mission control gateway", () => {
       expect(health.body).not.toContain("Error:");
       expect(health.body).not.toContain("stack");
     } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("separates process liveness from dependency readiness", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-health-separation-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const lock = new DatabaseSync(dbPath);
+    try {
+      lock.exec("BEGIN IMMEDIATE");
+      const live = await app.inject({ method: "GET", url: "/livez" });
+      const ready = await app.inject({ method: "GET", url: "/readyz" });
+      expect(live.statusCode).toBe(200);
+      expect(live.json()).toEqual({ ok: true, status: "alive" });
+      expect(ready.statusCode).toBe(503);
+    } finally {
+      lock.exec("ROLLBACK");
+      lock.close();
       await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
@@ -321,7 +341,7 @@ describe("mission control gateway", () => {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("serves the attributed agent registry API", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-agent-registry-api-"));
@@ -689,12 +709,18 @@ describe("mission control gateway", () => {
 describe("gateway MCP transport", () => {
   it("returns an MCP initialization response", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: testAuth });
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: testAuth,
+      mcpAuth: { localBearerToken: testAuth.token }
+    });
 
     try {
       const response = await app.inject({
         method: "POST",
         url: "/mcp",
+        headers: { authorization: `Bearer ${testAuth.token}` },
         payload: {
           jsonrpc: "2.0",
           id: 1,
@@ -725,12 +751,18 @@ describe("gateway MCP transport", () => {
 
   it("lists gateway tools in MCP-compatible shape", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: testAuth });
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: testAuth,
+      mcpAuth: { localBearerToken: testAuth.token }
+    });
 
     try {
       const response = await app.inject({
         method: "POST",
         url: "/mcp",
+        headers: { authorization: `Bearer ${testAuth.token}` },
         payload: {
           jsonrpc: "2.0",
           id: "tools",
@@ -750,16 +782,10 @@ describe("gateway MCP transport", () => {
               securitySchemes: [{ type: "oauth2", scopes: ["acs:work:create"] }]
             }
           }),
-          expect.objectContaining({
-            name: "approve_work_item",
-            description: expect.any(String),
-            inputSchema: expect.objectContaining({ type: "object" }),
-            securitySchemes: [{ type: "oauth2", scopes: ["acs:work:approve"] }]
-          })
         ])
       );
       expect(response.json().result.tools.map((tool: { name: string }) => tool.name)).not.toEqual(
-        expect.arrayContaining(["claim_next_approved_work_item", "submit_work_result"])
+        expect.arrayContaining(["approve_work_item", "claim_next_approved_work_item", "submit_work_result"])
       );
     } finally {
       await app.close();
@@ -767,7 +793,7 @@ describe("gateway MCP transport", () => {
     }
   });
 
-  it("treats direct agent MCP runs as approval-scoped mutating calls", async () => {
+  it("keeps direct agent MCP runs disabled by default even with an injected controller", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-direct-agent-"));
     const dbPath = join(dir, "control.db");
     const oauth = createTestOAuth();
@@ -810,11 +836,7 @@ describe("gateway MCP transport", () => {
         payload: directRunPayload
       });
 
-      expect(directTool).toMatchObject({
-        name: "test.agent.run",
-        securitySchemes: [{ type: "oauth2", scopes: ["acs:work:approve"] }],
-        annotations: { readOnlyHint: false, openWorldHint: true }
-      });
+      expect(directTool).toBeUndefined();
       expect(readScoped.statusCode).toBe(403);
       expect(readScoped.json().result.structuredContent).toMatchObject({
         authError: "insufficient_scope",
@@ -829,17 +851,220 @@ describe("gateway MCP transport", () => {
         payload: directRunPayload
       });
 
-      expect(approvalScoped.statusCode).toBe(200);
-      expect(approvalScoped.json().result.structuredContent).toMatchObject({ ok: true, agent: "codex" });
-      expect(directAgentController.callTool).toHaveBeenCalledWith("test.agent.run", {
-        agent: "codex",
-        prompt: "Inspect only",
-        cwd: "/repo"
-      });
+      expect(approvalScoped.statusCode).toBe(409);
+      expect(approvalScoped.json().error.message).toContain("not configured");
+      expect(directAgentController.callTool).not.toHaveBeenCalled();
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("keeps direct agent MCP runs disabled by default when machine config and a fake runner exist", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-direct-agent-config-disabled-"));
+    const allowed = join(dir, "allowed");
+    const configPath = join(dir, "machine-controller.json");
+    const dbPath = join(dir, "control.db");
+    mkdirSync(allowed);
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        paths: { allow: [allowed], deny: [] },
+        commands: { allow_readonly: ["node"], deny: [] },
+        audit: { log_path: join(dir, "machine-audit.jsonl") }
+      })
+    );
+    seedActor(dbPath, testAuth.actorId, "local_bearer:local-dev");
+    const directAgentRunner = vi.fn(async () => ({
+      stdout: "must not run",
+      stderr: "",
+      exitCode: 0,
+      durationMs: 1
+    }));
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { localBearerToken: testAuth.token },
+      machineControllerConfigPath: configPath,
+      directAgentRunner
+    });
+
+    try {
+      const listed = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${testAuth.token}`, host: "127.0.0.1:3000" },
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" },
+        remoteAddress: "127.0.0.1"
+      });
+      const called = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${testAuth.token}`, host: "127.0.0.1:3000" },
+        payload: mcpToolCall("direct-agent-config", "test.agent.run", {
+          agent: "codex",
+          prompt: "Inspect only",
+          cwd: allowed
+        }),
+        remoteAddress: "127.0.0.1"
+      });
+
+      expect(listed.json().result.tools.map((tool: { name: string }) => tool.name)).not.toContain("test.agent.run");
+      expect(called.statusCode).toBe(409);
+      expect(directAgentRunner).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("allows the explicit direct agent opt-in only for loopback development requests", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-direct-agent-local-dev-"));
+    const dbPath = join(dir, "control.db");
+    const oauth = createTestOAuth();
+    seedActor(dbPath, "oauth-user", "oauth_jwt:user_123");
+    const directAgentController = {
+      callTool: vi.fn(async () => ({
+        ok: true,
+        agent: "codex",
+        stdout: "review ok",
+        stderr: "",
+        exitCode: 0,
+        durationMs: 1,
+        error: null
+      }))
+    };
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { oauth: oauth.options },
+      directAgentController,
+      enableTestAgentRunForLocalDevelopment: true
+    });
+    const directRunPayload = mcpToolCall("direct-agent-local-dev", "test.agent.run", {
+      agent: "codex",
+      prompt: "Inspect only",
+      cwd: "/repo"
+    });
+
+    try {
+      const listed = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: {
+          authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}`,
+          host: "127.0.0.1:3000"
+        },
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" },
+        remoteAddress: "127.0.0.1"
+      });
+      const readScoped = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: {
+          authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}`,
+          host: "127.0.0.1:3000"
+        },
+        payload: directRunPayload,
+        remoteAddress: "127.0.0.1"
+      });
+      expect(readScoped.statusCode).toBe(403);
+      expect(directAgentController.callTool).not.toHaveBeenCalled();
+
+      const called = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: {
+          authorization: `Bearer ${oauth.token({ scope: "acs:work:approve" })}`,
+          host: "127.0.0.1:3000"
+        },
+        payload: directRunPayload,
+        remoteAddress: "127.0.0.1"
+      });
+
+      expect(listed.json().result.tools.map((tool: { name: string }) => tool.name)).toContain("test.agent.run");
+      expect(called.statusCode).toBe(200);
+      expect(called.json().result.structuredContent).toMatchObject({ ok: true, agent: "codex" });
+      expect(directAgentController.callTool).toHaveBeenCalledTimes(1);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not expose or pass an opted-in direct agent controller to non-loopback requests", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-direct-agent-remote-"));
+    const dbPath = join(dir, "control.db");
+    const oauth = createTestOAuth();
+    seedActor(dbPath, "oauth-user", "oauth_jwt:user_123");
+    const directAgentController = { callTool: vi.fn(async () => ({ ok: true })) };
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { oauth: oauth.options },
+      directAgentController,
+      enableTestAgentRunForLocalDevelopment: true
+    });
+    const headers = {
+      authorization: `Bearer ${oauth.token({ scope: "acs:work:approve acs:work:read" })}`,
+      host: "acs.example.test"
+    };
+
+    try {
+      const listed = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers,
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" },
+        remoteAddress: "203.0.113.10"
+      });
+      const called = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers,
+        payload: mcpToolCall("direct-agent-remote", "test.agent.run", {
+          agent: "codex",
+          prompt: "Inspect only",
+          cwd: "/repo"
+        }),
+        remoteAddress: "203.0.113.10"
+      });
+
+      expect(listed.json().result.tools.map((tool: { name: string }) => tool.name)).not.toContain("test.agent.run");
+      expect(called.statusCode).toBe(409);
+      expect(directAgentController.callTool).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses the direct agent local-development opt-in in production", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-direct-agent-production-"));
+    let app: ReturnType<typeof buildGateway> | undefined;
+    let thrown: unknown;
+
+    try {
+      try {
+        app = buildGateway({
+          dbPath: join(dir, "control.db"),
+          logger: false,
+          directAgentController: { callTool: vi.fn(async () => ({ ok: true })) },
+          enableTestAgentRunForLocalDevelopment: true
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      if (app) {
+        await app.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+
+    expect(thrown).toMatchObject({ code: "direct_agent_production_forbidden" });
   });
 
   it("rejects remote MCP worker claim tools and does not leak lease tokens", async () => {
@@ -1509,7 +1734,7 @@ describe("gateway MCP transport", () => {
     }
   });
 
-  it("binds MCP approval, cancel, and unblock actors to the authenticated subject", async () => {
+  it("denies MCP approval while binding cancel and unblock actors to the authenticated subject", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-mcp-actor-"));
     const dbPath = join(dir, "control.db");
     const setup = new SqliteWorkItemStore(dbPath);
@@ -1579,7 +1804,8 @@ describe("gateway MCP transport", () => {
         })
       });
 
-      expect(approved.statusCode).toBe(200);
+      expect(approved.statusCode).toBe(403);
+      expect(approved.json().error.message).toBe("MCP identities cannot grant approval");
       expect(cancelled.statusCode).toBe(200);
       expect(unblocked.statusCode).toBe(200);
 
@@ -1598,7 +1824,7 @@ describe("gateway MCP transport", () => {
         );
         const connectorEvents = events.filter((event) => event.name === "connector.requested");
 
-        expect(approval?.body).toMatchObject({ approvedBy: "oauth-user" });
+        expect(approval).toBeUndefined();
         expect(cancellation?.body).toMatchObject({ actor: "oauth-user" });
         expect(unblockDecision?.body.context).toMatchObject({ actor: "oauth-user" });
         expect(connectorEvents).toEqual(

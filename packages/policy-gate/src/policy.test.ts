@@ -17,7 +17,7 @@ const base = {
 };
 
 describe("policy gate", () => {
-  it("allows prompt dispatch, read-only repo inspection, and local tests", () => {
+  it("allows prompt dispatch and read-only repo inspection but gates package scripts", () => {
     expect(
       evaluatePolicy({ ...base, action: { kind: "agent.prompt", description: "dispatch prompt", params: {} } }).decision
     ).toBe("allow");
@@ -30,7 +30,9 @@ describe("policy gate", () => {
     ).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "status"] }).decision).toBe("allow");
     expect(evaluatePolicy({ ...base, command: ["git", "diff"] }).decision).toBe("allow");
-    expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).decision).toBe("allow");
+    expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).decision).toBe("require_approval");
+    expect(evaluatePolicy({ ...base, command: ["npm", "test"] }).matchedRules).toContain("approval:package-script");
+    expect(evaluatePolicy({ ...base, command: ["pnpm", "run", "test"] }).decision).toBe("require_approval");
   });
 
   it("classifies policy contexts into the connector risk model", () => {

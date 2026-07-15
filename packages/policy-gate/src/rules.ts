@@ -91,8 +91,10 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (isAllowedGitRead(command)) {
     return risk("read_only", "git inspection is allowed", ["allow:git-read"], { maxRuntimeMs: 30_000 });
   }
-  if (isAllowedTestCommand(command)) {
-    return risk("read_only", "test command is allowed", ["allow:test"], { maxRuntimeMs: 120_000 });
+  if (isPackageLifecycleCommand(command)) {
+    return risk("requires_approval", "package lifecycle scripts can execute arbitrary code", ["approval:package-script"], {
+      maxRuntimeMs: 120_000
+    });
   }
   if (isReadOnlyInsideCwd(context)) {
     return risk("read_only", "read-only repo inspection is allowed", ["allow:read-only"], {
@@ -254,11 +256,12 @@ function isAllowedGitRead(command: string[]): boolean {
   return command[0] === "git" && (command[1] === "status" || command[1] === "diff");
 }
 
-function isAllowedTestCommand(command: string[]): boolean {
+function isPackageLifecycleCommand(command: string[]): boolean {
   return (
     (command[0] === "npm" && command[1] === "test") ||
-    (command[0] === "npm" && command[1] === "run" && (command[2] === "test" || command[2] === "check")) ||
-    command[0] === "vitest"
+    (command[0] === "npm" && command[1] === "run") ||
+    (command[0] === "pnpm" && (command[1] === "test" || command[1] === "run")) ||
+    (command[0] === "bun" && command[1] === "test")
   );
 }
 

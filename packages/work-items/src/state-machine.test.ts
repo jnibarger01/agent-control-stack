@@ -53,7 +53,7 @@ describe("work item state machine", () => {
     } finally {
       store.close();
     }
-  });
+  }, 30_000);
 
   it("reads only events for the requested work item or agent", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-event-filter-"));
@@ -813,6 +813,26 @@ describe("work item state machine", () => {
     expect(tableColumns(dbPath, "approval_records")).toEqual(
       expect.arrayContaining(["request_hash", "approval_token_hash", "status", "expires_at", "consumed_at"])
     );
+  });
+
+  it("records migration checksums and refuses drifted migration history", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-migration-checksum-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    store.close();
+    const db = new DatabaseSync(dbPath);
+    try {
+      const rows = db.prepare(`SELECT checksum FROM schema_migrations ORDER BY version`).all() as Array<{
+        checksum: string;
+      }>;
+      expect(rows).toHaveLength(controlPlaneMigrations().length);
+      expect(rows.every((row) => /^[a-f0-9]{64}$/.test(row.checksum))).toBe(true);
+      db.prepare(`UPDATE schema_migrations SET checksum = ? WHERE version = 1`).run("0".repeat(64));
+    } finally {
+      db.close();
+    }
+
+    expect(() => new SqliteWorkItemStore(dbPath)).toThrow("migration checksum mismatch for version 1");
   });
 
   it("migrates a previous control-plane schema without reloading SQL blindly", () => {

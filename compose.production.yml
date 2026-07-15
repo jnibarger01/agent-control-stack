@@ -1,0 +1,32 @@
+services:
+  gateway:
+    build:
+      context: .
+      target: runtime
+    image: agent-control-stack:${ACS_IMAGE_TAG:-local}
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    ports:
+      - "127.0.0.1:${ACS_PORT:-3000}:3000"
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 3000
+      ACS_DB_PATH: /data/control.db
+      ACS_GATEWAY_TOKEN: ${ACS_GATEWAY_TOKEN:?set ACS_GATEWAY_TOKEN}
+      ACS_OAUTH_ISSUER: ${ACS_OAUTH_ISSUER:?set ACS_OAUTH_ISSUER}
+      ACS_OAUTH_AUDIENCE: ${ACS_OAUTH_AUDIENCE:?set ACS_OAUTH_AUDIENCE}
+      ACS_OAUTH_JWKS_URI: ${ACS_OAUTH_JWKS_URI:?set ACS_OAUTH_JWKS_URI}
+    volumes:
+      - acs-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    stop_grace_period: 15s
+
+volumes:
+  acs-data:

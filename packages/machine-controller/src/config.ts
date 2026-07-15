@@ -142,7 +142,7 @@ function parseSimpleYaml(text: string): Record<string, unknown> {
       continue;
     }
 
-    const keyValue = /^  ([A-Za-z0-9_]+):(?:\s*(.*))?$/.exec(line);
+    const keyValue = /^ {2}([A-Za-z0-9_]+):(?:\s*(.*))?$/.exec(line);
     if (keyValue && section) {
       const key = keyValue[1] ?? "";
       const value = keyValue[2] ?? "";
@@ -156,7 +156,7 @@ function parseSimpleYaml(text: string): Record<string, unknown> {
       continue;
     }
 
-    const item = /^    -\s*(.*)$/.exec(line);
+    const item = /^ {4}-\s*(.*)$/.exec(line);
     if (item && arrayTarget) {
       arrayTarget.push(parseScalar(item[1] ?? ""));
       continue;

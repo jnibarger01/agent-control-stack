@@ -94,6 +94,9 @@ describe("machine controller", () => {
 
     try {
       expect(previewCommand(config, { cwd: allowed, command: "git", args: ["status"] }).risk).toBe("read_only");
+      expect(previewCommand(config, { cwd: allowed, command: "npm", args: ["test"] }).risk).toBe("requires_approval");
+      expect(previewCommand(config, { cwd: allowed, command: "npm", args: ["run", "check"] }).risk).toBe("requires_approval");
+      expect(previewCommand(config, { cwd: allowed, command: "pnpm", args: ["run", "test"] }).risk).toBe("requires_approval");
       expect(previewCommand(config, { cwd: allowed, command: "npm", args: ["install"] }).risk).toBe("requires_approval");
       expect(previewCommand(config, { cwd: allowed, command: "rm", args: ["-rf", "/"] }).risk).toBe("forbidden");
     } finally {

@@ -41,6 +41,7 @@ import {
 } from "./auth.js";
 import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit, type GatewayDirectAgentController } from "./mcp.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
+import { gatewayListenConfig } from "./runtime-config.js";
 
 const approvalBodySchema = z.object({
   reason: z.string().min(1),
@@ -142,12 +143,14 @@ export interface GatewayOptions {
   machineControllerConfigPath?: string;
   directAgentRunner?: DirectAgentRunner;
   directAgentController?: GatewayDirectAgentController;
+  enableTestAgentRunForLocalDevelopment?: boolean;
   acpAdapter?: ReadonlyAcpAdapterConfig | false;
   moa?: MoaGatewayOverrides | false;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  const directAgentController = resolveDirectAgentController(options);
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
@@ -156,7 +159,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
-  const directAgentController = resolveDirectAgentController(options);
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
   const acpAdapter = acpAdapterConfig === false || !acpAdapterConfig
     ? undefined
@@ -205,10 +207,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     return reply.send(error);
   });
 
-  app.get("/health", async (request, reply) => {
+  app.get("/livez", async () => ({ ok: true, status: "alive" }));
+
+  const readiness = async (request: FastifyRequest, reply: FastifyReply) => {
     const health = workItems.health();
     return reply.code(health.ok ? 200 : 503).send(health);
-  });
+  };
+  app.get("/readyz", readiness);
+  app.get("/health", readiness);
 
   app.post("/session/login", async (request, reply) => {
     try {
@@ -363,11 +369,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return reply.code(403).send(jsonRpcError(null, -32002, "forbidden origin"));
     }
     const resourceMetadataUrl = mcpResourceMetadataUrl(request, mcpAuth?.oauth);
+    const localDevelopmentDirectAgentController = isDevelopmentLoopbackRequest(request)
+      ? directAgentController
+      : undefined;
     const result = await handleMcpHttpRequest({
       body: request.body,
       headers: request.headers,
       tools,
-      directAgentController,
+      directAgentController: localDevelopmentDirectAgentController,
       auth: mcpAuth,
       requireAuthentication: requiresMcpAuthentication(request, mcpAuth),
       resourceMetadataUrl,
@@ -378,6 +387,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);
+    }
+    if (result.body === undefined) {
+      return reply.code(result.statusCode).send();
     }
     return reply.code(result.statusCode).send(result.body);
   });
@@ -771,10 +783,23 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
 }
 
 function resolveDirectAgentController(options: GatewayOptions): GatewayDirectAgentController | undefined {
+  const enabled =
+    options.enableTestAgentRunForLocalDevelopment ??
+    process.env.ACS_ENABLE_TEST_AGENT_RUN_FOR_LOCAL_DEVELOPMENT === "1";
+  if (!enabled) return undefined;
+  if (process.env.NODE_ENV === "production") {
+    throw new ControlStackError(
+      "direct_agent_production_forbidden",
+      "test.agent.run local-development opt-in is forbidden in production"
+    );
+  }
   if (options.directAgentController) return options.directAgentController;
   const configPath = options.machineControllerConfigPath ?? process.env.ACS_MACHINE_CONTROLLER_CONFIG;
   if (!configPath) return undefined;
-  return new MachineController(loadMachineControllerConfig(configPath), { directAgentRunner: options.directAgentRunner });
+  return new MachineController(loadMachineControllerConfig(configPath), {
+    directAgentRunner: options.directAgentRunner,
+    enableTestAgentRunForLocalDevelopment: true
+  });
 }
 
 function resolveMcpAuth(options: GatewayOptions, workItems: SqliteWorkItemStore): McpAuthOptions | undefined {
@@ -1080,10 +1105,8 @@ function isLoopbackHost(value: string | string[] | undefined): boolean {
 }
 
 export async function startGateway(): Promise<FastifyInstance> {
+  const listen = gatewayListenConfig();
   const app = buildGateway();
-  await app.listen({
-    host: process.env.HOST ?? "127.0.0.1",
-    port: Number(process.env.PORT ?? 3000)
-  });
+  await app.listen(listen);
   return app;
 }

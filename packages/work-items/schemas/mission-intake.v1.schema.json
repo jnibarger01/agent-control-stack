@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://agent-control-stack.local/schemas/mission-intake.v1.schema.json",
+  "title": "ACS Mission Intake v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "requestId", "title", "goal", "origin", "target", "proposedActions", "constraints"],
+  "properties": {
+    "schemaVersion": { "const": "acs.mission-intake.v1" },
+    "requestId": { "type": "string", "minLength": 6, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$" },
+    "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "goal": { "type": "string", "minLength": 1, "maxLength": 8000 },
+    "origin": { "enum": ["cli", "telegram", "imessage", "dashboard", "openclaw", "hermes", "api"] },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["files"],
+      "properties": {
+        "repo": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "cwd": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "files": { "type": "array", "maxItems": 64, "items": { "type": "string", "minLength": 1, "maxLength": 512 } }
+      }
+    },
+    "proposedActions": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["clientActionId", "kind", "description", "params"],
+        "properties": {
+          "clientActionId": { "type": "string", "minLength": 6, "maxLength": 128, "pattern": "^[A-Za-z0-9._:-]+$" },
+          "kind": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9._:-]+$" },
+          "description": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "params": { "type": "object" }
+        }
+      }
+    },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["network", "maxRuntimeMs", "successCriteria"],
+      "properties": {
+        "network": { "enum": ["none", "declared"] },
+        "maxRuntimeMs": { "type": "integer", "minimum": 1, "maximum": 86400000 },
+        "successCriteria": { "type": "array", "maxItems": 32, "items": { "type": "string", "minLength": 1, "maxLength": 1000 } },
+        "rollbackPlan": { "type": "object" }
+      }
+    },
+    "submittedClaims": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "taskType": { "enum": ["coding", "research", "memory_lookup", "browser_scrape", "deal_analysis", "system_admin", "unknown"] },
+        "risk": { "enum": ["read_only", "draft", "write", "destructive", "unknown"] },
+        "approvalRequested": { "type": "boolean" }
+      }
+    },
+    "legacyProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "sourceSystem", "sourceVersion", "sourceMissionId", "sourceEnvelopeVersion", "sourceEnvelopeHash", "verification"],
+      "properties": {
+        "schemaVersion": { "const": "acs.legacy-provenance-claim.v1" },
+        "sourceSystem": { "const": "mission-router" },
+        "sourceVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "sourceMissionId": { "type": "string", "format": "uuid" },
+        "sourceEnvelopeVersion": { "const": 1 },
+        "sourceEnvelopeHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sourceTraceHeadHash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sourceRunId": { "type": "string", "minLength": 6, "maxLength": 128 },
+        "verification": { "const": "unverified" }
+      }
+    }
+  }
+}

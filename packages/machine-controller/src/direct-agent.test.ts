@@ -139,7 +139,10 @@ describe("test.agent.run direct agent runner", () => {
     };
 
     try {
-      const controller = new MachineController(config(dir, allowed), { directAgentRunner: runner });
+      const controller = new MachineController(config(dir, allowed), {
+        directAgentRunner: runner,
+        enableTestAgentRunForLocalDevelopment: true
+      });
       const result = await controller.callTool("test.agent.run", {
         ...examplePayload,
         cwd: allowed
@@ -160,16 +163,47 @@ describe("test.agent.run direct agent runner", () => {
     }
   });
 
+  it("rejects MachineController test.agent.run by default before invoking the runner", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-controller-disabled-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    let runnerCalls = 0;
+    const runner: DirectAgentRunner = async () => {
+      runnerCalls += 1;
+      return { stdout: "must not run", stderr: "", exitCode: 0, durationMs: 1 };
+    };
+
+    try {
+      const controller = new MachineController(config(dir, allowed), { directAgentRunner: runner });
+
+      await expect(
+        controller.callTool("test.agent.run", { ...examplePayload, cwd: allowed })
+      ).rejects.toMatchObject({ code: "direct_agent_disabled" });
+      expect(runnerCalls).toBe(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an unknown agent through MachineController test.agent.run", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-agent-controller-unknown-"));
     const allowed = join(dir, "allowed");
     mkdirSync(allowed);
 
     try {
-      const controller = new MachineController(config(dir, allowed));
+      let runnerCalls = 0;
+      const runner: DirectAgentRunner = async () => {
+        runnerCalls += 1;
+        return { stdout: "must not run", stderr: "", exitCode: 0, durationMs: 1 };
+      };
+      const controller = new MachineController(config(dir, allowed), {
+        directAgentRunner: runner,
+        enableTestAgentRunForLocalDevelopment: true
+      });
       await expect(
         controller.callTool("test.agent.run", { agent: "ghost", prompt: "Inspect only", cwd: allowed })
       ).rejects.toThrow(ControlStackError);
+      expect(runnerCalls).toBe(0);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

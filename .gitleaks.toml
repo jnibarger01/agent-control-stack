@@ -1,0 +1,16 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated state and explicit non-secret development fixtures"
+regexTarget = "match"
+paths = [
+  '''(^|/)dist/''',
+  '''(^|/)\.ijfw/''',
+  '''(^|/)apps/gateway/src/server\.test\.ts$''',
+  '''(^|/)packages/agentos-contracts/test/trace\.test\.js$'''
+]
+regexes = [
+  '''(?i)authorization:\s*bearer\s+(?:change-me-local-dev|local-dev-token)''',
+  '''(?i)authorization:\s*bearer['`;]?$'''
+]

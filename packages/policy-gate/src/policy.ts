@@ -76,7 +76,6 @@ export function policyContextFromAction(
   actor: string,
   operation: PolicyOperation
 ): PolicyContext {
-  const params = action.params;
   return policyContextSchema.parse({
     workItemId: workItem.id,
     actor,

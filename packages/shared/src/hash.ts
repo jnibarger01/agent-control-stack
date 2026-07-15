@@ -4,6 +4,13 @@ export function stableHash(value: unknown): string {
   return createHash("sha256").update(canonicalJson(value)).digest("hex");
 }
 
+export function domainHash(domain: string, value: unknown): string {
+  if (!/^[a-z0-9][a-z0-9:._-]{0,127}$/i.test(domain)) {
+    throw new TypeError("hash domain must be a bounded non-empty identifier");
+  }
+  return createHash("sha256").update(`${domain}\n${canonicalJson(value)}`).digest("hex");
+}
+
 export function canonicalJson(value: unknown): string {
   return JSON.stringify(normalizeJson(value)) ?? "undefined";
 }

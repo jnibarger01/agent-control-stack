@@ -12,9 +12,19 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b",
-    "test": "vitest run",
-    "check": "npm run build && npm test",
+    "build": "tsc -b && npm run build -w apps/public-site",
+    "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety",
+    "test:vitest": "vitest run",
+    "test:agentos": "npm test -w packages/agentos-contracts",
+    "test:public-site-safety": "npm run verify:safety -w apps/public-site",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "tsc -b --pretty false",
+    "lint": "eslint apps packages harness evals scripts --max-warnings=0",
+    "format:check": "git diff --check && prettier --check apps/gateway/src/lifecycle.ts apps/gateway/src/lifecycle.test.ts apps/gateway/src/runtime-config.ts apps/gateway/src/runtime-config.test.ts scripts/db-ops.mjs docs/runbooks/production.md eslint.config.js .prettierrc.json compose.production.yml",
+    "db:ops": "node scripts/db-ops.mjs",
+    "security:audit": "npm audit --audit-level=high",
+    "security:secrets": "docker run --rm -v \"$PWD:/repo:ro\" zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml --exit-code=1",
+    "check": "npm run format:check && npm run lint && npm run build && npm test && npm run security:audit",
     "dev:gateway": "tsx apps/gateway/src/index.ts",
     "eval": "tsx packages/eval-harness/src/cli.ts",
     "start:mcp": "node apps/mcp/dist/cli.js",
@@ -22,9 +32,18 @@
     "start:worker": "node apps/worker/dist/cli.js"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^24.0.10",
+    "@vitest/coverage-v8": "^3.2.7",
+    "eslint": "^10.7.0",
+    "prettier": "^3.9.5",
     "tsx": "^4.23.0",
     "typescript": "^5.8.3",
+    "typescript-eslint": "^8.64.0",
     "vitest": "^3.2.4"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true,
+    "esbuild@0.28.1": true
   }
 }

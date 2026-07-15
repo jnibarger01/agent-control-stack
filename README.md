@@ -552,9 +552,11 @@ Use this for personal/local operation.
    }
    ```
 
-### Option B: systemd service example
+### Option B: container deployment
 
-This repository does not ship a systemd unit. If you need one, use an environment file and keep it mode `0600`.
+The supported repeatable artifact is the non-root container in `Dockerfile`; `compose.production.yml` provides a loopback-published production template. Follow [`docs/runbooks/production.md`](docs/runbooks/production.md) for build, backup, deploy, smoke, rollback, and recovery.
+
+### Option C: systemd service example
 
 `/etc/agent-control-stack/gateway.env`:
 
@@ -603,7 +605,7 @@ sudo systemctl status agent-control-stack-gateway
 
 Adjust paths for your host. Do not blindly paste privileged service files into production. Computers are literal and systemd is especially literal.
 
-### Option C: authenticated HTTPS reverse proxy
+### Option D: authenticated HTTPS reverse proxy
 
 For Claude/ChatGPT custom connectors or remote MCP clients, expose only HTTPS and configure OAuth or signed tunnel-session auth.
 
@@ -633,7 +635,7 @@ https://gateway.example.com/mcp
 
 Do not expose `/mcp` publicly without OAuth/JWKS or signed tunnel-session auth. Local bearer auth is a development fallback and is ignored in `NODE_ENV=production`.
 
-### Option D: signed tunnel-session mode
+### Option E: signed tunnel-session mode
 
 Use this when a trusted local proxy authenticates the tunnel and injects signed ACS headers.
 
@@ -666,7 +668,7 @@ Register connectors and sessions through the authenticated gateway routes before
 curl -fsS http://127.0.0.1:3000/health
 ```
 
-A healthy response means the SQLite store can read/write health probes and the audit chain has not failed closed.
+Use `/livez` for process liveness and `/readyz` for traffic readiness. `/health` remains a compatibility alias for readiness. A ready response means the SQLite store can read/write health probes, migration checksums match, and the audit chain has not failed closed.
 
 ### Logs
 
@@ -708,7 +710,7 @@ Current storage includes:
 Back up the SQLite database before upgrades:
 
 ```sh
-sqlite3 /var/lib/agent-control-stack/control.db ".backup '/var/lib/agent-control-stack/control.db.bak'"
+npm run db:ops -- backup /var/lib/agent-control-stack/control.db /secure-backups/control.db.bak
 ```
 
 ### Upgrades
@@ -778,8 +780,8 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 - Worker execution is dry-run only.
 - No real OS sandbox is wired in yet.
 - Public worker result submission is not implemented.
-- Production remote connector mode requires careful OAuth or signed tunnel-session deployment.
-- The repository does not currently ship Docker Compose, Kubernetes manifests, or systemd units.
+- Production remote connector mode requires OAuth or signed tunnel-session deployment and TLS termination.
+- Docker and Compose artifacts are provided; Kubernetes and a checked-in systemd unit are not.
 - Dashboard approval rendering is intentionally minimal.
 - Error envelopes are not uniform across every route.
 - Release hardening is still in progress.
@@ -790,6 +792,7 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 - [`docs/threat-model.md`](docs/threat-model.md)
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
+- [`docs/runbooks/production.md`](docs/runbooks/production.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)
 
 ## License

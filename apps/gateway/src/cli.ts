@@ -1,3 +1,5 @@
 import { startGateway } from "./server.js";
+import { installGracefulShutdown } from "./lifecycle.js";
 
-await startGateway();
+const app = await startGateway();
+installGracefulShutdown(app);

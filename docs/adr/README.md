@@ -20,6 +20,7 @@ ADR status values:
 | [0005](0005-hash-chained-audit-log.md) | Hash-chained audit/event log | Accepted |
 | [0006](0006-read-only-by-default-tooling.md) | Read-only by default MCP tooling | Accepted |
 | [0007](0007-chatgpt-https-mcp-transport.md) | HTTPS streaming MCP transport for ChatGPT connector mode | Proposed |
+| [0008](0008-mission-intake-authority-boundary.md) | Mission intake is advisory; ACS is the sole execution authority | Accepted for migration Phases 0–2 |
 
 ## Decision rules
 

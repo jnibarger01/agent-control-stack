@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -9,7 +9,12 @@ const auth = { token: "t", actor: "user" };
 describe("gateway MCP edge hardening", () => {
   it("returns 405 with Allow POST for GET /mcp", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: { localBearerToken: "mcp-token" }
+    });
 
     try {
       const response = await app.inject({ method: "GET", url: "/mcp" });
@@ -69,9 +74,70 @@ describe("gateway MCP edge hardening", () => {
     }
   });
 
+  it("returns 202 with no body for accepted MCP notifications", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: { localBearerToken: "mcp-token" }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: { jsonrpc: "2.0", method: "notifications/initialized" }
+      });
+
+      expect(response.statusCode).toBe(202);
+      expect(response.body).toBe("");
+      expect(response.headers["content-type"]).toBeUndefined();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("wraps array tool results in object-shaped structured content", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: { localBearerToken: "mcp-token" }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: {
+          jsonrpc: "2.0",
+          id: "list",
+          method: "tools/call",
+          params: { name: "list_work_items", arguments: {} }
+        }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().result.structuredContent).toEqual({ result: [] });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects browser origins by default", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
-    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: { localBearerToken: "mcp-token" }
+    });
 
     try {
       const blocked = await app.inject({
@@ -83,6 +149,7 @@ describe("gateway MCP edge hardening", () => {
       const nonBrowser = await app.inject({
         method: "POST",
         url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
         payload: { jsonrpc: "2.0", id: "no-origin", method: "initialize" }
       });
 
@@ -101,6 +168,7 @@ describe("gateway MCP edge hardening", () => {
       dbPath: join(dir, "control.db"),
       logger: false,
       auth,
+      mcpAuth: { localBearerToken: "mcp-token" },
       mcpAllowedOrigins: ["https://allowed.example"]
     });
 
@@ -122,7 +190,7 @@ describe("gateway MCP edge hardening", () => {
       const allowed = await app.inject({
         method: "POST",
         url: "/mcp",
-        headers: { origin: "https://allowed.example" },
+        headers: { origin: "https://allowed.example", authorization: "Bearer mcp-token" },
         payload: { jsonrpc: "2.0", id: "origin", method: "initialize" }
       });
 

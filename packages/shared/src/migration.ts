@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 
 const migrationsDir = new URL("../../../storage/migrations/", import.meta.url);
 
@@ -7,6 +8,7 @@ export interface ControlPlaneMigration {
   name: string;
   filename: string;
   sql: string;
+  checksum: string;
 }
 
 interface SqliteLike {
@@ -25,10 +27,10 @@ const migrationFiles = [
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
-  return migrationFiles.map((migration) => ({
-    ...migration,
-    sql: readFileSync(new URL(migration.filename, migrationsDir), "utf8")
-  }));
+  return migrationFiles.map((migration) => {
+    const sql = readFileSync(new URL(migration.filename, migrationsDir), "utf8");
+    return { ...migration, sql, checksum: createHash("sha256").update(sql).digest("hex") };
+  });
 }
 
 export function controlPlaneMigrationSql(): string {
@@ -41,15 +43,34 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       version INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
       filename TEXT NOT NULL,
+      checksum TEXT NOT NULL DEFAULT '',
       applied_at TEXT NOT NULL
     );
   `);
-  const applied = new Set(
-    (db.prepare(`SELECT version FROM schema_migrations`).all() as Array<{ version: number }>).map((row) => row.version)
+  if (!hasColumn(db, "schema_migrations", "checksum")) {
+    db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
+  }
+  const applied = new Map(
+    (db.prepare(`SELECT version, name, filename, checksum FROM schema_migrations`).all() as Array<{
+      version: number;
+      name: string;
+      filename: string;
+      checksum: string;
+    }>).map((row) => [row.version, row])
   );
 
   for (const migration of controlPlaneMigrations()) {
-    if (applied.has(migration.version)) {
+    const existing = applied.get(migration.version);
+    if (existing) {
+      if (existing.name !== migration.name || existing.filename !== migration.filename) {
+        throw new Error(`migration metadata mismatch for version ${migration.version}`);
+      }
+      if (existing.checksum && existing.checksum !== migration.checksum) {
+        throw new Error(`migration checksum mismatch for version ${migration.version}`);
+      }
+      if (!existing.checksum) {
+        db.prepare(`UPDATE schema_migrations SET checksum = ? WHERE version = ?`).run(migration.checksum, migration.version);
+      }
       continue;
     }
     db.exec("BEGIN IMMEDIATE");
@@ -57,10 +78,10 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       db.exec(migrationSqlForCurrentSchema(db, migration));
       db
         .prepare(
-          `INSERT INTO schema_migrations (version, name, filename, applied_at)
-           VALUES (?, ?, ?, ?)`
+          `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+           VALUES (?, ?, ?, ?, ?)`
         )
-        .run(migration.version, migration.name, migration.filename, new Date().toISOString());
+        .run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
       db.exec("COMMIT");
     } catch (error) {
       try {

@@ -1,55 +1,47 @@
 # agentos-contracts v0.1.0
 
-Shared contract kernel for the **Mission Router + LoopTrace + codex-swarm gated coding loop**.
-Zero dependencies. Node >= 18.17. Pure functions — no I/O, no network, no exec.
-All persistence and dispatch is wired by the consuming repo via injected sinks/callbacks.
+Legacy compatibility contracts for the Mission Router, LoopTrace, and gated coding loop. Zero dependencies; Node >=18.17; pure functions only.
 
-## Why a shared package
+## Current authority warning
 
-mission-router, LoopTrace, and codex-swarm each need the same four contracts:
-task envelope, risk policy, trace event model, promotion gate. Three private copies
-drift; one package makes contract changes explicit and testable in one place.
+This package still exports `applyRiskPolicy()` and `route()`. Agent Control Stack currently invokes them as a hard compatibility admission veto in `packages/policy-gate/src/contracts.ts` before ACS policy evaluation.
+
+That is an acknowledged migration gap, not the target architecture. Do not add new policy, approval, lifecycle, dispatch, or execution authority here.
+
+The versioned ACS mission-intake, classifier-evidence, action-manifest, approval-binding, idempotency, trace-correlation, and legacy-provenance contracts live in `@agent-control-stack/work-items`. Mission-classifier evidence generation lives in `@agent-control-stack/policy-gate`. ACS work-item policy, approval consumption, worker claims/leases, results, and audit remain authoritative under [ADR 0008](../../docs/adr/0008-mission-intake-authority-boundary.md).
 
 ## Modules
 
-| Module                  | Contract                                                | Consumed by            |
-| ----------------------- | ------------------------------------------------------- | ---------------------- |
-| `src/envelope.js`       | Task envelope validation (fail-closed, strict)           | mission-router (ingress) |
-| `src/risk-policy.js`    | Tool/task risk derivation, never-downgrade escalation    | mission-router (classify) |
-| `src/router.js`         | Routing table + approval queueing decision               | mission-router (dispatch) |
-| `src/trace-events.js`   | Hash-chained events, tamper check, replay divergence, redaction | LoopTrace (capture/audit) |
-| `src/promotion-gate.js` | Maker/Verifier/Reviewer/Promoter gate evaluator          | codex-swarm (promoter) |
-| `src/failure-taxonomy.js` | Canonical failure codes                                | all three              |
-| `schemas/*.json`        | Language-neutral JSON Schemas (CI validation via ajv)    | CI / external agents   |
+| Module | Current role |
+|---|---|
+| `src/envelope.js` | Legacy strict task-envelope compatibility validation |
+| `src/risk-policy.js` | Legacy hard-veto risk compatibility; scheduled for de-authorization |
+| `src/router.js` | Legacy hard-veto routing compatibility; never machine dispatch authority |
+| `src/trace-events.js` | Compatibility trace/replay/redaction helpers; ACS audit remains canonical |
+| `src/promotion-gate.js` | Maker/verifier/reviewer/promoter evidence gate |
+| `src/failure-taxonomy.js` | Shared legacy failure vocabulary |
+| `schemas/*.json` | Legacy language-neutral schemas |
 
-## Integration points
+## Migration rule
 
-1. **mission-router**: replace ad-hoc intake with `validateEnvelope()` -> `route()`.
-   Record `task_received`, `task_validated`, `risk_classified`, `route_selected`
-   through a LoopTrace-backed sink **before** dispatch. Rejections never dispatch.
-2. **LoopTrace**: adopt the event model as the write-time schema. `createTrace(run_id, { sink })`
-   with a JSONL/SQLite sink gives hash-chained records; `verifyChain()` is the audit;
-   `detectReplayDivergence()` is the replay check. run_id + seq live inside the hash body,
-   so events cannot be replayed across runs (closes the HMAC cross-path replay class).
-3. **codex-swarm**: Promoter calls `evaluateGate(evidence)` and merges **only** on
-   `promoted === true`. Evidence must carry `head_sha_expected` (SHA the Verifier tested)
-   and `head_sha_actual` (branch re-resolved at merge time). Mismatch blocks regardless
-   of any claimed boolean — this is the head_sha fix that unblocks mission-router
-   from dry-run default.
+- Do not treat a legacy route, risk decision, task-envelope hash, or trace as ACS approval.
+- Do not persist new canonical ACS contracts in this package.
+- Remove the `policy-gate/src/contracts.ts` hard-veto dependency only in a separately reviewed runtime migration.
+- LoopTrace remains a projection/read-compatibility surface, not lifecycle or approval truth.
 
 ## Verify
 
 ```bash
-node --test        # 48 tests
-node examples/smoke.mjs   # end-to-end gated loop, exit 0 on pass
+npm test --workspace agentos-contracts
+node packages/agentos-contracts/examples/smoke.mjs
 ```
 
-## Invariants enforced
+## Existing compatibility invariants
 
-- No trace, no write: `trace_required` must be true for write/destructive at validation.
-- Approval forced at effective risk >= write; rollback forced at destructive. Never downgraded.
-- Unknown task_type -> human triage. Unknown tool -> treated as write.
-- Network tools without declared network access -> `network_blocked`, rejected.
-- Gate is fail-closed: missing/mistyped evidence blocks; raw evidence (exit codes, SHAs)
-  overrides self-reported booleans. Maker optimism does not merge code.
-- Secrets redacted by category at event-write time; values never persist in traces.
+- No trace, no legacy write.
+- Legacy write risk forces legacy approval and destructive risk forces rollback.
+- Unknown legacy tasks route to human triage.
+- Unknown tools are treated as write.
+- Undeclared network tools are blocked.
+- Promotion evidence is fail-closed; raw exit codes and SHAs override claimed booleans.
+- Compatibility trace helpers redact recognized secret categories and detect chain/replay divergence.

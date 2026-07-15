@@ -1,5 +1,5 @@
 import { cpus, freemem, loadavg, platform, release, totalmem, uptime } from "node:os";
-import { redactValue } from "@agent-control-stack/shared";
+import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import { JsonlAuditLogger } from "./audit.js";
 import { previewCommand, runReadonlyCommand, type RiskLevel } from "./command.js";
 import type { MachineControllerConfig } from "./config.js";
@@ -28,6 +28,7 @@ interface DispatchResult {
 
 export interface MachineControllerOptions {
   directAgentRunner?: DirectAgentRunner;
+  enableTestAgentRunForLocalDevelopment?: boolean;
 }
 
 export class MachineController {
@@ -95,6 +96,9 @@ export class MachineController {
         return { result, risk: result.preview.risk, cwd: result.preview.cwd, exitCode: result.exitCode };
       }
       case "test.agent.run": {
+        if (this.options.enableTestAgentRunForLocalDevelopment !== true) {
+          throw new ControlStackError("direct_agent_disabled", "test.agent.run is disabled by default");
+        }
         const result = await runDirectAgent(this.config, args, this.options.directAgentRunner);
         return { result, risk: "requires_approval", exitCode: result.exitCode };
       }

@@ -79,6 +79,57 @@ describe("policy-gated work item tools", () => {
     }
   });
 
+  it("consumes one write approval once across competing store connections", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-tools-claim-race-"));
+    const dbPath = join(dir, "control.db");
+    const firstStore = new SqliteWorkItemStore(dbPath);
+    const secondStore = new SqliteWorkItemStore(dbPath);
+    const policy = createPolicyEngine();
+    const firstTools = createWorkItemTools(firstStore, policy);
+    const secondTools = createWorkItemTools(secondStore, policy);
+
+    try {
+      const workItem = firstTools.create_work_item({
+        title: "Claim approved write once",
+        requester: "user",
+        intent: "verify one approval cannot authorize competing claims",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      const approvalEvaluation = policy.evaluateWorkItem(workItem, "approver", "approve")[0];
+
+      expect(approvalEvaluation?.decision.decision).toBe("require_approval");
+      const approval = firstTools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "approver",
+        reason: "approve the exact write action",
+        actionHash: approvalEvaluation!.actionHash
+      });
+      expect(approval.workItem.status).toBe("approved");
+
+      const claims = [
+        firstTools.claim_next_approved_work_item({ workerId: "worker-a" }),
+        secondTools.claim_next_approved_work_item({ workerId: "worker-b" })
+      ];
+      const claimed = claims.filter((candidate) => candidate !== undefined);
+      const events = firstStore.readEvents();
+
+      expect(claimed).toHaveLength(1);
+      expect(claimed[0]?.id).toBe(workItem.id);
+      expect(events.filter((event) => event.name === "approval.granted")).toHaveLength(1);
+      expect(events.filter((event) => event.name === "approval.consumed")).toHaveLength(1);
+      expect(events.find((event) => event.name === "approval.consumed")?.body).toMatchObject({
+        workItemId: workItem.id,
+        actionHash: approvalEvaluation!.actionHash
+      });
+    } finally {
+      firstStore.close();
+      secondStore.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("re-denies blocked work on unblock and records the decision", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-unblock-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

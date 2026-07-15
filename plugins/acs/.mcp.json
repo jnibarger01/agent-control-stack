@@ -1,8 +1,11 @@
 {
   "mcpServers": {
     "acs": {
-      "transport": "http",
-      "url": "http://127.0.0.1:3000/mcp"
+      "type": "http",
+      "url": "http://127.0.0.1:3000/mcp",
+      "headers": {
+        "Authorization": "Bearer ${user_config.mcp_bearer_token}"
+      }
     }
   }
 }

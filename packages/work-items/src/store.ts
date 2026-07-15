@@ -1649,15 +1649,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
     try {
       const expected = controlPlaneMigrations();
       const rows = this.db
-        .prepare(`SELECT version, name, filename FROM schema_migrations ORDER BY version ASC`)
-        .all() as Array<{ version: number; name: string; filename: string }>;
+        .prepare(`SELECT version, name, filename, checksum FROM schema_migrations ORDER BY version ASC`)
+        .all() as Array<{ version: number; name: string; filename: string; checksum: string }>;
       const byVersion = new Map(rows.map((row) => [row.version, row]));
       for (const migration of expected) {
         const row = byVersion.get(migration.version);
         if (!row) {
           return failHealth("migration_missing");
         }
-        if (row.name !== migration.name || row.filename !== migration.filename) {
+        if (row.name !== migration.name || row.filename !== migration.filename || row.checksum !== migration.checksum) {
           return failHealth("migration_mismatch");
         }
       }
