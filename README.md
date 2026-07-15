@@ -12,6 +12,7 @@ This repository is currently a **v0.1.0-alpha dry-run control-plane release**. I
 - [Repository layout](#repository-layout)
 - [Runtime flow](#runtime-flow)
 - [Security model](#security-model)
+- [Claude Code plugin](#claude-code-plugin)
 - [Requirements](#requirements)
 - [Install](#install)
 - [Configuration](#configuration)
@@ -54,6 +55,86 @@ Do **not** claim this alpha provides:
 - a multi-user enterprise authorization model
 
 The current `packages/sandbox` implementation is intentionally dry-run only. Real execution should be added behind that package after isolation, environment allowlisting, path containment, output caps, and network controls pass their own release gate.
+
+## Claude Code plugin
+
+This repository is also the source for the `agent-control-stack` Claude Code plugin. The plugin adds:
+
+- `/agent-control-stack:acs-review`, a review workflow for ACS policy, exact-action approval, audit, authentication, MCP, and execution-boundary changes;
+- an optional `acs` HTTP MCP connection to a local gateway at `http://127.0.0.1:3000/mcp`.
+
+The plugin does not install, build, start, expose, or upgrade ACS. It does not grant approvals or turn the alpha dry-run worker into a real command executor.
+
+### Plugin requirements
+
+- Claude Code 2.1.207 or newer for `userConfig` substitution as documented here.
+- The repository dependencies and runtime versions listed below when running ACS itself.
+- A locally running ACS gateway for MCP tools.
+- A bearer token supplied to both `ACS_MCP_BEARER_TOKEN` on the gateway and the plugin's secure `mcp_bearer_token` prompt.
+- Loopback access to `127.0.0.1:3000`; no external network access is required by the plugin.
+
+### Local development installation
+
+From the parent directory of a checkout:
+
+```sh
+claude --plugin-dir ./agent-control-stack
+```
+
+Then invoke:
+
+```text
+/agent-control-stack:acs-review
+/agent-control-stack:acs-review review the current branch against main
+```
+
+### Marketplace installation
+
+After the `jace-private-plugins` marketplace is published:
+
+```sh
+claude plugin marketplace add jnibarger01/claude-private-marketplace
+claude plugin install agent-control-stack@jace-private-plugins
+```
+
+Update or uninstall it with:
+
+```sh
+claude plugin marketplace update jace-private-plugins
+claude plugin update agent-control-stack@jace-private-plugins
+claude plugin uninstall agent-control-stack@jace-private-plugins
+```
+
+The plugin has not been accepted into an Anthropic-managed marketplace. Do not use an `@claude-plugins-official` installation command unless Anthropic independently lists it there.
+
+### Plugin security and permissions
+
+The review skill runs only commands Claude Code is separately permitted to run. It is instructed to use read-only Git and test commands and not to mutate ACS work items. The MCP connection sends MCP requests and the configured bearer token only to the fixed loopback URL. The token is declared sensitive so Claude Code stores it in secure storage where supported; it is never committed to this repository.
+
+ACS MCP tools can create or transition work items when the authenticated actor and server policy permit it. Exact-action approvals, file changes, command execution, and destructive operations remain governed by ACS and Claude Code permissions. Disable the plugin or stop the local gateway to remove access. Audit `.mcp.json`, `.claude-plugin/plugin.json`, and `skills/acs-review/SKILL.md` before enabling it.
+
+### Plugin development and release
+
+Validate the plugin and application, then test a local load:
+
+```sh
+claude plugin validate .
+npm ci
+npm run check
+claude --plugin-dir .
+```
+
+Release versions are declared once in `.claude-plugin/plugin.json`. Marketplace entries should omit a duplicate version and pin releases to an immutable Git tag or commit SHA. Bump the plugin version, validate from a clean checkout, tag the release, update the marketplace source pin, and test marketplace installation before publishing status changes.
+
+Current status as of 2026-07-15:
+
+- local manifest validation: passed with Claude Code 2.1.207;
+- local marketplace installation: passed through an ephemeral local marketplace;
+- primary skill execution: not verified because a non-interactive invocation hung and was terminated;
+- application build: passed; full test suite: 268 passed and 13 failed on the clean base branch;
+- `jace-private-plugins` marketplace: prepared separately, not published;
+- Anthropic community marketplace: not submitted;
+- Anthropic official marketplace: not accepted and has no public application process.
 
 ## Architecture
 

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin.json",
+  "name": "agent-control-stack",
+  "displayName": "Agent Control Stack",
+  "description": "Review Agent Control Stack changes and connect Claude Code to a local ACS policy, approval, and audit control plane.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Jace Nibarger"
+  },
+  "homepage": "https://github.com/jnibarger01/agent-control-stack",
+  "repository": "https://github.com/jnibarger01/agent-control-stack",
+  "license": "MIT",
+  "keywords": [
+    "agents",
+    "mcp",
+    "approval",
+    "policy",
+    "audit"
+  ],
+  "userConfig": {
+    "mcp_bearer_token": {
+      "type": "string",
+      "title": "ACS MCP bearer token",
+      "description": "Bearer token configured in ACS_MCP_BEARER_TOKEN for the local ACS gateway.",
+      "sensitive": true,
+      "required": true
+    }
+  }
+}

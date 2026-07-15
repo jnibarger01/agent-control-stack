@@ -1,0 +1,42 @@
+# Claude Code plugin release report
+
+Date: 2026-07-15
+
+## Architecture
+
+Agent Control Stack remains a Node/TypeScript application. Its Claude Code integration is a thin root-level plugin containing one review skill and one optional authenticated loopback MCP connection. It does not add commands, agents, hooks, LSP servers, background monitors, or executable plugin scripts.
+
+The root plugin slug is `agent-control-stack`; its review skill is exposed as `/agent-control-stack:acs-review`. Version `0.1.0` is declared only in `.claude-plugin/plugin.json`. The separate `jace-private-plugins` marketplace intentionally omits a second version declaration.
+
+## Official requirements checked
+
+- Plugin creation and local `--plugin-dir` loading: <https://code.claude.com/docs/en/plugins>
+- Plugin manifest, component paths, user configuration, and MCP substitution: <https://code.claude.com/docs/en/plugins-reference>
+- Marketplace schema, GitHub sources, installation, update, and validation: <https://code.claude.com/docs/en/plugin-marketplaces>
+- Anthropic-managed directory and third-party submission distinction: <https://github.com/anthropics/claude-plugins-official>
+
+The current documentation permits `skills/` and `.mcp.json` at the plugin root, `userConfig` in the manifest, and `${user_config.KEY}` substitution in MCP configuration. A marketplace may reference a GitHub repository using `{ "source": "github", "repo": "owner/repo" }`. Official validation is `claude plugin validate <path>`.
+
+Anthropic documents a reviewed `claude-community` submission form for third-party plugins. The separately curated `claude-plugins-official` marketplace has no public application process; Anthropic decides inclusion. A community submission therefore cannot be reported as an official-marketplace submission or acceptance.
+
+## Validation evidence
+
+Run from the isolated `feat/claude-plugin-marketplace` worktree based on `origin/main` at `d2cd2aa`:
+
+- `npm ci`: exit 0; 118 packages added; npm reported zero known vulnerabilities.
+- `npm run build`: exit 0 as part of `npm run check`.
+- `npm test`: exit 1; 268 of 281 tests passed. Five clean-base gateway/MCP tests expected unauthenticated 200 responses but received fail-closed 401 responses. Eight ACP adapter tests timed out during initialization. No plugin file participates in those test paths.
+- `claude plugin validate .`: exit 0 with one warning that root `CLAUDE.md` is project context and is not loaded as plugin context.
+- Ephemeral marketplace `claude plugin validate .`: exit 0.
+- Ephemeral marketplace add and `claude plugin install agent-control-stack@jace-private-plugins-test --config mcp_bearer_token=...`: exit 0; installed version 0.1.0 and preserved the `acs` MCP definition.
+- Non-interactive `/agent-control-stack:acs-review` invocation: no output before timeout; terminated with exit 130. Primary workflow execution is not verified.
+
+The tracked-file secret scan found variable names, placeholders, test fixtures, and redaction documentation. It found no tracked `.env`, private-key file, or confirmed credential. Real values must remain outside Git.
+
+## Publication gates
+
+- Source branch commit: pending final scoped commit.
+- Source push: blocked until GitHub authentication is valid and write permission is confirmed.
+- Marketplace repository: prepared locally at `/home/jacen/claude-private-marketplace`; the requested GitHub repository was not visible through the current account and could not be published.
+- Anthropic community submission: not submitted. The plugin must first be published at a stable public source, pass its full release gate or document accepted exceptions, and complete the official review form.
+- Anthropic official marketplace: not submitted or accepted; there is no public application process.
