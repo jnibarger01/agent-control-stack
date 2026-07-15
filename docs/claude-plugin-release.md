@@ -37,6 +37,6 @@ The tracked-file secret scan found variable names, placeholders, test fixtures, 
 
 - Source branch commit: `49daac6` plus the final evidence update.
 - Source push: published to `origin/feat/claude-plugin-marketplace`; no merge or pull request was created.
-- Marketplace repository: published privately at `jnibarger01/claude-private-marketplace` on `feat/claude-plugin-marketplace`. The entry pins ACS commit `282fea26f609caa0acb9100b1a4d7d8c35227b54`; owner/repo marketplace add and installation both passed.
+- Marketplace repository: published privately at `jnibarger01/claude-private-marketplace` on `feat/claude-plugin-marketplace`. The entry pins a full immutable ACS commit SHA; owner/repo marketplace add and installation both passed.
 - Anthropic community submission: not submitted. The plugin must first be published at a stable public source, pass its full release gate or document accepted exceptions, and complete the official review form.
 - Anthropic official marketplace: not submitted or accepted; there is no public application process.
