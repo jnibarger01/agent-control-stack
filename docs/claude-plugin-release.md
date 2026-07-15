@@ -27,16 +27,16 @@ Run from the isolated `feat/claude-plugin-marketplace` worktree based on `origin
 - `npm run build`: exit 0 as part of `npm run check`.
 - `npm test`: exit 1; 268 of 281 tests passed. Five clean-base gateway/MCP tests expected unauthenticated 200 responses but received fail-closed 401 responses. Eight ACP adapter tests timed out during initialization. No plugin file participates in those test paths.
 - `claude plugin validate .`: exit 0 with one warning that root `CLAUDE.md` is project context and is not loaded as plugin context.
-- Ephemeral marketplace `claude plugin validate .`: exit 0.
-- Ephemeral marketplace add and `claude plugin install agent-control-stack@jace-private-plugins-test --config mcp_bearer_token=...`: exit 0; installed version 0.1.0 and preserved the `acs` MCP definition.
+- Prepared marketplace `claude plugin validate .`: exit 0.
+- `claude plugin marketplace add /home/jacen/claude-private-marketplace` and `claude plugin install agent-control-stack@jace-private-plugins --config mcp_bearer_token=...`: exit 0 after changing the source to the official HTTPS Git format; Claude Code fetched the published source branch, installed version 0.1.0, and preserved the `acs` MCP definition.
 - Non-interactive `/agent-control-stack:acs-review` invocation: no output before timeout; terminated with exit 130. Primary workflow execution is not verified.
 
 The tracked-file secret scan found variable names, placeholders, test fixtures, and redaction documentation. It found no tracked `.env`, private-key file, or confirmed credential. Real values must remain outside Git.
 
 ## Publication gates
 
-- Source branch commit: pending final scoped commit.
-- Source push: blocked until GitHub authentication is valid and write permission is confirmed.
+- Source branch commit: `49daac6` plus the final evidence update.
+- Source push: published to `origin/feat/claude-plugin-marketplace`; no merge or pull request was created.
 - Marketplace repository: prepared locally at `/home/jacen/claude-private-marketplace`; the requested GitHub repository was not visible through the current account and could not be published.
 - Anthropic community submission: not submitted. The plugin must first be published at a stable public source, pass its full release gate or document accepted exceptions, and complete the official review form.
 - Anthropic official marketplace: not submitted or accepted; there is no public application process.

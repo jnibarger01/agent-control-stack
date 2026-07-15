@@ -129,7 +129,7 @@ Release versions are declared once in `.claude-plugin/plugin.json`. Marketplace 
 Current status as of 2026-07-15:
 
 - local manifest validation: passed with Claude Code 2.1.207;
-- local marketplace installation: passed through an ephemeral local marketplace;
+- local marketplace installation: passed through the prepared `jace-private-plugins` marketplace, fetching the published source branch over HTTPS;
 - primary skill execution: not verified because a non-interactive invocation hung and was terminated;
 - application build: passed; full test suite: 268 passed and 13 failed on the clean base branch;
 - `jace-private-plugins` marketplace: prepared separately, not published;
