@@ -132,7 +132,7 @@ Current status as of 2026-07-15:
 - local marketplace installation: passed through the prepared `jace-private-plugins` marketplace, fetching the published source branch over HTTPS;
 - primary skill execution: passed with a bounded non-interactive invocation that returned the documented `BLOCK` failure contract when no repository evidence was available;
 - application build and full test suite: passed, 281/281 tests, after removing the host-only `ACS_MCP_BEARER_TOKEN` and running outside the managed sandbox required for nested ACP child processes;
-- `jace-private-plugins` marketplace: prepared separately, not published;
+- `jace-private-plugins` marketplace: published privately at `jnibarger01/claude-private-marketplace`; owner/repo installation passed against the immutable ACS commit pin;
 - Anthropic community marketplace: not submitted;
 - Anthropic official marketplace: not accepted and has no public application process.
 

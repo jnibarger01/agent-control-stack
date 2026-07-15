@@ -38,9 +38,9 @@ Submitting the form does not submit to or publish in `claude-plugins-official`.
 - [x] Full clean-branch build and test gate passes: 281/281 tests.
 - [x] A live `/agent-control-stack:acs-review` invocation completes and follows its failure contract.
 - [ ] Merge the release branch after independent review.
-- [ ] Create and push an immutable release tag or choose a full commit SHA.
-- [ ] Update the marketplace entry from the branch ref to that immutable release.
-- [ ] Publish `jnibarger01/claude-private-marketplace` and retest installation from GitHub.
+- [x] Pin the release to full commit SHA `282fea26f609caa0acb9100b1a4d7d8c35227b54`.
+- [x] Update the marketplace entry to that immutable release.
+- [x] Publish `jnibarger01/claude-private-marketplace` privately and retest installation from GitHub.
 
 ## Manual submission action
 
