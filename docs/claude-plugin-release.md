@@ -25,11 +25,11 @@ Run from the isolated `feat/claude-plugin-marketplace` worktree based on `origin
 
 - `npm ci`: exit 0; 118 packages added; npm reported zero known vulnerabilities.
 - `npm run build`: exit 0 as part of `npm run check`.
-- `npm test`: exit 1; 268 of 281 tests passed. Five clean-base gateway/MCP tests expected unauthenticated 200 responses but received fail-closed 401 responses. Eight ACP adapter tests timed out during initialization. No plugin file participates in those test paths.
+- `env -u ACS_MCP_BEARER_TOKEN npm run check` outside the managed sandbox: exit 0; TypeScript build passed and all 281 tests in 34 files passed. The earlier five MCP failures were caused by the host bearer variable enabling authentication in tests that intentionally exercise an unconfigured local endpoint. The earlier eight ACP timeouts were caused by nested child-process restrictions in the managed sandbox.
 - `claude plugin validate .`: exit 0 with one warning that root `CLAUDE.md` is project context and is not loaded as plugin context.
 - Prepared marketplace `claude plugin validate .`: exit 0.
 - `claude plugin marketplace add /home/jacen/claude-private-marketplace` and `claude plugin install agent-control-stack@jace-private-plugins --config mcp_bearer_token=...`: exit 0 after changing the source to the official HTTPS Git format; Claude Code fetched the published source branch, installed version 0.1.0, and preserved the `acs` MCP definition.
-- Non-interactive `/agent-control-stack:acs-review` invocation: no output before timeout; terminated with exit 130. Primary workflow execution is not verified.
+- Bounded non-interactive `/agent-control-stack:acs-review` invocation with Haiku: exit 0. With no repository evidence supplied, it returned `Verdict: BLOCK`, all required output sections, the unverified invariants, and the precise next action, matching the skill failure contract.
 
 The tracked-file secret scan found variable names, placeholders, test fixtures, and redaction documentation. It found no tracked `.env`, private-key file, or confirmed credential. Real values must remain outside Git.
 

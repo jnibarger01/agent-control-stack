@@ -35,8 +35,8 @@ Submitting the form does not submit to or publish in `claude-plugins-official`.
 - [x] MIT license is present.
 - [x] Security and permission behavior is documented.
 - [x] Tracked-file secret scan found no confirmed credential or private key.
-- [ ] Resolve or explicitly accept the 13 clean-base test failures.
-- [ ] Verify a live `/agent-control-stack:acs-review` invocation completes.
+- [x] Full clean-branch build and test gate passes: 281/281 tests.
+- [x] A live `/agent-control-stack:acs-review` invocation completes and follows its failure contract.
 - [ ] Merge the release branch after independent review.
 - [ ] Create and push an immutable release tag or choose a full commit SHA.
 - [ ] Update the marketplace entry from the branch ref to that immutable release.
