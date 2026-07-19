@@ -68,18 +68,62 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
 
   const started = Date.now();
   return await new Promise((resolvePromise) => {
+    const useProcessGroup = process.platform !== "win32";
     const child = spawn(preview.command, preview.args, {
       cwd: preview.cwd,
       env: subprocessEnv(),
+      detached: useProcessGroup,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"]
     });
     let stdout = "";
     let stderr = "";
     let timedOut = false;
-    const timer = setTimeout(() => {
+    let settled = false;
+    let childClosed = false;
+    let closeExitCode: number | null = null;
+    let escalationSent = false;
+    let spawnError: Error | undefined;
+    let terminationError: Error | undefined;
+    let escalationTimer: NodeJS.Timeout | undefined;
+    let completionTimer: NodeJS.Timeout | undefined;
+
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeoutTimer);
+      if (escalationTimer) clearTimeout(escalationTimer);
+      if (completionTimer) clearTimeout(completionTimer);
+      const error = spawnError ?? terminationError;
+      resolvePromise({
+        preview,
+        exitCode: closeExitCode,
+        stdout: redactText(stdout),
+        stderr: redactText(`${stderr}${error ? `${stderr ? "\n" : ""}${error.message}` : ""}`),
+        timedOut,
+        durationMs: Date.now() - started
+      });
+    };
+
+    const timeoutTimer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
+      terminationError = signalCommandTree(child.pid, useProcessGroup, "SIGTERM");
+      escalationTimer = setTimeout(() => {
+        escalationSent = true;
+        const escalationError = signalCommandTree(child.pid, useProcessGroup, "SIGKILL");
+        terminationError = escalationError ?? terminationError;
+        if (childClosed || escalationError) {
+          settle();
+          return;
+        }
+        completionTimer = setTimeout(
+          () => {
+            terminationError ??= new Error("command process tree did not exit after SIGKILL");
+            settle();
+          },
+          Math.min(config.security.commandTerminationGraceMs, 1_000)
+        );
+      }, config.security.commandTerminationGraceMs);
     }, config.security.commandTimeoutMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
@@ -89,28 +133,54 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
       stderr = appendCapped(stderr, chunk.toString("utf8"), config.security.maxOutputBytes);
     });
     child.on("error", (error) => {
-      clearTimeout(timer);
-      resolvePromise({
-        preview,
-        exitCode: null,
-        stdout: redactText(stdout),
-        stderr: redactText(`${stderr}${stderr ? "\n" : ""}${error.message}`),
-        timedOut,
-        durationMs: Date.now() - started
-      });
+      spawnError = error;
+      if (child.pid === undefined) settle();
     });
     child.on("close", (exitCode) => {
-      clearTimeout(timer);
-      resolvePromise({
-        preview,
-        exitCode,
-        stdout: redactText(stdout),
-        stderr: redactText(stderr),
-        timedOut,
-        durationMs: Date.now() - started
-      });
+      childClosed = true;
+      closeExitCode = exitCode;
+      if (
+        !timedOut ||
+        !useProcessGroup ||
+        escalationSent ||
+        child.pid === undefined ||
+        !processGroupExists(child.pid)
+      ) {
+        settle();
+      }
     });
   });
+}
+
+function signalCommandTree(
+  pid: number | undefined,
+  useProcessGroup: boolean,
+  signal: NodeJS.Signals
+): Error | undefined {
+  if (pid === undefined) return undefined;
+  try {
+    process.kill(useProcessGroup ? -pid : pid, signal);
+    return undefined;
+  } catch (error) {
+    return hasErrorCode(error, "ESRCH") ? undefined : asError(error);
+  }
+}
+
+function processGroupExists(pid: number): boolean {
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return !hasErrorCode(error, "ESRCH");
+  }
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function isKnownReadonly(command: string, args: string[]): boolean {

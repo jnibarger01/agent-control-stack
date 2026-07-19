@@ -218,7 +218,8 @@ function config(dir: string, allowed: string): MachineControllerConfig {
       requireApprovalForMutations: true,
       redactSecrets: true,
       maxOutputBytes: 200_000,
-      commandTimeoutMs: 120_000
+      commandTimeoutMs: 120_000,
+      commandTerminationGraceMs: 1_000
     },
     paths: { allow: [allowed], deny: [] },
     commands: { allowReadonly: ["node"], deny: [] },

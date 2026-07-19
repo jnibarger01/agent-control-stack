@@ -77,11 +77,11 @@ Stop every gateway and worker using the database before restore.
 
 ```sh
 npm run db:ops -- verify /secure-backups/control-$OLD_SHA.db
-npm run db:ops -- restore /secure-backups/control-$OLD_SHA.db /path/control.db --replace
+npm run db:ops -- restore /secure-backups/control-$OLD_SHA.db /path/control.db --replace --writers-stopped
 npm run db:ops -- verify /path/control.db
 ```
 
-Restore requires the literal `--replace` flag and automatically creates a timestamped `control.db.pre-restore-*` safety backup. Keep both until post-rollback checks pass.
+Restore requires both literal `--replace` and `--writers-stopped` flags. The latter is an operator attestation: stop every gateway and worker first. The command also fails closed if an active writer lock or a lingering `-journal`/`-wal`/`-shm` sidecar makes that state ambiguous. It verifies a unique sibling temporary copy, flushes it, atomically replaces the destination, and creates a timestamped `control.db.pre-restore-*` safety backup. Keep both until post-rollback checks pass.
 
 ## Incident recovery
 

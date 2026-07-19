@@ -18,7 +18,8 @@ const rawConfigSchema = z.object({
       require_approval_for_mutations: z.boolean().default(true),
       redact_secrets: z.boolean().default(true),
       max_output_bytes: z.number().int().positive().default(200_000),
-      command_timeout_ms: z.number().int().positive().default(120_000)
+      command_timeout_ms: z.number().int().positive().default(120_000),
+      command_termination_grace_ms: z.number().int().positive().max(2_147_483_647).default(1_000)
     })
     .optional(),
   paths: z.object({
@@ -50,6 +51,7 @@ export interface MachineControllerConfig {
     redactSecrets: boolean;
     maxOutputBytes: number;
     commandTimeoutMs: number;
+    commandTerminationGraceMs: number;
   };
   paths: {
     allow: string[];
@@ -95,7 +97,8 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
     require_approval_for_mutations: true,
     redact_secrets: true,
     max_output_bytes: 200_000,
-    command_timeout_ms: 120_000
+    command_timeout_ms: 120_000,
+    command_termination_grace_ms: 1_000
   };
   const commands = raw.commands ?? { allow_readonly: [], deny: [] };
   const audit = raw.audit ?? { log_path: ".acs/audit/mcp.jsonl" };
@@ -107,7 +110,8 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
       requireApprovalForMutations: security.require_approval_for_mutations,
       redactSecrets: security.redact_secrets,
       maxOutputBytes: security.max_output_bytes,
-      commandTimeoutMs: security.command_timeout_ms
+      commandTimeoutMs: security.command_timeout_ms,
+      commandTerminationGraceMs: security.command_termination_grace_ms
     },
     paths: {
       allow: raw.paths.allow.map((entry) => realExistingPath(entry, baseDir)),

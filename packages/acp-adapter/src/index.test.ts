@@ -4,9 +4,19 @@ import { join } from "node:path";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type StoredAuditEvent } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
-import { ReadonlyAcpAdapter } from "./index.js";
+import { ReadonlyAcpAdapter, acpChildEnvironment } from "./index.js";
 
 describe("read-only ACP adapter", () => {
+  it("uses host-correct environment-name matching", () => {
+    const environment = acpChildEnvironment({ PATH: "/bin", path: "/lowercase" }, { path: "/explicit" });
+
+    if (process.platform === "win32") {
+      expect(Object.values(environment)).toEqual(["/explicit"]);
+    } else {
+      expect(environment).toEqual({ PATH: "/bin", path: "/explicit" });
+    }
+  });
+
   it("initializes a stdio ACP agent and persists registry metadata", async () => {
     await withAdapter("success", async ({ adapter, store }) => {
       const status = await adapter.start();
@@ -140,11 +150,48 @@ describe("read-only ACP adapter", () => {
       expect(eventNames(store.readEvents())).toContain("acp.plan");
     });
   });
+
+  it("excludes inherited secrets while preserving allowlisted and explicit child environment values", async () => {
+    const inheritedSecrets = {
+      ACS_GATEWAY_TOKEN: "gateway-secret",
+      ACS_OAUTH_ISSUER: "https://issuer.example",
+      CONTROL_PLANE_API_KEY: "control-plane-secret",
+      OPENAI_API_KEY: "cloud-secret",
+      AWS_SECRET_ACCESS_KEY: "aws-secret",
+      NODE_OPTIONS: "--no-warnings",
+      LD_PRELOAD: "/definitely/not/a/real/library.so",
+      DYLD_INSERT_LIBRARIES: "/definitely/not/a/real/library.dylib"
+    };
+    const previous = Object.fromEntries(Object.keys(inheritedSecrets).map((name) => [name, process.env[name]]));
+    Object.assign(process.env, inheritedSecrets);
+
+    try {
+      await withAdapter(
+        "environment",
+        async ({ adapter }) => {
+          const status = await adapter.start();
+
+          expect(status).toMatchObject({
+            agentName: "explicit-value",
+            agentVersion: "no-secrets",
+            protocolVersion: "path-present"
+          });
+        },
+        { ACP_EXPLICIT_TEST: "explicit-value" }
+      );
+    } finally {
+      for (const [name, value] of Object.entries(previous)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  });
 });
 
 async function withAdapter(
   scenario: string,
-  fn: (context: { adapter: ReadonlyAcpAdapter; store: SqliteWorkItemStore; dbPath: string }) => Promise<void>
+  fn: (context: { adapter: ReadonlyAcpAdapter; store: SqliteWorkItemStore; dbPath: string }) => Promise<void>,
+  env?: NodeJS.ProcessEnv
 ): Promise<void> {
   const dir = mkdtempSync(join(tmpdir(), "acs-acp-adapter-"));
   const dbPath = join(dir, "control.db");
@@ -155,6 +202,7 @@ async function withAdapter(
     actorId: "acp-test-actor",
     command: process.execPath,
     args: ["-e", fixtureAgentScript(scenario)],
+    env,
     initializeTimeoutMs: 500
   });
   try {
@@ -179,9 +227,24 @@ function send(message) {
 }
 
 function initializeResult() {
+  const inheritedSecretNames = [
+    'ACS_GATEWAY_TOKEN',
+    'ACS_OAUTH_ISSUER',
+    'CONTROL_PLANE_API_KEY',
+    'OPENAI_API_KEY',
+    'AWS_SECRET_ACCESS_KEY',
+    'NODE_OPTIONS',
+    'LD_PRELOAD',
+    'DYLD_INSERT_LIBRARIES'
+  ].filter((name) => process.env[name]);
   return {
-    protocolVersion: '1.0',
-    agent: { name: 'Fixture ACP Agent', version: '0.2.0' },
+    protocolVersion: scenario === 'environment'
+      ? (process.env.PATH ? 'path-present' : 'path-missing')
+      : '1.0',
+    agent: {
+      name: scenario === 'environment' ? (process.env.ACP_EXPLICIT_TEST || 'missing-explicit') : 'Fixture ACP Agent',
+      version: scenario === 'environment' ? (inheritedSecretNames.join(',') || 'no-secrets') : '0.2.0'
+    },
     capabilities: scenario === 'unsupported-capability'
       ? { client: { fileSystem: { read: true } } }
       : { plan: true, sessionUpdate: true, filesystem: false, terminal: false },

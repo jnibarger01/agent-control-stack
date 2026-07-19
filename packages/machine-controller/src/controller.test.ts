@@ -145,6 +145,26 @@ describe("machine controller", () => {
     expect(env).not.toHaveProperty("OPENAI_API_KEY");
   });
 
+  it("loads a configurable command termination grace interval", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-machine-grace-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    const configPath = join(dir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        security: { command_termination_grace_ms: 250 },
+        paths: { allow: [allowed], deny: [] }
+      })
+    );
+
+    try {
+      expect(loadMachineControllerConfig(configPath).security.commandTerminationGraceMs).toBe(250);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("runs only read-only commands", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-machine-"));
     const allowed = join(dir, "allowed");

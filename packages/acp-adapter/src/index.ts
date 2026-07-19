@@ -70,6 +70,44 @@ interface InitializeMetadata {
   rawCapabilities: unknown;
 }
 
+const acpChildEnvironmentAllowlist = new Set([
+  "COMSPEC",
+  "HOME",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "PATH",
+  "PATHEXT",
+  "SHELL",
+  "SYSTEMROOT",
+  "TEMP",
+  "TMP",
+  "TMPDIR",
+  "USER",
+  "USERNAME",
+  "WINDIR"
+]);
+
+export function acpChildEnvironment(
+  source: NodeJS.ProcessEnv = process.env,
+  additions: NodeJS.ProcessEnv = {}
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = {};
+  const caseInsensitiveNames = process.platform === "win32";
+  for (const [name, value] of Object.entries(source)) {
+    const allowlistName = caseInsensitiveNames ? name.toUpperCase() : name;
+    if (value !== undefined && acpChildEnvironmentAllowlist.has(allowlistName)) {
+      setEnvironmentValue(environment, name, value, caseInsensitiveNames);
+    }
+  }
+  for (const [name, value] of Object.entries(additions)) {
+    if (value !== undefined) {
+      setEnvironmentValue(environment, name, value, caseInsensitiveNames);
+    }
+  }
+  return environment;
+}
+
 export function acpAdapterConfigFromEnv(env: NodeJS.ProcessEnv = process.env): ReadonlyAcpAdapterConfig | undefined {
   const command = env.ACS_ACP_AGENT_COMMAND?.trim();
   if (!command) return undefined;
@@ -131,7 +169,7 @@ export class ReadonlyAcpAdapter {
 
     this.child = spawn(this.options.command, this.options.args ?? [], {
       cwd: this.options.cwd,
-      env: this.options.env ? { ...process.env, ...this.options.env } : process.env,
+      env: acpChildEnvironment(process.env, this.options.env),
       stdio: "pipe",
       shell: false
     });
@@ -406,6 +444,20 @@ export class ReadonlyAcpAdapter {
   private snapshot(): ReadonlyAcpAdapterStatus {
     return { ...this.status, capabilities: [...this.status.capabilities], authMethods: [...this.status.authMethods], supportedSessionFeatures: [...this.status.supportedSessionFeatures] };
   }
+}
+
+function setEnvironmentValue(
+  environment: NodeJS.ProcessEnv,
+  name: string,
+  value: string,
+  caseInsensitiveNames: boolean
+): void {
+  const normalized = caseInsensitiveNames ? name.toUpperCase() : name;
+  for (const existing of Object.keys(environment)) {
+    const normalizedExisting = caseInsensitiveNames ? existing.toUpperCase() : existing;
+    if (normalizedExisting === normalized) delete environment[existing];
+  }
+  environment[name] = value;
 }
 
 class JsonRpcParser {
