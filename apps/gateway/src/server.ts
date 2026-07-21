@@ -22,6 +22,7 @@ import {
   MAX_EVENT_LIMIT,
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
+  validateHeartbeatTtl,
   acpRoles,
   actorTypes,
   registryStatuses,
@@ -153,12 +154,13 @@ export interface GatewayOptions {
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
-    heartbeatTtlMs: options.heartbeatTtlMs
+    heartbeatTtlMs
   });
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
@@ -492,7 +494,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.post("/actors", registerActorHandler);
 
   app.get("/api/agents", { preHandler: requireRead }, async () => ({
-    agents: workItems.listRegistryAgents().map(projectRegistryFreshness)
+    agents: workItems.listRegistryAgents().map((agent) => projectRegistryFreshness(agent, heartbeatTtlMs))
   }));
 
   app.post("/api/agents", async (request, reply) => {
@@ -518,7 +520,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return reply.code(404).send({ error: "agent not found" });
       }
       return {
-        agent: projectRegistryFreshness(agent),
+        agent: projectRegistryFreshness(agent, heartbeatTtlMs),
         adapterStatus: adapterStatusFor(request.params.id),
         events: workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }))
       };
@@ -806,7 +808,7 @@ function eventReadOptions(query: unknown, filters: Pick<ReadEventsOptions, "work
   };
 }
 
-function projectRegistryFreshness(agent: RegistryAgentDetail): RegistryAgentDetail & {
+function projectRegistryFreshness(agent: RegistryAgentDetail, heartbeatTtlMs: number): RegistryAgentDetail & {
   effectiveStatus: RegistryStatus;
   heartbeatAgeMs: number | null;
   isStale: boolean;
@@ -818,7 +820,7 @@ function projectRegistryFreshness(agent: RegistryAgentDetail): RegistryAgentDeta
     agent.lastHeartbeatAt,
     agent.updatedAt,
     new Date(),
-    DEFAULT_HEARTBEAT_TTL_MS
+    heartbeatTtlMs
   );
   return {
     ...agent,

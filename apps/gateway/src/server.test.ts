@@ -351,6 +351,51 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("uses the configured heartbeat TTL when projecting registry freshness", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-api-agent-custom-ttl-"));
+    const dbPath = join(dir, "control.db");
+    const heartbeatTtlMs = 1_000;
+    const seed = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs });
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+    seed.createRegistryAgent({
+      id: "custom-ttl-agent",
+      name: "Custom TTL Agent",
+      kind: "cli",
+      acpRole: "IMPLEMENTATION_AGENT",
+      actorId: "user"
+    });
+    seed.recordAgentHeartbeat("custom-ttl-agent", {
+      status: "AVAILABLE",
+      actorId: "user",
+      now: new Date(Date.now() - heartbeatTtlMs - 1)
+    });
+    seed.close();
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth, heartbeatTtlMs });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/api/agents",
+        headers: { authorization: `Bearer ${testAuth.token}` }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().agents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "custom-ttl-agent",
+            status: "AVAILABLE",
+            effectiveStatus: "OFFLINE",
+            isStale: true
+          })
+        ])
+      );
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reconciles stale tunnel sessions and agents before reporting readiness", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-readiness-liveness-"));
     const dbPath = join(dir, "control.db");
