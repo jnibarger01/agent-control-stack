@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -911,6 +911,27 @@ describe("work item state machine", () => {
     }
   });
 
+  it("migrates a copied version-three database without mutating the source", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-migration-copy-"));
+    const sourcePath = join(dir, "source.db");
+    const copiedPath = join(dir, "copied.db");
+    createVersionThreeDatabase(sourcePath);
+    const sourceBefore = readFileSync(sourcePath);
+    copyFileSync(sourcePath, copiedPath);
+
+    const store = new SqliteWorkItemStore(copiedPath);
+    try {
+      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+      expect(store.verifyAuditChain()).toMatchObject({ ok: true });
+    } finally {
+      store.close();
+    }
+
+    expect(readFileSync(sourcePath)).toEqual(sourceBefore);
+    expect(migrationRows(sourcePath).map((row) => row.version)).toEqual([1, 2, 3]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it("migrates a previous control-plane schema without reloading SQL blindly", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-migration-previous-"));
     const dbPath = join(dir, "control.db");
@@ -1414,6 +1435,32 @@ function migrationRows(dbPath: string): Array<{ version: number; name: string; f
     return db
       .prepare(`SELECT version, name, filename FROM schema_migrations ORDER BY version ASC`)
       .all() as Array<{ version: number; name: string; filename: string }>;
+  } finally {
+    db.close();
+  }
+}
+
+function createVersionThreeDatabase(dbPath: string): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`
+      CREATE TABLE schema_migrations (
+        version INTEGER PRIMARY KEY,
+        name TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        checksum TEXT NOT NULL,
+        applied_at TEXT NOT NULL
+      );
+    `);
+    for (const migration of controlPlaneMigrations().slice(0, 3)) {
+      db.exec(migration.sql);
+      db
+        .prepare(
+          `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(migration.version, migration.name, migration.filename, migration.checksum, "2026-07-20T00:00:00.000Z");
+    }
   } finally {
     db.close();
   }
