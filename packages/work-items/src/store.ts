@@ -6,9 +6,9 @@ import {
   ControlStackError,
   applyControlPlaneMigrations,
   auditEventHash,
-  controlPlaneMigrations,
   createId,
   createEvent,
+  inspectControlPlaneDatabase,
   redactValue,
   stableHash,
   verifyAuditChain,
@@ -32,6 +32,12 @@ import {
   type WorkItemRisk,
   type WorkItemStatus
 } from "./work-item.js";
+import {
+  DEFAULT_HEARTBEAT_TTL_MS,
+  isHeartbeatExpired,
+  validateHeartbeatTtl,
+  type LivenessReconciliationOptions
+} from "./liveness.js";
 
 interface WorkItemRow {
   id: string;
@@ -70,8 +76,11 @@ export interface StoreHealth {
   checks: {
     read: HealthCheck;
     write: HealthCheck;
+    integrity: HealthCheck;
+    foreignKeys: HealthCheck;
     migrations: HealthCheck;
     auditChain: HealthCheck;
+    liveness: HealthCheck;
   };
 }
 
@@ -426,6 +435,7 @@ export interface PrivilegedTransitionOptions {
 
 export interface SqliteWorkItemStoreOptions {
   leaseMs?: number;
+  heartbeatTtlMs?: number;
   onEvent?: (event: StoredAuditEvent) => void;
 }
 
@@ -455,9 +465,11 @@ export interface WorkItemStore {
   replaceAgentCapabilities(agentId: string, capabilities: RegistryCapabilityInput[], actorId: string): RegistryCapability[];
   listAgentCapabilities(agentId: string): RegistryCapability[];
   recordAgentHeartbeat(agentId: string, input: RegistryHeartbeatInput): { agent: RegistryAgentDetail; heartbeat: RegistryHeartbeat };
+  reconcileStaleAgents(options?: LivenessReconciliationOptions): RegistryAgentDetail[];
   registerTunnelSession(input: TunnelSessionRegistration): RegisteredTunnelSession;
   heartbeatTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession;
   revokeTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession;
+  reconcileStaleTunnelSessions(options?: LivenessReconciliationOptions): RegisteredTunnelSession[];
   getTunnelSession(input: TunnelSessionRef): TunnelSessionAuthorizationRecord | undefined;
   recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent;
   recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent;
@@ -474,6 +486,7 @@ export interface WorkItemStore {
 export class SqliteWorkItemStore implements WorkItemStore {
   private readonly db: DatabaseSync;
   private readonly leaseMs: number;
+  private readonly heartbeatTtlMs: number;
   private readonly onEvent: (event: StoredAuditEvent) => void;
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
@@ -483,15 +496,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
+    this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     this.onEvent = options.onEvent ?? (() => undefined);
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
       PRAGMA foreign_keys = ON;
     `);
-    applyControlPlaneMigrations(this.db);
-    this.backfillAuditChain();
-    this.auditChainValid = this.verifyAuditChain().ok;
+    try {
+      applyControlPlaneMigrations(this.db);
+      this.backfillAuditChain();
+      this.auditChainValid = this.verifyAuditChain().ok;
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   create(input: unknown): WorkItem {
@@ -609,11 +628,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   health(): StoreHealth {
+    const database = inspectControlPlaneDatabase(this.db);
+    this.auditChainValid = database.checks.auditChain.ok;
     const checks = {
       read: this.readHealth(),
       write: this.writeHealth(),
-      migrations: this.migrationHealth(),
-      auditChain: this.auditChainHealth()
+      ...database.checks,
+      liveness: this.livenessHealth()
     };
     return { ok: Object.values(checks).every((check) => check.ok), checks };
   }
@@ -965,6 +986,68 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  reconcileStaleAgents(options: LivenessReconciliationOptions = {}): RegistryAgentDetail[] {
+    return this.write(() => {
+      const now = options.now ?? new Date();
+      const nowIso = now.toISOString();
+      const actorId = options.actorId ?? "actor_system_bootstrap";
+      this.getActorRequired(actorId);
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM agents
+           WHERE status IN ('AVAILABLE', 'BUSY', 'DEGRADED')
+           ORDER BY id ASC`
+        )
+        .all() as unknown as AgentRow[];
+      const reconciled: RegistryAgentDetail[] = [];
+      const events: StoredAuditEvent[] = [];
+
+      for (const row of rows) {
+        if (!isHeartbeatExpired(row.last_heartbeat_at, row.updated_at, now, this.heartbeatTtlMs)) {
+          continue;
+        }
+        const result = this.db
+          .prepare(
+            `UPDATE agents
+             SET status = 'OFFLINE',
+                 last_error = CASE WHEN last_error IS NULL THEN 'heartbeat expired' ELSE last_error END,
+                 updated_at = ?, updated_by_actor_id = ?
+             WHERE id = ? AND status = ? AND last_heartbeat_at IS ? AND updated_at = ?`
+          )
+          .run(nowIso, actorId, row.id, row.status, row.last_heartbeat_at, row.updated_at);
+        if (result.changes !== 1) {
+          continue;
+        }
+        const agent = this.getRegistryAgentRequired(row.id);
+        reconciled.push(agent);
+        events.push(
+          this.appendAuditEvent(
+            createEvent(
+              "agent.reconciled",
+              {
+                agentId: row.id,
+                previousStatus: row.status,
+                status: agent.status,
+                lastHeartbeatAt: row.last_heartbeat_at,
+                reason: "heartbeat_expired",
+                heartbeatTtlMs: this.heartbeatTtlMs,
+                actorId
+              },
+              {
+                "agent.id": row.id,
+                "agent.status": agent.status,
+                "actor.id": actorId,
+                "liveness.reason": "heartbeat_expired"
+              }
+            )
+          )
+        );
+      }
+
+      return { value: reconciled, events };
+    });
+  }
+
   registerTunnelSession(input: TunnelSessionRegistration): RegisteredTunnelSession {
     return this.write(() => {
       const connector = this.getConnectorRequired(input.connectorId);
@@ -1038,6 +1121,71 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
       );
       return { value: session, events: [event] };
+    });
+  }
+
+  reconcileStaleTunnelSessions(options: LivenessReconciliationOptions = {}): RegisteredTunnelSession[] {
+    return this.write(() => {
+      const now = options.now ?? new Date();
+      const nowIso = now.toISOString();
+      const actorId = options.actorId ?? "actor_system_bootstrap";
+      this.getActorRequired(actorId);
+      const rows = this.db
+        .prepare(`SELECT * FROM tunnel_sessions WHERE status = 'active' ORDER BY connector_id, tunnel_id, session_id`)
+        .all() as unknown as TunnelSessionRow[];
+      const reconciled: RegisteredTunnelSession[] = [];
+      const events: StoredAuditEvent[] = [];
+
+      for (const row of rows) {
+        const sessionExpired = !Number.isFinite(Date.parse(row.expires_at)) || Date.parse(row.expires_at) <= now.getTime();
+        const heartbeatExpired = isHeartbeatExpired(row.last_heartbeat_at, row.issued_at, now, this.heartbeatTtlMs);
+        if (!sessionExpired && !heartbeatExpired) {
+          continue;
+        }
+        const result = this.db
+          .prepare(
+            `UPDATE tunnel_sessions
+             SET status = 'revoked', updated_at = ?
+             WHERE connector_id = ? AND tunnel_id = ? AND session_id = ?
+               AND status = 'active' AND expires_at = ? AND last_heartbeat_at IS ?`
+          )
+          .run(
+            nowIso,
+            row.connector_id,
+            row.tunnel_id,
+            row.session_id,
+            row.expires_at,
+            row.last_heartbeat_at
+          );
+        if (result.changes !== 1) {
+          continue;
+        }
+        const session = this.getTunnelSessionRequired({
+          connectorId: row.connector_id,
+          tunnelId: row.tunnel_id,
+          sessionId: row.session_id
+        });
+        const reason = sessionExpired ? "session_expired" : "heartbeat_expired";
+        reconciled.push(session);
+        events.push(
+          this.appendAuditEvent(
+            createEvent(
+              "tunnel_session.reconciled",
+              { ...session, previousStatus: "active", reason, heartbeatTtlMs: this.heartbeatTtlMs, actorId },
+              {
+                "connector.id": session.connectorId,
+                "tunnel.id": session.tunnelId,
+                "tunnel.session_id": session.sessionId,
+                "tunnel.session_status": session.status,
+                "actor.id": actorId,
+                "liveness.reason": reason
+              }
+            )
+          )
+        );
+      }
+
+      return { value: reconciled, events };
     });
   }
 
@@ -1610,6 +1758,36 @@ export class SqliteWorkItemStore implements WorkItemStore {
     }
   }
 
+  private livenessHealth(): HealthCheck {
+    try {
+      const now = new Date();
+      const activeSessions = this.db
+        .prepare(`SELECT expires_at, issued_at, last_heartbeat_at FROM tunnel_sessions WHERE status = 'active'`)
+        .all() as Array<{ expires_at: string; issued_at: string; last_heartbeat_at: string | null }>;
+      if (
+        activeSessions.some(
+          (session) =>
+            !Number.isFinite(Date.parse(session.expires_at)) ||
+            Date.parse(session.expires_at) <= now.getTime() ||
+            isHeartbeatExpired(session.last_heartbeat_at, session.issued_at, now, this.heartbeatTtlMs)
+        )
+      ) {
+        return failHealth("stale_liveness");
+      }
+      const activeAgents = this.db
+        .prepare(
+          `SELECT last_heartbeat_at, updated_at FROM agents
+           WHERE status IN ('AVAILABLE', 'BUSY', 'DEGRADED')`
+        )
+        .all() as Array<{ last_heartbeat_at: string | null; updated_at: string }>;
+      return activeAgents.some((agent) => isHeartbeatExpired(agent.last_heartbeat_at, agent.updated_at, now, this.heartbeatTtlMs))
+        ? failHealth("stale_liveness")
+        : okHealth();
+    } catch {
+      return failHealth("liveness_probe_failed");
+    }
+  }
+
   private writeHealth(): HealthCheck {
     try {
       this.db.exec("PRAGMA busy_timeout = 50");
@@ -1642,43 +1820,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       } catch {
         // health checks should report the probe failure, not cleanup details.
       }
-    }
-  }
-
-  private migrationHealth(): HealthCheck {
-    try {
-      const expected = controlPlaneMigrations();
-      const rows = this.db
-        .prepare(`SELECT version, name, filename, checksum FROM schema_migrations ORDER BY version ASC`)
-        .all() as Array<{ version: number; name: string; filename: string; checksum: string }>;
-      const byVersion = new Map(rows.map((row) => [row.version, row]));
-      for (const migration of expected) {
-        const row = byVersion.get(migration.version);
-        if (!row) {
-          return failHealth("migration_missing");
-        }
-        if (row.name !== migration.name || row.filename !== migration.filename || row.checksum !== migration.checksum) {
-          return failHealth("migration_mismatch");
-        }
-      }
-      return okHealth();
-    } catch {
-      return failHealth("migration_probe_failed");
-    }
-  }
-
-  private auditChainHealth(): HealthCheck {
-    try {
-      const verification = this.verifyAuditChain();
-      if (verification.ok) {
-        this.auditChainValid = true;
-        return okHealth();
-      }
-      this.auditChainValid = false;
-      return failHealth(`audit_chain_${verification.failure.reason}`);
-    } catch {
-      this.auditChainValid = false;
-      return failHealth("audit_chain_probe_failed");
     }
   }
 

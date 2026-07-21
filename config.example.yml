@@ -8,6 +8,7 @@ security:
   redact_secrets: true
   max_output_bytes: 200000
   command_timeout_ms: 120000
+  command_termination_grace_ms: 1000
 
 paths:
   allow:

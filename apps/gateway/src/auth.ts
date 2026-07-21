@@ -111,6 +111,26 @@ export function oauthDiscoveryChallenge(
   return `Bearer ${params.join(", ")}`;
 }
 
+export function mcpAuthorizationHttpError(
+  authorization: Exclude<McpAuthorizationResult, { ok: true }>,
+  resourceMetadataUrl: string | undefined,
+  scopes: McpScope[]
+): {
+  statusCode: 401 | 403;
+  error: "unauthorized" | "insufficient_scope";
+  wwwAuthenticate?: string;
+} {
+  const oauthError = authorization.error === "insufficient_scope" ? "insufficient_scope" : "invalid_token";
+  const challenge = resourceMetadataUrl
+    ? oauthDiscoveryChallenge(resourceMetadataUrl, oauthError, authorization.message, scopes)
+    : undefined;
+  return {
+    statusCode: authorization.statusCode,
+    error: authorization.error === "insufficient_scope" ? "insufficient_scope" : "unauthorized",
+    ...(challenge ? { wwwAuthenticate: challenge } : {})
+  };
+}
+
 export function resolveMcpAuthOptions(input: {
   localBearerToken?: string;
   oauth?: McpOAuthOptions;

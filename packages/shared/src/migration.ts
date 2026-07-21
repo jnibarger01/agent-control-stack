@@ -23,7 +23,8 @@ interface SqliteLike {
 const migrationFiles = [
   { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
   { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
-  { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" }
+  { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" },
+  { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -98,7 +99,79 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
   if (migration.version === 3 && hasColumn(db, "work_items", "requester_subject")) {
     return migration.sql.replace(/^\s*ALTER TABLE work_items ADD COLUMN requester_subject TEXT;\s*/u, "");
   }
+  if (migration.version === 4) {
+    validateStateConstraintPreflight(db);
+  }
   return migration.sql;
+}
+
+function validateStateConstraintPreflight(db: SqliteLike): void {
+  const invalidQueries = [
+    {
+      label: "work_items",
+      sql: `SELECT id FROM work_items
+            WHERE status NOT IN ('draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected')
+               OR risk NOT IN ('low', 'medium', 'high', 'critical')
+               OR target_json IS NULL OR json_valid(target_json) = 0
+               OR requested_actions_json IS NULL OR json_valid(requested_actions_json) = 0
+               OR (result_json IS NOT NULL AND json_valid(result_json) = 0)`
+    },
+    {
+      label: "approval_records",
+      sql: `SELECT work_item_id || ':' || action_hash AS id FROM approval_records
+            WHERE status NOT IN ('granted', 'consumed')`
+    },
+    {
+      label: "connector_records",
+      sql: `SELECT id FROM connector_records
+            WHERE status NOT IN ('active', 'revoked')
+               OR allowed_scopes_json IS NULL OR json_valid(allowed_scopes_json) = 0`
+    },
+    {
+      label: "tunnel_sessions",
+      sql: `SELECT session_id AS id FROM tunnel_sessions
+            WHERE status NOT IN ('active', 'revoked')`
+    },
+    {
+      label: "actors",
+      sql: `SELECT id FROM actors
+            WHERE actor_type NOT IN ('HUMAN', 'SYSTEM', 'AGENT', 'SERVICE')`
+    },
+    {
+      label: "agents",
+      sql: `SELECT id FROM agents
+            WHERE status NOT IN ('UNKNOWN', 'AVAILABLE', 'BUSY', 'DEGRADED', 'OFFLINE', 'ERROR')`
+    },
+    {
+      label: "heartbeats",
+      sql: `SELECT id FROM heartbeats
+            WHERE status NOT IN ('UNKNOWN', 'AVAILABLE', 'BUSY', 'DEGRADED', 'OFFLINE', 'ERROR')`
+    },
+    {
+      label: "capabilities",
+      sql: `SELECT id FROM capabilities
+            WHERE input_schema IS NOT NULL AND json_valid(input_schema) = 0`
+    },
+    {
+      label: "audit_events",
+      sql: `SELECT id FROM audit_events
+            WHERE attributes IS NULL OR json_valid(attributes) = 0
+               OR body IS NULL OR json_valid(body) = 0`
+    }
+  ];
+
+  for (const query of invalidQueries) {
+    const rows = queryRows(db, query.sql);
+    if (rows.length > 0) {
+      throw new Error(
+        `state constraints migration refused invalid ${query.label} rows: ${rows.slice(0, 50).join(", ")}`
+      );
+    }
+  }
+}
+
+function queryRows(db: SqliteLike, sql: string): string[] {
+  return (db.prepare(sql).all() as Array<Record<string, unknown>>).map((row) => String(Object.values(row)[0]));
 }
 
 function hasColumn(db: SqliteLike, table: string, column: string): boolean {

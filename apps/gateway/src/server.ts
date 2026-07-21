@@ -20,6 +20,8 @@ import {
   SqliteWorkItemStore,
   DEFAULT_EVENT_LIMIT,
   MAX_EVENT_LIMIT,
+  DEFAULT_HEARTBEAT_TTL_MS,
+  isHeartbeatExpired,
   acpRoles,
   actorTypes,
   registryStatuses,
@@ -32,7 +34,9 @@ import {
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import {
+  authorizeMcpRequest,
   createProtectedResourceMetadata,
+  mcpAuthorizationHttpError,
   MCP_SCOPES,
   resolveMcpAuthOptions,
   type McpAuthenticatedRequest,
@@ -124,8 +128,6 @@ const sessionCookiePayloadSchema = z.object({
   iat: z.number().int().nonnegative(),
   exp: z.number().int().nonnegative()
 });
-const agentFreshnessWindowMs = 15 * 60 * 1000;
-
 export interface GatewayAuthOptions {
   token: string;
   actor: string;
@@ -135,6 +137,7 @@ export interface GatewayAuthOptions {
 
 export interface GatewayOptions {
   dbPath?: string;
+  heartbeatTtlMs?: number;
   logger?: boolean;
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
@@ -153,7 +156,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const directAgentController = resolveDirectAgentController(options);
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
-  const workItems = new SqliteWorkItemStore(dbPath, { onEvent: broadcast });
+  const workItems = new SqliteWorkItemStore(dbPath, {
+    onEvent: broadcast,
+    heartbeatTtlMs: options.heartbeatTtlMs
+  });
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
   const auth = resolveAuth(options);
@@ -209,7 +215,25 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.get("/livez", async () => ({ ok: true, status: "alive" }));
 
-  const readiness = async (request: FastifyRequest, reply: FastifyReply) => {
+  const readiness = async (_request: FastifyRequest, reply: FastifyReply) => {
+    const initialHealth = workItems.health();
+    const dependencyChecks = Object.entries(initialHealth.checks)
+      .filter(([name]) => name !== "liveness")
+      .map(([, check]) => check);
+    if (!dependencyChecks.every((check) => check.ok)) {
+      return reply.code(503).send(initialHealth);
+    }
+    try {
+      workItems.reconcileStaleTunnelSessions();
+      workItems.reconcileStaleAgents();
+    } catch {
+      const health = workItems.health();
+      return reply.code(503).send({
+        ...health,
+        ok: false,
+        checks: { ...health.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
+      });
+    }
     const health = workItems.health();
     return reply.code(health.ok ? 200 : 503).send(health);
   };
@@ -260,7 +284,34 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-  app.get("/mcp/tools", async () => ({ tools: workItemToolNames }));
+  app.get("/mcp/tools", async (request, reply) => {
+    const requiredScopes = ["acs:work:read"] as const;
+    const authorization = await authorizeMcpRequest({
+      headers: request.headers,
+      auth: mcpAuth,
+      requiredScopes: [...requiredScopes],
+      remoteAddress: request.socket.remoteAddress ?? request.ip
+    });
+    if (!authorization.ok) {
+      const error = mcpAuthorizationHttpError(
+        authorization,
+        mcpResourceMetadataUrl(request, mcpAuth?.oauth),
+        [...requiredScopes]
+      );
+      if (error.wwwAuthenticate) {
+        reply.header("WWW-Authenticate", error.wwwAuthenticate);
+      }
+      return reply.code(error.statusCode).send({ error: error.error });
+    }
+    recordAuthenticatedMcpRequest({
+      requestId: request.id,
+      method: "GET",
+      toolName: "tools/list",
+      resolvedActor: resolveMcpActorId(workItems, authorization.auth, auth) ?? authorization.auth.subject,
+      auth: authorization.auth
+    });
+    return { tools: workItemToolNames };
+  });
 
   app.post("/connectors", async (request, reply) => {
     try {
@@ -394,16 +445,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     return reply.code(result.statusCode).send(result.body);
   });
 
-  app.get("/.well-known/oauth-protected-resource", async (request, reply) => {
-    const metadata = protectedResourceMetadata(request, mcpAuth);
+  app.get("/.well-known/oauth-protected-resource", async (_request, reply) => {
+    const metadata = protectedResourceMetadata(mcpAuth);
     if (!metadata) {
       return reply.code(404).send({ error: "MCP auth is not configured" });
     }
     return metadata;
   });
 
-  app.get("/.well-known/oauth-protected-resource/mcp", async (request, reply) => {
-    const metadata = protectedResourceMetadata(request, mcpAuth);
+  app.get("/.well-known/oauth-protected-resource/mcp", async (_request, reply) => {
+    const metadata = protectedResourceMetadata(mcpAuth);
     if (!metadata) {
       return reply.code(404).send({ error: "MCP auth is not configured" });
     }
@@ -763,7 +814,12 @@ function projectRegistryFreshness(agent: RegistryAgentDetail): RegistryAgentDeta
   const heartbeatTime = agent.lastHeartbeatAt ? Date.parse(agent.lastHeartbeatAt) : Number.NaN;
   const heartbeatAgeMs = Number.isFinite(heartbeatTime) ? Math.max(0, Date.now() - heartbeatTime) : null;
   const freshnessStatus = agent.status === "AVAILABLE" || agent.status === "BUSY" || agent.status === "DEGRADED";
-  const isStale = freshnessStatus && (heartbeatAgeMs === null || heartbeatAgeMs > agentFreshnessWindowMs);
+  const isStale = freshnessStatus && isHeartbeatExpired(
+    agent.lastHeartbeatAt,
+    agent.updatedAt,
+    new Date(),
+    DEFAULT_HEARTBEAT_TTL_MS
+  );
   return {
     ...agent,
     effectiveStatus: isStale ? "OFFLINE" : agent.status,
@@ -873,23 +929,8 @@ function mcpResourceMetadataUrl(request: FastifyRequest, oauth: McpOAuthOptions 
   return host ? `${proto}://${host}/.well-known/oauth-protected-resource/mcp` : undefined;
 }
 
-function protectedResourceMetadata(request: FastifyRequest, auth: McpAuthOptions | undefined) {
-  if (auth?.oauth) {
-    return createProtectedResourceMetadata(auth.oauth);
-  }
-  const forwardedProto = firstHeader(request.headers["x-forwarded-proto"]);
-  const proto = forwardedProto ?? request.protocol;
-  const host = firstHeader(request.headers["x-forwarded-host"]) ?? request.headers.host;
-  if (!host) {
-    return undefined;
-  }
-  return {
-    resource: `${proto}://${host}/mcp`,
-    resource_name: "Agent Control Stack MCP Gateway",
-    authorization_servers: [],
-    scopes_supported: [...MCP_SCOPES],
-    bearer_methods_supported: ["header"] as const
-  };
+function protectedResourceMetadata(auth: McpAuthOptions | undefined) {
+  return auth?.oauth ? createProtectedResourceMetadata(auth.oauth) : undefined;
 }
 
 function requiresMcpAuthentication(request: FastifyRequest, auth: McpAuthOptions | undefined): boolean {

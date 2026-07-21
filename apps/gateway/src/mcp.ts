@@ -5,7 +5,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import { ZodError, z } from "zod";
 import {
   authorizeMcpRequest,
-  oauthDiscoveryChallenge,
+  mcpAuthorizationHttpError,
   type McpAuthenticatedRequest,
   type McpAuthOptions,
   type McpScope
@@ -117,7 +117,11 @@ export async function handleMcpHttpRequest(input: {
     case "ping":
       return jsonRpcResult(request.data.id, {});
     case "tools/list":
-      return jsonRpcResult(request.data.id, { tools: mcpToolDefinitions(Boolean(input.directAgentController)) });
+      return jsonRpcResult(request.data.id, {
+        tools: mcpToolDefinitions(Boolean(input.directAgentController), Boolean(input.auth?.oauth))
+      });
+    case "resources/list":
+      return jsonRpcResult(request.data.id, { resources: [] });
     case "tools/call":
       return handleToolsCall({
         id: request.data.id,
@@ -163,7 +167,13 @@ async function authorizeDiscoveryMethod(input: {
 }
 
 function isDiscoveryMethod(method: string): boolean {
-  return method === "initialize" || method === "ping" || method === "tools/list" || method.startsWith("notifications/");
+  return (
+    method === "initialize" ||
+    method === "ping" ||
+    method === "tools/list" ||
+    method === "resources/list" ||
+    method.startsWith("notifications/")
+  );
 }
 
 async function handleToolsCall(input: {
@@ -352,20 +362,23 @@ function workItemIdFromToolResult(result: unknown): string | undefined {
   return undefined;
 }
 
-function mcpToolDefinitions(includeDirectAgent: boolean) {
+function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean) {
   const toolNames: McpToolName[] = includeDirectAgent
     ? [...remoteMcpToolNames, directAgentToolName]
     : [...remoteMcpToolNames];
-  return toolNames.map((name) => ({
-    name,
-    description: toolDescription(name),
-    inputSchema: toolInputSchema(name),
-    securitySchemes: [{ type: "oauth2", scopes: requiredScopes(name) }],
-    _meta: {
-      securitySchemes: [{ type: "oauth2", scopes: requiredScopes(name) }]
-    },
-    annotations: toolAnnotations(name)
-  }));
+  return toolNames.map((name) => {
+    const securitySchemes = advertiseOAuth
+      ? [{ type: "oauth2" as const, scopes: requiredScopes(name) }]
+      : [{ type: "noauth" as const }];
+    return {
+      name,
+      description: toolDescription(name),
+      inputSchema: toolInputSchema(name),
+      securitySchemes,
+      _meta: { securitySchemes },
+      annotations: toolAnnotations(name)
+    };
+  });
 }
 
 function requiredScopes(name: McpToolName): McpScope[] {
@@ -533,13 +546,10 @@ function mcpAuthError(
   resourceMetadataUrl: string | undefined,
   scopes: McpScope[]
 ): McpHttpResult {
-  const oauthError = authorization.error === "insufficient_scope" ? "insufficient_scope" : "invalid_token";
-  const challenge = resourceMetadataUrl
-    ? oauthDiscoveryChallenge(resourceMetadataUrl, oauthError, authorization.message, scopes)
-    : undefined;
+  const sharedError = mcpAuthorizationHttpError(authorization, resourceMetadataUrl, scopes);
   return {
     statusCode: authorization.statusCode,
-    ...(challenge ? { wwwAuthenticate: challenge } : {}),
+    ...(sharedError.wwwAuthenticate ? { wwwAuthenticate: sharedError.wwwAuthenticate } : {}),
     body: {
       jsonrpc: "2.0",
       id,
@@ -549,7 +559,7 @@ function mcpAuthError(
           authError: authorization.error,
           requiredScopes: scopes
         },
-        ...(challenge ? { _meta: { "mcp/www_authenticate": [challenge] } } : {}),
+        ...(sharedError.wwwAuthenticate ? { _meta: { "mcp/www_authenticate": [sharedError.wwwAuthenticate] } } : {}),
         isError: true
       }
     }

@@ -38,7 +38,7 @@ ACS provides a local control plane for agent-requested work:
 7. Lets a local worker claim only approved work items.
 8. Requires lease-bound worker result submission.
 9. Records redacted, OpenTelemetry-shaped audit events.
-10. Verifies audit-chain health through the store and `/health` endpoint.
+10. Verifies audit-chain and persisted liveness health through the store and `/health` endpoint.
 
 The core point: agents can ask; ACS decides whether the request is allowed, denied, or approval-gated. Trust is expensive. ACS tries not to hand it out like Halloween candy.
 
@@ -314,6 +314,8 @@ security:
   default_policy: deny
   require_approval_for_mutations: true
   redact_secrets: true
+  command_timeout_ms: 120000
+  command_termination_grace_ms: 1000
 paths:
   allow:
     - /home/jacen/projects
@@ -340,6 +342,8 @@ commands:
 ```
 
 For another machine, copy this file and adjust allowlisted paths. Keep denylisted credential/system paths tighter than your optimism.
+
+Timed-out read-only commands run in an isolated process group on POSIX. ACS sends the whole group `SIGTERM`, waits `command_termination_grace_ms`, then sends `SIGKILL` if the process group remains. Windows does not provide equivalent process-group signaling through Node.js, so ACS terminates only the direct child there; Windows command execution is not a process-tree containment boundary.
 
 ## Run locally
 
@@ -668,7 +672,9 @@ Register connectors and sessions through the authenticated gateway routes before
 curl -fsS http://127.0.0.1:3000/health
 ```
 
-Use `/livez` for process liveness and `/readyz` for traffic readiness. `/health` remains a compatibility alias for readiness. A ready response means the SQLite store can read/write health probes, migration checksums match, and the audit chain has not failed closed.
+Use `/livez` for process liveness and `/readyz` for traffic readiness. `/health` remains a compatibility alias for readiness. A ready response means the SQLite store can read/write health probes, migration checksums match, the audit chain has not failed closed, and stale active tunnel sessions or available agent states have been reconciled using the shared 15-minute heartbeat TTL. Reconciliation persists terminal/offline state and appends an audit event; it does not delete history.
+
+`GET /mcp/tools` is an authenticated capability-inventory route and requires the MCP `acs:work:read` scope. Anonymous, invalid, and insufficient-scope requests do not receive the tool inventory.
 
 ### Logs
 
