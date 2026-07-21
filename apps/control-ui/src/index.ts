@@ -1,4 +1,10 @@
-import type { RegistryAgentDetail, StoredAuditEvent, WorkItem } from "@agent-control-stack/work-items";
+import {
+  DEFAULT_HEARTBEAT_ONLINE_WINDOW_MS,
+  DEFAULT_HEARTBEAT_TTL_MS,
+  type RegistryAgentDetail,
+  type StoredAuditEvent,
+  type WorkItem
+} from "@agent-control-stack/work-items";
 
 export interface MissionControlAgent {
   id: string;
@@ -166,9 +172,13 @@ function finalizeAgent(agent: MissionControlAgent, now: Date): MissionControlAge
   let status = agent.status;
   let health = agent.health;
   if (agent.lastHeartbeatAt) {
-    status = heartbeatAgeMs <= 120_000 ? "online" : heartbeatAgeMs <= 900_000 ? "stale" : "offline";
+    status = heartbeatAgeMs <= DEFAULT_HEARTBEAT_ONLINE_WINDOW_MS
+      ? "online"
+      : heartbeatAgeMs <= DEFAULT_HEARTBEAT_TTL_MS
+        ? "stale"
+        : "offline";
     health = status === "online" ? "healthy" : status === "stale" ? "warning" : health === "unhealthy" ? "unhealthy" : "unknown";
-  } else if (status !== "offline" && eventAgeMs > 900_000) {
+  } else if (status !== "offline" && eventAgeMs > DEFAULT_HEARTBEAT_TTL_MS) {
     status = "stale";
   }
   return { ...agent, status, health };
