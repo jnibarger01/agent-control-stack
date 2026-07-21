@@ -26,7 +26,12 @@ describe("renderDashboard", () => {
     const html = renderDashboard({
       workItems: [workItem, blockedItem],
       events: [],
-      approvalActionHashesByWorkItem: { wrk_test: ["hash-one", "hash-two"] },
+      approvalActionHashesByWorkItem: {
+        wrk_test: [
+          { hash: "hash-one", kind: "fs.read", description: "inspect source" },
+          { hash: "hash-two", kind: "fs.write", description: "apply approved patch" }
+        ]
+      },
       now: new Date("2026-07-05T00:01:00.000Z")
     });
 
@@ -40,6 +45,8 @@ describe("renderDashboard", () => {
     expect(html).toContain(`data-approve="wrk_test"`);
     expect(html).toContain(`data-action-hash="hash-one"`);
     expect(html).toContain(`data-action-hash="hash-two"`);
+    expect(html).toContain("apply approved patch");
+    expect(html).toContain("hash-one");
     expect(html).toContain("payload.actionHash = button.dataset.actionHash;");
     expect(html).toContain(`data-reject="wrk_test"`);
     expect(html).toContain(`data-unblock="wrk_blocked"`);
@@ -61,6 +68,11 @@ describe("renderDashboard", () => {
     expect(html).toContain("new EventSource('/events')");
     expect(html).toContain("'work_item.rejected'");
     expect(html).not.toContain("location.reload");
+    expect(html).not.toContain("location.assign");
+    expect(html).toContain("SSE disconnected; retrying");
+    expect(html).toContain("refreshReadiness()");
+    expect(html).toContain("Load older events");
+    expect(html).toContain("Load more work items");
   });
 
   it("posts reject actions to the reject route instead of cancellation", () => {

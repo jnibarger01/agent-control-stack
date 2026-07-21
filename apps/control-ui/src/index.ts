@@ -26,8 +26,15 @@ export interface MissionControlViewModel {
   events: StoredAuditEvent[];
   registeredAgents?: RegistryAgentDetail[];
   agents?: MissionControlAgent[];
-  approvalActionHashesByWorkItem?: Record<string, string[]>;
+  approvalActionHashesByWorkItem?: Record<string, ApprovalAction[]>;
+  workItemsNextCursor?: { createdAt: string; id: string };
   now?: Date;
+}
+
+export interface ApprovalAction {
+  hash: string;
+  kind: string;
+  description: string;
 }
 
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
@@ -36,7 +43,6 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
   const agents = model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date(), model.registeredAgents ?? []);
   const stats = summarize(model.workItems, agents);
   const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
-  const recentEvents = [...events].slice(-10).reverse();
 
   return `<!doctype html>
 <html lang="en">
@@ -62,19 +68,19 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <main>
       <header>
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
-        <div class="live"><span></span> SSE ready</div>
+        <div id="sse-status" class="live" data-sse-state="connecting"><span></span><span id="sse-label">Connecting…</span></div>
       </header>
       <section id="overview" class="cards">${overviewCards(stats)}</section>
       <section class="grid">
-        <article id="agents" class="panel wide roster-panel"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems)}</article>
+        <article id="agents" class="panel wide roster-panel"><div class="panel-head"><div><h2>Agent Roster</h2><p>Persisted registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
+        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span id="work-item-count">${model.workItems.length}${model.workItemsNextCursor ? "+" : ""} loaded</span></div>${workQueue(model.workItems, model.workItemsNextCursor)}</article>
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
       </section>
       <section class="grid lower">
-        <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(recentEvents)}</article>
-        <article id="system" class="panel"><div class="panel-head"><h2>System Health</h2><span>derived</span></div>${systemPanel(stats, agents)}</article>
+        <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(events)}</article>
+        <article id="system" class="panel"><div class="panel-head"><h2>System Health</h2><span>projection</span></div>${systemPanel(stats, agents)}</article>
       </section>
       <section class="grid lower">
         <article id="dispatch" class="panel composer"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
@@ -221,17 +227,19 @@ function agentDetailPanel(): string {
   </section>`;
 }
 
-function workQueue(workItems: WorkItem[]): string {
+function workQueue(workItems: WorkItem[], nextCursor?: { createdAt: string; id: string }): string {
   if (!workItems.length) return `<p class="empty">No work items.</p>`;
   return `<div class="queue">${workItems
     .slice(0, 12)
-    .map(
-      (item) => `<button class="queue-item" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${workItemError(item)}</button>`
-    )
-    .join("")}</div><section id="work-detail" class="detail-panel work-detail" aria-live="polite"><div class="detail-empty"><h3>No work item selected</h3><p>Timeline pending.</p></div></section>`;
+    .map(queueItem)
+    .join("")}</div>${nextCursor ? `<button id="load-more-work-items" type="button" data-after-created-at="${escapeHtml(nextCursor.createdAt)}" data-after-id="${escapeHtml(nextCursor.id)}">Load more work items</button>` : ""}<section id="work-detail" class="detail-panel work-detail" aria-live="polite"><div class="detail-empty"><h3>No work item selected</h3><p>Timeline pending.</p></div></section>`;
 }
 
-function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Record<string, string[]>): string {
+function queueItem(item: WorkItem): string {
+  return `<button class="queue-item" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${workItemError(item)}</button>`;
+}
+
+function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Record<string, ApprovalAction[]>): string {
   if (!items.length) return `<p class="empty">No approvals or blocked work.</p>`;
   return `<div class="approvals-list">${items
     .map((item) => {
@@ -248,14 +256,13 @@ function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Recor
     .join("")}</div>`;
 }
 
-function approvalButtonsFor(item: WorkItem, hashes: string[]): string {
-  if (!hashes.length) {
+function approvalButtonsFor(item: WorkItem, actions: ApprovalAction[]): string {
+  if (!actions.length) {
     return `<button type="button" data-approve="${escapeHtml(item.id)}" disabled>Approval hash unavailable</button>`;
   }
-  return hashes
+  return actions
     .map(
-      (hash, index) =>
-        `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(hash)}">Approve ${index + 1}</button>`
+      (action) => `<div class="approval-action"><small><strong>${escapeHtml(action.kind)}:</strong> ${escapeHtml(action.description)}</small><code>${escapeHtml(action.hash)}</code><button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(action.hash)}">Approve action</button></div>`
     )
     .join("");
 }
@@ -275,14 +282,16 @@ function systemPanel(stats: ReturnType<typeof summarize>, agents: MissionControl
   const warning = agents.filter((agent) => agent.health === "warning" || agent.status === "stale").length + stats.approvals;
   const score = Math.max(0, 100 - unhealthy * 18 - warning * 6);
   const label = score >= 90 ? "Healthy" : score >= 70 ? "Degraded" : "Unhealthy";
-  return `<div class="system-panel"><strong>${score}</strong><span>${escapeHtml(label)}</span><dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div></dl></div>`;
+  return `<div class="system-panel"><div id="readiness-status" data-readyz="unknown" role="status">Readiness: checking…</div><strong>${score}</strong><span>${escapeHtml(label)} projection</span><dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div></dl></div>`;
 }
 
 function eventTimeline(events: StoredAuditEvent[]): string {
   if (!events.length) return `<p class="empty">No audit events recorded.</p>`;
-  return `<ol class="timeline">${events
+  const visible = [...events].slice(-10).reverse();
+  const beforeSequence = visible[visible.length - 1]?.sequence;
+  return `<div id="event-history"><ol id="event-timeline" class="timeline">${visible
     .map((event) => `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(JSON.stringify(event.attributes))}</small></li>`)
-    .join("")}</ol>`;
+    .join("")}</ol>${events.length > visible.length && beforeSequence !== undefined ? `<button id="load-older-events" type="button" data-before-sequence="${beforeSequence}">Load older events</button>` : ""}</div>`;
 }
 
 function composer(): string {
@@ -299,6 +308,18 @@ function composer(): string {
 function clientScript(): string {
   return `
 const source = new EventSource('/events');
+const sseStatus = document.querySelector('#sse-status');
+const sseLabel = document.querySelector('#sse-label');
+
+function setSseState(state, label) {
+  if (sseStatus) sseStatus.dataset.sseState = state;
+  if (sseLabel) sseLabel.textContent = label;
+}
+
+source.onopen = function () { setSseState('connected', 'SSE connected'); };
+source.onerror = function () {
+  setSseState(source.readyState === EventSource.CLOSED ? 'disconnected' : 'retrying', source.readyState === EventSource.CLOSED ? 'SSE disconnected' : 'SSE disconnected; retrying');
+};
 [
   'work_item.created',
   'work_item.needs_approval',
@@ -342,7 +363,7 @@ function appendAuditEvent(event) {
   const nanos = Number(data.timeUnixNano);
   time.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
   name.textContent = data.name || event.type;
-  attrs.textContent = JSON.stringify(data.attributes || {});
+  attrs.textContent = redactClient(JSON.stringify(data.attributes || {}));
   item.append(time, name, attrs);
   list.prepend(item);
   while (list.children.length > 10) list.lastElementChild?.remove();
@@ -379,18 +400,54 @@ function pillMarkup(value) {
   return '<span class="pill ' + safe + '">' + safe + '</span>';
 }
 
-function fetchJson(url) {
-  return fetch(url, { headers: { accept: 'application/json' } }).then(async function (res) {
-    const body = await res.json().catch(function () { return {}; });
+function requestJson(url, options) {
+  const requestOptions = Object.assign({ headers: { accept: 'application/json' } }, options || {});
+  requestOptions.headers = Object.assign({ accept: 'application/json' }, requestOptions.headers || {});
+  return fetch(url, requestOptions).then(async function (res) {
+    const text = await res.text();
+    const contentType = res.headers.get('content-type') || '';
+    const looksJson = /^[{[]/.test(text.trim());
+    let body = {};
+    if (text.trim() && (contentType.includes('json') || looksJson)) {
+      try { body = JSON.parse(text); } catch { body = {}; }
+    }
     if (!res.ok) {
-      throw new Error(body.error || body.code || ('HTTP ' + res.status));
+      const error = new Error((body && (body.error || body.code)) || (text.trim() ? text.trim().slice(0, 200) : ('HTTP ' + res.status)));
+      error.status = res.status;
+      error.body = body;
+      throw error;
+    }
+    if (text.trim() && !contentType.includes('json') && !looksJson) {
+      throw new Error('Expected JSON response');
     }
     return body;
   });
 }
 
+function fetchJson(url) {
+  return requestJson(url);
+}
+
+function setReadiness(state, label) {
+  const target = document.querySelector('#readiness-status');
+  if (!target) return;
+  target.dataset.readyz = state;
+  target.textContent = 'Readiness: ' + label;
+}
+
+async function refreshReadiness() {
+  try {
+    await fetchJson('/readyz');
+    setReadiness('healthy', 'healthy');
+  } catch (error) {
+    setReadiness('unhealthy', 'unhealthy — ' + error.message);
+  }
+}
+
 function bindWorkItems() {
   document.querySelectorAll('[data-work-item]').forEach(function (button) {
+    if (button.dataset.bound === 'true') return;
+    button.dataset.bound = 'true';
     button.addEventListener('click', async function () {
       const target = document.querySelector('#work-detail');
       if (!target) return;
@@ -403,6 +460,150 @@ function bindWorkItems() {
       }
     });
   });
+}
+
+function queueItemMarkup(item) {
+  const resultError = item.result && typeof item.result.error === 'string' ? '<small class="error-line">' + escapeClient(redactClient(item.result.error)) + '</small>' : '';
+  return '<button class="queue-item" data-work-item="' + escapeClient(item.id) + '"><span>' + pillMarkup(item.status) + ' ' + pillMarkup(item.risk) + '</span><strong>' + escapeClient(item.title) + '</strong><small>' + escapeClient(item.intent) + '</small>' + resultError + '</button>';
+}
+
+function loadMoreWorkButton(cursor) {
+  if (!cursor) return null;
+  const button = document.createElement('button');
+  button.id = 'load-more-work-items';
+  button.type = 'button';
+  button.textContent = 'Load more work items';
+  button.dataset.afterCreatedAt = cursor.createdAt;
+  button.dataset.afterId = cursor.id;
+  button.addEventListener('click', loadMoreWorkItems);
+  return button;
+}
+
+async function loadMoreWorkItems() {
+  const button = document.querySelector('#load-more-work-items');
+  const queue = document.querySelector('#queue .queue');
+  if (!button || !queue) return;
+  button.disabled = true;
+  try {
+    const url = '/work-items?limit=50&afterCreatedAt=' + encodeURIComponent(button.dataset.afterCreatedAt || '') + '&afterId=' + encodeURIComponent(button.dataset.afterId || '');
+    const body = await fetchJson(url);
+    const items = Array.isArray(body.workItems) ? body.workItems : [];
+    items.slice(0, 12).forEach(function (item) { queue.insertAdjacentHTML('beforeend', queueItemMarkup(item)); });
+    button.remove();
+    const next = loadMoreWorkButton(body.nextCursor);
+    const detail = document.querySelector('#work-detail');
+    if (next && detail) detail.parentElement.insertBefore(next, detail);
+    const count = document.querySelector('#work-item-count');
+    if (count) count.textContent = (document.querySelectorAll('#queue .queue-item').length) + (body.nextCursor ? '+' : '') + ' loaded';
+    bindWorkItems();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = 'Load more failed: ' + error.message;
+  }
+}
+
+function eventMarkup(event) {
+  const item = document.createElement('li');
+  const eventTime = document.createElement('time');
+  const name = document.createElement('strong');
+  const attrs = document.createElement('small');
+  const nanos = Number(event && event.timeUnixNano);
+  eventTime.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
+  name.textContent = event && event.name ? event.name : 'event';
+  attrs.textContent = redactClient(JSON.stringify((event && event.attributes) || {}));
+  item.append(eventTime, name, attrs);
+  return item;
+}
+
+function bindOlderEvents() {
+  const button = document.querySelector('#load-older-events');
+  if (!button || button.dataset.bound === 'true') return;
+  button.dataset.bound = 'true';
+  button.addEventListener('click', async function () {
+    button.disabled = true;
+    try {
+      const body = await fetchJson('/api/events?limit=50&beforeSequence=' + encodeURIComponent(button.dataset.beforeSequence || ''));
+      const list = document.querySelector('#event-timeline');
+      const events = Array.isArray(body.events) ? body.events : [];
+      if (list) events.slice().reverse().forEach(function (event) { list.appendChild(eventMarkup(event)); });
+      if (body.previousCursor !== undefined && body.previousCursor !== null) {
+        button.disabled = false;
+        button.dataset.beforeSequence = body.previousCursor;
+      } else {
+        button.remove();
+      }
+    } catch (error) {
+      button.disabled = false;
+      button.textContent = 'Load older failed: ' + error.message;
+    }
+  });
+}
+
+async function refreshWorkQueue() {
+  const body = await fetchJson('/work-items?limit=50');
+  const queuePanel = document.querySelector('#queue');
+  if (!queuePanel) return;
+  let queue = queuePanel.querySelector('.queue');
+  if (!queue) {
+    queue = document.createElement('div');
+    queue.className = 'queue';
+    queuePanel.querySelector('.empty')?.replaceWith(queue);
+    if (!queuePanel.querySelector('#work-detail')) {
+      const detail = document.createElement('section');
+      detail.id = 'work-detail';
+      detail.className = 'detail-panel work-detail';
+      detail.setAttribute('aria-live', 'polite');
+      detail.innerHTML = '<div class="detail-empty"><h3>No work item selected</h3><p>Timeline pending.</p></div>';
+      queuePanel.appendChild(detail);
+    }
+  }
+  const items = Array.isArray(body.workItems) ? body.workItems : [];
+  queue.innerHTML = items.slice(0, 12).map(queueItemMarkup).join('');
+  document.querySelector('#load-more-work-items')?.remove();
+  const next = loadMoreWorkButton(body.nextCursor);
+  const detail = document.querySelector('#work-detail');
+  if (next && detail) detail.parentElement.insertBefore(next, detail);
+  const count = document.querySelector('#work-item-count');
+  if (count) count.textContent = items.length + (body.nextCursor ? '+' : '') + ' loaded';
+  bindWorkItems();
+}
+
+async function refreshEventHistory() {
+  const body = await fetchJson('/api/events?limit=100');
+  const eventPanel = document.querySelector('#events');
+  if (!eventPanel) return;
+  let history = eventPanel.querySelector('#event-history');
+  if (!history) {
+    history = document.createElement('div');
+    history.id = 'event-history';
+    eventPanel.querySelector('.empty')?.replaceWith(history);
+  }
+  const events = Array.isArray(body.events) ? body.events : [];
+  const visible = events.slice(-10).reverse();
+  const list = document.createElement('ol');
+  list.id = 'event-timeline';
+  list.className = 'timeline';
+  visible.forEach(function (event) { list.appendChild(eventMarkup(event)); });
+  history.replaceChildren(list);
+  if (events.length > visible.length) {
+    const older = document.createElement('button');
+    older.id = 'load-older-events';
+    older.type = 'button';
+    older.dataset.beforeSequence = visible[visible.length - 1]?.sequence;
+    older.textContent = 'Load older events';
+    history.appendChild(older);
+  }
+  bindOlderEvents();
+}
+
+function removeApprovalCard(id) {
+  document.querySelector('#approvals [data-approve="' + id + '"], #approvals [data-reject="' + id + '"], #approvals [data-unblock="' + id + '"]')?.closest('.approval-item')?.remove();
+  const count = document.querySelector('#approvals .panel-head span');
+  if (count) count.textContent = document.querySelectorAll('#approvals .approval-item').length + ' waiting';
+}
+
+async function refreshDashboardState() {
+  await Promise.allSettled([refreshWorkQueue(), refreshEventHistory(), refreshAgentRoster(), refreshReadiness()]);
 }
 
 function agentRowsMarkup(agents) {
@@ -561,7 +762,10 @@ function renderWorkDetail(target, workItem, events) {
 
 bindWorkItems();
 bindAgentRows();
+document.querySelector('#load-more-work-items')?.addEventListener('click', loadMoreWorkItems);
+bindOlderEvents();
 refreshAgentRoster();
+refreshReadiness();
 
 document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
   button.addEventListener('click', async () => {
@@ -583,17 +787,22 @@ document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach
       }
       payload.actionHash = button.dataset.actionHash;
     }
-    const res = await fetch('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
-    const body = await res.json();
-    output.textContent = res.ok ? action + ' accepted' : 'Rejected: ' + (body.error || body.code || res.status);
-    if (res.ok) setTimeout(() => location.assign(location.href), 500);
+    try {
+      await requestJson('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
+      output.textContent = action + ' accepted';
+      removeApprovalCard(id);
+      await refreshDashboardState();
+    } catch (error) {
+      output.textContent = 'Rejected: ' + error.message;
+    }
   });
 });
 
 
 document.querySelector('#task-form')?.addEventListener('submit', async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   const actionKind = String(form.get('actionKind') || '').trim();
   const actionDescription = String(form.get('actionDescription') || '').trim();
   const service = String(form.get('service') || '').trim();
@@ -609,10 +818,15 @@ document.querySelector('#task-form')?.addEventListener('submit', async (event) =
     }]
   };
   const headers = { 'content-type': 'application/json' };
-  const res = await fetch('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
-  const body = await res.json();
-  document.querySelector('#task-result').textContent = res.ok ? 'Created ' + body.id : 'Rejected: ' + (body.error || res.status);
-  if (res.ok) setTimeout(() => location.assign(location.href), 500);
+  const result = document.querySelector('#task-result');
+  try {
+    const body = await requestJson('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
+    result.textContent = 'Created ' + body.id;
+    formElement.reset();
+    await refreshDashboardState();
+  } catch (error) {
+    result.textContent = 'Rejected: ' + error.message;
+  }
 });`;
 }
 
@@ -684,6 +898,8 @@ h1 { margin: 0; font-size: 26px; color: var(--ink); }
 p { color: var(--muted); margin: 6px 0 0; }
 .live { border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: var(--surface); white-space: nowrap; }
 .live span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
+.live[data-sse-state="retrying"] { color: var(--amber); }
+.live[data-sse-state="disconnected"] { color: var(--red); }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px rgba(23, 32, 42, .06); }
 .card { padding: 15px; min-height: 108px; }
@@ -716,7 +932,13 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .approval-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
 .approval-actions button:hover { background: #f4f8ff; border-color: #9db7d7; }
 .approval-actions button:last-child { color: var(--red); border-color: #f0b8b2; }
+.approval-action { border: 1px solid var(--line); border-radius: 7px; padding: 8px; display: grid; gap: 5px; }
+.approval-action code { color: var(--muted); font-size: 10px; overflow-wrap: anywhere; }
+.approval-action button { justify-self: start; }
 .system-panel { padding: 18px; display: grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: start; }
+.system-panel #readiness-status { grid-column: 1 / -1; border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; color: var(--muted); font-size: 12px; }
+.system-panel #readiness-status[data-readyz="healthy"] { color: var(--green); border-color: #a8dfc0; }
+.system-panel #readiness-status[data-readyz="unhealthy"] { color: var(--red); border-color: #f0b8b2; }
 .system-panel strong { font-size: 44px; color: var(--green); }
 .system-panel span { color: var(--muted); margin-top: 52px; margin-left: -130px; }
 .system-panel dl { margin: 0; display: grid; gap: 8px; }
@@ -749,6 +971,8 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .detail-events { list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }
 .detail-events li { border-left: 2px solid var(--accent); padding-left: 10px; }
 .detail-events time, .detail-events small { display: block; color: var(--muted); font-size: 11px; }
+#load-more-work-items, #load-older-events { margin: 0 14px 14px; border: 1px solid var(--line); background: var(--surface-2); color: var(--ink); border-radius: 7px; padding: 8px 10px; cursor: pointer; }
+#load-more-work-items:hover, #load-older-events:hover { border-color: var(--accent); }
 .action-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
 .action-list li { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; background: #ffffff; }
 .action-list small { display: block; color: var(--muted); margin-top: 2px; }
