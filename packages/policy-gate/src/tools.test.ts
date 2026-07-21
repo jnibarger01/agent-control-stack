@@ -20,7 +20,9 @@ describe("policy-gated work item tools", () => {
           title: "Delete without rollback",
           requester: "agent",
           intent: "verify contract admission happens before persistence",
-          requestedActions: [{ kind: "fs.delete", description: "delete", params: { paths: ["dist"], destructive: true } }],
+          requestedActions: [
+            { kind: "fs.delete", description: "delete", params: { paths: ["dist"], destructive: true } }
+          ],
           risk: "low"
         })
       ).toThrow("contract envelope invalid");
@@ -234,6 +236,66 @@ describe("policy-gated work item tools", () => {
 
       expect(second.approvals).toHaveLength(1);
       expect(second.workItem.status).toBe("approved");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-evaluates policy for retry and clone lineage instead of copying approval", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-lineage-policy-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      const source = tools.create_work_item({
+        title: "Completed source",
+        requester: "user",
+        intent: "verify retry policy",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
+      if (!claimed) throw new Error("expected source claim");
+      tools.submit_work_result({
+        workItemId: claimed.id,
+        leaseId: claimed.leaseId,
+        workerId: claimed.workerId,
+        actionHash: claimed.actionHash,
+        idempotencyKey: "policy-lineage-source",
+        outcome: "succeeded",
+        startedAt: claimed.startedAt,
+        finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
+        exitCode: 0,
+        summary: "source simulated",
+        structuredOutput: { simulated: true },
+        artifacts: [],
+        simulationMetadata: { executionMode: "dry_run", simulated: true }
+      });
+
+      const retried = tools.retry_work_item({ id: source.id, actor: "operator", reason: "repeat inspection" });
+      const cloned = tools.clone_work_item({ id: source.id, actor: "operator", risk: "high" });
+      const policyEvents = store
+        .readEvents()
+        .filter((event) => event.name === "policy.decided")
+        .filter((event) => (event.body.context as { operation?: string } | undefined)?.operation === "create");
+
+      expect(retried.status).toBe("approved");
+      expect(cloned.status).toBe("needs_approval");
+      expect(store.get(source.id)?.status).toBe("succeeded");
+      expect(
+        policyEvents.some(
+          (event) => (event.body.context as { workItemId?: string } | undefined)?.workItemId === retried.id
+        )
+      ).toBe(true);
+      expect(
+        policyEvents.some(
+          (event) => (event.body.context as { workItemId?: string } | undefined)?.workItemId === cloned.id
+        )
+      ).toBe(true);
+      expect(store.hasApproval(retried.id, "policy-lineage-source")).toBe(false);
+      expect(store.hasApproval(cloned.id, "policy-lineage-source")).toBe(false);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
