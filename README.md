@@ -36,9 +36,11 @@ ACS provides a local control plane for agent-requested work:
 5. Requires human approval for risky actions.
 6. Binds approvals to exact canonical action hashes.
 7. Lets a local worker claim only approved work items.
-8. Requires lease-bound worker result submission.
-9. Records redacted, OpenTelemetry-shaped audit events.
-10. Verifies audit-chain and persisted liveness health through the store and `/health` endpoint.
+8. Requires authenticated, lease-bound, worker-identity-bound result submission.
+9. Persists immutable execution results with durable idempotency and audit evidence.
+10. Creates immutable retry and clone work items with fresh identities and action hashes.
+11. Records redacted, OpenTelemetry-shaped audit events.
+12. Verifies audit-chain and persisted liveness health through the store and `/health` endpoint.
 
 The core point: agents can ask; ACS decides whether the request is allowed, denied, or approval-gated. Trust is expensive. ACS tries not to hand it out like Halloween candy.
 
@@ -54,6 +56,8 @@ Do **not** claim this alpha provides:
 - a multi-user enterprise authorization model
 
 The current `packages/sandbox` implementation is intentionally dry-run only. Real execution should be added behind that package after isolation, environment allowlisting, path containment, output caps, and network controls pass their own release gate.
+
+Wave 2 models completion without claiming execution: result submission accepts only authenticated worker principals with an active matching lease, action hash, and dry-run metadata. Accepted results are immutable. Retry and clone create new work items; they never reopen or edit historical items. External connector proof remains separate from this local lifecycle proof.
 
 ## Architecture
 
@@ -72,7 +76,7 @@ packages/policy-gate
   v
 packages/work-items
   |
-  | SQLite work_items + approval_records + audit_events
+  | SQLite work_items + leases + execution_results + audit_events
   v
 apps/worker
   |
@@ -82,26 +86,26 @@ packages/sandbox
   |
   | dry-run execution simulation in v0.1.0-alpha
   v
-redacted terminal result + audit event
+immutable result + audit evidence
 ```
 
 ### Main components
 
-| Component | Purpose |
-| --- | --- |
-| `apps/gateway` | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events. |
-| `apps/control-ui` | Server-rendered mission-control dashboard HTML. |
-| `apps/mcp` | stdio MCP server backed by the machine-controller package. |
-| `apps/worker` | One-shot local worker that claims the next approved work item and records a dry-run result. |
-| `packages/work-items` | Work-item state machine, SQLite store, approvals, leases, audit events, registry, audit-chain health. |
-| `packages/policy-gate` | Policy evaluation, action fingerprinting, approval gating, worker-claim gating. |
-| `packages/sandbox` | Execution boundary. Currently dry-run only. |
-| `packages/shared` | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers. |
-| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary. |
-| `packages/acp-adapter` | Read-only ACP stdio adapter for registering agent status/capabilities. |
-| `packages/moa-orchestrator` | Multi-model/model-routing orchestration support. |
-| `packages/eval-harness` | Replay and policy validation harness. |
-| `packages/temporal-memory` | Source-backed memory events/projections. |
+| Component                     | Purpose                                                                                                                                       |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/gateway`                | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events.                                                      |
+| `apps/control-ui`             | Server-rendered mission-control dashboard HTML.                                                                                               |
+| `apps/mcp`                    | stdio MCP server backed by the machine-controller package.                                                                                    |
+| `apps/worker`                 | One-shot local worker that claims the next approved work item and records a dry-run result.                                                   |
+| `packages/work-items`         | Work-item state machine, SQLite store, approvals, leases, immutable results, retry/clone lineage, audit events, registry, audit-chain health. |
+| `packages/policy-gate`        | Policy evaluation, action fingerprinting, approval gating, worker-claim gating.                                                               |
+| `packages/sandbox`            | Execution boundary. Currently dry-run only.                                                                                                   |
+| `packages/shared`             | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers.                                                                    |
+| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary.                                                                               |
+| `packages/acp-adapter`        | Read-only ACP stdio adapter for registering agent status/capabilities.                                                                        |
+| `packages/moa-orchestrator`   | Multi-model/model-routing orchestration support.                                                                                              |
+| `packages/eval-harness`       | Replay and policy validation harness.                                                                                                         |
+| `packages/temporal-memory`    | Source-backed memory events/projections.                                                                                                      |
 
 ## Repository layout
 
@@ -176,9 +180,11 @@ The local worker claims only approved work items. Claiming uses a status compare
 
 ### 5. Result submission
 
-Worker results are lease-bound. The store requires the matching work item, worker id, lease token, and unexpired lease before accepting a terminal result.
+Worker results are submitted to `POST /work-items/:id/results`. The route requires a configured bearer/session credential bound to the `agent` role and worker ID. The store then requires the matching work item, lease ID, worker ID, action hash, unexpired active lease, bounded canonical payload, and durable idempotency key before accepting a terminal result. The transaction inserts the immutable result, transitions the work item, consumes the lease, and appends audit evidence together.
 
-In this alpha, the sandbox returns a dry-run result and persists `execution_mode: "dry_run"`.
+The first accepted submission returns `201`; an exact replay returns the original result with `200`; conflicting payloads fail closed with `409`. Results cannot reopen terminal history. `POST /work-items/:id/retry` and `/clone` create fresh linked work items that return to normal policy and approval flow.
+
+In this alpha, the sandbox and worker return only simulated results and persist `executionMode: "dry_run"`. This proves the local lifecycle, not a real command execution or a ChatGPT-originated connector action.
 
 ## Security model
 
@@ -274,36 +280,36 @@ Do not commit `.env` or real secrets.
 
 ### Core environment variables
 
-| Variable | Purpose | Local example |
-| --- | --- | --- |
-| `NODE_ENV` | Runtime mode. Production disables local bearer MCP fallback. | `development` |
-| `HOST` | Gateway bind host if supported by runtime wrapper. Prefer loopback locally. | `127.0.0.1` |
-| `PORT` | Gateway port. | `3000` |
-| `ACS_DB_PATH` | SQLite database path. | `storage/local.db` |
-| `ACS_GATEWAY_TOKEN` | Dashboard/API bearer token. Required for HTTP mutations. | generate a secret |
-| `ACS_GATEWAY_ACTOR` | Requester/actor label for gateway-authenticated mutations. | `user` |
-| `ACS_GATEWAY_ACTOR_ID` | Registry actor id bound to gateway mutations that require actor registry identity. | optional locally |
-| `ACS_MCP_BEARER_TOKEN` | Local development bearer token for `/mcp`. Ignored in production. | generate a local token |
-| `ACS_MCP_RESOURCE_METADATA_URL` | Override OAuth protected-resource metadata URL. | optional |
-| `ACS_OAUTH_ISSUER` | OAuth issuer for production MCP auth. | provider URL |
-| `ACS_OAUTH_AUDIENCE` | OAuth audience/resource, usually public `/mcp` URL. | `https://gateway.example.com/mcp` |
-| `ACS_OAUTH_JWKS_URI` | JWKS URI for JWT verification. | provider JWKS URL |
-| `ACS_AUTH_MODE` | Set to `tunnel_id` for trusted signed tunnel-session mode. | optional |
-| `ACS_TRUSTED_TUNNEL_PROXY` | Local proxy IP allowed to assert tunnel sessions. | `127.0.0.1` |
-| `ACS_ALLOWED_TUNNEL_IDS` | Legacy dev tunnel allowlist. Prefer persistent connector records. | optional |
-| `ACS_TUNNEL_SCOPES` | Comma-separated MCP scopes for tunnel mode. | `acs:work:create,acs:work:read` |
-| `ACS_MCP_CONFIG` | Config path for stdio MCP machine controller. | `config.example.yml` |
-| `ACS_MACHINE_CONTROLLER_CONFIG` | Config path used by the gateway direct-agent controller. | optional |
-| `ACS_ACP_AGENT_COMMAND` | Read-only ACP agent command to spawn. | optional |
-| `ACS_ACP_AGENT_ARGS_JSON` | JSON array of ACP command args. | `[]` |
-| `ACS_ACP_AGENT_CWD` | ACP process working directory. | optional |
-| `ACS_ACP_AGENT_ID` | Registry id for ACP agent. | required with command |
-| `ACS_ACP_ACTOR_ID` | Actor id for ACP adapter registration. | required with command |
-| `ACS_MOA_CONFIG` | MoA/model routing config path. | optional |
-| `ACS_MOA_AUDIT_LOG` | MoA audit log path. | `storage/moa-audit.jsonl` |
-| `ACS_OPENROUTER_API_KEY` | Optional model provider key for MoA routes. | secret |
-| `ACS_OPENAI_API_KEY` | Optional OpenAI/Codex provider key for MoA routes. | secret |
-| `ACS_OLLAMA_BASE_URL` | Local Ollama endpoint. | `http://127.0.0.1:11434` |
+| Variable                        | Purpose                                                                            | Local example                     |
+| ------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------- |
+| `NODE_ENV`                      | Runtime mode. Production disables local bearer MCP fallback.                       | `development`                     |
+| `HOST`                          | Gateway bind host if supported by runtime wrapper. Prefer loopback locally.        | `127.0.0.1`                       |
+| `PORT`                          | Gateway port.                                                                      | `3000`                            |
+| `ACS_DB_PATH`                   | SQLite database path.                                                              | `storage/local.db`                |
+| `ACS_GATEWAY_TOKEN`             | Dashboard/API bearer token. Required for HTTP mutations.                           | generate a secret                 |
+| `ACS_GATEWAY_ACTOR`             | Requester/actor label for gateway-authenticated mutations.                         | `user`                            |
+| `ACS_GATEWAY_ACTOR_ID`          | Registry actor id bound to gateway mutations that require actor registry identity. | optional locally                  |
+| `ACS_MCP_BEARER_TOKEN`          | Local development bearer token for `/mcp`. Ignored in production.                  | generate a local token            |
+| `ACS_MCP_RESOURCE_METADATA_URL` | Override OAuth protected-resource metadata URL.                                    | optional                          |
+| `ACS_OAUTH_ISSUER`              | OAuth issuer for production MCP auth.                                              | provider URL                      |
+| `ACS_OAUTH_AUDIENCE`            | OAuth audience/resource, usually public `/mcp` URL.                                | `https://gateway.example.com/mcp` |
+| `ACS_OAUTH_JWKS_URI`            | JWKS URI for JWT verification.                                                     | provider JWKS URL                 |
+| `ACS_AUTH_MODE`                 | Set to `tunnel_id` for trusted signed tunnel-session mode.                         | optional                          |
+| `ACS_TRUSTED_TUNNEL_PROXY`      | Local proxy IP allowed to assert tunnel sessions.                                  | `127.0.0.1`                       |
+| `ACS_ALLOWED_TUNNEL_IDS`        | Legacy dev tunnel allowlist. Prefer persistent connector records.                  | optional                          |
+| `ACS_TUNNEL_SCOPES`             | Comma-separated MCP scopes for tunnel mode.                                        | `acs:work:create,acs:work:read`   |
+| `ACS_MCP_CONFIG`                | Config path for stdio MCP machine controller.                                      | `config.example.yml`              |
+| `ACS_MACHINE_CONTROLLER_CONFIG` | Config path used by the gateway direct-agent controller.                           | optional                          |
+| `ACS_ACP_AGENT_COMMAND`         | Read-only ACP agent command to spawn.                                              | optional                          |
+| `ACS_ACP_AGENT_ARGS_JSON`       | JSON array of ACP command args.                                                    | `[]`                              |
+| `ACS_ACP_AGENT_CWD`             | ACP process working directory.                                                     | optional                          |
+| `ACS_ACP_AGENT_ID`              | Registry id for ACP agent.                                                         | required with command             |
+| `ACS_ACP_ACTOR_ID`              | Actor id for ACP adapter registration.                                             | required with command             |
+| `ACS_MOA_CONFIG`                | MoA/model routing config path.                                                     | optional                          |
+| `ACS_MOA_AUDIT_LOG`             | MoA audit log path.                                                                | `storage/moa-audit.jsonl`         |
+| `ACS_OPENROUTER_API_KEY`        | Optional model provider key for MoA routes.                                        | secret                            |
+| `ACS_OPENAI_API_KEY`            | Optional OpenAI/Codex provider key for MoA routes.                                 | secret                            |
+| `ACS_OLLAMA_BASE_URL`           | Local Ollama endpoint.                                                             | `http://127.0.0.1:11434`          |
 
 ### Machine-controller config
 
@@ -506,7 +512,7 @@ ACS_DB_PATH=storage/local.db npm run start:worker
 Expected no-work output looks like:
 
 ```json
-{"executed":false,"reason":"no approved work item"}
+{ "executed": false, "reason": "no approved work item" }
 ```
 
 When it claims work, the result includes the work item id and `executionMode: "dry_run"`.

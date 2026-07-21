@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Worker leases prevent untrusted or stale workers from submitting results for work they did not claim.
+Worker leases prevent untrusted or stale workers from submitting results for work they did not claim. The lease is one part of authority: result submission also requires an authenticated worker principal, a matching worker identity, the execution action hash, and a bounded canonical payload.
 
 ## Work lifecycle
 
@@ -31,7 +31,10 @@ Claim response:
 ```json
 {
   "work_item_id": "wrk_...",
+  "lease_id": "lease_...",
   "lease_token": "lease_once_...",
+  "worker_id": "worker_local_1",
+  "action_hash": "<64 lowercase hex characters>",
   "lease_expires_at": "2026-07-05T18:00:00Z"
 }
 ```
@@ -44,46 +47,30 @@ The server stores:
 - `worker_id`
 - `lease_token_hash`
 - `lease_expires_at`
-- `claimed_at`
-- `status`
+- `issued_at`
+- `expires_at`
+- `status` (`active`, `consumed`, `expired`, or `revoked`)
+- `action_hash`
 
 Raw lease tokens are never stored.
 
-## Submitting results
+## Result submission
 
-Result request:
+The canonical result contract and HTTP response matrix are documented in [`worker-results.md`](worker-results.md). The worker sends the opaque `lease_id`, not the persisted token hash, to `POST /work-items/:id/results` along with its authenticated worker identity and `action_hash`. The gateway never accepts an unauthenticated result route.
 
-```json
-{
-  "work_item_id": "wrk_...",
-  "worker_id": "worker_local_1",
-  "lease_token": "lease_once_...",
-  "status": "succeeded",
-  "summary": "Completed.",
-  "artifacts": []
-}
-```
-
-Validation:
-
-1. Work item exists.
-2. Work item is claimed or running.
-3. Submitted `worker_id` matches claim.
-4. Hash of submitted `lease_token` matches stored hash.
-5. Lease is not expired.
-6. Result status is valid.
-7. Result payload passes schema validation.
+The store validates the work item, active lease, worker binding, action hash, expiry, result state, timestamp order, output bounds, dry-run metadata, and idempotency key in one transaction. It inserts one immutable result, transitions the work item, closes the lease, and appends audit events atomically.
 
 ## Failure behavior
 
-| Failure | Result |
-|---|---|
-| Missing worker ID | Reject. |
-| Missing lease token | Reject. |
-| Wrong worker ID | Reject and audit. |
-| Wrong token | Reject and audit. |
-| Expired lease | Reject and mark expired if applicable. |
-| Duplicate result | Reject. |
+| Failure                                      | Result                                               |
+| -------------------------------------------- | ---------------------------------------------------- |
+| Missing or invalid authentication            | `401`; no result lookup is exposed.                  |
+| Non-worker or wrong worker identity          | `403`; no lease ownership is disclosed.              |
+| Missing, unknown, revoked, or consumed lease | `403`/`409` according to the gateway error contract. |
+| Expired lease                                | `410`; no worker result is accepted.                 |
+| Action-hash mismatch                         | `403`; no result is accepted.                        |
+| Exact replay                                 | `200` with the original immutable result.            |
+| Conflicting replay or second key             | `409`; no state changes.                             |
 
 ## Renewal
 
@@ -98,4 +85,4 @@ When added, renewal must require:
 
 ## Security rule
 
-Worker identity without a lease token is not authority. Lease token without matching worker identity is not authority. Both are required, because apparently computers also need two-factor common sense.
+Worker identity without an active matching lease is not authority. A lease without the authenticated worker binding and action hash is not authority. Both are required, and results remain dry-run records until a separately gated sandbox wave exists.
