@@ -16,6 +16,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import {
   createWorkItemSchema,
   listWorkItemsSchema,
+  submitWorkResultSchema,
   requesterSchema,
   SqliteWorkItemStore,
   DEFAULT_EVENT_LIMIT,
@@ -122,6 +123,7 @@ const eventQuerySchema = z
 const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
+const MAX_RESULT_BODY_BYTES = 256 * 1024;
 const sessionCookiePayloadSchema = z.object({
   v: z.literal(1),
   actor: z.string().min(1),
@@ -168,9 +170,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
-  const acpAdapter = acpAdapterConfig === false || !acpAdapterConfig
-    ? undefined
-    : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
+  const acpAdapter =
+    acpAdapterConfig === false || !acpAdapterConfig
+      ? undefined
+      : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
   const requireRead = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!hasReadAccess(request, auth)) {
       if (request.routeOptions.url === "/" && auth) {
@@ -190,7 +193,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         dbPath,
         store: workItems,
         authenticate: async (moaRequest) =>
-          auth && (hasBearerAuth(moaRequest, auth) || hasSessionCookie(moaRequest, auth)) ? { actor: auth.actor } : null,
+          auth && (hasBearerAuth(moaRequest, auth) || hasSessionCookie(moaRequest, auth))
+            ? { actor: auth.actor }
+            : null,
         ...(options.moa ? { overrides: options.moa } : {})
       });
     });
@@ -275,12 +280,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const workItemList = workItems.list();
       const events = workItems.readEvents(eventReadOptions(request.query));
-      reply.type("text/html").send(renderDashboard({
-        workItems: workItemList,
-        events,
-        registeredAgents: workItems.listRegistryAgents(),
-        approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(policy, workItemList, auth?.actor)
-      }));
+      reply.type("text/html").send(
+        renderDashboard({
+          workItems: workItemList,
+          events,
+          registeredAgents: workItems.listRegistryAgents(),
+          approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(policy, workItemList, auth?.actor)
+        })
+      );
     } catch (error) {
       return sendError(reply, error);
     }
@@ -295,11 +302,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       remoteAddress: request.socket.remoteAddress ?? request.ip
     });
     if (!authorization.ok) {
-      const error = mcpAuthorizationHttpError(
-        authorization,
-        mcpResourceMetadataUrl(request, mcpAuth?.oauth),
-        [...requiredScopes]
-      );
+      const error = mcpAuthorizationHttpError(authorization, mcpResourceMetadataUrl(request, mcpAuth?.oauth), [
+        ...requiredScopes
+      ]);
       if (error.wwwAuthenticate) {
         reply.header("WWW-Authenticate", error.wwwAuthenticate);
       }
@@ -414,7 +419,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   );
 
   app.get("/mcp", async (_request, reply) => {
-    return reply.header("allow", "POST").code(405).send(jsonRpcError(null, -32000, "method not allowed"));
+    return reply
+      .header("allow", "POST")
+      .code(405)
+      .send(jsonRpcError(null, -32000, "method not allowed"));
   });
 
   app.post("/mcp", async (request, reply) => {
@@ -538,20 +546,27 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!actorId) {
         return;
       }
-      const agent = workItems.updateRegistryAgent(request.params.id, { ...agentPatchSchema.parse(request.body), actorId });
+      const agent = workItems.updateRegistryAgent(request.params.id, {
+        ...agentPatchSchema.parse(request.body),
+        actorId
+      });
       return { agent };
     } catch (error) {
       return sendError(reply, error);
     }
   });
 
-  app.get<{ Params: { id: string } }>("/api/agents/:id/capabilities", { preHandler: requireRead }, async (request, reply) => {
-    try {
-      return { capabilities: workItems.listAgentCapabilities(request.params.id) };
-    } catch (error) {
-      return sendError(reply, error);
+  app.get<{ Params: { id: string } }>(
+    "/api/agents/:id/capabilities",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        return { capabilities: workItems.listAgentCapabilities(request.params.id) };
+      } catch (error) {
+        return sendError(reply, error);
+      }
     }
-  });
+  );
 
   app.put<{ Params: { id: string } }>("/api/agents/:id/capabilities", async (request, reply) => {
     try {
@@ -579,7 +594,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!actorId) {
         return;
       }
-      const result = workItems.recordAgentHeartbeat(request.params.id, { ...heartbeatBodySchema.parse(request.body), actorId });
+      const result = workItems.recordAgentHeartbeat(request.params.id, {
+        ...heartbeatBodySchema.parse(request.body),
+        actorId
+      });
       return reply.code(201).send(result);
     } catch (error) {
       return sendError(reply, error);
@@ -616,7 +634,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!workItem) {
         return reply.code(404).send({ error: "work item not found" });
       }
-      return { workItem, events: workItems.readEvents(eventReadOptions(request.query, { workItemId: request.params.id })) };
+      return {
+        workItem,
+        events: workItems.readEvents(eventReadOptions(request.query, { workItemId: request.params.id }))
+      };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -699,8 +720,79 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-  app.post<{ Params: { id: string } }>("/work-items/:id/results", async (request, reply) => {
-    return reply.code(501).send({ error: "worker result submission requires a lease-bound worker API" });
+  app.post<{ Params: { id: string } }>(
+    "/work-items/:id/results",
+    { bodyLimit: MAX_RESULT_BODY_BYTES },
+    async (request, reply) => {
+      reply.header("x-request-id", request.id);
+      try {
+        const workerId = requireWorkerIdentity(request, reply, auth);
+        if (!workerId) {
+          return;
+        }
+        const body = submitWorkResultSchema.parse(request.body);
+        if (body.workItemId !== request.params.id) {
+          return reply.code(400).send({ error: "result work item id does not match route id", code: "result_invalid" });
+        }
+        if (body.workerId !== workerId) {
+          return reply
+            .code(403)
+            .send({ error: "worker identity is not authorized for this result", code: "forbidden" });
+        }
+        if (body.outcome === "blocked" || body.outcome === "lease_expired") {
+          return reply.code(403).send({ error: "ACS-derived outcomes are not worker-submittable", code: "forbidden" });
+        }
+        const replay = workItems.getExecutionResultForIdempotency(body.workerId, body.idempotencyKey);
+        const workItem = workItems.submitWorkResult(body);
+        const resultId = typeof workItem.result?.resultId === "string" ? workItem.result.resultId : undefined;
+        const result = resultId ? workItems.getExecutionResult(resultId) : undefined;
+        if (!result) {
+          throw new ControlStackError("result_persistence_failed", "accepted result could not be read back");
+        }
+        request.log.info(
+          { requestId: request.id, workItemId: body.workItemId, workerId: body.workerId, resultId: result.resultId },
+          "worker result accepted"
+        );
+        return reply.code(replay ? 200 : 201).send({ result, workItem });
+      } catch (error) {
+        request.log.warn(
+          {
+            requestId: request.id,
+            workItemId: request.params.id,
+            code:
+              error instanceof ControlStackError
+                ? error.code
+                : error instanceof ZodError
+                  ? "invalid_request"
+                  : "internal_error"
+          },
+          "worker result rejected"
+        );
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/retry", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) return;
+      const workItem = tools.retry_work_item({ ...requestObject(request.body), id: request.params.id, actor });
+      return reply.code(201).send({ workItem });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/clone", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) return;
+      const workItem = tools.clone_work_item({ ...requestObject(request.body), id: request.params.id, actor });
+      return reply.code(201).send({ workItem });
+    } catch (error) {
+      return sendError(reply, error);
+    }
   });
 
   app.get("/events", { preHandler: requireRead }, (request, reply) => {
@@ -756,13 +848,32 @@ function sendError(reply: FastifyReply, error: unknown) {
     const status =
       error.code === "work_item_not_found" || error.code === "agent_not_found"
         ? 404
-        : error.code === "actor_not_found" ||
-            error.code === "invalid_agent_registration" ||
-            error.code === "invalid_event_query" ||
-            error.code === "approval_action_hash_required"
-          ? 400
-          : 409;
-    return reply.code(status).send({ error: error.message, code: error.code });
+        : error.code === "worker_lease_expired"
+          ? 410
+          : error.code === "worker_lease_mismatch" ||
+              error.code === "worker_action_hash_mismatch" ||
+              error.code === "result_outcome_forbidden"
+            ? 403
+            : error.code === "actor_not_found" ||
+                error.code === "invalid_agent_registration" ||
+                error.code === "invalid_event_query" ||
+                error.code === "approval_action_hash_required" ||
+                error.code === "result_invalid" ||
+                error.code === "invalid_retry_request"
+              ? 400
+              : 409;
+    const safeMessages: Record<string, string> = {
+      worker_lease_missing: "active worker lease is required",
+      worker_lease_conflict: "worker lease changed while accepting the result",
+      lease_state_inconsistent: "worker lease state is invalid",
+      result_conflict: "result conflicts with an accepted result",
+      result_persistence_failed: "result could not be persisted",
+      work_item_not_running: "work item is not accepting a result",
+      worker_action_hash_mismatch: "worker action hash does not match the active lease",
+      worker_lease_mismatch: "worker lease does not match the submitted result",
+      result_outcome_forbidden: "ACS-derived outcomes are not worker-submittable"
+    };
+    return reply.code(status).send({ error: safeMessages[error.code] ?? error.message, code: error.code });
   }
   throw error;
 }
@@ -773,7 +884,10 @@ function requestObject(input: unknown): Record<string, unknown> {
 
 function requireApprovalActionHash(input: Record<string, unknown>): void {
   if (typeof input.actionHash !== "string" || input.actionHash.trim().length === 0) {
-    throw new ControlStackError("approval_action_hash_required", "approval_action_hash_required: actionHash is required");
+    throw new ControlStackError(
+      "approval_action_hash_required",
+      "approval_action_hash_required: actionHash is required"
+    );
   }
 }
 
@@ -799,7 +913,10 @@ function approvalActionHashesByWorkItem(
   );
 }
 
-function eventReadOptions(query: unknown, filters: Pick<ReadEventsOptions, "workItemId" | "agentId"> = {}): ReadEventsOptions {
+function eventReadOptions(
+  query: unknown,
+  filters: Pick<ReadEventsOptions, "workItemId" | "agentId"> = {}
+): ReadEventsOptions {
   const parsed = eventQuerySchema.parse(query ?? {});
   return {
     ...filters,
@@ -808,7 +925,10 @@ function eventReadOptions(query: unknown, filters: Pick<ReadEventsOptions, "work
   };
 }
 
-function projectRegistryFreshness(agent: RegistryAgentDetail, heartbeatTtlMs: number): RegistryAgentDetail & {
+function projectRegistryFreshness(
+  agent: RegistryAgentDetail,
+  heartbeatTtlMs: number
+): RegistryAgentDetail & {
   effectiveStatus: RegistryStatus;
   heartbeatAgeMs: number | null;
   isStale: boolean;
@@ -816,12 +936,8 @@ function projectRegistryFreshness(agent: RegistryAgentDetail, heartbeatTtlMs: nu
   const heartbeatTime = agent.lastHeartbeatAt ? Date.parse(agent.lastHeartbeatAt) : Number.NaN;
   const heartbeatAgeMs = Number.isFinite(heartbeatTime) ? Math.max(0, Date.now() - heartbeatTime) : null;
   const freshnessStatus = agent.status === "AVAILABLE" || agent.status === "BUSY" || agent.status === "DEGRADED";
-  const isStale = freshnessStatus && isHeartbeatExpired(
-    agent.lastHeartbeatAt,
-    agent.updatedAt,
-    new Date(),
-    heartbeatTtlMs
-  );
+  const isStale =
+    freshnessStatus && isHeartbeatExpired(agent.lastHeartbeatAt, agent.updatedAt, new Date(), heartbeatTtlMs);
   return {
     ...agent,
     effectiveStatus: isStale ? "OFFLINE" : agent.status,
@@ -957,6 +1073,26 @@ function requireMutationActor(
     return undefined;
   }
   return auth.actor;
+}
+
+function requireWorkerIdentity(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  if (!auth) {
+    reply.code(503).send({ error: "worker auth is not configured", code: "worker_auth_unconfigured" });
+    return undefined;
+  }
+  if (!hasBearerAuth(request, auth) && !hasSessionCookie(request, auth)) {
+    reply.code(401).send({ error: "unauthorized" });
+    return undefined;
+  }
+  if (auth.actor !== "agent" || !auth.actorId) {
+    reply.code(403).send({ error: "worker role is required", code: "insufficient_worker_authority" });
+    return undefined;
+  }
+  return auth.actorId;
 }
 
 function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {
