@@ -110,8 +110,8 @@ function validateStateConstraintPreflight(db: SqliteLike): void {
     {
       label: "work_items",
       sql: `SELECT id FROM work_items
-            WHERE status NOT IN ('draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected')
-               OR risk NOT IN ('low', 'medium', 'high', 'critical')
+            WHERE status IS NULL OR status NOT IN ('draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected')
+               OR risk IS NULL OR risk NOT IN ('low', 'medium', 'high', 'critical')
                OR target_json IS NULL OR json_valid(target_json) = 0
                OR requested_actions_json IS NULL OR json_valid(requested_actions_json) = 0
                OR (result_json IS NOT NULL AND json_valid(result_json) = 0)`
@@ -119,33 +119,33 @@ function validateStateConstraintPreflight(db: SqliteLike): void {
     {
       label: "approval_records",
       sql: `SELECT work_item_id || ':' || action_hash AS id FROM approval_records
-            WHERE status NOT IN ('granted', 'consumed')`
+            WHERE status IS NULL OR status NOT IN ('granted', 'consumed')`
     },
     {
       label: "connector_records",
       sql: `SELECT id FROM connector_records
-            WHERE status NOT IN ('active', 'revoked')
+            WHERE status IS NULL OR status NOT IN ('active', 'revoked')
                OR allowed_scopes_json IS NULL OR json_valid(allowed_scopes_json) = 0`
     },
     {
       label: "tunnel_sessions",
       sql: `SELECT session_id AS id FROM tunnel_sessions
-            WHERE status NOT IN ('active', 'revoked')`
+            WHERE status IS NULL OR status NOT IN ('active', 'revoked')`
     },
     {
       label: "actors",
       sql: `SELECT id FROM actors
-            WHERE actor_type NOT IN ('HUMAN', 'SYSTEM', 'AGENT', 'SERVICE')`
+            WHERE actor_type IS NULL OR actor_type NOT IN ('HUMAN', 'SYSTEM', 'AGENT', 'SERVICE')`
     },
     {
       label: "agents",
       sql: `SELECT id FROM agents
-            WHERE status NOT IN ('UNKNOWN', 'AVAILABLE', 'BUSY', 'DEGRADED', 'OFFLINE', 'ERROR')`
+            WHERE status IS NULL OR status NOT IN ('UNKNOWN', 'AVAILABLE', 'BUSY', 'DEGRADED', 'OFFLINE', 'ERROR')`
     },
     {
       label: "heartbeats",
       sql: `SELECT id FROM heartbeats
-            WHERE status NOT IN ('UNKNOWN', 'AVAILABLE', 'BUSY', 'DEGRADED', 'OFFLINE', 'ERROR')`
+            WHERE status IS NULL OR status NOT IN ('UNKNOWN', 'AVAILABLE', 'BUSY', 'DEGRADED', 'OFFLINE', 'ERROR')`
     },
     {
       label: "capabilities",

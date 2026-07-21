@@ -911,6 +911,56 @@ describe("work item state machine", () => {
     }
   });
 
+  it("rejects NULL persisted state values before applying the constraints migration", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-state-constraints-null-"));
+    const dbPath = join(dir, "control.db");
+    const db = new DatabaseSync(dbPath);
+
+    try {
+      db.exec(`
+        CREATE TABLE schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          checksum TEXT NOT NULL,
+          applied_at TEXT NOT NULL
+        );
+        CREATE TABLE work_items (id TEXT, status TEXT, risk TEXT, target_json TEXT, requested_actions_json TEXT, result_json TEXT);
+        CREATE TABLE approval_records (work_item_id TEXT, action_hash TEXT, status TEXT);
+        CREATE TABLE connector_records (id TEXT, status TEXT, allowed_scopes_json TEXT);
+        CREATE TABLE tunnel_sessions (session_id TEXT, status TEXT);
+        CREATE TABLE actors (id TEXT, actor_type TEXT);
+        CREATE TABLE agents (id TEXT, status TEXT);
+        CREATE TABLE heartbeats (id INTEGER, status TEXT);
+        CREATE TABLE capabilities (id TEXT, input_schema TEXT);
+        CREATE TABLE audit_events (id TEXT, attributes TEXT, body TEXT);
+      `);
+      for (const migration of controlPlaneMigrations().slice(0, 3)) {
+        db
+          .prepare(
+            `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .run(migration.version, migration.name, migration.filename, migration.checksum, "2026-07-20T00:00:00.000Z");
+      }
+      db.prepare(
+        `INSERT INTO work_items (id, status, risk, target_json, requested_actions_json, result_json)
+         VALUES (?, NULL, ?, ?, ?, NULL)`
+      ).run("null-work-item", "low", "{}", "[]");
+
+      expect(() => applyControlPlaneMigrations(db)).toThrow(/null-work-item/);
+      expect(db.prepare(`SELECT MAX(version) AS version FROM schema_migrations`).get()).toEqual({ version: 3 });
+      expect(
+        db
+          .prepare(`SELECT name FROM sqlite_master WHERE type = 'trigger' AND name = 'work_items_state_guard_insert'`)
+          .get()
+      ).toBeUndefined();
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("migrates a copied version-three database without mutating the source", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-migration-copy-"));
     const sourcePath = join(dir, "source.db");
