@@ -209,4 +209,86 @@ describe("policy gate", () => {
     expect(evaluateWorkItemPolicy(renamed, "user", "create")[0]?.actionHash).not.toBe(hashes[0]);
     expect(evaluateWorkItemPolicy(higherRisk, "user", "create")[0]?.actionHash).not.toBe(hashes[0]);
   });
+
+  it("binds every agent execution control to the canonical action hash", () => {
+    const params = {
+      agent: "codex",
+      provider: "codex-cli",
+      model: "gpt-5-codex",
+      prompt: "Inspect the repository and return a report",
+      cwd: "/repo",
+      permissionMode: "read-only",
+      timeoutMs: 30_000,
+      networkAccess: "none",
+      expectedOutputs: ["report.md"]
+    };
+    const workItem = createWorkItem({
+      title: "Bound agent execution",
+      requester: "user",
+      intent: "verify execution binding",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "agent.prompt", description: "run bounded agent", params }],
+      risk: "low"
+    });
+    const baseline = evaluateWorkItemPolicy(workItem, "user", "create")[0]?.actionHash;
+
+    for (const field of ["agent", "provider", "model", "prompt", "cwd", "permissionMode", "timeoutMs", "networkAccess", "expectedOutputs"]) {
+      const changedParams = { ...params, [field]: field === "expectedOutputs" ? ["different.md"] : `changed-${field}` };
+      const changed = createWorkItem({
+        title: "Bound agent execution",
+        requester: "user",
+        intent: "verify execution binding",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "agent.prompt", description: "run bounded agent", params: changedParams }],
+        risk: "low"
+      });
+      expect(evaluateWorkItemPolicy(changed, "user", "create")[0]?.actionHash, field).not.toBe(baseline);
+    }
+  });
+
+  it("canonicalizes agent execution defaults before hashing", () => {
+    const baseInput = {
+      title: "Defaulted agent execution",
+      requester: "user" as const,
+      intent: "verify default binding",
+      target: { cwd: "/repo" },
+      risk: "low" as const
+    };
+    const implicit = createWorkItem({
+      ...baseInput,
+      requestedActions: [{
+        kind: "agent.prompt",
+        description: "run bounded agent",
+        params: {
+          agent: "codex",
+          provider: "codex-cli",
+          prompt: "Inspect the repository",
+          cwd: "/repo",
+          permissionMode: "read-only",
+          networkAccess: "none"
+        }
+      }]
+    });
+    const explicit = createWorkItem({
+      ...baseInput,
+      requestedActions: [{
+        kind: "agent.prompt",
+        description: "run bounded agent",
+        params: {
+          agent: "codex",
+          provider: "codex-cli",
+          prompt: "Inspect the repository",
+          cwd: "/repo",
+          permissionMode: "read-only",
+          timeoutMs: 900_000,
+          networkAccess: "none",
+          expectedOutputs: []
+        }
+      }]
+    });
+
+    expect(evaluateWorkItemPolicy(implicit, "user", "create")[0]?.actionHash).toBe(
+      evaluateWorkItemPolicy(explicit, "user", "create")[0]?.actionHash
+    );
+  });
 });

@@ -415,12 +415,46 @@ describe("work item state machine", () => {
           workerId: "worker-a",
           leaseToken: claimed!.leaseToken,
           status: "succeeded",
-          result: { output: "ok" }
+          result: { execution_mode: "dry_run", output: "ok" }
         }).status
       ).toBe("succeeded");
       expect(JSON.stringify(store.readEvents())).not.toContain(claimed!.leaseToken);
     } finally {
       store.close();
+    }
+  });
+
+  it("rejects result evidence outside the structured worker contract without consuming the lease", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-result-evidence-contract-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Evidence contract",
+        requester: "agent",
+        intent: "verify structured result evidence",
+        requestedActions: [{ kind: "manual", description: "result" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id, domainTransition);
+      const claimed = store.claimNextApprovedWorkItem("worker-a");
+
+      expectControlError(
+        () =>
+          store.submitWorkResult({
+            id: workItem.id,
+            workerId: "worker-a",
+            leaseToken: claimed!.leaseToken,
+            status: "succeeded",
+            result: { execution_mode: "dry_run", unexpected_field: "reject me" }
+          }),
+        "worker_result_invalid"
+      );
+      expect(store.get(workItem.id)?.status).toBe("running");
+      expect(store.readEvents().at(-1)?.name).toBe(WorkItemEvent.Running);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

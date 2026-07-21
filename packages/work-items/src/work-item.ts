@@ -62,17 +62,62 @@ export const cancelRequestSchema = z.object({
 });
 export const rejectRequestSchema = cancelRequestSchema;
 
+export const executionModeSchema = z.enum(["not_started", "dry_run", "sandboxed_agent"]);
+const timestampSchema = z.string().datetime({ offset: true });
+const boundedTextSchema = z.string().max(20_000);
+const hashSchema = z.string().regex(/^[a-f0-9]{64}$/i);
+const verificationResultSchema = z
+  .object({
+    command: z.string().min(1).max(1_000),
+    ok: z.boolean(),
+    exit_code: z.number().int().nullable().optional(),
+    summary: boundedTextSchema.optional()
+  })
+  .strict();
+
+export const workerResultSchema = z
+  .object({
+    execution_mode: executionModeSchema,
+    agent: z.string().min(1).max(128).optional(),
+    provider: z.string().min(1).max(128).optional(),
+    model: z.string().min(1).max(256).optional(),
+    started_at: timestampSchema.optional(),
+    completed_at: timestampSchema.optional(),
+    exit_code: z.number().int().nullable().optional(),
+    timed_out: z.boolean().optional(),
+    stdout_summary: boundedTextSchema.optional(),
+    stderr_summary: boundedTextSchema.optional(),
+    output: boundedTextSchema.optional(),
+    error: boundedTextSchema.optional(),
+    summary: boundedTextSchema.optional(),
+    changed_paths: z.array(z.string().min(1).max(1_000)).max(200).optional(),
+    verification_commands: z.array(z.string().min(1).max(1_000)).max(100).optional(),
+    verification_results: z.array(verificationResultSchema).max(100).optional(),
+    workspace_before_hash: hashSchema.optional(),
+    workspace_after_hash: hashSchema.optional(),
+    sandbox_identity: z.string().min(1).max(512).optional(),
+    evidence_source: z.enum(["worker_reported", "acs_derived"]).optional(),
+    recorded_at: timestampSchema.optional()
+  })
+  .strict();
+
 export const submitWorkResultSchema = z.object({
   id: z.string().min(1),
   workerId: z.string().min(1),
   leaseToken: z.string().min(1),
   status: z.enum(["succeeded", "failed", "blocked"]),
   result: z.record(z.string(), z.unknown()).default({})
-});
+}).strict();
 
 export const listWorkItemsSchema = z.object({
-  status: workItemStatusSchema.optional()
-});
+  status: workItemStatusSchema.optional(),
+  limit: z.coerce.number().int().min(1).max(100).optional(),
+  afterCreatedAt: z.string().min(1).max(128).optional(),
+  afterId: z.string().min(1).max(128).optional()
+}).refine(
+  (value) => (value.afterCreatedAt === undefined) === (value.afterId === undefined),
+  "afterCreatedAt and afterId must be provided together"
+);
 
 export type Requester = z.infer<typeof requesterSchema>;
 export type WorkItemRisk = z.infer<typeof workItemRiskSchema>;
@@ -84,6 +129,7 @@ export type ApprovalRequest = z.infer<typeof approvalRequestSchema>;
 export type CancelRequest = z.infer<typeof cancelRequestSchema>;
 export type RejectRequest = z.infer<typeof rejectRequestSchema>;
 export type SubmitWorkResultInput = z.infer<typeof submitWorkResultSchema>;
+export type WorkerResult = z.infer<typeof workerResultSchema>;
 export type ClaimedWorkItem = WorkItem & { workerId: string; leaseToken: string; leaseExpiresAt: string };
 
 export const WorkItemEvent = {
@@ -125,6 +171,10 @@ export function createWorkItem(input: unknown, now = new Date().toISOString()): 
     createdAt: now,
     updatedAt: now
   });
+}
+
+export function createNotStartedResult(error: string): WorkerResult {
+  return workerResultSchema.parse({ execution_mode: "not_started", error, evidence_source: "acs_derived" });
 }
 
 export function workItemCreatedEvent(workItem: WorkItem): AuditEvent {

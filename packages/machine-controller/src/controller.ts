@@ -1,9 +1,8 @@
 import { cpus, freemem, loadavg, platform, release, totalmem, uptime } from "node:os";
-import { ControlStackError, redactValue } from "@agent-control-stack/shared";
+import { redactValue } from "@agent-control-stack/shared";
 import { JsonlAuditLogger } from "./audit.js";
 import { previewCommand, runReadonlyCommand, type RiskLevel } from "./command.js";
 import type { MachineControllerConfig } from "./config.js";
-import { runDirectAgent, sanitizeDirectAgentAuditArgs, type DirectAgentRunner } from "./direct-agent.js";
 import { listFiles, readTextFile, searchNames, statPath } from "./filesystem.js";
 
 export const machineToolNames = [
@@ -13,8 +12,7 @@ export const machineToolNames = [
   "fs.read",
   "fs.search_name",
   "cmd.preview",
-  "cmd.run",
-  "test.agent.run"
+  "cmd.run"
 ] as const;
 
 export type MachineToolName = (typeof machineToolNames)[number];
@@ -26,24 +24,16 @@ interface DispatchResult {
   exitCode?: number | null;
 }
 
-export interface MachineControllerOptions {
-  directAgentRunner?: DirectAgentRunner;
-  enableTestAgentRunForLocalDevelopment?: boolean;
-}
-
 export class MachineController {
   private readonly audit: JsonlAuditLogger;
 
-  constructor(
-    private readonly config: MachineControllerConfig,
-    private readonly options: MachineControllerOptions = {}
-  ) {
+  constructor(private readonly config: MachineControllerConfig) {
     this.audit = new JsonlAuditLogger(config.audit.logPath);
   }
 
   async callTool(name: string, args: unknown = {}): Promise<unknown> {
     const started = Date.now();
-    const auditArgs = name === "test.agent.run" ? sanitizeDirectAgentAuditArgs(args) : args;
+    const auditArgs = args;
     try {
       const dispatched = await this.dispatch(name, args);
       const result = this.config.security.redactSecrets ? redactValue(dispatched.result) : dispatched.result;
@@ -94,13 +84,6 @@ export class MachineController {
       case "cmd.run": {
         const result = await runReadonlyCommand(this.config, args);
         return { result, risk: result.preview.risk, cwd: result.preview.cwd, exitCode: result.exitCode };
-      }
-      case "test.agent.run": {
-        if (this.options.enableTestAgentRunForLocalDevelopment !== true) {
-          throw new ControlStackError("direct_agent_disabled", "test.agent.run is disabled by default");
-        }
-        const result = await runDirectAgent(this.config, args, this.options.directAgentRunner);
-        return { result, risk: "requires_approval", exitCode: result.exitCode };
       }
       default:
         throw new Error(`unknown tool: ${name}`);

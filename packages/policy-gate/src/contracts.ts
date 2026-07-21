@@ -134,6 +134,7 @@ function isUnknownActionKind(kind: string): boolean {
     "fs.patch",
     "fs.move",
     "fs.delete",
+    "agent.prompt",
     "cmd.preview",
     "cmd.run",
     "service.restart",

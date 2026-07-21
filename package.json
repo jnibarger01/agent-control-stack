@@ -18,6 +18,7 @@
     "test:agentos": "npm test -w packages/agentos-contracts",
     "test:public-site-safety": "npm run verify:safety -w apps/public-site",
     "test:coverage": "vitest run --coverage",
+    "test:release-smoke": "vitest run scripts/release-smoke.test.ts",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint apps packages harness evals scripts --max-warnings=0",
     "format:check": "git diff --check && prettier --check apps/gateway/src/lifecycle.ts apps/gateway/src/lifecycle.test.ts apps/gateway/src/runtime-config.ts apps/gateway/src/runtime-config.test.ts scripts/db-ops.mjs docs/runbooks/production.md eslint.config.js .prettierrc.json compose.production.yml",

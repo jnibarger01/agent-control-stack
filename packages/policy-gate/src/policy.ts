@@ -158,7 +158,19 @@ function normalizeAction(workItem: WorkItem, action: ActionRequest): Partial<Pol
 }
 
 function canonicalAction(action: ActionRequest): ActionRequest {
-  return { ...action, kind: canonicalActionKind(action.kind) };
+  const kind = canonicalActionKind(action.kind);
+  if (kind !== "agent.prompt") {
+    return { ...action, kind };
+  }
+  return {
+    ...action,
+    kind,
+    params: {
+      ...action.params,
+      timeoutMs: action.params.timeoutMs ?? 900_000,
+      expectedOutputs: action.params.expectedOutputs ?? []
+    }
+  };
 }
 
 function canonicalActionKind(kind: string): string {

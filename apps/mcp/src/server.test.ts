@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import { MachineController, loadMachineControllerConfig, type DirectAgentRunner } from "@agent-control-stack/machine-controller";
+import { MachineController, loadMachineControllerConfig } from "@agent-control-stack/machine-controller";
 import { describe, expect, it } from "vitest";
 import { McpStdioServer, frameMessage } from "./server.js";
 
@@ -24,25 +24,12 @@ describe("MCP stdio server", () => {
         audit: { log_path: join(dir, "audit.jsonl") }
       })
     );
-    const directAgentCalls: Array<{ cwd: string; timeoutMs: number; permissionMode: string; args: string[] }> = [];
-    const directAgentRunner: DirectAgentRunner = async (request) => {
-      directAgentCalls.push({
-        cwd: request.cwd,
-        timeoutMs: request.timeoutMs,
-        permissionMode: request.permissionMode,
-        args: request.args
-      });
-      return { stdout: "mcp review ok", stderr: "", exitCode: 0, durationMs: 7 };
-    };
     const input = new PassThrough();
     const output = new PassThrough();
     new McpStdioServer(
       input,
       output,
-      new MachineController(loadMachineControllerConfig(configPath), {
-        directAgentRunner,
-        enableTestAgentRunForLocalDevelopment: true
-      })
+      new MachineController(loadMachineControllerConfig(configPath))
     ).start();
 
     try {
@@ -53,26 +40,6 @@ describe("MCP stdio server", () => {
       const toolNames = tools.result.tools.map((tool: { name: string }) => tool.name);
       expect(toolNames).toContain("fs.read");
       expect(toolNames).not.toContain("test.agent.run");
-
-      const directRun = await request(input, output, {
-        jsonrpc: "2.0",
-        id: 21,
-        method: "tools/call",
-        params: {
-          name: "test.agent.run",
-          arguments: {
-            agent: "codex",
-            prompt: "Review apps/gateway/src/server.ts for auth bugs. Do not modify files.",
-            cwd: allowed,
-            timeoutSeconds: 120,
-            permissionMode: "read-only"
-          }
-        }
-      });
-      expect(directRun).toMatchObject({
-        error: { code: -32602 }
-      });
-      expect(directAgentCalls).toHaveLength(0);
 
       const status = await request(input, output, {
         jsonrpc: "2.0",

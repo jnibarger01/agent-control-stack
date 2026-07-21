@@ -34,7 +34,7 @@ describe("deterministic replay", () => {
         workerId: "eval-worker",
         leaseToken: running!.leaseToken,
         status: "succeeded",
-        result: { output: "ok" }
+        result: { execution_mode: "dry_run", output: "ok" }
       });
 
       expect(store.get(workItem.id)?.status).toBe("succeeded");

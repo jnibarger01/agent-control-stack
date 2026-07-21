@@ -6,16 +6,12 @@ import {
   type ReadonlyAcpAdapterConfig
 } from "@agent-control-stack/acp-adapter";
 import { projectAgents, renderDashboard } from "@agent-control-stack/control-ui";
-import {
-  MachineController,
-  loadMachineControllerConfig,
-  type DirectAgentRunner
-} from "@agent-control-stack/machine-controller";
 import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
   createWorkItemSchema,
   listWorkItemsSchema,
+  submitWorkResultSchema,
   requesterSchema,
   SqliteWorkItemStore,
   DEFAULT_EVENT_LIMIT,
@@ -44,8 +40,9 @@ import {
   type McpAuthOptions,
   type McpOAuthOptions
 } from "./auth.js";
-import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit, type GatewayDirectAgentController } from "./mcp.js";
+import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit } from "./mcp.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
+import { GatewayReconciler } from "./reconciliation.js";
 import { gatewayListenConfig } from "./runtime-config.js";
 
 const approvalBodySchema = z.object({
@@ -116,9 +113,13 @@ const heartbeatBodySchema = z.object({
 const eventQuerySchema = z
   .object({
     limit: z.coerce.number().int().positive().optional(),
-    afterSequence: z.coerce.number().int().nonnegative().optional()
+    afterSequence: z.coerce.number().int().nonnegative().optional(),
+    beforeSequence: z.coerce.number().int().nonnegative().optional()
   })
-  .passthrough();
+  .refine(
+    (value) => !(value.afterSequence !== undefined && value.beforeSequence !== undefined),
+    "afterSequence and beforeSequence cannot be combined"
+  );
 const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
@@ -139,15 +140,12 @@ export interface GatewayAuthOptions {
 export interface GatewayOptions {
   dbPath?: string;
   heartbeatTtlMs?: number;
+  reconciliationIntervalMs?: number;
   logger?: boolean;
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
   mcpAllowedOrigins?: string[];
-  machineControllerConfigPath?: string;
-  directAgentRunner?: DirectAgentRunner;
-  directAgentController?: GatewayDirectAgentController;
-  enableTestAgentRunForLocalDevelopment?: boolean;
   acpAdapter?: ReadonlyAcpAdapterConfig | false;
   moa?: MoaGatewayOverrides | false;
 }
@@ -155,7 +153,6 @@ export interface GatewayOptions {
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
-  const directAgentController = resolveDirectAgentController(options);
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, {
@@ -164,6 +161,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
+  const reconciler = new GatewayReconciler(workItems, {
+    intervalMs: options.reconciliationIntervalMs,
+    onError: (error) => app.log.error({ err: error }, "gateway liveness reconciliation failed")
+  });
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
@@ -218,26 +219,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/livez", async () => ({ ok: true, status: "alive" }));
 
   const readiness = async (_request: FastifyRequest, reply: FastifyReply) => {
-    const initialHealth = workItems.health();
-    const dependencyChecks = Object.entries(initialHealth.checks)
-      .filter(([name]) => name !== "liveness")
-      .map(([, check]) => check);
-    if (!dependencyChecks.every((check) => check.ok)) {
-      return reply.code(503).send(initialHealth);
-    }
-    try {
-      workItems.reconcileStaleTunnelSessions();
-      workItems.reconcileStaleAgents();
-    } catch {
-      const health = workItems.health();
-      return reply.code(503).send({
-        ...health,
-        ok: false,
-        checks: { ...health.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
-      });
-    }
     const health = workItems.health();
-    return reply.code(health.ok ? 200 : 503).send(health);
+    const reconciliation = reconciler.health();
+    const checks = { ...health.checks, reconciliation };
+    const ok = health.ok && reconciliation.ok;
+    return reply.code(ok ? 200 : 503).send({ ...health, ok, checks });
   };
   app.get("/readyz", readiness);
   app.get("/health", readiness);
@@ -271,15 +257,25 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   }
 
+  app.addHook("onReady", async () => {
+    await reconciler.runOnce();
+    reconciler.start();
+  });
+
   app.get("/", { preHandler: requireRead }, async (request, reply) => {
     try {
-      const workItemList = workItems.list();
+      const workItemList = workItems.list({ limit: 50 });
+      const lastWorkItem = workItemList[workItemList.length - 1];
+      const hasMoreWorkItems = lastWorkItem
+        ? workItems.list({ limit: 1, afterCreatedAt: lastWorkItem.createdAt, afterId: lastWorkItem.id }).length > 0
+        : false;
       const events = workItems.readEvents(eventReadOptions(request.query));
       reply.type("text/html").send(renderDashboard({
         workItems: workItemList,
         events,
         registeredAgents: workItems.listRegistryAgents(),
-        approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(policy, workItemList, auth?.actor)
+        approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(policy, workItemList, auth?.actor),
+        workItemsNextCursor: hasMoreWorkItems ? workItemCursor(lastWorkItem) : undefined
       }));
     } catch (error) {
       return sendError(reply, error);
@@ -422,14 +418,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return reply.code(403).send(jsonRpcError(null, -32002, "forbidden origin"));
     }
     const resourceMetadataUrl = mcpResourceMetadataUrl(request, mcpAuth?.oauth);
-    const localDevelopmentDirectAgentController = isDevelopmentLoopbackRequest(request)
-      ? directAgentController
-      : undefined;
     const result = await handleMcpHttpRequest({
       body: request.body,
       headers: request.headers,
       tools,
-      directAgentController: localDevelopmentDirectAgentController,
       auth: mcpAuth,
       requireAuthentication: requiresMcpAuthentication(request, mcpAuth),
       resourceMetadataUrl,
@@ -465,7 +457,38 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.get("/work-items", { preHandler: requireRead }, async (request, reply) => {
     try {
-      return { workItems: tools.list_work_items(listWorkItemsSchema.parse(request.query)) };
+      const query = listWorkItemsSchema.parse(request.query);
+      const limit = query.limit ?? 50;
+      const workItems = tools.list_work_items({ ...query, limit });
+      const lastWorkItem = workItems[workItems.length - 1];
+      const hasMoreWorkItems = lastWorkItem
+        ? tools.list_work_items({
+            ...query,
+            limit: 1,
+            afterCreatedAt: lastWorkItem.createdAt,
+            afterId: lastWorkItem.id
+          }).length > 0
+        : false;
+      return {
+        workItems,
+        nextCursor: hasMoreWorkItems ? workItemCursor(lastWorkItem) : undefined
+      };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get("/api/events", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      const options = eventReadOptions(request.query);
+      const events = workItems.readEvents(options);
+      const limit = options.limit ?? DEFAULT_EVENT_LIMIT;
+      return {
+        events,
+        ...(options.beforeSequence !== undefined
+          ? { previousCursor: events.length === limit ? events[0]?.sequence : undefined }
+          : { nextCursor: events.length === limit ? events[events.length - 1]?.sequence : undefined })
+      };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -700,7 +723,23 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.post<{ Params: { id: string } }>("/work-items/:id/results", async (request, reply) => {
-    return reply.code(501).send({ error: "worker result submission requires a lease-bound worker API" });
+    try {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) {
+        return;
+      }
+      const body = submitWorkResultSchema.parse(request.body);
+      if (body.id !== request.params.id) {
+        return reply.code(400).send({ error: "result work item id does not match route id" });
+      }
+      if (body.workerId !== workerId) {
+        return reply.code(403).send({ error: "result worker identity does not match authenticated worker" });
+      }
+      const workItem = workItems.submitWorkResult(body);
+      return reply.code(200).send({ workItem });
+    } catch (error) {
+      return sendError(reply, error);
+    }
   });
 
   app.get("/events", { preHandler: requireRead }, (request, reply) => {
@@ -718,6 +757,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.addHook("onClose", async () => {
+    reconciler.stop();
     await acpAdapter?.stop();
     workItems.close();
   });
@@ -759,7 +799,8 @@ function sendError(reply: FastifyReply, error: unknown) {
         : error.code === "actor_not_found" ||
             error.code === "invalid_agent_registration" ||
             error.code === "invalid_event_query" ||
-            error.code === "approval_action_hash_required"
+            error.code === "approval_action_hash_required" ||
+            error.code === "worker_result_invalid"
           ? 400
           : 409;
     return reply.code(status).send({ error: error.message, code: error.code });
@@ -781,7 +822,7 @@ function approvalActionHashesByWorkItem(
   policy: ReturnType<typeof createPolicyEngine>,
   workItems: WorkItem[],
   actor: string | undefined
-): Record<string, string[]> {
+): Record<string, Array<{ hash: string; kind: string; description: string }>> {
   if (!actor) {
     return {};
   }
@@ -793,10 +834,18 @@ function approvalActionHashesByWorkItem(
         policy
           .evaluateWorkItem(workItem, actor, "approve")
           .filter((evaluation) => evaluation.decision.decision === "require_approval")
-          .map((evaluation) => evaluation.actionHash)
+          .map((evaluation) => ({
+            hash: evaluation.actionHash,
+            kind: evaluation.action.kind,
+            description: evaluation.action.description
+          }))
       ])
-      .filter(([, hashes]) => hashes.length > 0)
+      .filter(([, actions]) => actions.length > 0)
   );
+}
+
+function workItemCursor(workItem: WorkItem | undefined): { createdAt: string; id: string } | undefined {
+  return workItem ? { createdAt: workItem.createdAt, id: workItem.id } : undefined;
 }
 
 function eventReadOptions(query: unknown, filters: Pick<ReadEventsOptions, "workItemId" | "agentId"> = {}): ReadEventsOptions {
@@ -804,7 +853,8 @@ function eventReadOptions(query: unknown, filters: Pick<ReadEventsOptions, "work
   return {
     ...filters,
     limit: parsed.limit === undefined ? DEFAULT_EVENT_LIMIT : Math.min(parsed.limit, MAX_EVENT_LIMIT),
-    ...(parsed.afterSequence === undefined ? {} : { afterSequence: parsed.afterSequence })
+    ...(parsed.afterSequence === undefined ? {} : { afterSequence: parsed.afterSequence }),
+    ...(parsed.beforeSequence === undefined ? {} : { beforeSequence: parsed.beforeSequence })
   };
 }
 
@@ -816,7 +866,8 @@ function projectRegistryFreshness(agent: RegistryAgentDetail, heartbeatTtlMs: nu
   const heartbeatTime = agent.lastHeartbeatAt ? Date.parse(agent.lastHeartbeatAt) : Number.NaN;
   const heartbeatAgeMs = Number.isFinite(heartbeatTime) ? Math.max(0, Date.now() - heartbeatTime) : null;
   const freshnessStatus = agent.status === "AVAILABLE" || agent.status === "BUSY" || agent.status === "DEGRADED";
-  const isStale = freshnessStatus && isHeartbeatExpired(
+  const reconciledOffline = agent.status === "OFFLINE" && agent.lastError === "heartbeat expired";
+  const isStale = (freshnessStatus || reconciledOffline) && isHeartbeatExpired(
     agent.lastHeartbeatAt,
     agent.updatedAt,
     new Date(),
@@ -838,26 +889,6 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   const actor = requesterSchema.parse(process.env.ACS_GATEWAY_ACTOR ?? "user");
   const actorId = process.env.ACS_GATEWAY_ACTOR_ID;
   return token ? { token, actor, ...(actorId ? { actorId } : {}) } : undefined;
-}
-
-function resolveDirectAgentController(options: GatewayOptions): GatewayDirectAgentController | undefined {
-  const enabled =
-    options.enableTestAgentRunForLocalDevelopment ??
-    process.env.ACS_ENABLE_TEST_AGENT_RUN_FOR_LOCAL_DEVELOPMENT === "1";
-  if (!enabled) return undefined;
-  if (process.env.NODE_ENV === "production") {
-    throw new ControlStackError(
-      "direct_agent_production_forbidden",
-      "test.agent.run local-development opt-in is forbidden in production"
-    );
-  }
-  if (options.directAgentController) return options.directAgentController;
-  const configPath = options.machineControllerConfigPath ?? process.env.ACS_MACHINE_CONTROLLER_CONFIG;
-  if (!configPath) return undefined;
-  return new MachineController(loadMachineControllerConfig(configPath), {
-    directAgentRunner: options.directAgentRunner,
-    enableTestAgentRunForLocalDevelopment: true
-  });
 }
 
 function resolveMcpAuth(options: GatewayOptions, workItems: SqliteWorkItemStore): McpAuthOptions | undefined {
@@ -957,6 +988,35 @@ function requireMutationActor(
     return undefined;
   }
   return auth.actor;
+}
+
+function requireWorkerIdentity(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  if (!auth) {
+    reply.code(503).send({ error: "worker auth is not configured" });
+    return undefined;
+  }
+  if (!hasBearerAuth(request, auth) && !hasSessionCookie(request, auth)) {
+    reply.code(401).send({ error: "unauthorized" });
+    return undefined;
+  }
+  if (auth.actor !== "agent" || !auth.actorId) {
+    reply.code(503).send({ error: "worker auth is not bound to an agent identity" });
+    return undefined;
+  }
+  const claimedWorkerId = firstHeader(request.headers["x-acs-worker-id"]);
+  if (!claimedWorkerId) {
+    reply.code(400).send({ error: "x-acs-worker-id is required" });
+    return undefined;
+  }
+  if (claimedWorkerId !== auth.actorId) {
+    reply.code(403).send({ error: "x-acs-worker-id does not match the credential-bound worker" });
+    return undefined;
+  }
+  return claimedWorkerId;
 }
 
 function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {

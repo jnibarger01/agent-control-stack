@@ -218,7 +218,10 @@ function gateWorkerClaimInTransaction(
       workerId: parsed.workerId,
       leaseToken: running.leaseToken,
       status: "blocked",
-      result: { error: missing ? "approval missing for action hash" : approvalFailure ? errorMessage(approvalFailure) : decision.reason }
+      result: {
+        execution_mode: "not_started",
+        error: missing ? "approval missing for action hash" : approvalFailure ? errorMessage(approvalFailure) : decision.reason
+      }
     });
     return {
       ...blocked,

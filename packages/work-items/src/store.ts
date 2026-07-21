@@ -19,10 +19,12 @@ import {
 import { transitionWorkItem } from "./state-machine.js";
 import {
   cancelRequestSchema,
+  createNotStartedResult,
   createWorkItem,
   listWorkItemsSchema,
   rejectRequestSchema,
   submitWorkResultSchema,
+  workerResultSchema,
   workItemCreatedEvent,
   workItemSchema,
   workItemStatusEvent,
@@ -65,6 +67,7 @@ export const MAX_EVENT_LIMIT = 500;
 export interface ReadEventsOptions {
   limit?: number;
   afterSequence?: number;
+  beforeSequence?: number;
   workItemId?: string;
   agentId?: string;
 }
@@ -546,11 +549,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   list(input: unknown = {}): WorkItem[] {
     const filter = listWorkItemsSchema.parse(input);
-    const rows = filter.status
-      ? (this.db
-          .prepare(`SELECT * FROM work_items WHERE status = ? ORDER BY created_at DESC`)
-          .all(filter.status) as unknown as WorkItemRow[])
-      : (this.db.prepare(`SELECT * FROM work_items ORDER BY created_at DESC`).all() as unknown as WorkItemRow[]);
+    const where: string[] = [];
+    const params: Array<number | string> = [];
+    if (filter.status) {
+      where.push("status = ?");
+      params.push(filter.status);
+    }
+    if (filter.afterCreatedAt !== undefined && filter.afterId !== undefined) {
+      where.push("(created_at < ? OR (created_at = ? AND id < ?))");
+      params.push(filter.afterCreatedAt, filter.afterCreatedAt, filter.afterId);
+    }
+    const whereSql = where.length ? ` WHERE ${where.join(" AND ")}` : "";
+    const limitSql = filter.limit === undefined ? "" : " LIMIT ?";
+    if (filter.limit !== undefined) {
+      params.push(filter.limit);
+    }
+    const rows = this.db
+      .prepare(`SELECT * FROM work_items${whereSql} ORDER BY created_at DESC, id DESC${limitSql}`)
+      .all(...params) as unknown as WorkItemRow[];
     return rows.map(rowToWorkItem);
   }
 
@@ -563,8 +579,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (!Number.isInteger(options.afterSequence) || options.afterSequence < 0) {
         throw new ControlStackError("invalid_event_query", "afterSequence must be a non-negative integer");
       }
+      if (options.beforeSequence !== undefined) {
+        throw new ControlStackError("invalid_event_query", "afterSequence and beforeSequence cannot be combined");
+      }
       where.push("sequence > ?");
       params.push(options.afterSequence);
+    }
+    if (options.beforeSequence !== undefined) {
+      if (!Number.isInteger(options.beforeSequence) || options.beforeSequence < 0) {
+        throw new ControlStackError("invalid_event_query", "beforeSequence must be a non-negative integer");
+      }
+      where.push("sequence < ?");
+      params.push(options.beforeSequence);
     }
     if (options.workItemId) {
       where.push(`json_extract(attributes, '$."work_item.id"') = ?`);
@@ -586,6 +612,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
     if (options.afterSequence !== undefined) {
       return (this.db
         .prepare(`SELECT * FROM audit_events ${whereSql} ORDER BY sequence ASC LIMIT ?`)
+        .all(...params, limit) as unknown as EventRow[]).map(rowToEvent);
+    }
+    if (options.beforeSequence !== undefined) {
+      return (this.db
+        .prepare(`SELECT * FROM (SELECT * FROM audit_events ${whereSql} ORDER BY sequence DESC LIMIT ?) ORDER BY sequence ASC`)
         .all(...params, limit) as unknown as EventRow[]).map(rowToEvent);
     }
     return (this.db
@@ -1506,7 +1537,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       for (const row of rows) {
         const current = rowToWorkItem(row);
         const updated = transitionWorkItem(current, "failed", nowIso);
-        const leaseFailureResult = { error: "worker lease expired" };
+        const leaseFailureResult = createNotStartedResult("worker lease expired");
         const result = this.db
           .prepare(
             `UPDATE work_items
@@ -1555,7 +1586,19 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
       const current = rowToWorkItem(row);
       const redactedResult = redactValue(parsed.result) as Record<string, unknown>;
-      const updated = { ...transitionWorkItem(current, parsed.status), result: redactedResult };
+      const resultEvidence = workerResultSchema.safeParse(redactedResult);
+      if (!resultEvidence.success) {
+        throw new ControlStackError(
+          "worker_result_invalid",
+          `worker result evidence is invalid for work item: ${parsed.id}`
+        );
+      }
+      const persistedResult = {
+        ...resultEvidence.data,
+        evidence_source: "worker_reported" as const,
+        recorded_at: new Date().toISOString()
+      };
+      const updated = { ...transitionWorkItem(current, parsed.status), result: persistedResult };
       const result = this.db
         .prepare(
           `UPDATE work_items
@@ -1565,7 +1608,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .run(
           updated.status,
           updated.updatedAt,
-          JSON.stringify(redactedResult),
+          JSON.stringify(persistedResult),
           parsed.id,
           parsed.workerId,
           expectedLeaseHash
@@ -1576,7 +1619,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       return {
         value: updated,
         events: [
-          this.appendAuditEvent(workItemStatusEvent(updated, { result: redactedResult }, resultEventAttributes(redactedResult)))
+          this.appendAuditEvent(workItemStatusEvent(updated, { result: persistedResult }, resultEventAttributes(persistedResult)))
         ]
       };
     });
@@ -1791,24 +1834,28 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private writeHealth(): HealthCheck {
     try {
       this.db.exec("PRAGMA busy_timeout = 50");
-      this.db.exec("SAVEPOINT acs_health_write");
+      this.db.exec("BEGIN IMMEDIATE");
       try {
         this.db
           .prepare(
             `UPDATE schema_migrations
-             SET applied_at = applied_at
+             SET applied_at = ?
              WHERE version = (SELECT version FROM schema_migrations ORDER BY version DESC LIMIT 1)`
           )
-          .run();
-        this.db.exec("ROLLBACK TO acs_health_write");
-        this.db.exec("RELEASE acs_health_write");
+          .run(`acs-health-probe-${Date.now()}`);
+        this.db.exec(`
+          CREATE TEMP TABLE IF NOT EXISTS acs_health_write_probe (value INTEGER);
+          DELETE FROM acs_health_write_probe;
+          INSERT INTO acs_health_write_probe (value) VALUES (1);
+          DELETE FROM acs_health_write_probe;
+        `);
+        this.db.exec("ROLLBACK");
         return okHealth();
       } catch (error) {
         try {
-          this.db.exec("ROLLBACK TO acs_health_write");
-          this.db.exec("RELEASE acs_health_write");
+          this.db.exec("ROLLBACK");
         } catch {
-          // best effort; a failed write probe may already have ended the savepoint.
+          // best effort; a failed write probe may already have ended the transaction.
         }
         throw error;
       }

@@ -1,5 +1,4 @@
 import type { IncomingHttpHeaders } from "node:http";
-import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { ZodError, z } from "zod";
@@ -15,16 +14,10 @@ const MCP_PROTOCOL_VERSION = "2024-11-05";
 
 type GatewayWorkItemTools = ReturnType<typeof createWorkItemTools>;
 type GatewayToolName = (typeof workItemToolNames)[number];
-const directAgentToolName = "test.agent.run" as const;
-type DirectAgentToolName = typeof directAgentToolName;
-const mcpToolNames = [...workItemToolNames, directAgentToolName] as const;
+const mcpToolNames = workItemToolNames;
 type McpToolName = (typeof mcpToolNames)[number];
 const remoteMcpToolNames = workItemToolNames.filter((name) => name !== "approve_work_item");
 type JsonRpcId = string | number | null;
-
-export interface GatewayDirectAgentController {
-  callTool(name: DirectAgentToolName, args: unknown): Promise<unknown> | unknown;
-}
 
 type JsonRpcSuccess = {
   jsonrpc: "2.0";
@@ -73,7 +66,6 @@ export async function handleMcpHttpRequest(input: {
   body: unknown;
   headers: IncomingHttpHeaders;
   tools: GatewayWorkItemTools;
-  directAgentController?: GatewayDirectAgentController;
   auth?: McpAuthOptions;
   requireAuthentication?: boolean;
   resourceMetadataUrl?: string;
@@ -118,7 +110,7 @@ export async function handleMcpHttpRequest(input: {
       return jsonRpcResult(request.data.id, {});
     case "tools/list":
       return jsonRpcResult(request.data.id, {
-        tools: mcpToolDefinitions(Boolean(input.directAgentController), Boolean(input.auth?.oauth))
+        tools: mcpToolDefinitions(Boolean(input.auth?.oauth))
       });
     case "resources/list":
       return jsonRpcResult(request.data.id, { resources: [] });
@@ -131,7 +123,6 @@ export async function handleMcpHttpRequest(input: {
         auth: input.auth,
         resourceMetadataUrl: input.resourceMetadataUrl,
         tools: input.tools,
-        directAgentController: input.directAgentController,
         remoteAddress: input.remoteAddress,
         auditAuthenticatedRequest: input.auditAuthenticatedRequest,
         resolveActorId: input.resolveActorId
@@ -184,7 +175,6 @@ async function handleToolsCall(input: {
   auth?: McpAuthOptions;
   resourceMetadataUrl?: string;
   tools: GatewayWorkItemTools;
-  directAgentController?: GatewayDirectAgentController;
   remoteAddress?: string;
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
@@ -225,7 +215,6 @@ async function handleToolsCall(input: {
   try {
     const result = await callMcpTool({
       tools: input.tools,
-      directAgentController: input.directAgentController,
       name: parsed.data.name,
       args: parsed.data.arguments ?? {},
       auth: authorization.auth,
@@ -296,19 +285,11 @@ async function handleProtectedUnsupportedMethod(input: {
 
 async function callMcpTool(input: {
   tools: GatewayWorkItemTools;
-  directAgentController?: GatewayDirectAgentController;
   name: McpToolName;
   args: unknown;
   auth: McpAuthenticatedRequest;
   actor: string;
 }): Promise<unknown> {
-  if (input.name === directAgentToolName) {
-    if (!input.directAgentController) {
-      throw new ControlStackError("direct_agent_not_configured", "test.agent.run is not configured on this gateway");
-    }
-    return await input.directAgentController.callTool(directAgentToolName, input.args);
-  }
-
   return callGatewayTool(input.tools, input.name, input.args, input.auth, input.actor);
 }
 
@@ -362,10 +343,8 @@ function workItemIdFromToolResult(result: unknown): string | undefined {
   return undefined;
 }
 
-function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean) {
-  const toolNames: McpToolName[] = includeDirectAgent
-    ? [...remoteMcpToolNames, directAgentToolName]
-    : [...remoteMcpToolNames];
+function mcpToolDefinitions(advertiseOAuth: boolean) {
+  const toolNames: McpToolName[] = [...remoteMcpToolNames];
   return toolNames.map((name) => {
     const securitySchemes = advertiseOAuth
       ? [{ type: "oauth2" as const, scopes: requiredScopes(name) }]
@@ -382,7 +361,6 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
 }
 
 function requiredScopes(name: McpToolName): McpScope[] {
-  if (name === directAgentToolName) return ["acs:work:approve"];
   switch (name) {
     case "create_work_item":
       return ["acs:work:create"];
@@ -398,12 +376,10 @@ function requiredScopes(name: McpToolName): McpScope[] {
 }
 
 function isMutatingTool(name: McpToolName): boolean {
-  if (name === directAgentToolName) return true;
   return !["get_work_item", "list_work_items"].includes(name);
 }
 
 function toolAnnotations(name: McpToolName): Record<string, boolean> {
-  if (name === directAgentToolName) return { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
   switch (name) {
     case "get_work_item":
     case "list_work_items":
@@ -417,9 +393,6 @@ function toolAnnotations(name: McpToolName): Record<string, boolean> {
 }
 
 function toolDescription(name: McpToolName): string {
-  if (name === directAgentToolName) {
-    return "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.";
-  }
   switch (name) {
     case "create_work_item":
       return "Create a governed work item and immediately evaluate it through the policy gate.";
@@ -439,20 +412,6 @@ function toolDescription(name: McpToolName): string {
 }
 
 function toolInputSchema(name: McpToolName): Record<string, unknown> {
-  if (name === directAgentToolName) {
-    return {
-      type: "object",
-      required: ["agent", "prompt"],
-      additionalProperties: true,
-      properties: {
-        agent: { type: "string", enum: [...directAgentNames] },
-        prompt: { type: "string", minLength: 1 },
-        cwd: { type: "string" },
-        timeoutSeconds: { type: "integer", minimum: 1 },
-        permissionMode: { type: "string", enum: ["read-only", "readonly", "read_only"], default: "read-only" }
-      }
-    };
-  }
   switch (name) {
     case "create_work_item":
       return {

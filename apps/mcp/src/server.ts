@@ -4,7 +4,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import { ZodError, z } from "zod";
 
 const protocolVersion = "2024-11-05";
-const standaloneMcpToolNames = machineToolNames.filter((name) => name !== "test.agent.run");
+const standaloneMcpToolNames = machineToolNames;
 
 type JsonRpcId = string | number | null;
 
@@ -143,8 +143,6 @@ function toolDescription(name: string): string {
       return "Classify a command without executing it.";
     case "cmd.run":
       return "Run a read-only allowlisted command with timeout, output caps, and audit logging.";
-    case "test.agent.run":
-      return "Run one allowed agent once from a clean JSON payload. Defaults to read-only and rejects write-capable direct runs.";
     default:
       return "Unknown tool.";
   }
@@ -173,20 +171,6 @@ function toolInputSchema(name: string): Record<string, unknown> {
         cwd: { type: "string" },
         command: { type: "string" },
         args: { type: "array", items: { type: "string" } }
-      }
-    };
-  }
-  if (name === "test.agent.run") {
-    return {
-      type: "object",
-      required: ["agent", "prompt"],
-      additionalProperties: true,
-      properties: {
-        agent: { type: "string", enum: ["pi", "openclaw", "codex", "claude", "gemini", "opencode"] },
-        prompt: { type: "string", minLength: 1 },
-        cwd: { type: "string" },
-        timeoutSeconds: { type: "integer", minimum: 1 },
-        permissionMode: { type: "string", enum: ["read-only", "readonly", "read_only"], default: "read-only" }
       }
     };
   }
