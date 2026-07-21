@@ -24,7 +24,8 @@ const migrationFiles = [
   { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
   { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
   { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" },
-  { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" }
+  { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" },
+  { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -35,7 +36,9 @@ export function controlPlaneMigrations(): ControlPlaneMigration[] {
 }
 
 export function controlPlaneMigrationSql(): string {
-  return controlPlaneMigrations().map((migration) => migration.sql).join("\n");
+  return controlPlaneMigrations()
+    .map((migration) => migration.sql)
+    .join("\n");
 }
 
 export function applyControlPlaneMigrations(db: SqliteLike): void {
@@ -52,12 +55,14 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
     db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
   }
   const applied = new Map(
-    (db.prepare(`SELECT version, name, filename, checksum FROM schema_migrations`).all() as Array<{
-      version: number;
-      name: string;
-      filename: string;
-      checksum: string;
-    }>).map((row) => [row.version, row])
+    (
+      db.prepare(`SELECT version, name, filename, checksum FROM schema_migrations`).all() as Array<{
+        version: number;
+        name: string;
+        filename: string;
+        checksum: string;
+      }>
+    ).map((row) => [row.version, row])
   );
 
   for (const migration of controlPlaneMigrations()) {
@@ -70,19 +75,20 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
         throw new Error(`migration checksum mismatch for version ${migration.version}`);
       }
       if (!existing.checksum) {
-        db.prepare(`UPDATE schema_migrations SET checksum = ? WHERE version = ?`).run(migration.checksum, migration.version);
+        db.prepare(`UPDATE schema_migrations SET checksum = ? WHERE version = ?`).run(
+          migration.checksum,
+          migration.version
+        );
       }
       continue;
     }
     db.exec("BEGIN IMMEDIATE");
     try {
       db.exec(migrationSqlForCurrentSchema(db, migration));
-      db
-        .prepare(
-          `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+      db.prepare(
+        `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
            VALUES (?, ?, ?, ?, ?)`
-        )
-        .run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
+      ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
       db.exec("COMMIT");
     } catch (error) {
       try {
@@ -102,7 +108,27 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
   if (migration.version === 4) {
     validateStateConstraintPreflight(db);
   }
+  if (migration.version === 5) {
+    validateExecutionResultPreflight(db);
+  }
   return migration.sql;
+}
+
+function validateExecutionResultPreflight(db: SqliteLike): void {
+  const running = queryRows(
+    db,
+    `SELECT id FROM work_items
+     WHERE status = 'running'
+        OR lease_token_hash IS NOT NULL
+        OR lease_expires_at IS NOT NULL`
+  );
+  if (running.length > 0) {
+    throw new Error(
+      `execution result migration refused legacy active lease state; reconcile explicitly: ${running
+        .slice(0, 50)
+        .join(", ")}`
+    );
+  }
 }
 
 function validateStateConstraintPreflight(db: SqliteLike): void {
