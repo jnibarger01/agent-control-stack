@@ -37,7 +37,9 @@ export function evaluateContractAdmission(input: unknown): ContractAdmission {
     throw contractError(decision.failure_code, "contract route rejected", decision.reasons);
   }
   if (decision.rollback_required && !hasRollbackCheckpoint(parsed.requestedActions)) {
-    throw contractError("policy_blocked", "contract envelope invalid", ["destructive tasks require rollback checkpoint metadata"]);
+    throw contractError("policy_blocked", "contract envelope invalid", [
+      "destructive tasks require rollback checkpoint metadata"
+    ]);
   }
 
   return { envelope: validation.envelope, policy, route: decision };
@@ -46,7 +48,9 @@ export function evaluateContractAdmission(input: unknown): ContractAdmission {
 function workItemInputToEnvelope(input: CreateWorkItemInput): TaskEnvelope {
   const allowedTools = input.requestedActions.map(actionToContractTool);
   const rollbackRequired = hasRollbackCheckpoint(input.requestedActions);
-  const networkAccess = input.requestedActions.some((action) => action.params.allowNetwork === true) ? "declared" : "none";
+  const networkAccess = input.requestedActions.some((action) => action.params.allowNetwork === true)
+    ? "declared"
+    : "none";
   const workspace = input.target.cwd ?? input.target.repo ?? "";
   return {
     schema_version: "1.0",
@@ -81,10 +85,23 @@ function inferTaskType(actions: ActionRequest[], hasWorkspace: boolean): TaskEnv
   if (actions.length === 0 || actions.some((action) => isUnknownActionKind(action.kind))) {
     return "unknown";
   }
-  if (actions.some((action) => action.kind === "service.restart" || action.kind === "shell" || action.kind === "cmd.run")) {
+  if (
+    actions.some(
+      (action) =>
+        action.kind === "service.restart" ||
+        action.kind === "shell" ||
+        action.kind === "cmd.run" ||
+        action.kind.startsWith("process.") ||
+        action.kind === "system.shutdown"
+    )
+  ) {
     return "system_admin";
   }
-  if (actions.some((action) => action.params.network === true || action.kind.startsWith("browser") || action.kind.includes("scrape"))) {
+  if (
+    actions.some(
+      (action) => action.params.network === true || action.kind.startsWith("browser") || action.kind.includes("scrape")
+    )
+  ) {
     return "browser_scrape";
   }
   if (actions.some((action) => action.kind.startsWith("fs.") || action.kind === "cmd.preview")) {
@@ -118,6 +135,22 @@ function actionToContractTool(action: ActionRequest): string {
       return "run_command";
     case "service.restart":
       return "systemctl";
+    case "process.start":
+      return "start_process";
+    case "process.interact":
+      return "interact_with_process";
+    case "process.output":
+      return "read_process_output";
+    case "process.kill":
+      return "kill_process";
+    case "process.force_terminate":
+      return "force_terminate";
+    case "process.list":
+      return "list_processes";
+    case "process.sessions":
+      return "list_sessions";
+    case "system.shutdown":
+      return "shutdown";
     default:
       return action.kind;
   }
@@ -129,6 +162,7 @@ function isUnknownActionKind(kind: string): boolean {
     "fs.list",
     "fs.stat",
     "fs.read",
+    "fs.read_multiple",
     "fs.search_name",
     "fs.write",
     "fs.patch",
@@ -138,6 +172,14 @@ function isUnknownActionKind(kind: string): boolean {
     "cmd.preview",
     "cmd.run",
     "service.restart",
+    "process.start",
+    "process.interact",
+    "process.output",
+    "process.kill",
+    "process.force_terminate",
+    "process.list",
+    "process.sessions",
+    "system.shutdown",
     "shell"
   ]).has(kind);
 }

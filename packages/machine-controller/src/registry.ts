@@ -38,6 +38,73 @@ export const connectorActionRegistry = [
     evidence: "required"
   },
   {
+    id: "acs.filesystem.list_directory",
+    version: "1.0",
+    kind: "fs.list",
+    executionBoundary: "worker-only",
+    approval: "none",
+    evidence: "required"
+  },
+  {
+    id: "acs.filesystem.read_multiple",
+    version: "1.0",
+    kind: "fs.read",
+    executionBoundary: "worker-only",
+    approval: "none",
+    evidence: "required"
+  },
+  {
+    id: "acs.filesystem.search",
+    version: "1.0",
+    kind: "fs.search_name",
+    executionBoundary: "worker-only",
+    approval: "none",
+    evidence: "required"
+  },
+  {
+    id: "acs.filesystem.create_directory",
+    version: "1.0",
+    kind: "fs.write",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required"
+  },
+  {
+    id: "acs.filesystem.write_file",
+    version: "1.0",
+    kind: "fs.write",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required",
+    rollback: "atomic-replace"
+  },
+  {
+    id: "acs.filesystem.edit_block",
+    version: "1.0",
+    kind: "fs.patch",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required",
+    rollback: "atomic-replace"
+  },
+  {
+    id: "acs.filesystem.move_file",
+    version: "1.0",
+    kind: "fs.move",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required"
+  },
+  {
+    id: "acs.filesystem.write_pdf",
+    version: "1.0",
+    kind: "fs.write",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required",
+    rollback: "atomic-replace"
+  },
+  {
     id: "acs.agent.codex.preview",
     version: "1.0",
     kind: "agent.preview",
@@ -51,6 +118,62 @@ export const connectorActionRegistry = [
     kind: "agent.prompt",
     executionBoundary: "worker-only",
     approval: "configured"
+  },
+  {
+    id: "acs.process.start",
+    version: "1.0",
+    kind: "process.start",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required"
+  },
+  {
+    id: "acs.process.interact",
+    version: "1.0",
+    kind: "process.interact",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required"
+  },
+  {
+    id: "acs.process.output",
+    version: "1.0",
+    kind: "process.output",
+    executionBoundary: "worker-only",
+    approval: "none",
+    evidence: "required"
+  },
+  {
+    id: "acs.process.kill",
+    version: "1.0",
+    kind: "process.kill",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required"
+  },
+  {
+    id: "acs.process.force_terminate",
+    version: "1.0",
+    kind: "process.force_terminate",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required"
+  },
+  {
+    id: "acs.process.list",
+    version: "1.0",
+    kind: "process.list",
+    executionBoundary: "worker-only",
+    approval: "none",
+    evidence: "required"
+  },
+  {
+    id: "acs.process.sessions",
+    version: "1.0",
+    kind: "process.sessions",
+    executionBoundary: "worker-only",
+    approval: "none",
+    evidence: "required"
   },
   {
     id: "acs.result.get",
@@ -90,6 +213,14 @@ export const connectorActionRegistry = [
     executionBoundary: "worker-only",
     approval: "human",
     rollback: "backup-and-atomic-replace"
+  },
+  {
+    id: "acs.system.shutdown",
+    version: "1.0",
+    kind: "system.shutdown",
+    executionBoundary: "worker-only",
+    approval: "human",
+    evidence: "required"
   }
 ] as const;
 
@@ -97,7 +228,13 @@ export type ConnectorActionDefinition = (typeof connectorActionRegistry)[number]
 
 export const registeredCommandRegistry = [
   { id: "os.metadata", version: "1.0", command: "uname", args: ["-a"], description: "Read kernel and OS metadata." },
-  { id: "cpu.memory", version: "1.0", command: "free", args: ["-h"], description: "Read memory totals and availability." },
+  {
+    id: "cpu.memory",
+    version: "1.0",
+    command: "free",
+    args: ["-h"],
+    description: "Read memory totals and availability."
+  },
   { id: "filesystem.usage", version: "1.0", command: "df", args: ["-h"], description: "Read filesystem usage." },
   {
     id: "failed.systemd.units",
@@ -106,9 +243,27 @@ export const registeredCommandRegistry = [
     args: ["--user", "--failed", "--no-legend", "--no-pager"],
     description: "List failed user services."
   },
-  { id: "docker.status", version: "1.0", command: "docker", args: ["ps", "--no-trunc"], description: "List running containers." },
-  { id: "docker.disk", version: "1.0", command: "docker", args: ["system", "df"], description: "Read Docker disk usage." },
-  { id: "tailscale.status", version: "1.0", command: "tailscale", args: ["status"], description: "Read Tailscale status." },
+  {
+    id: "docker.status",
+    version: "1.0",
+    command: "docker",
+    args: ["ps", "--no-trunc"],
+    description: "List running containers."
+  },
+  {
+    id: "docker.disk",
+    version: "1.0",
+    command: "docker",
+    args: ["system", "df"],
+    description: "Read Docker disk usage."
+  },
+  {
+    id: "tailscale.status",
+    version: "1.0",
+    command: "tailscale",
+    args: ["status"],
+    description: "Read Tailscale status."
+  },
   {
     id: "pending.updates",
     version: "1.0",
@@ -129,6 +284,13 @@ export const registeredCommandRegistry = [
     command: "lsblk",
     args: ["-o", "NAME,SIZE,TYPE,MOUNTPOINT"],
     description: "Read block-device and mount metadata."
+  },
+  {
+    id: "process.list",
+    version: "1.0",
+    command: "ps",
+    args: ["-eo", "pid,comm,pcpu,pmem,args", "--no-headers"],
+    description: "Read a bounded process listing."
   }
 ] as const;
 
@@ -186,15 +348,15 @@ export function getRegisteredCommand(commandId: string): RegisteredCommandDefini
   return registeredCommandRegistry.find((entry) => entry.id === commandId);
 }
 
-export function resolveRegisteredCommand(
-  config: MachineControllerConfig,
-  input: unknown
-): ResolvedRegisteredCommand {
+export function resolveRegisteredCommand(config: MachineControllerConfig, input: unknown): ResolvedRegisteredCommand {
   let parsed: z.infer<typeof registeredCommandInputSchema>;
   try {
     parsed = registeredCommandInputSchema.parse(input);
   } catch {
-    throw new ControlStackError("command_input_invalid", "registered commands accept only commandId and an optional cwd");
+    throw new ControlStackError(
+      "command_input_invalid",
+      "registered commands accept only commandId and an optional cwd"
+    );
   }
   const definition = getRegisteredCommand(parsed.commandId);
   if (!definition) {
@@ -203,7 +365,10 @@ export function resolveRegisteredCommand(
   if (parsed.cwd && parsed.rootId) {
     throw new ControlStackError("command_input_invalid", "registered commands accept either cwd or rootId, not both");
   }
-  const cwd = resolveSafePath(config, parsed.cwd ?? resolveRegisteredRoot(config, parsed.rootId ?? "acs-repo")).realPath;
+  const cwd = resolveSafePath(
+    config,
+    parsed.cwd ?? resolveRegisteredRoot(config, parsed.rootId ?? "acs-repo")
+  ).realPath;
   return { ...definition, commandId: parsed.commandId, args: [...definition.args], cwd };
 }
 

@@ -23,6 +23,10 @@ describe("ACS connector registry", () => {
         expect.objectContaining({ id: "acs.command.preview", version: "1.0" }),
         expect.objectContaining({ id: "acs.command.run", version: "1.0" }),
         expect.objectContaining({ id: "acs.filesystem.read_text", version: "1.0" }),
+        expect.objectContaining({ id: "acs.filesystem.write_file", version: "1.0" }),
+        expect.objectContaining({ id: "acs.filesystem.edit_block", version: "1.0" }),
+        expect.objectContaining({ id: "acs.process.start", version: "1.0" }),
+        expect.objectContaining({ id: "acs.system.shutdown", version: "1.0" }),
         expect.objectContaining({ id: "acs.agent.codex.run", version: "1.0" }),
         expect.objectContaining({ id: "acs.service.restart", version: "1.0" }),
         expect.objectContaining({ id: "acs.config.change", version: "1.0" })
@@ -66,9 +70,13 @@ describe("ACS connector registry", () => {
   it("limits restart and config targets to ACS-owned registrations", () => {
     expect(getRegisteredService("acs-gateway")).toMatchObject({ unit: "acs-gateway.service" });
     expect(getRegisteredService("openclaw")).toBeUndefined();
-    expect(() => getRegisteredService("openclaw") ?? (() => { throw new ControlStackError("unknown", "unknown"); })()).toThrow(
-      ControlStackError
-    );
+    expect(
+      () =>
+        getRegisteredService("openclaw") ??
+        (() => {
+          throw new ControlStackError("unknown", "unknown");
+        })()
+    ).toThrow(ControlStackError);
 
     expect(getRegisteredConfigTarget("acs-connector-settings")).toMatchObject({ format: "json" });
     expect(getRegisteredConfigTarget("etc-hosts")).toBeUndefined();

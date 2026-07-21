@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkItem } from "@agent-control-stack/work-items";
@@ -37,7 +37,11 @@ describe("worker connector action dispatcher", () => {
       expect(result.ok).toBe(true);
       expect(result.executionMode).toBe("controlled_action");
       expect(result.output).toContain('"name":"fixture"');
-      expect(result.evidence?.[0]).toMatchObject({ evidence_type: "filesystem", executor_id: "worker-test", redacted: false });
+      expect(result.evidence?.[0]).toMatchObject({
+        evidence_type: "filesystem",
+        executor_id: "worker-test",
+        redacted: false
+      });
       expect(result.evidence?.[0]?.content_hash).toMatch(/^[a-f0-9]{64}$/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -62,7 +66,13 @@ describe("worker connector action dispatcher", () => {
       requester: "agent",
       intent: "preview Codex",
       target: { cwd: allowed },
-      requestedActions: [{ kind: "agent.preview", description: "preview", params: { agent: "codex", provider: "codex-cli", prompt: "inspect" } }],
+      requestedActions: [
+        {
+          kind: "agent.preview",
+          description: "preview",
+          params: { agent: "codex", provider: "codex-cli", prompt: "inspect" }
+        }
+      ],
       risk: "low"
     });
 
@@ -74,6 +84,135 @@ describe("worker connector action dispatcher", () => {
       expect(agentResult.ok).toBe(true);
       expect(agentResult.output).toContain("Codex");
       expect(agentResult.evidence?.[0]?.evidence_type).toBe("agent");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("executes an approved bounded file write and surgical edit", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-desktop-write-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    const config = writeConfig(dir, allowed);
+    const write = createWorkItem({
+      title: "Write fixture",
+      requester: "agent",
+      intent: "write a fixture",
+      target: { cwd: allowed },
+      requestedActions: [
+        {
+          kind: "fs.write",
+          description: "write fixture",
+          params: {
+            rootId: "acs-repo",
+            relativePath: "notes.txt",
+            content: "hello",
+            mode: "rewrite",
+            registryActionId: "acs.filesystem.write_file",
+            registryVersion: "1.0"
+          }
+        }
+      ],
+      risk: "high"
+    });
+    const edit = createWorkItem({
+      title: "Edit fixture",
+      requester: "agent",
+      intent: "edit a fixture",
+      target: { cwd: allowed },
+      requestedActions: [
+        {
+          kind: "fs.patch",
+          description: "edit fixture",
+          params: {
+            rootId: "acs-repo",
+            relativePath: "notes.txt",
+            oldString: "hello",
+            newString: "world",
+            expectedReplacements: 1,
+            registryActionId: "acs.filesystem.edit_block",
+            registryVersion: "1.0"
+          }
+        }
+      ],
+      risk: "high"
+    });
+
+    try {
+      const written = await executeWorkerAction(write, config, "worker-test");
+      const edited = await executeWorkerAction(edit, config, "worker-test");
+      expect(written.ok).toBe(true);
+      expect(edited.ok).toBe(true);
+      expect(readFileSync(join(allowed, "notes.txt"), "utf8")).toBe("world");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("only exposes process output for a command that ACS started", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-process-session-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    const config = writeConfig(dir, allowed);
+    const start = createWorkItem({
+      title: "Start registered process",
+      requester: "agent",
+      intent: "start a bounded diagnostic",
+      target: { cwd: allowed },
+      requestedActions: [
+        {
+          kind: "process.start",
+          description: "start diagnostic",
+          params: { commandId: "os.metadata" }
+        }
+      ],
+      risk: "high"
+    });
+
+    try {
+      const started = await executeWorkerAction(start, config, "worker-test");
+      expect(started.ok).toBe(true);
+      const session = JSON.parse(started.output) as { pid: number };
+      const output = await executeWorkerAction(
+        createWorkItem({
+          title: "Read process output",
+          requester: "agent",
+          intent: "read diagnostic output",
+          target: { cwd: allowed },
+          requestedActions: [
+            {
+              kind: "process.output",
+              description: "read diagnostic output",
+              params: { pid: session.pid, offset: 0, length: 20 }
+            }
+          ],
+          risk: "low"
+        }),
+        config,
+        "worker-test"
+      );
+      expect(output.ok).toBe(true);
+      expect(output.output).toContain(String(session.pid));
+      const foreign = await executeWorkerAction(
+        createWorkItem({
+          title: "Read foreign process output",
+          requester: "agent",
+          intent: "read foreign output",
+          target: { cwd: allowed },
+          requestedActions: [
+            {
+              kind: "process.output",
+              description: "read foreign output",
+              params: { pid: 999999, offset: 0, length: 20 }
+            }
+          ],
+          risk: "low"
+        }),
+        config,
+        "worker-test"
+      );
+      expect(foreign.ok).toBe(false);
+      expect(foreign.error).toContain("not started by ACS");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

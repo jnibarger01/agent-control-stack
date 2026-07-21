@@ -21,9 +21,29 @@ describe("ACS connector MCP exposure", () => {
 
     try {
       const headers = { authorization: "Bearer mcp-token" };
-      const listed = await app.inject({ method: "POST", url: "/mcp", headers, payload: { jsonrpc: "2.0", id: "list", method: "tools/list" } });
+      const listed = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers,
+        payload: { jsonrpc: "2.0", id: "list", method: "tools/list" }
+      });
       const names = listed.json().result.tools.map((tool: { name: string }) => tool.name);
-      expect(names).toEqual(expect.arrayContaining(["command.preview", "filesystem.read_text", "agent.run", "result.get", "service.restart", "config.change"]));
+      expect(names).toEqual(
+        expect.arrayContaining([
+          "command.preview",
+          "filesystem.read_text",
+          "agent.run",
+          "result.get",
+          "service.restart",
+          "config.change",
+          "create_directory",
+          "read_file",
+          "write_file",
+          "start_process",
+          "get_config",
+          "who_am_i"
+        ])
+      );
 
       const called = await app.inject({
         method: "POST",
@@ -60,7 +80,9 @@ describe("ACS connector MCP exposure", () => {
       });
 
       expect(retrieved.statusCode).toBe(200);
-      expect(retrieved.json().result.structuredContent.workItem.id).toBe(called.json().result.structuredContent.workItem.id);
+      expect(retrieved.json().result.structuredContent.workItem.id).toBe(
+        called.json().result.structuredContent.workItem.id
+      );
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

@@ -58,6 +58,12 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (isSelfApproval(context)) {
     return risk("forbidden", "high-risk self-approval is denied", ["deny:self-approval"]);
   }
+  if (isReadOnlyProcessAction(context.action.kind)) {
+    return risk("read_only", "ACS process observation is read-only", ["allow:process-read"]);
+  }
+  if (isProcessMutation(context.action.kind) || context.action.kind === "system.shutdown") {
+    return risk("requires_approval", "ACS process control requires human approval", ["approval:process-control"]);
+  }
   if (isConnectorPreview(context)) {
     return risk("read_only", "registered connector preview is allowed", ["allow:connector-preview"]);
   }
@@ -102,9 +108,14 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     return risk("read_only", "git inspection is allowed", ["allow:git-read"], { maxRuntimeMs: 30_000 });
   }
   if (isPackageLifecycleCommand(command)) {
-    return risk("requires_approval", "package lifecycle scripts can execute arbitrary code", ["approval:package-script"], {
-      maxRuntimeMs: 120_000
-    });
+    return risk(
+      "requires_approval",
+      "package lifecycle scripts can execute arbitrary code",
+      ["approval:package-script"],
+      {
+        maxRuntimeMs: 120_000
+      }
+    );
   }
   if (isReadOnlyInsideCwd(context)) {
     return risk("read_only", "read-only repo inspection is allowed", ["allow:read-only"], {
@@ -167,6 +178,14 @@ function isSupportedAction(kind: string): boolean {
     kind === "service.restart.preview" ||
     kind === "config.change" ||
     kind === "config.change.preview" ||
+    kind === "process.start" ||
+    kind === "process.interact" ||
+    kind === "process.output" ||
+    kind === "process.kill" ||
+    kind === "process.force_terminate" ||
+    kind === "process.list" ||
+    kind === "process.sessions" ||
+    kind === "system.shutdown" ||
     kind === "shell"
   );
 }
@@ -234,6 +253,19 @@ function realpathForPolicy(path: string): string {
 
 function isAgentPrompt(context: PolicyContext): boolean {
   return context.action.kind === "agent.prompt";
+}
+
+function isReadOnlyProcessAction(kind: string): boolean {
+  return kind === "process.output" || kind === "process.list" || kind === "process.sessions";
+}
+
+function isProcessMutation(kind: string): boolean {
+  return (
+    kind === "process.start" ||
+    kind === "process.interact" ||
+    kind === "process.kill" ||
+    kind === "process.force_terminate"
+  );
 }
 
 function isConnectorPreview(context: PolicyContext): boolean {

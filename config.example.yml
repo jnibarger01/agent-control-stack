@@ -38,6 +38,7 @@ commands:
     - apt
     - journalctl
     - lsblk
+    - ps
   deny:
     - rm
     - shred

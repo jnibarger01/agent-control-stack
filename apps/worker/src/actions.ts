@@ -2,20 +2,36 @@ import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
   applyRegisteredConfigChange,
+  createDirectory,
+  editTextBlock,
   executeRegisteredServiceRestart,
+  listFiles,
+  movePath,
   previewRegisteredCommand,
   previewRegisteredConfigChange,
   previewRegisteredServiceRestart,
+  readMultipleTextFiles,
   readTextFile,
   resolveRegisteredRoot,
   runReadonlyCommand,
   runRegisteredCommand,
+  searchFiles,
   statPath,
+  writePdfFile,
+  writeTextFile,
   type MachineControllerConfig
 } from "@agent-control-stack/machine-controller";
 import { executeAgentSandboxed, executeSandboxed } from "@agent-control-stack/sandbox";
 import { redactValue } from "@agent-control-stack/shared";
 import { type ActionRequest, type EvidenceRecord, type WorkItem } from "@agent-control-stack/work-items";
+import {
+  interactWithManagedProcess,
+  listManagedProcesses,
+  readManagedProcessOutput,
+  shutdownManagedDevice,
+  startManagedProcess,
+  terminateManagedProcess
+} from "./process-sessions.js";
 
 export interface WorkerActionResult {
   ok: boolean;
@@ -91,20 +107,141 @@ async function dispatchAction(
     }
     case "fs.read": {
       const root = resolveRegisteredRoot(config, optionalStringParam(params, "rootId") ?? "acs-repo");
-      const relativePath = stringParam(params, "relativePath") || firstPath(params);
-      const endLine = numberParam(params, "endLine");
-      const result = readTextFile(config, {
-        path: join(root, relativePath),
-        start_line: numberParam(params, "startLine") ?? 1,
-        ...(endLine === undefined ? {} : { end_line: endLine })
+      const result =
+        Array.isArray(params.paths) && params.operation === "read_multiple"
+          ? readMultipleTextFiles(config, {
+              paths: params.paths.map((path) => join(root, stringParamValue(path))),
+              offset: numberParam(params, "offset") ?? 0,
+              length: numberParam(params, "length") ?? 1_000
+            })
+          : readTextFile(config, {
+              path: join(root, stringParam(params, "relativePath") || firstPath(params)),
+              start_line: numberParam(params, "startLine") ?? 1,
+              ...(numberParam(params, "endLine") === undefined ? {} : { end_line: numberParam(params, "endLine") }),
+              ...(numberParam(params, "offset") === undefined ? {} : { offset: numberParam(params, "offset") }),
+              ...(numberParam(params, "length") === undefined ? {} : { length: numberParam(params, "length") })
+            });
+      return success(
+        "controlled_action",
+        result && typeof result === "object" && "text" in result && typeof result.text === "string"
+          ? result.text
+          : JSON.stringify(result),
+        executorId,
+        "filesystem",
+        result
+      );
+    }
+    case "fs.list": {
+      const root = resolveRegisteredRoot(config, optionalStringParam(params, "rootId") ?? "acs-repo");
+      const result = listFiles(config, {
+        path: join(root, stringParam(params, "relativePath")),
+        max_depth: numberParam(params, "maxDepth") ?? 2
       });
-      return success("controlled_action", result.text, executorId, "filesystem", result);
+      return success("controlled_action", JSON.stringify(result), executorId, "filesystem", result);
     }
     case "fs.stat": {
       const root = resolveRegisteredRoot(config, optionalStringParam(params, "rootId") ?? "acs-repo");
       const relativePath = stringParam(params, "relativePath") || firstPath(params);
       const result = statPath(config, { path: join(root, relativePath) });
       return success("controlled_action", JSON.stringify(result), executorId, "filesystem", result);
+    }
+    case "fs.write": {
+      const root = resolveRegisteredRoot(config, optionalStringParam(params, "rootId") ?? "acs-repo");
+      const operation = optionalStringParam(params, "operation") ?? "write_file";
+      const result =
+        operation === "create_directory"
+          ? createDirectory(config, { path: join(root, stringParam(params, "relativePath")) })
+          : operation === "write_pdf"
+            ? writePdfFile(config, {
+                path: join(root, stringParam(params, "path")),
+                ...(optionalStringParam(params, "outputPath")
+                  ? { outputPath: join(root, stringParam(params, "outputPath")) }
+                  : {}),
+                content: stringParam(params, "content")
+              })
+            : writeTextFile(config, {
+                path: join(root, stringParam(params, "relativePath")),
+                content: stringParam(params, "content"),
+                mode: (optionalStringParam(params, "mode") as "rewrite" | "append" | undefined) ?? "rewrite"
+              });
+      return success("controlled_action", JSON.stringify(result), executorId, "filesystem", result);
+    }
+    case "fs.patch": {
+      const root = resolveRegisteredRoot(config, optionalStringParam(params, "rootId") ?? "acs-repo");
+      const result = editTextBlock(config, {
+        path: join(root, stringParam(params, "relativePath")),
+        old_string: stringParam(params, "oldString"),
+        new_string: stringParam(params, "newString"),
+        expected_replacements: numberParam(params, "expectedReplacements") ?? 1
+      });
+      return success("controlled_action", JSON.stringify(result), executorId, "filesystem", result);
+    }
+    case "fs.move": {
+      const root = resolveRegisteredRoot(config, optionalStringParam(params, "rootId") ?? "acs-repo");
+      const result = movePath(config, {
+        source: join(root, stringParam(params, "source")),
+        destination: join(root, stringParam(params, "destination")),
+        overwrite: params.overwrite === true
+      });
+      return success("controlled_action", JSON.stringify(result), executorId, "filesystem", result);
+    }
+    case "fs.search_name": {
+      const root = resolveRegisteredRoot(config, optionalStringParam(params, "rootId") ?? "acs-repo");
+      const result = searchFiles(config, {
+        path: join(root, stringParam(params, "relativePath")),
+        pattern: stringParam(params, "pattern"),
+        searchType: optionalStringParam(params, "searchType") ?? "files",
+        ...(optionalStringParam(params, "filePattern") ? { filePattern: stringParam(params, "filePattern") } : {}),
+        ignoreCase: params.ignoreCase !== false,
+        maxResults: numberParam(params, "maxResults") ?? 100,
+        includeHidden: params.includeHidden === true,
+        contextLines: numberParam(params, "contextLines") ?? 5,
+        literalSearch: params.literalSearch === true,
+        maxDepth: numberParam(params, "maxDepth") ?? 3
+      });
+      return success("controlled_action", JSON.stringify(result), executorId, "filesystem", result);
+    }
+    case "process.start": {
+      const result = startManagedProcess(config, { commandId: stringParam(params, "commandId") });
+      return success("controlled_action", JSON.stringify(result), executorId, "command", result);
+    }
+    case "process.interact": {
+      const result = await interactWithManagedProcess(
+        {
+          pid: numberParam(params, "pid") ?? 0,
+          input: stringParam(params, "input"),
+          timeoutMs: numberParam(params, "timeout_ms") ?? 8_000
+        },
+        config
+      );
+      return success("controlled_action", JSON.stringify(result), executorId, "command", result);
+    }
+    case "process.output": {
+      const result = await readManagedProcessOutput(
+        {
+          pid: numberParam(params, "pid") ?? 0,
+          offset: numberParam(params, "offset") ?? 0,
+          length: numberParam(params, "length") ?? 1_000,
+          timeoutMs: numberParam(params, "timeout_ms") ?? 8_000
+        },
+        config
+      );
+      return success("controlled_action", JSON.stringify(result), executorId, "command", result);
+    }
+    case "process.kill":
+    case "process.force_terminate": {
+      const result = terminateManagedProcess({
+        pid: numberParam(params, "pid") ?? 0,
+        force: action.kind === "process.force_terminate"
+      });
+      return success("controlled_action", JSON.stringify(result), executorId, "command", result);
+    }
+    case "process.sessions": {
+      const result = listManagedProcesses();
+      return success("controlled_action", JSON.stringify(result), executorId, "command", result);
+    }
+    case "system.shutdown": {
+      return shutdownManagedDevice();
     }
     case "agent.preview": {
       const prompt = stringParam(params, "prompt");
@@ -160,7 +297,9 @@ async function dispatchAction(
         ...(result.sandboxIdentity ? { sandboxIdentity: result.sandboxIdentity } : {}),
         ...(repository.commit ? { repositoryCommit: repository.commit } : {}),
         ...(repository.worktreeState !== undefined ? { repositoryWorktreeState: repository.worktreeState } : {}),
-        evidence: [makeEvidence("agent", "Codex response", output, executorId, { provider: result.provider ?? "codex-cli" })]
+        evidence: [
+          makeEvidence("agent", "Codex response", output, executorId, { provider: result.provider ?? "codex-cli" })
+        ]
       };
     }
     case "service.restart.preview": {
@@ -218,7 +357,9 @@ function success(
     ok: true,
     executionMode,
     output,
-    sandboxIdentity: ["dry_run", "controlled_action"].includes(executionMode) ? "acs-worker-registered-action" : undefined,
+    sandboxIdentity: ["dry_run", "controlled_action"].includes(executionMode)
+      ? "acs-worker-registered-action"
+      : undefined,
     evidence: [makeEvidence(evidenceType, `${evidenceType} result`, output, executorId, metadata)]
   };
 }
@@ -274,6 +415,13 @@ function stringParam(params: Record<string, unknown>, key: string): string {
   return value;
 }
 
+function stringParamValue(value: unknown): string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error("worker filesystem action paths must be non-empty strings");
+  }
+  return value;
+}
+
 function optionalStringParam(params: Record<string, unknown>, key: string): string | undefined {
   const value = params[key];
   return typeof value === "string" && value.length > 0 ? value : undefined;
@@ -294,7 +442,10 @@ function hashText(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
-async function repositoryEvidence(config: MachineControllerConfig, root: string): Promise<{ commit?: string; worktreeState?: string }> {
+async function repositoryEvidence(
+  config: MachineControllerConfig,
+  root: string
+): Promise<{ commit?: string; worktreeState?: string }> {
   try {
     const commit = await runReadonlyCommand(config, { cwd: root, command: "git", args: ["rev-parse", "HEAD"] });
     const state = await runReadonlyCommand(config, {

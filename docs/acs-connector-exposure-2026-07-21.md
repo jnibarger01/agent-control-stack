@@ -29,6 +29,8 @@ The Codex profile uses the installed `qwen2.5-coder:7b` model through Codex OSS/
 
 The command registry contains fixed read-only diagnostics only. The filesystem registry contains the `acs-repo` root. The service registry contains ACS-owned units plus the stopped `acs-connector-test` acceptance fixture. The configuration registry contains only `storage/acs-connector-settings.json` and its bounded integer keys.
 
+Desktop Commander compatibility tools are listed in docs/acs-desktop-commander-compatibility-2026-07-21.md. They remain bounded by the same registry, approval, worker, path, and evidence controls described above.
+
 ## Deployment
 
 Tracked deployment references are in [`deploy/systemd/acs-gateway.service`](../deploy/systemd/acs-gateway.service), [`deploy/systemd/acs-worker.service`](../deploy/systemd/acs-worker.service), [`deploy/systemd/acs-tunnel.service`](../deploy/systemd/acs-tunnel.service), [`deploy/systemd/acs-connector-test.service`](../deploy/systemd/acs-connector-test.service), and [`deploy/tunnel-client/agent-control-stack.example.json`](../deploy/tunnel-client/agent-control-stack.example.json).

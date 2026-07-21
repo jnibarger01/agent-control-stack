@@ -86,7 +86,10 @@ export function previewRegisteredCommand(config: MachineControllerConfig, input:
   return { commandId: resolved.commandId, version: resolved.version, ...preview };
 }
 
-export async function runRegisteredCommand(config: MachineControllerConfig, input: unknown): Promise<RegisteredCommandRunResult> {
+export async function runRegisteredCommand(
+  config: MachineControllerConfig,
+  input: unknown
+): Promise<RegisteredCommandRunResult> {
   const resolved = resolveRegisteredCommand(config, input);
   const result = await runReadonlyCommand(config, {
     cwd: resolved.cwd,
@@ -249,9 +252,7 @@ function isKnownReadonly(command: string, args: string[]): boolean {
   if (command === "python3") return args.length === 1 && ["--version", "-V"].includes(args[0] ?? "");
   if (command === "docker") {
     return (
-      (args.length === 1 && args[0] === "ps") ||
-      args.join(" ") === "ps --no-trunc" ||
-      args.join(" ") === "system df"
+      (args.length === 1 && args[0] === "ps") || args.join(" ") === "ps --no-trunc" || args.join(" ") === "system df"
     );
   }
   if (command === "df") return args.length <= 1 && [undefined, "-h"].includes(args[0]);
@@ -265,6 +266,9 @@ function isKnownReadonly(command: string, args: string[]): boolean {
     return args.join(" ") === "--user -n 100 --no-pager -o short-iso";
   }
   if (command === "lsblk") return args.length === 2 && args[0] === "-o" && args[1] === "NAME,SIZE,TYPE,MOUNTPOINT";
+  if (command === "ps") {
+    return args.join(" ") === "-eo pid,comm,pcpu,pmem,args --no-headers";
+  }
   return false;
 }
 
