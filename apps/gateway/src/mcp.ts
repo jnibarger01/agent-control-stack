@@ -891,7 +891,7 @@ function toolInputSchema(name: McpToolName): Record<string, unknown> {
         required: ["key", "value"],
         properties: {
           key: { type: "string", enum: ["worker_poll_interval_ms", "max_evidence_bytes"] },
-          value: {},
+          value: { type: "integer" },
           reason: { type: "string" }
         }
       };
@@ -947,7 +947,38 @@ function toolInputSchema(name: McpToolName): Record<string, unknown> {
           rootId: { type: "string", enum: ["acs-repo"] },
           path: { type: "string" },
           outputPath: { type: "string" },
-          content: { anyOf: [{ type: "string" }, { type: "array" }] }
+          content: {
+            anyOf: [
+              { type: "string" },
+              {
+                type: "array",
+                maxItems: 100,
+                items: {
+                  anyOf: [
+                    {
+                      type: "object",
+                      required: ["type", "pageIndex"],
+                      properties: {
+                        type: { type: "string", enum: ["insert"] },
+                        pageIndex: { type: "integer", minimum: 0 },
+                        markdown: { type: "string" },
+                        sourcePdfPath: { type: "string" },
+                        pdfOptions: { type: "object" }
+                      }
+                    },
+                    {
+                      type: "object",
+                      required: ["type", "pageIndexes"],
+                      properties: {
+                        type: { type: "string", enum: ["delete"] },
+                        pageIndexes: { type: "array", items: { type: "integer", minimum: 0 }, minItems: 1 }
+                      }
+                    }
+                  ]
+                }
+              }
+            ]
+          }
         }
       };
   }

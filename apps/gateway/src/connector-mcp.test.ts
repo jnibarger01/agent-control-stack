@@ -184,6 +184,7 @@ describe("ACS connector MCP exposure", () => {
         expect(tool.description.length).toBeGreaterThan(0);
         expect(tool.description.length).toBeLessThanOrEqual(2_000);
         expect(tool.inputSchema.type).toBe("object");
+        assertSchemaNode(tool.inputSchema, tool.name);
         for (const required of tool.inputSchema.required ?? []) {
           expect(tool.inputSchema.properties ?? {}).toHaveProperty(required);
         }
@@ -194,3 +195,34 @@ describe("ACS connector MCP exposure", () => {
     }
   });
 });
+
+function assertSchemaNode(value: unknown, path: string): void {
+  expect(value).toBeTypeOf("object");
+  expect(value).not.toBeNull();
+  if (!value || typeof value !== "object" || Array.isArray(value)) return;
+
+  const node = value as Record<string, unknown>;
+  const hasSchemaKeyword =
+    typeof node.type === "string" ||
+    "$ref" in node ||
+    "const" in node ||
+    "enum" in node ||
+    ["anyOf", "oneOf", "allOf"].some((key) => key in node);
+  expect(hasSchemaKeyword, `${path} must declare a JSON Schema keyword`).toBe(true);
+
+  if (node.type === "array") {
+    expect(node.items, `${path} array schema must declare items`).toBeDefined();
+    assertSchemaNode(node.items, `${path}.items`);
+  }
+  if (node.properties && typeof node.properties === "object" && !Array.isArray(node.properties)) {
+    for (const [key, property] of Object.entries(node.properties as Record<string, unknown>)) {
+      assertSchemaNode(property, `${path}.properties.${key}`);
+    }
+  }
+  for (const key of ["anyOf", "oneOf", "allOf"]) {
+    const alternatives = node[key];
+    if (Array.isArray(alternatives)) {
+      alternatives.forEach((alternative, index) => assertSchemaNode(alternative, `${path}.${key}[${index}]`));
+    }
+  }
+}

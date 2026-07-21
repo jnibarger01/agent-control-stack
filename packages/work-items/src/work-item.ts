@@ -103,6 +103,7 @@ export const workerResultSchema = z
     stdout_summary: boundedTextSchema.optional(),
     stderr_summary: boundedTextSchema.optional(),
     output: boundedTextSchema.optional(),
+    output_truncated: z.boolean().optional(),
     error: boundedTextSchema.optional(),
     summary: boundedTextSchema.optional(),
     changed_paths: z.array(z.string().min(1).max(1_000)).max(200).optional(),

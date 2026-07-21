@@ -84,6 +84,71 @@ describe("worker policy gate", () => {
     }
   });
 
+  it("persists large registered reads as explicitly truncated bounded results", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-large-list-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    for (let index = 0; index < 300; index += 1) {
+      writeFileSync(join(allowed, `fixture-${String(index).padStart(4, "0")}-${"x".repeat(40)}.txt`), "");
+    }
+    const configPath = join(dir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        paths: { allow: [allowed], deny: [] },
+        commands: { allow_readonly: ["uname"], deny: [] },
+        audit: { log_path: join(dir, "audit.jsonl") }
+      })
+    );
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    const workItem = tools.create_work_item({
+      title: "List large fixture directory",
+      requester: "agent",
+      intent: "verify bounded directory evidence",
+      target: { cwd: allowed },
+      requestedActions: [
+        {
+          kind: "fs.list",
+          description: "list fixture directory",
+          params: {
+            rootId: "acs-repo",
+            relativePath: ".",
+            paths: ["."],
+            maxDepth: 0,
+            registryActionId: "acs.filesystem.list_directory",
+            registryVersion: "1.0"
+          }
+        }
+      ],
+      risk: "low"
+    });
+    store.close();
+    vi.stubEnv("ACS_MACHINE_CONTROLLER_CONFIG", configPath);
+
+    try {
+      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        const persisted = check.get(workItem.id);
+        expect(result.executed).toBe(true);
+        expect(persisted?.status).toBe("succeeded");
+        expect(persisted?.result).toMatchObject({
+          execution_mode: "controlled_action",
+          output_truncated: true,
+          evidence: [expect.objectContaining({ evidence_type: "filesystem", truncated: true })]
+        });
+        expect(JSON.stringify(persisted?.result).length).toBeGreaterThan(20_000);
+      } finally {
+        check.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("simulates approved read-only work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");

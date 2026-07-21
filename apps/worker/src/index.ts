@@ -172,9 +172,14 @@ function workerResultPayload(
   completedAt: string
 ): Record<string, unknown> {
   const policy = createPolicyEngine();
+  const output = boundedWorkerText(result.output);
+  const error = result.error === undefined ? undefined : boundedWorkerText(result.error);
+  const stderr = result.stderr === undefined ? undefined : boundedWorkerText(result.stderr);
   return {
     execution_mode: result.executionMode,
-    ...(result.ok ? { output: result.output } : { error: result.error ?? "worker execution failed" }),
+    ...(result.ok
+      ? { output: output.value, ...(output.truncated ? { output_truncated: true } : {}) }
+      : { error: error?.value ?? "worker execution failed" }),
     ...(result.ok
       ? {
           summary:
@@ -202,7 +207,20 @@ function workerResultPayload(
     ...(result.agent ? { agent: result.agent } : {}),
     ...(result.provider ? { provider: result.provider } : {}),
     ...(result.model ? { model: result.model } : {}),
-    ...(result.output && !result.ok ? { stdout_summary: result.output } : {}),
-    ...(result.stderr ? { stderr_summary: result.stderr } : {})
+    ...(result.output && !result.ok ? { stdout_summary: output.value } : {}),
+    ...(stderr ? { stderr_summary: stderr.value } : {})
+  };
+}
+
+const MAX_WORKER_RESULT_TEXT = 20_000;
+
+function boundedWorkerText(value: string): { value: string; truncated: boolean } {
+  if (value.length <= MAX_WORKER_RESULT_TEXT) {
+    return { value, truncated: false };
+  }
+  const marker = "\n[truncated by ACS]";
+  return {
+    value: value.slice(0, MAX_WORKER_RESULT_TEXT - marker.length) + marker,
+    truncated: true
   };
 }
