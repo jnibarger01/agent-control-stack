@@ -28,8 +28,8 @@ create_directory, edit_block, force_terminate, get_config, get_file_info, get_mo
 
 ## Verification status
 
-Full repository verification passes: 51 Vitest files with 388 tests, 48 AgentOS contract tests, public-site safety checks, typecheck, lint, production build, formatting, and secret scanning.
+Full repository verification passes: 51 Vitest files with 390 tests, 48 AgentOS contract tests, public-site safety checks, typecheck, lint, production build, formatting, and secret scanning.
 
 The restarted local ACS gateway and worker are healthy. Authenticated loopback tools/list returns 55 tools, including all 30 requested names. A live read_file request created an approved fs.read work item that the worker completed successfully.
 
-A live external ChatGPT-originated call remains a separate transport proof and is not inferred from localhost tests. The current external connector snapshot exposes only the six lifecycle names; refresh/rescan the ChatGPT app actions after this deployment before treating the remaining 49 names as externally callable.
+A live ChatGPT-originated proof now exists through the connected `ACS Secure Tunnel` app: its action snapshot contains all 55 names, and read-only calls reached the registered actor and ACS worker boundary. The older `ACS` app still exposes only the six lifecycle names. The new app is configured as `No Auth`; its tunnel-injected local bearer is governed by ACS but is not OAuth-backed identity/scope provenance, so the strict external acceptance remains `PARTIAL`.

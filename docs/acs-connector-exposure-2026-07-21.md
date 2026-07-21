@@ -2,7 +2,7 @@
 
 ## Verdict
 
-`PASS` for the local governed ACS connector surface: the gateway MCP exposes the command, filesystem, result/evidence, service-request, configuration-preview, and Codex-dispatch surfaces, and each passed localhost acceptance. The live Codex acceptance returned a non-empty response from the local Ollama-backed Codex CLI inside the credentialless Bubblewrap profile. A ChatGPT-originated external call remains unverified and is reported separately as a transport limitation.
+`PARTIAL` for the end-to-end ChatGPT acceptance: the local governed ACS surface passes, and the newly connected ChatGPT `ACS Secure Tunnel` app exposes all 55 canonical remote tools. ChatGPT-originated read-only calls reached ACS and completed, but the app is configured as `No Auth`/`Authorization used: None` because this tunnel deployment does not advertise OAuth metadata. The external path therefore has transport and local ACS enforcement proof, not the required OAuth identity/scope proof.
 
 ## Baseline
 
@@ -48,13 +48,15 @@ All calls below were made through `http://127.0.0.1:3000/mcp` with the configure
 - Configuration preview: `wrk_aa66a318-7e58-468c-ade4-7f0018607da3` succeeded without changing the target file; it captured current and proposed hashes, bounded diff state, backup requirement, and atomic-write metadata. The file remained `{ "worker_poll_interval_ms": 5000, "max_evidence_bytes": 200000 }`.
 - Codex dispatch: the earlier approved attempt `wrk_c0ef5840-c3e9-413d-8ccb-86ba0dbab1d5` reached Bubblewrap but was cancelled after the credentialless cloud path produced no response. The final post-commit acceptance passed with approved work item `wrk_2030d142-4138-4a3d-84d6-6c30a45c0a88`, action hash `6bb874c969148a5ffeaa4c1f7917b77bf7e6a16626980c14d171fbda46f73b3e`, commit `b9c4a5c5a9fb5cb4c881ebd40c8304a33914a081`, succeeded status, `execution_mode=sandboxed_agent`, `executor_id=acs-worker`, released lease, clean repository worktree state, equal workspace before/after hashes, and evidence `ev_373937667141d853df2844bf`. Retrieved evidence contains the non-empty Codex response `ACS-POSTCOMMIT-CODEX-OK`; the sandbox identity is `bubblewrap:read-only-workspace,no-network,local-ollama-unix-socket`.
 
-The live gateway health checks are green for read/write, integrity, foreign keys, migrations, audit chain, liveness, and reconciliation. The tunnel service is active and probes the gateway MCP locally. A ChatGPT-originated external call is not proven by these localhost tests.
+The live gateway health checks are green for read/write, integrity, foreign keys, migrations, audit chain, liveness, and reconciliation. The tunnel service is active and probes the gateway MCP locally. These localhost checks are supplemented by the external ChatGPT evidence below; they are not substituted for it.
 
-## External discovery boundary
+## External discovery and invocation
 
-The tunnel's `main` route points at the authenticated gateway `/mcp`, whose local `tools/list` now returns the same canonical 55-name inventory used by `/mcp/tools`. The current ChatGPT connector snapshot still reports only the six legacy lifecycle tools: `create_work_item`, `get_work_item`, `list_work_items`, `unblock_work_item`, `reject_work_item`, and `cancel_work_item`.
+The tunnel's `main` route points at the authenticated gateway `/mcp`, whose local `tools/list` and `/mcp/tools` responses use the same canonical 55-name inventory. On 2026-07-21, the connected ChatGPT app `ACS Secure Tunnel` (`asdk_app_6a5f22ebaa008191a2e0472b95e96b4e`, version `asdk_app_v_6a5f22ee374081919fca273f7ccbe499`) showed all 55 names with zero missing entries. The older `ACS` app remains a separate stale six-tool snapshot and was not used for this result.
 
-This is an external action-snapshot state, not a local registry count. ChatGPT's current custom MCP app guidance says server updates are not automatically enabled after approval; an administrator must refresh the actions, or recreate and republish the app where the workspace plan requires it. Until that refresh is performed and a harmless governed read is observed from ChatGPT, the overall result remains `PARTIAL`, not an external `PASS`.
+The fresh ChatGPT conversation `ACS Secure Tunnel Access` reached the live tunnel and invoked read-only ACS tools. The resulting response identified the registered human actor, `acs-local`, and `acs-worker`; reported default-deny policy, redaction, one registered `acs-repo` root, and registered-only commands; and recorded successful `get_config`, `who_am_i`, `ping`, `list_devices`, and governed filesystem-read activity. A `list_directory` probe returned HTTP 400 because its root-directory arguments did not satisfy the relative-path schema; ACS rejected it without creating a work item. That is expected fail-closed behavior, not direct host access.
+
+The external app metadata reported `Authorization supported: None` and `Authorization used: None`. The gateway audit for the ChatGPT-originated requests records the injected local bearer path (`auth.method=local_bearer`, resolved ACS actor `user`, all three ACS scopes), not an OAuth JWT subject. The app is therefore externally callable through the Secure MCP Tunnel, but the strict OAuth identity/scope acceptance remains open.
 
 The complete per-tool evidence table is [`acs-mcp-tool-exposure-matrix-2026-07-21.md`](./acs-mcp-tool-exposure-matrix-2026-07-21.md).
 
@@ -66,4 +68,4 @@ The prior known-good commit is `648946225bbfcc68d75c0fbd47055d218de692f9`. Rollb
 
 ## Remaining limitations
 
-The contained Codex profile is local-only and has no provider credential. Enabling network access, mounting the host Codex credential store, or routing around Bubblewrap would violate the required control boundary. The separate standalone `apps/mcp` process is not the live gateway surface. Public tunnel transport is active locally, but external ChatGPT-originated invocation remains unverified.
+The contained Codex profile is local-only and has no provider credential. Enabling network access, mounting the host Codex credential store, or routing around Bubblewrap would violate the required control boundary. The separate standalone `apps/mcp` process is not the live gateway surface. ChatGPT external discovery and read-only invocation are proven, but OAuth-backed external identity/scope provenance and a successful valid-argument directory listing remain unverified.
