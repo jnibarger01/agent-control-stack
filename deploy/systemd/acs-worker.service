@@ -1,0 +1,24 @@
+[Unit]
+Description=Agent Control Stack governed worker
+Requires=acs-gateway.service
+After=acs-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jacen/agent-control-stack
+EnvironmentFile=/home/jacen/.agent-control-stack/secrets/local-gateway.env
+Environment=ACS_WORKER_GATEWAY_URL=http://127.0.0.1:3000
+Environment=ACS_WORKER_ID=acs-worker
+Environment=ACS_DB_PATH=storage/local.db
+Environment=ACS_MACHINE_CONTROLLER_CONFIG=/home/jacen/agent-control-stack/config.example.yml
+Environment=ACS_WORKER_POLL_INTERVAL_MS=5000
+Environment=ACS_AGENT_EXECUTION_MODE=codex-bubblewrap
+Environment=PATH=/home/jacen/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=/home/jacen/.nvm/versions/node/v24.16.0/bin/node apps/worker/dist/cli.js
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

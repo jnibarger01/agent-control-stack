@@ -1,4 +1,3 @@
-import { runWorkerOnce } from "./index.js";
+import { runWorkerLoop } from "./index.js";
 
-const result = await runWorkerOnce();
-console.log(JSON.stringify(result));
+await runWorkerLoop();

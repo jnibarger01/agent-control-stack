@@ -131,6 +131,33 @@ describe("policy gate", () => {
     ).toContain("approval:long-running");
   });
 
+  it("admits registered connector previews and gates registered mutations", () => {
+    expect(
+      evaluatePolicy({
+        ...base,
+        action: { kind: "cmd.preview", description: "preview registered diagnostic", params: { commandId: "os.metadata" } }
+      }).decision
+    ).toBe("allow");
+    expect(
+      evaluatePolicy({
+        ...base,
+        action: { kind: "agent.preview", description: "preview Codex dispatch", params: { agentId: "codex-cli" } }
+      }).decision
+    ).toBe("allow");
+    expect(
+      evaluatePolicy({
+        ...base,
+        action: { kind: "service.restart", description: "restart ACS worker", params: { serviceId: "acs-worker" } }
+      }).matchedRules
+    ).toContain("approval:service-restart");
+    expect(
+      evaluatePolicy({
+        ...base,
+        action: { kind: "config.change", description: "change ACS connector settings", params: { targetId: "acs-connector-settings" } }
+      }).matchedRules
+    ).toContain("approval:config-change");
+  });
+
   it("requires risk approval and denies high-risk self-approval", () => {
     expect(
       evaluatePolicy({

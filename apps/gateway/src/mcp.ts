@@ -1,4 +1,5 @@
 import type { IncomingHttpHeaders } from "node:http";
+import { connectorToolNames, type ConnectorToolHandler, type ConnectorToolName } from "./connector.js";
 import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { ZodError, z } from "zod";
@@ -13,10 +14,12 @@ import {
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
 type GatewayWorkItemTools = ReturnType<typeof createWorkItemTools>;
-type GatewayToolName = (typeof workItemToolNames)[number];
-const mcpToolNames = workItemToolNames;
+type GatewayTools = GatewayWorkItemTools & Partial<Record<ConnectorToolName, ConnectorToolHandler>>;
+const mcpToolNames = [...workItemToolNames, ...connectorToolNames] as const;
 type McpToolName = (typeof mcpToolNames)[number];
-const remoteMcpToolNames = workItemToolNames.filter((name) => name !== "approve_work_item");
+const remoteMcpToolNames = mcpToolNames.filter(
+  (name) => name !== "approve_work_item"
+) as McpToolName[];
 type JsonRpcId = string | number | null;
 
 type JsonRpcSuccess = {
@@ -65,7 +68,7 @@ const toolsCallParamsSchema = z.object({
 export async function handleMcpHttpRequest(input: {
   body: unknown;
   headers: IncomingHttpHeaders;
-  tools: GatewayWorkItemTools;
+  tools: GatewayTools;
   auth?: McpAuthOptions;
   requireAuthentication?: boolean;
   resourceMetadataUrl?: string;
@@ -174,7 +177,7 @@ async function handleToolsCall(input: {
   headers: IncomingHttpHeaders;
   auth?: McpAuthOptions;
   resourceMetadataUrl?: string;
-  tools: GatewayWorkItemTools;
+  tools: GatewayTools;
   remoteAddress?: string;
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
@@ -206,8 +209,8 @@ async function handleToolsCall(input: {
     return jsonRpcError(input.id, -32002, "MCP identities cannot grant approval", 403);
   }
 
-  const actor = isMutatingTool(parsed.data.name)
-    ? input.resolveActorId?.(authorization.auth)
+  const actor = requiresRegistryActor(parsed.data.name) && input.resolveActorId
+    ? input.resolveActorId(authorization.auth)
     : resolvedMcpActor(authorization.auth);
   if (!actor) {
     return jsonRpcError(input.id, -32001, "MCP actor is not registered", 403);
@@ -284,7 +287,7 @@ async function handleProtectedUnsupportedMethod(input: {
 }
 
 async function callMcpTool(input: {
-  tools: GatewayWorkItemTools;
+  tools: GatewayTools;
   name: McpToolName;
   args: unknown;
   auth: McpAuthenticatedRequest;
@@ -294,8 +297,8 @@ async function callMcpTool(input: {
 }
 
 function callGatewayTool(
-  tools: GatewayWorkItemTools,
-  name: GatewayToolName,
+  tools: GatewayTools,
+  name: McpToolName,
   args: unknown,
   auth: McpAuthenticatedRequest,
   actor: string
@@ -304,24 +307,22 @@ function callGatewayTool(
   return handler(bindAuthenticatedActor(name, args, auth, actor));
 }
 
-function bindAuthenticatedActor(name: GatewayToolName, args: unknown, auth: McpAuthenticatedRequest, actor: string): unknown {
+function bindAuthenticatedActor(name: McpToolName, args: unknown, auth: McpAuthenticatedRequest, actor: string): unknown {
   if (name === "create_work_item") {
     // MCP identities are agents; caller-supplied requester/requesterSubject are untrusted.
     return { ...requestObject(args), requester: "agent", requesterSubject: actor };
-  }
-  if (
-    name !== "approve_work_item" &&
-    name !== "unblock_work_item" &&
-    name !== "reject_work_item" &&
-    name !== "cancel_work_item"
-  ) {
-    return args;
   }
   const record = requestObject(args);
   if (name === "approve_work_item") {
     return { ...record, approvedBy: actor };
   }
-  return { ...record, actor };
+  if (name === "unblock_work_item" || name === "reject_work_item" || name === "cancel_work_item") {
+    return { ...record, actor };
+  }
+  if (name === "work_item.create" || name === "work_item.get" || name === "work_item.approve" || name === "work_item.reject" || name === "work_item.cancel" || name === "work_item.unblock" || connectorToolNames.includes(name as ConnectorToolName)) {
+    return { ...record, actor };
+  }
+  return args;
 }
 
 function resolvedMcpActor(auth: McpAuthenticatedRequest): string {
@@ -363,29 +364,56 @@ function mcpToolDefinitions(advertiseOAuth: boolean) {
 function requiredScopes(name: McpToolName): McpScope[] {
   switch (name) {
     case "create_work_item":
+    case "work_item.create":
+    case "command.preview":
+    case "command.run":
+    case "filesystem.read_text":
+    case "filesystem.stat":
+    case "agent.preview":
+    case "agent.run":
+    case "service.restart.preview":
+    case "service.restart":
+    case "config.change.preview":
+    case "config.change":
       return ["acs:work:create"];
     case "get_work_item":
     case "list_work_items":
+    case "work_item.get":
+    case "result.get":
+    case "evidence.list":
+    case "evidence.get":
       return ["acs:work:read"];
     case "approve_work_item":
     case "unblock_work_item":
     case "reject_work_item":
     case "cancel_work_item":
+    case "work_item.approve":
+    case "work_item.reject":
+    case "work_item.cancel":
+    case "work_item.unblock":
       return ["acs:work:approve"];
   }
 }
 
-function isMutatingTool(name: McpToolName): boolean {
-  return !["get_work_item", "list_work_items"].includes(name);
+function requiresRegistryActor(name: McpToolName): boolean {
+  return name !== "get_work_item" && name !== "list_work_items";
 }
 
 function toolAnnotations(name: McpToolName): Record<string, boolean> {
   switch (name) {
     case "get_work_item":
     case "list_work_items":
+    case "work_item.get":
+    case "result.get":
+    case "evidence.list":
+    case "evidence.get":
       return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
     case "cancel_work_item":
     case "reject_work_item":
+    case "work_item.cancel":
+    case "work_item.reject":
+    case "service.restart":
+    case "config.change":
       return { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
     default:
       return { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
@@ -408,6 +436,44 @@ function toolDescription(name: McpToolName): string {
       return "Reject a work item through a distinct terminal denial state.";
     case "cancel_work_item":
       return "Cancel a work item through the work-item state machine.";
+    case "work_item.create":
+      return "Create a work item with a registered ACS action and policy receipt.";
+    case "work_item.get":
+      return "Read a work item with policy, approval, lease, and evidence metadata.";
+    case "work_item.approve":
+      return "Approve an exact action hash; only a registered human actor may approve.";
+    case "work_item.reject":
+      return "Reject a governed work item.";
+    case "work_item.cancel":
+      return "Cancel a governed work item.";
+    case "work_item.unblock":
+      return "Return a blocked work item to policy evaluation.";
+    case "command.preview":
+      return "Preview a fixed, registered read-only diagnostic command through a work item.";
+    case "command.run":
+      return "Run a fixed, registered read-only diagnostic command through the worker.";
+    case "filesystem.read_text":
+      return "Read bounded redacted text from a named ACS filesystem root through the worker.";
+    case "filesystem.stat":
+      return "Read metadata for a file under a named ACS filesystem root through the worker.";
+    case "agent.preview":
+      return "Preview a bounded Codex read-only dispatch.";
+    case "agent.run":
+      return "Request a bounded Codex dispatch; execution remains approval- and worker-gated.";
+    case "result.get":
+      return "Read a governed work-item result.";
+    case "evidence.list":
+      return "List bounded evidence metadata for a work item.";
+    case "evidence.get":
+      return "Retrieve one bounded redacted evidence record and audit the access.";
+    case "service.restart.preview":
+      return "Preview a restart request for a registered ACS-owned service.";
+    case "service.restart":
+      return "Request an approval-gated restart for a registered ACS-owned service.";
+    case "config.change.preview":
+      return "Preview a structured change for a registered ACS config target.";
+    case "config.change":
+      return "Request an approval-gated structured change for a registered ACS config target.";
   }
 }
 
@@ -475,6 +541,92 @@ function toolInputSchema(name: McpToolName): Record<string, unknown> {
         required: ["id"],
         properties: {
           id: { type: "string" }
+        }
+      };
+    case "work_item.create":
+      return {
+        type: "object",
+        required: ["title", "intent", "requestedActions"],
+        properties: {
+          title: { type: "string" },
+          intent: { type: "string" },
+          target: { type: "object" },
+          requestedActions: { type: "array", items: { type: "object" } },
+          risk: { type: "string", enum: ["low", "medium", "high", "critical"] }
+        }
+      };
+    case "work_item.get":
+    case "result.get":
+    case "evidence.list":
+      return { type: "object", required: ["id"], properties: { id: { type: "string" } } };
+    case "work_item.approve":
+      return {
+        type: "object",
+        required: ["id", "actionHash"],
+        properties: { id: { type: "string" }, actionHash: { type: "string" }, reason: { type: "string" } }
+      };
+    case "work_item.reject":
+    case "work_item.cancel":
+    case "work_item.unblock":
+      return { type: "object", required: ["id"], properties: { id: { type: "string" } } };
+    case "command.preview":
+    case "command.run":
+      return { type: "object", required: ["commandId"], properties: { commandId: { type: "string" } } };
+    case "filesystem.read_text":
+      return {
+        type: "object",
+        required: ["rootId", "relativePath"],
+        properties: {
+          rootId: { type: "string", enum: ["acs-repo"] },
+          relativePath: { type: "string" },
+          startLine: { type: "integer", minimum: 1 },
+          endLine: { type: "integer", minimum: 1 }
+        }
+      };
+    case "filesystem.stat":
+      return {
+        type: "object",
+        required: ["rootId", "relativePath"],
+        properties: { rootId: { type: "string", enum: ["acs-repo"] }, relativePath: { type: "string" } }
+      };
+    case "agent.preview":
+    case "agent.run":
+      return {
+        type: "object",
+        required: ["prompt"],
+        properties: {
+          agentId: { type: "string", enum: ["codex-cli"] },
+          prompt: { type: "string" },
+          rootId: { type: "string", enum: ["acs-repo"] },
+          timeoutMs: { type: "integer", minimum: 1, maximum: 900000 },
+          expectedOutputs: { type: "array", items: { type: "string" } }
+        }
+      };
+    case "evidence.get":
+      return {
+        type: "object",
+        required: ["id", "evidenceId"],
+        properties: { id: { type: "string" }, evidenceId: { type: "string" } }
+      };
+    case "service.restart.preview":
+    case "service.restart":
+      return {
+        type: "object",
+        required: ["serviceId", "reason"],
+        properties: {
+          serviceId: { type: "string", enum: ["acs-gateway", "acs-worker", "acs-tunnel", "acs-connector-test"] },
+          reason: { type: "string" }
+        }
+      };
+    case "config.change.preview":
+    case "config.change":
+      return {
+        type: "object",
+        required: ["targetId", "patch", "reason"],
+        properties: {
+          targetId: { type: "string", enum: ["acs-connector-settings"] },
+          patch: { type: "array", items: { type: "object" } },
+          reason: { type: "string" }
         }
       };
   }

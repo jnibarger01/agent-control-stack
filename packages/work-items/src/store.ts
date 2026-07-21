@@ -236,6 +236,12 @@ export interface ConnectorRequestRecord {
   authScopes?: string[];
 }
 
+export interface EvidenceAccessRecord {
+  workItemId: string;
+  evidenceId: string;
+  actor: string;
+}
+
 export const acpTimelineEventTypes = [
   "initialized",
   "message",
@@ -475,6 +481,7 @@ export interface WorkItemStore {
   reconcileStaleTunnelSessions(options?: LivenessReconciliationOptions): RegisteredTunnelSession[];
   getTunnelSession(input: TunnelSessionRef): TunnelSessionAuthorizationRecord | undefined;
   recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent;
+  recordEvidenceAccess(input: EvidenceAccessRecord): StoredAuditEvent;
   recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
@@ -1289,6 +1296,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  recordEvidenceAccess(input: EvidenceAccessRecord): StoredAuditEvent {
+    return this.write(() => {
+      this.getRequired(input.workItemId);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "evidence.accessed",
+          { workItemId: input.workItemId, evidenceId: input.evidenceId, actor: input.actor },
+          {
+            "work_item.id": input.workItemId,
+            "evidence.id": input.evidenceId,
+            "actor.id": input.actor
+          }
+        )
+      );
+      return { value: event, events: [event] };
+    });
+  }
+
   recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent {
     return this.write(() => {
       this.getActorRequired(input.actorId);
@@ -1481,7 +1506,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
       eventBody: { workerId },
       eventAttributes: { "worker.id": workerId }
     });
-    return { ...workItem, workerId, leaseToken, leaseExpiresAt: leaseExpiresAt(workItem.updatedAt, leaseMs) };
+    return {
+      ...workItem,
+      workerId,
+      leaseToken,
+      leaseExpiresAt: leaseExpiresAt(workItem.updatedAt, leaseMs),
+      leaseId: leaseId(workItem.id, workerId, workItem.updatedAt)
+    };
   }
 
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
@@ -1511,7 +1542,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
 
       return {
-        value: { ...updated, workerId, leaseToken, leaseExpiresAt },
+        value: { ...updated, workerId, leaseToken, leaseExpiresAt, leaseId: leaseId(updated.id, workerId, startedAt) },
         events: [
           this.appendAuditEvent(
             workItemStatusEvent(updated, { workerId, leaseExpiresAt }, { "worker.id": workerId })
@@ -1979,7 +2010,13 @@ function normalizeEventLimit(limit: number | undefined): number {
 }
 
 function resultEventAttributes(result: Record<string, unknown>): Record<string, string> {
-  return typeof result.execution_mode === "string" ? { "execution.mode": result.execution_mode } : {};
+  return {
+    ...(typeof result.execution_mode === "string" ? { "execution.mode": result.execution_mode } : {}),
+    ...(typeof result.executor_id === "string" ? { "executor.id": result.executor_id } : {}),
+    ...(typeof result.lease_id === "string" ? { "lease.id": result.lease_id } : {}),
+    ...(Array.isArray(result.action_hashes) ? { "action.hashes": result.action_hashes.filter((value): value is string => typeof value === "string").join(",") } : {}),
+    ...(Array.isArray(result.evidence) ? { "evidence.count": String(result.evidence.length) } : {})
+  };
 }
 
 function okHealth(): HealthCheck {
@@ -2094,6 +2131,10 @@ function isStoredLeaseHash(value: string | null): value is string {
 
 function leaseExpiresAt(startedAt: string, leaseMs: number): string {
   return new Date(Date.parse(startedAt) + leaseMs).toISOString();
+}
+
+function leaseId(workItemId: string, workerId: string, startedAt: string): string {
+  return `lease_${stableHash({ workItemId, workerId, startedAt }).slice(0, 32)}`;
 }
 
 export function approvalRequestHash(workItemId: string, actionHash: string): string {

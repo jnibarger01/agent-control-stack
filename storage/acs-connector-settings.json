@@ -1,0 +1,4 @@
+{
+  "worker_poll_interval_ms": 5000,
+  "max_evidence_bytes": 200000
+}

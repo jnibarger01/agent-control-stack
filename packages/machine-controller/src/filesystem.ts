@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 import { ControlStackError, redactValue } from "@agent-control-stack/shared";
@@ -53,12 +54,24 @@ export function readTextFile(config: MachineControllerConfig, input: unknown) {
   const lines = buffer.toString("utf8").split(/\r?\n/);
   const start = parsed.start_line;
   const end = parsed.end_line ?? lines.length;
-  const selected = lines.slice(start - 1, end).map((line, index) => redactLine(`${start + index}: ${line}`));
+  let redacted = false;
+  const selected = lines.slice(start - 1, end).map((line, index) => {
+    const original = `${start + index}: ${line}`;
+    const safe = redactLine(original);
+    redacted ||= safe !== original;
+    return safe;
+  });
+  const text = selected.join("\n");
   return {
     path: safe.realPath,
     startLine: start,
     endLine: Math.min(end, lines.length),
-    text: selected.join("\n")
+    text,
+    contentHash: createHash("sha256").update(text, "utf8").digest("hex"),
+    byteCount: buffer.byteLength,
+    returnedBytes: Buffer.byteLength(text, "utf8"),
+    truncated: end < lines.length,
+    redacted
   };
 }
 

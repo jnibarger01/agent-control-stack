@@ -6,6 +6,7 @@ import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import { z } from "zod";
 import type { MachineControllerConfig } from "./config.js";
 import { resolveSafePath } from "./path.js";
+import { resolveRegisteredCommand } from "./registry.js";
 
 export const riskLevelSchema = z.enum(["read_only", "safe_mutation", "requires_approval", "destructive", "forbidden"]);
 export type RiskLevel = z.infer<typeof riskLevelSchema>;
@@ -31,6 +32,18 @@ export interface CommandRunResult {
   stderr: string;
   timedOut: boolean;
   durationMs: number;
+}
+
+export interface RegisteredCommandPreview extends CommandPreview {
+  commandId: string;
+  version: string;
+}
+
+export interface RegisteredCommandRunResult {
+  commandId: string;
+  version: string;
+  invocation: { cwd: string; command: string; args: string[] };
+  result: CommandRunResult;
 }
 
 const defaultDeniedCommands = new Set(["rm", "shred", "mkfs", "dd", "chmod", "chown", "sudo"]);
@@ -61,6 +74,31 @@ export function previewCommand(config: MachineControllerConfig, input: unknown):
   }
 
   return { cwd, command, args, risk: "forbidden", reason: "no read-only allow rule matched" };
+}
+
+export function previewRegisteredCommand(config: MachineControllerConfig, input: unknown): RegisteredCommandPreview {
+  const resolved = resolveRegisteredCommand(config, input);
+  const preview = previewCommand(config, {
+    cwd: resolved.cwd,
+    command: resolved.command,
+    args: resolved.args
+  });
+  return { commandId: resolved.commandId, version: resolved.version, ...preview };
+}
+
+export async function runRegisteredCommand(config: MachineControllerConfig, input: unknown): Promise<RegisteredCommandRunResult> {
+  const resolved = resolveRegisteredCommand(config, input);
+  const result = await runReadonlyCommand(config, {
+    cwd: resolved.cwd,
+    command: resolved.command,
+    args: resolved.args
+  });
+  return {
+    commandId: resolved.commandId,
+    version: resolved.version,
+    invocation: { cwd: resolved.cwd, command: resolved.command, args: resolved.args },
+    result
+  };
 }
 
 export async function runReadonlyCommand(config: MachineControllerConfig, input: unknown): Promise<CommandRunResult> {
@@ -189,6 +227,7 @@ function asError(error: unknown): Error {
 }
 
 function isKnownReadonly(command: string, args: string[]): boolean {
+  if (command === "uname") return args.length === 1 && args[0] === "-a";
   if (command === "git") {
     const subcommand = args[0];
     const flags = args.slice(1);
@@ -196,7 +235,8 @@ function isKnownReadonly(command: string, args: string[]): boolean {
       status: ["--short", "--porcelain", "--branch", "--untracked-files=no", "--no-renames"],
       diff: ["--stat", "--name-only", "--name-status", "--check", "--cached", "--staged"],
       log: ["--oneline", "--decorate", "--no-decorate", "--stat", "--no-patch"],
-      show: ["--stat", "--no-patch", "--oneline", "--no-decorate"]
+      show: ["--stat", "--no-patch", "--oneline", "--no-decorate"],
+      "rev-parse": ["HEAD"]
     };
     return (
       typeof subcommand === "string" &&
@@ -207,9 +247,24 @@ function isKnownReadonly(command: string, args: string[]): boolean {
   if (command === "bun") return args.length === 1 && args[0] === "--version";
   if (command === "node") return args.length === 1 && ["--version", "-v"].includes(args[0] ?? "");
   if (command === "python3") return args.length === 1 && ["--version", "-V"].includes(args[0] ?? "");
-  if (command === "docker") return args.length === 1 && args[0] === "ps";
+  if (command === "docker") {
+    return (
+      (args.length === 1 && args[0] === "ps") ||
+      args.join(" ") === "ps --no-trunc" ||
+      args.join(" ") === "system df"
+    );
+  }
   if (command === "df") return args.length <= 1 && [undefined, "-h"].includes(args[0]);
   if (command === "free") return args.length <= 1 && [undefined, "-h"].includes(args[0]);
+  if (command === "systemctl") {
+    return args.join(" ") === "--user --failed --no-legend --no-pager";
+  }
+  if (command === "tailscale") return args.length === 1 && args[0] === "status";
+  if (command === "apt") return args.length === 2 && args[0] === "list" && args[1] === "--upgradable";
+  if (command === "journalctl") {
+    return args.join(" ") === "--user -n 100 --no-pager -o short-iso";
+  }
+  if (command === "lsblk") return args.length === 2 && args[0] === "-o" && args[1] === "NAME,SIZE,TYPE,MOUNTPOINT";
   return false;
 }
 

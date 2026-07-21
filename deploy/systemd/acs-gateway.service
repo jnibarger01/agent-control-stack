@@ -1,0 +1,24 @@
+[Unit]
+Description=Agent Control Stack gateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jacen/agent-control-stack
+EnvironmentFile=/home/jacen/.agent-control-stack/secrets/local-gateway.env
+Environment=ACS_DB_PATH=storage/local.db
+Environment=ACS_GATEWAY_ACTOR=user
+Environment=ACS_GATEWAY_ACTOR_ID=user
+Environment=ACS_WORKER_ID=acs-worker
+Environment=ACS_AUTH_MODE=tunnel_id
+Environment=ACS_TRUSTED_TUNNEL_PROXY=127.0.0.1
+Environment=HOST=127.0.0.1
+Environment=PORT=3000
+Environment=PATH=/home/jacen/.nvm/versions/node/v24.16.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/home/jacen/.nvm/versions/node/v24.16.0/bin/npm run start:gateway
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

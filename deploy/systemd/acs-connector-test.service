@@ -1,0 +1,7 @@
+[Unit]
+Description=ACS connector acceptance test fixture
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/sleep 3600
+Restart=no

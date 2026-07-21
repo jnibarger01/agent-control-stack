@@ -1,0 +1,33 @@
+{
+  "admin_ui": {
+    "open_browser": false
+  },
+  "config_version": 1,
+  "control_plane": {
+    "api_key": "env:CONTROL_PLANE_API_KEY",
+    "base_url": "https://api.openai.com",
+    "tunnel_id": "tunnel_6a4b1ed328e88191a9906d346ba899ae"
+  },
+  "health": {
+    "listen_addr": "127.0.0.1:0",
+    "url_file": "/home/jacen/.local/state/tunnel-client/health/agent-control-stack.url"
+  },
+  "log": {
+    "format": "json",
+    "level": "info"
+  },
+  "mcp": {
+    "discovery_extra_headers": {
+      "Authorization": "env:ACS_MCP_AUTH_HEADER"
+    },
+    "extra_headers": {
+      "Authorization": "env:ACS_MCP_AUTH_HEADER"
+    },
+    "server_urls": [
+      {
+        "channel": "main",
+        "url": "http://127.0.0.1:3000/mcp"
+      }
+    ]
+  }
+}

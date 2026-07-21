@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exec, fork, spawn } from "node:child_process";
@@ -24,6 +24,66 @@ function approvalActionHash(workItem: WorkItem, actor: string): string {
 }
 
 describe("worker policy gate", () => {
+  it("executes a registered filesystem connector action and persists evidence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-connector-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    writeFileSync(join(allowed, "package.json"), '{"name":"worker-fixture"}\n');
+    const configPath = join(dir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        paths: { allow: [allowed], deny: [] },
+        commands: { allow_readonly: ["uname"], deny: [] },
+        audit: { log_path: join(dir, "audit.jsonl") }
+      })
+    );
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    const workItem = tools.create_work_item({
+      title: "Read connector fixture",
+      requester: "agent",
+      intent: "read package metadata",
+      target: { cwd: allowed },
+      requestedActions: [
+        {
+          kind: "fs.read",
+          description: "read package",
+          params: {
+            rootId: "acs-repo",
+            relativePath: "package.json",
+            paths: ["package.json"],
+            registryActionId: "acs.filesystem.read_text",
+            registryVersion: "1.0"
+          }
+        }
+      ],
+      risk: "low"
+    });
+    store.close();
+    vi.stubEnv("ACS_MACHINE_CONTROLLER_CONFIG", configPath);
+
+    try {
+      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(result.executed).toBe(true);
+        expect(check.get(workItem.id)?.status).toBe("succeeded");
+        expect(check.get(workItem.id)?.result).toMatchObject({
+          execution_mode: "controlled_action",
+          executor_id: "test-worker",
+          evidence: [expect.objectContaining({ evidence_type: "filesystem" })]
+        });
+      } finally {
+        check.close();
+      }
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("simulates approved read-only work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");

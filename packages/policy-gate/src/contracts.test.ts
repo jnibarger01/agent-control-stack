@@ -3,6 +3,21 @@ import { describe, expect, it } from "vitest";
 import { evaluateContractAdmission } from "./contracts.js";
 
 describe("agentos contract admission", () => {
+  it("admits the governed ACS connector action kinds", () => {
+    for (const kind of ["agent.preview", "config.change", "config.change.preview", "service.restart.preview"]) {
+      expect(() =>
+        evaluateContractAdmission({
+          title: `connector ${kind}`,
+          requester: "agent",
+          intent: `exercise ${kind}`,
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind, description: kind, params: { targetId: "acs-connector-settings" } }],
+          risk: kind === "config.change" ? "high" : "low"
+        })
+      ).not.toThrow();
+    }
+  });
+
   it("routes unknown tools to human triage with write-risk approval", () => {
     const admission = evaluateContractAdmission({
       title: "Unknown tool",

@@ -56,12 +56,21 @@ describe("machine controller", () => {
     try {
       const result = (await controller.callTool("fs.read", { path: join(allowed, "notes.txt"), start_line: 1 })) as {
         text: string;
+        byteCount: number;
+        returnedBytes: number;
+        contentHash: string;
+        redacted: boolean;
+        truncated: boolean;
       };
 
       expect(result.text).toContain("1: hello");
       expect(result.text).toContain("2: OPENAI_API_KEY=[redacted]");
       expect(result.text).toContain("3: bye");
       expect(result.text).not.toContain(fakeSecret);
+      expect(result).toMatchObject({ redacted: true, truncated: false });
+      expect(result.byteCount).toBeGreaterThan(0);
+      expect(result.returnedBytes).toBeGreaterThan(0);
+      expect(result.contentHash).toMatch(/^[a-f0-9]{64}$/);
       const auditLog = readFileSync(config.audit.logPath, "utf8");
       expect(auditLog).toContain("1: hello");
       expect(auditLog).toContain("2: OPENAI_API_KEY=[redacted]");

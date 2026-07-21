@@ -14,7 +14,7 @@ import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { previewCommand, runReadonlyCommand } from "./command.js";
+import { previewCommand, previewRegisteredCommand, runReadonlyCommand, runRegisteredCommand } from "./command.js";
 import type { MachineControllerConfig } from "./config.js";
 
 describe("read-only command process cleanup", () => {
@@ -122,6 +122,26 @@ describe("read-only command process cleanup", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   }, 15_000);
+});
+
+describe("registered connector commands", () => {
+  it("previews and runs a fixed diagnostic invocation without accepting raw argv", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-registered-command-"));
+    try {
+      const machineConfig = config(directory);
+      machineConfig.commands.allowReadonly.push("uname");
+      const preview = previewRegisteredCommand(machineConfig, { commandId: "os.metadata" });
+      expect(preview).toMatchObject({ commandId: "os.metadata", version: "1.0", risk: "read_only" });
+      expect(preview).not.toHaveProperty("requestedCommand");
+
+      const result = await runRegisteredCommand(machineConfig, { commandId: "os.metadata" });
+      expect(result.commandId).toBe("os.metadata");
+      expect(result.result.exitCode).toBe(0);
+      await expect(runRegisteredCommand(machineConfig, { commandId: "os.metadata", command: "sh" })).rejects.toThrow();
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
 });
 
 function runPreview(machineConfig: MachineControllerConfig, args: string[]) {

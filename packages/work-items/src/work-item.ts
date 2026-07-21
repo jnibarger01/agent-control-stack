@@ -62,10 +62,25 @@ export const cancelRequestSchema = z.object({
 });
 export const rejectRequestSchema = cancelRequestSchema;
 
-export const executionModeSchema = z.enum(["not_started", "dry_run", "sandboxed_agent"]);
+export const executionModeSchema = z.enum(["not_started", "dry_run", "controlled_action", "sandboxed_agent"]);
 const timestampSchema = z.string().datetime({ offset: true });
 const boundedTextSchema = z.string().max(20_000);
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/i);
+export const evidenceRecordSchema = z
+  .object({
+    evidence_id: z.string().min(1).max(256),
+    evidence_type: z.enum(["command", "filesystem", "agent", "service", "config", "verification", "summary"]),
+    label: z.string().min(1).max(256),
+    content: boundedTextSchema.optional(),
+    content_hash: hashSchema,
+    size_bytes: z.number().int().nonnegative(),
+    redacted: z.boolean(),
+    truncated: z.boolean(),
+    executor_id: z.string().min(1).max(256),
+    created_at: timestampSchema,
+    metadata: z.record(z.string(), z.unknown()).default({})
+  })
+  .strict();
 const verificationResultSchema = z
   .object({
     command: z.string().min(1).max(1_000),
@@ -96,6 +111,12 @@ export const workerResultSchema = z
     workspace_before_hash: hashSchema.optional(),
     workspace_after_hash: hashSchema.optional(),
     sandbox_identity: z.string().min(1).max(512).optional(),
+    lease_id: z.string().min(1).max(256).optional(),
+    action_hashes: z.array(hashSchema).max(100).optional(),
+    executor_id: z.string().min(1).max(256).optional(),
+    repository_commit: z.string().min(1).max(256).optional(),
+    repository_worktree_state: boundedTextSchema.optional(),
+    evidence: z.array(evidenceRecordSchema).max(100).optional(),
     evidence_source: z.enum(["worker_reported", "acs_derived"]).optional(),
     recorded_at: timestampSchema.optional()
   })
@@ -130,7 +151,13 @@ export type CancelRequest = z.infer<typeof cancelRequestSchema>;
 export type RejectRequest = z.infer<typeof rejectRequestSchema>;
 export type SubmitWorkResultInput = z.infer<typeof submitWorkResultSchema>;
 export type WorkerResult = z.infer<typeof workerResultSchema>;
-export type ClaimedWorkItem = WorkItem & { workerId: string; leaseToken: string; leaseExpiresAt: string };
+export type EvidenceRecord = z.infer<typeof evidenceRecordSchema>;
+export type ClaimedWorkItem = WorkItem & {
+  workerId: string;
+  leaseToken: string;
+  leaseExpiresAt: string;
+  leaseId: string;
+};
 
 export const WorkItemEvent = {
   Created: "work_item.created",

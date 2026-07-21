@@ -1,0 +1,30 @@
+[Unit]
+Description=ACS OpenAI secure tunnel
+Requires=acs-gateway.service
+After=acs-gateway.service
+PartOf=acs-gateway.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jacen/agent-control-stack
+ExecStartPre=/bin/sh -c 'for attempt in 1 2 3 4 5 6 7 8 9 10; do /usr/bin/curl -fsS --max-time 2 http://127.0.0.1:3000/livez >/dev/null && exit 0; /usr/bin/sleep 1; done; exit 1'
+ExecStart=/home/jacen/.agent-control-stack/bin/acs-tunnel-run
+Restart=always
+RestartSec=5
+TimeoutStopSec=15
+KillMode=control-group
+UMask=0077
+
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/jacen/.local/state/tunnel-client
+ReadOnlyPaths=/home/jacen/.local/state/tunnel-client/backups
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=default.target

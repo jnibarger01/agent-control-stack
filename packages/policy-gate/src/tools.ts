@@ -227,7 +227,8 @@ function gateWorkerClaimInTransaction(
       ...blocked,
       workerId: running.workerId,
       leaseToken: running.leaseToken,
-      leaseExpiresAt: running.leaseExpiresAt
+      leaseExpiresAt: running.leaseExpiresAt,
+      leaseId: running.leaseId
     };
   }
 
@@ -290,7 +291,13 @@ function policyContextAuditReceipt(context: PolicyContext): Record<string, unkno
     requester: context.requester,
     risk: context.risk,
     action: {
-      kind: context.action.kind
+      kind: context.action.kind,
+      ...(typeof context.action.params.registryActionId === "string"
+        ? { registryActionId: context.action.params.registryActionId }
+        : {}),
+      ...(typeof context.action.params.registryVersion === "string"
+        ? { registryVersion: context.action.params.registryVersion }
+        : {})
     },
     cwd: context.cwd,
     paths: context.paths,

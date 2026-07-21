@@ -41,6 +41,7 @@ import {
   type McpOAuthOptions
 } from "./auth.js";
 import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit } from "./mcp.js";
+import { connectorToolNames, createConnectorTools } from "./connector.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
 import { GatewayReconciler } from "./reconciliation.js";
 import { gatewayListenConfig } from "./runtime-config.js";
@@ -121,6 +122,7 @@ const eventQuerySchema = z
     "afterSequence and beforeSequence cannot be combined"
   );
 const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
+const workerClaimBodySchema = z.object({ leaseMs: z.number().int().positive().optional() }).strict();
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
 const sessionCookiePayloadSchema = z.object({
@@ -143,6 +145,7 @@ export interface GatewayOptions {
   reconciliationIntervalMs?: number;
   logger?: boolean;
   auth?: GatewayAuthOptions;
+  workerAuth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
   mcpAllowedOrigins?: string[];
@@ -161,11 +164,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
+  const connectorTools = createConnectorTools({ store: workItems, policy, workItemTools: tools, cwd: process.cwd() });
+  const gatewayTools = { ...tools, ...connectorTools };
   const reconciler = new GatewayReconciler(workItems, {
     intervalMs: options.reconciliationIntervalMs,
     onError: (error) => app.log.error({ err: error }, "gateway liveness reconciliation failed")
   });
   const auth = resolveAuth(options);
+  const workerAuth = resolveWorkerAuth(options, auth);
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
@@ -308,7 +314,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       resolvedActor: resolveMcpActorId(workItems, authorization.auth, auth) ?? authorization.auth.subject,
       auth: authorization.auth
     });
-    return { tools: workItemToolNames };
+    return { tools: [...workItemToolNames, ...connectorToolNames] };
   });
 
   app.post("/connectors", async (request, reply) => {
@@ -421,7 +427,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const result = await handleMcpHttpRequest({
       body: request.body,
       headers: request.headers,
-      tools,
+      tools: gatewayTools,
       auth: mcpAuth,
       requireAuthentication: requiresMcpAuthentication(request, mcpAuth),
       resourceMetadataUrl,
@@ -724,7 +730,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.post<{ Params: { id: string } }>("/work-items/:id/results", async (request, reply) => {
     try {
-      const workerId = requireWorkerIdentity(request, reply, auth);
+      const workerId = requireWorkerIdentity(request, reply, workerAuth);
       if (!workerId) {
         return;
       }
@@ -737,6 +743,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
       const workItem = workItems.submitWorkResult(body);
       return reply.code(200).send({ workItem });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/worker/claim", async (request, reply) => {
+    try {
+      const workerId = requireWorkerIdentity(request, reply, workerAuth);
+      if (!workerId) {
+        return;
+      }
+      const body = workerClaimBodySchema.parse(request.body ?? {});
+      workItems.failExpiredLeases();
+      const workItem = tools.claim_next_approved_work_item({ workerId, ...(body.leaseMs === undefined ? {} : { leaseMs: body.leaseMs }) });
+      return { workItem: workItem ?? null };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -889,6 +910,18 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   const actor = requesterSchema.parse(process.env.ACS_GATEWAY_ACTOR ?? "user");
   const actorId = process.env.ACS_GATEWAY_ACTOR_ID;
   return token ? { token, actor, ...(actorId ? { actorId } : {}) } : undefined;
+}
+
+function resolveWorkerAuth(options: GatewayOptions, gatewayAuth: GatewayAuthOptions | undefined): GatewayAuthOptions | undefined {
+  if (options.workerAuth) {
+    return options.workerAuth;
+  }
+  const token = process.env.ACS_WORKER_TOKEN;
+  const workerId = process.env.ACS_WORKER_ID;
+  if (token && workerId) {
+    return { token, actor: "agent", actorId: workerId };
+  }
+  return gatewayAuth?.actor === "agent" && gatewayAuth.actorId ? gatewayAuth : undefined;
 }
 
 function resolveMcpAuth(options: GatewayOptions, workItems: SqliteWorkItemStore): McpAuthOptions | undefined {

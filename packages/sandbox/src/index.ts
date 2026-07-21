@@ -11,7 +11,7 @@ export type {
 
 export const sandboxResultSchema = z.object({
   ok: z.boolean(),
-  executionMode: z.enum(["dry_run", "sandboxed_agent", "not_started"]),
+  executionMode: z.enum(["dry_run", "controlled_action", "sandboxed_agent", "not_started"]),
   output: z.string(),
   error: z.string().optional(),
   stderr: z.string().optional(),

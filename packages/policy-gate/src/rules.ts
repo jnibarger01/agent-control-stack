@@ -58,6 +58,9 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (isSelfApproval(context)) {
     return risk("forbidden", "high-risk self-approval is denied", ["deny:self-approval"]);
   }
+  if (isConnectorPreview(context)) {
+    return risk("read_only", "registered connector preview is allowed", ["allow:connector-preview"]);
+  }
   if (requiresRiskApproval(context)) {
     return risk("requires_approval", `${context.risk} risk work requires approval`, ["approval:risk"]);
   }
@@ -78,6 +81,12 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   }
   if (isServiceRestart(command)) {
     return risk("requires_approval", "service restart requires approval", ["approval:service-restart"]);
+  }
+  if (context.action.kind === "service.restart") {
+    return risk("requires_approval", "registered service restart requires approval", ["approval:service-restart"]);
+  }
+  if (context.action.kind === "config.change") {
+    return risk("requires_approval", "registered config change requires approval", ["approval:config-change"]);
   }
   if (isGitCommit(command)) {
     return risk("requires_approval", "git commit requires approval", ["approval:git-commit"]);
@@ -151,9 +160,13 @@ function isSupportedAction(kind: string): boolean {
     kind === "fs.move" ||
     kind === "fs.delete" ||
     kind === "agent.prompt" ||
+    kind === "agent.preview" ||
     kind === "cmd.preview" ||
     kind === "cmd.run" ||
     kind === "service.restart" ||
+    kind === "service.restart.preview" ||
+    kind === "config.change" ||
+    kind === "config.change.preview" ||
     kind === "shell"
   );
 }
@@ -221,6 +234,19 @@ function realpathForPolicy(path: string): string {
 
 function isAgentPrompt(context: PolicyContext): boolean {
   return context.action.kind === "agent.prompt";
+}
+
+function isConnectorPreview(context: PolicyContext): boolean {
+  if (["agent.preview", "service.restart.preview", "config.change.preview"].includes(context.action.kind)) {
+    return true;
+  }
+  if (context.action.kind === "cmd.preview") {
+    return typeof context.action.params.commandId === "string";
+  }
+  if (context.action.kind === "cmd.run") {
+    return context.action.params.readOnly === true && typeof context.action.params.commandId === "string";
+  }
+  return false;
 }
 
 function isServiceRestart(command: string[]): boolean {

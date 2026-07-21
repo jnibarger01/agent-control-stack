@@ -32,6 +32,12 @@ commands:
     - docker
     - df
     - free
+    - uname
+    - systemctl
+    - tailscale
+    - apt
+    - journalctl
+    - lsblk
   deny:
     - rm
     - shred

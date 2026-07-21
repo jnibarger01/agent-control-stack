@@ -327,6 +327,7 @@ describe("work item state machine", () => {
       store.approveWorkItem(workItem.id, domainTransition);
 
       const claimed = store.claimNextApprovedWorkItem("worker-a");
+      expect(claimed?.leaseId).toMatch(/^lease_/);
       expect(claimed?.leaseToken).toEqual(expect.any(String));
 
       const row = readLeaseRow(dbPath, workItem.id);
@@ -415,7 +416,28 @@ describe("work item state machine", () => {
           workerId: "worker-a",
           leaseToken: claimed!.leaseToken,
           status: "succeeded",
-          result: { execution_mode: "dry_run", output: "ok" }
+          result: {
+            execution_mode: "dry_run",
+            output: "ok",
+            lease_id: claimed!.leaseId,
+            action_hashes: ["a".repeat(64)],
+            executor_id: "worker-a",
+            evidence: [
+              {
+                evidence_id: "ev_result",
+                evidence_type: "summary",
+                label: "worker summary",
+                content: "ok",
+                content_hash: "b".repeat(64),
+                size_bytes: 2,
+                redacted: false,
+                truncated: false,
+                executor_id: "worker-a",
+                created_at: new Date().toISOString(),
+                metadata: {}
+              }
+            ]
+          }
         }).status
       ).toBe("succeeded");
       expect(JSON.stringify(store.readEvents())).not.toContain(claimed!.leaseToken);
