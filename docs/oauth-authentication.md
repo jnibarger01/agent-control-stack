@@ -118,7 +118,7 @@ ACS_OAUTH_JWKS_URI=<OAuth JWKS URI> \
 npm run start:gateway
 ```
 
-If OAuth and tunnel auth are both missing in production, startup logs a warning and protected MCP calls fail closed. Never put bearer tokens, JWTs, tunnel IDs, session IDs, signatures, or private keys in logs.
+If OAuth and tunnel auth are both missing in production, gateway startup fails closed. Never put bearer tokens, JWTs, tunnel IDs, session IDs, signatures, or private keys in logs.
 
 ## Claude Custom Connector
 

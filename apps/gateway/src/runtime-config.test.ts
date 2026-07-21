@@ -9,12 +9,15 @@ describe("gateway runtime configuration", () => {
     expect(() => gatewayListenConfig({ PORT: "not-a-port" })).toThrow();
   });
 
-  it("fails closed for unauthenticated remote production binding", () => {
+  it("fails closed for unauthenticated production startup", () => {
     expect(() => gatewayListenConfig({ NODE_ENV: "production", HOST: "0.0.0.0" })).toThrow(
       "ACS_GATEWAY_TOKEN is required"
     );
     expect(() =>
       gatewayListenConfig({ NODE_ENV: "production", HOST: "0.0.0.0", ACS_GATEWAY_TOKEN: "dashboard" })
+    ).toThrow("requires complete OAuth or trusted tunnel authentication");
+    expect(() =>
+      gatewayListenConfig({ NODE_ENV: "production", HOST: "127.0.0.1", ACS_GATEWAY_TOKEN: "dashboard" })
     ).toThrow("requires complete OAuth or trusted tunnel authentication");
     expect(
       gatewayListenConfig({

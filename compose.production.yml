@@ -6,6 +6,8 @@ services:
     image: agent-control-stack:${ACS_IMAGE_TAG:-local}
     init: true
     restart: unless-stopped
+    user: "node"
+    pids_limit: 256
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777

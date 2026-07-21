@@ -73,9 +73,9 @@ Trust assumptions:
 - Durable state is SQLite in `storage/local.db` by default.
 - Gateway HTTP mutations require configured bearer auth; if mutation auth is not configured, they fail closed with `503`.
 - MCP `tools/call` requests require bearer authorization or a signed tunnel-session assertion from a configured trusted local proxy. A local `ACS_MCP_BEARER_TOKEN` can satisfy this outside production; production uses OAuth/JWKS validation or `ACS_AUTH_MODE=tunnel_id` with persistent connector/session records. `initialize`, `ping`, `notifications/*`, and `tools/list` are unauthenticated only for loopback local development when MCP auth is not configured.
-- Worker simulation must only consume approved work-item events.
-- Sandbox execution is currently dry-run only.
-- Result submission is lease-bound in the work-item store; the public HTTP result route is not implemented.
+- Worker execution must only consume approved work-item events.
+- Sandbox execution is dry-run by default. The opt-in Codex profile requires Bubblewrap, read-only workspace and permission mode, no network, cleared credentials/environment, bounded output/runtime, and before/after workspace verification; other providers fail closed.
+- Result submission is lease-bound in both the work-item store and authenticated worker HTTP route.
 - Approval and registry mutation identity is resolved to a canonical registry actor id where authenticated mutation paths are implemented.
 - Audit entries are transactional, append-only in SQLite, hash-chained, and locally verifiable. They are not OS-protected against local tampering.
 
@@ -188,7 +188,7 @@ Minimum test groups:
 
 ## Deferred Hardening
 
-The execution slice authorization artifact will be an Ed25519-signed approval grant per the locked PDP contract. Do not add a parallel approval bearer token. Real plugin or command execution also needs process isolation before enablement: firejail, nsjail, bubblewrap, Docker, or equivalent. Add that behind `packages/sandbox` instead of teaching callers about the runtime.
+The execution slice authorization artifact will be an Ed25519-signed approval grant per the locked PDP contract. Do not add a parallel approval bearer token. Additional plugin or provider execution needs its own containment review. The current contained profile does not provide remote inference credentials or a network-enabled broker.
 
 Layer 2 should also move risk-based approval routing into `packages/policy-gate`, add lease renewal before live long-running execution, add a true cross-process claim contention check, and treat `draft` as a reserved ingestion state until a draft creation endpoint exists.
 

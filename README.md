@@ -2,7 +2,7 @@
 
 Agent Control Stack (ACS) is a local-first TypeScript/Node control plane for policy-gated agent work. It sits between untrusted agent requests and privileged local-machine actions, turning proposed work into durable work items, applying policy, requiring exact-action approvals, recording a tamper-evident audit trail, and letting a local worker claim approved work.
 
-This repository is currently a **v0.1.0-alpha dry-run control-plane release**. It proves the control-plane loop, not production command execution. The worker records `execution_mode: "dry_run"`; it does **not** run real shell commands or provide hardened OS sandbox isolation yet.
+This repository is currently a **v0.1.0-alpha control-plane release**. The worker is dry-run by default. An explicitly enabled Codex profile can run a locally installed agent inside Bubblewrap with a read-only workspace and no network; no unconstrained execution fallback or remote-provider credential broker is included. See [`docs/sandbox-execution.md`](docs/sandbox-execution.md).
 
 ## Table of contents
 
@@ -46,14 +46,12 @@ The core point: agents can ask; ACS decides whether the request is allowed, deni
 
 Do **not** claim this alpha provides:
 
-- real command execution
-- hardened sandbox isolation
 - production-safe machine mutation
 - production-ready remote connector operation
 - kernel-level containment
 - a multi-user enterprise authorization model
 
-The current `packages/sandbox` implementation is intentionally dry-run only. Real execution should be added behind that package after isolation, environment allowlisting, path containment, output caps, and network controls pass their own release gate.
+The default worker path remains dry-run. The optional contained profile is limited to a read-only Codex provider and fails closed when Bubblewrap, the provider, the workspace, or process-tree evidence is unavailable. It is not a machine-mutation capability.
 
 ## Architecture
 
@@ -80,7 +78,7 @@ apps/worker
   v
 packages/sandbox
   |
-  | dry-run execution simulation in v0.1.0-alpha
+  | dry-run default or explicitly contained read-only Codex profile
   v
 redacted terminal result + audit event
 ```
@@ -92,12 +90,12 @@ redacted terminal result + audit event
 | `apps/gateway` | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events. |
 | `apps/control-ui` | Server-rendered mission-control dashboard HTML. |
 | `apps/mcp` | stdio MCP server backed by the machine-controller package. |
-| `apps/worker` | One-shot local worker that claims the next approved work item and records a dry-run result. |
+| `apps/worker` | One-shot local worker that claims the next approved work item and records structured dry-run or contained-agent evidence. |
 | `packages/work-items` | Work-item state machine, SQLite store, approvals, leases, audit events, registry, audit-chain health. |
 | `packages/policy-gate` | Policy evaluation, action fingerprinting, approval gating, worker-claim gating. |
-| `packages/sandbox` | Execution boundary. Currently dry-run only. |
+| `packages/sandbox` | Execution boundary with dry-run default and an opt-in Bubblewrap Codex read-only profile. |
 | `packages/shared` | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers. |
-| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary. |
+| `packages/machine-controller` | Local machine-controller config and read-only command boundary. |
 | `packages/acp-adapter` | Read-only ACP stdio adapter for registering agent status/capabilities. |
 | `packages/moa-orchestrator` | Multi-model/model-routing orchestration support. |
 | `packages/eval-harness` | Replay and policy validation harness. |
@@ -114,10 +112,10 @@ apps/
 packages/
   acp-adapter/      Read-only ACP process adapter
   eval-harness/     Replay/evaluation harness
-  machine-controller/ Local machine-controller config and direct-agent boundary
+  machine-controller/ Local machine-controller config and read-only command boundary
   moa-orchestrator/ Model/orchestration support
   policy-gate/      Policy decisions and approval gates
-  sandbox/          Dry-run sandbox boundary
+  sandbox/          Dry-run and contained-agent sandbox boundary
   shared/           Shared schemas, errors, hashing, redaction
   temporal-memory/  Memory event/projection package
   work-items/       SQLite store, state machine, approvals, audit chain
@@ -178,7 +176,7 @@ The local worker claims only approved work items. Claiming uses a status compare
 
 Worker results are lease-bound. The store requires the matching work item, worker id, lease token, and unexpired lease before accepting a terminal result.
 
-In this alpha, the sandbox returns a dry-run result and persists `execution_mode: "dry_run"`.
+The default worker path returns a dry-run result and persists `execution_mode: "dry_run"`. The opt-in contained profile persists `sandboxed_agent` or a fail-closed `not_started` result with structured evidence.
 
 ## Security model
 
@@ -293,7 +291,7 @@ Do not commit `.env` or real secrets.
 | `ACS_ALLOWED_TUNNEL_IDS` | Legacy dev tunnel allowlist. Prefer persistent connector records. | optional |
 | `ACS_TUNNEL_SCOPES` | Comma-separated MCP scopes for tunnel mode. | `acs:work:create,acs:work:read` |
 | `ACS_MCP_CONFIG` | Config path for stdio MCP machine controller. | `config.example.yml` |
-| `ACS_MACHINE_CONTROLLER_CONFIG` | Config path used by the gateway direct-agent controller. | optional |
+| `ACS_MACHINE_CONTROLLER_CONFIG` | Config path used by the stdio machine-controller command boundary. | optional |
 | `ACS_ACP_AGENT_COMMAND` | Read-only ACP agent command to spawn. | optional |
 | `ACS_ACP_AGENT_ARGS_JSON` | JSON array of ACP command args. | `[]` |
 | `ACS_ACP_AGENT_CWD` | ACP process working directory. | optional |
@@ -487,7 +485,7 @@ Current public MCP work-item tools:
 - `reject_work_item`
 - `cancel_work_item`
 
-Worker claim/result tools exist only in the local worker/store path. They are not exposed through the public MCP gateway in this alpha.
+Worker claim/result tools remain local-only in the MCP surface; the authenticated `/work-items/:id/results` HTTP route is lease-bound and intended for a configured worker identity.
 
 For stdio MCP machine-controller mode:
 
@@ -497,7 +495,7 @@ ACS_MCP_CONFIG=config.example.yml npm run start:mcp
 
 ## Run the worker
 
-The worker is one-shot. It claims at most one approved item, records a dry-run result, and exits.
+The worker is one-shot. It claims at most one approved item, records a structured result, and exits. Without explicit profile enablement, execution remains dry-run.
 
 ```sh
 ACS_DB_PATH=storage/local.db npm run start:worker
@@ -509,7 +507,7 @@ Expected no-work output looks like:
 {"executed":false,"reason":"no approved work item"}
 ```
 
-When it claims work, the result includes the work item id and `executionMode: "dry_run"`.
+When it claims work, the result includes the work item id and an `executionMode` of `dry_run`, `sandboxed_agent`, or `not_started`.
 
 ## Deploy
 
@@ -783,14 +781,12 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 
 ## Known limitations
 
-- Worker execution is dry-run only.
-- No real OS sandbox is wired in yet.
-- Public worker result submission is not implemented.
+- The default worker execution is dry-run; the contained profile is Codex-only, read-only, no-network, and opt-in.
+- A remote inference broker and provider credentials are intentionally not wired into the contained profile.
 - Production remote connector mode requires OAuth or signed tunnel-session deployment and TLS termination.
 - Docker and Compose artifacts are provided; Kubernetes and a checked-in systemd unit are not.
-- Dashboard approval rendering is intentionally minimal.
-- Error envelopes are not uniform across every route.
-- Release hardening is still in progress.
+- The dashboard is a bounded projection; use the persisted work-item and audit APIs as the source of truth.
+- Error envelopes are not uniform across every legacy route.
 
 ## Related docs
 

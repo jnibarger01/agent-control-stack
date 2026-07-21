@@ -6,9 +6,17 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+concurrency:
+  group: acs-check-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,5 +42,16 @@ jobs:
       - name: Secret scan
         run: npm run security:secrets
 
+      - name: Release smoke with temporary database
+        run: npm run test:release-smoke
+
       - name: Build production image
         run: docker build -t agent-control-stack:${{ github.sha }} .
+
+      - name: Upload coverage evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: acs-coverage-${{ github.sha }}
+          path: coverage/
+          if-no-files-found: warn

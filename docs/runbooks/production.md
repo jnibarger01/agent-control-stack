@@ -2,7 +2,7 @@
 
 ## Supported production scope
 
-This release supports a policy, approval, audit, and dry-run worker control plane. It does not execute real commands or claim OS sandbox isolation. Do not enable machine mutation until a separately reviewed sandbox release gate passes.
+This release supports a policy, approval, audit, and dry-run-default worker control plane. The optional Codex profile is read-only, no-network, Bubblewrap-contained, and fails closed when its host prerequisites are absent. It is not machine mutation and does not provide a remote inference broker. Review [`../sandbox-execution.md`](../sandbox-execution.md) before enabling it.
 
 ## Prerequisites
 
@@ -11,6 +11,9 @@ This release supports a policy, approval, audit, and dry-run worker control plan
 - A persistent volume with enough free space for SQLite WAL growth and backups.
 - `ACS_GATEWAY_TOKEN` and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
 - A versioned image tag and a recorded previous image tag.
+- The public marketing site is a separate Vercel project rooted at `apps/public-site`; never deploy the gateway or its SQLite volume to Vercel.
+- The gateway is the persistent Docker target in `compose.production.yml`; Compose publishes it on loopback and requires a reverse proxy or signed tunnel for intentional external ingress.
+- The protected `main` branch must require the GitHub `check` workflow before merge; this repository does not alter branch-protection settings.
 
 ## Build and verify
 
