@@ -33,6 +33,24 @@ const claimInputSchema = z.object({
 const approvalInputSchema = idInputSchema.merge(approvalRequestSchema);
 const cancelInputSchema = idInputSchema.merge(cancelRequestSchema);
 const rejectInputSchema = idInputSchema.merge(rejectRequestSchema);
+const retryInputSchema = idInputSchema.extend({ actor: z.string().min(1), reason: z.string().min(1).max(2_000) });
+const cloneInputSchema = idInputSchema.extend({
+  actor: z.string().min(1),
+  title: z.string().min(1).max(512).optional(),
+  intent: z.string().min(1).max(4_000).optional(),
+  target: z.record(z.string(), z.unknown()).optional(),
+  requestedActions: z
+    .array(
+      z.object({
+        kind: z.string().min(1),
+        description: z.string().min(1),
+        params: z.record(z.string(), z.unknown()).default({})
+      })
+    )
+    .max(32)
+    .optional(),
+  risk: z.enum(["low", "medium", "high", "critical"]).optional()
+});
 const policyTransition = { via: "policy_gate" } satisfies PrivilegedTransitionOptions;
 const domainTransition = { via: "domain_service" } satisfies PrivilegedTransitionOptions;
 
@@ -71,9 +89,12 @@ export function applyPolicyStatus(store: WorkItemStore, workItem: WorkItem, deci
     return workItem.status === "blocked" ? workItem : store.blockWorkItem(workItem.id);
   }
 
-  const pending = workItem.status === "draft" ? store.transition(workItem.id, "pending_policy", policyTransition) : workItem;
+  const pending =
+    workItem.status === "draft" ? store.transition(workItem.id, "pending_policy", policyTransition) : workItem;
   if (decision.decision === "require_approval") {
-    return pending.status === "needs_approval" ? pending : store.transition(pending.id, "needs_approval", policyTransition);
+    return pending.status === "needs_approval"
+      ? pending
+      : store.transition(pending.id, "needs_approval", policyTransition);
   }
   return pending.status === "approved" ? pending : store.approveWorkItem(pending.id, policyTransition);
 }
@@ -84,7 +105,10 @@ export function gateApproval(
   input: unknown
 ): { decision: PolicyDecision; workItem: WorkItem; approvals: ApprovalGrant[] } {
   if (!hasActionHash(input)) {
-    throw new ControlStackError("approval_action_hash_required", "approval_action_hash_required: actionHash is required");
+    throw new ControlStackError(
+      "approval_action_hash_required",
+      "approval_action_hash_required: actionHash is required"
+    );
   }
   const parsed = approvalInputSchema.parse(input);
   return store.withTransaction(() => gateApprovalInTransaction(store, policy, parsed));
@@ -113,24 +137,32 @@ function gateApprovalInTransaction(
   const approvals: ApprovalGrant[] = [];
   for (const actionHash of hashes) {
     if (!requestedHashes.has(actionHash)) {
-      throw new ControlStackError("approval_action_mismatch", `approval action hash does not match work item: ${actionHash}`);
+      throw new ControlStackError(
+        "approval_action_mismatch",
+        `approval action hash does not match work item: ${actionHash}`
+      );
     }
     if (!requiredHashes.has(actionHash)) {
       throw new ControlStackError("approval_not_required", `approval is not required for action hash: ${actionHash}`);
     }
-    approvals.push(store.recordApproval({
-      workItemId: workItem.id,
-      actionHash,
-      approvedBy: parsed.approvedBy,
-      reason: parsed.reason
-    }));
+    approvals.push(
+      store.recordApproval({
+        workItemId: workItem.id,
+        actionHash,
+        approvedBy: parsed.approvedBy,
+        reason: parsed.reason
+      })
+    );
   }
 
   const missingApproval = required.find((evaluation) => !store.hasApproval(workItem.id, evaluation.actionHash));
 
   return {
     decision,
-    workItem: missingApproval || workItem.status === "approved" ? workItem : store.approveWorkItem(workItem.id, policyTransition),
+    workItem:
+      missingApproval || workItem.status === "approved"
+        ? workItem
+        : store.approveWorkItem(workItem.id, policyTransition),
     approvals
   };
 }
@@ -172,16 +204,22 @@ function gateUnblockInTransaction(
   if (decision.decision === "require_approval") {
     return {
       decision,
-      workItem: pending.status === "needs_approval" ? pending : store.transition(pending.id, "needs_approval", policyTransition)
+      workItem:
+        pending.status === "needs_approval" ? pending : store.transition(pending.id, "needs_approval", policyTransition)
     };
   }
   return {
     decision,
-    workItem: pending.status === "pending_policy" ? pending : store.transition(pending.id, "pending_policy", policyTransition)
+    workItem:
+      pending.status === "pending_policy" ? pending : store.transition(pending.id, "pending_policy", policyTransition)
   };
 }
 
-export function gateWorkerClaim(store: WorkItemStore, policy: PolicyEngine, input: unknown): ClaimedWorkItem | undefined {
+export function gateWorkerClaim(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  input: unknown
+): ClaimedWorkItem | undefined {
   const parsed = claimInputSchema.parse(input);
   return store.withTransaction(() => gateWorkerClaimInTransaction(store, policy, parsed));
 }
@@ -213,17 +251,14 @@ function gateWorkerClaimInTransaction(
     }
   }
   if (decision.decision === "deny" || missing || approvalFailure) {
-    const blocked = store.submitWorkResult({
-      id: running.id,
-      workerId: parsed.workerId,
-      leaseToken: running.leaseToken,
-      status: "blocked",
-      result: { error: missing ? "approval missing for action hash" : approvalFailure ? errorMessage(approvalFailure) : decision.reason }
-    });
+    const blocked = store.blockWorkItem(running.id);
     return {
       ...blocked,
       workerId: running.workerId,
       leaseToken: running.leaseToken,
+      leaseId: running.leaseId,
+      actionHash: running.actionHash,
+      startedAt: running.startedAt,
       leaseExpiresAt: running.leaseExpiresAt
     };
   }
@@ -262,6 +297,42 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       const parsed = cancelInputSchema.parse(input);
       return store.cancelWorkItem(parsed.id, parsed, domainTransition);
     },
+    retry_work_item(input: unknown): WorkItem {
+      const parsed = retryInputSchema.parse(input);
+      return store.withTransaction(() => {
+        const workItem = store.retryWorkItem(parsed.id, { actor: parsed.actor, reason: parsed.reason });
+        evaluateContractAdmission({
+          title: workItem.title,
+          requester: workItem.requester,
+          ...(workItem.requesterSubject ? { requesterSubject: workItem.requesterSubject } : {}),
+          status: workItem.status === "draft" ? "draft" : "pending_policy",
+          intent: workItem.intent,
+          target: workItem.target,
+          requestedActions: workItem.requestedActions,
+          risk: workItem.risk
+        });
+        const { decision } = evaluateAndRecordPolicy(store, policy, workItem, parsed.actor, "create");
+        return applyPolicyStatus(store, workItem, decision);
+      });
+    },
+    clone_work_item(input: unknown): WorkItem {
+      const parsed = cloneInputSchema.parse(input);
+      return store.withTransaction(() => {
+        const workItem = store.cloneWorkItem(parsed.id, parsed);
+        evaluateContractAdmission({
+          title: workItem.title,
+          requester: workItem.requester,
+          ...(workItem.requesterSubject ? { requesterSubject: workItem.requesterSubject } : {}),
+          status: workItem.status === "draft" ? "draft" : "pending_policy",
+          intent: workItem.intent,
+          target: workItem.target,
+          requestedActions: workItem.requestedActions,
+          risk: workItem.risk
+        });
+        const { decision } = evaluateAndRecordPolicy(store, policy, workItem, parsed.actor, "create");
+        return applyPolicyStatus(store, workItem, decision);
+      });
+    },
     claim_next_approved_work_item(input: unknown): ClaimedWorkItem | undefined {
       return gateWorkerClaim(store, policy, input);
     },
@@ -269,10 +340,6 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.submitWorkResult(input);
     }
   };
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : "approval validation failed";
 }
 
 function approvalRequired(evaluations: PolicyEvaluation[]): PolicyEvaluation[] {

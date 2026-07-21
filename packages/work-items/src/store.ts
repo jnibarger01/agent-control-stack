@@ -23,11 +23,14 @@ import {
   listWorkItemsSchema,
   rejectRequestSchema,
   submitWorkResultSchema,
+  executionActionHash,
   workItemCreatedEvent,
   workItemSchema,
   workItemStatusEvent,
   type ClaimedWorkItem,
   type Requester,
+  type ResultOutcome,
+  type SubmitWorkResultInput,
   type WorkItem,
   type WorkItemRisk,
   type WorkItemStatus
@@ -54,9 +57,51 @@ interface WorkItemRow {
   started_at: string | null;
   lease_expires_at: string | null;
   lease_token_hash: string | null;
+  source_work_item_id: string | null;
+  lineage_type: "retry" | "clone" | null;
+  retry_reason: string | null;
+  retry_sequence: number;
+  root_work_item_id: string | null;
   created_at: string;
   updated_at: string;
 }
+
+interface LeaseRow {
+  lease_id: string;
+  work_item_id: string;
+  worker_id: string;
+  token_hash: string;
+  action_hash: string;
+  issued_at: string;
+  expires_at: string;
+  status: "active" | "consumed" | "expired" | "revoked";
+  closed_at: string | null;
+}
+
+interface ExecutionResultRow {
+  result_id: string;
+  work_item_id: string;
+  lease_id: string;
+  worker_id: string;
+  idempotency_key: string;
+  action_hash: string;
+  outcome: ResultOutcome;
+  started_at: string;
+  finished_at: string;
+  exit_code: number | null;
+  summary: string;
+  stdout: string | null;
+  stderr: string | null;
+  structured_output_json: string;
+  artifacts_json: string;
+  error: string | null;
+  resource_usage_json: string | null;
+  simulation_metadata_json: string;
+  payload_hash: string;
+  created_at: string;
+}
+
+type PersistedResultInput = Omit<SubmitWorkResultInput, "outcome"> & { outcome: ResultOutcome };
 
 export type StoredAuditEvent = AuditChainEvent;
 export const DEFAULT_EVENT_LIMIT = 100;
@@ -429,6 +474,29 @@ export interface ClaimOptions {
   allowDirectStartForTests?: true;
 }
 
+export interface StoredExecutionResult {
+  resultId: string;
+  workItemId: string;
+  leaseId: string;
+  workerId: string;
+  idempotencyKey: string;
+  actionHash: string;
+  outcome: ResultOutcome;
+  startedAt: string;
+  finishedAt: string;
+  exitCode?: number | null;
+  summary: string;
+  stdout?: string;
+  stderr?: string;
+  structuredOutput: Record<string, unknown>;
+  artifacts: Array<Record<string, unknown>>;
+  error?: string;
+  resourceUsage?: Record<string, unknown>;
+  simulationMetadata: Record<string, unknown>;
+  payloadHash: string;
+  createdAt: string;
+}
+
 export interface PrivilegedTransitionOptions {
   via: "policy_gate" | "domain_service";
 }
@@ -462,9 +530,16 @@ export interface WorkItemStore {
   updateRegistryAgent(id: string, input: RegistryAgentUpdate): RegistryAgentDetail;
   listRegistryAgents(): RegistryAgentDetail[];
   getRegistryAgent(id: string): RegistryAgentDetail | undefined;
-  replaceAgentCapabilities(agentId: string, capabilities: RegistryCapabilityInput[], actorId: string): RegistryCapability[];
+  replaceAgentCapabilities(
+    agentId: string,
+    capabilities: RegistryCapabilityInput[],
+    actorId: string
+  ): RegistryCapability[];
   listAgentCapabilities(agentId: string): RegistryCapability[];
-  recordAgentHeartbeat(agentId: string, input: RegistryHeartbeatInput): { agent: RegistryAgentDetail; heartbeat: RegistryHeartbeat };
+  recordAgentHeartbeat(
+    agentId: string,
+    input: RegistryHeartbeatInput
+  ): { agent: RegistryAgentDetail; heartbeat: RegistryHeartbeat };
   reconcileStaleAgents(options?: LivenessReconciliationOptions): RegistryAgentDetail[];
   registerTunnelSession(input: TunnelSessionRegistration): RegisteredTunnelSession;
   heartbeatTunnelSession(input: TunnelSessionRef): RegisteredTunnelSession;
@@ -481,6 +556,25 @@ export interface WorkItemStore {
   claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
   submitWorkResult(input: unknown): WorkItem;
+  recordDerivedWorkResult(input: unknown): WorkItem;
+  getExecutionResult(resultId: string): StoredExecutionResult | undefined;
+  getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined;
+  retryWorkItem(id: string, input: RetryWorkItemInput): WorkItem;
+  cloneWorkItem(id: string, input: CloneWorkItemInput): WorkItem;
+}
+
+export interface RetryWorkItemInput {
+  reason: string;
+  actor: string;
+}
+
+export interface CloneWorkItemInput {
+  actor: string;
+  title?: string;
+  intent?: string;
+  target?: Record<string, unknown>;
+  requestedActions?: Array<{ kind: string; description: string; params?: Record<string, unknown> }>;
+  risk?: WorkItemRisk;
 }
 
 export class SqliteWorkItemStore implements WorkItemStore {
@@ -584,13 +678,19 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
     const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
     if (options.afterSequence !== undefined) {
-      return (this.db
-        .prepare(`SELECT * FROM audit_events ${whereSql} ORDER BY sequence ASC LIMIT ?`)
-        .all(...params, limit) as unknown as EventRow[]).map(rowToEvent);
+      return (
+        this.db
+          .prepare(`SELECT * FROM audit_events ${whereSql} ORDER BY sequence ASC LIMIT ?`)
+          .all(...params, limit) as unknown as EventRow[]
+      ).map(rowToEvent);
     }
-    return (this.db
-      .prepare(`SELECT * FROM (SELECT * FROM audit_events ${whereSql} ORDER BY sequence DESC LIMIT ?) ORDER BY sequence ASC`)
-      .all(...params, limit) as unknown as EventRow[]).map(rowToEvent);
+    return (
+      this.db
+        .prepare(
+          `SELECT * FROM (SELECT * FROM audit_events ${whereSql} ORDER BY sequence DESC LIMIT ?) ORDER BY sequence ASC`
+        )
+        .all(...params, limit) as unknown as EventRow[]
+    ).map(rowToEvent);
   }
 
   listActors(): RegistryActor[] {
@@ -702,11 +802,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const allowedScopes = uniqueNonEmpty(input.allowedScopes, "allowedScopes");
       const actorId = requiredActorId(input.actorId);
       this.getActorRequired(actorId);
-      const existing = this.db
-        .prepare(`SELECT public_key_pem FROM connector_records WHERE id = ?`)
-        .get(input.id) as { public_key_pem: string } | undefined;
+      const existing = this.db.prepare(`SELECT public_key_pem FROM connector_records WHERE id = ?`).get(input.id) as
+        { public_key_pem: string } | undefined;
       if (existing && existing.public_key_pem !== input.publicKeyPem) {
-        throw new ControlStackError("connector_key_rotation_required", `connector key rotation requires /connectors/${input.id}/rotate-key`);
+        throw new ControlStackError(
+          "connector_key_rotation_required",
+          `connector key rotation requires /connectors/${input.id}/rotate-key`
+        );
       }
       this.db
         .prepare(
@@ -881,11 +983,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
           input.name === undefined ? current.name : requiredString(input.name, "name"),
           input.kind === undefined ? current.kind : requiredString(input.kind, "kind"),
           input.acpRole ?? current.acpRole,
-          input.provider === undefined ? current.provider ?? null : optionalString(input.provider),
-          input.model === undefined ? current.model ?? null : optionalString(input.model),
-          input.endpoint === undefined ? current.endpoint ?? null : optionalString(input.endpoint),
+          input.provider === undefined ? (current.provider ?? null) : optionalString(input.provider),
+          input.model === undefined ? (current.model ?? null) : optionalString(input.model),
+          input.endpoint === undefined ? (current.endpoint ?? null) : optionalString(input.endpoint),
           input.status ?? current.status,
-          input.lastError === undefined ? current.lastError ?? null : redactedOptionalString(input.lastError),
+          input.lastError === undefined ? (current.lastError ?? null) : redactedOptionalString(input.lastError),
           now,
           input.actorId,
           id
@@ -898,7 +1000,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-  replaceAgentCapabilities(agentId: string, capabilities: RegistryCapabilityInput[], actorId: string): RegistryCapability[] {
+  replaceAgentCapabilities(
+    agentId: string,
+    capabilities: RegistryCapabilityInput[],
+    actorId: string
+  ): RegistryCapability[] {
     return this.write(() => {
       const now = new Date().toISOString();
       this.getActorRequired(actorId);
@@ -949,7 +1055,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.capabilitiesForAgent(agentId);
   }
 
-  recordAgentHeartbeat(agentId: string, input: RegistryHeartbeatInput): { agent: RegistryAgentDetail; heartbeat: RegistryHeartbeat } {
+  recordAgentHeartbeat(
+    agentId: string,
+    input: RegistryHeartbeatInput
+  ): { agent: RegistryAgentDetail; heartbeat: RegistryHeartbeat } {
     return this.write(() => {
       const observedAt = (input.now ?? new Date()).toISOString();
       this.getActorRequired(input.actorId);
@@ -1081,11 +1190,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       };
       attributes["actor.id"] = actorId;
       const event = this.appendAuditEvent(
-        createEvent(
-          "tunnel_session.registered",
-          { ...session, actorId },
-          attributes
-        )
+        createEvent("tunnel_session.registered", { ...session, actorId }, attributes)
       );
       return { value: session, events: [event] };
     });
@@ -1113,13 +1218,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         "tunnel.session_id": session.sessionId
       };
       attributes["actor.id"] = actorId;
-      const event = this.appendAuditEvent(
-        createEvent(
-          "tunnel_session.heartbeat",
-          { ...session, actorId },
-          attributes
-        )
-      );
+      const event = this.appendAuditEvent(createEvent("tunnel_session.heartbeat", { ...session, actorId }, attributes));
       return { value: session, events: [event] };
     });
   }
@@ -1137,7 +1236,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const events: StoredAuditEvent[] = [];
 
       for (const row of rows) {
-        const sessionExpired = !Number.isFinite(Date.parse(row.expires_at)) || Date.parse(row.expires_at) <= now.getTime();
+        const sessionExpired =
+          !Number.isFinite(Date.parse(row.expires_at)) || Date.parse(row.expires_at) <= now.getTime();
         const heartbeatExpired = isHeartbeatExpired(row.last_heartbeat_at, row.issued_at, now, this.heartbeatTtlMs);
         if (!sessionExpired && !heartbeatExpired) {
           continue;
@@ -1149,14 +1249,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
              WHERE connector_id = ? AND tunnel_id = ? AND session_id = ?
                AND status = 'active' AND expires_at = ? AND last_heartbeat_at IS ?`
           )
-          .run(
-            nowIso,
-            row.connector_id,
-            row.tunnel_id,
-            row.session_id,
-            row.expires_at,
-            row.last_heartbeat_at
-          );
+          .run(nowIso, row.connector_id, row.tunnel_id, row.session_id, row.expires_at, row.last_heartbeat_at);
         if (result.changes !== 1) {
           continue;
         }
@@ -1212,13 +1305,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         "tunnel.session_status": session.status
       };
       attributes["actor.id"] = actorId;
-      const event = this.appendAuditEvent(
-        createEvent(
-          "tunnel_session.revoked",
-          { ...session, actorId },
-          attributes
-        )
-      );
+      const event = this.appendAuditEvent(createEvent("tunnel_session.revoked", { ...session, actorId }, attributes));
       return { value: session, events: [event] };
     });
   }
@@ -1251,9 +1338,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (input.authConnectorId) attributes["auth.connector_id"] = input.authConnectorId;
       if (input.authTunnelId) attributes["auth.tunnel_id"] = input.authTunnelId;
       if (input.authSessionId) attributes["auth.session_id"] = input.authSessionId;
-      const event = this.appendAuditEvent(
-        createEvent("connector.requested", { ...input }, attributes)
-      );
+      const event = this.appendAuditEvent(createEvent("connector.requested", { ...input }, attributes));
       return { value: event, events: [event] };
     });
   }
@@ -1293,11 +1378,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent {
     return this.write(() => {
       const event = this.appendAuditEvent(
-        createEvent("policy.decided", { ...input }, {
-          "work_item.id": input.workItemId,
-          "action.hash": input.actionHash,
-          "policy.decision": input.decision
-        })
+        createEvent(
+          "policy.decided",
+          { ...input },
+          {
+            "work_item.id": input.workItemId,
+            "action.hash": input.actionHash,
+            "policy.decision": input.decision
+          }
+        )
       );
       return { value: event, events: [event] };
     });
@@ -1395,8 +1484,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
            WHERE work_item_id = ? AND action_hash = ?`
         )
         .get(workItemId, actionHash) as unknown as
-        | { request_hash: string; status: string; expires_at: string }
-        | undefined;
+        { request_hash: string; status: string; expires_at: string } | undefined;
 
       if (!row) {
         throw new ControlStackError("approval_missing", `approval missing for action hash: ${actionHash}`);
@@ -1439,18 +1527,52 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   startWorkItem(id: string, workerId = "local-worker", options: ClaimOptions = {}): ClaimedWorkItem {
     if (options.allowDirectStartForTests !== true) {
-      throw new ControlStackError("worker_claim_required", "direct startWorkItem is test-only; use claimNextApprovedWorkItem");
+      throw new ControlStackError(
+        "worker_claim_required",
+        "direct startWorkItem is test-only; use claimNextApprovedWorkItem"
+      );
     }
     const leaseToken = createLeaseToken();
     const leaseMs = options.leaseMs ?? this.leaseMs;
-    const workItem = this.transitionWithEvent(id, "running", {
-      leaseMs,
-      leaseToken,
-      workerId,
-      eventBody: { workerId },
-      eventAttributes: { "worker.id": workerId }
+    return this.write(() => {
+      const current = this.getRequired(id);
+      const updated = transitionWorkItem(current, "running");
+      const startedAt = updated.updatedAt;
+      const expiresAt = leaseExpiresAt(startedAt, leaseMs);
+      const actionHash = executionActionHash(current);
+      const leaseId = createId("lease");
+      const result = this.db
+        .prepare(
+          `UPDATE work_items
+           SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, lease_token_hash = ?
+           WHERE id = ? AND status = ?`
+        )
+        .run(
+          updated.status,
+          updated.updatedAt,
+          workerId,
+          startedAt,
+          expiresAt,
+          hashLeaseToken(id, workerId, leaseToken),
+          id,
+          current.status
+        );
+      if (result.changes !== 1) {
+        throw new ControlStackError("work_item_conflict", `work item changed while claiming: ${id}`);
+      }
+      this.insertLease({ leaseId, workItemId: id, workerId, leaseToken, actionHash, issuedAt: startedAt, expiresAt });
+      const event = this.appendAuditEvent(
+        workItemStatusEvent(
+          updated,
+          { workerId, leaseId, actionHash, leaseExpiresAt: expiresAt },
+          { "worker.id": workerId, "lease.id": leaseId, "action.hash": actionHash }
+        )
+      );
+      return {
+        value: { ...updated, workerId, leaseToken, leaseId, actionHash, startedAt, leaseExpiresAt: expiresAt },
+        events: [event]
+      };
     });
-    return { ...workItem, workerId, leaseToken, leaseExpiresAt: leaseExpiresAt(workItem.updatedAt, leaseMs) };
   }
 
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
@@ -1465,25 +1587,40 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const current = rowToWorkItem(row);
       const updated = transitionWorkItem(current, "running");
       const startedAt = updated.updatedAt;
-      const leaseExpiresAt = new Date(Date.parse(startedAt) + (options.leaseMs ?? this.leaseMs)).toISOString();
+      const leaseExpiry = leaseExpiresAt(startedAt, options.leaseMs ?? this.leaseMs);
       const leaseToken = createLeaseToken();
       const leaseHash = hashLeaseToken(updated.id, workerId, leaseToken);
+      const actionHash = executionActionHash(current);
+      const leaseId = createId("lease");
       const result = this.db
         .prepare(
           `UPDATE work_items
            SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, lease_token_hash = ?
            WHERE id = ? AND status = 'approved'`
         )
-        .run(updated.status, updated.updatedAt, workerId, startedAt, leaseExpiresAt, leaseHash, updated.id);
+        .run(updated.status, updated.updatedAt, workerId, startedAt, leaseExpiry, leaseHash, updated.id);
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while claiming: ${updated.id}`);
       }
+      this.insertLease({
+        leaseId,
+        workItemId: updated.id,
+        workerId,
+        leaseToken,
+        actionHash,
+        issuedAt: startedAt,
+        expiresAt: leaseExpiry
+      });
 
       return {
-        value: { ...updated, workerId, leaseToken, leaseExpiresAt },
+        value: { ...updated, workerId, leaseToken, leaseId, actionHash, startedAt, leaseExpiresAt: leaseExpiry },
         events: [
           this.appendAuditEvent(
-            workItemStatusEvent(updated, { workerId, leaseExpiresAt }, { "worker.id": workerId })
+            workItemStatusEvent(
+              updated,
+              { workerId, leaseId, actionHash, leaseExpiresAt: leaseExpiry },
+              { "worker.id": workerId, "lease.id": leaseId, "action.hash": actionHash }
+            )
           )
         ]
       };
@@ -1494,37 +1631,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => {
       const nowIso = now.toISOString();
       const rows = this.db
-        .prepare(
-          `SELECT * FROM work_items
-           WHERE status = 'running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
-           ORDER BY started_at ASC`
-        )
-        .all(nowIso) as unknown as WorkItemRow[];
+        .prepare(`SELECT * FROM leases WHERE status = 'active' AND expires_at <= ? ORDER BY issued_at ASC`)
+        .all(nowIso) as unknown as LeaseRow[];
       const failed: WorkItem[] = [];
       const events: StoredAuditEvent[] = [];
 
-      for (const row of rows) {
-        const current = rowToWorkItem(row);
-        const updated = transitionWorkItem(current, "failed", nowIso);
-        const leaseFailureResult = { error: "worker lease expired" };
-        const result = this.db
-          .prepare(
-            `UPDATE work_items
-             SET status = ?, updated_at = ?, result_json = ?, lease_expires_at = NULL, lease_token_hash = NULL
-             WHERE id = ? AND status = 'running' AND lease_expires_at = ?`
-          )
-          .run(
-            updated.status,
-            updated.updatedAt,
-            JSON.stringify(leaseFailureResult),
-            updated.id,
-            row.lease_expires_at
+      for (const lease of rows) {
+        const currentRow = this.getRowRequired(lease.work_item_id);
+        if (currentRow.status !== "running" || currentRow.worker_id !== lease.worker_id) {
+          throw new ControlStackError(
+            "lease_state_inconsistent",
+            `active lease state is inconsistent: ${lease.lease_id}`
           );
-        if (result.changes === 1) {
-          const failedItem = { ...updated, result: leaseFailureResult };
-          failed.push(failedItem);
-          events.push(this.appendAuditEvent(workItemStatusEvent(failedItem, { result: leaseFailureResult })));
         }
+        const input = this.derivedResultInput(lease, "lease_expired", nowIso, "worker lease expired");
+        const accepted = this.acceptResultInTransaction(input, { now: nowIso, allowDerivedOutcome: true });
+        failed.push(accepted.value);
+        events.push(...accepted.events);
       }
 
       return { value: failed, events };
@@ -1533,52 +1656,340 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   submitWorkResult(input: unknown): WorkItem {
     const parsed = submitWorkResultSchema.parse(input);
-    return this.write(() => {
-      const row = this.getRowRequired(parsed.id);
-      if (row.status !== "running") {
-        throw new ControlStackError("work_item_not_running", `work item is not running: ${parsed.id}`);
-      }
-      if (!row.worker_id || !row.lease_expires_at || !isStoredLeaseHash(row.lease_token_hash)) {
-        throw new ControlStackError("worker_lease_missing", `worker lease is missing for work item: ${parsed.id}`);
-      }
-      if (row.worker_id !== parsed.workerId) {
-        throw new ControlStackError("worker_lease_mismatch", `worker lease does not match work item: ${parsed.id}`);
-      }
-      const expectedLeaseHash = hashLeaseToken(parsed.id, parsed.workerId, parsed.leaseToken);
-      if (row.lease_token_hash !== expectedLeaseHash) {
-        throw new ControlStackError("worker_lease_mismatch", `worker lease does not match work item: ${parsed.id}`);
-      }
-      const leaseExpiresAt = Date.parse(row.lease_expires_at);
-      if (!Number.isFinite(leaseExpiresAt) || leaseExpiresAt <= Date.now()) {
-        throw new ControlStackError("worker_lease_expired", `worker lease expired for work item: ${parsed.id}`);
-      }
+    return this.write(() => this.acceptResultInTransaction(parsed));
+  }
 
-      const current = rowToWorkItem(row);
-      const redactedResult = redactValue(parsed.result) as Record<string, unknown>;
-      const updated = { ...transitionWorkItem(current, parsed.status), result: redactedResult };
-      const result = this.db
+  recordDerivedWorkResult(input: unknown): WorkItem {
+    const parsed = submitWorkResultSchema.parse(input);
+    if (parsed.outcome !== "blocked" && parsed.outcome !== "lease_expired") {
+      throw new ControlStackError("result_outcome_invalid", "only ACS-derived outcomes may use this path");
+    }
+    return this.write(() => this.acceptResultInTransaction(parsed, { allowDerivedOutcome: true }));
+  }
+
+  getExecutionResult(resultId: string): StoredExecutionResult | undefined {
+    if (!resultId) return undefined;
+    const row = this.db.prepare(`SELECT * FROM execution_results WHERE result_id = ?`).get(resultId) as unknown as
+      ExecutionResultRow | undefined;
+    return row ? rowToExecutionResult(row) : undefined;
+  }
+
+  getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM execution_results WHERE worker_id = ? AND idempotency_key = ?`)
+      .get(workerId, idempotencyKey) as unknown as ExecutionResultRow | undefined;
+    return row ? rowToExecutionResult(row) : undefined;
+  }
+
+  private acceptResultInTransaction(
+    input: PersistedResultInput,
+    options: { now?: string; allowDerivedOutcome?: boolean } = {}
+  ): { value: WorkItem; events: StoredAuditEvent[] } {
+    if ((input.outcome === "blocked" || input.outcome === "lease_expired") && options.allowDerivedOutcome !== true) {
+      throw new ControlStackError("result_outcome_forbidden", "ACS-derived result outcomes are not worker-submittable");
+    }
+
+    const now = options.now ?? new Date().toISOString();
+    const payloadHash = resultPayloadHash(input);
+    const existingByKey = this.db
+      .prepare(`SELECT * FROM execution_results WHERE worker_id = ? AND idempotency_key = ?`)
+      .get(input.workerId, input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
+    if (existingByKey) {
+      if (existingByKey.payload_hash !== payloadHash || existingByKey.work_item_id !== input.workItemId) {
+        throw new ControlStackError("result_conflict", "result idempotency key conflicts with an accepted result");
+      }
+      const replayed = this.getRequired(input.workItemId);
+      return { value: replayed, events: [] };
+    }
+
+    const existingForWorkItem = this.db
+      .prepare(`SELECT result_id FROM execution_results WHERE work_item_id = ?`)
+      .get(input.workItemId) as { result_id: string } | undefined;
+    if (existingForWorkItem) {
+      throw new ControlStackError("result_conflict", "work item already has an accepted result");
+    }
+
+    const row = this.getRowRequired(input.workItemId);
+    if (row.status !== "running") {
+      throw new ControlStackError("work_item_not_running", "work item is not accepting a result");
+    }
+    const lease = this.db.prepare(`SELECT * FROM leases WHERE lease_id = ?`).get(input.leaseId) as unknown as
+      LeaseRow | undefined;
+    if (!lease) {
+      throw new ControlStackError("worker_lease_missing", "active worker lease is required");
+    }
+    if (
+      lease.work_item_id !== input.workItemId ||
+      lease.worker_id !== input.workerId ||
+      row.worker_id !== input.workerId
+    ) {
+      throw new ControlStackError("worker_lease_mismatch", "worker lease does not match the submitted result");
+    }
+    if (!row.lease_token_hash || !isStoredLeaseHash(row.lease_token_hash)) {
+      throw new ControlStackError("worker_lease_missing", "active worker lease is required");
+    }
+    if (row.lease_token_hash !== lease.token_hash) {
+      throw new ControlStackError("worker_lease_mismatch", "worker lease does not match the submitted result");
+    }
+    if (lease.action_hash !== input.actionHash) {
+      throw new ControlStackError("worker_action_hash_mismatch", "worker action hash does not match the active lease");
+    }
+    const expiresAt = Date.parse(lease.expires_at);
+    if (!Number.isFinite(expiresAt)) {
+      throw new ControlStackError("lease_state_inconsistent", "worker lease expiry is invalid");
+    }
+    if (input.outcome === "lease_expired") {
+      if (expiresAt > Date.parse(now)) {
+        throw new ControlStackError("lease_state_inconsistent", "lease-expired result is not justified by lease state");
+      }
+    } else if (expiresAt <= Date.parse(now)) {
+      throw new ControlStackError("worker_lease_expired", "worker lease has expired");
+    }
+
+    const resultId = createId("res");
+    const updated = {
+      ...transitionWorkItem(rowToWorkItem(row), resultStatus(input.outcome), now),
+      result: compactResult(input, payloadHash, now, resultId)
+    };
+    this.db
+      .prepare(
+        `INSERT INTO execution_results
+         (result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome,
+          started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json,
+          artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        resultId,
+        input.workItemId,
+        input.leaseId,
+        input.workerId,
+        input.idempotencyKey,
+        input.actionHash,
+        input.outcome,
+        input.startedAt,
+        input.finishedAt,
+        input.exitCode ?? null,
+        input.summary,
+        input.stdout ?? null,
+        input.stderr ?? null,
+        JSON.stringify(input.structuredOutput),
+        JSON.stringify(input.artifacts),
+        input.error ?? null,
+        input.resourceUsage ? JSON.stringify(input.resourceUsage) : null,
+        JSON.stringify(input.simulationMetadata),
+        payloadHash,
+        now
+      );
+
+    const updatedWorkItem = this.db
+      .prepare(
+        `UPDATE work_items
+         SET status = ?, updated_at = ?, result_json = ?, lease_expires_at = NULL, lease_token_hash = NULL
+         WHERE id = ? AND status = 'running' AND worker_id = ?`
+      )
+      .run(updated.status, updated.updatedAt, JSON.stringify(updated.result), input.workItemId, input.workerId);
+    if (updatedWorkItem.changes !== 1) {
+      throw new ControlStackError("work_item_conflict", "work item changed while accepting the result");
+    }
+    const closedLease = this.db
+      .prepare(`UPDATE leases SET status = ?, closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+      .run(input.outcome === "lease_expired" ? "expired" : "consumed", now, input.leaseId);
+    if (closedLease.changes !== 1) {
+      throw new ControlStackError("worker_lease_conflict", "worker lease changed while accepting the result");
+    }
+
+    const resultEvent = this.appendAuditEvent(
+      createEvent(
+        "execution_result.accepted",
+        {
+          resultId,
+          workItemId: input.workItemId,
+          leaseId: input.leaseId,
+          workerId: input.workerId,
+          actionHash: input.actionHash,
+          idempotencyKey: input.idempotencyKey,
+          outcome: input.outcome,
+          payloadHash,
+          simulationMetadata: input.simulationMetadata
+        },
+        {
+          "work_item.id": input.workItemId,
+          "lease.id": input.leaseId,
+          "worker.id": input.workerId,
+          "action.hash": input.actionHash,
+          "execution.outcome": input.outcome
+        }
+      )
+    );
+    const statusEvent = this.appendAuditEvent(
+      workItemStatusEvent(
+        updated,
+        { result: updated.result, resultId, leaseId: input.leaseId },
+        { "lease.id": input.leaseId, "action.hash": input.actionHash, ...resultEventAttributes(updated.result ?? {}) }
+      )
+    );
+    return { value: updated, events: [resultEvent, statusEvent] };
+  }
+
+  private derivedResultInput(
+    lease: LeaseRow,
+    outcome: "blocked" | "lease_expired",
+    finishedAt: string,
+    reason: string
+  ): PersistedResultInput {
+    return {
+      workItemId: lease.work_item_id,
+      leaseId: lease.lease_id,
+      workerId: lease.worker_id,
+      actionHash: lease.action_hash,
+      idempotencyKey: stableHash({ domain: "acs.derived-result", leaseId: lease.lease_id, outcome }),
+      outcome,
+      startedAt: lease.issued_at,
+      finishedAt,
+      summary: reason,
+      structuredOutput: {},
+      artifacts: [],
+      simulationMetadata: { executionMode: "dry_run", simulated: true, reason }
+    };
+  }
+
+  private insertLease(input: {
+    leaseId: string;
+    workItemId: string;
+    workerId: string;
+    leaseToken: string;
+    actionHash: string;
+    issuedAt: string;
+    expiresAt: string;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO leases
+         (lease_id, work_item_id, worker_id, token_hash, action_hash, issued_at, expires_at, status, closed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL)`
+      )
+      .run(
+        input.leaseId,
+        input.workItemId,
+        input.workerId,
+        hashLeaseToken(input.workItemId, input.workerId, input.leaseToken),
+        input.actionHash,
+        input.issuedAt,
+        input.expiresAt
+      );
+  }
+
+  retryWorkItem(id: string, input: RetryWorkItemInput): WorkItem {
+    const reason = input.reason.trim();
+    if (!reason || reason.length > 2_000) {
+      throw new ControlStackError("invalid_retry_request", "retry reason must be between 1 and 2,000 characters");
+    }
+    return this.createLinkedWorkItem(id, "retry", input.actor, { retryReason: reason });
+  }
+
+  cloneWorkItem(id: string, input: CloneWorkItemInput): WorkItem {
+    return this.createLinkedWorkItem(id, "clone", input.actor, {
+      title: input.title,
+      intent: input.intent,
+      target: input.target,
+      requestedActions: input.requestedActions,
+      risk: input.risk
+    });
+  }
+
+  private createLinkedWorkItem(
+    sourceId: string,
+    lineageType: "retry" | "clone",
+    actor: string,
+    overrides: {
+      retryReason?: string;
+      title?: string;
+      intent?: string;
+      target?: Record<string, unknown>;
+      requestedActions?: Array<{ kind: string; description: string; params?: Record<string, unknown> }>;
+      risk?: WorkItemRisk;
+    }
+  ): WorkItem {
+    return this.write(() => {
+      const source = this.getRequired(sourceId);
+      if (!isTerminalStatus(source.status)) {
+        throw new ControlStackError(
+          "lineage_source_not_terminal",
+          "retry and clone require a terminal source work item"
+        );
+      }
+      if (lineageType === "retry" && !overrides.retryReason) {
+        throw new ControlStackError("invalid_retry_request", "retry reason is required");
+      }
+      const created = createWorkItem({
+        title: overrides.title ?? source.title,
+        requester: source.requester,
+        ...(source.requesterSubject ? { requesterSubject: source.requesterSubject } : {}),
+        status: "pending_policy",
+        intent: overrides.intent ?? source.intent,
+        target: overrides.target ?? source.target,
+        requestedActions: overrides.requestedActions ?? source.requestedActions,
+        risk: overrides.risk ?? source.risk
+      });
+      const retrySequence = (source.retrySequence ?? 0) + (lineageType === "retry" ? 1 : 0);
+      const linked = workItemSchema.parse({
+        ...created,
+        sourceWorkItemId: source.id,
+        lineageType,
+        ...(overrides.retryReason ? { retryReason: overrides.retryReason } : {}),
+        retrySequence,
+        rootWorkItemId: source.rootWorkItemId ?? source.id
+      });
+      this.db
         .prepare(
-          `UPDATE work_items
-           SET status = ?, updated_at = ?, result_json = ?, lease_expires_at = NULL, lease_token_hash = NULL
-           WHERE id = ? AND status = 'running' AND worker_id = ? AND lease_token_hash = ?`
+          `INSERT INTO work_items
+           (id, title, requester, requester_subject, status, intent, target_json, requested_actions_json, risk, result_json,
+            worker_id, started_at, lease_expires_at, lease_token_hash, source_work_item_id, lineage_type, retry_reason,
+            retry_sequence, root_work_item_id, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
-          updated.status,
-          updated.updatedAt,
-          JSON.stringify(redactedResult),
-          parsed.id,
-          parsed.workerId,
-          expectedLeaseHash
+          linked.id,
+          linked.title,
+          linked.requester,
+          linked.requesterSubject ?? null,
+          linked.status,
+          linked.intent,
+          JSON.stringify(linked.target),
+          JSON.stringify(linked.requestedActions),
+          linked.risk,
+          linked.sourceWorkItemId ?? source.id,
+          linked.lineageType ?? lineageType,
+          linked.retryReason ?? null,
+          linked.retrySequence ?? 0,
+          linked.rootWorkItemId ?? source.rootWorkItemId ?? source.id,
+          linked.createdAt,
+          linked.updatedAt
         );
-      if (result.changes !== 1) {
-        throw new ControlStackError("work_item_conflict", `work item changed while submitting result: ${parsed.id}`);
-      }
-      return {
-        value: updated,
-        events: [
-          this.appendAuditEvent(workItemStatusEvent(updated, { result: redactedResult }, resultEventAttributes(redactedResult)))
-        ]
-      };
+      const eventName = lineageType === "retry" ? "work_item.retried" : "work_item.cloned";
+      const event = this.appendAuditEvent(
+        createEvent(
+          eventName,
+          {
+            workItemId: linked.id,
+            sourceWorkItemId: source.id,
+            lineageType,
+            retryReason: linked.retryReason,
+            retrySequence: linked.retrySequence,
+            rootWorkItemId: linked.rootWorkItemId,
+            actor
+          },
+          {
+            "work_item.id": linked.id,
+            "work_item.source_id": source.id,
+            "work_item.lineage_type": lineageType,
+            "actor.id": actor
+          }
+        )
+      );
+      const createdEvent = this.appendAuditEvent(workItemCreatedEvent(linked));
+      return { value: linked, events: [createdEvent, event] };
     });
   }
 
@@ -1604,8 +2015,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   private getConnectorRequired(id: string): RegisteredConnector {
     const row = this.db.prepare(`SELECT * FROM connector_records WHERE id = ?`).get(id) as unknown as
-      | ConnectorRow
-      | undefined;
+      ConnectorRow | undefined;
     if (!row) {
       throw new ControlStackError("connector_not_found", `connector not found: ${id}`);
     }
@@ -1644,9 +2054,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   private capabilitiesForAgent(agentId: string): RegistryCapability[] {
-    return (this.db.prepare(`SELECT * FROM capabilities WHERE agent_id = ? ORDER BY name ASC`).all(agentId) as unknown as CapabilityRow[]).map(
-      rowToCapability
-    );
+    return (
+      this.db
+        .prepare(`SELECT * FROM capabilities WHERE agent_id = ? ORDER BY name ASC`)
+        .all(agentId) as unknown as CapabilityRow[]
+    ).map(rowToCapability);
   }
 
   private getTunnelSessionRequired(input: TunnelSessionRef): RegisteredTunnelSession {
@@ -1705,6 +2117,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
               .run(updated.status, updated.updatedAt, id, current.status);
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while transitioning: ${id}`);
+      }
+      if (current.status === "running" && status !== "running") {
+        this.db
+          .prepare(`UPDATE leases SET status = 'revoked', closed_at = ? WHERE work_item_id = ? AND status = 'active'`)
+          .run(updated.updatedAt, id);
       }
       return {
         value: updated,
@@ -1780,7 +2197,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
            WHERE status IN ('AVAILABLE', 'BUSY', 'DEGRADED')`
         )
         .all() as Array<{ last_heartbeat_at: string | null; updated_at: string }>;
-      return activeAgents.some((agent) => isHeartbeatExpired(agent.last_heartbeat_at, agent.updated_at, now, this.heartbeatTtlMs))
+      return activeAgents.some((agent) =>
+        isHeartbeatExpired(agent.last_heartbeat_at, agent.updated_at, now, this.heartbeatTtlMs)
+      )
         ? failHealth("stale_liveness")
         : okHealth();
     } catch {
@@ -1870,9 +2289,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   private latestAuditHash(): string {
-    const row = this.db
-      .prepare(`SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1`)
-      .get() as { event_hash: string } | undefined;
+    const row = this.db.prepare(`SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1`).get() as
+      { event_hash: string } | undefined;
     return row?.event_hash ?? "";
   }
 
@@ -1903,6 +2321,11 @@ function rowToWorkItem(row: WorkItemRow): WorkItem {
     requestedActions: JSON.parse(row.requested_actions_json),
     risk: row.risk,
     ...(row.result_json ? { result: JSON.parse(row.result_json) as Record<string, unknown> } : {}),
+    ...(row.source_work_item_id ? { sourceWorkItemId: row.source_work_item_id } : {}),
+    ...(row.lineage_type ? { lineageType: row.lineage_type } : {}),
+    ...(row.retry_reason ? { retryReason: row.retry_reason } : {}),
+    ...(row.retry_sequence ? { retrySequence: row.retry_sequence } : {}),
+    ...(row.root_work_item_id ? { rootWorkItemId: row.root_work_item_id } : {}),
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
@@ -1921,6 +2344,33 @@ function rowToEvent(row: EventRow): StoredAuditEvent {
   };
 }
 
+function rowToExecutionResult(row: ExecutionResultRow): StoredExecutionResult {
+  return {
+    resultId: row.result_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    workerId: row.worker_id,
+    idempotencyKey: row.idempotency_key,
+    actionHash: row.action_hash,
+    outcome: row.outcome,
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    ...(row.exit_code === null ? {} : { exitCode: row.exit_code }),
+    summary: row.summary,
+    ...(row.stdout === null ? {} : { stdout: row.stdout }),
+    ...(row.stderr === null ? {} : { stderr: row.stderr }),
+    structuredOutput: JSON.parse(row.structured_output_json) as Record<string, unknown>,
+    artifacts: JSON.parse(row.artifacts_json) as Array<Record<string, unknown>>,
+    ...(row.error === null ? {} : { error: row.error }),
+    ...(row.resource_usage_json === null
+      ? {}
+      : { resourceUsage: JSON.parse(row.resource_usage_json) as Record<string, unknown> }),
+    simulationMetadata: JSON.parse(row.simulation_metadata_json) as Record<string, unknown>,
+    payloadHash: row.payload_hash,
+    createdAt: row.created_at
+  };
+}
+
 function normalizeEventLimit(limit: number | undefined): number {
   if (limit === undefined) {
     return DEFAULT_EVENT_LIMIT;
@@ -1932,7 +2382,72 @@ function normalizeEventLimit(limit: number | undefined): number {
 }
 
 function resultEventAttributes(result: Record<string, unknown>): Record<string, string> {
-  return typeof result.execution_mode === "string" ? { "execution.mode": result.execution_mode } : {};
+  const executionMode = result.executionMode ?? result.execution_mode;
+  return typeof executionMode === "string" ? { "execution.mode": executionMode } : {};
+}
+
+function resultStatus(outcome: ResultOutcome): WorkItemStatus {
+  switch (outcome) {
+    case "succeeded":
+      return "succeeded";
+    case "cancelled":
+      return "cancelled";
+    case "blocked":
+      return "blocked";
+    case "failed":
+    case "worker_infrastructure_failure":
+    case "lease_expired":
+      return "failed";
+  }
+}
+
+function isTerminalStatus(status: WorkItemStatus): boolean {
+  return status === "succeeded" || status === "failed" || status === "cancelled" || status === "rejected";
+}
+
+function resultPayloadHash(input: PersistedResultInput): string {
+  return stableHash({
+    domain: "acs.execution-result",
+    workItemId: input.workItemId,
+    leaseId: input.leaseId,
+    workerId: input.workerId,
+    actionHash: input.actionHash,
+    idempotencyKey: input.idempotencyKey,
+    outcome: input.outcome,
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt,
+    exitCode: input.exitCode ?? null,
+    summary: input.summary,
+    stdout: input.stdout ?? null,
+    stderr: input.stderr ?? null,
+    structuredOutput: input.structuredOutput,
+    artifacts: input.artifacts,
+    error: input.error ?? null,
+    resourceUsage: input.resourceUsage ?? null,
+    simulationMetadata: input.simulationMetadata
+  });
+}
+
+function compactResult(
+  input: PersistedResultInput,
+  payloadHash: string,
+  recordedAt: string,
+  resultId: string
+): Record<string, unknown> {
+  return {
+    resultId,
+    leaseId: input.leaseId,
+    workerId: input.workerId,
+    actionHash: input.actionHash,
+    idempotencyKey: input.idempotencyKey,
+    outcome: input.outcome,
+    summary: input.summary,
+    executionMode: input.simulationMetadata.executionMode,
+    payloadHash,
+    recordedAt,
+    ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }),
+    ...(input.error === undefined ? {} : { error: input.error })
+  };
 }
 
 function okHealth(): HealthCheck {
