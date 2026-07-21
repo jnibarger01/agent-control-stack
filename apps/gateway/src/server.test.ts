@@ -5,7 +5,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { auditEventHash } from "@agent-control-stack/shared";
-import { DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT, SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
+import {
+  DEFAULT_EVENT_LIMIT,
+  MAX_EVENT_LIMIT,
+  SqliteWorkItemStore,
+  type WorkItem
+} from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
 import { buildGateway } from "./server.js";
@@ -62,7 +67,12 @@ describe("mission control gateway", () => {
       const created = await app.inject({
         method: "POST",
         url: "/work-items",
-        payload: { title: "Inspect route", intent: "verify mission control", target: { services: ["chatgpt-prod"] }, risk: "high" }
+        payload: {
+          title: "Inspect route",
+          intent: "verify mission control",
+          target: { services: ["chatgpt-prod"] },
+          risk: "high"
+        }
       });
       const workItemId = created.json().id;
 
@@ -127,13 +137,19 @@ describe("mission control gateway", () => {
       expect(dashboard.body).not.toContain("audit.seed.0");
       expect(defaultWorkItem.json().events).toHaveLength(DEFAULT_EVENT_LIMIT);
       expect(limitedWorkItem.json().events).toHaveLength(5);
-      expect(limitedWorkItem.json().events.every((event: { attributes: Record<string, string> }) => event.attributes["work_item.id"] === workItem.id)).toBe(
-        true
-      );
+      expect(
+        limitedWorkItem
+          .json()
+          .events.every(
+            (event: { attributes: Record<string, string> }) => event.attributes["work_item.id"] === workItem.id
+          )
+      ).toBe(true);
       expect(limitedAgent.json().events).toHaveLength(4);
-      expect(limitedAgent.json().events.every((event: { attributes: Record<string, string> }) => event.attributes["agent.id"] === "api-agent")).toBe(
-        true
-      );
+      expect(
+        limitedAgent
+          .json()
+          .events.every((event: { attributes: Record<string, string> }) => event.attributes["agent.id"] === "api-agent")
+      ).toBe(true);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -439,7 +455,9 @@ describe("mission control gateway", () => {
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(check.getRegistryAgent("stale-agent")).toMatchObject({ status: "OFFLINE" });
-        expect(check.getTunnelSession({ connectorId: "connector", tunnelId: "tunnel", sessionId: "session" })).toMatchObject({
+        expect(
+          check.getTunnelSession({ connectorId: "connector", tunnelId: "tunnel", sessionId: "session" })
+        ).toMatchObject({
           status: "revoked"
         });
         expect(check.readEvents().filter((event) => event.name === "agent.reconciled")).toHaveLength(1);
@@ -552,10 +570,7 @@ describe("mission control gateway", () => {
         url: "/api/agents/api-agent/capabilities",
         headers: actorHeaders,
         payload: {
-          capabilities: [
-            { name: "code:implement", inputSchema: { type: "object" } },
-            { name: "repo:inspect" }
-          ]
+          capabilities: [{ name: "code:implement", inputSchema: { type: "object" } }, { name: "repo:inspect" }]
         }
       });
       const replacedCapabilities = await app.inject({
@@ -972,7 +987,7 @@ describe("gateway MCP transport", () => {
             _meta: {
               securitySchemes: [{ type: "noauth" }]
             }
-          }),
+          })
         ])
       );
       expect(response.json().result.tools.map((tool: { name: string }) => tool.name)).not.toEqual(
@@ -1264,7 +1279,12 @@ describe("gateway MCP transport", () => {
     const oauth = createTestOAuth();
     const seed = new SqliteWorkItemStore(dbPath);
     const seedTools = createWorkItemTools(seed, createPolicyEngine());
-    seed.registerActor({ id: "oauth-user", actorType: "HUMAN", displayName: "OAuth User", externalRef: "oauth_jwt:user_123" });
+    seed.registerActor({
+      id: "oauth-user",
+      actorType: "HUMAN",
+      displayName: "OAuth User",
+      externalRef: "oauth_jwt:user_123"
+    });
     const workItem = seedTools.create_work_item({
       title: "Approved remote claim target",
       requester: "user",
@@ -1325,9 +1345,7 @@ describe("gateway MCP transport", () => {
               requester: "agent",
               intent: "verify MCP governed tool call",
               target: { cwd: "/repo" },
-              requestedActions: [
-                { kind: "fs.write", description: "write file", params: { paths: ["src/index.ts"] } }
-              ],
+              requestedActions: [{ kind: "fs.write", description: "write file", params: { paths: ["src/index.ts"] } }],
               risk: "medium"
             }
           }
@@ -1693,9 +1711,7 @@ describe("gateway MCP transport", () => {
       mcpAuth: {
         tunnel: {
           trustedProxies: ["127.0.0.1"],
-          connectors: [
-            { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
-          ]
+          connectors: [{ id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }]
         }
       }
     });
@@ -1790,9 +1806,7 @@ describe("gateway MCP transport", () => {
       mcpAuth: {
         tunnel: {
           trustedProxies: ["127.0.0.1"],
-          connectors: [
-            { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
-          ]
+          connectors: [{ id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }]
         }
       }
     });
@@ -1832,9 +1846,7 @@ describe("gateway MCP transport", () => {
       mcpAuth: {
         tunnel: {
           trustedProxies: ["127.0.0.1"],
-          connectors: [
-            { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
-          ]
+          connectors: [{ id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }]
         }
       }
     });
@@ -1880,9 +1892,7 @@ describe("gateway MCP transport", () => {
       mcpAuth: {
         tunnel: {
           trustedProxies: ["127.0.0.1"],
-          connectors: [
-            { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
-          ]
+          connectors: [{ id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }]
         }
       }
     });
@@ -1947,7 +1957,12 @@ describe("gateway MCP transport", () => {
       requestedActions: [{ kind: "fs.read", description: "read", params: { paths: ["src/index.ts"] } }],
       risk: "low"
     });
-    setup.registerActor({ id: "oauth-user", actorType: "HUMAN", displayName: "OAuth User", externalRef: "oauth_jwt:user_123" });
+    setup.registerActor({
+      id: "oauth-user",
+      actorType: "HUMAN",
+      displayName: "OAuth User",
+      externalRef: "oauth_jwt:user_123"
+    });
     setup.blockWorkItem(unblockItem.id);
     setup.close();
 
@@ -1998,12 +2013,17 @@ describe("gateway MCP transport", () => {
       const check = new SqliteWorkItemStore(dbPath);
       try {
         const events = check.readEvents();
-        const approval = events.find((event) => event.name === "approval.granted" && event.body.workItemId === approvalItem.id);
-        const cancellation = events.find((event) => event.name === "work_item.cancelled" && event.body.id === cancelItem.id);
+        const approval = events.find(
+          (event) => event.name === "approval.granted" && event.body.workItemId === approvalItem.id
+        );
+        const cancellation = events.find(
+          (event) => event.name === "work_item.cancelled" && event.body.id === cancelItem.id
+        );
         const unblockDecision = events.find(
           (event) =>
             event.name === "policy.decided" &&
-            (event.body.context as { workItemId?: string; operation?: string } | undefined)?.workItemId === unblockItem.id &&
+            (event.body.context as { workItemId?: string; operation?: string } | undefined)?.workItemId ===
+              unblockItem.id &&
             (event.body.context as { workItemId?: string; operation?: string } | undefined)?.operation === "unblock"
         );
         const connectorEvents = events.filter((event) => event.name === "connector.requested");
@@ -2504,7 +2524,7 @@ describe("gateway MCP transport", () => {
     expect(result.response.statusCode).toBe(401);
     expect(result.response.headers["www-authenticate"]).toBe(authChallenge(result.response.json()));
     expect(authChallenge(result.response.json())).toBe(
-      "Bearer resource_metadata=\"http://localhost:80/.well-known/oauth-protected-resource/mcp\", error=\"invalid_token\", error_description=\"missing bearer token\", scope=\"acs:work:create\""
+      'Bearer resource_metadata="http://localhost:80/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="missing bearer token", scope="acs:work:create"'
     );
     expect(result.response.json().result.structuredContent).toMatchObject({
       authError: "missing_token",
@@ -2521,7 +2541,7 @@ describe("gateway MCP transport", () => {
     });
 
     expect(result.response.statusCode).toBe(401);
-    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(authChallenge(result.response.json())).toContain('error="invalid_token"');
     expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
     expect(result.workItems).toEqual([]);
   });
@@ -2534,7 +2554,7 @@ describe("gateway MCP transport", () => {
     });
 
     expect(result.response.statusCode).toBe(401);
-    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(authChallenge(result.response.json())).toContain('error="invalid_token"');
     expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
     expect(result.workItems).toEqual([]);
   });
@@ -2587,7 +2607,7 @@ describe("gateway MCP transport", () => {
     });
 
     expect(result.response.statusCode).toBe(401);
-    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(authChallenge(result.response.json())).toContain('error="invalid_token"');
     expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
     expect(result.workItems).toEqual([]);
   });
@@ -2605,7 +2625,7 @@ describe("gateway MCP transport", () => {
     });
 
     expect(result.response.statusCode).toBe(401);
-    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(authChallenge(result.response.json())).toContain('error="invalid_token"');
     expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
     expect(result.workItems).toEqual([]);
   });
@@ -2618,7 +2638,7 @@ describe("gateway MCP transport", () => {
     });
 
     expect(result.response.statusCode).toBe(401);
-    expect(authChallenge(result.response.json())).toContain("error=\"invalid_token\"");
+    expect(authChallenge(result.response.json())).toContain('error="invalid_token"');
     expect(result.response.json().result.structuredContent.authError).toBe("invalid_token");
     expect(result.workItems).toEqual([]);
   });
@@ -2633,7 +2653,7 @@ describe("gateway MCP transport", () => {
     expect(result.response.statusCode).toBe(403);
     expect(result.response.headers["www-authenticate"]).toBe(authChallenge(result.response.json()));
     expect(authChallenge(result.response.json())).toBe(
-      "Bearer resource_metadata=\"http://localhost:80/.well-known/oauth-protected-resource/mcp\", error=\"insufficient_scope\", error_description=\"insufficient scope\", scope=\"acs:work:create\""
+      'Bearer resource_metadata="http://localhost:80/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", error_description="insufficient scope", scope="acs:work:create"'
     );
     expect(result.response.json().result.structuredContent).toMatchObject({
       authError: "insufficient_scope",
@@ -2701,9 +2721,7 @@ describe("gateway MCP transport", () => {
       })?.tunnel
     ).toEqual({
       trustedProxies: ["127.0.0.1", "::1"],
-      connectors: [
-        { id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }
-      ]
+      connectors: [{ id: "chatgpt-prod", tunnelId: "tunnel_abc123", scopes: ["acs:work:create", "acs:work:read"] }]
     });
   });
 });
@@ -2878,7 +2896,12 @@ describe("gateway dashboard sessions", () => {
       ];
 
       for (const tampered of tamperedCookies) {
-        const response = await app.inject({ method: "GET", url: "/events", headers: { cookie: tampered }, payloadAsStream: true });
+        const response = await app.inject({
+          method: "GET",
+          url: "/events",
+          headers: { cookie: tampered },
+          payloadAsStream: true
+        });
         if (response.statusCode === 200) response.stream().destroy();
         expect(response.statusCode).toBe(401);
       }
@@ -2961,7 +2984,9 @@ describe("gateway work-item routes", () => {
       for (const url of routes) {
         const response = await app.inject({ method: "GET", url });
         expect(response.statusCode, url).toBe(503);
-        expect(response.json()).toMatchObject({ error: "read auth is not configured for production or exposed access" });
+        expect(response.json()).toMatchObject({
+          error: "read auth is not configured for production or exposed access"
+        });
       }
     } finally {
       await app.close();
@@ -3041,9 +3066,7 @@ describe("gateway work-item routes", () => {
           requester: "user",
           intent: "verify approval path",
           target: { cwd: "/repo" },
-          requestedActions: [
-            { kind: "fs.write", description: "write file", params: { paths: ["src/index.ts"] } }
-          ],
+          requestedActions: [{ kind: "fs.write", description: "write file", params: { paths: ["src/index.ts"] } }],
           risk: "medium"
         }
       });
@@ -3446,13 +3469,20 @@ describe("gateway work-item routes", () => {
       expect(claimed?.id).toBe(workItem.id);
 
       const submitted = tools.submit_work_result({
-        id: workItem.id,
+        workItemId: workItem.id,
+        leaseId: claimed?.leaseId,
         workerId: "worker-a",
-        leaseToken: claimed?.leaseToken,
-        status: "succeeded",
-        result: { summary: "done", apiToken: secret }
+        actionHash: claimed?.actionHash,
+        idempotencyKey: "gateway-result-redaction-1",
+        outcome: "succeeded",
+        startedAt: claimed?.startedAt,
+        finishedAt: new Date().toISOString(),
+        summary: "done",
+        stdout: "dry-run output",
+        structuredOutput: { result: "done" },
+        simulationMetadata: { executionMode: "dry_run", simulated: true, reason: "gateway_test" }
       });
-      expect(submitted).toMatchObject({ status: "succeeded", result: { summary: "done", apiToken: "[redacted]" } });
+      expect(submitted).toMatchObject({ status: "succeeded", result: { summary: "done", executionMode: "dry_run" } });
 
       const app = buildTestGateway({ dbPath, logger: false });
       try {
@@ -3460,14 +3490,14 @@ describe("gateway work-item routes", () => {
         expect(detail.statusCode).toBe(200);
         expect(detail.json().workItem).toMatchObject({
           status: "succeeded",
-          result: { summary: "done", apiToken: "[redacted]" }
+          result: { summary: "done", executionMode: "dry_run" }
         });
       } finally {
         await app.close();
       }
 
       const succeededEvent = store.readEvents().find((event) => event.name === "work_item.succeeded");
-      expect(succeededEvent?.body).toMatchObject({ result: { summary: "done", apiToken: "[redacted]" } });
+      expect(succeededEvent?.body).toMatchObject({ result: { summary: "done", executionMode: "dry_run" } });
       const raw = readRawWorkItemResult(dbPath, workItem.id);
       expect(JSON.stringify(store.readEvents()) + JSON.stringify(raw)).not.toContain(secret);
     } finally {
@@ -3623,8 +3653,7 @@ function seedAuditRows(dbPath: string, count: number, input: { workItemId: strin
     let previousHash =
       (
         db.prepare(`SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1`).get() as
-          | { event_hash: string }
-          | undefined
+          { event_hash: string } | undefined
       )?.event_hash ?? "";
     const insert = db.prepare(
       `INSERT INTO audit_events (id, name, time_unix_nano, attributes, body, previous_hash, event_hash)
@@ -3632,9 +3661,11 @@ function seedAuditRows(dbPath: string, count: number, input: { workItemId: strin
     );
     for (let index = 0; index < count; index += 1) {
       const event = {
-        sequence:
-          ((db.prepare(`SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM audit_events`).get() as { sequence: number })
-            .sequence),
+        sequence: (
+          db.prepare(`SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM audit_events`).get() as {
+            sequence: number;
+          }
+        ).sequence,
         id: `evt_seed_${index}`,
         name: `audit.seed.${index}`,
         timeUnixNano: String((Date.now() + index) * 1_000_000),
@@ -3676,10 +3707,7 @@ interface SessionCookiePayload {
   exp: number;
 }
 
-function tamperSessionCookie(
-  cookie: string,
-  mutate: (payload: SessionCookiePayload) => SessionCookiePayload
-): string {
+function tamperSessionCookie(cookie: string, mutate: (payload: SessionCookiePayload) => SessionCookiePayload): string {
   const [name, value] = cookie.split("=");
   const [payloadPart, signature] = (value ?? "").split(".");
   const payload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8")) as SessionCookiePayload;
