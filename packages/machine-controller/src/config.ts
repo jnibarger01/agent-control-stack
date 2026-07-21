@@ -4,6 +4,8 @@ import { fileURLToPath } from "node:url";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { z } from "zod";
 
+const defaultExecutablePaths = ["/usr/local/bin", "/usr/bin", "/bin"];
+
 const rawConfigSchema = z.object({
   server: z
     .object({
@@ -29,7 +31,8 @@ const rawConfigSchema = z.object({
   commands: z
     .object({
       allow_readonly: z.array(z.string().min(1)).default([]),
-      deny: z.array(z.string().min(1)).default([])
+      deny: z.array(z.string().min(1)).default([]),
+      executable_paths: z.array(z.string().min(1)).default(defaultExecutablePaths)
     })
     .optional(),
   audit: z
@@ -60,6 +63,7 @@ export interface MachineControllerConfig {
   commands: {
     allowReadonly: string[];
     deny: string[];
+    executablePaths: string[];
   };
   audit: {
     logPath: string;
@@ -100,7 +104,7 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
     command_timeout_ms: 120_000,
     command_termination_grace_ms: 1_000
   };
-  const commands = raw.commands ?? { allow_readonly: [], deny: [] };
+  const commands = raw.commands ?? { allow_readonly: [], deny: [], executable_paths: defaultExecutablePaths };
   const audit = raw.audit ?? { log_path: ".acs/audit/mcp.jsonl" };
 
   return {
@@ -119,7 +123,8 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
     },
     commands: {
       allowReadonly: commands.allow_readonly,
-      deny: commands.deny
+      deny: commands.deny,
+      executablePaths: commands.executable_paths.map((entry) => absolutePath(entry, baseDir))
     },
     audit: {
       logPath: absolutePath(audit.log_path, baseDir)
