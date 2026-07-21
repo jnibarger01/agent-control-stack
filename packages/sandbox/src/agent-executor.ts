@@ -3,15 +3,21 @@ import {
   constants,
   existsSync,
   lstatSync,
+  mkdtempSync,
   readdirSync,
   readFileSync,
   readlinkSync,
   realpathSync,
-  statSync
+  rmdirSync,
+  statSync,
+  unlinkSync
 } from "node:fs";
 import { createHash } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
+import { createConnection, createServer, type Server } from "node:net";
+import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { ControlStackError, isPathContained, redactValue } from "@agent-control-stack/shared";
 import { assertExecutableWorkItem, type ActionRequest, type WorkItem } from "@agent-control-stack/work-items";
 import { z } from "zod";
@@ -22,6 +28,10 @@ const DEFAULT_OUTPUT_BYTES = 256 * 1024;
 const MAX_WORKSPACE_ENTRIES = 50_000;
 const MAX_WORKSPACE_FILE_BYTES = 64 * 1024 * 1024;
 const GUEST_WORKSPACE = "/var/tmp";
+const LOCAL_OLLAMA_SOCKET = "/tmp/acs-ollama.sock";
+const LOCAL_INFERENCE_RUNNER = "/tmp/acs-local-inference-runner.js";
+const DEFAULT_LOCAL_OLLAMA_MODEL = "qwen2.5-coder:7b";
+const ACS_RUNTIME_SQLITE_SIDECAR = /^storage\/local\.db-(?:wal|shm)$/;
 
 export const agentExecutionRequestSchema = z
   .object({
@@ -138,12 +148,17 @@ export async function executeAgentSandboxed(
     return notStarted(`workspace verification could not start: ${errorMessage(error)}`, request);
   }
 
-  const command = options.commandFactory
-    ? options.commandFactory(request)
-    : codexCommand(request, options.providerExecutable, options.nodeExecutable);
+  let localRelay: LocalOllamaRelay | undefined;
   const started = Date.now();
   let contained: ContainedCommandResult;
   try {
+    const command = options.commandFactory
+      ? options.commandFactory(request)
+      : await (async () => {
+          const relay = await createLocalOllamaRelay();
+          localRelay = relay;
+          return codexCommand(request, options.providerExecutable, options.nodeExecutable, relay.socketPath);
+        })();
     contained = await runContainedReadonlyCommand({
       executable: command.executable,
       args: command.args,
@@ -156,6 +171,8 @@ export async function executeAgentSandboxed(
     });
   } catch (error) {
     return notStarted(`contained agent process could not start: ${errorMessage(error)}`, request);
+  } finally {
+    await localRelay?.close();
   }
 
   let after: WorkspaceManifest;
@@ -175,7 +192,7 @@ export async function executeAgentSandboxed(
       provider: request.provider,
       ...(request.model ? { model: request.model } : {}),
       workspaceBeforeHash: before.hash,
-      sandboxIdentity: "bubblewrap:read-only-workspace,no-network"
+      sandboxIdentity: "bubblewrap:read-only-workspace,no-network,local-ollama-unix-socket"
     };
   }
 
@@ -202,7 +219,7 @@ export async function executeAgentSandboxed(
     workspaceBeforeHash: before.hash,
     workspaceAfterHash: after.hash,
     ...(changedPaths.length ? { changedPaths } : {}),
-    sandboxIdentity: "bubblewrap:read-only-workspace,no-network"
+    sandboxIdentity: "bubblewrap:read-only-workspace,no-network,local-ollama-unix-socket"
   };
 }
 
@@ -327,30 +344,87 @@ function validateProvider(request: AgentExecutionRequest): string | undefined {
 function codexCommand(
   request: AgentExecutionRequest,
   providerExecutable = process.env.ACS_CODEX_PATH ?? "codex",
-  nodeExecutable = process.env.ACS_NODE_PATH ?? process.execPath
+  nodeExecutable = process.env.ACS_NODE_PATH ?? process.execPath,
+  localSocketPath: string
 ): { executable: string; args: string[]; mounts: readonly [source: string, destination: string][] } {
   const codexPath = resolveCommandPath(providerExecutable);
   const nodePath = realpathSync(nodeExecutable);
   const packageRoot = dirname(dirname(codexPath));
-  const providerRoot = "/usr/local";
+  const runnerPath = join(dirname(fileURLToPath(import.meta.url)), "local-inference-runner.js");
+  if (!existsSync(runnerPath)) {
+    throw new Error(`local inference runner is unavailable: ${runnerPath}`);
+  }
+  const model = request.model ?? process.env.ACS_CODEX_LOCAL_MODEL ?? DEFAULT_LOCAL_OLLAMA_MODEL;
   return {
     executable: "/usr/bin/node",
-    args: [
-      `${providerRoot}/bin/codex.js`,
-      "exec",
-      "--sandbox",
-      "read-only",
-      "--ephemeral",
-      "--ignore-user-config",
-      "--cd",
-      GUEST_WORKSPACE,
-      request.prompt
-    ],
+    args: [LOCAL_INFERENCE_RUNNER, LOCAL_OLLAMA_SOCKET, model, request.prompt],
     mounts: [
       [nodePath, "/usr/bin/node"],
-      [packageRoot, providerRoot]
+      [packageRoot, "/usr/local"],
+      [runnerPath, LOCAL_INFERENCE_RUNNER],
+      [localSocketPath, LOCAL_OLLAMA_SOCKET]
     ]
   };
+}
+
+interface LocalOllamaRelay {
+  socketPath: string;
+  close: () => Promise<void>;
+}
+
+async function createLocalOllamaRelay(): Promise<LocalOllamaRelay> {
+  const directory = mkdtempSync(join(tmpdir(), "acs-ollama-relay-"));
+  const socketPath = join(directory, "ollama.sock");
+  const server = createServer((client) => {
+    const upstream = createConnection({ host: "127.0.0.1", port: 11434 });
+    client.once("error", () => upstream.destroy());
+    upstream.once("error", () => client.destroy());
+    client.pipe(upstream);
+    upstream.pipe(client);
+  });
+  server.maxConnections = 4;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socketPath, () => resolve());
+    });
+  } catch (error) {
+    cleanupRelayArtifacts(server, socketPath, directory);
+    throw error;
+  }
+
+  return {
+    socketPath,
+    close: () => closeLocalOllamaRelay(server, socketPath, directory)
+  };
+}
+
+async function closeLocalOllamaRelay(server: Server, socketPath: string, directory: string): Promise<void> {
+  await new Promise<void>((resolve) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close(() => resolve());
+  });
+  cleanupRelayArtifacts(server, socketPath, directory);
+}
+
+function cleanupRelayArtifacts(server: Server, socketPath: string, directory: string): void {
+  if (server.listening) {
+    server.close();
+  }
+  try {
+    unlinkSync(socketPath);
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) throw error;
+  }
+  try {
+    rmdirSync(directory);
+  } catch (error) {
+    if (!hasErrorCode(error, "ENOENT")) throw error;
+  }
 }
 
 function bubblewrapInvocation(input: ContainedCommandInput): string[] {
@@ -425,6 +499,9 @@ interface WorkspaceManifest {
 function snapshotWorkspace(root: string): WorkspaceManifest {
   const entries = new Map<string, WorkspaceEntry>();
   const visit = (path: string, relativePath: string) => {
+    if (relativePath && ACS_RUNTIME_SQLITE_SIDECAR.test(relativePath)) {
+      return;
+    }
     if (entries.size >= MAX_WORKSPACE_ENTRIES) {
       throw new Error(`workspace exceeds ${MAX_WORKSPACE_ENTRIES} manifest entries`);
     }

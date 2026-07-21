@@ -2,7 +2,7 @@
 
 ## Verdict
 
-`PARTIAL`: the gateway MCP exposes the governed command, filesystem, result/evidence, service-request, configuration-preview, and Codex-dispatch surfaces. The command, filesystem, evidence, service-restart, and configuration-preview paths passed live localhost MCP acceptance. A successful Codex response is not claimed: the installed CLI stalled inside the deliberately credentialless, no-network Bubblewrap profile and the approved work item was cancelled. No sandbox or credential boundary was weakened to force a green result.
+`PASS` for the local governed ACS connector surface: the gateway MCP exposes the command, filesystem, result/evidence, service-request, configuration-preview, and Codex-dispatch surfaces, and each passed localhost acceptance. The live Codex acceptance returned a non-empty response from the local Ollama-backed Codex CLI inside the credentialless Bubblewrap profile. A ChatGPT-originated external call remains unverified and is reported separately as a transport limitation.
 
 ## Baseline
 
@@ -15,6 +15,8 @@ Every connector request follows:
 `MCP → schema → registered work item → policy → human approval when required → authenticated worker lease → machine-controller or Bubblewrap boundary → bounded redacted evidence → audit/result persistence → MCP retrieval`
 
 The gateway creates and reads work items only. It does not invoke host commands, read files, restart services, apply configuration, or invoke Codex. The remote worker authenticates with a separate worker token and submits results against its lease token. The action registry metadata remains in the canonical action and action hash; the worker projects only executor-approved fields into the strict Codex request schema.
+
+The Codex profile uses the installed `qwen2.5-coder:7b` model through Codex OSS/Ollama mode. The worker exposes only a per-run Unix socket to the Bubblewrap namespace; a host-side relay has a fixed destination of `127.0.0.1:11434`, and the in-sandbox HTTP filter allowlists only model discovery and `POST /v1/responses`. Bubblewrap still uses `--unshare-net`, cleared environment, read-only workspace mounts, and a temporary home; no OpenAI credential is mounted.
 
 ## Exposed MCP tools
 
@@ -42,7 +44,7 @@ All calls below were made through `http://127.0.0.1:3000/mcp` with the configure
 - `filesystem.stat` `acs-repo/package.json`: `wrk_87faa708-8695-44ec-90a2-7626cb49c493` succeeded with file metadata.
 - Approved restart of the harmless fixture: final acceptance `wrk_d240129e-9122-46cb-9c81-da7a0da30d40` succeeded after the worker-side user-D-Bus environment was corrected. It captured active pre/post health, `controlled_action` mode, lease release, and fixed-unit evidence. Evidence: `ev_c48ff5b813ee19733ac00047`.
 - Configuration preview: `wrk_aa66a318-7e58-468c-ade4-7f0018607da3` succeeded without changing the target file; it captured current and proposed hashes, bounded diff state, backup requirement, and atomic-write metadata. The file remained `{ "worker_poll_interval_ms": 5000, "max_evidence_bytes": 200000 }`.
-- Codex dispatch: the first live attempt exposed and fixed a worker projection bug. The fresh approved attempt `wrk_c0ef5840-c3e9-413d-8ccb-86ba0dbab1d5` reached the worker and Bubblewrap but produced no response under the no-network/no-credential profile, so it was cancelled. The sandbox process showed read-only mounts, `--unshare-net`, cleared environment, temporary home, and no TCP sockets. A successful Codex result remains unverified.
+- Codex dispatch: the earlier approved attempt `wrk_c0ef5840-c3e9-413d-8ccb-86ba0dbab1d5` reached Bubblewrap but was cancelled after the credentialless cloud path produced no response. The local inference path then passed with approved work item `wrk_a8cc9cbd-b42d-4a7d-990e-844307008c26`, action hash `67e085096930a8b263ce9cd78b970dd9ad46ef69fd76fc5292e6b489100a91e5`, succeeded status, `execution_mode=sandboxed_agent`, `executor_id=acs-worker`, released lease, equal workspace before/after hashes, and evidence `ev_93879ca87b5d3cc2ddd23ebf`. Retrieved evidence contains the non-empty Codex response `ACS-LIVE-CODEX-OK-2`; the sandbox identity is `bubblewrap:read-only-workspace,no-network,local-ollama-unix-socket`.
 
 The live gateway health checks are green for read/write, integrity, foreign keys, migrations, audit chain, liveness, and reconciliation. The tunnel service is active and probes the gateway MCP locally. A ChatGPT-originated external call is not proven by these localhost tests.
 
@@ -54,4 +56,4 @@ The prior known-good commit is `648946225bbfcc68d75c0fbd47055d218de692f9`. Rollb
 
 ## Remaining limitations
 
-The contained Codex profile has no provider credential and no local inference broker by design. Enabling network access, mounting the host Codex credential store, or routing around Bubblewrap would violate the required control boundary. The separate standalone `apps/mcp` process is not the live gateway surface. Public tunnel transport is active locally, but external ChatGPT-originated invocation and a successful Codex model response remain unverified.
+The contained Codex profile is local-only and has no provider credential. Enabling network access, mounting the host Codex credential store, or routing around Bubblewrap would violate the required control boundary. The separate standalone `apps/mcp` process is not the live gateway surface. Public tunnel transport is active locally, but external ChatGPT-originated invocation remains unverified.

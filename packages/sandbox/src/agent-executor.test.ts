@@ -1,4 +1,4 @@
-import { existsSync, lstatSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkItem, type WorkItem } from "@agent-control-stack/work-items";
@@ -88,6 +88,29 @@ describe("contained agent execution", () => {
       expect(existsSync(join(dir, "blocked"))).toBe(false);
       expect(lstatSync(join(dir, "before.txt")).isFile()).toBe(true);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!runTests)("ignores only ACS SQLite sidecars created by the control plane", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-runtime-sidecar-"));
+    const storage = join(dir, "storage");
+    const sidecar = join(storage, "local.db-wal");
+    mkdirSync(storage);
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      const result = await executeAgentSandboxed(agentWorkItem(dir), {
+        enabled: true,
+        commandFactory: () => {
+          timer = setTimeout(() => writeFileSync(sidecar, "control-plane runtime state"), 50);
+          return { executable: "/bin/sh", args: ["-c", "sleep 0.2; printf agent-output"] };
+        }
+      });
+      expect(result.ok).toBe(true);
+      expect(result.changedPaths).toBeUndefined();
+      expect(result.output).toContain("agent-output");
+    } finally {
+      if (timer) clearTimeout(timer);
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -13,6 +13,7 @@ Environment=ACS_DB_PATH=storage/local.db
 Environment=ACS_MACHINE_CONTROLLER_CONFIG=/home/jacen/agent-control-stack/config.example.yml
 Environment=ACS_WORKER_POLL_INTERVAL_MS=5000
 Environment=ACS_AGENT_EXECUTION_MODE=codex-bubblewrap
+Environment=ACS_CODEX_LOCAL_MODEL=qwen2.5-coder:7b
 Environment=PATH=/home/jacen/.nvm/versions/node/v24.16.0/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/home/jacen/.nvm/versions/node/v24.16.0/bin/node apps/worker/dist/cli.js
 Restart=on-failure

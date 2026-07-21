@@ -397,7 +397,7 @@ function agentParams(
   return {
     agent: "codex",
     provider: "codex-cli",
-    model: "gpt-5-codex",
+    model: "qwen2.5-coder:7b",
     prompt: input.prompt,
     rootId: input.rootId,
     permissionMode: "read-only",
