@@ -32,4 +32,4 @@ Full repository verification passes: 51 Vitest files with 388 tests, 48 AgentOS 
 
 The restarted local ACS gateway and worker are healthy. Authenticated loopback tools/list returns 55 tools, including all 30 requested names. A live read_file request created an approved fs.read work item that the worker completed successfully.
 
-A live external ChatGPT-originated call remains a separate transport proof and is not inferred from localhost tests.
+A live external ChatGPT-originated call remains a separate transport proof and is not inferred from localhost tests. The current external connector snapshot exposes only the six lifecycle names; refresh/rescan the ChatGPT app actions after this deployment before treating the remaining 49 names as externally callable.

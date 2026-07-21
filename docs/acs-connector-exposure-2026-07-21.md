@@ -50,6 +50,14 @@ All calls below were made through `http://127.0.0.1:3000/mcp` with the configure
 
 The live gateway health checks are green for read/write, integrity, foreign keys, migrations, audit chain, liveness, and reconciliation. The tunnel service is active and probes the gateway MCP locally. A ChatGPT-originated external call is not proven by these localhost tests.
 
+## External discovery boundary
+
+The tunnel's `main` route points at the authenticated gateway `/mcp`, whose local `tools/list` now returns the same canonical 55-name inventory used by `/mcp/tools`. The current ChatGPT connector snapshot still reports only the six legacy lifecycle tools: `create_work_item`, `get_work_item`, `list_work_items`, `unblock_work_item`, `reject_work_item`, and `cancel_work_item`.
+
+This is an external action-snapshot state, not a local registry count. ChatGPT's current custom MCP app guidance says server updates are not automatically enabled after approval; an administrator must refresh the actions, or recreate and republish the app where the workspace plan requires it. Until that refresh is performed and a harmless governed read is observed from ChatGPT, the overall result remains `PARTIAL`, not an external `PASS`.
+
+The complete per-tool evidence table is [`acs-mcp-tool-exposure-matrix-2026-07-21.md`](./acs-mcp-tool-exposure-matrix-2026-07-21.md).
+
 ## Controls and rollback
 
 Unknown action IDs, raw commands, arbitrary roots, path traversal, unregistered services, unregistered configuration targets, non-human approvals, altered approval hashes, expired leases, and invalid worker results fail closed. Result/evidence retrieval is limited to the requesting actor or a registered human; evidence content is omitted from list responses and access is audited. Service restarts require exact approval and capture pre/post health with a rollback attempt on failure. Configuration changes require registered keys, a current-hash match, backup, atomic replacement, and bounded validation.

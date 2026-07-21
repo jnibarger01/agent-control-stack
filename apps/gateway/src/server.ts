@@ -6,7 +6,7 @@ import {
   type ReadonlyAcpAdapterConfig
 } from "@agent-control-stack/acp-adapter";
 import { projectAgents, renderDashboard } from "@agent-control-stack/control-ui";
-import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
+import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
   createWorkItemSchema,
@@ -40,8 +40,8 @@ import {
   type McpAuthOptions,
   type McpOAuthOptions
 } from "./auth.js";
-import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit } from "./mcp.js";
-import { connectorToolNames, createConnectorTools } from "./connector.js";
+import { handleMcpHttpRequest, remoteMcpToolNames, type AuthenticatedMcpRequestAudit } from "./mcp.js";
+import { createConnectorTools } from "./connector.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
 import { GatewayReconciler } from "./reconciliation.js";
 import { gatewayListenConfig } from "./runtime-config.js";
@@ -314,7 +314,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       resolvedActor: resolveMcpActorId(workItems, authorization.auth, auth) ?? authorization.auth.subject,
       auth: authorization.auth
     });
-    return { tools: [...workItemToolNames, ...connectorToolNames] };
+    return { tools: [...remoteMcpToolNames] };
   });
 
   app.post("/connectors", async (request, reply) => {

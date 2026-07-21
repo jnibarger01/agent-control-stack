@@ -15,9 +15,9 @@ const MCP_PROTOCOL_VERSION = "2024-11-05";
 
 type GatewayWorkItemTools = ReturnType<typeof createWorkItemTools>;
 type GatewayTools = GatewayWorkItemTools & Partial<Record<ConnectorToolName, ConnectorToolHandler>>;
-const mcpToolNames = [...workItemToolNames, ...connectorToolNames] as const;
+export const mcpToolNames = [...workItemToolNames, ...connectorToolNames] as const;
 type McpToolName = (typeof mcpToolNames)[number];
-const remoteMcpToolNames = mcpToolNames.filter((name) => name !== "approve_work_item") as McpToolName[];
+export const remoteMcpToolNames = mcpToolNames.filter((name) => name !== "approve_work_item") as McpToolName[];
 type JsonRpcId = string | number | null;
 
 type JsonRpcSuccess = {

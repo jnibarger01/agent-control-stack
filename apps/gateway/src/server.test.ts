@@ -8,6 +8,7 @@ import { auditEventHash } from "@agent-control-stack/shared";
 import { DEFAULT_EVENT_LIMIT, MAX_EVENT_LIMIT, SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
+import { remoteMcpToolNames } from "./mcp.js";
 import { buildGateway } from "./server.js";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
@@ -350,7 +351,7 @@ describe("mission control gateway", () => {
             effectiveStatus: "OFFLINE",
             isStale: true,
             heartbeatAgeMs: expect.any(Number)
-          })
+          }),
         ])
       );
       expect(detail.json().agent).toMatchObject({
@@ -954,7 +955,8 @@ describe("gateway MCP transport", () => {
       expect(invalid.statusCode).toBe(401);
       expect(invalid.json()).toEqual({ error: "unauthorized" });
       expect(valid.statusCode).toBe(200);
-      expect(valid.json().tools).toEqual(expect.arrayContaining(["list_work_items"]));
+      expect(valid.json().tools).toEqual([...remoteMcpToolNames]);
+      expect(valid.json().tools).toHaveLength(55);
       expect(insufficient.statusCode).toBe(403);
       expect(insufficient.json()).toEqual({ error: "insufficient_scope" });
       expect(insufficient.headers["www-authenticate"]).toContain('error="insufficient_scope"');
@@ -1028,6 +1030,9 @@ describe("gateway MCP transport", () => {
       });
 
       expect(response.statusCode).toBe(200);
+      const localTools = response.json().result.tools as Array<{ name: string }>;
+      expect(localTools.map((tool) => tool.name)).toEqual([...remoteMcpToolNames]);
+      expect(localTools).toHaveLength(55);
       expect(response.json().result.tools).toEqual(
         expect.arrayContaining([
           expect.objectContaining({
@@ -1038,12 +1043,43 @@ describe("gateway MCP transport", () => {
             _meta: {
               securitySchemes: [{ type: "noauth" }]
             }
-          }),
+          })
         ])
       );
       expect(response.json().result.tools.map((tool: { name: string }) => tool.name)).not.toEqual(
         expect.arrayContaining(["approve_work_item", "claim_next_approved_work_item", "submit_work_result"])
       );
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("publishes the same 55-tool inventory with OAuth security metadata", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-oauth-tools-"));
+    const oauth = createTestOAuth();
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      mcpAuth: { oauth: oauth.options }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}` },
+        payload: { jsonrpc: "2.0", id: "oauth-tools", method: "tools/list" }
+      });
+      const tools = response.json().result.tools as Array<{
+        name: string;
+        securitySchemes: Array<{ type: string; scopes?: string[] }>;
+      }>;
+
+      expect(response.statusCode).toBe(200);
+      expect(tools.map((tool) => tool.name)).toEqual([...remoteMcpToolNames]);
+      expect(tools).toHaveLength(55);
+      expect(tools.every((tool) => tool.securitySchemes[0]?.type === "oauth2")).toBe(true);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
