@@ -6,7 +6,7 @@ import { describe, expect, it } from "vitest";
 import { previewCommand, subprocessEnv } from "./command.js";
 import { loadMachineControllerConfig } from "./config.js";
 import { MachineController } from "./controller.js";
-import { resolveSafePath } from "./path.js";
+import { isInside, resolveSafePath } from "./path.js";
 
 describe("machine controller", () => {
   it("fails closed when config is missing", () => {
@@ -35,6 +35,13 @@ describe("machine controller", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it("uses Windows-oriented containment rules for cross-platform policy vectors", () => {
+    expect(isInside("C:\\Workspace", "c:\\workspace\\src", "win32")).toBe(true);
+    expect(isInside("C:\\Workspace", "C:\\Workspace\\..\\Secrets", "win32")).toBe(false);
+    expect(isInside("C:\\Workspace", "D:\\Workspace\\src", "win32")).toBe(false);
+    expect(isInside("\\\\server\\share\\workspace", "\\\\SERVER\\SHARE\\workspace\\src", "win32")).toBe(true);
   });
 
   it("reads files with line numbers and redacts secrets before returning or logging", async () => {

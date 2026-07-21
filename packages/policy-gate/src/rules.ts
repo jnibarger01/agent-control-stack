@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
+import { isPathContained } from "@agent-control-stack/shared";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
 
 export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
@@ -182,7 +183,7 @@ function hasPathEscape(context: PolicyContext): boolean {
 }
 
 function isInside(root: string, target: string): boolean {
-  return target === root || target.startsWith(`${root}/`);
+  return isPathContained(root, target);
 }
 
 function isPackageInstall(command: string[]): boolean {

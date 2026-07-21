@@ -7,6 +7,7 @@ export * from "./audit-chain.js";
 export * from "./database-health.js";
 export * from "./database-operations.js";
 export * from "./migration.js";
+export * from "./path-containment.js";
 export * from "./redact.js";
 export * from "./schema.js";
 
