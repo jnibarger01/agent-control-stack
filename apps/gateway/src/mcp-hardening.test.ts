@@ -100,6 +100,122 @@ describe("gateway MCP edge hardening", () => {
     }
   });
 
+  it("advertises noauth tools when OAuth is not configured", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: { localBearerToken: "mcp-token" }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      for (const tool of response.json().result.tools) {
+        expect(tool.securitySchemes).toEqual([{ type: "noauth" }]);
+        expect(tool._meta.securitySchemes).toEqual([{ type: "noauth" }]);
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("preserves OAuth tool metadata when OAuth is configured", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: {
+        localBearerToken: "mcp-token",
+        oauth: {
+          issuer: "https://auth.example.test",
+          audience: "https://acs.example.test/mcp",
+          resource: "https://acs.example.test/mcp",
+          jwksUri: "https://auth.example.test/.well-known/jwks.json"
+        }
+      }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      for (const tool of response.json().result.tools) {
+        expect(tool.securitySchemes).toEqual([{ type: "oauth2", scopes: expect.any(Array) }]);
+        expect(tool._meta.securitySchemes).toEqual(tool.securitySchemes);
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not publish OAuth metadata when OAuth is not configured", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: { localBearerToken: "mcp-token" }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "GET",
+        url: "/.well-known/oauth-protected-resource/mcp"
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ error: "MCP auth is not configured" });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns an empty resource list for connector compatibility", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: { localBearerToken: "mcp-token" }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: { jsonrpc: "2.0", id: "resources", method: "resources/list" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json()).toEqual({
+        jsonrpc: "2.0",
+        id: "resources",
+        result: { resources: [] }
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("wraps array tool results in object-shaped structured content", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
     const app = buildGateway({

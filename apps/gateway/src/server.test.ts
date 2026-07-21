@@ -193,6 +193,51 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("uses integrity and foreign-key verification in the readiness contract", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-health-foreign-key-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.close();
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.exec("PRAGMA foreign_keys = OFF");
+      db.prepare(
+        `INSERT INTO approval_records
+         (work_item_id, action_hash, request_hash, approval_token_hash, approved_by, reason, status, created_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "missing-work-item",
+        "action-hash",
+        "request-hash",
+        "",
+        "user",
+        "fixture",
+        "granted",
+        "2026-07-19T00:00:00.000Z",
+        "2026-07-20T00:00:00.000Z"
+      );
+    } finally {
+      db.close();
+    }
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+
+    try {
+      const ready = await app.inject({ method: "GET", url: "/readyz" });
+
+      expect(ready.statusCode).toBe(503);
+      expect(ready.json()).toMatchObject({
+        ok: false,
+        checks: {
+          integrity: { ok: true },
+          foreignKeys: { ok: false, code: "foreign_key_violation" }
+        }
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("fails closed on writes after startup detects audit-chain tampering", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-write-audit-tamper-"));
     const dbPath = join(dir, "control.db");
@@ -302,6 +347,65 @@ describe("mission control gateway", () => {
       expect(detail.json().agent.heartbeatAgeMs).toBeGreaterThan(900_000);
     } finally {
       await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles stale tunnel sessions and agents before reporting readiness", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-readiness-liveness-"));
+    const dbPath = join(dir, "control.db");
+    const staleAt = new Date(Date.now() - 901_000);
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+    seed.registerConnector({
+      id: "connector",
+      publicKeyPem: "public-key",
+      allowedScopes: ["acs:work:read"],
+      actorId: "user",
+      now: staleAt
+    });
+    seed.registerTunnelSession({
+      connectorId: "connector",
+      tunnelId: "tunnel",
+      sessionId: "session",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      actorId: "user",
+      now: staleAt
+    });
+    seed.createRegistryAgent({
+      id: "stale-agent",
+      name: "Stale Agent",
+      kind: "cli",
+      acpRole: "IMPLEMENTATION_AGENT",
+      actorId: "user"
+    });
+    seed.recordAgentHeartbeat("stale-agent", { status: "AVAILABLE", actorId: "user", now: staleAt });
+    seed.close();
+    const app = buildTestGateway({ dbPath, logger: false });
+    let appClosed = false;
+
+    try {
+      const ready = await app.inject({ method: "GET", url: "/readyz" });
+      expect(ready.statusCode).toBe(200);
+      expect(ready.json()).toMatchObject({ ok: true, checks: { liveness: { ok: true } } });
+      await app.close();
+      appClosed = true;
+
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(check.getRegistryAgent("stale-agent")).toMatchObject({ status: "OFFLINE" });
+        expect(check.getTunnelSession({ connectorId: "connector", tunnelId: "tunnel", sessionId: "session" })).toMatchObject({
+          status: "revoked"
+        });
+        expect(check.readEvents().filter((event) => event.name === "agent.reconciled")).toHaveLength(1);
+        expect(check.readEvents().filter((event) => event.name === "tunnel_session.reconciled")).toHaveLength(1);
+      } finally {
+        check.close();
+      }
+    } finally {
+      if (!appClosed) {
+        await app.close();
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -707,6 +811,48 @@ describe("mission control gateway", () => {
 });
 
 describe("gateway MCP transport", () => {
+  it("protects the MCP tool inventory with the same auth and scope contract", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-tools-inventory-"));
+    const oauth = createTestOAuth();
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      mcpAuth: { localBearerToken: "mcp-token", oauth: oauth.options }
+    });
+
+    try {
+      const anonymous = await app.inject({ method: "GET", url: "/mcp/tools" });
+      const invalid = await app.inject({
+        method: "GET",
+        url: "/mcp/tools",
+        headers: { authorization: "Bearer invalid" }
+      });
+      const valid = await app.inject({
+        method: "GET",
+        url: "/mcp/tools",
+        headers: { authorization: "Bearer mcp-token" }
+      });
+      const insufficient = await app.inject({
+        method: "GET",
+        url: "/mcp/tools",
+        headers: { authorization: `Bearer ${oauth.token({ scope: "acs:work:create" })}` }
+      });
+
+      expect(anonymous.statusCode).toBe(401);
+      expect(anonymous.json()).toEqual({ error: "unauthorized" });
+      expect(invalid.statusCode).toBe(401);
+      expect(invalid.json()).toEqual({ error: "unauthorized" });
+      expect(valid.statusCode).toBe(200);
+      expect(valid.json().tools).toEqual(expect.arrayContaining(["list_work_items"]));
+      expect(insufficient.statusCode).toBe(403);
+      expect(insufficient.json()).toEqual({ error: "insufficient_scope" });
+      expect(insufficient.headers["www-authenticate"]).toContain('error="insufficient_scope"');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("returns an MCP initialization response", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-"));
     const app = buildGateway({
@@ -777,9 +923,9 @@ describe("gateway MCP transport", () => {
             name: "create_work_item",
             description: expect.any(String),
             inputSchema: expect.objectContaining({ type: "object" }),
-            securitySchemes: [{ type: "oauth2", scopes: ["acs:work:create"] }],
+            securitySchemes: [{ type: "noauth" }],
             _meta: {
-              securitySchemes: [{ type: "oauth2", scopes: ["acs:work:create"] }]
+              securitySchemes: [{ type: "noauth" }]
             }
           }),
         ])
@@ -1470,7 +1616,7 @@ describe("gateway MCP transport", () => {
     }
   });
 
-  it("publishes OAuth protected resource metadata without OAuth configuration", async () => {
+  it("does not publish OAuth protected resource metadata without OAuth configuration", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-metadata-"));
     const app = buildGateway({
       dbPath: join(dir, "control.db"),
@@ -1484,15 +1630,8 @@ describe("gateway MCP transport", () => {
         headers: { host: "127.0.0.1:3000" }
       });
 
-      expect(response.statusCode).toBe(200);
-      expect(response.json()).toMatchObject({
-        resource: "http://127.0.0.1:3000/mcp",
-        resource_name: "Agent Control Stack MCP Gateway",
-        authorization_servers: [],
-        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve"],
-        bearer_methods_supported: ["header"]
-      });
-      expect(response.json().scopes_supported).not.toContain("acs:worker:claim");
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toEqual({ error: "MCP auth is not configured" });
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

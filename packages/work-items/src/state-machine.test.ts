@@ -773,7 +773,8 @@ describe("work item state machine", () => {
       expect(migrationRows(dbPath)).toEqual([
         { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
         { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
-        { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" }
+        { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" },
+        { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -835,6 +836,81 @@ describe("work item state machine", () => {
     expect(() => new SqliteWorkItemStore(dbPath)).toThrow("migration checksum mismatch for version 1");
   });
 
+  it("enforces persisted state and JSON constraints without rewriting existing rows", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-state-constraints-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const workItem = store.create({
+      title: "Constraint fixture",
+      requester: "user",
+      intent: "verify state constraints",
+      requestedActions: [{ kind: "manual", description: "constraint" }],
+      risk: "low"
+    });
+    store.close();
+    const db = new DatabaseSync(dbPath);
+
+    try {
+      expect(() => db.prepare(`UPDATE work_items SET risk = 'invalid' WHERE id = ?`).run(workItem.id)).toThrow(
+        "work_items: invalid risk"
+      );
+      expect(() => db.prepare(`UPDATE work_items SET target_json = 'not-json' WHERE id = ?`).run(workItem.id)).toThrow(
+        "work_items: target_json must be valid JSON"
+      );
+      expect(db.prepare(`SELECT version FROM schema_migrations ORDER BY version`).all()).toEqual([
+        { version: 1 },
+        { version: 2 },
+        { version: 3 },
+        { version: 4 }
+      ]);
+    } finally {
+      db.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects invalid existing state before applying the constraints migration", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-state-constraints-invalid-"));
+    const dbPath = join(dir, "control.db");
+    const db = new DatabaseSync(dbPath);
+
+    try {
+      for (const migration of controlPlaneMigrations().slice(0, 3)) {
+        db.exec(migration.sql);
+      }
+      db.prepare(
+        `INSERT INTO work_items
+         (id, title, requester, status, intent, target_json, requested_actions_json, risk, result_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`
+      ).run(
+        "bad-work-item",
+        "Invalid persisted state",
+        "user",
+        "not-a-work-item-status",
+        "migration preflight",
+        "{}",
+        "[]",
+        "low",
+        "2026-07-20T00:00:00.000Z",
+        "2026-07-20T00:00:00.000Z"
+      );
+    } finally {
+      db.close();
+    }
+
+    expect(() => new SqliteWorkItemStore(dbPath)).toThrow(/bad-work-item/);
+    const unchanged = new DatabaseSync(dbPath);
+    try {
+      expect(unchanged.prepare(`SELECT status FROM work_items WHERE id = 'bad-work-item'`).get()).toEqual({
+        status: "not-a-work-item-status"
+      });
+      expect(unchanged.prepare(`SELECT MAX(version) AS version FROM schema_migrations`).get()).toEqual({ version: 3 });
+    } finally {
+      unchanged.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("migrates a previous control-plane schema without reloading SQL blindly", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-migration-previous-"));
     const dbPath = join(dir, "control.db");
@@ -848,7 +924,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3]);
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" })])
       );
@@ -1077,6 +1153,120 @@ describe("work item state machine", () => {
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
       store.close();
+    }
+  });
+
+  it("reconciles stale tunnel sessions transactionally and prevents heartbeat resurrection", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-tunnel-liveness-"));
+    const dbPath = join(dir, "control.db");
+    const base = new Date("2026-07-20T00:00:00.000Z");
+    const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: 1_000 });
+    const concurrentStore = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: 1_000 });
+
+    try {
+      store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+      store.registerConnector({
+        id: "connector",
+        publicKeyPem: "public-key",
+        allowedScopes: ["acs:work:read"],
+        actorId: "user",
+        now: base
+      });
+      store.registerTunnelSession({
+        connectorId: "connector",
+        tunnelId: "tunnel",
+        sessionId: "session",
+        expiresAt: new Date(base.getTime() + 60_000).toISOString(),
+        actorId: "user",
+        now: base
+      });
+
+      expect(store.reconcileStaleTunnelSessions({ now: new Date(base.getTime() + 1_000) })).toEqual([]);
+      store.heartbeatTunnelSession({
+        connectorId: "connector",
+        tunnelId: "tunnel",
+        sessionId: "session",
+        actorId: "user",
+        now: new Date(base.getTime() + 500)
+      });
+
+      const [first, second] = await Promise.all([
+        Promise.resolve(store.reconcileStaleTunnelSessions({ now: new Date(base.getTime() + 1_501) })),
+        Promise.resolve(concurrentStore.reconcileStaleTunnelSessions({ now: new Date(base.getTime() + 1_501) }))
+      ]);
+      expect([first, second].flat()).toHaveLength(1);
+      expect(store.getTunnelSession({ connectorId: "connector", tunnelId: "tunnel", sessionId: "session" })).toMatchObject({
+        status: "revoked"
+      });
+      expect(store.readEvents().filter((event) => event.name === "tunnel_session.reconciled")).toHaveLength(1);
+      expect(store.readEvents().at(-1)).toMatchObject({
+        name: "tunnel_session.reconciled",
+        attributes: expect.objectContaining({ "tunnel.session_status": "revoked", "actor.id": "actor_system_bootstrap" }),
+        body: expect.objectContaining({ reason: "heartbeat_expired" })
+      });
+      expect(store.reconcileStaleTunnelSessions({ now: new Date(base.getTime() + 2_000) })).toEqual([]);
+      expectControlError(
+        () =>
+          store.heartbeatTunnelSession({
+            connectorId: "connector",
+            tunnelId: "tunnel",
+            sessionId: "session",
+            actorId: "user",
+            now: new Date(base.getTime() + 2_000)
+          }),
+        "tunnel_session_not_active"
+      );
+    } finally {
+      store.close();
+      concurrentStore.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reconciles stale agents only on an actual transition and permits recovery", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-liveness-"));
+    const dbPath = join(dir, "control.db");
+    const base = new Date("2026-07-20T00:00:00.000Z");
+    const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: 1_000 });
+    const concurrentStore = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: 1_000 });
+
+    try {
+      store.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+      store.createRegistryAgent({
+        id: "agent",
+        name: "Agent",
+        kind: "service",
+        acpRole: "ORCHESTRATION_LAYER",
+        actorId: "user"
+      });
+      store.recordAgentHeartbeat("agent", { status: "AVAILABLE", actorId: "user", now: base });
+
+      expect(store.reconcileStaleAgents({ now: new Date(base.getTime() + 1_000) })).toEqual([]);
+      const [first, second] = await Promise.all([
+        Promise.resolve(store.reconcileStaleAgents({ now: new Date(base.getTime() + 1_001) })),
+        Promise.resolve(concurrentStore.reconcileStaleAgents({ now: new Date(base.getTime() + 1_001) }))
+      ]);
+      expect([first, second].flat()).toHaveLength(1);
+      expect(store.getRegistryAgent("agent")).toMatchObject({ status: "OFFLINE", lastError: "heartbeat expired" });
+      expect(store.readEvents().filter((event) => event.name === "agent.reconciled")).toHaveLength(1);
+      expect(store.readEvents().at(-1)).toMatchObject({
+        name: "agent.reconciled",
+        attributes: expect.objectContaining({ "agent.status": "OFFLINE", "actor.id": "actor_system_bootstrap" }),
+        body: expect.objectContaining({ previousStatus: "AVAILABLE", status: "OFFLINE", reason: "heartbeat_expired" })
+      });
+      expect(store.reconcileStaleAgents({ now: new Date(base.getTime() + 2_000) })).toEqual([]);
+
+      const recovered = store.recordAgentHeartbeat("agent", {
+        status: "AVAILABLE",
+        actorId: "user",
+        now: new Date(base.getTime() + 2_001)
+      });
+      expect(recovered.agent.status).toBe("AVAILABLE");
+      expect(store.reconcileStaleAgents({ now: new Date(base.getTime() + 2_500) })).toEqual([]);
+    } finally {
+      store.close();
+      concurrentStore.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
