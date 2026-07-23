@@ -1,5 +1,6 @@
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { executeSandboxed } from "@agent-control-stack/sandbox";
+import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 
 export interface WorkerOptions {
@@ -30,23 +31,45 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       return { executed: false, workItemId: running.id, reason: "blocked by policy" };
     }
 
+    const startedAt = new Date().toISOString();
     const result = await executeSandboxed(running);
+    const completedAt = new Date().toISOString();
 
     if (result.ok) {
       tools.submit_work_result({
-        id: running.id,
+        workItemId: running.id,
+        leaseId: running.leaseId,
         workerId,
-        leaseToken: running.leaseToken,
-        status: "succeeded",
-        result: { output: result.output, execution_mode: result.executionMode }
+        actionHash: running.actionHash,
+        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        outcome: "succeeded",
+        startedAt,
+        finishedAt: completedAt,
+        exitCode: 0,
+        summary: "dry-run simulation completed; no real command ran",
+        stdout: result.output,
+        structuredOutput: { simulated: true },
+        artifacts: [],
+        simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
     } else {
       tools.submit_work_result({
-        id: running.id,
+        workItemId: running.id,
+        leaseId: running.leaseId,
         workerId,
-        leaseToken: running.leaseToken,
-        status: "failed",
-        result: { error: result.error ?? "dry-run sandbox simulation failed", execution_mode: result.executionMode }
+        actionHash: running.actionHash,
+        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        outcome: "failed",
+        startedAt,
+        finishedAt: completedAt,
+        exitCode: null,
+        summary: "dry-run simulation failed; no real command ran",
+        error: result.error ?? "dry-run sandbox simulation failed",
+        stdout: result.output,
+        stderr: result.error,
+        structuredOutput: { simulated: true },
+        artifacts: [],
+        simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
     }
 
@@ -54,4 +77,8 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   } finally {
     workItems.close();
   }
+}
+
+export function workerResultIdempotencyKey(workItemId: string, leaseId: string, workerId: string): string {
+  return stableHash({ domain: "acs.worker-result", workItemId, leaseId, workerId, attempt: 1 });
 }

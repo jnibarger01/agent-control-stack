@@ -199,7 +199,7 @@ describe("worker policy gate", () => {
         expect(events).toContain("approval.granted");
         expect(events).toContain("approval.consumed");
         expect(events).toContain("work_item.succeeded");
-        expect(succeededEvent?.body.result).toMatchObject({ execution_mode: "dry_run" });
+        expect(succeededEvent?.body.result).toMatchObject({ executionMode: "dry_run", outcome: "succeeded" });
         expect(succeededEvent?.attributes).toMatchObject({ "execution.mode": "dry_run" });
         expect(spawn).not.toHaveBeenCalled();
         expect(exec).not.toHaveBeenCalled();

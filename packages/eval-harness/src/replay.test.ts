@@ -30,11 +30,17 @@ describe("deterministic replay", () => {
       expect(running).toBeDefined();
 
       store.submitWorkResult({
-        id: running!.id,
+        workItemId: running!.id,
+        leaseId: running!.leaseId,
         workerId: "eval-worker",
-        leaseToken: running!.leaseToken,
-        status: "succeeded",
-        result: { output: "ok" }
+        actionHash: running!.actionHash,
+        idempotencyKey: "eval-replay-result-1",
+        outcome: "succeeded",
+        startedAt: running!.startedAt,
+        finishedAt: new Date().toISOString(),
+        summary: "deterministic replay completed",
+        structuredOutput: { output: "ok" },
+        simulationMetadata: { executionMode: "dry_run", simulated: true, reason: "eval_replay" }
       });
 
       expect(store.get(workItem.id)?.status).toBe("succeeded");

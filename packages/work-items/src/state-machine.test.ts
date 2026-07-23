@@ -2,11 +2,40 @@ import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { ControlStackError, applyControlPlaneMigrations, controlPlaneMigrations } from "@agent-control-stack/shared";
+import {
+  ControlStackError,
+  applyControlPlaneMigrations,
+  controlPlaneMigrations,
+  stableHash
+} from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_EVENT_LIMIT, SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
 
 const domainTransition = { via: "domain_service" } as const;
+
+function resultInput(
+  claimed: { id: string; leaseId: string; workerId: string; actionHash: string; startedAt: string },
+  overrides: Record<string, unknown> = {}
+) {
+  return {
+    workItemId: claimed.id,
+    leaseId: claimed.leaseId,
+    workerId: claimed.workerId,
+    actionHash: claimed.actionHash,
+    idempotencyKey: stableHash({ workItemId: claimed.id, leaseId: claimed.leaseId, attempt: 1 }),
+    outcome: "succeeded" as const,
+    startedAt: claimed.startedAt,
+    finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
+    exitCode: 0,
+    summary: "simulated result",
+    stdout: "no real command ran",
+    stderr: "",
+    structuredOutput: { simulated: true },
+    artifacts: [],
+    simulationMetadata: { executionMode: "dry_run" as const, simulated: true },
+    ...overrides
+  };
+}
 
 describe("work item state machine", () => {
   it("reads audit events with bounded pagination filters", () => {
@@ -257,7 +286,9 @@ describe("work item state machine", () => {
       expect(() => store.startWorkItem(workItem.id)).toThrow(ControlStackError);
       expect(store.approveWorkItem(workItem.id, domainTransition).status).toBe("approved");
       expectControlError(() => store.startWorkItem(workItem.id), "worker_claim_required");
-      expect(store.startWorkItem(workItem.id, "test-worker", { allowDirectStartForTests: true }).status).toBe("running");
+      expect(store.startWorkItem(workItem.id, "test-worker", { allowDirectStartForTests: true }).status).toBe(
+        "running"
+      );
     } finally {
       store.close();
     }
@@ -391,33 +422,19 @@ describe("work item state machine", () => {
       expectControlError(
         () =>
           store.submitWorkResult({
-            id: workItem.id,
-            workerId: "worker-b",
-            leaseToken: claimed!.leaseToken,
-            status: "succeeded"
+            ...resultInput(claimed!, { workerId: "worker-b" })
           }),
         "worker_lease_mismatch"
       );
       expectControlError(
         () =>
           store.submitWorkResult({
-            id: workItem.id,
-            workerId: "worker-a",
-            leaseToken: "wrong-token",
-            status: "succeeded"
+            ...resultInput(claimed!, { actionHash: "0".repeat(64) })
           }),
-        "worker_lease_mismatch"
+        "worker_action_hash_mismatch"
       );
 
-      expect(
-        store.submitWorkResult({
-          id: workItem.id,
-          workerId: "worker-a",
-          leaseToken: claimed!.leaseToken,
-          status: "succeeded",
-          result: { output: "ok" }
-        }).status
-      ).toBe("succeeded");
+      expect(store.submitWorkResult(resultInput(claimed!, { stdout: "ok" })).status).toBe("succeeded");
       expect(JSON.stringify(store.readEvents())).not.toContain(claimed!.leaseToken);
     } finally {
       store.close();
@@ -441,16 +458,13 @@ describe("work item state machine", () => {
 
       expect(() =>
         store.submitWorkResult({
-          id: workItem.id,
-          leaseToken: claimed!.leaseToken,
-          status: "succeeded"
+          workItemId: workItem.id
         })
       ).toThrow();
       expect(() =>
         store.submitWorkResult({
-          id: workItem.id,
-          workerId: "worker-a",
-          status: "succeeded"
+          workItemId: workItem.id,
+          leaseId: claimed!.leaseId
         })
       ).toThrow();
     } finally {
@@ -475,28 +489,10 @@ describe("work item state machine", () => {
       const claimed = store.claimNextApprovedWorkItem("worker-a");
 
       updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", null);
-      expectControlError(
-        () =>
-          store.submitWorkResult({
-            id: workItem.id,
-            workerId: "worker-a",
-            leaseToken: claimed!.leaseToken,
-            status: "succeeded"
-          }),
-        "worker_lease_missing"
-      );
+      expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_missing");
 
       updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", "not-a-sha256-hex-digest");
-      expectControlError(
-        () =>
-          store.submitWorkResult({
-            id: workItem.id,
-            workerId: "worker-a",
-            leaseToken: "wrong-token",
-            status: "succeeded"
-          }),
-        "worker_lease_missing"
-      );
+      expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_missing");
     } finally {
       store.close();
     }
@@ -517,18 +513,9 @@ describe("work item state machine", () => {
       });
       store.approveWorkItem(workItem.id, domainTransition);
       const claimed = store.claimNextApprovedWorkItem("worker-a");
-      updateWorkItemColumn(dbPath, workItem.id, "lease_expires_at", "not-an-iso-date");
+      updateLeaseColumn(dbPath, claimed!.leaseId, "expires_at", "not-an-iso-date");
 
-      expectControlError(
-        () =>
-          store.submitWorkResult({
-            id: workItem.id,
-            workerId: "worker-a",
-            leaseToken: claimed!.leaseToken,
-            status: "succeeded"
-          }),
-        "worker_lease_expired"
-      );
+      expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "lease_state_inconsistent");
     } finally {
       store.close();
     }
@@ -542,10 +529,16 @@ describe("work item state machine", () => {
       expectControlError(
         () =>
           store.submitWorkResult({
-            id: "wrk_missing",
+            workItemId: "wrk_missing",
+            leaseId: "lease_missing",
             workerId: "worker-a",
-            leaseToken: "token",
-            status: "succeeded"
+            actionHash: "0".repeat(64),
+            idempotencyKey: "result-missing",
+            outcome: "succeeded",
+            startedAt: "2026-07-20T00:00:00.000Z",
+            finishedAt: "2026-07-20T00:00:01.000Z",
+            summary: "missing",
+            simulationMetadata: { executionMode: "dry_run", simulated: true }
           }),
         "work_item_not_found"
       );
@@ -570,16 +563,7 @@ describe("work item state machine", () => {
       const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
       await new Promise((resolve) => setTimeout(resolve, 10));
 
-      expectControlError(
-        () =>
-          store.submitWorkResult({
-            id: workItem.id,
-            workerId: "worker-a",
-            leaseToken: claimed!.leaseToken,
-            status: "succeeded"
-          }),
-        "worker_lease_expired"
-      );
+      expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_expired");
     } finally {
       store.close();
     }
@@ -601,10 +585,16 @@ describe("work item state machine", () => {
       expectControlError(
         () =>
           store.submitWorkResult({
-            id: workItem.id,
+            workItemId: workItem.id,
+            leaseId: "lease-not-running",
             workerId: "worker-a",
-            leaseToken: "invalid-token",
-            status: "succeeded"
+            actionHash: "0".repeat(64),
+            idempotencyKey: "result-not-running",
+            outcome: "succeeded",
+            startedAt: "2026-07-20T00:00:00.000Z",
+            finishedAt: "2026-07-20T00:00:01.000Z",
+            summary: "premature",
+            simulationMetadata: { executionMode: "dry_run", simulated: true }
           }),
         "work_item_not_running"
       );
@@ -774,21 +764,20 @@ describe("work item state machine", () => {
         { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
         { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
         { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" },
-        { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" }
+        { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" },
+        { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
       );
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining(
-          canonical.map(([id, name, acpRole]) =>
-            expect.objectContaining({ id, name, acpRole, status: "UNKNOWN" })
-          )
+          canonical.map(([id, name, acpRole]) => expect.objectContaining({ id, name, acpRole, status: "UNKNOWN" }))
         )
       );
-      expect(store.listRegistryAgents().every((agent) => agent.capabilities.length === 0 && !agent.latestHeartbeat)).toBe(
-        true
-      );
+      expect(
+        store.listRegistryAgents().every((agent) => agent.capabilities.length === 0 && !agent.latestHeartbeat)
+      ).toBe(true);
     } finally {
       store.close();
     }
@@ -806,11 +795,20 @@ describe("work item state machine", () => {
     }
 
     expect(tableColumns(dbPath, "work_items")).toEqual(
-      expect.arrayContaining(["requester_subject", "worker_id", "started_at", "lease_expires_at", "lease_token_hash"])
+      expect.arrayContaining([
+        "requester_subject",
+        "worker_id",
+        "started_at",
+        "lease_expires_at",
+        "lease_token_hash",
+        "source_work_item_id",
+        "lineage_type",
+        "retry_reason",
+        "retry_sequence",
+        "root_work_item_id"
+      ])
     );
-    expect(tableColumns(dbPath, "audit_events")).toEqual(
-      expect.arrayContaining(["previous_hash", "event_hash"])
-    );
+    expect(tableColumns(dbPath, "audit_events")).toEqual(expect.arrayContaining(["previous_hash", "event_hash"]));
     expect(tableColumns(dbPath, "approval_records")).toEqual(
       expect.arrayContaining(["request_hash", "approval_token_hash", "status", "expires_at", "consumed_at"])
     );
@@ -861,7 +859,8 @@ describe("work item state machine", () => {
         { version: 1 },
         { version: 2 },
         { version: 3 },
-        { version: 4 }
+        { version: 4 },
+        { version: 5 }
       ]);
     } finally {
       db.close();
@@ -936,12 +935,10 @@ describe("work item state machine", () => {
         CREATE TABLE audit_events (id TEXT, attributes TEXT, body TEXT);
       `);
       for (const migration of controlPlaneMigrations().slice(0, 3)) {
-        db
-          .prepare(
-            `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+        db.prepare(
+          `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
              VALUES (?, ?, ?, ?, ?)`
-          )
-          .run(migration.version, migration.name, migration.filename, migration.checksum, "2026-07-20T00:00:00.000Z");
+        ).run(migration.version, migration.name, migration.filename, migration.checksum, "2026-07-20T00:00:00.000Z");
       }
       db.prepare(
         `INSERT INTO work_items (id, status, risk, target_json, requested_actions_json, result_json)
@@ -971,7 +968,7 @@ describe("work item state machine", () => {
 
     const store = new SqliteWorkItemStore(copiedPath);
     try {
-      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
       store.close();
@@ -980,6 +977,55 @@ describe("work item state machine", () => {
     expect(readFileSync(sourcePath)).toEqual(sourceBefore);
     expect(migrationRows(sourcePath).map((row) => row.version)).toEqual([1, 2, 3]);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("refuses Wave 2 migration when a legacy active lease needs explicit reconciliation", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-migration-active-lease-"));
+    const dbPath = join(dir, "active.db");
+    createVersionThreeDatabase(dbPath);
+    const db = new DatabaseSync(dbPath);
+    try {
+      db.prepare(
+        `INSERT INTO work_items
+         (id, title, requester, requester_subject, status, intent, target_json, requested_actions_json, risk,
+          result_json, worker_id, lease_token_hash, started_at, lease_expires_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, 'running', ?, ?, ?, 'low', NULL, ?, ?, ?, ?, ?, ?)`
+      ).run(
+        "legacy-running",
+        "Legacy running item",
+        "agent",
+        null,
+        "migration safety",
+        "{}",
+        "[]",
+        "legacy-worker",
+        "legacy-hash",
+        "2026-07-20T00:00:00.000Z",
+        "2026-07-20T00:05:00.000Z",
+        "2026-07-20T00:00:00.000Z",
+        "2026-07-20T00:00:00.000Z"
+      );
+    } finally {
+      db.close();
+    }
+
+    expect(() => new SqliteWorkItemStore(dbPath)).toThrow(/legacy active lease state/);
+    const unchanged = new DatabaseSync(dbPath);
+    try {
+      expect(unchanged.prepare(`SELECT MAX(version) AS version FROM schema_migrations`).get()).toEqual({ version: 4 });
+      expect(
+        unchanged.prepare(`SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'leases'`).get()
+      ).toBeUndefined();
+      expect(
+        unchanged.prepare(`SELECT status, lease_token_hash FROM work_items WHERE id = 'legacy-running'`).get()
+      ).toEqual({
+        status: "running",
+        lease_token_hash: "legacy-hash"
+      });
+    } finally {
+      unchanged.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("migrates a previous control-plane schema without reloading SQL blindly", () => {
@@ -995,7 +1041,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4]);
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" })])
       );
@@ -1100,16 +1146,35 @@ describe("work item state machine", () => {
         actorId: "user"
       });
       expectControlError(
-        () => store.revokeTunnelSession({ connectorId: "chatgpt-prod", tunnelId: "tunnel_1", sessionId: "session_1" } as never),
+        () =>
+          store.revokeTunnelSession({
+            connectorId: "chatgpt-prod",
+            tunnelId: "tunnel_1",
+            sessionId: "session_1"
+          } as never),
         "actor_required"
       );
-      store.revokeTunnelSession({ connectorId: "chatgpt-prod", tunnelId: "tunnel_1", sessionId: "session_1", actorId: "user" });
+      store.revokeTunnelSession({
+        connectorId: "chatgpt-prod",
+        tunnelId: "tunnel_1",
+        sessionId: "session_1",
+        actorId: "user"
+      });
 
       expect(store.readEvents()).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ name: "connector.registered", attributes: expect.objectContaining({ "actor.id": "user" }) }),
-          expect.objectContaining({ name: "tunnel_session.registered", attributes: expect.objectContaining({ "actor.id": "user" }) }),
-          expect.objectContaining({ name: "tunnel_session.revoked", attributes: expect.objectContaining({ "actor.id": "user" }) })
+          expect.objectContaining({
+            name: "connector.registered",
+            attributes: expect.objectContaining({ "actor.id": "user" })
+          }),
+          expect.objectContaining({
+            name: "tunnel_session.registered",
+            attributes: expect.objectContaining({ "actor.id": "user" })
+          }),
+          expect.objectContaining({
+            name: "tunnel_session.revoked",
+            attributes: expect.objectContaining({ "actor.id": "user" })
+          })
         ])
       );
     } finally {
@@ -1144,9 +1209,7 @@ describe("work item state machine", () => {
         () => store.replaceAgentCapabilities("test-agent", [{ name: "bad", inputSchema: [] as never }], "user"),
         "invalid_agent_registration"
       );
-      expect(store.listAgentCapabilities("test-agent")).toEqual([
-        expect.objectContaining({ name: "repo:inspect" })
-      ]);
+      expect(store.listAgentCapabilities("test-agent")).toEqual([expect.objectContaining({ name: "repo:inspect" })]);
       expectControlError(
         () => store.replaceAgentCapabilities("test-agent", [{ name: "repo:write" }], "missing"),
         "actor_not_found"
@@ -1266,13 +1329,18 @@ describe("work item state machine", () => {
         Promise.resolve(concurrentStore.reconcileStaleTunnelSessions({ now: new Date(base.getTime() + 1_501) }))
       ]);
       expect([first, second].flat()).toHaveLength(1);
-      expect(store.getTunnelSession({ connectorId: "connector", tunnelId: "tunnel", sessionId: "session" })).toMatchObject({
+      expect(
+        store.getTunnelSession({ connectorId: "connector", tunnelId: "tunnel", sessionId: "session" })
+      ).toMatchObject({
         status: "revoked"
       });
       expect(store.readEvents().filter((event) => event.name === "tunnel_session.reconciled")).toHaveLength(1);
       expect(store.readEvents().at(-1)).toMatchObject({
         name: "tunnel_session.reconciled",
-        attributes: expect.objectContaining({ "tunnel.session_status": "revoked", "actor.id": "actor_system_bootstrap" }),
+        attributes: expect.objectContaining({
+          "tunnel.session_status": "revoked",
+          "actor.id": "actor_system_bootstrap"
+        }),
         body: expect.objectContaining({ reason: "heartbeat_expired" })
       });
       expect(store.reconcileStaleTunnelSessions({ now: new Date(base.getTime() + 2_000) })).toEqual([]);
@@ -1482,9 +1550,11 @@ function tableColumns(dbPath: string, table: string): string[] {
 function migrationRows(dbPath: string): Array<{ version: number; name: string; filename: string }> {
   const db = new DatabaseSync(dbPath);
   try {
-    return db
-      .prepare(`SELECT version, name, filename FROM schema_migrations ORDER BY version ASC`)
-      .all() as Array<{ version: number; name: string; filename: string }>;
+    return db.prepare(`SELECT version, name, filename FROM schema_migrations ORDER BY version ASC`).all() as Array<{
+      version: number;
+      name: string;
+      filename: string;
+    }>;
   } finally {
     db.close();
   }
@@ -1504,12 +1574,10 @@ function createVersionThreeDatabase(dbPath: string): void {
     `);
     for (const migration of controlPlaneMigrations().slice(0, 3)) {
       db.exec(migration.sql);
-      db
-        .prepare(
-          `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+      db.prepare(
+        `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
            VALUES (?, ?, ?, ?, ?)`
-        )
-        .run(migration.version, migration.name, migration.filename, migration.checksum, "2026-07-20T00:00:00.000Z");
+      ).run(migration.version, migration.name, migration.filename, migration.checksum, "2026-07-20T00:00:00.000Z");
     }
   } finally {
     db.close();
@@ -1533,7 +1601,11 @@ function readLeaseRow(
   try {
     return db
       .prepare(`SELECT worker_id, lease_token_hash, lease_expires_at FROM work_items WHERE id = ?`)
-      .get(workItemId) as { worker_id: string | null; lease_token_hash: string | null; lease_expires_at: string | null };
+      .get(workItemId) as {
+      worker_id: string | null;
+      lease_token_hash: string | null;
+      lease_expires_at: string | null;
+    };
   } finally {
     db.close();
   }
@@ -1548,6 +1620,21 @@ function updateWorkItemColumn(
   const db = new DatabaseSync(dbPath);
   try {
     db.prepare(`UPDATE work_items SET ${column} = ? WHERE id = ?`).run(value, workItemId);
+  } finally {
+    db.close();
+  }
+}
+
+function updateLeaseColumn(
+  dbPath: string,
+  leaseId: string,
+  column: "expires_at" | "token_hash",
+  value: string | null
+): void {
+  const db = new DatabaseSync(dbPath);
+  try {
+    db.exec(`DROP TRIGGER IF EXISTS leases_immutable_fields_guard`);
+    db.prepare(`UPDATE leases SET ${column} = ? WHERE lease_id = ?`).run(value, leaseId);
   } finally {
     db.close();
   }
