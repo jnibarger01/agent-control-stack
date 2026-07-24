@@ -31,7 +31,8 @@
     "eval": "tsx packages/eval-harness/src/cli.ts",
     "start:mcp": "node apps/mcp/dist/cli.js",
     "start:gateway": "node apps/gateway/dist/cli.js",
-    "start:worker": "node apps/worker/dist/cli.js"
+    "start:worker": "node apps/worker/dist/cli.js",
+    "start:scheduler": "node apps/scheduler/dist/cli.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

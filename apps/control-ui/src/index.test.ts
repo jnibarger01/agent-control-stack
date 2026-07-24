@@ -95,6 +95,98 @@ describe("renderDashboard", () => {
     });
   });
 
+  it("visually distinguishes work items that need operator attention from normally running ones", () => {
+    const runningItem = { ...workItem, id: "wrk_running", status: "running" as const, title: "Running task" };
+    const succeededItem = { ...workItem, id: "wrk_succeeded", status: "succeeded" as const, title: "Succeeded task" };
+    const quarantinedItem = { ...workItem, id: "wrk_quarantined", status: "quarantined" as const, title: "Quarantined task" };
+
+    const html = renderDashboard({
+      workItems: [workItem, blockedItem, runningItem, succeededItem, quarantinedItem],
+      events: [],
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain(`<button class="queue-item attention" data-work-item="wrk_test">`);
+    expect(html).toContain(`<button class="queue-item attention" data-work-item="wrk_blocked">`);
+    expect(html).toContain(`<button class="queue-item attention" data-work-item="wrk_quarantined">`);
+    expect(html).toContain(`<button class="queue-item" data-work-item="wrk_running">`);
+    expect(html).toContain(`<button class="queue-item" data-work-item="wrk_succeeded">`);
+    expect(html).toContain("Needs attention");
+    expect(html).toContain(".quarantined");
+  });
+
+  it("surfaces execution plan admission status when a plan is available for a work item", () => {
+    const plan = {
+      planId: "plan_1",
+      workItemId: "wrk_test",
+      planNumber: 1,
+      definition: {
+        schemaVersion: "acs.execution-plan.v1" as const,
+        workItemId: "wrk_test",
+        subjectInputHash: "a".repeat(64),
+        objective: "verify rendering",
+        target: { cwd: "/repo" },
+        steps: [
+          {
+            stepId: "step-001",
+            sequence: 1,
+            action: { kind: "fs.read", description: "inspect source", params: {} },
+            successCriteria: []
+          }
+        ],
+        constraints: {
+          executionMode: "dry_run" as const,
+          network: "none" as const,
+          localGitOnly: true as const,
+          allowPush: false as const,
+          allowDeployment: false as const,
+          allowedCommands: [],
+          maxRuntimeMs: 300_000
+        }
+      },
+      planHash: "b".repeat(64),
+      subjectInputHash: "a".repeat(64),
+      createdByActorId: "user",
+      createdAt: "2026-07-05T00:00:00.000Z"
+    };
+    const admittedRequiresApproval = {
+      admissionId: "admission_1",
+      workItemId: "wrk_test",
+      planId: "plan_1",
+      planHash: "b".repeat(64),
+      policyVersion: "v1",
+      policyDecisionHash: "c".repeat(64),
+      requiresApproval: true,
+      admittedByActorId: "policy-gate",
+      admittedAt: "2026-07-05T00:00:30.000Z"
+    };
+
+    const admittedHtml = renderDashboard({
+      workItems: [workItem],
+      events: [],
+      now: new Date("2026-07-05T00:01:00.000Z"),
+      executionPlansByWorkItem: { wrk_test: plan },
+      executionPlanAdmissionsByWorkItem: { wrk_test: admittedRequiresApproval }
+    });
+    expect(admittedHtml).toContain("Execution plan admitted");
+    expect(admittedHtml).toContain("requires approval");
+
+    const draftedOnlyHtml = renderDashboard({
+      workItems: [workItem],
+      events: [],
+      now: new Date("2026-07-05T00:01:00.000Z"),
+      executionPlansByWorkItem: { wrk_test: plan }
+    });
+    expect(draftedOnlyHtml).toContain("not yet admitted");
+    expect(draftedOnlyHtml).not.toContain("Execution plan admitted");
+  });
+
+  it("renders unchanged when execution plan fields are omitted (additive, backward compatible)", () => {
+    const html = renderDashboard({ workItems: [workItem], events: [], now: new Date("2026-07-05T00:01:00.000Z") });
+    expect(html).not.toContain("Execution plan drafted");
+    expect(html).not.toContain("Execution plan admitted");
+  });
+
   it("keeps registered local agents offline without heartbeat evidence", () => {
     const agents = projectAgents([], [], new Date("2026-07-05T00:01:00.000Z"), [
       {
