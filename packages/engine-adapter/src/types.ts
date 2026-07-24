@@ -1,3 +1,4 @@
+import { engineEgressAllowlistSchema, engineCredentialSchema, sandboxLimitsSchema } from "@agent-control-stack/sandbox";
 import { z } from "zod";
 
 const identifierSchema = z
@@ -5,22 +6,41 @@ const identifierSchema = z
   .min(1)
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
+const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 
+/**
+ * Everything EngineIsolationBackend needs to bind this invocation to a
+ * persisted authority record (ADR 0014) - the same field set as
+ * packages/sandbox's SandboxExecutionRequest/EngineIsolationRequest, not a
+ * caller-chosen subset. A caller that cannot supply these has not actually
+ * authorized the invocation; there is no "trust me" path.
+ */
 export const engineTaskSchema = z
   .object({
     workItemId: identifierSchema,
+    attemptId: identifierSchema,
+    leaseId: identifierSchema,
+    workerId: identifierSchema,
+    fencingToken: z.number().int().positive(),
+    authorization: z
+      .object({
+        kind: z.enum(["action", "plan"]),
+        hash: hashSchema
+      })
+      .strict(),
+    policyVersion: identifierSchema,
+    auditCorrelationId: identifierSchema,
+    idempotencyKey: identifierSchema,
+    workspace: z
+      .object({
+        allocationId: identifierSchema,
+        hostPath: z.string().min(1)
+      })
+      .strict(),
     prompt: z.string().min(1).max(64_000),
-    workspaceHostPath: z.string().min(1),
-    timeoutMs: z
-      .number()
-      .int()
-      .min(100)
-      .max(15 * 60 * 1_000),
-    maxOutputBytes: z
-      .number()
-      .int()
-      .min(1_024)
-      .max(8 * 1_024 * 1_024)
+    egressAllowlist: engineEgressAllowlistSchema,
+    credential: engineCredentialSchema.optional(),
+    limits: sandboxLimitsSchema
   })
   .strict();
 
@@ -68,12 +88,15 @@ export type EngineOutcome = z.infer<typeof engineOutcomeSchema>;
  * included) run to completion as one opaque process, deciding and running
  * their own tool calls internally under their own permission model. This
  * adapter does not intercept those internal calls; containment comes from
- * running the whole process inside a scoped workspace with an allowlisted
- * environment (see env.ts), and from CommandBroker re-gating anything the
- * resulting change needs to have executed against it (build/test/lint)
- * through real policy evaluation before it runs. A future engine whose CLI
- * exposes a real per-call streaming protocol could implement a richer
- * interface; this one does not claim visibility it doesn't have.
+ * packages/sandbox's EngineIsolationBackend (ADR 0014) - an authority-bound
+ * workspace mount, a private HOME, single-credential injection, and
+ * scoped network egress through an audited proxy, not from the working
+ * directory or an environment allowlist alone. CommandBroker separately
+ * re-gates anything the resulting change needs to have executed against it
+ * (build/test/lint) through real policy evaluation before it runs. A future
+ * engine whose CLI exposes a real per-call streaming protocol could
+ * implement a richer interface; this one does not claim visibility it
+ * doesn't have.
  */
 export interface EngineAdapter {
   readonly id: string;

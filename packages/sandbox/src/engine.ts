@@ -88,7 +88,12 @@ const EGRESS_BRIDGE_PORT = 39_217;
  * network destination reachable from inside the sandbox is one this
  * invocation was explicitly allowlisted to reach.
  */
-export class EngineIsolationBackend {
+export interface EngineIsolation {
+  preflight(input: unknown): Promise<void>;
+  execute(input: unknown, options?: { signal?: AbortSignal }): Promise<EngineIsolationObservation>;
+}
+
+export class EngineIsolationBackend implements EngineIsolation {
   readonly name = "engine-isolation-v1" as const;
   private readonly options: ResolvedEngineOptions;
   private hostProbe: Promise<string> | undefined;
@@ -130,7 +135,12 @@ export class EngineIsolationBackend {
         }
       });
 
-      const bubblewrap = buildEngineBubblewrapInvocation(request, canonicalWorkspacePath, proxy.socketPath, this.options);
+      const bubblewrap = buildEngineBubblewrapInvocation(
+        request,
+        canonicalWorkspacePath,
+        proxy.socketPath,
+        this.options
+      );
       const systemd = buildEngineSystemdScopeInvocation(request, bubblewrap, unitName, this.options);
 
       return await this.launch(request, systemd, backendVersion, executionOptions, egressDecisions);
@@ -279,7 +289,9 @@ export class EngineIsolationBackend {
       ...(input.request.credential ? { credentialInjected: input.request.credential.envName } : {}),
       egressAllowedCount: allowed.length,
       egressDeniedCount: denied.length,
-      egressDeniedSample: denied.slice(0, MAX_EGRESS_DENIED_SAMPLE).map((decision) => `${decision.host}:${decision.port}`),
+      egressDeniedSample: denied
+        .slice(0, MAX_EGRESS_DENIED_SAMPLE)
+        .map((decision) => `${decision.host}:${decision.port}`),
       ...(error ? { error } : {})
     });
   }

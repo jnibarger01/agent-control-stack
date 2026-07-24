@@ -139,9 +139,7 @@ async function processRequest(
   }
   const host = (target[1] ?? "").toLowerCase();
   const port = Number(target[2]);
-  const allowed = context.allowlist.some(
-    (entry) => entry.host.toLowerCase() === host && entry.port === port
-  );
+  const allowed = context.allowlist.some((entry) => entry.host.toLowerCase() === host && entry.port === port);
   context.onDecision?.({ host, port, allowed, at: context.now().toISOString() });
 
   if (!allowed) {

@@ -1,5 +1,13 @@
-import { spawn } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+import { join } from "node:path";
 import { ControlStackError } from "@agent-control-stack/shared";
+import {
+  createEngineIsolation,
+  type EngineIsolation,
+  type EngineIsolationAuthorityVerifier,
+  type EngineIsolationRequest,
+  type EngineRuntimeMount
+} from "@agent-control-stack/sandbox";
 import {
   verificationResultSchema,
   type CommandEvidence,
@@ -9,29 +17,31 @@ import {
   type VerificationResult
 } from "./types.js";
 
-// Deliberately a fresh, self-contained allowlist rather than importing
-// harness/claude-cli-provider.ts or packages/engine-adapter/src/env.ts:
-// harness/ is not an npm workspace package (no package.json), so a
-// packages/* package cannot depend on it without a relative import that
-// reaches outside the workspace boundary every other package respects.
-// Same deny-by-default shape as those two, independently maintained.
-const claudeVerifierEnvAllowlist = ["HOME", "PATH", "SHELL", "TMPDIR", "USER", "ANTHROPIC_API_KEY"] as const;
-
-function claudeVerifierEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = {};
-  for (const name of claudeVerifierEnvAllowlist) {
-    const value = source[name];
-    if (value !== undefined) env[name] = value;
-  }
-  return env;
-}
+const DEFAULT_CREDENTIAL_ENV_NAME = "ANTHROPIC_API_KEY";
+const DEFAULT_EGRESS_ALLOWLIST = [{ host: "api.anthropic.com", port: 443 }] as const;
 
 export interface ClaudeVerifierOptions {
-  binary?: string;
+  binaryPath?: string;
   model?: string;
   maxBudgetUsd?: number;
   timeoutMs?: number;
-  spawnFn?: typeof spawn;
+  /** ACS-operator-trusted authority source - never derived from evidence input. */
+  authorityVerifier: EngineIsolationAuthorityVerifier;
+  /**
+   * The verifier reads evidence over stdin and never touches a repository
+   * (--tools "" below disables tool use entirely), so it needs only a
+   * throwaway scratch allocation, not the work item's real workspace - but
+   * that allocation is still authority-verified, never a caller-supplied
+   * path, exactly like the workspace an engine writes into.
+   */
+  scratchWorkspace: { allocationId: string; hostPath: string };
+  runtimeMounts?: EngineRuntimeMount[];
+  credentialEnvName?: string;
+  credentialSource?: (envName: string) => string | undefined;
+  isolationFactory?: (options: {
+    authorityVerifier: EngineIsolationAuthorityVerifier;
+    runtimeMounts?: EngineRuntimeMount[];
+  }) => EngineIsolation;
 }
 
 const VERIFIER_SYSTEM_PROMPT = `You are an independent verifier. You did not produce the change under review and have no memory of producing it.
@@ -100,83 +110,109 @@ interface ClaudeCliEnvelope {
   result: string;
 }
 
+let verifierInvocationCounter = 0;
+
 /**
  * Renders a verdict from evidence via a single, non-interactive, tools-
- * disabled Claude CLI call (--tools "" --permission-mode plan, matching
- * harness/claude-cli-provider.ts's proven invocation shape) - this engine
- * only ever reads evidence and judges it, it never touches the filesystem
- * or runs commands, which is exactly the shape an independent verifier
- * needs and the implementer engine (packages/engine-adapter's Codex
- * adapter) explicitly must not have.
+ * disabled Claude CLI call (--tools "" --permission-mode plan) run inside
+ * packages/sandbox's EngineIsolationBackend (ADR 0014) - the same isolation
+ * boundary as CodexEngineAdapter: private HOME, one injected credential,
+ * network scoped to api.anthropic.com through an audited proxy, full
+ * process-tree containment. This engine only ever reads evidence and
+ * judges it (it never touches the filesystem or runs commands), which is
+ * exactly the shape an independent verifier needs and the implementer
+ * engine explicitly must not have.
+ *
+ * Binding this invocation to the exact plan/action/attempt/workspace being
+ * verified (beyond the workItemId already carried in VerificationEvidence)
+ * is a separate, tracked hardening item - this class establishes the
+ * isolation boundary; it does not yet re-derive engine provenance from
+ * trusted configuration for arbitrary Verifier implementations.
  */
 export class ClaudeVerifier implements Verifier {
   readonly engineId = "claude-cli-verifier" as const;
-  private readonly binary: string;
+  private readonly binaryPath: string;
   private readonly model: string;
   private readonly maxBudgetUsd: number;
   private readonly timeoutMs: number;
-  private readonly spawnFn: typeof spawn;
+  private readonly credentialEnvName: string;
+  private readonly credentialSource: (envName: string) => string | undefined;
+  private readonly scratchWorkspace: { allocationId: string; hostPath: string };
+  private readonly isolation: EngineIsolation;
 
-  constructor(options: ClaudeVerifierOptions = {}) {
-    this.binary = options.binary ?? "claude";
+  constructor(options: ClaudeVerifierOptions) {
+    this.binaryPath = options.binaryPath ?? resolveOnPath("claude");
     this.model = options.model ?? "claude-sonnet-5";
     this.maxBudgetUsd = options.maxBudgetUsd ?? 0.5;
     this.timeoutMs = options.timeoutMs ?? 2 * 60 * 1_000;
-    this.spawnFn = options.spawnFn ?? spawn;
+    this.credentialEnvName = options.credentialEnvName ?? DEFAULT_CREDENTIAL_ENV_NAME;
+    this.credentialSource = options.credentialSource ?? ((envName) => process.env[envName]);
+    this.scratchWorkspace = options.scratchWorkspace;
+    const factory = options.isolationFactory ?? createEngineIsolation;
+    this.isolation = factory({ authorityVerifier: options.authorityVerifier, runtimeMounts: options.runtimeMounts });
   }
 
   async verify(criteria: VerificationCriterion[], evidence: VerificationEvidence): Promise<VerificationResult> {
     const started = Date.now();
     const prompt = buildVerificationPrompt(criteria, evidence);
-    const raw = await this.invoke(prompt);
-    const parsed = parseClaudeEnvelope(raw);
+    const credentialValue = this.credentialSource(this.credentialEnvName);
+    if (!credentialValue) {
+      throw new ControlStackError(
+        "verifier_credential_unavailable",
+        `no value available for required credential ${this.credentialEnvName}`
+      );
+    }
+
+    verifierInvocationCounter += 1;
+    const suffix = `${evidence.workItemId}-${verifierInvocationCounter}`.replace(/[^A-Za-z0-9._-]+/gu, "-").slice(-100);
+    const request: EngineIsolationRequest = {
+      schemaVersion: "acs.engine-isolation.v1",
+      workItemId: evidence.workItemId,
+      attemptId: `verify-${suffix}`,
+      leaseId: `verify-${suffix}`,
+      workerId: "claude-cli-verifier",
+      fencingToken: verifierInvocationCounter,
+      authorization: { kind: "action", hash: "0".repeat(64) },
+      policyVersion: "verifier-v1",
+      auditCorrelationId: `verify-${suffix}`,
+      idempotencyKey: `verify-${suffix}`,
+      workspace: this.scratchWorkspace,
+      engineId: this.engineId,
+      executable: this.binaryPath,
+      args: buildClaudeVerifierArgs(this.model, this.maxBudgetUsd),
+      cwd: ".",
+      stdin: prompt,
+      credential: { envName: this.credentialEnvName, envValue: credentialValue },
+      network: "scoped-egress",
+      egressAllowlist: [...DEFAULT_EGRESS_ALLOWLIST],
+      limits: {
+        wallClockMs: this.timeoutMs,
+        terminationGraceMs: Math.min(5_000, Math.max(100, Math.floor(this.timeoutMs / 10))),
+        cpuQuotaPercent: 100,
+        memoryBytes: 512 * 1_024 * 1_024,
+        pids: 32,
+        outputBytes: 256 * 1_024,
+        tmpfsBytes: 32 * 1_024 * 1_024
+      }
+    };
+
+    const observation = await this.isolation.execute(request);
+    if (observation.outcome === "timed_out") {
+      throw new ControlStackError("verifier_timeout", `verifier timed out after ${this.timeoutMs}ms`);
+    }
+    if (observation.outcome !== "exited" || observation.exitCode !== 0) {
+      throw new ControlStackError(
+        "verifier_process_failed",
+        observation.error ?? `verifier exited with outcome ${observation.outcome}`
+      );
+    }
+
+    const parsed = parseClaudeEnvelope(observation.stdout);
     const judged = JSON.parse(parsed) as unknown;
     return verificationResultSchema.parse({
       ...(judged as Record<string, unknown>),
       verifierEngineId: this.engineId,
       durationMs: Date.now() - started
-    });
-  }
-
-  private invoke(prompt: string): Promise<string> {
-    return new Promise((resolvePromise, reject) => {
-      const args = buildClaudeVerifierArgs(this.model, this.maxBudgetUsd);
-      const child = this.spawnFn(this.binary, args, {
-        env: claudeVerifierEnv(),
-        stdio: ["pipe", "pipe", "pipe"]
-      });
-
-      let stdout = "";
-      let settled = false;
-      const settle = (fn: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        fn();
-      };
-      const timer = setTimeout(() => {
-        child.kill("SIGTERM");
-        setTimeout(() => child.kill("SIGKILL"), 1_000).unref();
-        settle(() => reject(new ControlStackError("verifier_timeout", `verifier timed out after ${this.timeoutMs}ms`)));
-      }, this.timeoutMs);
-
-      child.stdout?.on("data", (chunk: Buffer) => {
-        stdout += chunk.toString("utf8");
-      });
-      child.on("error", (error) => {
-        settle(() => reject(new ControlStackError("verifier_process_error", error.message)));
-      });
-      child.on("close", (code) => {
-        settle(() => {
-          if (code !== 0) {
-            reject(new ControlStackError("verifier_process_failed", `verifier exited with code ${code}`));
-            return;
-          }
-          resolvePromise(stdout);
-        });
-      });
-
-      child.stdin?.end(prompt, "utf8");
     });
   }
 }
@@ -208,4 +244,19 @@ function parseClaudeEnvelope(raw: string): string {
     throw new ControlStackError("verifier_invalid_response", "verifier CLI result is missing the result field");
   }
   return envelope.result;
+}
+
+function resolveOnPath(name: string): string {
+  const searchPath = process.env.PATH ?? "";
+  for (const dir of searchPath.split(":")) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here; keep searching the rest of PATH.
+    }
+  }
+  throw new ControlStackError("verifier_binary_not_found", `unable to resolve "${name}" on PATH`);
 }

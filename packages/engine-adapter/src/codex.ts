@@ -1,44 +1,71 @@
-import { spawn } from "node:child_process";
+import { accessSync, constants } from "node:fs";
+import { join } from "node:path";
 import { ControlStackError } from "@agent-control-stack/shared";
-import { engineSubprocessEnv } from "./env.js";
+import {
+  createEngineIsolation,
+  type EngineIsolation,
+  type EngineIsolationAuthorityVerifier,
+  type EngineIsolationObservation,
+  type EngineIsolationRequest,
+  type EngineRuntimeMount
+} from "@agent-control-stack/sandbox";
 import { type EngineAdapter, type EngineOutcome, type EngineTask, engineTaskSchema } from "./types.js";
 
 export interface CodexEngineAdapterOptions {
-  binary?: string;
   /** Codex CLI's own sandbox mode for the shell commands it decides to run internally. */
   codexSandboxMode?: "read-only" | "workspace-write";
-  spawnFn?: typeof spawn;
+  /** ACS-operator-trusted authority source - never derived from task input. */
+  authorityVerifier: EngineIsolationAuthorityVerifier;
+  /** ACS-operator-configured read-only mounts for the Codex CLI's own install directory. */
+  runtimeMounts?: EngineRuntimeMount[];
+  /** Absolute path to the codex binary. Resolved once at construction; never caller-supplied per task. */
+  binaryPath?: string;
+  /** Name of the environment variable Codex needs for its own model API. */
+  credentialEnvName?: string;
+  /** Where the credential's value comes from at invoke time. Defaults to reading process.env once per call, never mutating or exposing the rest of the environment. */
+  credentialSource?: (envName: string) => string | undefined;
+  isolationFactory?: (options: {
+    authorityVerifier: EngineIsolationAuthorityVerifier;
+    runtimeMounts?: EngineRuntimeMount[];
+  }) => EngineIsolation;
 }
 
 const DEFAULT_CODEX_SANDBOX_MODE = "workspace-write";
+const DEFAULT_CREDENTIAL_ENV_NAME = "OPENAI_API_KEY";
+const DEFAULT_EGRESS_ALLOWLIST = [{ host: "api.openai.com", port: 443 }] as const;
 
 export function buildCodexArgs(prompt: string, sandboxMode: "read-only" | "workspace-write"): string[] {
   return ["exec", "--sandbox", sandboxMode, "--skip-git-repo-check", prompt];
 }
 
 /**
- * Codex CLI as an EngineAdapter. Runs `codex exec` as a workspace-scoped,
- * env-allowlisted subprocess - not through packages/sandbox's Bubblewrap
- * backend, because that backend unconditionally unshares the network
- * namespace and Codex needs network access to reach its own model API (see
- * the tracked "sandbox needs scoped network egress" gap). Containment here
- * is: cwd fixed to the provisioned workspace, env allowlisted, output and
- * wall-clock bounded, and Codex's own --sandbox workspace-write mode
- * constraining the shell commands it runs internally to that same
- * workspace. This is real but partial isolation, not equivalent to the
- * Bubblewrap sandbox's process/mount/network namespace containment - do not
- * describe it as such.
+ * Codex CLI as an EngineAdapter. Runs `codex exec` inside
+ * packages/sandbox's EngineIsolationBackend (ADR 0014) - an
+ * authority-resolved workspace mount, a private HOME, exactly one injected
+ * credential, and network access scoped to api.openai.com through an
+ * audited proxy - not a bare, workspace-scoped subprocess. Codex's own
+ * `--sandbox workspace-write` remains as defense in depth for the shell
+ * commands it decides to run internally; it is not the containment
+ * boundary itself.
  */
 export class CodexEngineAdapter implements EngineAdapter {
   readonly id = "codex" as const;
-  private readonly binary: string;
   private readonly sandboxMode: "read-only" | "workspace-write";
-  private readonly spawnFn: typeof spawn;
+  private readonly binaryPath: string;
+  private readonly credentialEnvName: string;
+  private readonly credentialSource: (envName: string) => string | undefined;
+  private readonly isolation: EngineIsolation;
 
-  constructor(options: CodexEngineAdapterOptions = {}) {
-    this.binary = options.binary ?? "codex";
+  constructor(options: CodexEngineAdapterOptions) {
     this.sandboxMode = options.codexSandboxMode ?? DEFAULT_CODEX_SANDBOX_MODE;
-    this.spawnFn = options.spawnFn ?? spawn;
+    this.binaryPath = options.binaryPath ?? resolveOnPath("codex");
+    this.credentialEnvName = options.credentialEnvName ?? DEFAULT_CREDENTIAL_ENV_NAME;
+    this.credentialSource = options.credentialSource ?? ((envName) => process.env[envName]);
+    const factory = options.isolationFactory ?? createEngineIsolation;
+    this.isolation = factory({
+      authorityVerifier: options.authorityVerifier,
+      runtimeMounts: options.runtimeMounts
+    });
   }
 
   async invoke(task: EngineTask, signal?: AbortSignal): Promise<EngineOutcome> {
@@ -47,105 +74,76 @@ export class CodexEngineAdapter implements EngineAdapter {
       throw new ControlStackError("engine_invoke_cancelled", "engine invocation was cancelled before it started");
     }
 
-    const started = Date.now();
-    return await new Promise<EngineOutcome>((resolvePromise) => {
-      const child = this.spawnFn(this.binary, buildCodexArgs(parsed.prompt, this.sandboxMode), {
-        cwd: parsed.workspaceHostPath,
-        env: engineSubprocessEnv({ extra: ["OPENAI_API_KEY"] }),
-        shell: false,
-        stdio: ["ignore", "pipe", "pipe"]
-      });
+    const credentialValue = this.credentialSource(this.credentialEnvName);
+    if (!credentialValue) {
+      throw new ControlStackError(
+        "engine_credential_unavailable",
+        `no value available for required credential ${this.credentialEnvName}`
+      );
+    }
 
-      let stdout = "";
-      let stderr = "";
-      let stdoutTruncated = false;
-      let stderrTruncated = false;
-      let settled = false;
-      let timedOut = false;
-      let aborted = false;
-      let escalationTimer: NodeJS.Timeout | undefined;
+    const request: EngineIsolationRequest = {
+      schemaVersion: "acs.engine-isolation.v1",
+      workItemId: parsed.workItemId,
+      attemptId: parsed.attemptId,
+      leaseId: parsed.leaseId,
+      workerId: parsed.workerId,
+      fencingToken: parsed.fencingToken,
+      authorization: parsed.authorization,
+      policyVersion: parsed.policyVersion,
+      auditCorrelationId: parsed.auditCorrelationId,
+      idempotencyKey: parsed.idempotencyKey,
+      workspace: parsed.workspace,
+      engineId: this.id,
+      executable: this.binaryPath,
+      args: buildCodexArgs(parsed.prompt, this.sandboxMode),
+      cwd: ".",
+      credential: { envName: this.credentialEnvName, envValue: credentialValue },
+      network: "scoped-egress",
+      egressAllowlist: parsed.egressAllowlist.length ? parsed.egressAllowlist : [...DEFAULT_EGRESS_ALLOWLIST],
+      limits: parsed.limits
+    };
 
-      const settle = (outcome: EngineOutcome) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (escalationTimer) clearTimeout(escalationTimer);
-        signal?.removeEventListener("abort", onAbort);
-        resolvePromise(outcome);
-      };
-
-      const escalate = () => {
-        child.kill("SIGTERM");
-        escalationTimer = setTimeout(() => {
-          if (!child.killed) child.kill("SIGKILL");
-        }, 1_000);
-        escalationTimer.unref();
-      };
-
-      const timer = setTimeout(() => {
-        timedOut = true;
-        escalate();
-      }, parsed.timeoutMs);
-
-      const onAbort = () => {
-        aborted = true;
-        escalate();
-      };
-      signal?.addEventListener("abort", onAbort, { once: true });
-
-      child.stdout?.on("data", (chunk: Buffer) => {
-        if (stdoutTruncated) return;
-        const combined = stdout + chunk.toString("utf8");
-        if (Buffer.byteLength(combined, "utf8") > parsed.maxOutputBytes) {
-          stdout = truncateToByteLength(combined, parsed.maxOutputBytes);
-          stdoutTruncated = true;
-          return;
-        }
-        stdout = combined;
-      });
-      child.stderr?.on("data", (chunk: Buffer) => {
-        if (stderrTruncated) return;
-        const combined = stderr + chunk.toString("utf8");
-        if (Buffer.byteLength(combined, "utf8") > parsed.maxOutputBytes) {
-          stderr = truncateToByteLength(combined, parsed.maxOutputBytes);
-          stderrTruncated = true;
-          return;
-        }
-        stderr = combined;
-      });
-
-      child.on("error", (error) => {
-        settle({ status: "process_error", message: error.message });
-      });
-
-      child.on("close", (code) => {
-        const durationMs = Date.now() - started;
-        if (timedOut) {
-          settle({ status: "timeout", durationMs });
-          return;
-        }
-        if (aborted) {
-          settle({ status: "cancelled", durationMs });
-          return;
-        }
-        settle({
-          status: "completed",
-          exitCode: code ?? -1,
-          stdout,
-          stderr,
-          durationMs,
-          stdoutTruncated,
-          stderrTruncated
-        });
-      });
-    });
+    const observation = await this.isolation.execute(request, { signal });
+    return outcomeFromObservation(observation);
   }
 }
 
-function truncateToByteLength(value: string, maxBytes: number): string {
-  // Buffer.byteLength/slice operate on bytes, not code points - decoding a
-  // slice cut mid-multi-byte-character would corrupt the last character
-  // rather than just dropping it, so fall back to Buffer's own utf8 decode,
-  // which drops a trailing partial sequence cleanly.
-  return Buffer.from(value, "utf8").subarray(0, maxBytes).toString("utf8");
+function outcomeFromObservation(observation: EngineIsolationObservation): EngineOutcome {
+  if (observation.outcome === "timed_out") {
+    return { status: "timeout", durationMs: observation.durationMs };
+  }
+  if (observation.outcome === "cancelled") {
+    return { status: "cancelled", durationMs: observation.durationMs };
+  }
+  if (observation.outcome === "exited" && observation.exitCode !== null) {
+    return {
+      status: "completed",
+      exitCode: observation.exitCode,
+      stdout: observation.stdout,
+      stderr: observation.stderr,
+      durationMs: observation.durationMs,
+      stdoutTruncated: observation.stdoutTruncated,
+      stderrTruncated: observation.stderrTruncated
+    };
+  }
+  return {
+    status: "process_error",
+    message: observation.error ?? `engine isolation reported an unexpected outcome: ${observation.outcome}`
+  };
+}
+
+function resolveOnPath(name: string): string {
+  const searchPath = process.env.PATH ?? "";
+  for (const dir of searchPath.split(":")) {
+    if (!dir) continue;
+    const candidate = join(dir, name);
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {
+      // Not here; keep searching the rest of PATH.
+    }
+  }
+  throw new ControlStackError("engine_binary_not_found", `unable to resolve "${name}" on PATH`);
 }

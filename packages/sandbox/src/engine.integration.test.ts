@@ -3,7 +3,11 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EngineIsolationAuthorityReceipt, EngineIsolationAuthorityVerifier, EngineIsolationRequest } from "./engine-contracts.js";
+import type {
+  EngineIsolationAuthorityReceipt,
+  EngineIsolationAuthorityVerifier,
+  EngineIsolationRequest
+} from "./engine-contracts.js";
 import { createEngineIsolation, type EngineRuntimeMount } from "./engine.js";
 
 const runIntegration = process.env.ACS_SANDBOX_INTEGRATION === "1";
@@ -66,7 +70,10 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
           `
         );
         const request = fixtureRequest(fixture.workspace, "home", [{ host: "127.0.0.1", port: 1 }]);
-        const result = await createEngineIsolation({ authorityVerifier: fixtureAuthority(request), runtimeMounts: nodeRuntimeMounts() }).execute(request);
+        const result = await createEngineIsolation({
+          authorityVerifier: fixtureAuthority(request),
+          runtimeMounts: nodeRuntimeMounts()
+        }).execute(request);
 
         expect(result).toMatchObject({ outcome: "exited", observedSuccess: true, cleanup: "verified", exitCode: 0 });
         expect(result.stdout).toContain("home-contained");
@@ -100,7 +107,10 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       // schema's non-empty allowlist requirement is satisfied without
       // actually permitting the destination under test.
       const request = fixtureRequest(fixture.workspace, "egress-deny", [{ host: "127.0.0.1", port: port + 1 }]);
-      const result = await createEngineIsolation({ authorityVerifier: fixtureAuthority(request), runtimeMounts: nodeRuntimeMounts() }).execute(request);
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts()
+      }).execute(request);
 
       expect(result).toMatchObject({ outcome: "exited", observedSuccess: true, cleanup: "verified", exitCode: 0 });
       expect(result.stdout).toContain("egress-denied-as-expected");
@@ -134,7 +144,10 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
         `
       );
       const request = fixtureRequest(fixture.workspace, "egress-allow", [{ host: "127.0.0.1", port }]);
-      const result = await createEngineIsolation({ authorityVerifier: fixtureAuthority(request), runtimeMounts: nodeRuntimeMounts() }).execute(request);
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts()
+      }).execute(request);
 
       expect(result).toMatchObject({ outcome: "exited", observedSuccess: true, cleanup: "verified", exitCode: 0 });
       expect(result.stdout).toContain("egress-allowed-as-expected");
@@ -152,7 +165,10 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       const request = fixtureRequest(fixture.workspace, "credential", [{ host: "127.0.0.1", port: 1 }], {
         credential: { envName: "ACS_TEST_CREDENTIAL", envValue: "super-secret-value-12345" }
       });
-      const result = await createEngineIsolation({ authorityVerifier: fixtureAuthority(request), runtimeMounts: nodeRuntimeMounts() }).execute(request);
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts()
+      }).execute(request);
 
       expect(result.observedSuccess).toBe(true);
       expect(result.credentialInjected).toBe("ACS_TEST_CREDENTIAL");
@@ -185,7 +201,10 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
       const request = fixtureRequest(fixture.workspace, "timeout", [{ host: "127.0.0.1", port: 1 }], {
         limits: { ...defaultLimits(), wallClockMs: 300, terminationGraceMs: 100 }
       });
-      const result = await createEngineIsolation({ authorityVerifier: fixtureAuthority(request), runtimeMounts: nodeRuntimeMounts() }).execute(request);
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts()
+      }).execute(request);
 
       expect(result).toMatchObject({ outcome: "timed_out", observedSuccess: false, cleanup: "verified" });
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 1_500));

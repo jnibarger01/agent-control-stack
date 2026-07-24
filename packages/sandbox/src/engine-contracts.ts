@@ -33,7 +33,10 @@ const egressHostSchema = z
   .string()
   .min(1)
   .max(255)
-  .regex(/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/u, "must be a lowercase DNS name");
+  .regex(
+    /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$/u,
+    "must be a lowercase DNS name"
+  );
 
 export const engineEgressAllowlistSchema = z
   .array(
@@ -92,7 +95,10 @@ export const engineIsolationRequestSchema = z
     executable: absolutePathSchema,
     args: z.array(z.string().max(4_096)).max(64),
     cwd: relativeWorkingDirectorySchema,
-    stdin: z.string().max(1_024 * 1_024).optional(),
+    stdin: z
+      .string()
+      .max(1_024 * 1_024)
+      .optional(),
     credential: engineCredentialSchema.optional(),
     network: z.literal("scoped-egress"),
     egressAllowlist: engineEgressAllowlistSchema,

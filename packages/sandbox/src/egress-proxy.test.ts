@@ -54,7 +54,10 @@ describe("startEgressProxy", () => {
       onDecision: (decision) => decisions.push(decision)
     });
 
-    const response = await connectRaw(socketPath, `CONNECT 127.0.0.1:${port} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`);
+    const response = await connectRaw(
+      socketPath,
+      `CONNECT 127.0.0.1:${port} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`
+    );
     expect(response.toString("utf8")).toContain("200 Connection Established");
     expect(response.toString("utf8")).toContain("dest-reached");
     expect(decisions).toEqual([{ host: "127.0.0.1", port, allowed: true, at: expect.any(String) }]);
@@ -71,7 +74,10 @@ describe("startEgressProxy", () => {
       onDecision: (decision) => decisions.push(decision)
     });
 
-    const response = await connectRaw(socketPath, `CONNECT 127.0.0.1:${port} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`);
+    const response = await connectRaw(
+      socketPath,
+      `CONNECT 127.0.0.1:${port} HTTP/1.1\r\nHost: 127.0.0.1:${port}\r\n\r\n`
+    );
     expect(response.toString("utf8")).toContain("403 Forbidden");
     expect(response.toString("utf8")).not.toContain("should-not-be-reached");
     expect(decisions).toEqual([{ host: "127.0.0.1", port, allowed: false, at: expect.any(String) }]);
@@ -92,7 +98,10 @@ describe("startEgressProxy", () => {
     const socketPath = join(dir, "egress.sock");
     handle = await startEgressProxy({ socketPath, allowlist: [{ host: "EXAMPLE.test", port: 443 }] });
 
-    const wrongPort = await connectRaw(socketPath, `CONNECT example.test:9999 HTTP/1.1\r\nHost: example.test:9999\r\n\r\n`);
+    const wrongPort = await connectRaw(
+      socketPath,
+      `CONNECT example.test:9999 HTTP/1.1\r\nHost: example.test:9999\r\n\r\n`
+    );
     expect(wrongPort.toString("utf8")).toContain("403 Forbidden");
     void port;
   });
