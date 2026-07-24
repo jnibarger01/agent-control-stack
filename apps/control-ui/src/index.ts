@@ -1,6 +1,8 @@
 import {
   DEFAULT_HEARTBEAT_ONLINE_WINDOW_MS,
   DEFAULT_HEARTBEAT_TTL_MS,
+  type ExecutionPlanAdmission,
+  type ExecutionPlanRecord,
   type RegistryAgentDetail,
   type StoredAuditEvent,
   type WorkItem
@@ -27,7 +29,21 @@ export interface MissionControlViewModel {
   registeredAgents?: RegistryAgentDetail[];
   agents?: MissionControlAgent[];
   approvalActionHashesByWorkItem?: Record<string, string[]>;
+  /** Current execution plan per work item, when one has been drafted (packages/work-items getCurrentExecutionPlan). */
+  executionPlansByWorkItem?: Record<string, ExecutionPlanRecord>;
+  /** Current plan's admission outcome per work item, when it has been admitted (getExecutionPlanAdmission). */
+  executionPlanAdmissionsByWorkItem?: Record<string, ExecutionPlanAdmission>;
   now?: Date;
+}
+
+const OPERATOR_ATTENTION_STATUSES: ReadonlySet<WorkItem["status"]> = new Set([
+  "blocked",
+  "needs_approval",
+  "quarantined"
+]);
+
+function needsOperatorAttention(status: WorkItem["status"]): boolean {
+  return OPERATOR_ATTENTION_STATUSES.has(status);
 }
 
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
@@ -37,6 +53,8 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
   const stats = summarize(model.workItems, agents);
   const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
   const recentEvents = [...events].slice(-10).reverse();
+  const executionPlansByWorkItem = model.executionPlansByWorkItem ?? {};
+  const executionPlanAdmissionsByWorkItem = model.executionPlanAdmissionsByWorkItem ?? {};
 
   return `<!doctype html>
 <html lang="en">
@@ -67,7 +85,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <section id="overview" class="cards">${overviewCards(stats)}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems)}</article>
+        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem)}</article>
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
@@ -221,14 +239,34 @@ function agentDetailPanel(): string {
   </section>`;
 }
 
-function workQueue(workItems: WorkItem[]): string {
+function workQueue(
+  workItems: WorkItem[],
+  executionPlansByWorkItem: Record<string, ExecutionPlanRecord>,
+  executionPlanAdmissionsByWorkItem: Record<string, ExecutionPlanAdmission>
+): string {
   if (!workItems.length) return `<p class="empty">No work items.</p>`;
   return `<div class="queue">${workItems
     .slice(0, 12)
-    .map(
-      (item) => `<button class="queue-item" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${workItemError(item)}</button>`
-    )
+    .map((item) => {
+      const attention = needsOperatorAttention(item.status);
+      const plan = executionPlansByWorkItem[item.id];
+      const admission = executionPlanAdmissionsByWorkItem[item.id];
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${workItemError(item)}</button>`;
+    })
     .join("")}</div><section id="work-detail" class="detail-panel work-detail" aria-live="polite"><div class="detail-empty"><h3>No work item selected</h3><p>Timeline pending.</p></div></section>`;
+}
+
+function attentionBadge(): string {
+  return `<span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span>`;
+}
+
+function executionPlanBadge(plan?: ExecutionPlanRecord, admission?: ExecutionPlanAdmission): string {
+  if (!plan) return "";
+  if (!admission) {
+    return `<small class="plan-status plan-pending">Execution plan drafted &middot; not yet admitted</small>`;
+  }
+  const approvalLabel = admission.requiresApproval ? "requires approval" : "auto-admitted";
+  return `<small class="plan-status plan-admitted">Execution plan admitted &middot; ${escapeHtml(approvalLabel)}</small>`;
 }
 
 function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Record<string, string[]>): string {
@@ -706,8 +744,13 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .empty { padding: 18px; color: var(--muted); }
 .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: #eef2f6; color: #45515f; border: 1px solid #d7dfe8; white-space: nowrap; }
 .online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: #a8d8bd; background: #eef9f2; }
-.stale, .warning, .needs_approval, .medium, .blocked { color: var(--amber); border-color: #f1d18a; background: #fff8e6; }
+.stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: #f1d18a; background: #fff8e6; }
 .offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: #f0b8b2; background: #fff1ef; }
+.queue-item.attention { border-left: 3px solid var(--red); background: #fff8f7; }
+.attention-badge { color: var(--red); font-weight: 700; margin-left: 6px; font-size: 11px; }
+.plan-status { display: block; margin-top: 4px; }
+.plan-pending { color: var(--amber); }
+.plan-admitted { color: var(--green); }
 .queue { display: grid; }
 .queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid #edf1f5; padding: 12px 14px; cursor: pointer; }
 .queue-item:hover { background: #f4f8ff; }

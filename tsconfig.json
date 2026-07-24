@@ -18,6 +18,7 @@
     { "path": "apps/control-ui" },
     { "path": "apps/mcp" },
     { "path": "apps/gateway" },
-    { "path": "apps/worker" }
+    { "path": "apps/worker" },
+    { "path": "apps/scheduler" }
   ]
 }
