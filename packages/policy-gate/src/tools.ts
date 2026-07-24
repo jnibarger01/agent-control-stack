@@ -342,11 +342,11 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
   };
 }
 
-function approvalRequired(evaluations: PolicyEvaluation[]): PolicyEvaluation[] {
+export function approvalRequired(evaluations: PolicyEvaluation[]): PolicyEvaluation[] {
   return evaluations.filter((evaluation) => evaluation.decision.decision === "require_approval");
 }
 
-function policyContextAuditReceipt(context: PolicyContext): Record<string, unknown> {
+export function policyContextAuditReceipt(context: PolicyContext): Record<string, unknown> {
   return {
     workItemId: context.workItemId,
     actor: context.actor,

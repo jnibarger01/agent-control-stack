@@ -45,13 +45,18 @@ import {
   admitExecutionPlanInputSchema,
   createExecutionPlanInputSchema,
   executionPlanAdmissionSchema,
+  executionPlanApprovalRequestHash,
+  executionPlanApprovalSchema,
   executionPlanHash,
   executionPlanRecordSchema,
   executionPlanSubjectInputHash,
+  grantExecutionPlanApprovalInputSchema,
   type AdmitExecutionPlanInput,
   type CreateExecutionPlanInput,
   type ExecutionPlanAdmission,
-  type ExecutionPlanRecord
+  type ExecutionPlanApproval,
+  type ExecutionPlanRecord,
+  type GrantExecutionPlanApprovalInput
 } from "./execution-plan.js";
 
 interface WorkItemRow {
@@ -143,6 +148,23 @@ interface ExecutionPlanAdmissionRow {
   requires_approval: number;
   admitted_by_actor_id: string;
   admitted_at: string;
+}
+
+interface ExecutionPlanApprovalRow {
+  approval_id: string;
+  work_item_id: string;
+  plan_id: string;
+  plan_hash: string;
+  action_hash: string;
+  request_hash: string;
+  approved_by_actor_id: string;
+  reason: string;
+  status: "granted" | "consumed" | "invalidated" | "expired";
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+  invalidated_at: string | null;
+  invalidation_reason: string | null;
 }
 
 type PersistedResultInput = Omit<SubmitWorkResultInput, "outcome"> & { outcome: ResultOutcome };
@@ -562,6 +584,11 @@ export interface WorkItemStore {
   listExecutionPlans(workItemId: string): ExecutionPlanRecord[];
   admitExecutionPlan(input: AdmitExecutionPlanInput, options: PrivilegedTransitionOptions): ExecutionPlanAdmission;
   getExecutionPlanAdmission(admissionId: string): ExecutionPlanAdmission | undefined;
+  grantExecutionPlanApproval(
+    input: GrantExecutionPlanApprovalInput,
+    options: PrivilegedTransitionOptions
+  ): ExecutionPlanApproval;
+  hasExecutionPlanApproval(workItemId: string, planHash: string, actionHash: string): boolean;
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
   health(): StoreHealth;
   verifyAuditChain(): AuditChainVerification;
@@ -931,6 +958,101 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(`SELECT * FROM execution_plan_admissions WHERE admission_id = ?`)
       .get(admissionId) as unknown as ExecutionPlanAdmissionRow | undefined;
     return row ? rowToExecutionPlanAdmission(row) : undefined;
+  }
+
+  grantExecutionPlanApproval(
+    input: GrantExecutionPlanApprovalInput,
+    options: PrivilegedTransitionOptions
+  ): ExecutionPlanApproval {
+    requirePrivilegedTransition(options, "grant_execution_plan_approval");
+    const parsed = grantExecutionPlanApprovalInputSchema.parse(input);
+    return this.write(() => {
+      const current = this.getCurrentExecutionPlan(parsed.workItemId);
+      if (!current || current.planHash !== parsed.planHash) {
+        throw new ControlStackError(
+          "execution_plan_not_current",
+          "only the current execution plan can be approved"
+        );
+      }
+
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM execution_plan_approvals
+           WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted'`
+        )
+        .get(parsed.workItemId, parsed.planHash, parsed.actionHash) as unknown as
+        | ExecutionPlanApprovalRow
+        | undefined;
+      if (existing) {
+        return { value: rowToExecutionPlanApproval(existing), events: [] };
+      }
+
+      const approvalId = createId("plan_approval");
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      const expiresAt = new Date(
+        Date.parse(createdAt) + (parsed.expiresInMs ?? 10 * 60 * 1_000)
+      ).toISOString();
+      const reason = parsed.reason ?? "approved";
+      const requestHash = executionPlanApprovalRequestHash({
+        workItemId: parsed.workItemId,
+        planHash: parsed.planHash,
+        actionHash: parsed.actionHash
+      });
+
+      this.db
+        .prepare(
+          `INSERT INTO execution_plan_approvals
+           (approval_id, work_item_id, plan_id, plan_hash, action_hash, request_hash,
+            approved_by_actor_id, reason, status, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'granted', ?, ?)`
+        )
+        .run(
+          approvalId,
+          parsed.workItemId,
+          current.planId,
+          parsed.planHash,
+          parsed.actionHash,
+          requestHash,
+          parsed.approvedByActorId,
+          reason,
+          createdAt,
+          expiresAt
+        );
+
+      const approval = executionPlanApprovalSchema.parse({
+        approvalId,
+        workItemId: parsed.workItemId,
+        planId: current.planId,
+        planHash: parsed.planHash,
+        actionHash: parsed.actionHash,
+        requestHash,
+        approvedByActorId: parsed.approvedByActorId,
+        reason,
+        status: "granted",
+        createdAt,
+        expiresAt
+      });
+      const event = this.appendAuditEvent(
+        createEvent("execution_plan_approval.granted", approval, {
+          "work_item.id": parsed.workItemId,
+          "plan.id": current.planId,
+          "plan.hash": parsed.planHash,
+          "action.hash": parsed.actionHash,
+          "actor.id": parsed.approvedByActorId
+        })
+      );
+      return { value: approval, events: [event] };
+    });
+  }
+
+  hasExecutionPlanApproval(workItemId: string, planHash: string, actionHash: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM execution_plan_approvals
+         WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted' AND expires_at > ?`
+      )
+      .get(workItemId, planHash, actionHash, new Date().toISOString());
+    return Boolean(row);
   }
 
   readEvents(options: ReadEventsOptions = {}): StoredAuditEvent[] {
@@ -2692,6 +2814,25 @@ function rowToExecutionPlanAdmission(row: ExecutionPlanAdmissionRow): ExecutionP
     requiresApproval: row.requires_approval === 1,
     admittedByActorId: row.admitted_by_actor_id,
     admittedAt: row.admitted_at
+  });
+}
+
+function rowToExecutionPlanApproval(row: ExecutionPlanApprovalRow): ExecutionPlanApproval {
+  return executionPlanApprovalSchema.parse({
+    approvalId: row.approval_id,
+    workItemId: row.work_item_id,
+    planId: row.plan_id,
+    planHash: row.plan_hash,
+    actionHash: row.action_hash,
+    requestHash: row.request_hash,
+    approvedByActorId: row.approved_by_actor_id,
+    reason: row.reason,
+    status: row.status,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    ...(row.consumed_at === null ? {} : { consumedAt: row.consumed_at }),
+    ...(row.invalidated_at === null ? {} : { invalidatedAt: row.invalidated_at }),
+    ...(row.invalidation_reason === null ? {} : { invalidationReason: row.invalidation_reason })
   });
 }
 

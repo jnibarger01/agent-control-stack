@@ -114,12 +114,58 @@ export const admitExecutionPlanInputSchema = z
   })
   .strict();
 
+export const executionPlanApprovalSchema = z
+  .object({
+    approvalId: identifierSchema,
+    workItemId: identifierSchema,
+    planId: identifierSchema,
+    planHash: hashSchema,
+    actionHash: hashSchema,
+    requestHash: hashSchema,
+    approvedByActorId: z.string().min(1).max(256),
+    reason: z.string(),
+    status: z.enum(["granted", "consumed", "invalidated", "expired"]),
+    createdAt: timestampSchema,
+    expiresAt: timestampSchema,
+    consumedAt: timestampSchema.optional(),
+    invalidatedAt: timestampSchema.optional(),
+    invalidationReason: z.string().optional()
+  })
+  .strict();
+
+export const grantExecutionPlanApprovalInputSchema = z
+  .object({
+    workItemId: identifierSchema,
+    planHash: hashSchema,
+    actionHash: hashSchema,
+    approvedByActorId: z.string().min(1).max(256),
+    reason: z.string().min(1).max(2_000).optional(),
+    expiresInMs: z
+      .number()
+      .int()
+      .positive()
+      .max(24 * 60 * 60 * 1_000)
+      .optional(),
+    now: z.date().optional()
+  })
+  .strict();
+
+export function executionPlanApprovalRequestHash(input: {
+  workItemId: string;
+  planHash: string;
+  actionHash: string;
+}): string {
+  return domainHash("acs:execution-plan-approval-request:v1", input);
+}
+
 export type ExecutionPlanStep = z.infer<typeof executionPlanStepSchema>;
 export type ExecutionPlanDefinition = z.infer<typeof executionPlanDefinitionSchema>;
 export type ExecutionPlanRecord = z.infer<typeof executionPlanRecordSchema>;
 export type ExecutionPlanAdmission = z.infer<typeof executionPlanAdmissionSchema>;
 export type CreateExecutionPlanInput = z.infer<typeof createExecutionPlanInputSchema>;
 export type AdmitExecutionPlanInput = z.infer<typeof admitExecutionPlanInputSchema>;
+export type ExecutionPlanApproval = z.infer<typeof executionPlanApprovalSchema>;
+export type GrantExecutionPlanApprovalInput = z.infer<typeof grantExecutionPlanApprovalInputSchema>;
 
 export function executionPlanHash(input: unknown): string {
   return domainHash("acs:execution-plan:v1", executionPlanDefinitionSchema.parse(input));
