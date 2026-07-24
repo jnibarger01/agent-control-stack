@@ -180,6 +180,27 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
     }
   }, 20_000);
 
+  it("caps aggregate output by exact bytes rather than buffering an oversized engine response unbounded", async () => {
+    const fixture = createFixture();
+    try {
+      writeScript(fixture.workspace, `process.stdout.write("x".repeat(64 * 1024));`);
+      const request = fixtureRequest(fixture.workspace, "output-cap", [{ host: "127.0.0.1", port: 1 }], {
+        limits: { ...defaultLimits(), outputBytes: 1_024 }
+      });
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts()
+      }).execute(request);
+
+      expect(result.observedSuccess).toBe(true);
+      expect(result.outputBytes).toBe(1_024);
+      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBeLessThanOrEqual(1_024);
+      expect(result.stdoutTruncated || result.stderrTruncated).toBe(true);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("kills the complete process tree, including the socat egress bridge, on timeout", async () => {
     const fixture = createFixture();
     try {
