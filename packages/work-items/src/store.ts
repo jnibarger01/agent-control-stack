@@ -41,6 +41,18 @@ import {
   validateHeartbeatTtl,
   type LivenessReconciliationOptions
 } from "./liveness.js";
+import {
+  admitExecutionPlanInputSchema,
+  createExecutionPlanInputSchema,
+  executionPlanAdmissionSchema,
+  executionPlanHash,
+  executionPlanRecordSchema,
+  executionPlanSubjectInputHash,
+  type AdmitExecutionPlanInput,
+  type CreateExecutionPlanInput,
+  type ExecutionPlanAdmission,
+  type ExecutionPlanRecord
+} from "./execution-plan.js";
 
 interface WorkItemRow {
   id: string;
@@ -99,6 +111,37 @@ interface ExecutionResultRow {
   simulation_metadata_json: string;
   payload_hash: string;
   created_at: string;
+}
+
+interface ExecutionPlanRow {
+  plan_id: string;
+  work_item_id: string;
+  plan_number: number;
+  schema_version: "acs.execution-plan.v1";
+  definition_json: string;
+  plan_hash: string;
+  subject_input_hash: string;
+  created_by_actor_id: string;
+  created_at: string;
+}
+
+interface ExecutionPlanHeadRow {
+  work_item_id: string;
+  current_plan_id: string;
+  current_plan_hash: string;
+  revision: number;
+  updated_at: string;
+}
+
+interface ExecutionPlanAdmissionRow {
+  admission_id: string;
+  work_item_id: string;
+  plan_id: string;
+  plan_hash: string;
+  policy_version: string;
+  policy_decision_hash: string;
+  admitted_by_actor_id: string;
+  admitted_at: string;
 }
 
 type PersistedResultInput = Omit<SubmitWorkResultInput, "outcome"> & { outcome: ResultOutcome };
@@ -512,6 +555,12 @@ export interface WorkItemStore {
   create(input: unknown): WorkItem;
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
+  createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord;
+  getExecutionPlan(planId: string): ExecutionPlanRecord | undefined;
+  getCurrentExecutionPlan(workItemId: string): ExecutionPlanRecord | undefined;
+  listExecutionPlans(workItemId: string): ExecutionPlanRecord[];
+  admitExecutionPlan(input: AdmitExecutionPlanInput, options: PrivilegedTransitionOptions): ExecutionPlanAdmission;
+  getExecutionPlanAdmission(admissionId: string): ExecutionPlanAdmission | undefined;
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
   health(): StoreHealth;
   verifyAuditChain(): AuditChainVerification;
@@ -646,6 +695,239 @@ export class SqliteWorkItemStore implements WorkItemStore {
           .all(filter.status) as unknown as WorkItemRow[])
       : (this.db.prepare(`SELECT * FROM work_items ORDER BY created_at DESC`).all() as unknown as WorkItemRow[]);
     return rows.map(rowToWorkItem);
+  }
+
+  createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord {
+    const parsed = createExecutionPlanInputSchema.parse(input);
+    const planHash = executionPlanHash(parsed.definition);
+    const now = (parsed.now ?? new Date()).toISOString();
+
+    return this.write(() => {
+      const workItem = this.getRequired(parsed.workItemId);
+      if (parsed.definition.workItemId !== workItem.id) {
+        throw new ControlStackError(
+          "execution_plan_work_item_mismatch",
+          "execution plan work item does not match the target work item"
+        );
+      }
+      const subjectInputHash = executionPlanSubjectInputHash(workItem);
+      if (
+        parsed.definition.subjectInputHash !== subjectInputHash ||
+        parsed.definition.subjectInputHash !== parsed.definition.subjectInputHash.toLowerCase()
+      ) {
+        throw new ControlStackError(
+          "execution_plan_input_mismatch",
+          "execution plan is not bound to the current work item inputs"
+        );
+      }
+
+      const current = this.db
+        .prepare(`SELECT * FROM execution_plan_heads WHERE work_item_id = ?`)
+        .get(workItem.id) as unknown as ExecutionPlanHeadRow | undefined;
+      if (current?.current_plan_hash === planHash) {
+        const existing = this.getExecutionPlan(current.current_plan_id);
+        if (!existing) {
+          throw new ControlStackError("execution_plan_state_invalid", "current execution plan cannot be resolved");
+        }
+        return { value: existing, events: [] };
+      }
+      if (current && parsed.expectedCurrentPlanHash !== current.current_plan_hash) {
+        throw new ControlStackError(
+          "execution_plan_conflict",
+          "current execution plan changed or an expected plan hash was not supplied"
+        );
+      }
+      if (!current && parsed.expectedCurrentPlanHash !== undefined) {
+        throw new ControlStackError(
+          "execution_plan_conflict",
+          "expected execution plan hash was supplied before an initial plan existed"
+        );
+      }
+      const activeAttempt = this.db
+        .prepare(
+          `SELECT attempt_id FROM execution_attempts
+           WHERE work_item_id = ?
+             AND status IN ('pending', 'leased', 'running', 'cancellation_requested', 'interrupted')
+           LIMIT 1`
+        )
+        .get(workItem.id) as { attempt_id: string } | undefined;
+      if (activeAttempt) {
+        throw new ControlStackError("execution_plan_in_use", "execution plan cannot change while an attempt is active");
+      }
+
+      const planNumber = (current?.revision ?? 0) + 1;
+      const planId = createId("plan");
+      this.db
+        .prepare(
+          `INSERT INTO execution_plans
+           (plan_id, work_item_id, plan_number, schema_version, definition_json, plan_hash,
+            subject_input_hash, created_by_actor_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          planId,
+          workItem.id,
+          planNumber,
+          parsed.definition.schemaVersion,
+          JSON.stringify(parsed.definition),
+          planHash,
+          subjectInputHash,
+          parsed.createdByActorId,
+          now
+        );
+
+      if (current) {
+        const changed = this.db
+          .prepare(
+            `UPDATE execution_plan_heads
+             SET current_plan_id = ?, current_plan_hash = ?, revision = ?, updated_at = ?
+             WHERE work_item_id = ? AND current_plan_hash = ? AND revision = ?`
+          )
+          .run(planId, planHash, planNumber, now, workItem.id, current.current_plan_hash, current.revision);
+        if (changed.changes !== 1) {
+          throw new ControlStackError("execution_plan_conflict", "current execution plan changed concurrently");
+        }
+      } else {
+        this.db
+          .prepare(
+            `INSERT INTO execution_plan_heads
+             (work_item_id, current_plan_id, current_plan_hash, revision, updated_at)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .run(workItem.id, planId, planHash, planNumber, now);
+      }
+
+      const record = executionPlanRecordSchema.parse({
+        planId,
+        workItemId: workItem.id,
+        planNumber,
+        definition: parsed.definition,
+        planHash,
+        subjectInputHash,
+        createdByActorId: parsed.createdByActorId,
+        createdAt: now
+      });
+      const event = this.appendAuditEvent(
+        createEvent(
+          "execution_plan.created",
+          {
+            planId,
+            workItemId: workItem.id,
+            planNumber,
+            planHash,
+            subjectInputHash,
+            replacedPlanHash: current?.current_plan_hash,
+            createdByActorId: parsed.createdByActorId
+          },
+          {
+            "work_item.id": workItem.id,
+            "plan.id": planId,
+            "plan.hash": planHash,
+            "plan.number": String(planNumber),
+            "actor.id": parsed.createdByActorId
+          }
+        )
+      );
+      return { value: record, events: [event] };
+    });
+  }
+
+  getExecutionPlan(planId: string): ExecutionPlanRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM execution_plans WHERE plan_id = ?`).get(planId) as unknown as
+      ExecutionPlanRow | undefined;
+    return row ? rowToExecutionPlan(row) : undefined;
+  }
+
+  getCurrentExecutionPlan(workItemId: string): ExecutionPlanRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT plans.*
+         FROM execution_plan_heads AS heads
+         JOIN execution_plans AS plans ON plans.plan_id = heads.current_plan_id
+         WHERE heads.work_item_id = ? AND plans.plan_hash = heads.current_plan_hash`
+      )
+      .get(workItemId) as unknown as ExecutionPlanRow | undefined;
+    return row ? rowToExecutionPlan(row) : undefined;
+  }
+
+  listExecutionPlans(workItemId: string): ExecutionPlanRecord[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM execution_plans WHERE work_item_id = ? ORDER BY plan_number ASC`)
+        .all(workItemId) as unknown as ExecutionPlanRow[]
+    ).map(rowToExecutionPlan);
+  }
+
+  admitExecutionPlan(input: AdmitExecutionPlanInput, options: PrivilegedTransitionOptions): ExecutionPlanAdmission {
+    requirePrivilegedTransition(options, "policy_gate");
+    if (options.via !== "policy_gate") {
+      throw new ControlStackError("policy_gate_required", "execution plan admission requires the policy gate");
+    }
+    const parsed = admitExecutionPlanInputSchema.parse(input);
+    return this.write(() => {
+      const current = this.getCurrentExecutionPlan(parsed.workItemId);
+      if (!current || current.planHash !== parsed.planHash) {
+        throw new ControlStackError("execution_plan_not_current", "only the current execution plan can be admitted");
+      }
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM execution_plan_admissions
+           WHERE plan_id = ? AND policy_version = ? AND policy_decision_hash = ?`
+        )
+        .get(current.planId, parsed.policyVersion, parsed.policyDecisionHash) as unknown as
+        ExecutionPlanAdmissionRow | undefined;
+      if (existing) {
+        return { value: rowToExecutionPlanAdmission(existing), events: [] };
+      }
+
+      const admissionId = createId("admission");
+      const admittedAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO execution_plan_admissions
+           (admission_id, work_item_id, plan_id, plan_hash, policy_version, policy_decision_hash,
+            admitted_by_actor_id, admitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          admissionId,
+          current.workItemId,
+          current.planId,
+          current.planHash,
+          parsed.policyVersion,
+          parsed.policyDecisionHash,
+          parsed.admittedByActorId,
+          admittedAt
+        );
+      const admission = executionPlanAdmissionSchema.parse({
+        admissionId,
+        workItemId: current.workItemId,
+        planId: current.planId,
+        planHash: current.planHash,
+        policyVersion: parsed.policyVersion,
+        policyDecisionHash: parsed.policyDecisionHash,
+        admittedByActorId: parsed.admittedByActorId,
+        admittedAt
+      });
+      const event = this.appendAuditEvent(
+        createEvent("execution_plan.admitted", admission, {
+          "work_item.id": current.workItemId,
+          "plan.id": current.planId,
+          "plan.hash": current.planHash,
+          "policy.version": parsed.policyVersion,
+          "policy.decision_hash": parsed.policyDecisionHash,
+          "actor.id": parsed.admittedByActorId
+        })
+      );
+      return { value: admission, events: [event] };
+    });
+  }
+
+  getExecutionPlanAdmission(admissionId: string): ExecutionPlanAdmission | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM execution_plan_admissions WHERE admission_id = ?`)
+      .get(admissionId) as unknown as ExecutionPlanAdmissionRow | undefined;
+    return row ? rowToExecutionPlanAdmission(row) : undefined;
   }
 
   readEvents(options: ReadEventsOptions = {}): StoredAuditEvent[] {
@@ -2369,6 +2651,32 @@ function rowToExecutionResult(row: ExecutionResultRow): StoredExecutionResult {
     payloadHash: row.payload_hash,
     createdAt: row.created_at
   };
+}
+
+function rowToExecutionPlan(row: ExecutionPlanRow): ExecutionPlanRecord {
+  return executionPlanRecordSchema.parse({
+    planId: row.plan_id,
+    workItemId: row.work_item_id,
+    planNumber: row.plan_number,
+    definition: JSON.parse(row.definition_json),
+    planHash: row.plan_hash,
+    subjectInputHash: row.subject_input_hash,
+    createdByActorId: row.created_by_actor_id,
+    createdAt: row.created_at
+  });
+}
+
+function rowToExecutionPlanAdmission(row: ExecutionPlanAdmissionRow): ExecutionPlanAdmission {
+  return executionPlanAdmissionSchema.parse({
+    admissionId: row.admission_id,
+    workItemId: row.work_item_id,
+    planId: row.plan_id,
+    planHash: row.plan_hash,
+    policyVersion: row.policy_version,
+    policyDecisionHash: row.policy_decision_hash,
+    admittedByActorId: row.admitted_by_actor_id,
+    admittedAt: row.admitted_at
+  });
 }
 
 function normalizeEventLimit(limit: number | undefined): number {
