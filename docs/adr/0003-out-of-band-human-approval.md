@@ -2,7 +2,10 @@
 
 ## Status
 
-Accepted
+Accepted, with a 2026-07-24 clarifying note: "capability" in Implementation Requirements below does not mean a bearer token — see [ADR 0004](0004-request-bound-approval-tokens.md), which was itself amended the same day to retire that requirement. The core decision here (approval must not be grantable through the same MCP/requester channel) is unchanged and is enforced today. Two things below are narrower in the current implementation than this ADR's original wording suggests, noted inline rather than rewritten:
+
+- "Acceptable approval channels" (below) lists local-only surfaces (CLI, localhost UI, tray app). The actual implementation permits approval from any authenticated gateway mutation actor calling `/work-items/:id/approve` over HTTP — which is not restricted to a local-only channel, only to a channel distinct from the MCP tool-call path. If approval is meant to be physically local, that constraint isn't enforced by anything today.
+- "Approval grant must produce a capability that is request-bound and one-time use" (Implementation Requirements): the capability is the stored approval record itself (bound to the policy-evaluated action hash, single-consumption via an atomic status transition), not a bearer token a human re-presents. See [approval-lifecycle.md](../protocol/approval-lifecycle.md) for the enforced mechanism.
 
 ## Context
 
