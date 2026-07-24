@@ -9,6 +9,7 @@
     { "path": "packages/machine-controller" },
     { "path": "packages/temporal-memory" },
     { "path": "packages/sandbox" },
+    { "path": "packages/workspace-manager" },
     { "path": "packages/eval-harness" },
     { "path": "packages/moa-orchestrator" },
     { "path": "apps/control-ui" },
