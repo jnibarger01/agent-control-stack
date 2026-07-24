@@ -73,6 +73,95 @@ describe("runIndependentVerification", () => {
       })
     ).rejects.toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "verifier_identity_mismatch" }));
   });
+
+  it("refuses a request with a duplicate criterion id before ever calling the verifier", async () => {
+    const verifier = fakeVerifier("claude-cli-verifier");
+    const duplicated = [...criteria(), { id: "c1", description: "again", expected: "exit code 0" }];
+
+    await expect(
+      runIndependentVerification({
+        implementerEngineId: "codex",
+        verifier,
+        criteria: duplicated,
+        evidence: evidence()
+      })
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "verifier_criteria_duplicate_request" })
+    );
+  });
+
+  it("refuses a result that silently drops a requested criterion", async () => {
+    const verifier = fakeVerifier("claude-cli-verifier", { criteriaResults: [] });
+
+    await expect(
+      runIndependentVerification({
+        implementerEngineId: "codex",
+        verifier,
+        criteria: criteria(),
+        evidence: evidence()
+      })
+    ).rejects.toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "verifier_criteria_missing" }));
+  });
+
+  it("refuses a result that judges an unrequested criterion", async () => {
+    const verifier = fakeVerifier("claude-cli-verifier", {
+      criteriaResults: [
+        { criterionId: "c1", satisfied: true, observed: "exit 0" },
+        { criterionId: "c-never-asked-about", satisfied: true, observed: "made up" }
+      ]
+    });
+
+    await expect(
+      runIndependentVerification({
+        implementerEngineId: "codex",
+        verifier,
+        criteria: criteria(),
+        evidence: evidence()
+      })
+    ).rejects.toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "verifier_criteria_unknown" }));
+  });
+
+  it("refuses a result that judges the same criterion twice", async () => {
+    const verifier = fakeVerifier("claude-cli-verifier", {
+      criteriaResults: [
+        { criterionId: "c1", satisfied: true, observed: "exit 0" },
+        { criterionId: "c1", satisfied: false, observed: "actually no" }
+      ]
+    });
+
+    await expect(
+      runIndependentVerification({
+        implementerEngineId: "codex",
+        verifier,
+        criteria: criteria(),
+        evidence: evidence()
+      })
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "verifier_criteria_duplicate_result" })
+    );
+  });
+
+  it("accepts a result that judges exactly the requested criteria, in any order", async () => {
+    const twoCriteria: VerificationCriterion[] = [
+      { id: "c1", description: "tests pass", expected: "exit code 0" },
+      { id: "c2", description: "lint passes", expected: "exit code 0" }
+    ];
+    const verifier = fakeVerifier("claude-cli-verifier", {
+      criteriaResults: [
+        { criterionId: "c2", satisfied: true, observed: "exit 0" },
+        { criterionId: "c1", satisfied: true, observed: "exit 0" }
+      ]
+    });
+
+    const result = await runIndependentVerification({
+      implementerEngineId: "codex",
+      verifier,
+      criteria: twoCriteria,
+      evidence: evidence()
+    });
+
+    expect(result.criteriaResults).toHaveLength(2);
+  });
 });
 
 describe("workItemOutcomeForVerdict", () => {
