@@ -10,6 +10,20 @@ import { ModelProviderError } from "./model-provider.js";
 
 const DEFAULT_MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
 
+// Mirrors packages/machine-controller/src/command.ts's subprocessEnvAllowlist:
+// deny-by-default rather than redact-after-the-fact. ANTHROPIC_API_KEY is added
+// because headless `claude` CLI auth needs it when no interactive session exists.
+export const claudeCliEnvAllowlist = ["HOME", "PATH", "SHELL", "TMPDIR", "USER", "ANTHROPIC_API_KEY"] as const;
+
+export function claudeCliSubprocessEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const name of claudeCliEnvAllowlist) {
+    const value = source[name];
+    if (value !== undefined) env[name] = value;
+  }
+  return env;
+}
+
 interface ClaudeCliProviderOptions {
   binary?: string;
   cwd: string;
@@ -126,7 +140,7 @@ export class ClaudeCliProvider implements ModelProvider {
     return new Promise((resolve, reject) => {
       const child = spawn(this.binary, buildClaudeCliArgs(request), {
         cwd: this.cwd,
-        env: process.env,
+        env: claudeCliSubprocessEnv(),
         stdio: ["pipe", "pipe", "pipe"]
       });
 

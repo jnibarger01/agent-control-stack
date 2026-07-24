@@ -1,452 +1,229 @@
 # Protocol Specification: MCP Tools
 
+## Status
+
+**Rewritten 2026-07-23.** The previous version of this document described a single unified tool surface (`fs_write`, `fs_patch`, `fs_move`, `service_status`, `service_restart`, `work_create`, `work_claim`, `work_submit_result`, `approval_list`, and an `approval_token` field on mutating requests) that was never implemented. No ADR, planning doc, or code reference points to any of those tools as near-term work — grepping `apps` and `packages` for their names returns nothing. This revision documents the two tool surfaces that actually exist, matching `apps/mcp/src/server.ts` and `apps/gateway/src/mcp.ts` as of this date. See [ADR 0004](../adr/0004-request-bound-approval-tokens.md) and [approval-lifecycle.md](approval-lifecycle.md) for why approval no longer involves a token at all, in either surface.
+
 ## Purpose
 
-This document defines the ChatGPT-facing MCP tool contract for `agent-control-stack`.
+This document defines the MCP tool contracts exposed by `agent-control-stack`.
 
 The protocol is intentionally narrow. A broad generic shell tool is not a feature; it is a way to turn documentation into an apology letter.
 
-## Naming convention
+## Two tool surfaces
 
-Tool names use snake_case for compatibility with function-style clients.
+There is no single tool catalog. Two independent MCP servers exist, with different transports, different tool names, and different backing state:
 
-Conceptual dotted names may appear in design docs, but protocol names must use snake_case.
+| | Local stdio MCP | Gateway MCP |
+|---|---|---|
+| Entry point | `apps/mcp/src/server.ts` (`McpStdioServer`) | `apps/gateway/src/mcp.ts` (`handleMcpHttpRequest`) |
+| Backed by | `MachineController` (`packages/machine-controller`) | work-item tools (`packages/policy-gate/src/tools.ts`, `packages/work-items`) |
+| Transport | stdio, `Content-Length`-framed JSON-RPC | HTTP JSON-RPC (`apps/gateway`), per [ADR 0007](../adr/0007-chatgpt-https-mcp-transport.md) |
+| Tool naming | dotted (`system.status`, `fs.read`, ...) | snake_case (`create_work_item`, `approve_work_item`, ...) |
+| What it does | Reads the local machine directly (files, command previews, one read-only command execution) | Creates and manages governed work items that a separate worker later claims and executes |
+| Auth | none (local process, trusted caller) | `authorizeMcpRequest` — bearer/OAuth scopes, per `apps/gateway/src/auth.ts` |
 
-Examples:
-
-| Conceptual name | Protocol name |
-|---|---|
-| `system.status` | `system_status` |
-| `fs.list` | `fs_list` |
-| `cmd.preview` | `cmd_preview` |
-| `work.create` | `work_create` |
+There is no naming convention that unifies the two — the local server's tool names are the literal `MachineController.callTool` dispatch keys (dots), and the gateway's are the literal `createWorkItemTools` keys (underscores). Do not assume one implies the other.
 
 ## Common envelope
 
-Every response uses this shape:
+Both surfaces speak plain JSON-RPC 2.0. There is no `{ok, data, error, audit_event_id}` envelope anywhere in the implementation — that shape does not exist in this codebase.
+
+Success (`tools/call`):
 
 ```json
 {
-  "ok": true,
-  "data": {},
-  "error": null,
-  "audit_event_id": "evt_..."
-}
-```
-
-Failure shape:
-
-```json
-{
-  "ok": false,
-  "data": null,
-  "error": {
-    "code": "policy_denied",
-    "message": "Path is outside configured allow roots.",
-    "details": {}
-  },
-  "audit_event_id": "evt_..."
-}
-```
-
-## Error codes
-
-| Code | Meaning |
-|---|---|
-| `invalid_request` | Request failed schema validation. |
-| `unauthenticated` | Connector identity/authentication missing or invalid. |
-| `policy_denied` | Policy rejected the action. |
-| `approval_required` | Request needs out-of-band approval before execution. |
-| `approval_invalid` | Approval token missing, expired, consumed, or mismatched. |
-| `path_denied` | Path failed allow/deny/realpath checks. |
-| `command_denied` | Command or arguments are forbidden. |
-| `execution_failed` | Tool ran but failed. |
-| `timeout` | Execution exceeded limit. |
-| `output_truncated` | Output exceeded response cap. |
-| `audit_failed` | Required audit event could not be written. |
-| `internal_error` | Unexpected server-side failure. |
-
-## Risk levels
-
-| Risk | Meaning |
-|---|---|
-| `read_only` | Inspects state without expected mutation. |
-| `sensitive_read` | Reads potentially sensitive data and may require approval. |
-| `safe_mutation` | Low-risk mutation, still approval-gated by default for MVP. |
-| `requires_approval` | Mutating or potentially dangerous action. |
-| `destructive` | High-impact operation; approval may not be sufficient depending on policy. |
-| `forbidden` | Categorically denied. |
-
-## Tools
-
-## `system_status`
-
-Returns local control plane and host health.
-
-### Request
-
-```json
-{}
-```
-
-### Response data
-
-```json
-{
-  "server_version": "0.1.0",
-  "mode": "local_stdio|https_connector",
-  "hostname": "machine",
-  "platform": "linux",
-  "uptime_seconds": 1234,
-  "memory": {
-    "total_bytes": 0,
-    "free_bytes": 0
-  },
-  "policy_version": "2026-07-05",
-  "audit_head": "sha256:..."
-}
-```
-
-## `fs_list`
-
-Lists entries under an allowed directory.
-
-### Request
-
-```json
-{
-  "path": "/home/user/project",
-  "max_depth": 2,
-  "include_hidden": false
-}
-```
-
-### Policy
-
-- Must resolve under an allowed root.
-- Denylist overrides allowlist.
-- Symlink escapes are denied.
-
-## `fs_read`
-
-Reads a text file with line-numbered output.
-
-### Request
-
-```json
-{
-  "path": "/home/user/project/package.json",
-  "start_line": 1,
-  "end_line": 200
-}
-```
-
-### Policy
-
-- Must resolve under an allowed root.
-- Restricted file patterns are denied or approval-gated.
-- Binary files are denied by default.
-- Output is redacted before response and audit persistence.
-
-## `fs_stat`
-
-Returns metadata for a path.
-
-### Request
-
-```json
-{
-  "path": "/home/user/project"
-}
-```
-
-## `fs_search_name`
-
-Searches filenames under an allowed root.
-
-### Request
-
-```json
-{
-  "root": "/home/user/project",
-  "query": "package",
-  "max_results": 50,
-  "max_depth": 5
-}
-```
-
-## `cmd_preview`
-
-Classifies a command without execution.
-
-### Request
-
-```json
-{
-  "cwd": "/home/user/project",
-  "command": "npm",
-  "args": ["test"]
-}
-```
-
-### Response data
-
-```json
-{
-  "normalized": {
-    "cwd": "/home/user/project",
-    "command": "npm",
-    "args": ["test"]
-  },
-  "risk": "read_only",
-  "decision": "allow_readonly",
-  "reasons": ["known_readonly_subcommand"],
-  "requires_approval": false
-}
-```
-
-## `cmd_run`
-
-Runs a command only when policy allows it or a valid approval exists.
-
-### Request
-
-```json
-{
-  "cwd": "/home/user/project",
-  "command": "npm",
-  "args": ["test"],
-  "approval_token": null,
-  "timeout_ms": 120000
-}
-```
-
-### Policy
-
-- `cwd` must be allowed.
-- Command is classified before execution.
-- Shell execution is denied by default.
-- Environment is allowlisted.
-- Timeout and output caps are enforced.
-- Mutating or dangerous commands require approval.
-
-## `fs_write`
-
-Writes or overwrites a file.
-
-### Request
-
-```json
-{
-  "path": "/home/user/project/file.txt",
-  "content": "new content",
-  "approval_token": "token_once_..."
-}
-```
-
-### Policy
-
-- Always approval-gated in MVP.
-- Path must be allowed.
-- Restricted paths denied.
-- Existing file backup required before overwrite.
-
-## `fs_patch`
-
-Applies a structured patch.
-
-### Request
-
-```json
-{
-  "path": "/home/user/project/file.txt",
-  "edits": [
-    {
-      "find": "old text",
-      "replace": "new text"
-    }
-  ],
-  "approval_token": "token_once_..."
-}
-```
-
-### Policy
-
-- Always approval-gated in MVP.
-- Fails if match is missing or ambiguous unless caller opts into explicit multiple replacement.
-- Path must be allowed.
-
-## `fs_move`
-
-Moves or renames a file.
-
-### Request
-
-```json
-{
-  "from": "/home/user/project/a.txt",
-  "to": "/home/user/project/b.txt",
-  "overwrite": false,
-  "approval_token": "token_once_..."
-}
-```
-
-## `service_status`
-
-Returns status for an allowlisted local service.
-
-### Request
-
-```json
-{
-  "service": "agent-control-gateway"
-}
-```
-
-## `service_restart`
-
-Restarts an allowlisted local service.
-
-### Request
-
-```json
-{
-  "service": "agent-control-gateway",
-  "approval_token": "token_once_..."
-}
-```
-
-### Policy
-
-- Service must be allowlisted.
-- Restart is approval-gated.
-- Result is audited.
-
-## `work_create`
-
-Creates a work item for later worker execution.
-
-### Request
-
-```json
-{
-  "title": "Run test suite",
-  "description": "Run npm test in the project root.",
-  "action": {
-    "kind": "command",
-    "cwd": "/home/user/project",
-    "command": "npm",
-    "args": ["test"]
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "content": [{ "type": "text", "text": "<tool.name> completed." }],
+    "structuredContent": { }
   }
 }
 ```
 
-### Response data
+`structuredContent` is the tool's actual return value (or `{ "result": <value> }` if the return value isn't a plain object).
+
+Failure is a JSON-RPC error, not a result with `ok: false`:
 
 ```json
 {
-  "work_item_id": "wrk_...",
-  "policy_decision": "allow_readonly|require_approval|deny",
-  "approval_request_id": "apr_..."
-}
-```
-
-## `work_claim`
-
-Allows a worker to claim approved work.
-
-### Request
-
-```json
-{
-  "worker_id": "worker_local_1",
-  "capabilities": ["command", "filesystem"]
-}
-```
-
-### Response data
-
-```json
-{
-  "work_item_id": "wrk_...",
-  "lease_token": "lease_once_...",
-  "lease_expires_at": "2026-07-05T18:00:00Z"
-}
-```
-
-## `work_submit_result`
-
-Submits a worker result.
-
-### Request
-
-```json
-{
-  "work_item_id": "wrk_...",
-  "worker_id": "worker_local_1",
-  "lease_token": "lease_once_...",
-  "status": "succeeded|failed|cancelled",
-  "summary": "Tests passed.",
-  "artifacts": []
-}
-```
-
-### Policy
-
-- `worker_id` and `lease_token` are required.
-- Lease must match the active claim.
-- Expired leases are rejected.
-- Result submission is audited.
-
-## `approval_list`
-
-Lists pending approval requests visible to the MCP client.
-
-### Request
-
-```json
-{
-  "status": "pending",
-  "limit": 20
-}
-```
-
-### Important
-
-This tool never grants approval and never returns raw approval tokens.
-
-## Approval-required response
-
-When a tool requires approval and no valid token is present, return:
-
-```json
-{
-  "ok": false,
-  "data": {
-    "approval_request_id": "apr_...",
-    "request_hash": "sha256:...",
-    "risk": "requires_approval",
-    "reason": "file_write",
-    "expires_at": "2026-07-05T18:00:00Z",
-    "human_instruction": "Approve locally using the control UI or CLI."
-  },
+  "jsonrpc": "2.0",
+  "id": 1,
   "error": {
-    "code": "approval_required",
-    "message": "This action requires out-of-band human approval.",
-    "details": {}
-  },
-  "audit_event_id": "evt_..."
+    "code": -32000,
+    "message": "path is outside allowed roots: /etc/passwd"
+  }
 }
 ```
 
-## Audit requirements
+`code` is `-32602` for a Zod schema validation failure, `-32000` for a thrown `ControlStackError`, `-32601` for an unsupported JSON-RPC method, `-32603` for anything else. The gateway additionally uses `-32001` (actor not registered), `-32002` (MCP identity attempted `approve_work_item`), and returns a matching HTTP status per error alongside the JSON-RPC body. `message` is the `ControlStackError`'s own message text — by convention some throw sites lead with the machine-readable code (`"approval_action_hash_required: actionHash is required"`), others just describe the failure (`"path is outside allowed roots: ..."`); the machine-readable `code` itself is a property on the server-side exception object, not a separate field in the JSON-RPC response.
 
-Every tool call produces at least one audit event.
+## Error codes
 
-Mutating tools produce:
+Error codes are `ControlStackError.code` values, not a fixed enum owned by this doc — the canonical list lives in the source and will drift out of sync with anything duplicated here. Identify which one occurred from the `message` text in the JSON-RPC error. The ones a caller of the tools below can actually hit:
 
-1. Intent event before execution.
-2. Approval check event, if applicable.
-3. Result event after execution.
+| Code | Surface | Meaning |
+|---|---|---|
+| `path_outside_allowlist` | local fs.* | Resolved path is outside `paths.allow`. |
+| `path_denied` | local fs.* | Resolved path matches `paths.deny`. |
+| `path_restricted` | local fs.* | Path looks credential-like (`.env`, `id_rsa`, `.ssh/`, `.aws/credentials`, etc.) and wasn't explicitly allowed. |
+| `fs_not_file` | local fs.read | Target is not a regular file. |
+| `fs_too_large` | local fs.read | File exceeds `security.max_output_bytes`. |
+| `fs_binary_refused` | local fs.read | File looks binary; refused rather than dumped. |
+| `command_refused` | local cmd.run | Command did not classify as `read_only` (see below — `cmd.run` never executes anything else). |
+| `direct_agent_disabled` | local test.agent.run | Tool is disabled unless the host explicitly opts in; disabled by default. |
+| `work_item_not_found` | gateway | No work item with the given `id`. |
+| `approval_action_hash_required` | gateway approve_work_item | Caller omitted `actionHash`. |
+| `approval_action_mismatch` | gateway approve_work_item | `actionHash` doesn't match a currently-evaluated action on the work item. |
+| `approval_not_required` | gateway approve_work_item | `actionHash` matches an action that policy didn't flag as `require_approval`. |
+| `invalid_work_item_transition` | gateway | Requested transition isn't legal from the item's current status. |
+| `direct_agent_not_configured` | gateway test.agent.run | Gateway wasn't wired with a direct-agent controller. |
 
-If intent cannot be audited, mutation must not execute.
+## Risk levels
+
+Both surfaces share the same risk vocabulary (`riskLevelSchema` in `packages/machine-controller/src/command.ts`, `PolicyRiskLevel` in `packages/policy-gate/src/rules.ts`):
+
+| Risk | Meaning |
+|---|---|
+| `read_only` | Inspects state without mutation. |
+| `safe_mutation` | Low-risk mutation. Currently only ever produced by the policy gate's agent-prompt-dispatch rule (`packages/policy-gate/src/rules.ts`) — no local `cmd.*` classification path returns it today. |
+| `requires_approval` | Mutating action; a gateway work item classified this way moves to `needs_approval` until `approve_work_item` is called with a matching action hash. |
+| `destructive` | High-impact operation (`rm`, `dd`, `mkfs`, `--force`, ...). |
+| `forbidden` | Categorically denied — includes anything with shell metacharacters, a `/` in the command name, or on the deny list. |
+
+## Local stdio MCP tools
+
+Backed by `MachineController`. All paths are resolved and validated by `resolveSafePath` (`packages/machine-controller/src/path.ts`) before any read.
+
+### `system.status`
+
+Returns host OS/process info. No input required.
+
+```json
+{ "os": { "platform": "linux", "release": "...", "cpus": 8 },
+  "uptimeSeconds": 1234,
+  "memory": { "totalBytes": 0, "freeBytes": 0 },
+  "loadAverage": [0, 0, 0],
+  "server": { "name": "personal-machine-controller", "version": "0.1.0", "transport": "stdio" } }
+```
+
+### `fs.list`
+
+```json
+{ "path": "/home/user/project", "max_depth": 1 }
+```
+
+`max_depth` is 0–5, default 1. Returns `{ path, entries: [{ name, path, kind, size, modifiedAt }] }`.
+
+### `fs.stat`
+
+```json
+{ "path": "/home/user/project" }
+```
+
+Returns a single `{ name, path, kind, size, modifiedAt }`.
+
+### `fs.read`
+
+```json
+{ "path": "/home/user/project/package.json", "start_line": 1, "end_line": 200 }
+```
+
+Text files only (binary refused). Output is line-numbered and redacted line-by-line — env-style secret assignments, `Bearer` tokens, GitHub/OpenAI-shaped tokens, credential URLs, and PEM private-key blocks are replaced with `[redacted]` before the response is built (not just before audit persistence).
+
+### `fs.search_name`
+
+```json
+{ "path": "/home/user/project", "query": "package", "max_depth": 3, "limit": 50 }
+```
+
+Filename substring search (case-insensitive), depth 0–8, limit up to 200.
+
+### `cmd.preview`
+
+Classifies a command without executing it.
+
+```json
+{ "cwd": "/home/user/project", "command": "npm", "args": ["test"] }
+```
+
+Returns `{ cwd, command, args, risk, reason }`. `risk` is one of the levels above.
+
+### `cmd.run`
+
+```json
+{ "cwd": "/home/user/project", "command": "npm", "args": ["test"] }
+```
+
+**Important divergence from the old spec:** this tool has no approval path and no `approval_token` field. It classifies the command exactly as `cmd.preview` does and throws `command_refused` for anything that doesn't classify as `read_only`. There is currently no MCP tool, local or gateway, that executes a mutating shell command directly — mutating work only happens through the gateway's work-item/worker-claim flow, which is a separate execution path entirely (see [approval-lifecycle.md](approval-lifecycle.md)). Environment is allowlisted to `HOME, PATH, SHELL, TMPDIR, USER`; timeout and output caps are enforced (`security.command_timeout_ms`, `security.max_output_bytes`); stdout/stderr are redacted the same way `fs.read` output is.
+
+### `test.agent.run`
+
+Runs one direct agent invocation (`pi`, `openclaw`, `codex`, `claude`, `gemini`, `opencode`) from a clean prompt. **Disabled by default** — the host process must pass `enableTestAgentRunForLocalDevelopment: true` to `MachineController`, otherwise every call throws `direct_agent_disabled`. Not part of the documented-as-stable surface; treat as a local dev escape hatch.
+
+## Gateway MCP tools
+
+Backed by `createWorkItemTools` (`packages/policy-gate/src/tools.ts`) over a `WorkItemStore`. These tools create and manage work items; they do not execute anything themselves. Execution happens later, out of band, when a worker calls `claim_next_approved_work_item` and `submit_work_result` — those two are **not** exposed as MCP tools (neither locally nor remotely); they're internal harness/worker calls, reached through the gateway's own HTTP endpoints, not `tools/call`.
+
+Remote (HTTP/OAuth) callers get `remoteMcpToolNames`: everything below except `approve_work_item`. Calling `approve_work_item` over MCP — local or remote — is unconditionally rejected with JSON-RPC error `-32002` ("MCP identities cannot grant approval"); approval must go through an authenticated gateway mutation actor via `/work-items/:id/approve`, per [ADR 0004](../adr/0004-request-bound-approval-tokens.md).
+
+### `create_work_item`
+
+```json
+{
+  "title": "Run test suite",
+  "requester": "user",
+  "intent": "Run npm test in the project root.",
+  "target": { "cwd": "/home/user/project" },
+  "requestedActions": [{ "kind": "command", "description": "npm test", "params": {} }],
+  "risk": "medium"
+}
+```
+
+Over MCP, `requester`/`requesterSubject` are overwritten server-side to `"agent"` / the authenticated actor — caller-supplied identity is not trusted. Runs policy evaluation immediately; the returned `WorkItem.status` reflects the outcome (`pending_policy`, `needs_approval`, `approved`, or `blocked`).
+
+### `get_work_item`
+
+```json
+{ "id": "wrk_..." }
+```
+
+### `list_work_items`
+
+```json
+{ "status": "needs_approval" }
+```
+
+`status` is optional; omit to list all.
+
+### `approve_work_item` (not reachable over remote MCP)
+
+```json
+{ "id": "wrk_...", "actionHash": "sha256:...", "reason": "looks safe" }
+```
+
+No `approval_token`. `actionHash` must exactly match a currently-required action on the work item (`approval_action_mismatch` / `approval_not_required` otherwise). See [approval-lifecycle.md](approval-lifecycle.md) for the full grant/consume lifecycle.
+
+### `unblock_work_item`
+
+```json
+{ "id": "wrk_..." }
+```
+
+Moves a `blocked` item back to `pending_policy` for re-evaluation.
+
+### `reject_work_item` / `cancel_work_item`
+
+```json
+{ "id": "wrk_...", "reason": "no longer needed" }
+```
+
+Two distinct terminal states (`rejected` vs `cancelled`).
+
+## Audit
+
+There is no separate `audit_event_id` returned per call. Auditing is a side effect, not part of the response envelope, and differs by surface:
+
+- **Local stdio MCP:** every `MachineController.callTool` invocation appends one JSONL line to `audit.log_path` (default `.acs/audit/mcp.jsonl`) with `{ timestamp, tool, args, cwd, risk, approvalStatus, ok, durationMs, exitCode, resultSummary | error }`. `args` is redacted the same way file/command output is before being written.
+- **Gateway MCP:** authenticated tool calls are reported via the `auditAuthenticatedRequest` callback (`AuthenticatedMcpRequestAudit`: `requestId, method, toolName, workItemId, resolvedActor, auth`), and work-item state changes are additionally recorded as policy/approval/transition events inside `WorkItemStore` (`policy.decided`, `approval.granted`, `approval.consumed`, etc.) — see [approval-lifecycle.md](approval-lifecycle.md).

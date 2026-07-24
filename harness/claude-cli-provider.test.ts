@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
-import { buildClaudeCliArgs, parseClaudeCliResult } from "./claude-cli-provider.js";
+import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, describe, expect, it } from "vitest";
+import { ClaudeCliProvider, buildClaudeCliArgs, claudeCliSubprocessEnv, parseClaudeCliResult } from "./claude-cli-provider.js";
 import { ModelProviderError, type CompletionRequest } from "./model-provider.js";
 
 const request: CompletionRequest = {
@@ -10,6 +13,86 @@ const request: CompletionRequest = {
   timeoutMs: 30_000,
   jsonSchema: { type: "object" }
 };
+
+describe("claudeCliSubprocessEnv", () => {
+  it("passes through only the allowlisted keys, dropping everything else including secrets", () => {
+    const source = {
+      HOME: "/home/tester",
+      PATH: "/usr/bin",
+      SHELL: "/bin/bash",
+      TMPDIR: "/tmp",
+      USER: "tester",
+      ANTHROPIC_API_KEY: "sk-test-key",
+      AWS_SECRET_ACCESS_KEY: "leaked-secret",
+      GITHUB_TOKEN: "leaked-token",
+      DATABASE_URL: "postgres://leaked"
+    };
+    const filtered = claudeCliSubprocessEnv(source);
+    expect(filtered).toEqual({
+      HOME: "/home/tester",
+      PATH: "/usr/bin",
+      SHELL: "/bin/bash",
+      TMPDIR: "/tmp",
+      USER: "tester",
+      ANTHROPIC_API_KEY: "sk-test-key"
+    });
+    expect(filtered).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
+    expect(filtered).not.toHaveProperty("GITHUB_TOKEN");
+    expect(filtered).not.toHaveProperty("DATABASE_URL");
+  });
+
+  it("omits allowlisted keys that are unset rather than passing undefined", () => {
+    const filtered = claudeCliSubprocessEnv({ HOME: "/home/tester" });
+    expect(filtered).toEqual({ HOME: "/home/tester" });
+    expect(Object.keys(filtered)).not.toContain("ANTHROPIC_API_KEY");
+  });
+});
+
+describe("ClaudeCliProvider spawn env", () => {
+  let scriptDir: string | undefined;
+
+  afterEach(() => {
+    if (scriptDir) rmSync(scriptDir, { recursive: true, force: true });
+    scriptDir = undefined;
+  });
+
+  it("never exposes a planted secret env var to the spawned claude process", async () => {
+    scriptDir = mkdtempSync(join(tmpdir(), "claude-cli-env-test-"));
+    const scriptPath = join(scriptDir, "fake-claude.mjs");
+    writeFileSync(
+      scriptPath,
+      [
+        "#!/usr/bin/env node",
+        "const result = {",
+        "  type: 'result', subtype: 'success', is_error: false,",
+        "  result: JSON.stringify(process.env),",
+        "  stop_reason: 'end_turn', duration_ms: 1, total_cost_usd: 0,",
+        "  usage: { input_tokens: 1, output_tokens: 1 }",
+        "};",
+        "process.stdout.write(JSON.stringify(result));"
+      ].join("\n"),
+      "utf8"
+    );
+    chmodSync(scriptPath, 0o755);
+
+    const plantedEnv = { ...process.env, TOTALLY_FAKE_SECRET: "should-never-reach-child" };
+    const originalEnv = process.env;
+    process.env = plantedEnv as NodeJS.ProcessEnv;
+    try {
+      const providerWithScript = new ClaudeCliProvider({ binary: scriptPath, cwd: scriptDir });
+      const result = await providerWithScript.complete(request);
+      const childEnv = JSON.parse(result.text) as Record<string, string>;
+      expect(childEnv.TOTALLY_FAKE_SECRET).toBeUndefined();
+      expect(Object.keys(childEnv).sort()).toEqual(
+        [...new Set(Object.keys(childEnv))].filter((key) =>
+          (["HOME", "PATH", "SHELL", "TMPDIR", "USER", "ANTHROPIC_API_KEY"] as string[]).includes(key)
+        ).sort()
+      );
+    } finally {
+      process.env = originalEnv;
+    }
+  });
+});
 
 describe("ClaudeCliProvider", () => {
   it("builds a tool-less, non-persistent, budget-capped invocation", () => {
