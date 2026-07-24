@@ -27,7 +27,8 @@ const migrationFiles = [
   { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" },
   { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" },
   { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
-  { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" }
+  { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" },
+  { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -56,36 +57,36 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   if (!hasColumn(db, "schema_migrations", "checksum")) {
     db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
   }
-  const applied = new Map(
-    (
-      db.prepare(`SELECT version, name, filename, checksum FROM schema_migrations`).all() as Array<{
-        version: number;
-        name: string;
-        filename: string;
-        checksum: string;
-      }>
-    ).map((row) => [row.version, row])
-  );
-
   for (const migration of controlPlaneMigrations()) {
-    const existing = applied.get(migration.version);
-    if (existing) {
-      if (existing.name !== migration.name || existing.filename !== migration.filename) {
-        throw new Error(`migration metadata mismatch for version ${migration.version}`);
-      }
-      if (existing.checksum && existing.checksum !== migration.checksum) {
-        throw new Error(`migration checksum mismatch for version ${migration.version}`);
-      }
-      if (!existing.checksum) {
-        db.prepare(`UPDATE schema_migrations SET checksum = ? WHERE version = ?`).run(
-          migration.checksum,
-          migration.version
-        );
-      }
-      continue;
-    }
+    // The "already applied?" question is answered fresh inside this
+    // migration's own transaction, after BEGIN IMMEDIATE's write lock is
+    // actually held - not from a snapshot taken before the loop started.
+    // Two processes racing a fresh database both reach this point believing
+    // a migration is unapplied; only one gets the lock first, and the
+    // other must re-check rather than blindly re-INSERT once it wakes up,
+    // or it hits a UNIQUE violation on schema_migrations.version and the
+    // whole startup crashes instead of just no-op'ing past what its rival
+    // already committed.
     db.exec("BEGIN IMMEDIATE");
     try {
+      const existing = queryMigrationRow(db, migration.version);
+      if (existing) {
+        if (existing.name !== migration.name || existing.filename !== migration.filename) {
+          throw new Error(`migration metadata mismatch for version ${migration.version}`);
+        }
+        if (existing.checksum && existing.checksum !== migration.checksum) {
+          throw new Error(`migration checksum mismatch for version ${migration.version}`);
+        }
+        if (!existing.checksum) {
+          db.prepare(`UPDATE schema_migrations SET checksum = ? WHERE version = ?`).run(
+            migration.checksum,
+            migration.version
+          );
+        }
+        db.exec("COMMIT");
+        continue;
+      }
+
       db.exec(migrationSqlForCurrentSchema(db, migration));
       db.prepare(
         `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
@@ -222,4 +223,13 @@ function queryRows(db: SqliteLike, sql: string): string[] {
 function hasColumn(db: SqliteLike, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   return rows.some((row) => row.name === column);
+}
+
+function queryMigrationRow(
+  db: SqliteLike,
+  version: number
+): { version: number; name: string; filename: string; checksum: string } | undefined {
+  return db
+    .prepare(`SELECT version, name, filename, checksum FROM schema_migrations WHERE version = ?`)
+    .get(version) as { version: number; name: string; filename: string; checksum: string } | undefined;
 }
