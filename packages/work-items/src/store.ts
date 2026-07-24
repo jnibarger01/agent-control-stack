@@ -664,6 +664,8 @@ export interface WorkItemStore {
     options: PrivilegedTransitionOptions
   ): WorkspaceAllocation;
   getWorkspaceAllocation(allocationId: string): WorkspaceAllocation | undefined;
+  getActiveWorkspaceAllocationForWorkItem(workItemId: string): WorkspaceAllocation | undefined;
+  closeWorkspaceAllocation(allocationId: string, options: PrivilegedTransitionOptions): WorkspaceAllocation;
   getCommandAuthority(input: {
     workItemId: string;
     attemptId: string;
@@ -1315,6 +1317,16 @@ export class SqliteWorkItemStore implements WorkItemStore {
         return { value: rowToWorkspaceAllocation(existing), events: [] };
       }
 
+      const activeForWorkItem = this.db
+        .prepare(`SELECT allocation_id FROM workspace_allocations WHERE work_item_id = ? AND status = 'active'`)
+        .get(parsed.workItemId) as { allocation_id: string } | undefined;
+      if (activeForWorkItem) {
+        throw new ControlStackError(
+          "workspace_allocation_conflict",
+          `work item ${parsed.workItemId} already has an active allocation (${activeForWorkItem.allocation_id})`
+        );
+      }
+
       const now = (parsed.now ?? new Date()).toISOString();
       this.db
         .prepare(
@@ -1347,6 +1359,48 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(`SELECT * FROM workspace_allocations WHERE allocation_id = ?`)
       .get(allocationId) as unknown as WorkspaceAllocationRow | undefined;
     return row ? rowToWorkspaceAllocation(row) : undefined;
+  }
+
+  getActiveWorkspaceAllocationForWorkItem(workItemId: string): WorkspaceAllocation | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM workspace_allocations WHERE work_item_id = ? AND status = 'active'`)
+      .get(workItemId) as unknown as WorkspaceAllocationRow | undefined;
+    return row ? rowToWorkspaceAllocation(row) : undefined;
+  }
+
+  closeWorkspaceAllocation(allocationId: string, options: PrivilegedTransitionOptions): WorkspaceAllocation {
+    requirePrivilegedTransition(options, "close_workspace_allocation");
+    return this.write(() => {
+      const existing = this.db
+        .prepare(`SELECT * FROM workspace_allocations WHERE allocation_id = ?`)
+        .get(allocationId) as unknown as WorkspaceAllocationRow | undefined;
+      if (!existing) {
+        throw new ControlStackError("workspace_allocation_not_found", "no such workspace allocation");
+      }
+      if (existing.status === "torn_down") {
+        return { value: rowToWorkspaceAllocation(existing), events: [] };
+      }
+
+      const now = new Date().toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE workspace_allocations SET status = 'torn_down', torn_down_at = ?
+           WHERE allocation_id = ? AND status = 'active'`
+        )
+        .run(now, allocationId);
+      if (updated.changes !== 1) {
+        throw new ControlStackError("workspace_allocation_conflict", "allocation changed concurrently while closing");
+      }
+
+      const allocation = rowToWorkspaceAllocation({ ...existing, status: "torn_down", torn_down_at: now });
+      const event = this.appendAuditEvent(
+        createEvent("workspace_allocation.torn_down", allocation, {
+          "work_item.id": existing.work_item_id,
+          "workspace.allocation_id": allocationId
+        })
+      );
+      return { value: allocation, events: [event] };
+    });
   }
 
   getCommandAuthority(input: {
