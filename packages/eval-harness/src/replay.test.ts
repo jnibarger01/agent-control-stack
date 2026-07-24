@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuditEvent } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore, WorkItemEvent, type WorkItem, type WorkItemStatus } from "@agent-control-stack/work-items";
+import {
+  SqliteWorkItemStore,
+  WorkItemEvent,
+  type WorkItem,
+  type WorkItemStatus
+} from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { findUnapprovedExecution, replay } from "./index.js";
 
@@ -132,9 +137,9 @@ describe("deterministic replay", () => {
     const approved = lifecycleEvent(WorkItemEvent.Approved, "approved");
     approved.body.title = "Rewritten title";
 
-    expect(() =>
-      replay([lifecycleEvent(WorkItemEvent.Created, "pending_policy"), approved])
-    ).toThrow(/work item snapshot mismatch for wrk-replay/u);
+    expect(() => replay([lifecycleEvent(WorkItemEvent.Created, "pending_policy"), approved])).toThrow(
+      /work item snapshot mismatch for wrk-replay/u
+    );
   });
 
   it("ignores unrelated mixed audit events for work item strictness", () => {
