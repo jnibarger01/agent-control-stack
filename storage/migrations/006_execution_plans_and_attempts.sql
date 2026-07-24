@@ -36,6 +36,7 @@ CREATE TABLE IF NOT EXISTS execution_plan_admissions (
   policy_decision_hash TEXT NOT NULL CHECK (
     length(policy_decision_hash) = 64 AND policy_decision_hash = lower(policy_decision_hash)
   ),
+  requires_approval INTEGER NOT NULL CHECK (requires_approval IN (0, 1)),
   admitted_by_actor_id TEXT NOT NULL CHECK (length(trim(admitted_by_actor_id)) > 0),
   admitted_at TEXT NOT NULL CHECK (julianday(admitted_at) IS NOT NULL),
   UNIQUE (plan_id, policy_version, policy_decision_hash),
@@ -121,6 +122,7 @@ CREATE TABLE IF NOT EXISTS attempt_leases (
   attempt_id TEXT NOT NULL,
   work_item_id TEXT NOT NULL,
   admission_id TEXT NOT NULL,
+  approval_id TEXT,
   worker_id TEXT NOT NULL CHECK (length(trim(worker_id)) > 0),
   token_hash TEXT NOT NULL CHECK (length(token_hash) = 64 AND token_hash = lower(token_hash)),
   plan_hash TEXT NOT NULL CHECK (length(plan_hash) = 64 AND plan_hash = lower(plan_hash)),
@@ -144,7 +146,8 @@ CREATE TABLE IF NOT EXISTS attempt_leases (
   UNIQUE (attempt_id, fencing_epoch),
   UNIQUE (lease_id, attempt_id),
   FOREIGN KEY (attempt_id, work_item_id) REFERENCES execution_attempts(attempt_id, work_item_id),
-  FOREIGN KEY (admission_id, work_item_id) REFERENCES execution_plan_admissions(admission_id, work_item_id)
+  FOREIGN KEY (admission_id, work_item_id) REFERENCES execution_plan_admissions(admission_id, work_item_id),
+  FOREIGN KEY (approval_id, work_item_id) REFERENCES execution_plan_approvals(approval_id, work_item_id)
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_attempt_leases_one_active_attempt
@@ -307,6 +310,10 @@ WHEN NEW.approval_id IS NOT OLD.approval_id
   OR OLD.status <> 'granted'
   OR NEW.status NOT IN ('consumed', 'invalidated', 'expired')
   OR (NEW.status = 'consumed' AND NEW.consumed_at IS NULL)
+  -- A grant that outlived its expiry must not be consumable just because no
+  -- sweeper has flipped it to 'expired' yet; check the clock atomically with
+  -- the consuming transition, not only in a separate expiry sweep.
+  OR (NEW.status = 'consumed' AND julianday(NEW.consumed_at) > julianday(OLD.expires_at))
   OR (NEW.status = 'invalidated' AND (NEW.invalidated_at IS NULL OR NEW.invalidation_reason IS NULL))
 BEGIN
   SELECT RAISE(ABORT, 'execution_plan_approvals: immutable binding or invalid transition');
@@ -320,14 +327,22 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS execution_attempts_binding_guard_insert
 BEFORE INSERT ON execution_attempts
+-- Must bind to the CURRENT plan head, not merely any historical plan the
+-- work item has ever had: once a plan is superseded, attempts against it
+-- must stop, even though the old plan/admission rows remain (append-only).
 WHEN NOT EXISTS (
-  SELECT 1 FROM execution_plans
-  WHERE plan_id = NEW.plan_id
-    AND work_item_id = NEW.work_item_id
-    AND plan_hash = NEW.plan_hash
+  SELECT 1
+  FROM execution_plans AS plans
+  JOIN execution_plan_heads AS heads
+    ON heads.work_item_id = plans.work_item_id
+   AND heads.current_plan_id = plans.plan_id
+   AND heads.current_plan_hash = plans.plan_hash
+  WHERE plans.plan_id = NEW.plan_id
+    AND plans.work_item_id = NEW.work_item_id
+    AND plans.plan_hash = NEW.plan_hash
 )
 BEGIN
-  SELECT RAISE(ABORT, 'execution_attempts: plan binding is invalid');
+  SELECT RAISE(ABORT, 'execution_attempts: plan binding is invalid or superseded');
 END;
 
 CREATE TRIGGER IF NOT EXISTS execution_attempts_state_guard_insert
@@ -389,6 +404,12 @@ END;
 
 CREATE TRIGGER IF NOT EXISTS attempt_leases_binding_guard
 BEFORE INSERT ON attempt_leases
+-- When the admission required approval, a lease must reference a granted,
+-- unexpired, unconsumed approval bound to the same plan - otherwise a
+-- policy-admitted high-risk plan could be leased on admission alone, with
+-- no proof a human ever approved it. When approval wasn't required, no
+-- approval_id may be attached (nothing to bind it to, and it would imply
+-- an approval was consumed for dispatch when policy never asked for one).
 WHEN NOT EXISTS (
   SELECT 1
   FROM execution_attempts AS attempts
@@ -406,9 +427,39 @@ WHEN NOT EXISTS (
     AND admissions.plan_hash = attempts.plan_hash
     AND admissions.policy_version = NEW.policy_version
     AND admissions.policy_decision_hash = NEW.policy_decision_hash
+    AND (
+      (admissions.requires_approval = 0 AND NEW.approval_id IS NULL)
+      OR (
+        admissions.requires_approval = 1
+        AND NEW.approval_id IS NOT NULL
+        AND EXISTS (
+          SELECT 1 FROM execution_plan_approvals AS approvals
+          WHERE approvals.approval_id = NEW.approval_id
+            AND approvals.work_item_id = NEW.work_item_id
+            AND approvals.plan_id = admissions.plan_id
+            AND approvals.plan_hash = admissions.plan_hash
+            AND approvals.status = 'granted'
+            AND julianday(approvals.expires_at) > julianday('now')
+        )
+      )
+    )
 )
 BEGIN
-  SELECT RAISE(ABORT, 'attempt_leases: attempt, admission, and fence binding is invalid');
+  SELECT RAISE(ABORT, 'attempt_leases: attempt, admission, fence, or approval binding is invalid');
+END;
+
+CREATE TRIGGER IF NOT EXISTS attempt_leases_consume_approval
+AFTER INSERT ON attempt_leases
+WHEN NEW.approval_id IS NOT NULL
+BEGIN
+  -- Consume atomically with lease issuance, in the same transaction as the
+  -- INSERT this fires from - there is no separate step where dispatch could
+  -- succeed without the approval being spent, or vice versa.
+  UPDATE execution_plan_approvals
+  SET status = 'consumed', consumed_at = NEW.issued_at
+  WHERE approval_id = NEW.approval_id
+    AND work_item_id = NEW.work_item_id
+    AND status = 'granted';
 END;
 
 CREATE TRIGGER IF NOT EXISTS attempt_leases_transition_guard
@@ -417,6 +468,7 @@ WHEN NEW.lease_id IS NOT OLD.lease_id
   OR NEW.attempt_id IS NOT OLD.attempt_id
   OR NEW.work_item_id IS NOT OLD.work_item_id
   OR NEW.admission_id IS NOT OLD.admission_id
+  OR NEW.approval_id IS NOT OLD.approval_id
   OR NEW.worker_id IS NOT OLD.worker_id
   OR NEW.token_hash IS NOT OLD.token_hash
   OR NEW.plan_hash IS NOT OLD.plan_hash
@@ -470,6 +522,10 @@ WHEN NOT EXISTS (
     AND leases.plan_hash = NEW.plan_hash
     AND leases.input_hash = NEW.input_hash
     AND leases.status = 'active'
+    -- 'active' status alone is insufficient: a lease whose wall-clock expiry
+    -- has passed but hasn't been swept to 'expired' yet must still be
+    -- rejected here, in the same transaction as result acceptance.
+    AND julianday(leases.expires_at) > julianday('now')
     AND attempts.current_fencing_epoch = NEW.fencing_epoch
     AND attempts.claimed_by_worker_id = NEW.worker_id
     AND attempts.status IN ('running', 'cancellation_requested')

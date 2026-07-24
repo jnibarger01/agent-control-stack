@@ -140,6 +140,7 @@ interface ExecutionPlanAdmissionRow {
   plan_hash: string;
   policy_version: string;
   policy_decision_hash: string;
+  requires_approval: number;
   admitted_by_actor_id: string;
   admitted_at: string;
 }
@@ -886,8 +887,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .prepare(
           `INSERT INTO execution_plan_admissions
            (admission_id, work_item_id, plan_id, plan_hash, policy_version, policy_decision_hash,
-            admitted_by_actor_id, admitted_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+            requires_approval, admitted_by_actor_id, admitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           admissionId,
@@ -896,6 +897,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           current.planHash,
           parsed.policyVersion,
           parsed.policyDecisionHash,
+          parsed.requiresApproval ? 1 : 0,
           parsed.admittedByActorId,
           admittedAt
         );
@@ -906,6 +908,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         planHash: current.planHash,
         policyVersion: parsed.policyVersion,
         policyDecisionHash: parsed.policyDecisionHash,
+        requiresApproval: parsed.requiresApproval,
         admittedByActorId: parsed.admittedByActorId,
         admittedAt
       });
@@ -2654,12 +2657,24 @@ function rowToExecutionResult(row: ExecutionResultRow): StoredExecutionResult {
 }
 
 function rowToExecutionPlan(row: ExecutionPlanRow): ExecutionPlanRecord {
+  const definition = JSON.parse(row.definition_json) as unknown;
+  // Recompute rather than trust the stored hash: a row surviving restart or
+  // persisted-state tampering could carry a definition that no longer matches
+  // its recorded plan_hash, silently defeating the content-addressed binding
+  // that approvals and admissions are keyed on. Fail closed on mismatch.
+  const recomputedHash = executionPlanHash(definition);
+  if (recomputedHash !== row.plan_hash) {
+    throw new ControlStackError(
+      "execution_plan_hash_mismatch",
+      `stored execution plan ${row.plan_id} does not reproduce its recorded hash`
+    );
+  }
   return executionPlanRecordSchema.parse({
     planId: row.plan_id,
     workItemId: row.work_item_id,
     planNumber: row.plan_number,
-    definition: JSON.parse(row.definition_json),
-    planHash: row.plan_hash,
+    definition,
+    planHash: recomputedHash,
     subjectInputHash: row.subject_input_hash,
     createdByActorId: row.created_by_actor_id,
     createdAt: row.created_at
@@ -2674,6 +2689,7 @@ function rowToExecutionPlanAdmission(row: ExecutionPlanAdmissionRow): ExecutionP
     planHash: row.plan_hash,
     policyVersion: row.policy_version,
     policyDecisionHash: row.policy_decision_hash,
+    requiresApproval: row.requires_approval === 1,
     admittedByActorId: row.admitted_by_actor_id,
     admittedAt: row.admitted_at
   });
