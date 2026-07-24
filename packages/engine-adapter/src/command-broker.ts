@@ -15,6 +15,7 @@ import {
   type SandboxExecutionRequest
 } from "@agent-control-stack/sandbox";
 import { ControlStackError, createId } from "@agent-control-stack/shared";
+import type { CommandAuthority } from "@agent-control-stack/work-items";
 import { z } from "zod";
 
 const identifierSchema = z
@@ -60,6 +61,23 @@ const profileCommands: Record<SandboxCommandProfile, string[]> = {
 };
 
 /**
+ * A store dependency narrow enough that CommandBroker doesn't need the
+ * entire WorkItemStore surface - just the one authoritative, joined lookup
+ * (attempt + lease + workspace allocation, all currently active and
+ * mutually consistent) it needs to gate execution on.
+ */
+export interface CommandAuthorityStore {
+  getCommandAuthority(input: {
+    workItemId: string;
+    attemptId: string;
+    leaseId: string;
+    workerId: string;
+    fencingToken: number;
+    workspaceAllocationId: string;
+  }): CommandAuthority | undefined;
+}
+
+/**
  * The only path through which an engine-proposed command actually runs.
  *
  * Every call re-evaluates policy from scratch via the real PolicyEvaluator
@@ -70,17 +88,19 @@ const profileCommands: Record<SandboxCommandProfile, string[]> = {
  * (even if only commandProfile or cwd) fails closed rather than silently
  * running something different from what was evaluated.
  *
- * The authority verifier here is self-contained (recomputes and compares
- * the hash, does not check against a persisted attempt/lease row) because
- * packages/work-items does not yet have store methods for the
- * execution_attempts/attempt_leases tables migration 006 created - only
- * raw SQL exists. Wiring this to real persisted-lease verification is
- * Phase 4 scope; this is real, working, hash-bound gating today, not a
- * mock, but it does not yet prove the caller holds a genuinely-issued,
- * still-active lease row - only that the request is internally consistent
- * and was actually policy-evaluated.
+ * The authority verifier loads its receipt from `store.getCommandAuthority`
+ * - a real, persisted, trigger-enforced (storage/migrations/006 and 007)
+ * attempt/lease/workspace-allocation record - not merely an echo of the
+ * caller's own claims. A request whose attempt, lease, worker, fencing
+ * token, or workspace allocation does not match a currently-active,
+ * unexpired, mutually-consistent persisted record is refused before the
+ * sandbox ever launches a process. The canonical workspace path the
+ * sandbox trusts comes from that persisted record, not from the request,
+ * so a caller cannot substitute a different host path merely by claiming
+ * the right allocation id.
  */
 export interface CommandBrokerOptions {
+  store: CommandAuthorityStore;
   sandbox?: SandboxBackend;
   /** Defaults to the real policy-gate evaluator. Overridable for testing only. */
   evaluate?: (context: PolicyContext) => PolicyDecision;
@@ -90,8 +110,8 @@ export class CommandBroker {
   private readonly sandbox: SandboxBackend;
   private readonly evaluate: (context: PolicyContext) => PolicyDecision;
 
-  constructor(options: CommandBrokerOptions = {}) {
-    this.sandbox = options.sandbox ?? createLinuxSandbox({ authorityVerifier: selfConsistentVerifier() });
+  constructor(options: CommandBrokerOptions) {
+    this.sandbox = options.sandbox ?? createLinuxSandbox({ authorityVerifier: storeBackedVerifier(options.store) });
     this.evaluate = options.evaluate ?? evaluatePolicy;
   }
 
@@ -160,15 +180,40 @@ function buildSandboxRequest(request: CommandRequest, actionHash: string): Sandb
 }
 
 /**
- * Confirms the request the sandbox is about to execute is exactly the one
- * policy evaluated (same authorization hash, same identifiers) and nothing
- * else - the TOCTOU guard between CommandBroker.run()'s policy check and
- * the sandbox's own execution. Does not check the request against a
- * persisted lease row (see the class-level comment on CommandBroker).
+ * Loads authority from the store (not the request) and rejects anything
+ * that does not resolve to a currently-active, unexpired, mutually-
+ * consistent attempt/lease/workspace-allocation triple - see
+ * packages/work-items's getCommandAuthority for the exact join and its
+ * matching database triggers for what "currently-active" is allowed to
+ * mean. Re-checked on every execute() call (immediately before the sandbox
+ * launches), not cached from an earlier point in the request's lifecycle,
+ * so a lease that expires or is revoked between policy evaluation and
+ * process launch is refused rather than honored.
  */
-function selfConsistentVerifier(): SandboxAuthorityVerifier {
+export function storeBackedVerifier(store: CommandAuthorityStore): SandboxAuthorityVerifier {
   return {
     async verify(request: SandboxExecutionRequest): Promise<SandboxAuthorityReceipt> {
+      const authority = store.getCommandAuthority({
+        workItemId: request.workItemId,
+        attemptId: request.attemptId,
+        leaseId: request.leaseId,
+        workerId: request.workerId,
+        fencingToken: request.fencingToken,
+        workspaceAllocationId: request.workspace.allocationId
+      });
+      if (!authority) {
+        throw new ControlStackError(
+          "command_authority_not_found",
+          "no active, matching, unexpired lease/attempt/workspace-allocation was found for this request"
+        );
+      }
+      if (authority.lease.policyVersion !== request.policyVersion) {
+        throw new ControlStackError(
+          "command_authority_mismatch",
+          "request policy version does not match the persisted lease"
+        );
+      }
+
       const receipt = {
         schemaVersion: "acs.sandbox-authority-receipt.v1" as const,
         workItemId: request.workItemId,
@@ -179,9 +224,16 @@ function selfConsistentVerifier(): SandboxAuthorityVerifier {
         authorizationHash: request.authorization.hash,
         policyVersion: request.policyVersion,
         workspaceAllocationId: request.workspace.allocationId,
-        canonicalWorkspacePath: request.workspace.hostPath,
+        // Rooted in the persisted allocation record, never in the caller's
+        // own claim - this is what defeats a workspace-substitution attempt
+        // even when every identifier otherwise lines up.
+        canonicalWorkspacePath: authority.workspaceAllocation.hostPath,
+        // verifyAuthorityReceipt requires this to equal the request's own
+        // auditCorrelationId, not a freshly generated id - the receipt is
+        // confirming authority for *this* request's already-recorded audit
+        // intent, not minting a new one.
         executionEvent: {
-          id: createId("evt"),
+          id: request.auditCorrelationId,
           sequence: 1,
           hash: request.authorization.hash
         }
