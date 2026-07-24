@@ -1,4 +1,4 @@
-import { domainHash } from "@agent-control-stack/shared";
+import { ControlStackError, domainHash } from "@agent-control-stack/shared";
 import { z } from "zod";
 import { actionRequestSchema, targetSchema, type WorkItem } from "./work-item.js";
 
@@ -86,6 +86,7 @@ export const executionPlanAdmissionSchema = z
     planHash: hashSchema,
     policyVersion: z.string().min(1).max(128),
     policyDecisionHash: hashSchema,
+    requiresApproval: z.boolean(),
     admittedByActorId: z.string().min(1).max(256),
     admittedAt: timestampSchema
   })
@@ -107,6 +108,7 @@ export const admitExecutionPlanInputSchema = z
     planHash: hashSchema,
     policyVersion: z.string().min(1).max(128),
     policyDecisionHash: hashSchema,
+    requiresApproval: z.boolean(),
     admittedByActorId: z.string().min(1).max(256),
     now: z.date().optional()
   })
@@ -148,6 +150,12 @@ export function executionAttemptInputHash(input: {
 export function defaultExecutionPlanForWorkItem(
   workItem: Pick<WorkItem, "id" | "requester" | "requesterSubject" | "intent" | "target" | "requestedActions" | "risk">
 ): ExecutionPlanDefinition {
+  if (workItem.requestedActions.length === 0) {
+    throw new ControlStackError(
+      "execution_plan_no_actions",
+      `work item ${workItem.id} has no requested actions; a plan requires at least one step`
+    );
+  }
   const subjectInputHash = executionPlanSubjectInputHash(workItem);
   return executionPlanDefinitionSchema.parse({
     schemaVersion: EXECUTION_PLAN_SCHEMA_VERSION,

@@ -157,6 +157,12 @@ describe("Bubblewrap sandbox construction", () => {
     const request = validSandboxRequest({ workspace: { allocationId: "workspace_test", hostPath: directory } });
     let authorityChecks = 0;
     try {
+      // requireExecutable() does a real lstatSync/accessSync on these paths before
+      // hostCommandRunner ever runs, so faking the runner alone isn't enough to make
+      // this test independent of whether bwrap/systemd-run/systemctl/git are actually
+      // installed on the host running the suite. Point every required path at the
+      // current Node binary, which is guaranteed to exist and be executable wherever
+      // this test runs - only hostCommandRunner's fake output is exercised below.
       await createLinuxSandbox({
         authorityVerifier: {
           verify: async () => {
@@ -164,10 +170,15 @@ describe("Bubblewrap sandbox construction", () => {
             throw new Error("preflight must not request execution authority");
           }
         },
+        bwrapPath: process.execPath,
+        systemdRunPath: process.execPath,
+        systemctlPath: process.execPath,
+        nodePath: process.execPath,
+        gitPath: process.execPath,
         hostCommandRunner: async (command) => ({
           code: 0,
           signal: null,
-          stdout: command.endsWith("bwrap") ? "bubblewrap 0.9.0\n" : "",
+          stdout: command === process.execPath ? "bubblewrap 0.9.0\n" : "",
           stderr: ""
         })
       }).preflight(request);

@@ -9,11 +9,14 @@ export const workItemStatusSchema = z.enum([
   "needs_approval",
   "approved",
   "running",
+  "cancelling",
   "succeeded",
   "failed",
   "blocked",
   "cancelled",
-  "rejected"
+  "rejected",
+  "unknown",
+  "quarantined"
 ]);
 
 export const targetSchema = z
@@ -241,11 +244,14 @@ export const WorkItemEvent = {
   NeedsApproval: "work_item.needs_approval",
   Approved: "work_item.approved",
   Running: "work_item.running",
+  Cancelling: "work_item.cancelling",
   Succeeded: "work_item.succeeded",
   Failed: "work_item.failed",
   Blocked: "work_item.blocked",
   Cancelled: "work_item.cancelled",
-  Rejected: "work_item.rejected"
+  Rejected: "work_item.rejected",
+  Unknown: "work_item.unknown",
+  Quarantined: "work_item.quarantined"
 } as const;
 
 const statusEvents: Record<WorkItemStatus, (typeof WorkItemEvent)[keyof typeof WorkItemEvent]> = {
@@ -254,11 +260,14 @@ const statusEvents: Record<WorkItemStatus, (typeof WorkItemEvent)[keyof typeof W
   needs_approval: WorkItemEvent.NeedsApproval,
   approved: WorkItemEvent.Approved,
   running: WorkItemEvent.Running,
+  cancelling: WorkItemEvent.Cancelling,
   succeeded: WorkItemEvent.Succeeded,
   failed: WorkItemEvent.Failed,
   blocked: WorkItemEvent.Blocked,
   cancelled: WorkItemEvent.Cancelled,
-  rejected: WorkItemEvent.Rejected
+  rejected: WorkItemEvent.Rejected,
+  unknown: WorkItemEvent.Unknown,
+  quarantined: WorkItemEvent.Quarantined
 };
 
 export function createWorkItem(input: unknown, now = new Date().toISOString()): WorkItem {
