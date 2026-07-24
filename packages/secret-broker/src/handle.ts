@@ -1,3 +1,5 @@
+import type { LeasePrincipal } from "./broker.js";
+
 /**
  * A capability token for a single leased secret, never a container for the
  * secret itself.
@@ -13,39 +15,50 @@
  * engine prompt: the only way to observe the secret is to call
  * `injectInto`, which writes it directly into a subprocess env object.
  *
- * `handleId`, `scope`, `issuedAt`, and `expiresAt` are plain public fields -
- * none of them are secret, and exposing them is what makes the handle
- * auditable.
+ * `handleId`, `scope`, `issuedAt`, `expiresAt`, `principal`, `purpose`, and
+ * `maxUses` are plain public fields - none of them are secret, and exposing
+ * them is what makes the handle auditable.
  */
 export class SecretHandle {
   readonly handleId: string;
   readonly scope: string;
   readonly issuedAt: string;
   readonly expiresAt: string;
+  readonly principal: LeasePrincipal;
+  readonly purpose: string;
+  readonly maxUses: number;
 
-  readonly #inject: (env: NodeJS.ProcessEnv) => void;
+  readonly #inject: (env: NodeJS.ProcessEnv, redeemer: LeasePrincipal) => void;
 
   constructor(params: {
     handleId: string;
     scope: string;
     issuedAt: string;
     expiresAt: string;
-    inject: (env: NodeJS.ProcessEnv) => void;
+    principal: LeasePrincipal;
+    purpose: string;
+    maxUses: number;
+    inject: (env: NodeJS.ProcessEnv, redeemer: LeasePrincipal) => void;
   }) {
     this.handleId = params.handleId;
     this.scope = params.scope;
     this.issuedAt = params.issuedAt;
     this.expiresAt = params.expiresAt;
+    this.principal = params.principal;
+    this.purpose = params.purpose;
+    this.maxUses = params.maxUses;
     this.#inject = params.inject;
   }
 
   /**
    * Mutates `env` in place, setting the secret's target variable to the
    * live raw value - or throws if this handle's lease is no longer active
-   * (expired or revoked). Never returns the value; there is no other way to
-   * read it out of this object.
+   * (expired, revoked, or already redeemed its maximum number of times), or
+   * if `redeemer` does not match the principal this handle was leased for.
+   * Never returns the value; there is no other way to read it out of this
+   * object.
    */
-  injectInto(env: NodeJS.ProcessEnv): void {
-    this.#inject(env);
+  injectInto(env: NodeJS.ProcessEnv, redeemer: LeasePrincipal): void {
+    this.#inject(env, redeemer);
   }
 }
