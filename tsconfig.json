@@ -9,11 +9,16 @@
     { "path": "packages/machine-controller" },
     { "path": "packages/temporal-memory" },
     { "path": "packages/sandbox" },
+    { "path": "packages/workspace-manager" },
+    { "path": "packages/engine-adapter" },
+    { "path": "packages/secret-broker" },
+    { "path": "packages/verification" },
     { "path": "packages/eval-harness" },
     { "path": "packages/moa-orchestrator" },
     { "path": "apps/control-ui" },
     { "path": "apps/mcp" },
     { "path": "apps/gateway" },
-    { "path": "apps/worker" }
+    { "path": "apps/worker" },
+    { "path": "apps/scheduler" }
   ]
 }

@@ -199,7 +199,7 @@ Minimum test groups:
 
 ## Deferred Hardening
 
-The execution slice authorization artifact will be an Ed25519-signed approval grant per the locked PDP contract. Do not add a parallel approval bearer token. Real plugin or command execution also needs process isolation before enablement: firejail, nsjail, bubblewrap, Docker, or equivalent. Add that behind `packages/sandbox` instead of teaching callers about the runtime.
+Approval grants are bound to exact plan/action content via `plan_hash`/`action_hash`/`request_hash` and are single-use and expiry-checked atomically at consumption (see [ADR 0004](adr/0004-request-bound-approval-tokens.md), [ADR 0012](adr/0012-retire-ed25519-approval-artifact-reference.md), `storage/migrations/006_execution_plans_and_attempts.sql`). No signed approval-grant artifact is planned or required. Real plugin or command execution also needs process isolation before enablement: firejail, nsjail, bubblewrap, Docker, or equivalent — this is now built behind `packages/sandbox` (see [ADR 0010](adr/0010-fail-closed-linux-sandbox.md)).
 
 Layer 2 should also move risk-based approval routing into `packages/policy-gate`, add lease renewal before live long-running execution, add a true cross-process claim contention check, and treat `draft` as a reserved ingestion state until a draft creation endpoint exists.
 

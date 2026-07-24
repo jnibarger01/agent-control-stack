@@ -3,6 +3,9 @@ import { z } from "zod";
 
 export * from "./contracts.js";
 export * from "./linux.js";
+export * from "./engine-contracts.js";
+export * from "./engine.js";
+export * from "./egress-proxy.js";
 
 export const sandboxResultSchema = z.object({
   ok: z.boolean(),

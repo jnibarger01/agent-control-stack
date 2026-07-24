@@ -82,7 +82,7 @@ interface ProfileCommand {
   runtimeRoot?: string;
 }
 
-interface CapturedOutput {
+export interface CapturedOutput {
   stdout: Buffer[];
   stderr: Buffer[];
   stdoutBytes: number;
@@ -499,7 +499,24 @@ async function probeLinuxHost(options: ResolvedLinuxSandboxOptions): Promise<str
   return bwrapVersion.stdout.trim();
 }
 
-function verifyWorkspace(request: SandboxExecutionRequest, receipt?: SandboxAuthorityReceipt): void {
+export interface WorkspaceBoundRequest {
+  workspace: { hostPath: string };
+  cwd: string;
+}
+
+export interface WorkspaceAuthorityHint {
+  canonicalWorkspacePath: string;
+}
+
+/**
+ * Shared by both sandbox backends (packages/sandbox/src/linux.ts for
+ * CommandBroker, packages/sandbox/src/engine.ts for engines - ADR 0014):
+ * the workspace path is never trusted from the caller. It must resolve to
+ * a real, non-symlink directory whose canonical path matches the
+ * authoritative allocation exactly, and the requested cwd must stay inside
+ * it after realpath resolution.
+ */
+export function verifyWorkspace(request: WorkspaceBoundRequest, receipt?: WorkspaceAuthorityHint): string {
   let workspaceRealPath: string;
   try {
     const stat = lstatSync(request.workspace.hostPath);
@@ -534,6 +551,7 @@ function verifyWorkspace(request: SandboxExecutionRequest, receipt?: SandboxAuth
       `working directory is unavailable: ${errorMessage(error)}`
     );
   }
+  return workspaceRealPath;
 }
 
 function resolveProfile(
@@ -564,7 +582,7 @@ function resolveProfile(
   return { executable, args: ["run", script], runtimeRoot };
 }
 
-function requireExecutable(path: string, code: string): void {
+export function requireExecutable(path: string, code: string): void {
   try {
     const stat = lstatSync(path);
     if ((!stat.isFile() && !stat.isSymbolicLink()) || stat.isDirectory()) {
@@ -576,14 +594,19 @@ function requireExecutable(path: string, code: string): void {
   }
 }
 
-function verifyCgroupV2(stat: StatsFs): void {
+export function verifyCgroupV2(stat: StatsFs): void {
   if (Number(stat.type) !== CGROUP2_SUPER_MAGIC) {
     throw new ControlStackError("sandbox_cgroup_unavailable", "cgroup v2 is required for live sandbox execution");
   }
 }
 
-async function signalScope(
-  options: ResolvedLinuxSandboxOptions,
+export interface ScopeSignalOptions {
+  systemctlPath: string;
+  hostCommandRunner: HostCommandRunner;
+}
+
+export async function signalScope(
+  options: ScopeSignalOptions,
   unitName: string,
   signal: "SIGTERM" | "SIGKILL"
 ): Promise<void> {
@@ -600,8 +623,8 @@ async function signalScope(
   }
 }
 
-async function verifyScopeCleanup(
-  options: ResolvedLinuxSandboxOptions,
+export async function verifyScopeCleanup(
+  options: ScopeSignalOptions,
   unitName: string
 ): Promise<"verified" | "failed" | "unknown"> {
   try {
@@ -622,7 +645,7 @@ async function verifyScopeCleanup(
   }
 }
 
-function observedOutcome(
+export function observedOutcome(
   input: {
     trigger?: "timeout" | "cancelled";
     launchError?: string;
@@ -640,7 +663,7 @@ function observedOutcome(
   return "unknown";
 }
 
-function observationError(
+export function observationError(
   input: { trigger?: string; terminationError?: string; launchError?: string },
   cleanup: "verified" | "failed" | "unknown"
 ): string | undefined {
@@ -652,7 +675,7 @@ function observationError(
   return undefined;
 }
 
-function emptyCapturedOutput(): CapturedOutput {
+export function emptyCapturedOutput(): CapturedOutput {
   return {
     stdout: [],
     stderr: [],
@@ -663,7 +686,12 @@ function emptyCapturedOutput(): CapturedOutput {
   };
 }
 
-function captureChunk(output: CapturedOutput, stream: "stdout" | "stderr", chunk: Buffer, maximumBytes: number): void {
+export function captureChunk(
+  output: CapturedOutput,
+  stream: "stdout" | "stderr",
+  chunk: Buffer,
+  maximumBytes: number
+): void {
   const used = output.stdoutBytes + output.stderrBytes;
   const remaining = Math.max(0, maximumBytes - used);
   const captured = chunk.subarray(0, remaining);
@@ -678,12 +706,12 @@ function captureChunk(output: CapturedOutput, stream: "stdout" | "stderr", chunk
   }
 }
 
-function isContainedPath(root: string, candidate: string): boolean {
+export function isContainedPath(root: string, candidate: string): boolean {
   const path = relative(root, candidate);
   return path === "" || (!path.startsWith(`..${sep}`) && path !== ".." && !path.startsWith(sep));
 }
 
-function signalProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
+export function signalProcessGroup(pid: number | undefined, signal: NodeJS.Signals): void {
   if (!pid) return;
   try {
     process.kill(-pid, signal);
@@ -708,21 +736,21 @@ function validatedUnitName(unitName: string): string {
   return unitName;
 }
 
-function redactOutput(value: string): string {
+export function redactOutput(value: string): string {
   const redacted = redactValue(value);
   return typeof redacted === "string" ? redacted : "[redacted]";
 }
 
-function boundedMessage(prefix: string, detail: string): string {
+export function boundedMessage(prefix: string, detail: string): string {
   const value = detail.trim();
   return value ? `${prefix}: ${value}`.slice(0, 4_096) : prefix;
 }
 
-function errorMessage(error: unknown): string {
+export function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function runHostCommand(
+export async function runHostCommand(
   command: string,
   args: readonly string[],
   options: { timeoutMs?: number } = {}
