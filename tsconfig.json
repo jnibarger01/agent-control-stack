@@ -12,6 +12,7 @@
     { "path": "packages/workspace-manager" },
     { "path": "packages/engine-adapter" },
     { "path": "packages/secret-broker" },
+    { "path": "packages/verification" },
     { "path": "packages/eval-harness" },
     { "path": "packages/moa-orchestrator" },
     { "path": "apps/control-ui" },
