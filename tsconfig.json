@@ -10,6 +10,7 @@
     { "path": "packages/temporal-memory" },
     { "path": "packages/sandbox" },
     { "path": "packages/workspace-manager" },
+    { "path": "packages/engine-adapter" },
     { "path": "packages/eval-harness" },
     { "path": "packages/moa-orchestrator" },
     { "path": "apps/control-ui" },
