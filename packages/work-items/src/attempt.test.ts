@@ -412,3 +412,189 @@ describe("getCommandAuthority", () => {
     }
   });
 });
+
+describe("leaseAttempt consumes an execution-plan approval atomically (R3)", () => {
+  let directory: string | undefined;
+
+  afterEach(() => {
+    if (directory) rmSync(directory, { recursive: true, force: true });
+    directory = undefined;
+  });
+
+  function createApprovalRequiredFixture() {
+    const fixture = createFixture();
+    // Replace the no-approval-required admission from createFixture with a
+    // requires-approval one bound to the same current plan.
+    const admission = fixture.store.admitExecutionPlan(
+      {
+        workItemId: fixture.workItem.id,
+        planHash: fixture.plan.planHash,
+        policyVersion: "acs.policy.v2",
+        policyDecisionHash: hex("2"),
+        requiresApproval: true,
+        admittedByActorId: "policy-gate"
+      },
+      { via: "policy_gate" }
+    );
+    const approval = fixture.store.grantExecutionPlanApproval(
+      {
+        workItemId: fixture.workItem.id,
+        planHash: fixture.plan.planHash,
+        actionHash: hex("3"),
+        approvedByActorId: "human-approver"
+      },
+      { via: "domain_service" }
+    );
+    return { ...fixture, admission, approval };
+  }
+
+  it("consumes the granted approval in the same transaction that issues the lease", () => {
+    const fixture = createApprovalRequiredFixture();
+    directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+
+    expect(fixture.approval.status).toBe("granted");
+
+    fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        admissionId: fixture.admission.admissionId,
+        approvalId: fixture.approval.approvalId,
+        workerId: "worker-1",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v2",
+        policyDecisionHash: hex("2"),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+
+    const dbAny = fixture.store as unknown as {
+      db: { prepare: (sql: string) => { get: (...a: unknown[]) => { status: string } } };
+    };
+    const row = dbAny.db
+      .prepare(`SELECT status FROM execution_plan_approvals WHERE approval_id = ?`)
+      .get(fixture.approval.approvalId);
+    expect(row.status).toBe("consumed");
+  });
+
+  it("refuses to lease a requires-approval attempt without an approval id at all", () => {
+    const fixture = createApprovalRequiredFixture();
+    directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+
+    expect(() =>
+      fixture.store.leaseAttempt(
+        {
+          attemptId: attempt.attemptId,
+          workItemId: fixture.workItem.id,
+          admissionId: fixture.admission.admissionId,
+          workerId: "worker-1",
+          leaseToken: "a".repeat(32),
+          policyVersion: "acs.policy.v2",
+          policyDecisionHash: hex("2"),
+          ttlMs: 60_000
+        },
+        { via: "domain_service" }
+      )
+    ).toThrow();
+  });
+
+  it("refuses to reuse an already-consumed approval for a second attempt (replay rejection)", () => {
+    const fixture = createApprovalRequiredFixture();
+    directory = fixture.directory;
+    const firstAttempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    fixture.store.leaseAttempt(
+      {
+        attemptId: firstAttempt.attemptId,
+        workItemId: fixture.workItem.id,
+        admissionId: fixture.admission.admissionId,
+        approvalId: fixture.approval.approvalId,
+        workerId: "worker-1",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v2",
+        policyDecisionHash: hex("2"),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+
+    // Free the "one active attempt per work item" slot so a second attempt
+    // can even be created, isolating the assertion to approval reuse.
+    const dbAny = fixture.store as unknown as {
+      db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } };
+    };
+    dbAny.db
+      .prepare(
+        `UPDATE execution_attempts SET status = 'cancelled', terminal_at = ?, outcome_code = ? WHERE attempt_id = ?`
+      )
+      .run(new Date().toISOString(), "cancelled", firstAttempt.attemptId);
+
+    const secondAttempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("b") },
+      { via: "domain_service" }
+    );
+
+    expect(() =>
+      fixture.store.leaseAttempt(
+        {
+          attemptId: secondAttempt.attemptId,
+          workItemId: fixture.workItem.id,
+          admissionId: fixture.admission.admissionId,
+          approvalId: fixture.approval.approvalId,
+          workerId: "worker-2",
+          leaseToken: "b".repeat(32),
+          policyVersion: "acs.policy.v2",
+          policyDecisionHash: hex("2"),
+          ttlMs: 60_000
+        },
+        { via: "domain_service" }
+      )
+    ).toThrow();
+  });
+
+  it("never lets an allow-classified admission attach an approval id that was not requested", () => {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    const strayApproval = fixture.store.grantExecutionPlanApproval(
+      {
+        workItemId: fixture.workItem.id,
+        planHash: fixture.plan.planHash,
+        actionHash: hex("9"),
+        approvedByActorId: "human-approver"
+      },
+      { via: "domain_service" }
+    );
+
+    expect(() =>
+      fixture.store.leaseAttempt(
+        {
+          attemptId: attempt.attemptId,
+          workItemId: fixture.workItem.id,
+          admissionId: fixture.admission.admissionId,
+          approvalId: strayApproval.approvalId,
+          workerId: "worker-1",
+          leaseToken: "a".repeat(32),
+          policyVersion: "acs.policy.v1",
+          policyDecisionHash: hex("1"),
+          ttlMs: 60_000
+        },
+        { via: "domain_service" }
+      )
+    ).toThrow();
+  });
+});
