@@ -3,6 +3,7 @@
   "references": [
     { "path": "./tsconfig.compounding.json" },
     { "path": "packages/shared" },
+    { "path": "packages/graph" },
     { "path": "packages/work-items" },
     { "path": "packages/acp-adapter" },
     { "path": "packages/policy-gate" },
