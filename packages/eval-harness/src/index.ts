@@ -1,14 +1,8 @@
 export * from "./promotion-gate.js";
+export * from "./replay.js";
+export * from "./sqlite-eval.js";
 import type { AuditEvent } from "@agent-control-stack/shared";
-import { projectMemories } from "@agent-control-stack/temporal-memory";
-import { WorkItemEvent, projectWorkItems, workItemSchema } from "@agent-control-stack/work-items";
-
-export function replay(events: AuditEvent[]) {
-  return {
-    workItems: projectWorkItems(events),
-    memories: projectMemories(events)
-  };
-}
+import { WorkItemEvent, workItemSchema } from "@agent-control-stack/work-items";
 
 export function findUnapprovedExecution(events: AuditEvent[]): string[] {
   const approved = new Set<string>();
