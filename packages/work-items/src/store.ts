@@ -969,10 +969,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => {
       const current = this.getCurrentExecutionPlan(parsed.workItemId);
       if (!current || current.planHash !== parsed.planHash) {
-        throw new ControlStackError(
-          "execution_plan_not_current",
-          "only the current execution plan can be approved"
-        );
+        throw new ControlStackError("execution_plan_not_current", "only the current execution plan can be approved");
       }
 
       const existing = this.db
@@ -980,18 +977,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
           `SELECT * FROM execution_plan_approvals
            WHERE work_item_id = ? AND plan_hash = ? AND action_hash = ? AND status = 'granted'`
         )
-        .get(parsed.workItemId, parsed.planHash, parsed.actionHash) as unknown as
-        | ExecutionPlanApprovalRow
-        | undefined;
+        .get(parsed.workItemId, parsed.planHash, parsed.actionHash) as unknown as ExecutionPlanApprovalRow | undefined;
       if (existing) {
         return { value: rowToExecutionPlanApproval(existing), events: [] };
       }
 
       const approvalId = createId("plan_approval");
       const createdAt = (parsed.now ?? new Date()).toISOString();
-      const expiresAt = new Date(
-        Date.parse(createdAt) + (parsed.expiresInMs ?? 10 * 60 * 1_000)
-      ).toISOString();
+      const expiresAt = new Date(Date.parse(createdAt) + (parsed.expiresInMs ?? 10 * 60 * 1_000)).toISOString();
       const reason = parsed.reason ?? "approved";
       const requestHash = executionPlanApprovalRequestHash({
         workItemId: parsed.workItemId,
