@@ -25,7 +25,8 @@ const migrationFiles = [
   { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
   { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" },
   { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" },
-  { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" }
+  { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" },
+  { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -111,7 +112,41 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
   if (migration.version === 5) {
     validateExecutionResultPreflight(db);
   }
+  if (migration.version === 6) {
+    validateExecutionPlanPreflight(db);
+  }
   return migration.sql;
+}
+
+function validateExecutionPlanPreflight(db: SqliteLike): void {
+  const invalid = queryRows(
+    db,
+    `SELECT id FROM work_items
+     WHERE status IS NULL OR status NOT IN (
+       'draft', 'pending_policy', 'needs_approval', 'approved', 'running',
+       'succeeded', 'failed', 'blocked', 'cancelled', 'rejected'
+     )`
+  );
+  if (invalid.length > 0) {
+    throw new Error(`execution plan migration refused invalid work item state: ${invalid.slice(0, 50).join(", ")}`);
+  }
+
+  const activeWorkItems = queryRows(
+    db,
+    `SELECT id FROM work_items
+     WHERE status = 'running'
+        OR lease_token_hash IS NOT NULL
+        OR lease_expires_at IS NOT NULL`
+  );
+  const activeLeases = queryRows(db, `SELECT lease_id FROM leases WHERE status = 'active'`);
+  const active = [...new Set([...activeWorkItems, ...activeLeases])];
+  if (active.length > 0) {
+    throw new Error(
+      `execution plan migration refused active legacy lease state; reconcile explicitly: ${active
+        .slice(0, 50)
+        .join(", ")}`
+    );
+  }
 }
 
 function validateExecutionResultPreflight(db: SqliteLike): void {

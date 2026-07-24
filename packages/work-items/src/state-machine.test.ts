@@ -2,40 +2,11 @@ import { copyFileSync, existsSync, mkdtempSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import {
-  ControlStackError,
-  applyControlPlaneMigrations,
-  controlPlaneMigrations,
-  stableHash
-} from "@agent-control-stack/shared";
+import { ControlStackError, applyControlPlaneMigrations, controlPlaneMigrations } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_EVENT_LIMIT, SqliteWorkItemStore, WorkItemEvent, transitionWorkItem } from "./index.js";
 
 const domainTransition = { via: "domain_service" } as const;
-
-function resultInput(
-  claimed: { id: string; leaseId: string; workerId: string; actionHash: string; startedAt: string },
-  overrides: Record<string, unknown> = {}
-) {
-  return {
-    workItemId: claimed.id,
-    leaseId: claimed.leaseId,
-    workerId: claimed.workerId,
-    actionHash: claimed.actionHash,
-    idempotencyKey: stableHash({ workItemId: claimed.id, leaseId: claimed.leaseId, attempt: 1 }),
-    outcome: "succeeded" as const,
-    startedAt: claimed.startedAt,
-    finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
-    exitCode: 0,
-    summary: "simulated result",
-    stdout: "no real command ran",
-    stderr: "",
-    structuredOutput: { simulated: true },
-    artifacts: [],
-    simulationMetadata: { executionMode: "dry_run" as const, simulated: true },
-    ...overrides
-  };
-}
 
 describe("work item state machine", () => {
   it("reads audit events with bounded pagination filters", () => {
@@ -182,7 +153,8 @@ describe("work item state machine", () => {
       store.approveWorkItem(workItem.id, domainTransition);
 
       expectControlError(() => store.transition(workItem.id, "running"), "worker_claim_required");
-      expect(store.claimNextApprovedWorkItem("worker-a")?.status).toBe("running");
+      expectControlError(() => store.claimNextApprovedWorkItem("worker-a"), "worker_protocol_unsupported");
+      expect(store.get(workItem.id)?.status).toBe("approved");
     } finally {
       store.close();
     }
@@ -232,7 +204,7 @@ describe("work item state machine", () => {
       expect(store.readEvents().map((event) => event.name)).toContain(WorkItemEvent.Rejected);
       expect(store.readEvents().map((event) => event.name)).not.toContain(WorkItemEvent.Cancelled);
       expectControlError(() => store.approveWorkItem(workItem.id, domainTransition), "invalid_work_item_transition");
-      expect(store.claimNextApprovedWorkItem("worker-a")).toBeUndefined();
+      expectControlError(() => store.claimNextApprovedWorkItem("worker-a"), "worker_protocol_unsupported");
     } finally {
       store.close();
     }
@@ -283,12 +255,13 @@ describe("work item state machine", () => {
 
       expect(store.get(workItem.id)?.status).toBe("pending_policy");
       expect(store.readEvents().map((event) => event.name)).toEqual([WorkItemEvent.Created]);
-      expect(() => store.startWorkItem(workItem.id)).toThrow(ControlStackError);
+      expectControlError(() => store.startWorkItem(workItem.id), "worker_protocol_unsupported");
       expect(store.approveWorkItem(workItem.id, domainTransition).status).toBe("approved");
-      expectControlError(() => store.startWorkItem(workItem.id), "worker_claim_required");
-      expect(store.startWorkItem(workItem.id, "test-worker", { allowDirectStartForTests: true }).status).toBe(
-        "running"
+      expectControlError(
+        () => store.startWorkItem(workItem.id, "test-worker", { allowDirectStartForTests: true }),
+        "worker_protocol_unsupported"
       );
+      expect(store.get(workItem.id)?.status).toBe("approved");
     } finally {
       store.close();
     }
@@ -313,7 +286,7 @@ describe("work item state machine", () => {
     }
   });
 
-  it("claims approved work once across store connections", () => {
+  it("rejects legacy claims across store connections", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-claim-"));
     const dbPath = join(dir, "control.db");
     const first = new SqliteWorkItemStore(dbPath);
@@ -329,20 +302,17 @@ describe("work item state machine", () => {
       });
       first.approveWorkItem(workItem.id, domainTransition);
 
-      const claimed = first.claimNextApprovedWorkItem("worker-a");
-      expect(claimed?.id).toBe(workItem.id);
-      expect(claimed?.workerId).toBe("worker-a");
-      expect(claimed?.leaseToken).toEqual(expect.any(String));
-      expect(claimed?.leaseExpiresAt).toEqual(expect.any(String));
-      expect(second.claimNextApprovedWorkItem("worker-b")).toBeUndefined();
-      expect(first.readEvents().filter((event) => event.name === WorkItemEvent.Running)).toHaveLength(1);
+      expectControlError(() => first.claimNextApprovedWorkItem("worker-a"), "worker_protocol_unsupported");
+      expectControlError(() => second.claimNextApprovedWorkItem("worker-b"), "worker_protocol_unsupported");
+      expect(first.get(workItem.id)?.status).toBe("approved");
+      expect(first.readEvents().filter((event) => event.name === WorkItemEvent.Running)).toHaveLength(0);
     } finally {
       first.close();
       second.close();
     }
   });
 
-  it("stores only a lease token hash and hides lease material from reads and audit", () => {
+  it("does not create legacy lease material after schema v6", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-claim-hash-"));
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath);
@@ -357,29 +327,26 @@ describe("work item state machine", () => {
       });
       store.approveWorkItem(workItem.id, domainTransition);
 
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
-      expect(claimed?.leaseToken).toEqual(expect.any(String));
-
-      const row = readLeaseRow(dbPath, workItem.id);
-      expect(row.worker_id).toBe("worker-a");
-      expect(row.lease_token_hash).toMatch(/^[a-f0-9]{64}$/);
-      expect(row.lease_token_hash).not.toBe(claimed!.leaseToken);
-      expect(row.lease_expires_at).toEqual(expect.any(String));
+      expectControlError(() => store.claimNextApprovedWorkItem("worker-a"), "worker_protocol_unsupported");
 
       const publicSurface = JSON.stringify({
         get: store.get(workItem.id),
         list: store.list(),
         events: store.readEvents()
       });
-      expect(publicSurface).not.toContain(claimed!.leaseToken);
-      expect(publicSurface).not.toContain(row.lease_token_hash);
       expect(publicSurface).not.toContain("lease_token_hash");
+      const db = new DatabaseSync(dbPath, { readOnly: true });
+      try {
+        expect(db.prepare(`SELECT COUNT(*) AS count FROM leases`).get()).toEqual({ count: 0 });
+      } finally {
+        db.close();
+      }
     } finally {
       store.close();
     }
   });
 
-  it("fails stale running leases", () => {
+  it("rejects the legacy lease reaper", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-lease-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
 
@@ -392,212 +359,22 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
-
-      const failed = store.failExpiredLeases(new Date(Date.now() + 1000));
-
-      expect(failed).toHaveLength(1);
-      expect(store.get(workItem.id)?.status).toBe("failed");
-      expect(store.readEvents().at(-1)?.name).toBe(WorkItemEvent.Failed);
+      expectControlError(() => store.failExpiredLeases(new Date(Date.now() + 1000)), "worker_protocol_unsupported");
+      expect(store.get(workItem.id)?.status).toBe("approved");
     } finally {
       store.close();
     }
   });
 
-  it("binds result submission to the claimed worker lease", () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-"));
+  it("rejects every legacy result mutation regardless of payload shape", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-result-v2-boundary-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
 
     try {
-      const workItem = store.create({
-        title: "Lease-bound result",
-        requester: "agent",
-        intent: "verify worker lease",
-        requestedActions: [{ kind: "manual", description: "result" }],
-        risk: "low"
-      });
-      store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
-
-      expectControlError(
-        () =>
-          store.submitWorkResult({
-            ...resultInput(claimed!, { workerId: "worker-b" })
-          }),
-        "worker_lease_mismatch"
-      );
-      expectControlError(
-        () =>
-          store.submitWorkResult({
-            ...resultInput(claimed!, { actionHash: "0".repeat(64) })
-          }),
-        "worker_action_hash_mismatch"
-      );
-
-      expect(store.submitWorkResult(resultInput(claimed!, { stdout: "ok" })).status).toBe("succeeded");
-      expect(JSON.stringify(store.readEvents())).not.toContain(claimed!.leaseToken);
-    } finally {
-      store.close();
-    }
-  });
-
-  it("rejects result submission when request omits worker lease fields", () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-fields-"));
-    const store = new SqliteWorkItemStore(join(dir, "control.db"));
-
-    try {
-      const workItem = store.create({
-        title: "Lease field result",
-        requester: "agent",
-        intent: "verify required worker lease fields",
-        requestedActions: [{ kind: "manual", description: "result" }],
-        risk: "low"
-      });
-      store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
-
-      expect(() =>
-        store.submitWorkResult({
-          workItemId: workItem.id
-        })
-      ).toThrow();
-      expect(() =>
-        store.submitWorkResult({
-          workItemId: workItem.id,
-          leaseId: claimed!.leaseId
-        })
-      ).toThrow();
-    } finally {
-      store.close();
-    }
-  });
-
-  it("rejects result submission when stored lease hash is missing or malformed", () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-hash-"));
-    const dbPath = join(dir, "control.db");
-    const store = new SqliteWorkItemStore(dbPath);
-
-    try {
-      const workItem = store.create({
-        title: "Stored lease hash result",
-        requester: "agent",
-        intent: "verify stored lease hash gate",
-        requestedActions: [{ kind: "manual", description: "result" }],
-        risk: "low"
-      });
-      store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
-
-      updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", null);
-      expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_missing");
-
-      updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", "not-a-sha256-hex-digest");
-      expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_missing");
-    } finally {
-      store.close();
-    }
-  });
-
-  it("rejects result submission when lease expiry is malformed", () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-expiry-"));
-    const dbPath = join(dir, "control.db");
-    const store = new SqliteWorkItemStore(dbPath);
-
-    try {
-      const workItem = store.create({
-        title: "Malformed lease expiry result",
-        requester: "agent",
-        intent: "verify malformed lease expiry gate",
-        requestedActions: [{ kind: "manual", description: "result" }],
-        risk: "low"
-      });
-      store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
-      updateLeaseColumn(dbPath, claimed!.leaseId, "expires_at", "not-an-iso-date");
-
-      expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "lease_state_inconsistent");
-    } finally {
-      store.close();
-    }
-  });
-
-  it("rejects result submission for missing work items", () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-result-missing-"));
-    const store = new SqliteWorkItemStore(join(dir, "control.db"));
-
-    try {
-      expectControlError(
-        () =>
-          store.submitWorkResult({
-            workItemId: "wrk_missing",
-            leaseId: "lease_missing",
-            workerId: "worker-a",
-            actionHash: "0".repeat(64),
-            idempotencyKey: "result-missing",
-            outcome: "succeeded",
-            startedAt: "2026-07-20T00:00:00.000Z",
-            finishedAt: "2026-07-20T00:00:01.000Z",
-            summary: "missing",
-            simulationMetadata: { executionMode: "dry_run", simulated: true }
-          }),
-        "work_item_not_found"
-      );
-    } finally {
-      store.close();
-    }
-  });
-
-  it("rejects expired lease result submission", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-result-expired-"));
-    const store = new SqliteWorkItemStore(join(dir, "control.db"));
-
-    try {
-      const workItem = store.create({
-        title: "Expired result",
-        requester: "agent",
-        intent: "verify expired result gate",
-        requestedActions: [{ kind: "manual", description: "result" }],
-        risk: "low"
-      });
-      store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
-      await new Promise((resolve) => setTimeout(resolve, 10));
-
-      expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_expired");
-    } finally {
-      store.close();
-    }
-  });
-
-  it("rejects result submission before running", () => {
-    const dir = mkdtempSync(join(tmpdir(), "acs-result-"));
-    const store = new SqliteWorkItemStore(join(dir, "control.db"));
-
-    try {
-      const workItem = store.create({
-        title: "Premature result",
-        requester: "agent",
-        intent: "verify result gate",
-        requestedActions: [{ kind: "manual", description: "result" }],
-        risk: "low"
-      });
-
-      expectControlError(
-        () =>
-          store.submitWorkResult({
-            workItemId: workItem.id,
-            leaseId: "lease-not-running",
-            workerId: "worker-a",
-            actionHash: "0".repeat(64),
-            idempotencyKey: "result-not-running",
-            outcome: "succeeded",
-            startedAt: "2026-07-20T00:00:00.000Z",
-            finishedAt: "2026-07-20T00:00:01.000Z",
-            summary: "premature",
-            simulationMetadata: { executionMode: "dry_run", simulated: true }
-          }),
-        "work_item_not_running"
-      );
+      expectControlError(() => store.submitWorkResult({}), "worker_protocol_unsupported");
+      expectControlError(() => store.recordDerivedWorkResult({}), "worker_protocol_unsupported");
+      expect(store.getExecutionResult("res_missing")).toBeUndefined();
+      expect(store.getExecutionResultForIdempotency("legacy-worker", "missing")).toBeUndefined();
     } finally {
       store.close();
     }
@@ -765,7 +542,8 @@ describe("work item state machine", () => {
         { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
         { version: 3, name: "event_indexes", filename: "003_event_indexes.sql" },
         { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" },
-        { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" }
+        { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" },
+        { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -860,7 +638,8 @@ describe("work item state machine", () => {
         { version: 2 },
         { version: 3 },
         { version: 4 },
-        { version: 5 }
+        { version: 5 },
+        { version: 6 }
       ]);
     } finally {
       db.close();
@@ -968,7 +747,7 @@ describe("work item state machine", () => {
 
     const store = new SqliteWorkItemStore(copiedPath);
     try {
-      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
       store.close();
@@ -1041,7 +820,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5]);
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" })])
       );
@@ -1588,53 +1367,6 @@ function countRows(dbPath: string, table: "heartbeats"): number {
   const db = new DatabaseSync(dbPath);
   try {
     return (db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number }).count;
-  } finally {
-    db.close();
-  }
-}
-
-function readLeaseRow(
-  dbPath: string,
-  workItemId: string
-): { worker_id: string | null; lease_token_hash: string | null; lease_expires_at: string | null } {
-  const db = new DatabaseSync(dbPath);
-  try {
-    return db
-      .prepare(`SELECT worker_id, lease_token_hash, lease_expires_at FROM work_items WHERE id = ?`)
-      .get(workItemId) as {
-      worker_id: string | null;
-      lease_token_hash: string | null;
-      lease_expires_at: string | null;
-    };
-  } finally {
-    db.close();
-  }
-}
-
-function updateWorkItemColumn(
-  dbPath: string,
-  workItemId: string,
-  column: "lease_expires_at" | "lease_token_hash",
-  value: string | null
-): void {
-  const db = new DatabaseSync(dbPath);
-  try {
-    db.prepare(`UPDATE work_items SET ${column} = ? WHERE id = ?`).run(value, workItemId);
-  } finally {
-    db.close();
-  }
-}
-
-function updateLeaseColumn(
-  dbPath: string,
-  leaseId: string,
-  column: "expires_at" | "token_hash",
-  value: string | null
-): void {
-  const db = new DatabaseSync(dbPath);
-  try {
-    db.exec(`DROP TRIGGER IF EXISTS leases_immutable_fields_guard`);
-    db.prepare(`UPDATE leases SET ${column} = ? WHERE lease_id = ?`).run(value, leaseId);
   } finally {
     db.close();
   }

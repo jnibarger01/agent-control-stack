@@ -22,15 +22,12 @@ import {
   createWorkItem,
   listWorkItemsSchema,
   rejectRequestSchema,
-  submitWorkResultSchema,
-  executionActionHash,
   workItemCreatedEvent,
   workItemSchema,
   workItemStatusEvent,
   type ClaimedWorkItem,
   type Requester,
   type ResultOutcome,
-  type SubmitWorkResultInput,
   type WorkItem,
   type WorkItemRisk,
   type WorkItemStatus
@@ -41,6 +38,33 @@ import {
   validateHeartbeatTtl,
   type LivenessReconciliationOptions
 } from "./liveness.js";
+import {
+  EXECUTION_ATTEMPT_CLAIM_SCHEMA_VERSION,
+  WORKER_PROTOCOL_VERSION,
+  admitExecutionPlanInputSchema,
+  claimExecutionAttemptInputSchema,
+  createExecutionPlanInputSchema,
+  executionAttemptClaimSchema,
+  executionAttemptInputHash,
+  executionPlanAdmissionHash,
+  executionPlanAdmissionSchema,
+  executionPlanApprovalBindingHash,
+  executionPlanApprovalSchema,
+  executionPlanHash,
+  executionPlanRecordSchema,
+  executionPlanSubjectInputHash,
+  recordExecutionPlanApprovalInputSchema,
+  verifyExecutionAttemptClaimInputSchema,
+  type AdmitExecutionPlanInput,
+  type ClaimExecutionAttemptInput,
+  type CreateExecutionPlanInput,
+  type ExecutionAttemptClaim,
+  type ExecutionPlanAdmission,
+  type ExecutionPlanApproval,
+  type ExecutionPlanRecord,
+  type RecordExecutionPlanApprovalInput,
+  type VerifyExecutionAttemptClaimInput
+} from "./execution-plan.js";
 
 interface WorkItemRow {
   id: string;
@@ -66,18 +90,6 @@ interface WorkItemRow {
   updated_at: string;
 }
 
-interface LeaseRow {
-  lease_id: string;
-  work_item_id: string;
-  worker_id: string;
-  token_hash: string;
-  action_hash: string;
-  issued_at: string;
-  expires_at: string;
-  status: "active" | "consumed" | "expired" | "revoked";
-  closed_at: string | null;
-}
-
 interface ExecutionResultRow {
   result_id: string;
   work_item_id: string;
@@ -101,7 +113,93 @@ interface ExecutionResultRow {
   created_at: string;
 }
 
-type PersistedResultInput = Omit<SubmitWorkResultInput, "outcome"> & { outcome: ResultOutcome };
+interface ExecutionPlanRow {
+  plan_id: string;
+  work_item_id: string;
+  plan_number: number;
+  schema_version: "acs.execution-plan.v1";
+  definition_json: string;
+  plan_hash: string;
+  subject_input_hash: string;
+  created_by_actor_id: string;
+  created_at: string;
+}
+
+interface ExecutionPlanHeadRow {
+  work_item_id: string;
+  plan_id: string;
+  plan_hash: string;
+  plan_number: number;
+  updated_at: string;
+}
+
+interface ExecutionPlanAdmissionRow {
+  admission_id: string;
+  work_item_id: string;
+  plan_id: string;
+  plan_hash: string;
+  admission_hash: string;
+  policy_version: string;
+  policy_decision_hash: string;
+  decision: "allow" | "require_approval";
+  required_approval_action_hashes_json: string;
+  admitted_by_actor_id: string;
+  admitted_at: string;
+}
+
+interface ExecutionPlanApprovalRow {
+  approval_id: string;
+  work_item_id: string;
+  plan_id: string;
+  plan_hash: string;
+  admission_id: string;
+  admission_hash: string;
+  policy_version: string;
+  action_hash: string;
+  approval_binding_hash: string;
+  approved_by_actor_id: string;
+  reason: string;
+  status: "granted" | "consumed" | "expired" | "revoked";
+  created_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+}
+
+interface ExecutionAttemptRow {
+  attempt_id: string;
+  work_item_id: string;
+  attempt_number: number;
+  protocol_version: "acs.worker.v2";
+  plan_id: string;
+  plan_hash: string;
+  admission_id: string;
+  admission_hash: string;
+  input_hash: string;
+  worker_id: string;
+  fencing_epoch: number;
+  status: "leased" | "unknown" | "quarantined";
+  created_at: string;
+  claimed_at: string;
+}
+
+interface AttemptLeaseRow {
+  lease_id: string;
+  attempt_id: string;
+  work_item_id: string;
+  worker_id: string;
+  protocol_version: "acs.worker.v2";
+  plan_id: string;
+  plan_hash: string;
+  admission_id: string;
+  admission_hash: string;
+  input_hash: string;
+  token_hash: string;
+  fencing_epoch: number;
+  issued_at: string;
+  expires_at: string;
+  status: "active" | "consumed" | "expired" | "revoked";
+  closed_at: string | null;
+}
 
 export type StoredAuditEvent = AuditChainEvent;
 export const DEFAULT_EVENT_LIMIT = 100;
@@ -512,6 +610,20 @@ export interface WorkItemStore {
   create(input: unknown): WorkItem;
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
+  createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord;
+  getExecutionPlan(planId: string): ExecutionPlanRecord | undefined;
+  getCurrentExecutionPlan(workItemId: string): ExecutionPlanRecord | undefined;
+  listExecutionPlans(workItemId: string): ExecutionPlanRecord[];
+  admitExecutionPlan(input: AdmitExecutionPlanInput, options: PrivilegedTransitionOptions): ExecutionPlanAdmission;
+  getExecutionPlanAdmission(admissionId: string): ExecutionPlanAdmission | undefined;
+  getCurrentExecutionPlanAdmission(workItemId: string): ExecutionPlanAdmission | undefined;
+  recordExecutionPlanApproval(
+    input: RecordExecutionPlanApprovalInput,
+    options: PrivilegedTransitionOptions
+  ): ExecutionPlanApproval;
+  getExecutionPlanApproval(approvalId: string): ExecutionPlanApproval | undefined;
+  claimExecutionAttempt(input: ClaimExecutionAttemptInput): ExecutionAttemptClaim;
+  verifyExecutionAttemptClaim(input: VerifyExecutionAttemptClaimInput): ExecutionAttemptClaim;
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
   health(): StoreHealth;
   verifyAuditChain(): AuditChainVerification;
@@ -646,6 +758,787 @@ export class SqliteWorkItemStore implements WorkItemStore {
           .all(filter.status) as unknown as WorkItemRow[])
       : (this.db.prepare(`SELECT * FROM work_items ORDER BY created_at DESC`).all() as unknown as WorkItemRow[]);
     return rows.map(rowToWorkItem);
+  }
+
+  createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord {
+    const parsed = createExecutionPlanInputSchema.parse(input);
+    const planHash = executionPlanHash(parsed.definition);
+    const now = (parsed.now ?? new Date()).toISOString();
+
+    return this.write(() => {
+      const workItem = this.getRequired(parsed.workItemId);
+      if (parsed.definition.workItemId !== workItem.id) {
+        throw new ControlStackError(
+          "execution_plan_work_item_mismatch",
+          "execution plan work item does not match the target work item"
+        );
+      }
+      const subjectInputHash = executionPlanSubjectInputHash(workItem);
+      if (parsed.definition.subjectInputHash !== subjectInputHash) {
+        throw new ControlStackError(
+          "execution_plan_input_mismatch",
+          "execution plan is not bound to the current work item inputs"
+        );
+      }
+
+      const current = this.db
+        .prepare(`SELECT * FROM execution_plan_heads WHERE work_item_id = ?`)
+        .get(workItem.id) as unknown as ExecutionPlanHeadRow | undefined;
+      if (current?.plan_hash === planHash) {
+        const existing = this.getExecutionPlan(current.plan_id);
+        if (!existing) {
+          throw new ControlStackError("execution_plan_state_invalid", "current execution plan cannot be resolved");
+        }
+        return { value: existing, events: [] };
+      }
+      if (current && parsed.expectedCurrentPlanHash !== current.plan_hash) {
+        throw new ControlStackError(
+          "execution_plan_conflict",
+          "current execution plan changed or an expected plan hash was not supplied"
+        );
+      }
+      if (!current && parsed.expectedCurrentPlanHash !== undefined) {
+        throw new ControlStackError(
+          "execution_plan_conflict",
+          "expected execution plan hash was supplied before an initial plan existed"
+        );
+      }
+      const activeAttempt = this.db
+        .prepare(
+          `SELECT attempt_id FROM execution_attempts
+           WHERE work_item_id = ? AND status IN ('leased', 'unknown', 'quarantined')
+           LIMIT 1`
+        )
+        .get(workItem.id) as { attempt_id: string } | undefined;
+      if (activeAttempt) {
+        throw new ControlStackError("execution_plan_in_use", "execution plan cannot change while an attempt is active");
+      }
+
+      const planNumber = (current?.plan_number ?? 0) + 1;
+      const planId = createId("plan");
+      this.db
+        .prepare(
+          `INSERT INTO execution_plans
+           (plan_id, work_item_id, plan_number, schema_version, definition_json, plan_hash,
+            subject_input_hash, created_by_actor_id, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          planId,
+          workItem.id,
+          planNumber,
+          parsed.definition.schemaVersion,
+          JSON.stringify(parsed.definition),
+          planHash,
+          subjectInputHash,
+          parsed.createdByActorId,
+          now
+        );
+
+      if (current) {
+        const changed = this.db
+          .prepare(
+            `UPDATE execution_plan_heads
+             SET plan_id = ?, plan_hash = ?, plan_number = ?, updated_at = ?
+             WHERE work_item_id = ? AND plan_hash = ? AND plan_number = ?`
+          )
+          .run(planId, planHash, planNumber, now, workItem.id, current.plan_hash, current.plan_number);
+        if (changed.changes !== 1) {
+          throw new ControlStackError("execution_plan_conflict", "current execution plan changed concurrently");
+        }
+      } else {
+        this.db
+          .prepare(
+            `INSERT INTO execution_plan_heads
+             (work_item_id, plan_id, plan_hash, plan_number, updated_at)
+             VALUES (?, ?, ?, ?, ?)`
+          )
+          .run(workItem.id, planId, planHash, planNumber, now);
+      }
+
+      const record = executionPlanRecordSchema.parse({
+        planId,
+        workItemId: workItem.id,
+        planNumber,
+        definition: parsed.definition,
+        planHash,
+        subjectInputHash,
+        createdByActorId: parsed.createdByActorId,
+        createdAt: now
+      });
+      const event = this.appendAuditEvent(
+        createEvent(
+          "execution_plan.created",
+          {
+            planId,
+            workItemId: workItem.id,
+            planNumber,
+            planHash,
+            subjectInputHash,
+            replacedPlanHash: current?.plan_hash,
+            createdByActorId: parsed.createdByActorId
+          },
+          {
+            "work_item.id": workItem.id,
+            "plan.id": planId,
+            "plan.hash": planHash,
+            "plan.number": String(planNumber),
+            "actor.id": parsed.createdByActorId
+          }
+        )
+      );
+      return { value: record, events: [event] };
+    });
+  }
+
+  getExecutionPlan(planId: string): ExecutionPlanRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM execution_plans WHERE plan_id = ?`).get(planId) as unknown as
+      ExecutionPlanRow | undefined;
+    return row ? rowToExecutionPlan(row) : undefined;
+  }
+
+  getCurrentExecutionPlan(workItemId: string): ExecutionPlanRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT plans.*
+         FROM execution_plan_heads AS heads
+         JOIN execution_plans AS plans
+           ON plans.plan_id = heads.plan_id
+          AND plans.work_item_id = heads.work_item_id
+          AND plans.plan_hash = heads.plan_hash
+          AND plans.plan_number = heads.plan_number
+         WHERE heads.work_item_id = ?`
+      )
+      .get(workItemId) as unknown as ExecutionPlanRow | undefined;
+    if (!row) return undefined;
+    const record = rowToExecutionPlan(row);
+    const workItem = this.getRequired(workItemId);
+    if (record.subjectInputHash !== executionPlanSubjectInputHash(workItem)) {
+      throw new ControlStackError(
+        "execution_plan_integrity_failed",
+        "current execution plan subject no longer matches the work item"
+      );
+    }
+    return record;
+  }
+
+  listExecutionPlans(workItemId: string): ExecutionPlanRecord[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM execution_plans WHERE work_item_id = ? ORDER BY plan_number ASC`)
+        .all(workItemId) as unknown as ExecutionPlanRow[]
+    ).map(rowToExecutionPlan);
+  }
+
+  admitExecutionPlan(input: AdmitExecutionPlanInput, options: PrivilegedTransitionOptions): ExecutionPlanAdmission {
+    requirePrivilegedTransition(options, "policy_gate");
+    if (options.via !== "policy_gate") {
+      throw new ControlStackError("policy_gate_required", "execution plan admission requires the policy gate");
+    }
+    const parsed = admitExecutionPlanInputSchema.parse(input);
+    const requiredApprovalActionHashes = [...parsed.requiredApprovalActionHashes].sort();
+
+    return this.write(() => {
+      const current = this.getCurrentExecutionPlan(parsed.workItemId);
+      if (!current || current.planHash !== parsed.planHash) {
+        throw new ControlStackError("execution_plan_not_current", "only the current execution plan can be admitted");
+      }
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM execution_plan_admissions
+           WHERE plan_id = ? AND policy_version = ? AND policy_decision_hash = ?`
+        )
+        .get(current.planId, parsed.policyVersion, parsed.policyDecisionHash) as unknown as
+        ExecutionPlanAdmissionRow | undefined;
+      if (existing) {
+        const admission = rowToExecutionPlanAdmission(existing);
+        const head = this.getCurrentExecutionPlanAdmission(current.workItemId);
+        if (head?.admissionId !== admission.admissionId) {
+          throw new ControlStackError(
+            "execution_plan_admission_stale",
+            "a superseded admission cannot become current again"
+          );
+        }
+        return { value: admission, events: [] };
+      }
+
+      const admissionId = createId("admission");
+      const admittedAt = (parsed.now ?? new Date()).toISOString();
+      const admissionHash = executionPlanAdmissionHash({
+        workItemId: current.workItemId,
+        planId: current.planId,
+        planHash: current.planHash,
+        policyVersion: parsed.policyVersion,
+        policyDecisionHash: parsed.policyDecisionHash,
+        decision: parsed.decision,
+        requiredApprovalActionHashes
+      });
+      this.db
+        .prepare(
+          `INSERT INTO execution_plan_admissions
+           (admission_id, work_item_id, plan_id, plan_hash, admission_hash, policy_version,
+            policy_decision_hash, decision, required_approval_action_hashes_json,
+            admitted_by_actor_id, admitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          admissionId,
+          current.workItemId,
+          current.planId,
+          current.planHash,
+          admissionHash,
+          parsed.policyVersion,
+          parsed.policyDecisionHash,
+          parsed.decision,
+          JSON.stringify(requiredApprovalActionHashes),
+          parsed.admittedByActorId,
+          admittedAt
+        );
+      this.db
+        .prepare(
+          `INSERT INTO execution_plan_admission_heads
+           (work_item_id, admission_id, admission_hash, plan_id, plan_hash, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?)
+           ON CONFLICT(work_item_id) DO UPDATE SET
+             admission_id = excluded.admission_id,
+             admission_hash = excluded.admission_hash,
+             plan_id = excluded.plan_id,
+             plan_hash = excluded.plan_hash,
+             updated_at = excluded.updated_at`
+        )
+        .run(current.workItemId, admissionId, admissionHash, current.planId, current.planHash, admittedAt);
+      const admission = executionPlanAdmissionSchema.parse({
+        admissionId,
+        workItemId: current.workItemId,
+        planId: current.planId,
+        planHash: current.planHash,
+        admissionHash,
+        policyVersion: parsed.policyVersion,
+        policyDecisionHash: parsed.policyDecisionHash,
+        decision: parsed.decision,
+        requiredApprovalActionHashes,
+        admittedByActorId: parsed.admittedByActorId,
+        admittedAt
+      });
+      const event = this.appendAuditEvent(
+        createEvent("execution_plan.admitted", admission, {
+          "work_item.id": current.workItemId,
+          "plan.id": current.planId,
+          "plan.hash": current.planHash,
+          "admission.id": admissionId,
+          "admission.hash": admissionHash,
+          "policy.version": parsed.policyVersion,
+          "policy.decision_hash": parsed.policyDecisionHash,
+          "actor.id": parsed.admittedByActorId
+        })
+      );
+      return { value: admission, events: [event] };
+    });
+  }
+
+  getExecutionPlanAdmission(admissionId: string): ExecutionPlanAdmission | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM execution_plan_admissions WHERE admission_id = ?`)
+      .get(admissionId) as unknown as ExecutionPlanAdmissionRow | undefined;
+    return row ? rowToExecutionPlanAdmission(row) : undefined;
+  }
+
+  getCurrentExecutionPlanAdmission(workItemId: string): ExecutionPlanAdmission | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT admissions.*
+         FROM execution_plan_admission_heads AS heads
+         JOIN execution_plan_admissions AS admissions
+           ON admissions.admission_id = heads.admission_id
+          AND admissions.work_item_id = heads.work_item_id
+          AND admissions.admission_hash = heads.admission_hash
+          AND admissions.plan_id = heads.plan_id
+          AND admissions.plan_hash = heads.plan_hash
+         JOIN execution_plan_heads AS plan_heads
+           ON plan_heads.work_item_id = heads.work_item_id
+          AND plan_heads.plan_id = heads.plan_id
+          AND plan_heads.plan_hash = heads.plan_hash
+         WHERE heads.work_item_id = ?`
+      )
+      .get(workItemId) as unknown as ExecutionPlanAdmissionRow | undefined;
+    return row ? rowToExecutionPlanAdmission(row) : undefined;
+  }
+
+  recordExecutionPlanApproval(
+    input: RecordExecutionPlanApprovalInput,
+    options: PrivilegedTransitionOptions
+  ): ExecutionPlanApproval {
+    requirePrivilegedTransition(options, "policy_gate");
+    if (options.via !== "policy_gate") {
+      throw new ControlStackError("policy_gate_required", "execution plan approval requires the policy gate");
+    }
+    const parsed = recordExecutionPlanApprovalInputSchema.parse(input);
+
+    return this.write(() => {
+      const plan = this.getCurrentExecutionPlan(parsed.workItemId);
+      const admission = this.getCurrentExecutionPlanAdmission(parsed.workItemId);
+      if (!plan || plan.planHash !== parsed.planHash) {
+        throw new ControlStackError("execution_plan_not_current", "approval does not match the current plan");
+      }
+      if (
+        !admission ||
+        admission.admissionHash !== parsed.admissionHash ||
+        admission.planId !== plan.planId ||
+        admission.policyVersion !== parsed.policyVersion
+      ) {
+        throw new ControlStackError(
+          "execution_plan_approval_binding_mismatch",
+          "approval does not match the current admission and policy version"
+        );
+      }
+      if (
+        admission.decision !== "require_approval" ||
+        !admission.requiredApprovalActionHashes.includes(parsed.actionHash)
+      ) {
+        throw new ControlStackError(
+          "execution_plan_approval_not_requested",
+          "approval action was not required by the current admission"
+        );
+      }
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      if (Date.parse(parsed.expiresAt) <= Date.parse(createdAt)) {
+        throw new ControlStackError("execution_plan_approval_expired", "approval expiry must be in the future");
+      }
+      const existing = this.db
+        .prepare(`SELECT * FROM execution_plan_approvals WHERE admission_id = ? AND action_hash = ?`)
+        .get(admission.admissionId, parsed.actionHash) as unknown as ExecutionPlanApprovalRow | undefined;
+      if (existing) {
+        const approval = rowToExecutionPlanApproval(existing);
+        if (approval.status !== "granted") {
+          throw new ControlStackError(
+            "execution_plan_approval_already_used",
+            "execution plan approval cannot be regranted"
+          );
+        }
+        return { value: approval, events: [] };
+      }
+
+      const approvalId = createId("approval");
+      const approvalBindingHash = executionPlanApprovalBindingHash({
+        workItemId: plan.workItemId,
+        planId: plan.planId,
+        planHash: plan.planHash,
+        admissionId: admission.admissionId,
+        admissionHash: admission.admissionHash,
+        policyVersion: admission.policyVersion,
+        actionHash: parsed.actionHash
+      });
+      this.db
+        .prepare(
+          `INSERT INTO execution_plan_approvals
+           (approval_id, work_item_id, plan_id, plan_hash, admission_id, admission_hash,
+            policy_version, action_hash, approval_binding_hash, approved_by_actor_id, reason,
+            status, created_at, expires_at, consumed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'granted', ?, ?, NULL)`
+        )
+        .run(
+          approvalId,
+          plan.workItemId,
+          plan.planId,
+          plan.planHash,
+          admission.admissionId,
+          admission.admissionHash,
+          admission.policyVersion,
+          parsed.actionHash,
+          approvalBindingHash,
+          parsed.approvedByActorId,
+          parsed.reason,
+          createdAt,
+          parsed.expiresAt
+        );
+      const approval = executionPlanApprovalSchema.parse({
+        approvalId,
+        workItemId: plan.workItemId,
+        planId: plan.planId,
+        planHash: plan.planHash,
+        admissionId: admission.admissionId,
+        admissionHash: admission.admissionHash,
+        policyVersion: admission.policyVersion,
+        actionHash: parsed.actionHash,
+        approvalBindingHash,
+        approvedByActorId: parsed.approvedByActorId,
+        reason: parsed.reason,
+        status: "granted",
+        createdAt,
+        expiresAt: parsed.expiresAt
+      });
+      const event = this.appendAuditEvent(
+        createEvent("execution_plan.approval_granted", approval, {
+          "work_item.id": plan.workItemId,
+          "plan.id": plan.planId,
+          "plan.hash": plan.planHash,
+          "admission.id": admission.admissionId,
+          "admission.hash": admission.admissionHash,
+          "approval.id": approvalId,
+          "action.hash": parsed.actionHash,
+          "policy.version": admission.policyVersion,
+          "actor.id": parsed.approvedByActorId
+        })
+      );
+      return { value: approval, events: [event] };
+    });
+  }
+
+  getExecutionPlanApproval(approvalId: string): ExecutionPlanApproval | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM execution_plan_approvals WHERE approval_id = ?`)
+      .get(approvalId) as unknown as ExecutionPlanApprovalRow | undefined;
+    return row ? rowToExecutionPlanApproval(row) : undefined;
+  }
+
+  claimExecutionAttempt(input: ClaimExecutionAttemptInput): ExecutionAttemptClaim {
+    assertWorkerProtocol((input as { protocolVersion?: unknown }).protocolVersion);
+    const parsed = claimExecutionAttemptInputSchema.parse(input);
+
+    return this.write(() => {
+      const workItem = this.getRequired(parsed.workItemId);
+      if (workItem.status !== "approved") {
+        throw new ControlStackError("execution_attempt_not_approved", "work item is not approved for an attempt");
+      }
+      const plan = this.getCurrentExecutionPlan(workItem.id);
+      const admission = this.getCurrentExecutionPlanAdmission(workItem.id);
+      if (!plan || plan.planId !== parsed.planId || plan.planHash !== parsed.planHash) {
+        throw new ControlStackError("execution_attempt_plan_mismatch", "attempt claim does not match the current plan");
+      }
+      if (
+        !admission ||
+        admission.admissionId !== parsed.admissionId ||
+        admission.admissionHash !== parsed.admissionHash ||
+        admission.planId !== plan.planId ||
+        admission.planHash !== plan.planHash
+      ) {
+        throw new ControlStackError(
+          "execution_attempt_admission_mismatch",
+          "attempt claim does not match the current admission"
+        );
+      }
+      const expectedInputHash = executionAttemptInputHash({
+        workItemId: workItem.id,
+        planId: plan.planId,
+        planHash: plan.planHash,
+        admissionId: admission.admissionId,
+        admissionHash: admission.admissionHash,
+        subjectInputHash: executionPlanSubjectInputHash(workItem)
+      });
+      if (parsed.inputHash !== expectedInputHash) {
+        throw new ControlStackError("execution_attempt_input_mismatch", "attempt input hash is invalid or stale");
+      }
+      const active = this.db
+        .prepare(
+          `SELECT attempt_id FROM execution_attempts
+           WHERE work_item_id = ? AND status IN ('leased', 'unknown', 'quarantined')
+           LIMIT 1`
+        )
+        .get(workItem.id) as { attempt_id: string } | undefined;
+      if (active) {
+        throw new ControlStackError("execution_attempt_claim_conflict", "work item already has an active attempt");
+      }
+
+      const now = parsed.now ?? new Date();
+      const issuedAt = now.toISOString();
+      const expiresAt = new Date(now.getTime() + (parsed.leaseMs ?? this.leaseMs)).toISOString();
+      const attemptNumberRow = this.db
+        .prepare(`SELECT COALESCE(MAX(attempt_number), 0) + 1 AS next FROM execution_attempts WHERE work_item_id = ?`)
+        .get(workItem.id) as { next: number };
+      const attemptNumber = attemptNumberRow.next;
+      const attemptId = createId("attempt");
+      const leaseId = createId("alease");
+      const leaseToken = createLeaseToken();
+      const fencingEpoch = 1;
+      const tokenHash = hashAttemptLeaseToken({
+        attemptId,
+        leaseId,
+        workerId: parsed.workerId,
+        fencingEpoch,
+        leaseToken
+      });
+      const approvals =
+        admission.decision === "require_approval"
+          ? (
+              this.db
+                .prepare(
+                  `SELECT * FROM execution_plan_approvals
+                   WHERE admission_id = ? AND admission_hash = ? AND status = 'granted'
+                   ORDER BY action_hash ASC`
+                )
+                .all(admission.admissionId, admission.admissionHash) as unknown as ExecutionPlanApprovalRow[]
+            ).map(rowToExecutionPlanApproval)
+          : [];
+      if (
+        admission.decision === "require_approval" &&
+        approvals.some((approval) => approval.approvedByActorId === parsed.workerId)
+      ) {
+        throw new ControlStackError(
+          "execution_attempt_self_approval",
+          "a worker cannot claim an attempt using its own approval"
+        );
+      }
+      if (
+        admission.decision === "require_approval" &&
+        (approvals.length !== admission.requiredApprovalActionHashes.length ||
+          approvals.some(
+            (approval) =>
+              approval.workItemId !== workItem.id ||
+              approval.planId !== plan.planId ||
+              approval.planHash !== plan.planHash ||
+              approval.admissionId !== admission.admissionId ||
+              approval.admissionHash !== admission.admissionHash ||
+              !admission.requiredApprovalActionHashes.includes(approval.actionHash) ||
+              approval.policyVersion !== admission.policyVersion ||
+              Date.parse(approval.expiresAt) <= now.getTime()
+          ))
+      ) {
+        throw new ControlStackError(
+          "execution_attempt_approval_missing",
+          "current plan approvals are missing, expired, or mismatched"
+        );
+      }
+
+      this.db
+        .prepare(
+          `INSERT INTO execution_attempts
+           (attempt_id, work_item_id, attempt_number, protocol_version, plan_id, plan_hash,
+            admission_id, admission_hash, input_hash, worker_id, fencing_epoch, status,
+            created_at, claimed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'leased', ?, ?)`
+        )
+        .run(
+          attemptId,
+          workItem.id,
+          attemptNumber,
+          WORKER_PROTOCOL_VERSION,
+          plan.planId,
+          plan.planHash,
+          admission.admissionId,
+          admission.admissionHash,
+          expectedInputHash,
+          parsed.workerId,
+          fencingEpoch,
+          issuedAt,
+          issuedAt
+        );
+      this.db
+        .prepare(
+          `INSERT INTO attempt_leases
+           (lease_id, attempt_id, work_item_id, worker_id, protocol_version, plan_id, plan_hash,
+            admission_id, admission_hash, input_hash, token_hash, fencing_epoch, issued_at,
+            expires_at, status, closed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL)`
+        )
+        .run(
+          leaseId,
+          attemptId,
+          workItem.id,
+          parsed.workerId,
+          WORKER_PROTOCOL_VERSION,
+          plan.planId,
+          plan.planHash,
+          admission.admissionId,
+          admission.admissionHash,
+          expectedInputHash,
+          tokenHash,
+          fencingEpoch,
+          issuedAt,
+          expiresAt
+        );
+
+      const claim = executionAttemptClaimSchema.parse({
+        schemaVersion: EXECUTION_ATTEMPT_CLAIM_SCHEMA_VERSION,
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        attemptId,
+        attemptNumber,
+        workItemId: workItem.id,
+        planId: plan.planId,
+        planHash: plan.planHash,
+        admissionId: admission.admissionId,
+        admissionHash: admission.admissionHash,
+        inputHash: expectedInputHash,
+        workerId: parsed.workerId,
+        leaseId,
+        leaseToken,
+        fencingEpoch,
+        issuedAt,
+        expiresAt
+      });
+      const events = approvals.map((approval) =>
+        this.appendAuditEvent(
+          createEvent(
+            "execution_plan.approval_consumed",
+            {
+              approvalId: approval.approvalId,
+              workItemId: workItem.id,
+              planId: plan.planId,
+              admissionId: admission.admissionId,
+              actionHash: approval.actionHash,
+              attemptId,
+              leaseId,
+              consumedAt: issuedAt
+            },
+            {
+              "work_item.id": workItem.id,
+              "plan.id": plan.planId,
+              "admission.id": admission.admissionId,
+              "approval.id": approval.approvalId,
+              "action.hash": approval.actionHash,
+              "attempt.id": attemptId,
+              "lease.id": leaseId
+            }
+          )
+        )
+      );
+      events.push(
+        this.appendAuditEvent(
+          createEvent(
+            "execution_attempt.created",
+            {
+              attemptId,
+              attemptNumber,
+              workItemId: workItem.id,
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              planId: plan.planId,
+              planHash: plan.planHash,
+              admissionId: admission.admissionId,
+              admissionHash: admission.admissionHash,
+              inputHash: expectedInputHash,
+              workerId: parsed.workerId,
+              fencingEpoch
+            },
+            {
+              "work_item.id": workItem.id,
+              "attempt.id": attemptId,
+              "attempt.number": String(attemptNumber),
+              "plan.id": plan.planId,
+              "plan.hash": plan.planHash,
+              "admission.id": admission.admissionId,
+              "admission.hash": admission.admissionHash,
+              "worker.id": parsed.workerId,
+              "lease.epoch": String(fencingEpoch)
+            }
+          )
+        ),
+        this.appendAuditEvent(
+          createEvent(
+            "attempt_lease.granted",
+            {
+              attemptId,
+              workItemId: workItem.id,
+              leaseId,
+              workerId: parsed.workerId,
+              protocolVersion: WORKER_PROTOCOL_VERSION,
+              fencingEpoch,
+              issuedAt,
+              expiresAt
+            },
+            {
+              "work_item.id": workItem.id,
+              "attempt.id": attemptId,
+              "lease.id": leaseId,
+              "worker.id": parsed.workerId,
+              "lease.epoch": String(fencingEpoch)
+            }
+          )
+        )
+      );
+      return { value: claim, events };
+    });
+  }
+
+  verifyExecutionAttemptClaim(input: VerifyExecutionAttemptClaimInput): ExecutionAttemptClaim {
+    assertWorkerProtocol((input as { protocolVersion?: unknown }).protocolVersion);
+    const parsed = verifyExecutionAttemptClaimInputSchema.parse(input);
+    const attempt = this.db
+      .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ?`)
+      .get(parsed.attemptId) as unknown as ExecutionAttemptRow | undefined;
+    const lease = this.db.prepare(`SELECT * FROM attempt_leases WHERE lease_id = ?`).get(parsed.leaseId) as unknown as
+      AttemptLeaseRow | undefined;
+    if (!attempt || !lease || attempt.status !== "leased" || lease.status !== "active") {
+      throw new ControlStackError("execution_attempt_lease_stale", "attempt lease is missing or no longer active");
+    }
+    if (
+      attempt.work_item_id !== parsed.workItemId ||
+      attempt.plan_id !== parsed.planId ||
+      attempt.plan_hash !== parsed.planHash ||
+      attempt.admission_id !== parsed.admissionId ||
+      attempt.admission_hash !== parsed.admissionHash ||
+      attempt.input_hash !== parsed.inputHash ||
+      attempt.worker_id !== parsed.workerId ||
+      attempt.fencing_epoch !== parsed.fencingEpoch ||
+      lease.attempt_id !== parsed.attemptId ||
+      lease.work_item_id !== parsed.workItemId ||
+      lease.plan_id !== parsed.planId ||
+      lease.plan_hash !== parsed.planHash ||
+      lease.admission_id !== parsed.admissionId ||
+      lease.admission_hash !== parsed.admissionHash ||
+      lease.input_hash !== parsed.inputHash ||
+      lease.worker_id !== parsed.workerId ||
+      lease.fencing_epoch !== parsed.fencingEpoch
+    ) {
+      throw new ControlStackError(
+        "execution_attempt_fencing_mismatch",
+        "attempt worker, lease, plan, admission, input, or fencing value is stale"
+      );
+    }
+    const expectedTokenHash = hashAttemptLeaseToken({
+      attemptId: attempt.attempt_id,
+      leaseId: lease.lease_id,
+      workerId: attempt.worker_id,
+      fencingEpoch: attempt.fencing_epoch,
+      leaseToken: parsed.leaseToken
+    });
+    if (lease.token_hash !== expectedTokenHash) {
+      throw new ControlStackError("execution_attempt_fencing_mismatch", "attempt lease token is stale or invalid");
+    }
+    const now = parsed.now ?? new Date();
+    if (Date.parse(lease.expires_at) <= now.getTime()) {
+      throw new ControlStackError("execution_attempt_lease_expired", "attempt lease has expired");
+    }
+    const plan = this.getCurrentExecutionPlan(attempt.work_item_id);
+    const admission = this.getCurrentExecutionPlanAdmission(attempt.work_item_id);
+    const workItem = this.getRequired(attempt.work_item_id);
+    if (
+      !plan ||
+      !admission ||
+      plan.planId !== attempt.plan_id ||
+      plan.planHash !== attempt.plan_hash ||
+      admission.admissionId !== attempt.admission_id ||
+      admission.admissionHash !== attempt.admission_hash
+    ) {
+      throw new ControlStackError("execution_attempt_integrity_failed", "attempt authority is no longer current");
+    }
+    const expectedInputHash = executionAttemptInputHash({
+      workItemId: workItem.id,
+      planId: plan.planId,
+      planHash: plan.planHash,
+      admissionId: admission.admissionId,
+      admissionHash: admission.admissionHash,
+      subjectInputHash: executionPlanSubjectInputHash(workItem)
+    });
+    if (expectedInputHash !== attempt.input_hash) {
+      throw new ControlStackError("execution_attempt_integrity_failed", "attempt input integrity check failed");
+    }
+    return executionAttemptClaimSchema.parse({
+      schemaVersion: EXECUTION_ATTEMPT_CLAIM_SCHEMA_VERSION,
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      attemptId: attempt.attempt_id,
+      attemptNumber: attempt.attempt_number,
+      workItemId: attempt.work_item_id,
+      planId: attempt.plan_id,
+      planHash: attempt.plan_hash,
+      admissionId: attempt.admission_id,
+      admissionHash: attempt.admission_hash,
+      inputHash: attempt.input_hash,
+      workerId: attempt.worker_id,
+      leaseId: lease.lease_id,
+      leaseToken: parsed.leaseToken,
+      fencingEpoch: attempt.fencing_epoch,
+      issuedAt: lease.issued_at,
+      expiresAt: lease.expires_at
+    });
   }
 
   readEvents(options: ReadEventsOptions = {}): StoredAuditEvent[] {
@@ -1525,146 +2418,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-  startWorkItem(id: string, workerId = "local-worker", options: ClaimOptions = {}): ClaimedWorkItem {
-    if (options.allowDirectStartForTests !== true) {
-      throw new ControlStackError(
-        "worker_claim_required",
-        "direct startWorkItem is test-only; use claimNextApprovedWorkItem"
-      );
-    }
-    const leaseToken = createLeaseToken();
-    const leaseMs = options.leaseMs ?? this.leaseMs;
-    return this.write(() => {
-      const current = this.getRequired(id);
-      const updated = transitionWorkItem(current, "running");
-      const startedAt = updated.updatedAt;
-      const expiresAt = leaseExpiresAt(startedAt, leaseMs);
-      const actionHash = executionActionHash(current);
-      const leaseId = createId("lease");
-      const result = this.db
-        .prepare(
-          `UPDATE work_items
-           SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, lease_token_hash = ?
-           WHERE id = ? AND status = ?`
-        )
-        .run(
-          updated.status,
-          updated.updatedAt,
-          workerId,
-          startedAt,
-          expiresAt,
-          hashLeaseToken(id, workerId, leaseToken),
-          id,
-          current.status
-        );
-      if (result.changes !== 1) {
-        throw new ControlStackError("work_item_conflict", `work item changed while claiming: ${id}`);
-      }
-      this.insertLease({ leaseId, workItemId: id, workerId, leaseToken, actionHash, issuedAt: startedAt, expiresAt });
-      const event = this.appendAuditEvent(
-        workItemStatusEvent(
-          updated,
-          { workerId, leaseId, actionHash, leaseExpiresAt: expiresAt },
-          { "worker.id": workerId, "lease.id": leaseId, "action.hash": actionHash }
-        )
-      );
-      return {
-        value: { ...updated, workerId, leaseToken, leaseId, actionHash, startedAt, leaseExpiresAt: expiresAt },
-        events: [event]
-      };
-    });
+  startWorkItem(_id: string, _workerId = "local-worker", _options: ClaimOptions = {}): ClaimedWorkItem {
+    return rejectLegacyWorkerProtocol();
   }
 
-  claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
-    return this.write(() => {
-      const row = this.db
-        .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
-        .get() as unknown as WorkItemRow | undefined;
-      if (!row) {
-        return { value: undefined, events: [] };
-      }
-
-      const current = rowToWorkItem(row);
-      const updated = transitionWorkItem(current, "running");
-      const startedAt = updated.updatedAt;
-      const leaseExpiry = leaseExpiresAt(startedAt, options.leaseMs ?? this.leaseMs);
-      const leaseToken = createLeaseToken();
-      const leaseHash = hashLeaseToken(updated.id, workerId, leaseToken);
-      const actionHash = executionActionHash(current);
-      const leaseId = createId("lease");
-      const result = this.db
-        .prepare(
-          `UPDATE work_items
-           SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, lease_token_hash = ?
-           WHERE id = ? AND status = 'approved'`
-        )
-        .run(updated.status, updated.updatedAt, workerId, startedAt, leaseExpiry, leaseHash, updated.id);
-      if (result.changes !== 1) {
-        throw new ControlStackError("work_item_conflict", `work item changed while claiming: ${updated.id}`);
-      }
-      this.insertLease({
-        leaseId,
-        workItemId: updated.id,
-        workerId,
-        leaseToken,
-        actionHash,
-        issuedAt: startedAt,
-        expiresAt: leaseExpiry
-      });
-
-      return {
-        value: { ...updated, workerId, leaseToken, leaseId, actionHash, startedAt, leaseExpiresAt: leaseExpiry },
-        events: [
-          this.appendAuditEvent(
-            workItemStatusEvent(
-              updated,
-              { workerId, leaseId, actionHash, leaseExpiresAt: leaseExpiry },
-              { "worker.id": workerId, "lease.id": leaseId, "action.hash": actionHash }
-            )
-          )
-        ]
-      };
-    });
+  claimNextApprovedWorkItem(_workerId: string, _options: ClaimOptions = {}): ClaimedWorkItem | undefined {
+    return rejectLegacyWorkerProtocol();
   }
 
-  failExpiredLeases(now = new Date()): WorkItem[] {
-    return this.write(() => {
-      const nowIso = now.toISOString();
-      const rows = this.db
-        .prepare(`SELECT * FROM leases WHERE status = 'active' AND expires_at <= ? ORDER BY issued_at ASC`)
-        .all(nowIso) as unknown as LeaseRow[];
-      const failed: WorkItem[] = [];
-      const events: StoredAuditEvent[] = [];
-
-      for (const lease of rows) {
-        const currentRow = this.getRowRequired(lease.work_item_id);
-        if (currentRow.status !== "running" || currentRow.worker_id !== lease.worker_id) {
-          throw new ControlStackError(
-            "lease_state_inconsistent",
-            `active lease state is inconsistent: ${lease.lease_id}`
-          );
-        }
-        const input = this.derivedResultInput(lease, "lease_expired", nowIso, "worker lease expired");
-        const accepted = this.acceptResultInTransaction(input, { now: nowIso, allowDerivedOutcome: true });
-        failed.push(accepted.value);
-        events.push(...accepted.events);
-      }
-
-      return { value: failed, events };
-    });
+  failExpiredLeases(_now = new Date()): WorkItem[] {
+    return rejectLegacyWorkerProtocol();
   }
 
-  submitWorkResult(input: unknown): WorkItem {
-    const parsed = submitWorkResultSchema.parse(input);
-    return this.write(() => this.acceptResultInTransaction(parsed));
+  submitWorkResult(_input: unknown): WorkItem {
+    return rejectLegacyWorkerProtocol();
   }
 
-  recordDerivedWorkResult(input: unknown): WorkItem {
-    const parsed = submitWorkResultSchema.parse(input);
-    if (parsed.outcome !== "blocked" && parsed.outcome !== "lease_expired") {
-      throw new ControlStackError("result_outcome_invalid", "only ACS-derived outcomes may use this path");
-    }
-    return this.write(() => this.acceptResultInTransaction(parsed, { allowDerivedOutcome: true }));
+  recordDerivedWorkResult(_input: unknown): WorkItem {
+    return rejectLegacyWorkerProtocol();
   }
 
   getExecutionResult(resultId: string): StoredExecutionResult | undefined {
@@ -1679,205 +2450,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(`SELECT * FROM execution_results WHERE worker_id = ? AND idempotency_key = ?`)
       .get(workerId, idempotencyKey) as unknown as ExecutionResultRow | undefined;
     return row ? rowToExecutionResult(row) : undefined;
-  }
-
-  private acceptResultInTransaction(
-    input: PersistedResultInput,
-    options: { now?: string; allowDerivedOutcome?: boolean } = {}
-  ): { value: WorkItem; events: StoredAuditEvent[] } {
-    if ((input.outcome === "blocked" || input.outcome === "lease_expired") && options.allowDerivedOutcome !== true) {
-      throw new ControlStackError("result_outcome_forbidden", "ACS-derived result outcomes are not worker-submittable");
-    }
-
-    const now = options.now ?? new Date().toISOString();
-    const payloadHash = resultPayloadHash(input);
-    const existingByKey = this.db
-      .prepare(`SELECT * FROM execution_results WHERE worker_id = ? AND idempotency_key = ?`)
-      .get(input.workerId, input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
-    if (existingByKey) {
-      if (existingByKey.payload_hash !== payloadHash || existingByKey.work_item_id !== input.workItemId) {
-        throw new ControlStackError("result_conflict", "result idempotency key conflicts with an accepted result");
-      }
-      const replayed = this.getRequired(input.workItemId);
-      return { value: replayed, events: [] };
-    }
-
-    const existingForWorkItem = this.db
-      .prepare(`SELECT result_id FROM execution_results WHERE work_item_id = ?`)
-      .get(input.workItemId) as { result_id: string } | undefined;
-    if (existingForWorkItem) {
-      throw new ControlStackError("result_conflict", "work item already has an accepted result");
-    }
-
-    const row = this.getRowRequired(input.workItemId);
-    if (row.status !== "running") {
-      throw new ControlStackError("work_item_not_running", "work item is not accepting a result");
-    }
-    const lease = this.db.prepare(`SELECT * FROM leases WHERE lease_id = ?`).get(input.leaseId) as unknown as
-      LeaseRow | undefined;
-    if (!lease) {
-      throw new ControlStackError("worker_lease_missing", "active worker lease is required");
-    }
-    if (
-      lease.work_item_id !== input.workItemId ||
-      lease.worker_id !== input.workerId ||
-      row.worker_id !== input.workerId
-    ) {
-      throw new ControlStackError("worker_lease_mismatch", "worker lease does not match the submitted result");
-    }
-    if (!row.lease_token_hash || !isStoredLeaseHash(row.lease_token_hash)) {
-      throw new ControlStackError("worker_lease_missing", "active worker lease is required");
-    }
-    if (row.lease_token_hash !== lease.token_hash) {
-      throw new ControlStackError("worker_lease_mismatch", "worker lease does not match the submitted result");
-    }
-    if (lease.action_hash !== input.actionHash) {
-      throw new ControlStackError("worker_action_hash_mismatch", "worker action hash does not match the active lease");
-    }
-    const expiresAt = Date.parse(lease.expires_at);
-    if (!Number.isFinite(expiresAt)) {
-      throw new ControlStackError("lease_state_inconsistent", "worker lease expiry is invalid");
-    }
-    if (input.outcome === "lease_expired") {
-      if (expiresAt > Date.parse(now)) {
-        throw new ControlStackError("lease_state_inconsistent", "lease-expired result is not justified by lease state");
-      }
-    } else if (expiresAt <= Date.parse(now)) {
-      throw new ControlStackError("worker_lease_expired", "worker lease has expired");
-    }
-
-    const resultId = createId("res");
-    const updated = {
-      ...transitionWorkItem(rowToWorkItem(row), resultStatus(input.outcome), now),
-      result: compactResult(input, payloadHash, now, resultId)
-    };
-    this.db
-      .prepare(
-        `INSERT INTO execution_results
-         (result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome,
-          started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json,
-          artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        resultId,
-        input.workItemId,
-        input.leaseId,
-        input.workerId,
-        input.idempotencyKey,
-        input.actionHash,
-        input.outcome,
-        input.startedAt,
-        input.finishedAt,
-        input.exitCode ?? null,
-        input.summary,
-        input.stdout ?? null,
-        input.stderr ?? null,
-        JSON.stringify(input.structuredOutput),
-        JSON.stringify(input.artifacts),
-        input.error ?? null,
-        input.resourceUsage ? JSON.stringify(input.resourceUsage) : null,
-        JSON.stringify(input.simulationMetadata),
-        payloadHash,
-        now
-      );
-
-    const updatedWorkItem = this.db
-      .prepare(
-        `UPDATE work_items
-         SET status = ?, updated_at = ?, result_json = ?, lease_expires_at = NULL, lease_token_hash = NULL
-         WHERE id = ? AND status = 'running' AND worker_id = ?`
-      )
-      .run(updated.status, updated.updatedAt, JSON.stringify(updated.result), input.workItemId, input.workerId);
-    if (updatedWorkItem.changes !== 1) {
-      throw new ControlStackError("work_item_conflict", "work item changed while accepting the result");
-    }
-    const closedLease = this.db
-      .prepare(`UPDATE leases SET status = ?, closed_at = ? WHERE lease_id = ? AND status = 'active'`)
-      .run(input.outcome === "lease_expired" ? "expired" : "consumed", now, input.leaseId);
-    if (closedLease.changes !== 1) {
-      throw new ControlStackError("worker_lease_conflict", "worker lease changed while accepting the result");
-    }
-
-    const resultEvent = this.appendAuditEvent(
-      createEvent(
-        "execution_result.accepted",
-        {
-          resultId,
-          workItemId: input.workItemId,
-          leaseId: input.leaseId,
-          workerId: input.workerId,
-          actionHash: input.actionHash,
-          idempotencyKey: input.idempotencyKey,
-          outcome: input.outcome,
-          payloadHash,
-          simulationMetadata: input.simulationMetadata
-        },
-        {
-          "work_item.id": input.workItemId,
-          "lease.id": input.leaseId,
-          "worker.id": input.workerId,
-          "action.hash": input.actionHash,
-          "execution.outcome": input.outcome
-        }
-      )
-    );
-    const statusEvent = this.appendAuditEvent(
-      workItemStatusEvent(
-        updated,
-        { result: updated.result, resultId, leaseId: input.leaseId },
-        { "lease.id": input.leaseId, "action.hash": input.actionHash, ...resultEventAttributes(updated.result ?? {}) }
-      )
-    );
-    return { value: updated, events: [resultEvent, statusEvent] };
-  }
-
-  private derivedResultInput(
-    lease: LeaseRow,
-    outcome: "blocked" | "lease_expired",
-    finishedAt: string,
-    reason: string
-  ): PersistedResultInput {
-    return {
-      workItemId: lease.work_item_id,
-      leaseId: lease.lease_id,
-      workerId: lease.worker_id,
-      actionHash: lease.action_hash,
-      idempotencyKey: stableHash({ domain: "acs.derived-result", leaseId: lease.lease_id, outcome }),
-      outcome,
-      startedAt: lease.issued_at,
-      finishedAt,
-      summary: reason,
-      structuredOutput: {},
-      artifacts: [],
-      simulationMetadata: { executionMode: "dry_run", simulated: true, reason }
-    };
-  }
-
-  private insertLease(input: {
-    leaseId: string;
-    workItemId: string;
-    workerId: string;
-    leaseToken: string;
-    actionHash: string;
-    issuedAt: string;
-    expiresAt: string;
-  }): void {
-    this.db
-      .prepare(
-        `INSERT INTO leases
-         (lease_id, work_item_id, worker_id, token_hash, action_hash, issued_at, expires_at, status, closed_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'active', NULL)`
-      )
-      .run(
-        input.leaseId,
-        input.workItemId,
-        input.workerId,
-        hashLeaseToken(input.workItemId, input.workerId, input.leaseToken),
-        input.actionHash,
-        input.issuedAt,
-        input.expiresAt
-      );
   }
 
   retryWorkItem(id: string, input: RetryWorkItemInput): WorkItem {
@@ -2078,9 +2650,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     id: string,
     status: WorkItemStatus,
     options: {
-      workerId?: string;
-      leaseMs?: number;
-      leaseToken?: string;
       eventBody?: Record<string, unknown>;
       eventAttributes?: Record<string, string>;
     } = {}
@@ -2088,33 +2657,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => {
       const current = this.getRequired(id);
       const updated = transitionWorkItem(current, status);
-      const result =
-        status === "running"
-          ? this.db
-              .prepare(
-                `UPDATE work_items
-                 SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, lease_token_hash = ?
-                 WHERE id = ? AND status = ?`
-              )
-              .run(
-                updated.status,
-                updated.updatedAt,
-                options.workerId ?? "local-worker",
-                updated.updatedAt,
-                new Date(Date.parse(updated.updatedAt) + (options.leaseMs ?? this.leaseMs)).toISOString(),
-                hashLeaseToken(id, options.workerId ?? "local-worker", options.leaseToken ?? ""),
-                id,
-                current.status
-              )
-          : this.db
-              .prepare(
-                `UPDATE work_items
-                 SET status = ?, updated_at = ?,
-                     lease_expires_at = CASE WHEN status = 'running' THEN NULL ELSE lease_expires_at END,
-                     lease_token_hash = CASE WHEN status = 'running' THEN NULL ELSE lease_token_hash END
-                 WHERE id = ? AND status = ?`
-              )
-              .run(updated.status, updated.updatedAt, id, current.status);
+      const result = this.db
+        .prepare(
+          `UPDATE work_items
+           SET status = ?, updated_at = ?,
+               lease_expires_at = CASE WHEN status = 'running' THEN NULL ELSE lease_expires_at END,
+               lease_token_hash = CASE WHEN status = 'running' THEN NULL ELSE lease_token_hash END
+           WHERE id = ? AND status = ?`
+        )
+        .run(updated.status, updated.updatedAt, id, current.status);
       if (result.changes !== 1) {
         throw new ControlStackError("work_item_conflict", `work item changed while transitioning: ${id}`);
       }
@@ -2371,6 +2922,107 @@ function rowToExecutionResult(row: ExecutionResultRow): StoredExecutionResult {
   };
 }
 
+function rowToExecutionPlan(row: ExecutionPlanRow): ExecutionPlanRecord {
+  let definition: unknown;
+  try {
+    definition = JSON.parse(row.definition_json);
+  } catch {
+    throw new ControlStackError("execution_plan_integrity_failed", "execution plan definition is not valid JSON");
+  }
+  const parsed = executionPlanRecordSchema.safeParse({
+    planId: row.plan_id,
+    workItemId: row.work_item_id,
+    planNumber: row.plan_number,
+    definition,
+    planHash: row.plan_hash,
+    subjectInputHash: row.subject_input_hash,
+    createdByActorId: row.created_by_actor_id,
+    createdAt: row.created_at
+  });
+  if (
+    !parsed.success ||
+    parsed.data.definition.schemaVersion !== row.schema_version ||
+    executionPlanHash(parsed.data.definition) !== row.plan_hash ||
+    parsed.data.definition.subjectInputHash !== row.subject_input_hash ||
+    parsed.data.definition.workItemId !== row.work_item_id
+  ) {
+    throw new ControlStackError("execution_plan_integrity_failed", "execution plan integrity check failed");
+  }
+  return parsed.data;
+}
+
+function rowToExecutionPlanAdmission(row: ExecutionPlanAdmissionRow): ExecutionPlanAdmission {
+  let requiredApprovalActionHashes: unknown;
+  try {
+    requiredApprovalActionHashes = JSON.parse(row.required_approval_action_hashes_json);
+  } catch {
+    throw new ControlStackError("execution_plan_integrity_failed", "execution plan admission is not valid JSON");
+  }
+  const parsed = executionPlanAdmissionSchema.safeParse({
+    admissionId: row.admission_id,
+    workItemId: row.work_item_id,
+    planId: row.plan_id,
+    planHash: row.plan_hash,
+    admissionHash: row.admission_hash,
+    policyVersion: row.policy_version,
+    policyDecisionHash: row.policy_decision_hash,
+    decision: row.decision,
+    requiredApprovalActionHashes,
+    admittedByActorId: row.admitted_by_actor_id,
+    admittedAt: row.admitted_at
+  });
+  if (
+    !parsed.success ||
+    executionPlanAdmissionHash({
+      workItemId: parsed.data.workItemId,
+      planId: parsed.data.planId,
+      planHash: parsed.data.planHash,
+      policyVersion: parsed.data.policyVersion,
+      policyDecisionHash: parsed.data.policyDecisionHash,
+      decision: parsed.data.decision,
+      requiredApprovalActionHashes: parsed.data.requiredApprovalActionHashes
+    }) !== parsed.data.admissionHash
+  ) {
+    throw new ControlStackError("execution_plan_integrity_failed", "execution plan admission integrity check failed");
+  }
+  return parsed.data;
+}
+
+function rowToExecutionPlanApproval(row: ExecutionPlanApprovalRow): ExecutionPlanApproval {
+  const parsed = executionPlanApprovalSchema.safeParse({
+    approvalId: row.approval_id,
+    workItemId: row.work_item_id,
+    planId: row.plan_id,
+    planHash: row.plan_hash,
+    admissionId: row.admission_id,
+    admissionHash: row.admission_hash,
+    policyVersion: row.policy_version,
+    actionHash: row.action_hash,
+    approvalBindingHash: row.approval_binding_hash,
+    approvedByActorId: row.approved_by_actor_id,
+    reason: row.reason,
+    status: row.status,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at,
+    ...(row.consumed_at ? { consumedAt: row.consumed_at } : {})
+  });
+  if (
+    !parsed.success ||
+    executionPlanApprovalBindingHash({
+      workItemId: parsed.data.workItemId,
+      planId: parsed.data.planId,
+      planHash: parsed.data.planHash,
+      admissionId: parsed.data.admissionId,
+      admissionHash: parsed.data.admissionHash,
+      policyVersion: parsed.data.policyVersion,
+      actionHash: parsed.data.actionHash
+    }) !== parsed.data.approvalBindingHash
+  ) {
+    throw new ControlStackError("execution_plan_integrity_failed", "execution plan approval integrity check failed");
+  }
+  return parsed.data;
+}
+
 function normalizeEventLimit(limit: number | undefined): number {
   if (limit === undefined) {
     return DEFAULT_EVENT_LIMIT;
@@ -2381,73 +3033,8 @@ function normalizeEventLimit(limit: number | undefined): number {
   return Math.min(limit, MAX_EVENT_LIMIT);
 }
 
-function resultEventAttributes(result: Record<string, unknown>): Record<string, string> {
-  const executionMode = result.executionMode ?? result.execution_mode;
-  return typeof executionMode === "string" ? { "execution.mode": executionMode } : {};
-}
-
-function resultStatus(outcome: ResultOutcome): WorkItemStatus {
-  switch (outcome) {
-    case "succeeded":
-      return "succeeded";
-    case "cancelled":
-      return "cancelled";
-    case "blocked":
-      return "blocked";
-    case "failed":
-    case "worker_infrastructure_failure":
-    case "lease_expired":
-      return "failed";
-  }
-}
-
 function isTerminalStatus(status: WorkItemStatus): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled" || status === "rejected";
-}
-
-function resultPayloadHash(input: PersistedResultInput): string {
-  return stableHash({
-    domain: "acs.execution-result",
-    workItemId: input.workItemId,
-    leaseId: input.leaseId,
-    workerId: input.workerId,
-    actionHash: input.actionHash,
-    idempotencyKey: input.idempotencyKey,
-    outcome: input.outcome,
-    startedAt: input.startedAt,
-    finishedAt: input.finishedAt,
-    exitCode: input.exitCode ?? null,
-    summary: input.summary,
-    stdout: input.stdout ?? null,
-    stderr: input.stderr ?? null,
-    structuredOutput: input.structuredOutput,
-    artifacts: input.artifacts,
-    error: input.error ?? null,
-    resourceUsage: input.resourceUsage ?? null,
-    simulationMetadata: input.simulationMetadata
-  });
-}
-
-function compactResult(
-  input: PersistedResultInput,
-  payloadHash: string,
-  recordedAt: string,
-  resultId: string
-): Record<string, unknown> {
-  return {
-    resultId,
-    leaseId: input.leaseId,
-    workerId: input.workerId,
-    actionHash: input.actionHash,
-    idempotencyKey: input.idempotencyKey,
-    outcome: input.outcome,
-    summary: input.summary,
-    executionMode: input.simulationMetadata.executionMode,
-    payloadHash,
-    recordedAt,
-    ...(input.exitCode === undefined ? {} : { exitCode: input.exitCode }),
-    ...(input.error === undefined ? {} : { error: input.error })
-  };
 }
 
 function okHealth(): HealthCheck {
@@ -2552,16 +3139,30 @@ function createLeaseToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
-function hashLeaseToken(workItemId: string, workerId: string, leaseToken: string): string {
-  return stableHash({ leaseToken, workItemId, workerId });
+function assertWorkerProtocol(value: unknown): asserts value is typeof WORKER_PROTOCOL_VERSION {
+  if (value !== WORKER_PROTOCOL_VERSION) {
+    throw new ControlStackError(
+      "worker_protocol_unsupported",
+      `worker protocol ${WORKER_PROTOCOL_VERSION} is required`
+    );
+  }
 }
 
-function isStoredLeaseHash(value: string | null): value is string {
-  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+function rejectLegacyWorkerProtocol(): never {
+  throw new ControlStackError(
+    "worker_protocol_unsupported",
+    `legacy worker writes are disabled; worker protocol ${WORKER_PROTOCOL_VERSION} is required`
+  );
 }
 
-function leaseExpiresAt(startedAt: string, leaseMs: number): string {
-  return new Date(Date.parse(startedAt) + leaseMs).toISOString();
+function hashAttemptLeaseToken(input: {
+  attemptId: string;
+  leaseId: string;
+  workerId: string;
+  fencingEpoch: number;
+  leaseToken: string;
+}): string {
+  return stableHash({ domain: "acs.attempt-lease-token.v1", ...input });
 }
 
 export function approvalRequestHash(workItemId: string, actionHash: string): string {

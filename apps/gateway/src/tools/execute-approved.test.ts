@@ -1,77 +1,42 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
-import { describe, expect, it } from "vitest";
+import { SqliteWorkItemStore, WORKER_PROTOCOL_VERSION } from "@agent-control-stack/work-items";
+import { describe, expect, it, vi } from "vitest";
 import { executeApprovedWorkItem } from "./execute-approved.js";
 
 const transition = { via: "domain_service" as const };
 
-function createApproved(dbPath: string): { store: SqliteWorkItemStore; id: string } {
-  const store = new SqliteWorkItemStore(dbPath);
-  const item = store.create({
-    title: "Approved dispatcher item",
-    requester: "agent",
-    intent: "exercise the dry-run dispatcher",
-    target: { cwd: "/repo" },
-    requestedActions: [{ kind: "fs.read", description: "simulate", params: { paths: ["src/index.ts"] } }],
-    risk: "low"
-  });
-  store.approveWorkItem(item.id, transition);
-  return { store, id: item.id };
-}
-
-describe("approved execution dispatcher", () => {
-  it("submits a canonical simulated result through the lease boundary", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "acs-approved-dispatch-"));
-    const { store, id } = createApproved(join(directory, "control.db"));
-    try {
-      const result = await executeApprovedWorkItem({
-        store,
-        workerId: "dispatcher-worker",
-        execute: async () => ({ ok: true, executionMode: "dry_run", output: "no real command ran" })
-      });
-
-      expect(result).toMatchObject({ executed: true, workItemId: id });
-      expect(store.get(id)).toMatchObject({ status: "succeeded", result: { executionMode: "dry_run" } });
-      expect(store.verifyAuditChain()).toMatchObject({ ok: true });
-      expect(store.readEvents().map((event) => event.name)).toContain("execution_result.accepted");
-    } finally {
-      store.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it("records simulated worker infrastructure failures without reopening the item", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "acs-approved-dispatch-failure-"));
-    const { store, id } = createApproved(join(directory, "control.db"));
-    try {
-      await executeApprovedWorkItem({
-        store,
-        workerId: "dispatcher-worker",
-        execute: async () => {
-          throw new Error("simulated callback failure");
-        }
-      });
-
-      expect(store.get(id)).toMatchObject({ status: "failed", result: { outcome: "worker_infrastructure_failure" } });
-      expect(store.verifyAuditChain()).toMatchObject({ ok: true });
-    } finally {
-      store.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it("does not claim work when no approved item exists", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "acs-approved-dispatch-empty-"));
+describe("Phase 2 Slice 1 approved execution dispatcher", () => {
+  it("does not claim or execute until the complete V2 result path exists", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-approved-dispatch-v2-boundary-"));
     const store = new SqliteWorkItemStore(join(directory, "control.db"));
+    const execute = vi.fn(async () => ({ ok: true as const, executionMode: "dry_run" as const, output: "unused" }));
     try {
+      const item = store.create({
+        title: "Approved dispatcher item",
+        requester: "agent",
+        intent: "prove the legacy dispatcher remains disabled",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "simulate", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      store.approveWorkItem(item.id, transition);
+
       const result = await executeApprovedWorkItem({
         store,
-        workerId: "dispatcher-worker",
-        execute: async () => ({ ok: true, executionMode: "dry_run", output: "unused" })
+        workerId: "legacy-dispatcher",
+        execute
       });
-      expect(result).toEqual({ executed: false, reason: "no approved work item" });
+
+      expect(result).toEqual({
+        executed: false,
+        reason: `${WORKER_PROTOCOL_VERSION} result acceptance is not available in Phase 2 Slice 1`
+      });
+      expect(execute).not.toHaveBeenCalled();
+      expect(store.get(item.id)?.status).toBe("approved");
+      expect(store.verifyAuditChain()).toMatchObject({ ok: true });
+      expect(store.readEvents().map((event) => event.name)).not.toContain("work_item.running");
     } finally {
       store.close();
       rmSync(directory, { recursive: true, force: true });

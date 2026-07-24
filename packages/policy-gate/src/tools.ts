@@ -1,7 +1,6 @@
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
   type ApprovalGrant,
-  approvalRequestHash,
   approvalRequestSchema,
   cancelRequestSchema,
   rejectRequestSchema,
@@ -221,49 +220,8 @@ export function gateWorkerClaim(
   input: unknown
 ): ClaimedWorkItem | undefined {
   const parsed = claimInputSchema.parse(input);
-  return store.withTransaction(() => gateWorkerClaimInTransaction(store, policy, parsed));
-}
-
-function gateWorkerClaimInTransaction(
-  store: WorkItemStore,
-  policy: PolicyEngine,
-  parsed: z.infer<typeof claimInputSchema>
-): ClaimedWorkItem | undefined {
-  const running = store.claimNextApprovedWorkItem(parsed.workerId, { leaseMs: parsed.leaseMs });
-  if (!running) {
-    return undefined;
-  }
-
-  const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, running, parsed.workerId, "claim");
-  const required = approvalRequired(evaluations);
-  const missing = required.find((evaluation) => !store.hasApproval(running.id, evaluation.actionHash));
-  let approvalFailure: unknown;
-  if (decision.decision !== "deny" && !missing) {
-    for (const evaluation of required) {
-      try {
-        store.consumeApproval(running.id, evaluation.actionHash, {
-          requestHash: approvalRequestHash(running.id, evaluation.actionHash)
-        });
-      } catch (error) {
-        approvalFailure = error;
-        break;
-      }
-    }
-  }
-  if (decision.decision === "deny" || missing || approvalFailure) {
-    const blocked = store.blockWorkItem(running.id);
-    return {
-      ...blocked,
-      workerId: running.workerId,
-      leaseToken: running.leaseToken,
-      leaseId: running.leaseId,
-      actionHash: running.actionHash,
-      startedAt: running.startedAt,
-      leaseExpiresAt: running.leaseExpiresAt
-    };
-  }
-
-  return running;
+  void policy;
+  return store.claimNextApprovedWorkItem(parsed.workerId, { leaseMs: parsed.leaseMs });
 }
 
 export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) {

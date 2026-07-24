@@ -2949,7 +2949,7 @@ describe("gateway work-item routes", () => {
       const store = new SqliteWorkItemStore(dbPath);
       try {
         expect(store.get(workItem.id)?.status).toBe("rejected");
-        expect(store.claimNextApprovedWorkItem("worker-a")).toBeUndefined();
+        expect(() => store.claimNextApprovedWorkItem("worker-a")).toThrow("acs.worker.v2");
         expect(store.readEvents().map((event) => event.name)).toContain("work_item.rejected");
         expect(store.readEvents().map((event) => event.name)).not.toContain("work_item.cancelled");
       } finally {
@@ -3109,7 +3109,7 @@ describe("gateway work-item routes", () => {
     }
   });
 
-  it("leaves no approval or audit side effects when approving a running work item", async () => {
+  it("re-approves without dispatch after legacy claim denial", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-approve-running-"));
     const dbPath = join(dir, "control.db");
     const app = buildTestGateway({ dbPath, logger: false });
@@ -3139,9 +3139,8 @@ describe("gateway work-item routes", () => {
       const store = new SqliteWorkItemStore(dbPath);
       try {
         const tools = createWorkItemTools(store, createPolicyEngine());
-        const claimed = tools.claim_next_approved_work_item({ workerId: "worker-1" });
-        expect(claimed?.status).toBe("running");
-        expect(store.hasApproval(id, actionHash)).toBe(false);
+        expect(() => tools.claim_next_approved_work_item({ workerId: "worker-1" })).toThrow("acs.worker.v2");
+        expect(store.hasApproval(id, actionHash)).toBe(true);
 
         const eventCountBefore = store.readEvents().length;
         const replay = await app.inject({
@@ -3150,10 +3149,12 @@ describe("gateway work-item routes", () => {
           payload: { reason: "again", actionHash }
         });
 
-        expect(replay.statusCode).toBe(409);
-        expect(store.hasApproval(id, actionHash)).toBe(false);
-        expect(store.get(id)?.status).toBe("running");
-        expect(store.readEvents()).toHaveLength(eventCountBefore);
+        expect(replay.statusCode).toBe(200);
+        expect(store.hasApproval(id, actionHash)).toBe(true);
+        expect(store.get(id)?.status).toBe("approved");
+        const events = store.readEvents();
+        expect(events).toHaveLength(eventCountBefore + 2);
+        expect(events.slice(-2).map((event) => event.name)).toEqual(["policy.decided", "approval.granted"]);
       } finally {
         store.close();
       }
@@ -3449,7 +3450,7 @@ describe("gateway work-item routes", () => {
     }
   });
 
-  it("exposes redacted worker results on the work item and audit timeline", async () => {
+  it("does not expose or persist a legacy worker result after schema v6", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-results-"));
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath);
@@ -3465,40 +3466,39 @@ describe("gateway work-item routes", () => {
         requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
         risk: "low"
       });
-      const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
-      expect(claimed?.id).toBe(workItem.id);
-
-      const submitted = tools.submit_work_result({
-        workItemId: workItem.id,
-        leaseId: claimed?.leaseId,
-        workerId: "worker-a",
-        actionHash: claimed?.actionHash,
-        idempotencyKey: "gateway-result-redaction-1",
-        outcome: "succeeded",
-        startedAt: claimed?.startedAt,
-        finishedAt: new Date().toISOString(),
-        summary: "done",
-        stdout: "dry-run output",
-        structuredOutput: { result: "done" },
-        simulationMetadata: { executionMode: "dry_run", simulated: true, reason: "gateway_test" }
-      });
-      expect(submitted).toMatchObject({ status: "succeeded", result: { summary: "done", executionMode: "dry_run" } });
+      expect(() => tools.claim_next_approved_work_item({ workerId: "worker-a" })).toThrow("acs.worker.v2");
+      expect(() =>
+        tools.submit_work_result({
+          workItemId: workItem.id,
+          leaseId: "legacy-lease",
+          workerId: "worker-a",
+          actionHash: "a".repeat(64),
+          idempotencyKey: "gateway-result-redaction-1",
+          outcome: "succeeded",
+          startedAt: "2026-07-23T20:00:00.000Z",
+          finishedAt: "2026-07-23T20:00:01.000Z",
+          summary: "done",
+          stdout: secret,
+          structuredOutput: { result: "done" },
+          simulationMetadata: { executionMode: "dry_run", simulated: true, reason: "gateway_test" }
+        })
+      ).toThrow("acs.worker.v2");
 
       const app = buildTestGateway({ dbPath, logger: false });
       try {
         const detail = await app.inject({ method: "GET", url: `/work-items/${workItem.id}` });
         expect(detail.statusCode).toBe(200);
         expect(detail.json().workItem).toMatchObject({
-          status: "succeeded",
-          result: { summary: "done", executionMode: "dry_run" }
+          status: "approved"
         });
+        expect(detail.json().workItem).not.toHaveProperty("result");
       } finally {
         await app.close();
       }
 
-      const succeededEvent = store.readEvents().find((event) => event.name === "work_item.succeeded");
-      expect(succeededEvent?.body).toMatchObject({ result: { summary: "done", executionMode: "dry_run" } });
+      expect(store.readEvents().find((event) => event.name === "work_item.succeeded")).toBeUndefined();
       const raw = readRawWorkItemResult(dbPath, workItem.id);
+      expect(raw).toEqual({ result_json: null });
       expect(JSON.stringify(store.readEvents()) + JSON.stringify(raw)).not.toContain(secret);
     } finally {
       store.close();

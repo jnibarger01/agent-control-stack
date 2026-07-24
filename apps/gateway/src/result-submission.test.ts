@@ -1,28 +1,25 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
-import { stableHash } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore, type ClaimedWorkItem } from "@agent-control-stack/work-items";
 import { buildGateway, type GatewayAuthOptions } from "./server.js";
 
-const transition = { via: "domain_service" as const };
 const workerAuth: GatewayAuthOptions = { token: "worker-token", actor: "agent", actorId: "worker-a" };
 
-function submission(claimed: ClaimedWorkItem, overrides: Record<string, unknown> = {}) {
+function legacySubmission(workItemId: string, overrides: Record<string, unknown> = {}) {
   return {
-    workItemId: claimed.id,
-    leaseId: claimed.leaseId,
-    workerId: claimed.workerId,
-    actionHash: claimed.actionHash,
-    idempotencyKey: stableHash({ workItemId: claimed.id, leaseId: claimed.leaseId, attempt: 1 }),
+    workItemId,
+    leaseId: "legacy_lease",
+    workerId: "worker-a",
+    actionHash: "a".repeat(64),
+    idempotencyKey: "legacy_result",
     outcome: "succeeded",
-    startedAt: claimed.startedAt,
-    finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
+    startedAt: "2026-07-23T20:00:00.000Z",
+    finishedAt: "2026-07-23T20:00:01.000Z",
     exitCode: 0,
-    summary: "gateway dry-run result",
+    summary: "legacy dry-run result",
     stdout: "no real command ran",
-    stderr: "",
     structuredOutput: { simulated: true },
     artifacts: [],
     simulationMetadata: { executionMode: "dry_run", simulated: true },
@@ -30,21 +27,19 @@ function submission(claimed: ClaimedWorkItem, overrides: Record<string, unknown>
   };
 }
 
-function seedClaim(dbPath: string, leaseMs?: number): ClaimedWorkItem {
-  const store = new SqliteWorkItemStore(dbPath, { leaseMs });
+function createApprovedWorkItem(dbPath: string): string {
+  const store = new SqliteWorkItemStore(dbPath);
   try {
     const item = store.create({
-      title: "Gateway result",
+      title: "Gateway legacy result boundary",
       requester: "agent",
-      intent: "submit a simulated result",
+      intent: "prove schema v6 rejects legacy worker results",
       target: { cwd: "/repo" },
       requestedActions: [{ kind: "manual", description: "simulate" }],
       risk: "low"
     });
-    store.approveWorkItem(item.id, transition);
-    const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs });
-    if (!claimed) throw new Error("expected a lease");
-    return claimed;
+    store.approveWorkItem(item.id, { via: "domain_service" });
+    return item.id;
   } finally {
     store.close();
   }
@@ -54,13 +49,13 @@ describe("authenticated result submission route", () => {
   it("fails closed for anonymous, invalid, and non-worker credentials", async () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-gateway-result-auth-"));
     const dbPath = join(directory, "control.db");
-    const claimed = seedClaim(dbPath);
     const app = buildGateway({ dbPath, logger: false, auth: workerAuth });
     try {
-      const anonymous = await app.inject({ method: "POST", url: `/work-items/${claimed.id}/results`, payload: {} });
+      const url = "/work-items/wrk_legacy/results";
+      const anonymous = await app.inject({ method: "POST", url, payload: {} });
       const invalid = await app.inject({
         method: "POST",
-        url: `/work-items/${claimed.id}/results`,
+        url,
         headers: { authorization: "Bearer wrong" },
         payload: {}
       });
@@ -71,19 +66,19 @@ describe("authenticated result submission route", () => {
       });
       const user = await userApp.inject({
         method: "POST",
-        url: `/work-items/${claimed.id}/results`,
+        url,
         headers: { authorization: "Bearer user-token" },
         payload: {}
       });
       const malformed = await app.inject({
         method: "POST",
-        url: `/work-items/${claimed.id}/results`,
+        url,
         headers: { authorization: "Basic worker-token" },
         payload: {}
       });
       const duplicated = await app.inject({
         method: "POST",
-        url: `/work-items/${claimed.id}/results`,
+        url,
         headers: { authorization: "Bearer worker-token, Bearer worker-token" },
         payload: {}
       });
@@ -100,109 +95,25 @@ describe("authenticated result submission route", () => {
     }
   });
 
-  it("binds the body to the authenticated worker and supports 201/200 idempotency", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "acs-gateway-result-"));
+  it("rejects every authenticated legacy result after schema v6", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-gateway-result-v2-boundary-"));
     const dbPath = join(directory, "control.db");
-    const claimed = seedClaim(dbPath);
-    const app = buildGateway({ dbPath, logger: false, auth: workerAuth });
-    try {
-      const wrongWorker = await app.inject({
-        method: "POST",
-        url: `/work-items/${claimed.id}/results`,
-        headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed, { workerId: "worker-b" })
-      });
-      const accepted = await app.inject({
-        method: "POST",
-        url: `/work-items/${claimed.id}/results`,
-        headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed)
-      });
-      const replay = await app.inject({
-        method: "POST",
-        url: `/work-items/${claimed.id}/results`,
-        headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed)
-      });
-      const conflict = await app.inject({
-        method: "POST",
-        url: `/work-items/${claimed.id}/results`,
-        headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed, { summary: "conflicting replay" })
-      });
-
-      expect(wrongWorker.statusCode).toBe(403);
-      expect(accepted.statusCode).toBe(201);
-      expect(accepted.headers["x-request-id"]).toBeTruthy();
-      expect(accepted.json().result).toMatchObject({ outcome: "succeeded", simulationMetadata: { simulated: true } });
-      expect(replay.statusCode).toBe(200);
-      expect(replay.json().result.resultId).toBe(accepted.json().result.resultId);
-      expect(conflict.statusCode).toBe(409);
-    } finally {
-      await app.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects an expired lease without creating a result", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "acs-gateway-result-expired-"));
-    const dbPath = join(directory, "control.db");
-    const claimed = seedClaim(dbPath, 1);
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    const workItemId = createApprovedWorkItem(dbPath);
     const app = buildGateway({ dbPath, logger: false, auth: workerAuth });
     try {
       const response = await app.inject({
         method: "POST",
-        url: `/work-items/${claimed.id}/results`,
+        url: `/work-items/${workItemId}/results`,
         headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed)
-      });
-      expect(response.statusCode).toBe(410);
-      expect(response.json()).toMatchObject({ code: "worker_lease_expired" });
-    } finally {
-      await app.close();
-      rmSync(directory, { recursive: true, force: true });
-    }
-  });
-
-  it("rejects route and lease mismatches before accepting any result", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "acs-gateway-result-boundary-"));
-    const dbPath = join(directory, "control.db");
-    const claimed = seedClaim(dbPath);
-    const app = buildGateway({ dbPath, logger: false, auth: workerAuth });
-    try {
-      const routeMismatch = await app.inject({
-        method: "POST",
-        url: `/work-items/${claimed.id}/results`,
-        headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed, { workItemId: "wrk_other" })
-      });
-      const actionMismatch = await app.inject({
-        method: "POST",
-        url: `/work-items/${claimed.id}/results`,
-        headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed, { actionHash: "a".repeat(64) })
-      });
-      const missingLease = await app.inject({
-        method: "POST",
-        url: `/work-items/${claimed.id}/results`,
-        headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed, { leaseId: "lease_unknown" })
-      });
-      const derivedOutcome = await app.inject({
-        method: "POST",
-        url: `/work-items/${claimed.id}/results`,
-        headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed, { outcome: "blocked", error: "policy" })
+        payload: legacySubmission(workItemId)
       });
 
-      expect(routeMismatch.statusCode).toBe(400);
-      expect(actionMismatch.statusCode).toBe(403);
-      expect(missingLease.statusCode).toBe(409);
-      expect(derivedOutcome.statusCode).toBe(403);
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ code: "worker_protocol_unsupported" });
       const check = new SqliteWorkItemStore(dbPath);
       try {
-        expect(check.get(claimed.id)?.status).toBe("running");
+        expect(check.get(workItemId)?.status).toBe("approved");
+        expect(check.getExecutionResultForIdempotency("worker-a", "legacy_result")).toBeUndefined();
       } finally {
         check.close();
       }
@@ -212,17 +123,51 @@ describe("authenticated result submission route", () => {
     }
   });
 
-  it("enforces the HTTP request body limit before persistence", async () => {
+  it("retains route, identity, and derived-outcome checks ahead of protocol rejection", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-gateway-result-boundary-"));
+    const dbPath = join(directory, "control.db");
+    const workItemId = createApprovedWorkItem(dbPath);
+    const app = buildGateway({ dbPath, logger: false, auth: workerAuth });
+    try {
+      const routeMismatch = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItemId}/results`,
+        headers: { authorization: "Bearer worker-token" },
+        payload: legacySubmission("wrk_other")
+      });
+      const workerMismatch = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItemId}/results`,
+        headers: { authorization: "Bearer worker-token" },
+        payload: legacySubmission(workItemId, { workerId: "worker-b" })
+      });
+      const derivedOutcome = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItemId}/results`,
+        headers: { authorization: "Bearer worker-token" },
+        payload: legacySubmission(workItemId, { outcome: "blocked", error: "policy" })
+      });
+
+      expect(routeMismatch.statusCode).toBe(400);
+      expect(workerMismatch.statusCode).toBe(403);
+      expect(derivedOutcome.statusCode).toBe(403);
+    } finally {
+      await app.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("enforces the HTTP request body limit before protocol handling", async () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-gateway-result-size-"));
     const dbPath = join(directory, "control.db");
-    const claimed = seedClaim(dbPath);
+    const workItemId = createApprovedWorkItem(dbPath);
     const app = buildGateway({ dbPath, logger: false, auth: workerAuth });
     try {
       const response = await app.inject({
         method: "POST",
-        url: `/work-items/${claimed.id}/results`,
+        url: `/work-items/${workItemId}/results`,
         headers: { authorization: "Bearer worker-token" },
-        payload: submission(claimed, { stdout: "x".repeat(256 * 1024) })
+        payload: legacySubmission(workItemId, { stdout: "x".repeat(256 * 1024) })
       });
       expect(response.statusCode).toBe(413);
       expect(response.body).not.toContain("/tmp/");

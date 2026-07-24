@@ -2,11 +2,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore } from "./store.js";
+import { executionActionHash } from "./work-item.js";
 import { describe, expect, it } from "vitest";
 
-function completeReadItem(store: SqliteWorkItemStore) {
+function createTerminalReadItem(store: SqliteWorkItemStore) {
   const item = store.create({
     title: "Immutable source",
     requester: "user",
@@ -15,25 +15,12 @@ function completeReadItem(store: SqliteWorkItemStore) {
     requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
     risk: "low"
   });
-  store.approveWorkItem(item.id, { via: "domain_service" });
-  const claimed = store.claimNextApprovedWorkItem("worker-a");
-  if (!claimed) throw new Error("expected source claim");
-  store.submitWorkResult({
-    workItemId: claimed.id,
-    leaseId: claimed.leaseId,
-    workerId: claimed.workerId,
-    actionHash: claimed.actionHash,
-    idempotencyKey: stableHash({ source: claimed.id, lease: claimed.leaseId }),
-    outcome: "succeeded",
-    startedAt: claimed.startedAt,
-    finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
-    exitCode: 0,
-    summary: "source completed in dry-run",
-    structuredOutput: { simulated: true },
-    artifacts: [],
-    simulationMetadata: { executionMode: "dry_run", simulated: true }
-  });
-  return { item, sourceSnapshot: store.get(item.id)!, sourceActionHash: claimed.actionHash };
+  store.cancelWorkItem(item.id, { actor: "operator", reason: "terminal lineage fixture" }, { via: "domain_service" });
+  return {
+    item,
+    sourceSnapshot: store.get(item.id)!,
+    sourceActionHash: executionActionHash(item)
+  };
 }
 
 describe("immutable retry and clone lineage", () => {
@@ -41,7 +28,7 @@ describe("immutable retry and clone lineage", () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-retry-"));
     const store = new SqliteWorkItemStore(join(directory, "control.db"));
     try {
-      const { item, sourceSnapshot } = completeReadItem(store);
+      const { item, sourceSnapshot } = createTerminalReadItem(store);
       const retried = store.retryWorkItem(item.id, { actor: "user", reason: "verify again" });
 
       expect(retried.id).not.toBe(item.id);
@@ -53,24 +40,11 @@ describe("immutable retry and clone lineage", () => {
       expect(retried.result).toBeUndefined();
       expect(store.get(item.id)).toEqual(sourceSnapshot);
 
-      store.approveWorkItem(retried.id, { via: "domain_service" });
-      const retryClaim = store.claimNextApprovedWorkItem("worker-a");
-      if (!retryClaim) throw new Error("expected retry claim");
-      store.submitWorkResult({
-        workItemId: retryClaim.id,
-        leaseId: retryClaim.leaseId,
-        workerId: retryClaim.workerId,
-        actionHash: retryClaim.actionHash,
-        idempotencyKey: stableHash({ retry: retryClaim.id, lease: retryClaim.leaseId }),
-        outcome: "succeeded",
-        startedAt: retryClaim.startedAt,
-        finishedAt: new Date(Date.parse(retryClaim.startedAt) + 10).toISOString(),
-        exitCode: 0,
-        summary: "retry completed in dry-run",
-        structuredOutput: { simulated: true },
-        artifacts: [],
-        simulationMetadata: { executionMode: "dry_run", simulated: true }
-      });
+      store.cancelWorkItem(
+        retried.id,
+        { actor: "operator", reason: "terminal second lineage fixture" },
+        { via: "domain_service" }
+      );
       const retryAgain = store.retryWorkItem(retried.id, { actor: "user", reason: "one more time" });
       expect(retryAgain.sourceWorkItemId).toBe(retried.id);
       expect(retryAgain.rootWorkItemId).toBe(item.id);
@@ -86,7 +60,7 @@ describe("immutable retry and clone lineage", () => {
     const dbPath = join(directory, "control.db");
     const store = new SqliteWorkItemStore(dbPath);
     try {
-      const { item, sourceSnapshot, sourceActionHash } = completeReadItem(store);
+      const { item, sourceSnapshot, sourceActionHash } = createTerminalReadItem(store);
       const cloned = store.cloneWorkItem(item.id, {
         actor: "user",
         title: "Cloned inspection",
@@ -94,8 +68,6 @@ describe("immutable retry and clone lineage", () => {
         target: { cwd: "/repo" },
         requestedActions: [{ kind: "fs.read", description: "inspect other", params: { paths: ["src/other.ts"] } }]
       });
-      store.approveWorkItem(cloned.id, { via: "domain_service" });
-
       expect(cloned.id).not.toBe(item.id);
       expect(cloned.sourceWorkItemId).toBe(item.id);
       expect(cloned.lineageType).toBe("clone");
@@ -103,11 +75,9 @@ describe("immutable retry and clone lineage", () => {
       expect(cloned.intent).toBe("inspect a second path");
       expect(store.get(item.id)).toEqual(sourceSnapshot);
 
-      const cloneClaim = store.claimNextApprovedWorkItem("worker-a");
-      expect(cloneClaim?.id).toBe(cloned.id);
-      expect(cloneClaim?.actionHash).toMatch(/^[a-f0-9]{64}$/);
-      expect(cloneClaim?.actionHash).not.toBe(sourceActionHash);
-      expect(store.claimNextApprovedWorkItem("worker-b")).toBeUndefined();
+      const cloneActionHash = executionActionHash(cloned);
+      expect(cloneActionHash).toMatch(/^[a-f0-9]{64}$/);
+      expect(cloneActionHash).not.toBe(sourceActionHash);
 
       const db = new DatabaseSync(dbPath, { readOnly: true });
       try {
@@ -137,7 +107,6 @@ describe("immutable retry and clone lineage", () => {
         risk: "low"
       });
       store.approveWorkItem(item.id, { via: "domain_service" });
-      store.claimNextApprovedWorkItem("worker-a");
 
       expect(() => store.retryWorkItem(item.id, { actor: "user", reason: "not safe yet" })).toThrow("terminal source");
       expect(() => store.cloneWorkItem(item.id, { actor: "user" })).toThrow("terminal source");

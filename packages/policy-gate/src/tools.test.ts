@@ -56,7 +56,7 @@ describe("policy-gated work item tools", () => {
     }
   });
 
-  it("blocks claimed work when required approval is missing", () => {
+  it("rejects the legacy claim tool before policy can dispatch work", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-tools-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
     const tools = createWorkItemTools(store, fakePolicy("require_approval"));
@@ -71,17 +71,17 @@ describe("policy-gated work item tools", () => {
       });
       store.approveWorkItem(workItem.id, domainTransition);
 
-      const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
-
-      expect(claimed?.status).toBe("blocked");
-      expect(store.readEvents().map((event) => event.name)).toContain("policy.decided");
+      const policyEventsBefore = store.readEvents().filter((event) => event.name === "policy.decided").length;
+      expect(() => tools.claim_next_approved_work_item({ workerId: "worker-a" })).toThrow("acs.worker.v2");
+      expect(store.get(workItem.id)?.status).toBe("approved");
+      expect(store.readEvents().filter((event) => event.name === "policy.decided")).toHaveLength(policyEventsBefore);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
-  it("consumes one write approval once across competing store connections", () => {
+  it("does not consume a legacy approval through competing legacy claim tools", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-tools-claim-race-"));
     const dbPath = join(dir, "control.db");
     const firstStore = new SqliteWorkItemStore(dbPath);
@@ -110,21 +110,13 @@ describe("policy-gated work item tools", () => {
       });
       expect(approval.workItem.status).toBe("approved");
 
-      const claims = [
-        firstTools.claim_next_approved_work_item({ workerId: "worker-a" }),
-        secondTools.claim_next_approved_work_item({ workerId: "worker-b" })
-      ];
-      const claimed = claims.filter((candidate) => candidate !== undefined);
+      expect(() => firstTools.claim_next_approved_work_item({ workerId: "worker-a" })).toThrow("acs.worker.v2");
+      expect(() => secondTools.claim_next_approved_work_item({ workerId: "worker-b" })).toThrow("acs.worker.v2");
       const events = firstStore.readEvents();
 
-      expect(claimed).toHaveLength(1);
-      expect(claimed[0]?.id).toBe(workItem.id);
       expect(events.filter((event) => event.name === "approval.granted")).toHaveLength(1);
-      expect(events.filter((event) => event.name === "approval.consumed")).toHaveLength(1);
-      expect(events.find((event) => event.name === "approval.consumed")?.body).toMatchObject({
-        workItemId: workItem.id,
-        actionHash: approvalEvaluation!.actionHash
-      });
+      expect(events.filter((event) => event.name === "approval.consumed")).toHaveLength(0);
+      expect(firstStore.hasApproval(workItem.id, approvalEvaluation!.actionHash)).toBe(true);
     } finally {
       firstStore.close();
       secondStore.close();
@@ -225,7 +217,7 @@ describe("policy-gated work item tools", () => {
 
       expect(first.approvals).toHaveLength(1);
       expect(first.workItem.status).toBe("needs_approval");
-      expect(tools.claim_next_approved_work_item({ workerId: "worker-a" })).toBeUndefined();
+      expect(() => tools.claim_next_approved_work_item({ workerId: "worker-a" })).toThrow("acs.worker.v2");
 
       const second = tools.approve_work_item({
         id: workItem.id,
@@ -256,23 +248,7 @@ describe("policy-gated work item tools", () => {
         requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
         risk: "low"
       });
-      const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
-      if (!claimed) throw new Error("expected source claim");
-      tools.submit_work_result({
-        workItemId: claimed.id,
-        leaseId: claimed.leaseId,
-        workerId: claimed.workerId,
-        actionHash: claimed.actionHash,
-        idempotencyKey: "policy-lineage-source",
-        outcome: "succeeded",
-        startedAt: claimed.startedAt,
-        finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
-        exitCode: 0,
-        summary: "source simulated",
-        structuredOutput: { simulated: true },
-        artifacts: [],
-        simulationMetadata: { executionMode: "dry_run", simulated: true }
-      });
+      tools.cancel_work_item({ id: source.id, actor: "operator", reason: "terminal lineage fixture" });
 
       const retried = tools.retry_work_item({ id: source.id, actor: "operator", reason: "repeat inspection" });
       const cloned = tools.clone_work_item({ id: source.id, actor: "operator", risk: "high" });
@@ -283,7 +259,7 @@ describe("policy-gated work item tools", () => {
 
       expect(retried.status).toBe("approved");
       expect(cloned.status).toBe("needs_approval");
-      expect(store.get(source.id)?.status).toBe("succeeded");
+      expect(store.get(source.id)?.status).toBe("cancelled");
       expect(
         policyEvents.some(
           (event) => (event.body.context as { workItemId?: string } | undefined)?.workItemId === retried.id

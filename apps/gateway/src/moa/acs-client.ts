@@ -18,7 +18,10 @@ import {
 
 const riskRank: Record<WorkItemRisk, number> = { low: 0, medium: 1, high: 2, critical: 3 };
 
-export function rederiveMoaRisk(category: ActionCategory, claimed: "low" | "medium" | "high" | "blocked"): WorkItemRisk {
+export function rederiveMoaRisk(
+  category: ActionCategory,
+  claimed: "low" | "medium" | "high" | "blocked"
+): WorkItemRisk {
   const claimedRisk: WorkItemRisk = claimed === "blocked" ? "critical" : claimed;
   const floor: WorkItemRisk = (HIGH_RISK_CATEGORIES as readonly string[]).includes(category)
     ? "high"
@@ -50,7 +53,10 @@ export function createMoaAcsClient(store: WorkItemStore): AcsClient {
           status: "pending_approval" as const
         };
       }
-      return { work_item_id: workItem.id, status: workItem.status === "approved" ? "approved" as const : "pending_approval" as const };
+      return {
+        work_item_id: workItem.id,
+        status: workItem.status === "approved" ? ("approved" as const) : ("pending_approval" as const)
+      };
     },
 
     async getExecutableGrant(input: ExecutableGrantRequest): Promise<ExecutableGrant> {
@@ -71,31 +77,42 @@ export function createMoaAcsClient(store: WorkItemStore): AcsClient {
       if (!action) {
         return { dispatched: false, reason: "work item action hash/category binding mismatch" };
       }
-      const evaluation = policy.evaluateWorkItem(workItem, input.actor, "claim").find((candidate) => candidate.action === action);
+      const evaluation = policy
+        .evaluateWorkItem(workItem, input.actor, "claim")
+        .find((candidate) => candidate.action === action);
       if (!evaluation) {
         return { dispatched: false, reason: "policy evaluation missing for work item action" };
       }
       const expectedGrantId = approvalRequestHash(workItem.id, evaluation.actionHash);
-      if (input.grant_id !== expectedGrantId || input.lease_token !== dispatchToken(workItem.id, evaluation.actionHash)) {
+      if (
+        input.grant_id !== expectedGrantId ||
+        input.lease_token !== dispatchToken(workItem.id, evaluation.actionHash)
+      ) {
         return { dispatched: false, reason: "approval grant mismatch" };
       }
       if (!store.hasApproval(workItem.id, evaluation.actionHash)) {
         return { dispatched: false, reason: "approval grant is missing, expired, or consumed" };
       }
-      return { dispatched: true, reason: "queued for worker claim" };
+      return {
+        dispatched: false,
+        reason: "acs.worker.v2 result acceptance is not available in Phase 2 Slice 1"
+      };
     },
 
     async policySummary() {
       return [
         "ACS is the sole authority for policy, approval, audit, lease/claim, and execution.",
-        "MoA decisions are requests only; approved work is executed by worker claim_next_approved_work_item.",
+        "MoA decisions are requests only; legacy worker claim and result paths are disabled after schema v6.",
         "Execution requests require matching task/session/actor/source/category/action-hash metadata and an unconsumed approval grant."
       ].join("\n");
     }
   };
 }
 
-export function verifyExecutableGrant(store: WorkItemStore, input: ExecutableGrantRequest): { workItem: WorkItem; actionHash: string } {
+export function verifyExecutableGrant(
+  store: WorkItemStore,
+  input: ExecutableGrantRequest
+): { workItem: WorkItem; actionHash: string } {
   const workItem = store.get(input.work_item_id);
   if (!workItem) {
     throw new ControlStackError("moa_work_item_not_found", `work item not found: ${input.work_item_id}`);
@@ -116,9 +133,14 @@ export function verifyExecutableGrant(store: WorkItemStore, input: ExecutableGra
     action.params.moa_source !== input.source ||
     action.params.moa_category !== input.expected_category
   ) {
-    throw new ControlStackError("moa_grant_binding_mismatch", "work item task/session/source/category binding mismatch");
+    throw new ControlStackError(
+      "moa_grant_binding_mismatch",
+      "work item task/session/source/category binding mismatch"
+    );
   }
-  const evaluation = createPolicyEngine().evaluateWorkItem(workItem, input.actor, "claim").find((candidate) => candidate.action === action);
+  const evaluation = createPolicyEngine()
+    .evaluateWorkItem(workItem, input.actor, "claim")
+    .find((candidate) => candidate.action === action);
   if (!evaluation) {
     throw new ControlStackError("moa_policy_evaluation_missing", "policy evaluation missing for work item action");
   }

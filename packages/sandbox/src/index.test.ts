@@ -5,10 +5,8 @@ import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { executeSandboxed } from "./index.js";
 
-const transition = { via: "domain_service" as const };
-
 describe("sandbox execution boundary", () => {
-  it("returns an explicitly simulated result for a leased running item", async () => {
+  it("returns an explicitly simulated result for a running-shaped unit fixture", async () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-sandbox-"));
     const store = new SqliteWorkItemStore(join(directory, "control.db"));
     try {
@@ -20,9 +18,7 @@ describe("sandbox execution boundary", () => {
         requestedActions: [{ kind: "manual", description: "simulate" }],
         risk: "low"
       });
-      store.approveWorkItem(item.id, transition);
-      const running = store.claimNextApprovedWorkItem("sandbox-worker");
-      if (!running) throw new Error("expected running item");
+      const running = { ...item, status: "running" as const };
 
       await expect(executeSandboxed(running)).resolves.toEqual({
         ok: true,

@@ -26,25 +26,8 @@ describe("deterministic replay", () => {
       const approved = store.approveWorkItem(workItem.id, domainTransition);
 
       expect(approved?.status).toBe("approved");
-      const running = store.claimNextApprovedWorkItem("eval-worker");
-      expect(running).toBeDefined();
-
-      store.submitWorkResult({
-        workItemId: running!.id,
-        leaseId: running!.leaseId,
-        workerId: "eval-worker",
-        actionHash: running!.actionHash,
-        idempotencyKey: "eval-replay-result-1",
-        outcome: "succeeded",
-        startedAt: running!.startedAt,
-        finishedAt: new Date().toISOString(),
-        summary: "deterministic replay completed",
-        structuredOutput: { output: "ok" },
-        simulationMetadata: { executionMode: "dry_run", simulated: true, reason: "eval_replay" }
-      });
-
-      expect(store.get(workItem.id)?.status).toBe("succeeded");
-      expect(replay(store.readEvents()).workItems[0]?.status).toBe("succeeded");
+      expect(store.get(workItem.id)?.status).toBe("approved");
+      expect(replay(store.readEvents()).workItems[0]?.status).toBe("approved");
       expect(findUnapprovedExecution(store.readEvents())).toEqual([]);
     } finally {
       store.close();
