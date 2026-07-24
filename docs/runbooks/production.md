@@ -2,7 +2,12 @@
 
 ## Supported production scope
 
-This release supports a policy, approval, audit, and dry-run worker control plane. It does not execute real commands or claim OS sandbox isolation. Do not enable machine mutation until a separately reviewed sandbox release gate passes.
+This release supports a policy, approval, audit, and dry-run worker control
+plane. A Bubblewrap/systemd containment backend is implemented and tested
+separately, but the production worker does not invoke it yet. Do not enable
+machine mutation until per-attempt workspace allocation, authoritative
+attempt/lease wiring, and the separately reviewed sandbox release gate all
+pass.
 
 ## Prerequisites
 
@@ -17,6 +22,7 @@ This release supports a policy, approval, audit, and dry-run worker control plan
 ```sh
 npm ci
 npm run check
+npm run test:sandbox-integration
 npm audit --audit-level=high
 docker build -t agent-control-stack:$GIT_SHA .
 ACS_GATEWAY_TOKEN=... \

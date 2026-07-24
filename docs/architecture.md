@@ -13,7 +13,9 @@ leases, result acceptance, or audit. See
 - `packages/work-items`: durable work-item state, leases, immutable execution results, retry/clone lineage, SQLite audit persistence, lifecycle events, and event replay projection.
 - `packages/policy-gate`: fail-closed static policy decisions for requested actions.
 - `packages/temporal-memory`: source-backed memory events and projections.
-- `packages/sandbox`: dry-run execution boundary for approved work.
+- `packages/sandbox`: explicit dry-run simulation plus a fail-closed
+  Bubblewrap/systemd Linux containment backend with strict command profiles,
+  sanitized environments, network denial, and resource limits.
 - `packages/eval-harness`: deterministic replay and policy checks.
 
 ## Apps
@@ -26,10 +28,10 @@ SQLite is the local durability layer. `work_items` holds the current control-pla
 
 The SQLite hash chain is the sole canonical audit and replay source
 ([ADR 0011](adr/0011-canonical-audit-sink.md)). Machine-controller JSONL and
-process logs are telemetry only. Live process execution remains blocked until
-the fail-closed Linux sandbox contract in
-[ADR 0010](adr/0010-fail-closed-linux-sandbox.md) is implemented and its host
-prerequisites are verified.
+process logs are telemetry only. The fail-closed Linux backend from
+[ADR 0010](adr/0010-fail-closed-linux-sandbox.md) exists and has a separate
+host-level test gate, but the production worker remains dry-run-only until
+per-attempt workspaces and authoritative attempt wiring are implemented.
 
 Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. `blocked` remains a recoverable policy state; an accepted execution result is immutable and terminal. In this alpha, worker simulation only starts by transitioning an approved work item to `running`; no real command execution is claimed.
 
