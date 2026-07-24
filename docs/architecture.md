@@ -2,6 +2,11 @@
 
 Agent Control Stack is a single TypeScript monorepo. Apps depend inward on packages; packages should not depend on apps.
 
+ACS is also the sole Engine Harness authority. Model and protocol adapters are
+untrusted capability adapters; they do not own policy, approval, lifecycle,
+leases, result acceptance, or audit. See
+[ADR 0009](adr/0009-engine-harness-authority-and-dependencies.md).
+
 ## Layers
 
 - `packages/shared`: IDs, redaction, errors, hash helpers, migrations, and OpenTelemetry-shaped event schemas.
@@ -18,6 +23,13 @@ Agent Control Stack is a single TypeScript monorepo. Apps depend inward on packa
 - `apps/worker`: one-shot worker that claims the next approved item and records a dry-run result.
 
 SQLite is the local durability layer. `work_items` holds the current control-plane state, while `audit_events` records append-only lifecycle events. Work-item mutations insert their matching audit event in the same SQLite transaction. Events use `name`, `timeUnixNano`, `attributes`, and `body` so they can be mapped to OpenTelemetry exporters later without changing the domain model.
+
+The SQLite hash chain is the sole canonical audit and replay source
+([ADR 0011](adr/0011-canonical-audit-sink.md)). Machine-controller JSONL and
+process logs are telemetry only. Live process execution remains blocked until
+the fail-closed Linux sandbox contract in
+[ADR 0010](adr/0010-fail-closed-linux-sandbox.md) is implemented and its host
+prerequisites are verified.
 
 Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. `blocked` remains a recoverable policy state; an accepted execution result is immutable and terminal. In this alpha, worker simulation only starts by transitioning an approved work item to `running`; no real command execution is claimed.
 
