@@ -18,16 +18,18 @@ approved -> expired
 
 ## Action hash
 
-The action hash binds an approval to exact action content. It is computed by `actionFingerprint` (`packages/policy-gate/src/fingerprint.ts`) over:
+The action hash binds an approval to exact action content. It is computed by `actionFingerprint` (`packages/policy-gate/src/fingerprint.ts`) over the `PolicyContext` it's called with (`packages/policy-gate/src/policy.ts`) — note `action` is a nested object and `risk` is the work item's own risk level, not the policy decision outcome:
 
 ```json
 {
   "requester": "actor-id",
-  "risk": "requires_approval",
-  "kind": "fs_write",
-  "description": "...",
-  "params": {},
-  "command": "...",
+  "risk": "high",
+  "action": {
+    "kind": "fs_write",
+    "description": "...",
+    "params": {}
+  },
+  "command": ["npm", "run", "build"],
   "cwd": "/normalized/path",
   "destructive": false,
   "network": false,
@@ -35,6 +37,8 @@ The action hash binds an approval to exact action content. It is computed by `ac
   "paths": ["..."]
 }
 ```
+
+`risk` is one of `low | medium | high | critical` (`policyContextSchema`); `command`, `paths`, `cwd`, `network`, `write`, and `destructive` are all optional depending on the action kind.
 
 Hash algorithm: `stableHash(...)` (`packages/shared`) — a deterministic canonical-JSON hash, sha256-based.
 
@@ -51,7 +55,7 @@ No separate "approval request" record with its own token is created. The require
 
 ## Granting approval
 
-Approval happens through an authenticated call to `approve_work_item` (`gateApproval` / `gateApprovalInTransaction`, `packages/policy-gate/src/tools.ts`), reached through the gateway's HTTP `/work-items/:id/approve` endpoint or the gateway's own MCP surface. It does **not** happen through an out-of-band local CLI/UI token-issuance step — the caller must already be an authenticated gateway mutation actor.
+Approval happens through an authenticated call to `approve_work_item` (`gateApproval` / `gateApprovalInTransaction`, `packages/policy-gate/src/tools.ts`), reached **only** through the gateway's HTTP `/work-items/:id/approve` endpoint. It is not reachable through either MCP surface: `handleToolsCall` (`apps/gateway/src/mcp.ts`) rejects any `approve_work_item` call — local or remote — with `-32002` before dispatch, unconditionally, and the local stdio server doesn't expose work-item tools at all. It also does not happen through an out-of-band local CLI/UI token-issuance step — the caller must already be an authenticated gateway mutation actor calling the HTTP route directly.
 
 The approval grant:
 
@@ -79,14 +83,15 @@ When a worker claims the next approved item (`claim_next_approved_work_item` / `
 
 | Failure | Result |
 |---|---|
-| No approval found for a required action hash | Work item transitions to `blocked` on claim |
+| No approval found, **or an approval exists but has expired** | Work item transitions to `blocked` on claim. `hasApproval`'s own query excludes expired rows (`expires_at > now`), so an expired grant looks identical to a missing one to the claim flow — `consumeApproval` is never reached for it, and `approval_expired` is not observable through this documented path. |
 | Action hash on approve call doesn't match a required action | `approval_action_mismatch` |
 | Approval not required for the supplied action hash | `approval_not_required` |
 | Approval already consumed | `approval_already_consumed` (on re-approve attempt) / `approval_conflict` (on double-consume race) |
 | Request hash mismatch at consumption | `approval_request_mismatch` |
-| Expired approval | `approval_expired` |
 | Current policy denies at claim time | Work item transitions to `blocked`, not executed |
 | Self-approval on high/critical risk | Denied by policy before an approval record is ever created |
+
+`approval_expired` is a real error thrown by the lower-level `store.consumeApproval` method (`packages/work-items/src/store.ts`), but the standard worker-claim flow above never reaches it — `hasApproval` filters expired rows out first. It's only observable by a caller that invokes `consumeApproval` directly, bypassing `hasApproval`.
 
 ## Non-negotiable rule
 
