@@ -13,6 +13,20 @@ npm run build
 npm test
 ```
 
+The normal test suite proves application behavior and keeps the production
+worker in dry-run mode. On a Linux host with Bubblewrap, a working user systemd
+manager, and cgroup v2, run the separate containment gate:
+
+```sh
+npm run test:sandbox-integration
+```
+
+That gate executes disposable fixtures in real namespaces and cgroup scopes. It
+must pass filesystem and network denial, output and wall-clock bounds,
+process-tree cleanup, cancellation, memory and PID enforcement, and exact
+CPU/memory/PID scope-property checks. A skipped or unavailable host gate is not
+containment proof.
+
 ## Run Gateway
 
 ```sh

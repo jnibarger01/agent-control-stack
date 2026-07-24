@@ -30,8 +30,8 @@ A production-ready ChatGPT tunnel connector must prove:
 - HTTPS connector transport is authenticated.
 - Tool schemas are narrow and validated.
 - Policy fails closed.
-- Mutating actions require out-of-band approval.
-- Approval tokens are request-bound, expiring, and one-time use.
+- Mutating actions require approval through a channel distinct from the requesting MCP tool call.
+- Approvals are request-bound (to the policy-evaluated action hash), expiring, and one-time use — enforced without a separate bearer token; see [ADR 0004](adr/0004-request-bound-approval-tokens.md).
 - Commands run without shell interpolation by default.
 - Paths are realpath-contained inside allowed roots.
 - Sensitive files and output are redacted or denied.

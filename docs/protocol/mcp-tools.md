@@ -72,7 +72,6 @@ Error codes are `ControlStackError.code` values, not a fixed enum owned by this 
 | `fs_too_large` | local fs.read | File exceeds `security.max_output_bytes`. |
 | `fs_binary_refused` | local fs.read | File looks binary; refused rather than dumped. |
 | `command_refused` | local cmd.run | Command did not classify as `read_only` (see below — `cmd.run` never executes anything else). |
-| `direct_agent_disabled` | local test.agent.run | Tool is disabled unless the host explicitly opts in; disabled by default. |
 | `work_item_not_found` | gateway | No work item with the given `id`. |
 | `approval_action_hash_required` | gateway approve_work_item | Caller omitted `actionHash`. |
 | `approval_action_mismatch` | gateway approve_work_item | `actionHash` doesn't match a currently-evaluated action on the work item. |
@@ -158,10 +157,6 @@ Returns `{ cwd, command, args, risk, reason }`. `risk` is one of the levels abov
 
 **Important divergence from the old spec:** this tool has no approval path and no `approval_token` field. It classifies the command exactly as `cmd.preview` does and throws `command_refused` for anything that doesn't classify as `read_only`. There is currently no MCP tool, local or gateway, that executes a mutating shell command directly — mutating work only happens through the gateway's work-item/worker-claim flow, which is a separate execution path entirely (see [approval-lifecycle.md](approval-lifecycle.md)). Environment is allowlisted to `HOME, PATH, SHELL, TMPDIR, USER`; timeout and output caps are enforced (`security.command_timeout_ms`, `security.max_output_bytes`); stdout/stderr are redacted the same way `fs.read` output is.
 
-### `test.agent.run`
-
-Runs one direct agent invocation (`pi`, `openclaw`, `codex`, `claude`, `gemini`, `opencode`) from a clean prompt. **Disabled by default** — the host process must pass `enableTestAgentRunForLocalDevelopment: true` to `MachineController`, otherwise every call throws `direct_agent_disabled`. Not part of the documented-as-stable surface; treat as a local dev escape hatch.
-
 ## Gateway MCP tools
 
 Backed by `createWorkItemTools` (`packages/policy-gate/src/tools.ts`) over a `WorkItemStore`. These tools create and manage work items; they do not execute anything themselves. Execution happens later, out of band, when a worker calls `claim_next_approved_work_item` and `submit_work_result` — those two are **not** exposed as MCP tools (neither locally nor remotely); they're internal harness/worker calls, reached through the gateway's own HTTP endpoints, not `tools/call`.
@@ -220,6 +215,24 @@ Moves a `blocked` item back to `pending_policy` for re-evaluation.
 ```
 
 Two distinct terminal states (`rejected` vs `cancelled`).
+
+### `test.agent.run` (gateway only — not part of the local stdio surface)
+
+Runs one direct agent invocation (`pi`, `openclaw`, `codex`, `claude`, `gemini`, `opencode`) from a clean prompt, through the gateway's approval-scoped path. This tool does **not** exist on the local stdio server described above — `apps/mcp/src/server.ts` unconditionally excludes `test.agent.run` from its accepted tool names (`standaloneMcpToolNames`), regardless of any configuration. It exists only here, on the gateway MCP surface (`apps/gateway/src/mcp.ts`).
+
+```json
+{ "agent": "codex", "prompt": "list the files in this directory", "cwd": "/home/user/project", "timeoutSeconds": 60, "permissionMode": "read-only" }
+```
+
+Requires the `acs:work:approve` OAuth scope — the same scope `approve_work_item` requires, not a separate lower bar. Always forces `permissionMode: read-only`; anything else throws `agent_permission_denied` (`normalizePermissionMode`, `packages/machine-controller/src/direct-agent.ts`) — no write-capable direct run exists through any documented path yet.
+
+Only appears in `tools/list` at all when the gateway was constructed with a direct-agent controller configured, which requires **all** of:
+
+1. `enableTestAgentRunForLocalDevelopment: true` (`GatewayOptions`) or `ACS_ENABLE_TEST_AGENT_RUN_FOR_LOCAL_DEVELOPMENT=1`.
+2. `NODE_ENV !== "production"` — if the flag above is set while `NODE_ENV=production`, the gateway refuses to construct at all (`direct_agent_production_forbidden`, thrown at startup, not as a per-call JSON-RPC error).
+3. `machineControllerConfigPath` (or `ACS_MACHINE_CONTROLLER_CONFIG`) configured.
+
+If the controller was never configured, calling `test.agent.run` fails with `direct_agent_not_configured` (see the error table above). Treat this as a local-development escape hatch, not a documented-as-stable production surface.
 
 ## Audit
 

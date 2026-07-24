@@ -66,6 +66,13 @@ Trust assumptions:
 - Local policy is trusted only if every privileged path routes through it.
 - Human approval is trusted only when it is out-of-band and request-bound.
 - Audit logs are trusted for incident evidence only if mutations fail closed on audit-write failure; tamper evidence requires hash chaining.
+- Only the hash-chained SQLite `audit_events` store is authoritative for Engine
+  Harness decisions and replay; JSONL and process logs are telemetry
+  ([ADR 0011](adr/0011-canonical-audit-sink.md)).
+- A live command is authorized only through the ACS authority path
+  ([ADR 0009](adr/0009-engine-harness-authority-and-dependencies.md)) and must
+  fail closed when the Linux sandbox contract cannot be proven
+  ([ADR 0010](adr/0010-fail-closed-linux-sandbox.md)).
 
 ## Current Boundaries
 
