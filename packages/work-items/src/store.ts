@@ -55,7 +55,10 @@ import {
   executionPlanRecordSchema,
   executionPlanSubjectInputHash,
   recordExecutionPlanApprovalInputSchema,
+  reacquireExecutionAttemptLeaseInputSchema,
+  renewExecutionAttemptLeaseInputSchema,
   retryExecutionAttemptInputSchema,
+  startExecutionAttemptInputSchema,
   transitionExecutionAttemptInputSchema,
   verifyExecutionAttemptClaimInputSchema,
   type AdmitExecutionPlanInput,
@@ -67,7 +70,10 @@ import {
   type ExecutionPlanApproval,
   type ExecutionPlanRecord,
   type RecordExecutionPlanApprovalInput,
+  type ReacquireExecutionAttemptLeaseInput,
+  type RenewExecutionAttemptLeaseInput,
   type RetryExecutionAttemptInput,
+  type StartExecutionAttemptInput,
   type TransitionExecutionAttemptInput,
   type VerifyExecutionAttemptClaimInput
 } from "./execution-plan.js";
@@ -186,6 +192,7 @@ interface ExecutionAttemptRow {
   status: "leased" | "unknown" | "quarantined";
   created_at: string;
   claimed_at: string;
+  started_at: string | null;
 }
 
 interface AttemptLeaseRow {
@@ -632,6 +639,9 @@ export interface WorkItemStore {
   listExecutionAttempts(workItemId: string): ExecutionAttemptRecord[];
   claimExecutionAttempt(input: ClaimExecutionAttemptInput): ExecutionAttemptClaim;
   retryExecutionAttempt(input: RetryExecutionAttemptInput): ExecutionAttemptClaim;
+  renewExecutionAttemptLease(input: RenewExecutionAttemptLeaseInput): ExecutionAttemptClaim;
+  reacquireExecutionAttemptLease(input: ReacquireExecutionAttemptLeaseInput): ExecutionAttemptClaim;
+  startExecutionAttempt(input: StartExecutionAttemptInput): ExecutionAttemptRecord;
   transitionExecutionAttempt(
     input: TransitionExecutionAttemptInput,
     options?: PrivilegedTransitionOptions
@@ -1231,6 +1241,281 @@ export class SqliteWorkItemStore implements WorkItemStore {
     }
     const { attemptId: _attemptId, ...claimInput } = parsed;
     return this.claimExecutionAttemptInternal(claimInput, true);
+  }
+
+  renewExecutionAttemptLease(input: RenewExecutionAttemptLeaseInput): ExecutionAttemptClaim {
+    assertWorkerProtocol((input as { protocolVersion?: unknown }).protocolVersion);
+    const parsed = renewExecutionAttemptLeaseInputSchema.parse(input);
+    return this.write(() => {
+      const now = parsed.now ?? new Date();
+      const current = this.assertExecutionAttemptLeaseClaim(parsed, now, ["leased"]);
+      const leaseMs = parsed.leaseMs ?? this.leaseMs;
+      const expiresAt = new Date(now.getTime() + leaseMs).toISOString();
+      const result = this.db
+        .prepare(
+          `UPDATE attempt_leases SET expires_at = ?
+           WHERE lease_id = ? AND attempt_id = ? AND worker_id = ? AND fencing_epoch = ?
+             AND status = 'active' AND expires_at > ?`
+        )
+        .run(expiresAt, parsed.leaseId, parsed.attemptId, parsed.workerId, parsed.fencingEpoch, now.toISOString());
+      if (result.changes !== 1) {
+        throw new ControlStackError("execution_attempt_lease_conflict", "attempt lease changed or expired");
+      }
+      const event = this.appendAuditEvent(
+        createEvent(
+          "attempt_lease.renewed",
+          {
+            attemptId: current.attempt_id,
+            workItemId: current.work_item_id,
+            leaseId: parsed.leaseId,
+            workerId: current.worker_id,
+            fencingEpoch: current.fencing_epoch,
+            renewedAt: now.toISOString(),
+            expiresAt
+          },
+          {
+            "work_item.id": current.work_item_id,
+            "attempt.id": current.attempt_id,
+            "lease.id": parsed.leaseId,
+            "worker.id": current.worker_id,
+            "lease.epoch": String(current.fencing_epoch)
+          }
+        )
+      );
+      const { leaseMs: _leaseMs, now: _now, ...claimFields } = parsed;
+      return { value: executionAttemptClaimSchema.parse({ ...claimFields, expiresAt }), events: [event] };
+    });
+  }
+
+  reacquireExecutionAttemptLease(input: ReacquireExecutionAttemptLeaseInput): ExecutionAttemptClaim {
+    assertWorkerProtocol((input as { protocolVersion?: unknown }).protocolVersion);
+    const parsed = reacquireExecutionAttemptLeaseInputSchema.parse(input);
+    return this.write(() => {
+      const now = parsed.now ?? new Date();
+      const attempt = this.db
+        .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ?`)
+        .get(parsed.attemptId) as unknown as ExecutionAttemptRow | undefined;
+      const oldLease = this.db
+        .prepare(`SELECT * FROM attempt_leases WHERE attempt_id = ? AND status = 'active'`)
+        .get(parsed.attemptId) as unknown as AttemptLeaseRow | undefined;
+      if (
+        !attempt ||
+        !oldLease ||
+        attempt.worker_id !== oldLease.worker_id ||
+        attempt.status !== "leased" ||
+        Date.parse(oldLease.expires_at) > now.getTime()
+      ) {
+        throw new ControlStackError(
+          "execution_attempt_reacquire_denied",
+          "only an expired leased attempt may be reacquired"
+        );
+      }
+      const epoch = attempt.fencing_epoch + 1;
+      const issuedAt = now.toISOString();
+      const expiresAt = new Date(now.getTime() + (parsed.leaseMs ?? this.leaseMs)).toISOString();
+      this.db
+        .prepare(`UPDATE attempt_leases SET status = 'expired', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+        .run(issuedAt, oldLease.lease_id);
+      this.db
+        .prepare(
+          `UPDATE execution_attempts SET fencing_epoch = ?, worker_id = ? WHERE attempt_id = ? AND fencing_epoch = ?`
+        )
+        .run(epoch, parsed.workerId, attempt.attempt_id, attempt.fencing_epoch);
+      const leaseId = createId("alease");
+      const leaseToken = createLeaseToken();
+      const tokenHash = hashAttemptLeaseToken({
+        attemptId: attempt.attempt_id,
+        leaseId,
+        workerId: parsed.workerId,
+        fencingEpoch: epoch,
+        leaseToken
+      });
+      this.db
+        .prepare(
+          `INSERT INTO attempt_leases
+        (lease_id, attempt_id, work_item_id, worker_id, protocol_version, plan_id, plan_hash, admission_id, admission_hash, input_hash, token_hash, fencing_epoch, issued_at, expires_at, status, closed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', NULL)`
+        )
+        .run(
+          leaseId,
+          attempt.attempt_id,
+          attempt.work_item_id,
+          parsed.workerId,
+          attempt.protocol_version,
+          attempt.plan_id,
+          attempt.plan_hash,
+          attempt.admission_id,
+          attempt.admission_hash,
+          attempt.input_hash,
+          tokenHash,
+          epoch,
+          issuedAt,
+          expiresAt
+        );
+      const event = this.appendAuditEvent(
+        createEvent(
+          "attempt_lease.reacquired",
+          {
+            attemptId: attempt.attempt_id,
+            workItemId: attempt.work_item_id,
+            leaseId,
+            workerId: parsed.workerId,
+            fencingEpoch: epoch,
+            issuedAt,
+            expiresAt
+          },
+          {
+            "work_item.id": attempt.work_item_id,
+            "attempt.id": attempt.attempt_id,
+            "lease.id": leaseId,
+            "worker.id": parsed.workerId,
+            "lease.epoch": String(epoch)
+          }
+        )
+      );
+      return {
+        value: executionAttemptClaimSchema.parse({
+          schemaVersion: EXECUTION_ATTEMPT_CLAIM_SCHEMA_VERSION,
+          protocolVersion: attempt.protocol_version,
+          attemptId: attempt.attempt_id,
+          attemptNumber: attempt.attempt_number,
+          workItemId: attempt.work_item_id,
+          planId: attempt.plan_id,
+          planHash: attempt.plan_hash,
+          admissionId: attempt.admission_id,
+          admissionHash: attempt.admission_hash,
+          inputHash: attempt.input_hash,
+          workerId: parsed.workerId,
+          leaseId,
+          leaseToken,
+          fencingEpoch: epoch,
+          issuedAt,
+          expiresAt
+        }),
+        events: [event]
+      };
+    });
+  }
+
+  startExecutionAttempt(input: StartExecutionAttemptInput): ExecutionAttemptRecord {
+    assertWorkerProtocol((input as { protocolVersion?: unknown }).protocolVersion);
+    const parsed = startExecutionAttemptInputSchema.parse(input);
+    return this.write(() => {
+      const now = parsed.now ?? new Date();
+      const current = this.assertExecutionAttemptLeaseClaim(parsed, now, ["leased"]);
+      if (current.started_at)
+        throw new ControlStackError("execution_attempt_already_started", "attempt was already started");
+      const result = this.db
+        .prepare(
+          `UPDATE execution_attempts SET started_at = ? WHERE attempt_id = ? AND fencing_epoch = ? AND started_at IS NULL`
+        )
+        .run(now.toISOString(), parsed.attemptId, parsed.fencingEpoch);
+      if (result.changes !== 1)
+        throw new ControlStackError("execution_attempt_conflict", "attempt changed while starting");
+      const updated = this.getExecutionAttempt(parsed.attemptId);
+      if (!updated) throw new ControlStackError("execution_attempt_integrity_failed", "started attempt cannot be read");
+      const event = this.appendAuditEvent(
+        createEvent(
+          "execution_attempt.started",
+          {
+            attemptId: updated.attemptId,
+            workItemId: updated.workItemId,
+            workerId: updated.workerId,
+            fencingEpoch: updated.fencingEpoch,
+            startedAt: now.toISOString()
+          },
+          {
+            "work_item.id": updated.workItemId,
+            "attempt.id": updated.attemptId,
+            "worker.id": updated.workerId,
+            "lease.epoch": String(updated.fencingEpoch)
+          }
+        )
+      );
+      return { value: updated, events: [event] };
+    });
+  }
+
+  private assertExecutionAttemptLeaseClaim(
+    parsed: VerifyExecutionAttemptClaimInput,
+    now: Date,
+    allowedStatuses: readonly ExecutionAttemptRow["status"][]
+  ): ExecutionAttemptRow {
+    const attempt = this.db
+      .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ?`)
+      .get(parsed.attemptId) as unknown as ExecutionAttemptRow | undefined;
+    const lease = this.db.prepare(`SELECT * FROM attempt_leases WHERE lease_id = ?`).get(parsed.leaseId) as unknown as
+      AttemptLeaseRow | undefined;
+    if (!attempt || !lease || !allowedStatuses.includes(attempt.status) || lease.status !== "active")
+      throw new ControlStackError("execution_attempt_lease_stale", "attempt lease is missing or no longer active");
+    if (
+      attempt.work_item_id !== parsed.workItemId ||
+      attempt.plan_id !== parsed.planId ||
+      attempt.plan_hash !== parsed.planHash ||
+      attempt.admission_id !== parsed.admissionId ||
+      attempt.admission_hash !== parsed.admissionHash ||
+      attempt.input_hash !== parsed.inputHash ||
+      attempt.worker_id !== parsed.workerId ||
+      attempt.fencing_epoch !== parsed.fencingEpoch ||
+      lease.attempt_id !== parsed.attemptId ||
+      lease.worker_id !== parsed.workerId ||
+      lease.fencing_epoch !== parsed.fencingEpoch
+    )
+      throw new ControlStackError(
+        "execution_attempt_fencing_mismatch",
+        "attempt lease authority is stale or mismatched"
+      );
+    if (
+      lease.token_hash !==
+      hashAttemptLeaseToken({
+        attemptId: attempt.attempt_id,
+        leaseId: lease.lease_id,
+        workerId: attempt.worker_id,
+        fencingEpoch: attempt.fencing_epoch,
+        leaseToken: parsed.leaseToken
+      })
+    )
+      throw new ControlStackError("execution_attempt_fencing_mismatch", "attempt lease token is stale or invalid");
+    if (Date.parse(lease.expires_at) <= now.getTime())
+      throw new ControlStackError("execution_attempt_lease_expired", "attempt lease has expired");
+    const plan = this.getCurrentExecutionPlan(attempt.work_item_id);
+    const admission = this.getCurrentExecutionPlanAdmission(attempt.work_item_id);
+    const workItem = this.getRequired(attempt.work_item_id);
+    if (
+      !plan ||
+      !admission ||
+      plan.planId !== attempt.plan_id ||
+      plan.planHash !== attempt.plan_hash ||
+      admission.admissionId !== attempt.admission_id ||
+      admission.admissionHash !== attempt.admission_hash
+    )
+      throw new ControlStackError("execution_attempt_integrity_failed", "attempt authority is no longer current");
+    const approvalBindingHashes =
+      admission.decision === "require_approval"
+        ? (
+            this.db
+              .prepare(
+                `SELECT * FROM execution_plan_approvals
+                 WHERE admission_id = ? AND admission_hash = ?
+                 ORDER BY action_hash ASC`
+              )
+              .all(admission.admissionId, admission.admissionHash) as unknown as ExecutionPlanApprovalRow[]
+          ).map((row) => rowToExecutionPlanApproval(row).approvalBindingHash)
+        : [];
+    const expectedInputHash = executionAttemptInputHash({
+      workItemId: workItem.id,
+      planId: plan.planId,
+      planHash: plan.planHash,
+      admissionId: admission.admissionId,
+      admissionHash: admission.admissionHash,
+      subjectInputHash: executionPlanSubjectInputHash(workItem),
+      policyVersion: admission.policyVersion,
+      policyDecisionHash: admission.policyDecisionHash,
+      approvalBindingHashes
+    });
+    if (expectedInputHash !== attempt.input_hash)
+      throw new ControlStackError("execution_attempt_integrity_failed", "attempt input integrity check failed");
+    return attempt;
   }
 
   transitionExecutionAttempt(
@@ -3205,7 +3490,8 @@ function rowToExecutionAttempt(row: ExecutionAttemptRow): ExecutionAttemptRecord
     fencingEpoch: row.fencing_epoch,
     status: row.status,
     createdAt: row.created_at,
-    claimedAt: row.claimed_at
+    claimedAt: row.claimed_at,
+    ...(row.started_at ? { startedAt: row.started_at } : {})
   });
   if (!parsed.success) {
     throw new ControlStackError("execution_attempt_integrity_failed", "execution attempt integrity check failed");

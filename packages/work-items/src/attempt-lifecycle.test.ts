@@ -26,6 +26,62 @@ afterEach(() => {
 });
 
 describe("execution attempt lifecycle", () => {
+  it("renews only the current unexpired lease and rejects the expiry boundary", () => {
+    const context = createContext("lease-renewal");
+    try {
+      const claim = context.store.claimExecutionAttempt(claimInput(context, "worker-renew"));
+      const renewed = context.store.renewExecutionAttemptLease({ ...claim, now: fixedNow, leaseMs: 60_000 });
+      expect(renewed.expiresAt).toBe("2026-07-24T00:01:00.000Z");
+      expect(() =>
+        context.store.renewExecutionAttemptLease({ ...claim, leaseToken: `${claim.leaseToken}stale`, now: fixedNow })
+      ).toThrow(ControlStackError);
+      expect(() =>
+        context.store.renewExecutionAttemptLease({ ...claim, workerId: "other-worker", now: fixedNow })
+      ).toThrow(ControlStackError);
+      expect(() => context.store.renewExecutionAttemptLease({ ...renewed, now: new Date(renewed.expiresAt) })).toThrow(
+        ControlStackError
+      );
+    } finally {
+      context.close();
+    }
+  });
+
+  it("starts an attempt only under its current lease authority", () => {
+    const context = createContext("lease-start");
+    try {
+      const claim = context.store.claimExecutionAttempt(claimInput(context, "worker-start"));
+      expect(context.store.startExecutionAttempt({ ...claim, now: fixedNow }).status).toBe("leased");
+      expect(() => context.store.startExecutionAttempt({ ...claim, now: fixedNow })).toThrow(ControlStackError);
+    } finally {
+      context.close();
+    }
+  });
+
+  it("reacquires an expired lease with a higher epoch and fences the old owner", () => {
+    const context = createContext("lease-reacquire");
+    try {
+      const claim = context.store.claimExecutionAttempt({ ...claimInput(context, "worker-old"), leaseMs: 1_000 });
+      const reacquired = context.store.reacquireExecutionAttemptLease({
+        protocolVersion: WORKER_PROTOCOL_VERSION,
+        attemptId: claim.attemptId,
+        workerId: "worker-new",
+        now: new Date("2026-07-24T00:00:01.000Z"),
+        leaseMs: 60_000
+      });
+      expect(reacquired.fencingEpoch).toBe(2);
+      expect(reacquired.workerId).toBe("worker-new");
+      expect(() => context.db.prepare(`DELETE FROM attempt_leases WHERE lease_id = ?`).run(reacquired.leaseId)).toThrow(
+        "attempt_leases: append-only"
+      );
+      expect(() => context.store.verifyExecutionAttemptClaim({ ...claim, now: fixedNow })).toThrow(ControlStackError);
+      expect(
+        context.store.verifyExecutionAttemptClaim({ ...reacquired, now: new Date("2026-07-24T00:00:02.000Z") })
+      ).toEqual(reacquired);
+    } finally {
+      context.close();
+    }
+  });
+
   it("requires privileged authorization for lifecycle transitions", () => {
     const context = createContext("transition-authorization");
     try {

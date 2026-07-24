@@ -27,7 +27,8 @@ const migrationFiles = [
   { version: 4, name: "state_constraints", filename: "004_state_constraints.sql" },
   { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" },
   { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
-  { version: 7, name: "execution_attempt_lifecycle", filename: "007_execution_attempt_lifecycle.sql" }
+  { version: 7, name: "execution_attempt_lifecycle", filename: "007_execution_attempt_lifecycle.sql" },
+  { version: 8, name: "fenced_attempt_leases", filename: "008_fenced_attempt_leases.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

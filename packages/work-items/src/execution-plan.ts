@@ -163,7 +163,8 @@ export const executionAttemptRecordSchema = z
     fencingEpoch: z.number().int().positive(),
     status: executionAttemptStatusSchema,
     createdAt: timestampSchema,
-    claimedAt: timestampSchema
+    claimedAt: timestampSchema,
+    startedAt: timestampSchema.optional()
   })
   .strict();
 
@@ -247,6 +248,24 @@ export const verifyExecutionAttemptClaimInputSchema = executionAttemptClaimSchem
   .extend({ now: z.date().optional() })
   .strict();
 
+export const renewExecutionAttemptLeaseInputSchema = executionAttemptClaimSchema
+  .extend({ leaseMs: positiveLeaseMsSchema.optional(), now: z.date().optional() })
+  .strict();
+
+export const startExecutionAttemptInputSchema = executionAttemptClaimSchema
+  .extend({ now: z.date().optional() })
+  .strict();
+
+export const reacquireExecutionAttemptLeaseInputSchema = z
+  .object({
+    protocolVersion: z.string().min(1).max(128),
+    attemptId: identifierSchema,
+    workerId: identifierSchema,
+    leaseMs: positiveLeaseMsSchema.optional(),
+    now: z.date().optional()
+  })
+  .strict();
+
 export const transitionExecutionAttemptInputSchema = z
   .object({
     attemptId: identifierSchema,
@@ -286,6 +305,9 @@ export type AdmitExecutionPlanInput = z.infer<typeof admitExecutionPlanInputSche
 export type RecordExecutionPlanApprovalInput = z.infer<typeof recordExecutionPlanApprovalInputSchema>;
 export type ClaimExecutionAttemptInput = z.infer<typeof claimExecutionAttemptInputSchema>;
 export type VerifyExecutionAttemptClaimInput = z.infer<typeof verifyExecutionAttemptClaimInputSchema>;
+export type RenewExecutionAttemptLeaseInput = z.infer<typeof renewExecutionAttemptLeaseInputSchema>;
+export type StartExecutionAttemptInput = z.infer<typeof startExecutionAttemptInputSchema>;
+export type ReacquireExecutionAttemptLeaseInput = z.infer<typeof reacquireExecutionAttemptLeaseInputSchema>;
 export type TransitionExecutionAttemptInput = z.infer<typeof transitionExecutionAttemptInputSchema>;
 export type RetryExecutionAttemptInput = z.infer<typeof retryExecutionAttemptInputSchema>;
 

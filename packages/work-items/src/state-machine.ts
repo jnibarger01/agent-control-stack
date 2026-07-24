@@ -15,7 +15,11 @@ const allowedTransitions: Record<WorkItemStatus, readonly WorkItemStatus[]> = {
   rejected: []
 };
 
-export function transitionWorkItem(workItem: WorkItem, status: WorkItemStatus, now = new Date().toISOString()): WorkItem {
+export function transitionWorkItem(
+  workItem: WorkItem,
+  status: WorkItemStatus,
+  now = new Date().toISOString()
+): WorkItem {
   assertCanTransition(workItem.status, status);
   return { ...workItem, status, updatedAt: now };
 }
@@ -38,10 +42,7 @@ const allowedAttemptTransitions: Record<ExecutionAttemptStatus, readonly Executi
   quarantined: []
 };
 
-export function assertCanTransitionExecutionAttempt(
-  from: ExecutionAttemptStatus,
-  to: ExecutionAttemptStatus
-): void {
+export function assertCanTransitionExecutionAttempt(from: ExecutionAttemptStatus, to: ExecutionAttemptStatus): void {
   if (!allowedAttemptTransitions[from].includes(to)) {
     throw new ControlStackError(
       "invalid_execution_attempt_transition",

@@ -75,10 +75,10 @@ describe("schema v6 migration custody", () => {
 
     applyControlPlaneMigrations(db);
 
-    expect(migrationVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(migrationVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(tableExists(db, "execution_plans")).toBe(true);
     expect(tableExists(db, "execution_attempts")).toBe(true);
-    expect(db.prepare(`SELECT checksum FROM schema_migrations WHERE version = 7`).get()).toEqual({
+    expect(db.prepare(`SELECT checksum FROM schema_migrations WHERE version = 8`).get()).toEqual({
       checksum: controlPlaneMigrations().at(-1)?.checksum
     });
     db.close();
