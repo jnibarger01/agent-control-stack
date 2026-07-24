@@ -27,6 +27,7 @@ describe("deterministic SQLite evaluation", () => {
           WorkItemEvent.Running,
           "policy.decided",
           "approval.consumed",
+          "execution_result.accepted",
           WorkItemEvent.Succeeded
         ],
         [
@@ -39,6 +40,7 @@ describe("deterministic SQLite evaluation", () => {
           WorkItemEvent.Running,
           "policy.decided",
           "approval.consumed",
+          "execution_result.accepted",
           WorkItemEvent.Succeeded
         ]
       ]);

@@ -21,6 +21,7 @@ const expectedEventNames = [
   WorkItemEvent.Running,
   "policy.decided",
   "approval.consumed",
+  "execution_result.accepted",
   WorkItemEvent.Succeeded
 ];
 
@@ -66,10 +67,7 @@ export function runDeterministicSqliteEvaluation(_rootDir: string): Deterministi
   if (tamperedVerification.ok) {
     throw new Error("SQLite evaluation tampered audit chain verified successfully");
   }
-  if (
-    tamperedVerification.failure.sequence !== 2 ||
-    tamperedVerification.failure.reason !== "event_hash_mismatch"
-  ) {
+  if (tamperedVerification.failure.sequence !== 2 || tamperedVerification.failure.reason !== "event_hash_mismatch") {
     throw new Error(
       `SQLite evaluation tamper mismatch: ${tamperedVerification.failure.reason} at ${tamperedVerification.failure.sequence}`
     );
@@ -131,11 +129,25 @@ function runGoldenPath(databasePath: string): SqliteEvaluationRun {
     }
 
     tools.submit_work_result({
-      id: claimed.id,
+      workItemId: claimed.id,
+      leaseId: claimed.leaseId,
       workerId: claimed.workerId,
-      leaseToken: claimed.leaseToken,
-      status: "succeeded",
-      result: { evaluation: "control-plane-only" }
+      actionHash: claimed.actionHash,
+      idempotencyKey: stableHash({
+        workItemId: claimed.id,
+        leaseId: claimed.leaseId,
+        evaluation: "control-plane-only"
+      }),
+      outcome: "succeeded",
+      startedAt: claimed.startedAt,
+      finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
+      exitCode: 0,
+      summary: "control-plane-only evaluation completed",
+      stdout: "",
+      stderr: "",
+      structuredOutput: { evaluation: "control-plane-only" },
+      artifacts: [],
+      simulationMetadata: { executionMode: "dry_run", simulated: true }
     });
 
     const events = store.readEvents({ limit: 500 });
@@ -154,7 +166,12 @@ function runGoldenPath(databasePath: string): SqliteEvaluationRun {
     const projected = replay(events).workItems;
     const finalProjection = projected[0];
     const persisted = store.get(created.id);
-    if (!finalProjection || projected.length !== 1 || !persisted || stableHash(finalProjection) !== stableHash(persisted)) {
+    if (
+      !finalProjection ||
+      projected.length !== 1 ||
+      !persisted ||
+      stableHash(finalProjection) !== stableHash(persisted)
+    ) {
       throw new Error(`SQLite evaluation replay divergence for ${created.id}`);
     }
 
@@ -192,12 +209,28 @@ function normalizeValue(value: unknown, workItemId: string, key?: string): unkno
     key === "updatedAt" ||
     key === "leaseExpiresAt" ||
     key === "expiresAt" ||
-    key === "consumedAt"
+    key === "consumedAt" ||
+    key === "recordedAt"
   ) {
     return "<time>";
   }
   if (key === "requestHash" || key === "approval.request_hash") {
     return "<request-hash>";
+  }
+  if (key === "leaseId" || key === "lease.id") {
+    return "<lease-id>";
+  }
+  if (key === "resultId") {
+    return "<result-id>";
+  }
+  if (key === "actionHash" || key === "action.hash") {
+    return "<action-hash>";
+  }
+  if (key === "idempotencyKey") {
+    return "<idempotency-key>";
+  }
+  if (key === "payloadHash") {
+    return "<payload-hash>";
   }
   if (value === workItemId) {
     return "<work-item-id>";
@@ -220,8 +253,7 @@ function tamperAuditBody(databasePath: string, sequence: number): void {
   const database = new DatabaseSync(databasePath);
   try {
     const row = database.prepare(`SELECT body FROM audit_events WHERE sequence = ?`).get(sequence) as
-      | { body: string }
-      | undefined;
+      { body: string } | undefined;
     if (!row) {
       throw new Error(`SQLite evaluation audit row is missing at sequence ${sequence}`);
     }
