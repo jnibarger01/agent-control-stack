@@ -13,7 +13,22 @@ const DEFAULT_MAX_OUTPUT_BYTES = 5 * 1024 * 1024;
 // Mirrors packages/machine-controller/src/command.ts's subprocessEnvAllowlist:
 // deny-by-default rather than redact-after-the-fact. ANTHROPIC_API_KEY is added
 // because headless `claude` CLI auth needs it when no interactive session exists.
-export const claudeCliEnvAllowlist = ["HOME", "PATH", "SHELL", "TMPDIR", "USER", "ANTHROPIC_API_KEY"] as const;
+// HTTPS_PROXY/HTTP_PROXY/NO_PROXY/NODE_EXTRA_CA_CERTS/SSL_CERT_FILE are non-secret
+// network configuration, not credentials - omitting them silently breaks the CLI
+// in proxied or private-CA deployments (https://code.claude.com/docs/en/network-config).
+export const claudeCliEnvAllowlist = [
+  "HOME",
+  "PATH",
+  "SHELL",
+  "TMPDIR",
+  "USER",
+  "ANTHROPIC_API_KEY",
+  "HTTPS_PROXY",
+  "HTTP_PROXY",
+  "NO_PROXY",
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE"
+] as const;
 
 export function claudeCliSubprocessEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};

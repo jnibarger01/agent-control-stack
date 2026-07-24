@@ -23,6 +23,11 @@ describe("claudeCliSubprocessEnv", () => {
       TMPDIR: "/tmp",
       USER: "tester",
       ANTHROPIC_API_KEY: "sk-test-key",
+      HTTPS_PROXY: "https://proxy.internal:8443",
+      HTTP_PROXY: "http://proxy.internal:8080",
+      NO_PROXY: "localhost,127.0.0.1",
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/internal-ca.pem",
+      SSL_CERT_FILE: "/etc/ssl/internal-ca.pem",
       AWS_SECRET_ACCESS_KEY: "leaked-secret",
       GITHUB_TOKEN: "leaked-token",
       DATABASE_URL: "postgres://leaked"
@@ -34,7 +39,12 @@ describe("claudeCliSubprocessEnv", () => {
       SHELL: "/bin/bash",
       TMPDIR: "/tmp",
       USER: "tester",
-      ANTHROPIC_API_KEY: "sk-test-key"
+      ANTHROPIC_API_KEY: "sk-test-key",
+      HTTPS_PROXY: "https://proxy.internal:8443",
+      HTTP_PROXY: "http://proxy.internal:8080",
+      NO_PROXY: "localhost,127.0.0.1",
+      NODE_EXTRA_CA_CERTS: "/etc/ssl/internal-ca.pem",
+      SSL_CERT_FILE: "/etc/ssl/internal-ca.pem"
     });
     expect(filtered).not.toHaveProperty("AWS_SECRET_ACCESS_KEY");
     expect(filtered).not.toHaveProperty("GITHUB_TOKEN");
@@ -85,7 +95,21 @@ describe("ClaudeCliProvider spawn env", () => {
       expect(childEnv.TOTALLY_FAKE_SECRET).toBeUndefined();
       expect(Object.keys(childEnv).sort()).toEqual(
         [...new Set(Object.keys(childEnv))].filter((key) =>
-          (["HOME", "PATH", "SHELL", "TMPDIR", "USER", "ANTHROPIC_API_KEY"] as string[]).includes(key)
+          (
+            [
+              "HOME",
+              "PATH",
+              "SHELL",
+              "TMPDIR",
+              "USER",
+              "ANTHROPIC_API_KEY",
+              "HTTPS_PROXY",
+              "HTTP_PROXY",
+              "NO_PROXY",
+              "NODE_EXTRA_CA_CERTS",
+              "SSL_CERT_FILE"
+            ] as string[]
+          ).includes(key)
         ).sort()
       );
     } finally {
