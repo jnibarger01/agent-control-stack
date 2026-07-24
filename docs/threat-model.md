@@ -122,7 +122,7 @@ Trust assumptions:
 - The worker only starts rows that are already `approved`; the sandbox only accepts `running` work items.
 - Work-item state changes and audit events are written in one SQLite transaction.
 - Policy decisions are audited as `policy.decided`.
-- Approvals are stored by work item and exact action hash, with request hashes, expiry, and consumed status. The dormant `approval_token_hash` column remains for compatibility but is not an authorization artifact.
+- Approvals are stored by work item and exact action hash, with request hashes, expiry, and consumed status. The dormant `approval_token_hash` column remains for compatibility but is not an authorization artifact — this is the intentional, documented design (see amended [ADR 0004](adr/0004-request-bound-approval-tokens.md)), not a gap awaiting a token implementation.
 - Audit rows store previous and current event hashes so tampering is detectable by verification; detected invalid chains disable future store writes until repaired out of band.
 - Running work has a worker lease; startup reaps expired leases as failed.
 - Result submission requires an authenticated worker principal plus matching work item ID, lease ID, worker ID, action hash, active unexpired lease, canonical bounded payload, and durable idempotency key. Raw lease tokens are never persisted.
