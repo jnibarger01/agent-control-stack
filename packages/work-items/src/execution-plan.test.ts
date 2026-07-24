@@ -75,10 +75,10 @@ describe("schema v6 migration custody", () => {
 
     applyControlPlaneMigrations(db);
 
-    expect(migrationVersions(db)).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(migrationVersions(db)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(tableExists(db, "execution_plans")).toBe(true);
     expect(tableExists(db, "execution_attempts")).toBe(true);
-    expect(db.prepare(`SELECT checksum FROM schema_migrations WHERE version = 6`).get()).toEqual({
+    expect(db.prepare(`SELECT checksum FROM schema_migrations WHERE version = 7`).get()).toEqual({
       checksum: controlPlaneMigrations().at(-1)?.checksum
     });
     db.close();
@@ -589,7 +589,7 @@ describe("V2 attempt claims and mixed-version rejection", () => {
       const { workItem, plan, admission } = createApprovalRequiredAdmission(context.store);
       const approval = grantRequiredApproval(context.store, workItem, plan, admission);
       const claim = context.store.claimExecutionAttempt(
-        attemptClaimInput(workItem, plan, admission, "worker-approved")
+        attemptClaimInput(workItem, plan, admission, "worker-approved", [approval.approvalBindingHash])
       );
 
       expect(context.store.getExecutionPlanApproval(approval.approvalId)).toMatchObject({
@@ -604,7 +604,9 @@ describe("V2 attempt claims and mixed-version rejection", () => {
         ])
       );
       expect(() =>
-        context.store.claimExecutionAttempt(attemptClaimInput(workItem, plan, admission, "worker-replay"))
+        context.store.claimExecutionAttempt(
+          attemptClaimInput(workItem, plan, admission, "worker-replay", [approval.approvalBindingHash])
+        )
       ).toThrow(ControlStackError);
     } finally {
       context.close();
@@ -641,7 +643,7 @@ describe("V2 attempt claims and mixed-version rejection", () => {
     const context = createStoreContext("self-approval");
     try {
       const { workItem, plan, admission } = createApprovalRequiredAdmission(context.store);
-      context.store.recordExecutionPlanApproval(
+      const approval = context.store.recordExecutionPlanApproval(
         {
           workItemId: workItem.id,
           planHash: plan.planHash,
@@ -657,7 +659,10 @@ describe("V2 attempt claims and mixed-version rejection", () => {
       );
 
       expectControlError(
-        () => context.store.claimExecutionAttempt(attemptClaimInput(workItem, plan, admission, "worker-self")),
+        () =>
+          context.store.claimExecutionAttempt(
+            attemptClaimInput(workItem, plan, admission, "worker-self", [approval.approvalBindingHash])
+          ),
         "execution_attempt_self_approval"
       );
       expect(countRawRows(context.dbPath, "execution_attempts")).toBe(0);
@@ -685,7 +690,9 @@ describe("V2 attempt claims and mixed-version rejection", () => {
       db.close();
 
       expect(() =>
-        context.store.claimExecutionAttempt(attemptClaimInput(workItem, plan, admission, "worker-audit"))
+        context.store.claimExecutionAttempt(
+          attemptClaimInput(workItem, plan, admission, "worker-audit", [approval.approvalBindingHash])
+        )
       ).toThrow("test attempt audit failure");
       expect(countRawRows(context.dbPath, "execution_attempts")).toBe(0);
       expect(countRawRows(context.dbPath, "attempt_leases")).toBe(0);
@@ -817,7 +824,8 @@ function attemptClaimInput(
   workItem: WorkItem,
   plan: ExecutionPlanRecord,
   admission: ExecutionPlanAdmission,
-  workerId: string
+  workerId: string,
+  approvalBindingHashes: string[] = []
 ): ClaimExecutionAttemptInput {
   return {
     protocolVersion: WORKER_PROTOCOL_VERSION,
@@ -832,7 +840,10 @@ function attemptClaimInput(
       planHash: plan.planHash,
       admissionId: admission.admissionId,
       admissionHash: admission.admissionHash,
-      subjectInputHash: executionPlanSubjectInputHash(workItem)
+      subjectInputHash: executionPlanSubjectInputHash(workItem),
+      policyVersion: admission.policyVersion,
+      policyDecisionHash: admission.policyDecisionHash,
+      approvalBindingHashes
     }),
     workerId,
     leaseMs: 5 * 60 * 1_000,

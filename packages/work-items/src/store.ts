@@ -16,7 +16,7 @@ import {
   type AuditChainVerification,
   type AuditEvent
 } from "@agent-control-stack/shared";
-import { transitionWorkItem } from "./state-machine.js";
+import { assertCanTransitionExecutionAttempt, transitionWorkItem } from "./state-machine.js";
 import {
   cancelRequestSchema,
   createWorkItem,
@@ -45,6 +45,7 @@ import {
   claimExecutionAttemptInputSchema,
   createExecutionPlanInputSchema,
   executionAttemptClaimSchema,
+  executionAttemptRecordSchema,
   executionAttemptInputHash,
   executionPlanAdmissionHash,
   executionPlanAdmissionSchema,
@@ -54,15 +55,20 @@ import {
   executionPlanRecordSchema,
   executionPlanSubjectInputHash,
   recordExecutionPlanApprovalInputSchema,
+  retryExecutionAttemptInputSchema,
+  transitionExecutionAttemptInputSchema,
   verifyExecutionAttemptClaimInputSchema,
   type AdmitExecutionPlanInput,
   type ClaimExecutionAttemptInput,
   type CreateExecutionPlanInput,
   type ExecutionAttemptClaim,
+  type ExecutionAttemptRecord,
   type ExecutionPlanAdmission,
   type ExecutionPlanApproval,
   type ExecutionPlanRecord,
   type RecordExecutionPlanApprovalInput,
+  type RetryExecutionAttemptInput,
+  type TransitionExecutionAttemptInput,
   type VerifyExecutionAttemptClaimInput
 } from "./execution-plan.js";
 
@@ -622,7 +628,14 @@ export interface WorkItemStore {
     options: PrivilegedTransitionOptions
   ): ExecutionPlanApproval;
   getExecutionPlanApproval(approvalId: string): ExecutionPlanApproval | undefined;
+  getExecutionAttempt(attemptId: string): ExecutionAttemptRecord | undefined;
+  listExecutionAttempts(workItemId: string): ExecutionAttemptRecord[];
   claimExecutionAttempt(input: ClaimExecutionAttemptInput): ExecutionAttemptClaim;
+  retryExecutionAttempt(input: RetryExecutionAttemptInput): ExecutionAttemptClaim;
+  transitionExecutionAttempt(
+    input: TransitionExecutionAttemptInput,
+    options?: PrivilegedTransitionOptions
+  ): ExecutionAttemptRecord;
   verifyExecutionAttemptClaim(input: VerifyExecutionAttemptClaimInput): ExecutionAttemptClaim;
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
   health(): StoreHealth;
@@ -806,7 +819,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const activeAttempt = this.db
         .prepare(
           `SELECT attempt_id FROM execution_attempts
-           WHERE work_item_id = ? AND status IN ('leased', 'unknown', 'quarantined')
+           WHERE work_item_id = ? AND status = 'leased'
            LIMIT 1`
         )
         .get(workItem.id) as { attempt_id: string } | undefined;
@@ -1191,7 +1204,90 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return row ? rowToExecutionPlanApproval(row) : undefined;
   }
 
+  getExecutionAttempt(attemptId: string): ExecutionAttemptRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ?`).get(attemptId) as unknown as
+      ExecutionAttemptRow | undefined;
+    return row ? this.readExecutionAttempt(row) : undefined;
+  }
+
+  listExecutionAttempts(workItemId: string): ExecutionAttemptRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM execution_attempts WHERE work_item_id = ? ORDER BY attempt_number ASC`)
+      .all(workItemId) as unknown as ExecutionAttemptRow[];
+    return rows.map((row) => this.readExecutionAttempt(row));
+  }
+
+  retryExecutionAttempt(input: RetryExecutionAttemptInput): ExecutionAttemptClaim {
+    const parsed = retryExecutionAttemptInputSchema.parse(input);
+    const latestRow = this.db
+      .prepare(`SELECT * FROM execution_attempts WHERE work_item_id = ? ORDER BY attempt_number DESC LIMIT 1`)
+      .get(parsed.workItemId) as unknown as ExecutionAttemptRow | undefined;
+    const latest = latestRow ? this.getExecutionAttempt(latestRow.attempt_id) : undefined;
+    if (!latest || latest.attemptId !== parsed.attemptId) {
+      throw new ControlStackError("execution_attempt_retry_not_latest", "only the latest attempt may be retried");
+    }
+    if (latest.status === "leased") {
+      throw new ControlStackError("execution_attempt_retry_not_eligible", "leased attempts cannot be retried");
+    }
+    const { attemptId: _attemptId, ...claimInput } = parsed;
+    return this.claimExecutionAttemptInternal(claimInput, true);
+  }
+
+  transitionExecutionAttempt(
+    input: TransitionExecutionAttemptInput,
+    options?: PrivilegedTransitionOptions
+  ): ExecutionAttemptRecord {
+    requirePrivilegedTransition(options, "execution attempt");
+    const parsed = transitionExecutionAttemptInputSchema.parse(input);
+    return this.write(() => {
+      const current = this.getExecutionAttempt(parsed.attemptId);
+      if (!current) {
+        throw new ControlStackError("execution_attempt_not_found", `execution attempt not found: ${parsed.attemptId}`);
+      }
+      assertCanTransitionExecutionAttempt(current.status, parsed.status);
+      const now = (parsed.now ?? new Date()).toISOString();
+      const result = this.db
+        .prepare(`UPDATE execution_attempts SET status = ? WHERE attempt_id = ? AND status = ?`)
+        .run(parsed.status, parsed.attemptId, current.status);
+      if (result.changes !== 1) {
+        throw new ControlStackError("execution_attempt_conflict", "execution attempt changed while transitioning");
+      }
+      const updated = this.getExecutionAttempt(parsed.attemptId);
+      if (!updated) {
+        throw new ControlStackError("execution_attempt_integrity_failed", "transitioned attempt cannot be read");
+      }
+      const event = this.appendAuditEvent(
+        createEvent(
+          "execution_attempt.transitioned",
+          {
+            attemptId: updated.attemptId,
+            workItemId: updated.workItemId,
+            attemptNumber: updated.attemptNumber,
+            from: current.status,
+            to: updated.status,
+            actorId: parsed.actorId,
+            reason: parsed.reason,
+            transitionedAt: now
+          },
+          {
+            "work_item.id": updated.workItemId,
+            "attempt.id": updated.attemptId,
+            "attempt.number": String(updated.attemptNumber),
+            "attempt.from": current.status,
+            "attempt.to": updated.status,
+            "actor.id": parsed.actorId
+          }
+        )
+      );
+      return { value: updated, events: [event] };
+    });
+  }
+
   claimExecutionAttempt(input: ClaimExecutionAttemptInput): ExecutionAttemptClaim {
+    return this.claimExecutionAttemptInternal(input, false);
+  }
+
+  private claimExecutionAttemptInternal(input: ClaimExecutionAttemptInput, retry: boolean): ExecutionAttemptClaim {
     assertWorkerProtocol((input as { protocolVersion?: unknown }).protocolVersion);
     const parsed = claimExecutionAttemptInputSchema.parse(input);
 
@@ -1217,26 +1313,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "attempt claim does not match the current admission"
         );
       }
-      const expectedInputHash = executionAttemptInputHash({
-        workItemId: workItem.id,
-        planId: plan.planId,
-        planHash: plan.planHash,
-        admissionId: admission.admissionId,
-        admissionHash: admission.admissionHash,
-        subjectInputHash: executionPlanSubjectInputHash(workItem)
-      });
-      if (parsed.inputHash !== expectedInputHash) {
-        throw new ControlStackError("execution_attempt_input_mismatch", "attempt input hash is invalid or stale");
-      }
       const active = this.db
         .prepare(
           `SELECT attempt_id FROM execution_attempts
-           WHERE work_item_id = ? AND status IN ('leased', 'unknown', 'quarantined')
+           WHERE work_item_id = ? AND status = 'leased'
            LIMIT 1`
         )
         .get(workItem.id) as { attempt_id: string } | undefined;
       if (active) {
         throw new ControlStackError("execution_attempt_claim_conflict", "work item already has an active attempt");
+      }
+      const previous = this.db
+        .prepare(`SELECT attempt_id FROM execution_attempts WHERE work_item_id = ? LIMIT 1`)
+        .get(workItem.id) as { attempt_id: string } | undefined;
+      if (previous && !retry) {
+        throw new ControlStackError(
+          "execution_attempt_retry_required",
+          "a work item with historical attempts must use the explicit retry operation"
+        );
       }
 
       const now = parsed.now ?? new Date();
@@ -1257,18 +1351,33 @@ export class SqliteWorkItemStore implements WorkItemStore {
         fencingEpoch,
         leaseToken
       });
-      const approvals =
+      const allApprovals =
         admission.decision === "require_approval"
           ? (
               this.db
                 .prepare(
                   `SELECT * FROM execution_plan_approvals
-                   WHERE admission_id = ? AND admission_hash = ? AND status = 'granted'
+                   WHERE admission_id = ? AND admission_hash = ?
                    ORDER BY action_hash ASC`
                 )
                 .all(admission.admissionId, admission.admissionHash) as unknown as ExecutionPlanApprovalRow[]
             ).map(rowToExecutionPlanApproval)
           : [];
+      const approvals = allApprovals.filter((approval) => approval.status === "granted");
+      const expectedInputHash = executionAttemptInputHash({
+        workItemId: workItem.id,
+        planId: plan.planId,
+        planHash: plan.planHash,
+        admissionId: admission.admissionId,
+        admissionHash: admission.admissionHash,
+        subjectInputHash: executionPlanSubjectInputHash(workItem),
+        policyVersion: admission.policyVersion,
+        policyDecisionHash: admission.policyDecisionHash,
+        approvalBindingHashes: allApprovals.map((approval) => approval.approvalBindingHash)
+      });
+      if (parsed.inputHash !== expectedInputHash) {
+        throw new ControlStackError("execution_attempt_input_mismatch", "attempt input hash is invalid or stale");
+      }
       if (
         admission.decision === "require_approval" &&
         approvals.some((approval) => approval.approvedByActorId === parsed.workerId)
@@ -1448,6 +1557,50 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  private readExecutionAttempt(row: ExecutionAttemptRow): ExecutionAttemptRecord {
+    const record = rowToExecutionAttempt(row);
+    const plan = this.getExecutionPlan(record.planId);
+    const admission = this.getExecutionPlanAdmission(record.admissionId);
+    const workItem = this.get(record.workItemId);
+    if (!plan || !admission || !workItem) {
+      throw new ControlStackError("execution_attempt_integrity_failed", "execution attempt authority is missing");
+    }
+    const approvalBindingHashes =
+      admission.decision === "require_approval"
+        ? (
+            this.db
+              .prepare(
+                `SELECT * FROM execution_plan_approvals
+                 WHERE admission_id = ? AND admission_hash = ?
+                 ORDER BY action_hash ASC`
+              )
+              .all(admission.admissionId, admission.admissionHash) as unknown as ExecutionPlanApprovalRow[]
+          ).map((approval) => rowToExecutionPlanApproval(approval).approvalBindingHash)
+        : [];
+    const expectedInputHash = executionAttemptInputHash({
+      workItemId: workItem.id,
+      planId: plan.planId,
+      planHash: plan.planHash,
+      admissionId: admission.admissionId,
+      admissionHash: admission.admissionHash,
+      subjectInputHash: executionPlanSubjectInputHash(workItem),
+      policyVersion: admission.policyVersion,
+      policyDecisionHash: admission.policyDecisionHash,
+      approvalBindingHashes
+    });
+    if (
+      record.planHash !== plan.planHash ||
+      record.admissionHash !== admission.admissionHash ||
+      record.inputHash !== expectedInputHash
+    ) {
+      throw new ControlStackError(
+        "execution_attempt_integrity_failed",
+        "execution attempt input integrity check failed"
+      );
+    }
+    return record;
+  }
+
   verifyExecutionAttemptClaim(input: VerifyExecutionAttemptClaimInput): ExecutionAttemptClaim {
     assertWorkerProtocol((input as { protocolVersion?: unknown }).protocolVersion);
     const parsed = verifyExecutionAttemptClaimInputSchema.parse(input);
@@ -1516,7 +1669,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
       planHash: plan.planHash,
       admissionId: admission.admissionId,
       admissionHash: admission.admissionHash,
-      subjectInputHash: executionPlanSubjectInputHash(workItem)
+      subjectInputHash: executionPlanSubjectInputHash(workItem),
+      policyVersion: admission.policyVersion,
+      policyDecisionHash: admission.policyDecisionHash,
+      approvalBindingHashes: (admission.decision === "require_approval"
+        ? (
+            this.db
+              .prepare(
+                `SELECT * FROM execution_plan_approvals
+                 WHERE admission_id = ? AND admission_hash = ?
+                 ORDER BY action_hash ASC`
+              )
+              .all(admission.admissionId, admission.admissionHash) as unknown as ExecutionPlanApprovalRow[]
+          ).map(rowToExecutionPlanApproval)
+        : []
+      ).map((approval) => approval.approvalBindingHash)
     });
     if (expectedInputHash !== attempt.input_hash) {
       throw new ControlStackError("execution_attempt_integrity_failed", "attempt input integrity check failed");
@@ -3019,6 +3186,29 @@ function rowToExecutionPlanApproval(row: ExecutionPlanApprovalRow): ExecutionPla
     }) !== parsed.data.approvalBindingHash
   ) {
     throw new ControlStackError("execution_plan_integrity_failed", "execution plan approval integrity check failed");
+  }
+  return parsed.data;
+}
+
+function rowToExecutionAttempt(row: ExecutionAttemptRow): ExecutionAttemptRecord {
+  const parsed = executionAttemptRecordSchema.safeParse({
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    attemptNumber: row.attempt_number,
+    protocolVersion: row.protocol_version,
+    planId: row.plan_id,
+    planHash: row.plan_hash,
+    admissionId: row.admission_id,
+    admissionHash: row.admission_hash,
+    inputHash: row.input_hash,
+    workerId: row.worker_id,
+    fencingEpoch: row.fencing_epoch,
+    status: row.status,
+    createdAt: row.created_at,
+    claimedAt: row.claimed_at
+  });
+  if (!parsed.success) {
+    throw new ControlStackError("execution_attempt_integrity_failed", "execution attempt integrity check failed");
   }
   return parsed.data;
 }

@@ -146,6 +146,27 @@ export const executionAttemptClaimSchema = z
   })
   .strict();
 
+export const executionAttemptStatusSchema = z.enum(["leased", "unknown", "quarantined"]);
+
+export const executionAttemptRecordSchema = z
+  .object({
+    attemptId: identifierSchema,
+    workItemId: identifierSchema,
+    attemptNumber: z.number().int().positive(),
+    protocolVersion: z.literal(WORKER_PROTOCOL_VERSION),
+    planId: identifierSchema,
+    planHash: executionHashSchema,
+    admissionId: identifierSchema,
+    admissionHash: executionHashSchema,
+    inputHash: executionHashSchema,
+    workerId: identifierSchema,
+    fencingEpoch: z.number().int().positive(),
+    status: executionAttemptStatusSchema,
+    createdAt: timestampSchema,
+    claimedAt: timestampSchema
+  })
+  .strict();
+
 export const createExecutionPlanInputSchema = z
   .object({
     workItemId: identifierSchema,
@@ -226,17 +247,47 @@ export const verifyExecutionAttemptClaimInputSchema = executionAttemptClaimSchem
   .extend({ now: z.date().optional() })
   .strict();
 
+export const transitionExecutionAttemptInputSchema = z
+  .object({
+    attemptId: identifierSchema,
+    status: z.enum(["unknown", "quarantined"]),
+    actorId: actorIdSchema,
+    reason: z.string().min(1).max(2_000),
+    now: z.date().optional()
+  })
+  .strict();
+
+export const retryExecutionAttemptInputSchema = z
+  .object({
+    attemptId: identifierSchema,
+    protocolVersion: z.string().min(1).max(128),
+    workItemId: identifierSchema,
+    planId: identifierSchema,
+    planHash: executionHashSchema,
+    admissionId: identifierSchema,
+    admissionHash: executionHashSchema,
+    inputHash: executionHashSchema,
+    workerId: identifierSchema,
+    leaseMs: positiveLeaseMsSchema.optional(),
+    now: z.date().optional()
+  })
+  .strict();
+
 export type ExecutionPlanStep = z.infer<typeof executionPlanStepSchema>;
 export type ExecutionPlanDefinition = z.infer<typeof executionPlanDefinitionSchema>;
 export type ExecutionPlanRecord = z.infer<typeof executionPlanRecordSchema>;
 export type ExecutionPlanAdmission = z.infer<typeof executionPlanAdmissionSchema>;
 export type ExecutionPlanApproval = z.infer<typeof executionPlanApprovalSchema>;
 export type ExecutionAttemptClaim = z.infer<typeof executionAttemptClaimSchema>;
+export type ExecutionAttemptRecord = z.infer<typeof executionAttemptRecordSchema>;
+export type ExecutionAttemptStatus = z.infer<typeof executionAttemptStatusSchema>;
 export type CreateExecutionPlanInput = z.infer<typeof createExecutionPlanInputSchema>;
 export type AdmitExecutionPlanInput = z.infer<typeof admitExecutionPlanInputSchema>;
 export type RecordExecutionPlanApprovalInput = z.infer<typeof recordExecutionPlanApprovalInputSchema>;
 export type ClaimExecutionAttemptInput = z.infer<typeof claimExecutionAttemptInputSchema>;
 export type VerifyExecutionAttemptClaimInput = z.infer<typeof verifyExecutionAttemptClaimInputSchema>;
+export type TransitionExecutionAttemptInput = z.infer<typeof transitionExecutionAttemptInputSchema>;
+export type RetryExecutionAttemptInput = z.infer<typeof retryExecutionAttemptInputSchema>;
 
 export function executionPlanHash(input: unknown): string {
   return domainHash("acs:execution-plan:v1", executionPlanDefinitionSchema.parse(input));
@@ -299,8 +350,14 @@ export function executionAttemptInputHash(input: {
   admissionId: string;
   admissionHash: string;
   subjectInputHash: string;
+  policyVersion: string;
+  policyDecisionHash: string;
+  approvalBindingHashes: string[];
 }): string {
-  return domainHash("acs:execution-attempt-input:v1", input);
+  return domainHash("acs:execution-attempt-input:v2", {
+    ...input,
+    approvalBindingHashes: [...input.approvalBindingHashes].sort()
+  });
 }
 
 export function defaultExecutionPlanForWorkItem(

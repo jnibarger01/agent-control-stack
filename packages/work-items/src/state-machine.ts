@@ -1,4 +1,5 @@
 import { ControlStackError } from "@agent-control-stack/shared";
+import type { ExecutionAttemptStatus } from "./execution-plan.js";
 import type { WorkItem, WorkItemStatus } from "./work-item.js";
 
 const allowedTransitions: Record<WorkItemStatus, readonly WorkItemStatus[]> = {
@@ -28,5 +29,23 @@ export function assertCanTransition(from: WorkItemStatus, to: WorkItemStatus): v
 export function assertExecutableWorkItem(workItem: WorkItem): void {
   if (workItem.status !== "running") {
     throw new ControlStackError("work_item_not_executable", `work item ${workItem.id} is ${workItem.status}`);
+  }
+}
+
+const allowedAttemptTransitions: Record<ExecutionAttemptStatus, readonly ExecutionAttemptStatus[]> = {
+  leased: ["unknown", "quarantined"],
+  unknown: [],
+  quarantined: []
+};
+
+export function assertCanTransitionExecutionAttempt(
+  from: ExecutionAttemptStatus,
+  to: ExecutionAttemptStatus
+): void {
+  if (!allowedAttemptTransitions[from].includes(to)) {
+    throw new ControlStackError(
+      "invalid_execution_attempt_transition",
+      `cannot transition execution attempt from ${from} to ${to}`
+    );
   }
 }
