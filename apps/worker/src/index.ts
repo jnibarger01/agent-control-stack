@@ -1,7 +1,7 @@
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { stableHash } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 
 export interface WorkerOptions {
   dbPath?: string;
@@ -13,6 +13,28 @@ export interface WorkerResult {
   executionMode?: "dry_run";
   workItemId?: string;
   reason?: string;
+}
+
+/**
+ * The one-shot worker is the first safe execution slice. Until authoritative
+ * attempt/workspace wiring is complete, it may only simulate filesystem
+ * inspection. Approval alone must never turn a mutation into a successful
+ * worker result.
+ */
+const readOnlyWorkerActionKinds = new Set(["system.status", "fs.list", "fs.stat", "fs.read", "fs.search_name"]);
+
+export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActions">): boolean {
+  return (
+    workItem.requestedActions.length > 0 &&
+    workItem.requestedActions.every(
+      (action) =>
+        readOnlyWorkerActionKinds.has(action.kind) &&
+        action.params.write !== true &&
+        action.params.destructive !== true &&
+        action.params.network !== true &&
+        action.params.allowNetwork !== true
+    )
+  );
 }
 
 export async function runWorkerOnce(options: WorkerOptions = {}): Promise<WorkerResult> {
@@ -32,6 +54,35 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
 
     const startedAt = new Date().toISOString();
+    if (!isReadOnlyWorkerWorkItem(running)) {
+      const completedAt = new Date().toISOString();
+      workItems.recordDerivedWorkResult({
+        workItemId: running.id,
+        leaseId: running.leaseId,
+        workerId,
+        actionHash: running.actionHash,
+        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        outcome: "blocked",
+        startedAt,
+        finishedAt: completedAt,
+        exitCode: null,
+        summary: "worker supports read-only repository inspection only; no command ran",
+        error: "worker_read_only_scope",
+        structuredOutput: { simulated: true, blocked: true, reason: "worker_read_only_scope" },
+        artifacts: [],
+        simulationMetadata: {
+          executionMode: "dry_run",
+          simulated: true,
+          reason: "worker_read_only_scope"
+        }
+      });
+      return {
+        executed: false,
+        workItemId: running.id,
+        reason: "worker supports read-only repository inspection only"
+      };
+    }
+
     const result = await executeSandboxed(running);
     const completedAt = new Date().toISOString();
 
