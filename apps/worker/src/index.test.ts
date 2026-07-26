@@ -162,7 +162,7 @@ describe("worker policy gate", () => {
     }
   });
 
-  it("simulates approved write work with a matching action approval", async () => {
+  it("blocks approved write work even with a matching action approval", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath);
@@ -192,15 +192,23 @@ describe("worker policy gate", () => {
       const check = new SqliteWorkItemStore(dbPath);
       try {
         const events = check.readEvents().map((event) => event.name);
-        const succeededEvent = check.readEvents().find((event) => event.name === "work_item.succeeded");
-        expect(result.executed).toBe(true);
-        expect(result.executionMode).toBe("dry_run");
-        expect(check.get(workItem.id)?.status).toBe("succeeded");
+        const blockedEvent = check.readEvents().find((event) => event.name === "work_item.blocked");
+        expect(result).toEqual({
+          executed: false,
+          workItemId: workItem.id,
+          reason: "worker supports read-only repository inspection only"
+        });
+        expect(check.get(workItem.id)?.status).toBe("blocked");
         expect(events).toContain("approval.granted");
         expect(events).toContain("approval.consumed");
-        expect(events).toContain("work_item.succeeded");
-        expect(succeededEvent?.body.result).toMatchObject({ executionMode: "dry_run", outcome: "succeeded" });
-        expect(succeededEvent?.attributes).toMatchObject({ "execution.mode": "dry_run" });
+        expect(events).toContain("work_item.blocked");
+        expect(events).not.toContain("work_item.succeeded");
+        expect(blockedEvent?.body.result).toMatchObject({
+          outcome: "blocked",
+          executionMode: "dry_run",
+          error: "worker_read_only_scope"
+        });
+        expect(blockedEvent?.attributes).toMatchObject({ "execution.mode": "dry_run" });
         expect(spawn).not.toHaveBeenCalled();
         expect(exec).not.toHaveBeenCalled();
         expect(fork).not.toHaveBeenCalled();

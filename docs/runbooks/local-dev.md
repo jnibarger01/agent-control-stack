@@ -44,4 +44,4 @@ For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send i
 ACS_DB_PATH=storage/local.db npm run start:worker
 ```
 
-The worker simulates one approved work item and records start/completion events with `execution_mode: "dry_run"`.
+The worker simulates one approved read-only work item and records start/completion events with `execution_mode: "dry_run"`. Approved writes, shell commands, and other non-read-only actions are recorded as blocked until the authoritative attempt/workspace execution path is enabled.
