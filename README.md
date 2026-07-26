@@ -129,6 +129,7 @@ storage/
   migrations/       SQLite migrations
 docs/
   architecture.md
+  authority-map.md
   oauth-authentication.md
   threat-model.md
   runbooks/local-dev.md
@@ -801,6 +802,7 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 ## Related docs
 
 - [`docs/architecture.md`](docs/architecture.md)
+- [`docs/authority-map.md`](docs/authority-map.md)
 - [`docs/threat-model.md`](docs/threat-model.md)
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
