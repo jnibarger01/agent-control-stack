@@ -4,6 +4,7 @@
     { "path": "./tsconfig.compounding.json" },
     { "path": "packages/shared" },
     { "path": "packages/work-items" },
+    { "path": "packages/graph" },
     { "path": "packages/acp-adapter" },
     { "path": "packages/policy-gate" },
     { "path": "packages/machine-controller" },

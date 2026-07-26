@@ -91,21 +91,22 @@ immutable result + audit evidence
 
 ### Main components
 
-| Component                     | Purpose                                                                                                                                       |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/gateway`                | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events.                                                      |
-| `apps/control-ui`             | Server-rendered mission-control dashboard HTML.                                                                                               |
-| `apps/mcp`                    | stdio MCP server backed by the machine-controller package.                                                                                    |
-| `apps/worker`                 | One-shot local worker that claims the next approved work item and records a dry-run result.                                                   |
-| `packages/work-items`         | Work-item state machine, SQLite store, approvals, leases, immutable results, retry/clone lineage, audit events, registry, audit-chain health. |
-| `packages/policy-gate`        | Policy evaluation, action fingerprinting, approval gating, worker-claim gating.                                                               |
-| `packages/sandbox`            | Execution boundary. Currently dry-run only.                                                                                                   |
-| `packages/shared`             | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers.                                                                    |
-| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary.                                                                               |
-| `packages/acp-adapter`        | Read-only ACP stdio adapter for registering agent status/capabilities.                                                                        |
-| `packages/moa-orchestrator`   | Multi-model/model-routing orchestration support.                                                                                              |
-| `packages/eval-harness`       | Replay and policy validation harness.                                                                                                         |
-| `packages/temporal-memory`    | Source-backed memory events/projections.                                                                                                      |
+| Component                     | Purpose                                                                                                                                           |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/gateway`                | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events.                                                          |
+| `apps/control-ui`             | Server-rendered mission-control dashboard HTML.                                                                                                   |
+| `apps/mcp`                    | stdio MCP server backed by the machine-controller package.                                                                                        |
+| `apps/worker`                 | One-shot local worker that claims the next approved work item and records a dry-run result.                                                       |
+| `packages/work-items`         | Work-item state machine, SQLite store, approvals, leases, immutable results, retry/clone lineage, audit events, registry, audit-chain health.     |
+| `packages/policy-gate`        | Policy evaluation, action fingerprinting, approval gating, worker-claim gating.                                                                   |
+| `packages/sandbox`            | Execution boundary. Currently dry-run only.                                                                                                       |
+| `packages/shared`             | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers.                                                                        |
+| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary.                                                                                   |
+| `packages/acp-adapter`        | Read-only ACP stdio adapter for registering agent status/capabilities.                                                                            |
+| `packages/moa-orchestrator`   | Multi-model/model-routing orchestration support.                                                                                                  |
+| `packages/eval-harness`       | Replay and policy validation harness.                                                                                                             |
+| `packages/graph`              | Derived, query-only graph over work-item/plan/attempt/lease records. Never an independent source of authority; see `docs/graph-foundation-v2.md`. |
+| `packages/temporal-memory`    | Source-backed memory events/projections.                                                                                                          |
 
 ## Repository layout
 
@@ -118,6 +119,7 @@ apps/
 packages/
   acp-adapter/      Read-only ACP process adapter
   eval-harness/     Replay/evaluation harness
+  graph/            Derived, query-only graph over work-item/plan/attempt/lease records
   machine-controller/ Local machine-controller config and direct-agent boundary
   moa-orchestrator/ Model/orchestration support
   policy-gate/      Policy decisions and approval gates
@@ -129,6 +131,7 @@ storage/
   migrations/       SQLite migrations
 docs/
   architecture.md
+  graph-foundation-v2.md
   oauth-authentication.md
   threat-model.md
   runbooks/local-dev.md
@@ -801,6 +804,7 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 ## Related docs
 
 - [`docs/architecture.md`](docs/architecture.md)
+- [`docs/graph-foundation-v2.md`](docs/graph-foundation-v2.md)
 - [`docs/threat-model.md`](docs/threat-model.md)
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
