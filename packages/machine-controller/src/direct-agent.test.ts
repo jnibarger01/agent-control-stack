@@ -222,7 +222,7 @@ function config(dir: string, allowed: string): MachineControllerConfig {
       commandTerminationGraceMs: 1_000
     },
     paths: { allow: [allowed], deny: [] },
-    commands: { allowReadonly: ["node"], deny: [] },
+    commands: { allowReadonly: ["node"], deny: [], executablePaths: ["/usr/local/bin", "/usr/bin", "/bin"] },
     audit: { logPath: join(dir, "audit.jsonl") }
   };
 }

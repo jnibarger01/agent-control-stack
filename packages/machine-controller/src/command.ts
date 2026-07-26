@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import { z } from "zod";
 import type { MachineControllerConfig } from "./config.js";
@@ -53,7 +56,7 @@ export function previewCommand(config: MachineControllerConfig, input: unknown):
   if (isMutation(command, args)) {
     return { cwd, command, args, risk: "requires_approval", reason: "command can mutate local state" };
   }
-  if (isKnownReadonly(command, args) && config.commands.allowReadonly.includes(command)) {
+  if (config.commands.allowReadonly.includes(command) && isKnownReadonly(command, args)) {
     return { cwd, command, args, risk: "read_only", reason: "command is an allowed read-only diagnostic" };
   }
 
@@ -69,9 +72,10 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
   const started = Date.now();
   return await new Promise((resolvePromise) => {
     const useProcessGroup = process.platform !== "win32";
-    const child = spawn(preview.command, preview.args, {
+    const isolatedHome = mkdtempSync(join(tmpdir(), "acs-command-home-"));
+    const child = spawn(preview.command, readonlyInvocationArgs(preview), {
       cwd: preview.cwd,
-      env: subprocessEnv(),
+      env: readonlySubprocessEnv(config, isolatedHome),
       detached: useProcessGroup,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"]
@@ -94,6 +98,7 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
       clearTimeout(timeoutTimer);
       if (escalationTimer) clearTimeout(escalationTimer);
       if (completionTimer) clearTimeout(completionTimer);
+      rmSync(isolatedHome, { recursive: true, force: true });
       const error = spawnError ?? terminationError;
       resolvePromise({
         preview,
@@ -184,15 +189,28 @@ function asError(error: unknown): Error {
 }
 
 function isKnownReadonly(command: string, args: string[]): boolean {
-  return (
-    (command === "git" && ["status", "diff", "log", "show"].includes(args[0] ?? "")) ||
-    (command === "bun" && args[0] === "--version") ||
-    (command === "node" && ["--version", "-v"].includes(args[0] ?? "")) ||
-    (command === "python3" && ["--version", "-V"].includes(args[0] ?? "")) ||
-    (command === "docker" && args[0] === "ps") ||
-    (command === "df" && ["", "-h"].includes(args[0] ?? "")) ||
-    (command === "free" && ["", "-h"].includes(args[0] ?? ""))
-  );
+  if (command === "git") {
+    const subcommand = args[0];
+    const flags = args.slice(1);
+    const reviewedFlags: Record<string, readonly string[]> = {
+      status: ["--short", "--porcelain", "--branch", "--untracked-files=no", "--no-renames"],
+      diff: ["--stat", "--name-only", "--name-status", "--check", "--cached", "--staged"],
+      log: ["--oneline", "--decorate", "--no-decorate", "--stat", "--no-patch"],
+      show: ["--stat", "--no-patch", "--oneline", "--no-decorate"]
+    };
+    return (
+      typeof subcommand === "string" &&
+      Object.hasOwn(reviewedFlags, subcommand) &&
+      flags.every((flag) => reviewedFlags[subcommand]?.includes(flag))
+    );
+  }
+  if (command === "bun") return args.length === 1 && args[0] === "--version";
+  if (command === "node") return args.length === 1 && ["--version", "-v"].includes(args[0] ?? "");
+  if (command === "python3") return args.length === 1 && ["--version", "-V"].includes(args[0] ?? "");
+  if (command === "docker") return args.length === 1 && args[0] === "ps";
+  if (command === "df") return args.length <= 1 && [undefined, "-h"].includes(args[0]);
+  if (command === "free") return args.length <= 1 && [undefined, "-h"].includes(args[0]);
+  return false;
 }
 
 function isMutation(command: string, args: string[]): boolean {
@@ -214,11 +232,43 @@ function isDestructive(command: string, args: string[]): boolean {
 
 function appendCapped(current: string, next: string, maxBytes: number): string {
   const combined = current + next;
-  return Buffer.byteLength(combined, "utf8") <= maxBytes ? combined : combined.slice(0, maxBytes) + "\n[truncated]";
+  if (Buffer.byteLength(combined, "utf8") <= maxBytes) return combined;
+  return `${Buffer.from(combined, "utf8").subarray(0, maxBytes).toString("utf8")}\n[truncated]`;
 }
 
 export function subprocessEnv(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   return Object.fromEntries(subprocessEnvAllowlist.map((name) => [name, source[name]]));
+}
+
+function readonlySubprocessEnv(config: MachineControllerConfig, isolatedHome: string): NodeJS.ProcessEnv {
+  return {
+    HOME: isolatedHome,
+    PATH: (config.commands.executablePaths ?? ["/usr/local/bin", "/usr/bin", "/bin"]).join(delimiter),
+    SHELL: "/bin/sh",
+    TMPDIR: isolatedHome,
+    USER: "acs-readonly",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_LOCAL: "/dev/null",
+    GIT_CONFIG_WORKTREE: "/dev/null",
+    GIT_ATTR_NOSYSTEM: "1",
+    GIT_OPTIONAL_LOCKS: "0",
+    GIT_PAGER: "cat",
+    GIT_TERMINAL_PROMPT: "0",
+    GIT_ASKPASS: "",
+    SSH_ASKPASS: "",
+    PAGER: "cat",
+    LESS: "-FRX",
+    NO_COLOR: "1"
+  };
+}
+
+function readonlyInvocationArgs(preview: CommandPreview): string[] {
+  if (preview.command === "git" && ["diff", "show"].includes(preview.args[0] ?? "")) {
+    return [preview.args[0]!, "--no-ext-diff", "--no-textconv", ...preview.args.slice(1)];
+  }
+  return preview.args;
 }
 
 function redactText(value: string): string {
