@@ -793,7 +793,8 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 - No real OS sandbox is wired in yet.
 - Public worker result submission is not implemented.
 - Production remote connector mode requires OAuth or signed tunnel-session deployment and TLS termination.
-- Docker and Compose artifacts are provided; Kubernetes and a checked-in systemd unit are not.
+- Docker and Compose artifacts are provided. Checked-in systemd units cover managed database backups and restore
+  drills; gateway and worker units and Kubernetes deployment artifacts are not provided.
 - Dashboard approval rendering is intentionally minimal.
 - Error envelopes are not uniform across every route.
 - Release hardening is still in progress.
