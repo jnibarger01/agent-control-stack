@@ -182,7 +182,7 @@ describe("work item state machine", () => {
       store.approveWorkItem(workItem.id, domainTransition);
 
       expectControlError(() => store.transition(workItem.id, "running"), "worker_claim_required");
-      expect(store.claimNextApprovedWorkItem("worker-a")?.status).toBe("running");
+      expect(store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true })?.status).toBe("running");
     } finally {
       store.close();
     }
@@ -329,7 +329,7 @@ describe("work item state machine", () => {
       });
       first.approveWorkItem(workItem.id, domainTransition);
 
-      const claimed = first.claimNextApprovedWorkItem("worker-a");
+      const claimed = first.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       expect(claimed?.id).toBe(workItem.id);
       expect(claimed?.workerId).toBe("worker-a");
       expect(claimed?.leaseToken).toEqual(expect.any(String));
@@ -357,7 +357,7 @@ describe("work item state machine", () => {
       });
       store.approveWorkItem(workItem.id, domainTransition);
 
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       expect(claimed?.leaseToken).toEqual(expect.any(String));
 
       const row = readLeaseRow(dbPath, workItem.id);
@@ -392,7 +392,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
+      store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1, allowLegacyClaimForTests: true });
 
       const failed = store.failExpiredLeases(new Date(Date.now() + 1000));
 
@@ -417,7 +417,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
 
       expectControlError(
         () =>
@@ -454,7 +454,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
 
       expect(() =>
         store.submitWorkResult({
@@ -486,7 +486,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
 
       updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", null);
       expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_missing");
@@ -512,7 +512,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       updateLeaseColumn(dbPath, claimed!.leaseId, "expires_at", "not-an-iso-date");
 
       expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "lease_state_inconsistent");
@@ -560,7 +560,10 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
+      const claimed = store.claimNextApprovedWorkItem("worker-a", {
+        leaseMs: 1,
+        allowLegacyClaimForTests: true
+      });
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_expired");

@@ -16,7 +16,7 @@ function completeReadItem(store: SqliteWorkItemStore) {
     risk: "low"
   });
   store.approveWorkItem(item.id, { via: "domain_service" });
-  const claimed = store.claimNextApprovedWorkItem("worker-a");
+  const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
   if (!claimed) throw new Error("expected source claim");
   store.submitWorkResult({
     workItemId: claimed.id,
@@ -54,7 +54,7 @@ describe("immutable retry and clone lineage", () => {
       expect(store.get(item.id)).toEqual(sourceSnapshot);
 
       store.approveWorkItem(retried.id, { via: "domain_service" });
-      const retryClaim = store.claimNextApprovedWorkItem("worker-a");
+      const retryClaim = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       if (!retryClaim) throw new Error("expected retry claim");
       store.submitWorkResult({
         workItemId: retryClaim.id,
@@ -103,7 +103,7 @@ describe("immutable retry and clone lineage", () => {
       expect(cloned.intent).toBe("inspect a second path");
       expect(store.get(item.id)).toEqual(sourceSnapshot);
 
-      const cloneClaim = store.claimNextApprovedWorkItem("worker-a");
+      const cloneClaim = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       expect(cloneClaim?.id).toBe(cloned.id);
       expect(cloneClaim?.actionHash).toMatch(/^[a-f0-9]{64}$/);
       expect(cloneClaim?.actionHash).not.toBe(sourceActionHash);
@@ -137,7 +137,7 @@ describe("immutable retry and clone lineage", () => {
         risk: "low"
       });
       store.approveWorkItem(item.id, { via: "domain_service" });
-      store.claimNextApprovedWorkItem("worker-a");
+      store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
 
       expect(() => store.retryWorkItem(item.id, { actor: "user", reason: "not safe yet" })).toThrow("terminal source");
       expect(() => store.cloneWorkItem(item.id, { actor: "user" })).toThrow("terminal source");

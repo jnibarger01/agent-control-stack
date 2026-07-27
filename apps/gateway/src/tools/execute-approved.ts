@@ -25,6 +25,9 @@ export async function executeApprovedWorkItem(options: ExecuteApprovedOptions) {
   if (running.status === "blocked") {
     return { executed: false, workItemId: running.id, reason: "policy blocked claim" };
   }
+  if (!running.attemptId || !running.planHash || !running.inputHash || running.fencingEpoch === undefined) {
+    throw new Error("approved dispatcher claim did not include persisted attempt authority");
+  }
 
   const startedAt = running.startedAt;
   let result: ExecutionResult;
@@ -41,10 +44,14 @@ export async function executeApprovedWorkItem(options: ExecuteApprovedOptions) {
   const finishedAt = new Date().toISOString();
   tools.submit_work_result({
     workItemId: running.id,
+    attemptId: running.attemptId,
     leaseId: running.leaseId,
     workerId: running.workerId,
     actionHash: running.actionHash,
-    idempotencyKey: stableHash({ domain: "acs.dispatcher-result", workItemId: running.id, leaseId: running.leaseId }),
+    planHash: running.planHash,
+    inputHash: running.inputHash,
+    fencingEpoch: running.fencingEpoch,
+    idempotencyKey: stableHash({ domain: "acs.attempt-result.v1", attemptId: running.attemptId }),
     outcome: result.ok ? "succeeded" : "worker_infrastructure_failure",
     startedAt,
     finishedAt,
