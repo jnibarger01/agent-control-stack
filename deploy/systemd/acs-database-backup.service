@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Control Stack encrypted database backup
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=agent-control-stack
+Group=agent-control-stack
+EnvironmentFile=/etc/agent-control-stack/database-backup.env
+WorkingDirectory=/opt/agent-control-stack
+ExecStart=/usr/bin/npm run db:backup-policy -- backup ${ACS_DB_PATH} --destination ${ACS_BACKUP_DIRECTORY} --key-file ${ACS_BACKUP_KEY_FILE} --retain ${ACS_BACKUP_RETENTION_COUNT}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/agent-control-stack

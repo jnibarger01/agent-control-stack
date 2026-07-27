@@ -5,6 +5,7 @@ import { redactValue } from "./redact.js";
 export * from "./hash.js";
 export * from "./audit-chain.js";
 export * from "./database-health.js";
+export * from "./database-backup-policy.js";
 export * from "./database-operations.js";
 export * from "./migration.js";
 export * from "./redact.js";
