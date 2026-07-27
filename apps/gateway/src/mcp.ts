@@ -1,5 +1,4 @@
 import type { IncomingHttpHeaders } from "node:http";
-import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import { ZodError, z } from "zod";
@@ -10,16 +9,22 @@ import {
   type McpAuthOptions,
   type McpScope
 } from "./auth.js";
-
-const MCP_PROTOCOL_VERSION = "2024-11-05";
+import {
+  directAgentToolName,
+  gatewayMcpInputSchemas,
+  jsonRpcRequestSchema,
+  MCP_PROTOCOL_VERSION,
+  mcpRequiredScopes,
+  mcpToolAnnotations,
+  mcpToolDescription,
+  remoteMcpToolNames,
+  toolsCallParamsSchema,
+  type McpToolName
+} from "./public-contracts.js";
 
 type GatewayWorkItemTools = ReturnType<typeof createWorkItemTools>;
 type GatewayToolName = (typeof workItemToolNames)[number];
-const directAgentToolName = "test.agent.run" as const;
 type DirectAgentToolName = typeof directAgentToolName;
-const mcpToolNames = [...workItemToolNames, directAgentToolName] as const;
-type McpToolName = (typeof mcpToolNames)[number];
-const remoteMcpToolNames = workItemToolNames.filter((name) => name !== "approve_work_item");
 type JsonRpcId = string | number | null;
 
 export interface GatewayDirectAgentController {
@@ -56,18 +61,6 @@ export type McpHttpResult = {
   body?: JsonRpcSuccess | JsonRpcFailure;
   wwwAuthenticate?: string;
 };
-
-const jsonRpcRequestSchema = z.object({
-  jsonrpc: z.literal("2.0"),
-  id: z.union([z.string(), z.number(), z.null()]).default(null),
-  method: z.string().min(1),
-  params: z.unknown().optional()
-});
-
-const toolsCallParamsSchema = z.object({
-  name: z.enum(mcpToolNames),
-  arguments: z.unknown().optional()
-});
 
 export async function handleMcpHttpRequest(input: {
   body: unknown;
@@ -197,11 +190,11 @@ async function handleToolsCall(input: {
   const authorization = await authorizeMcpRequest({
     headers: input.headers,
     auth: input.auth,
-    requiredScopes: requiredScopes(parsed.data.name),
+    requiredScopes: mcpRequiredScopes(parsed.data.name),
     remoteAddress: input.remoteAddress
   });
   if (!authorization.ok) {
-    return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, requiredScopes(parsed.data.name));
+    return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, mcpRequiredScopes(parsed.data.name));
   }
 
   if (parsed.data.name === "approve_work_item") {
@@ -323,7 +316,12 @@ function callGatewayTool(
   return handler(bindAuthenticatedActor(name, args, auth, actor));
 }
 
-function bindAuthenticatedActor(name: GatewayToolName, args: unknown, auth: McpAuthenticatedRequest, actor: string): unknown {
+function bindAuthenticatedActor(
+  name: GatewayToolName,
+  args: unknown,
+  auth: McpAuthenticatedRequest,
+  actor: string
+): unknown {
   if (name === "create_work_item") {
     // MCP identities are agents; caller-supplied requester/requesterSubject are untrusted.
     return { ...requestObject(args), requester: "agent", requesterSubject: actor };
@@ -368,157 +366,22 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
     : [...remoteMcpToolNames];
   return toolNames.map((name) => {
     const securitySchemes = advertiseOAuth
-      ? [{ type: "oauth2" as const, scopes: requiredScopes(name) }]
+      ? [{ type: "oauth2" as const, scopes: mcpRequiredScopes(name) }]
       : [{ type: "noauth" as const }];
     return {
       name,
-      description: toolDescription(name),
-      inputSchema: toolInputSchema(name),
+      description: mcpToolDescription(name),
+      inputSchema: z.toJSONSchema(gatewayMcpInputSchemas[name], { target: "draft-7", io: "input" }),
       securitySchemes,
       _meta: { securitySchemes },
-      annotations: toolAnnotations(name)
+      annotations: mcpToolAnnotations(name)
     };
   });
-}
-
-function requiredScopes(name: McpToolName): McpScope[] {
-  if (name === directAgentToolName) return ["acs:work:approve"];
-  switch (name) {
-    case "create_work_item":
-      return ["acs:work:create"];
-    case "get_work_item":
-    case "list_work_items":
-      return ["acs:work:read"];
-    case "approve_work_item":
-    case "unblock_work_item":
-    case "reject_work_item":
-    case "cancel_work_item":
-      return ["acs:work:approve"];
-  }
 }
 
 function isMutatingTool(name: McpToolName): boolean {
   if (name === directAgentToolName) return true;
   return !["get_work_item", "list_work_items"].includes(name);
-}
-
-function toolAnnotations(name: McpToolName): Record<string, boolean> {
-  if (name === directAgentToolName) return { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
-  switch (name) {
-    case "get_work_item":
-    case "list_work_items":
-      return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
-    case "cancel_work_item":
-    case "reject_work_item":
-      return { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
-    default:
-      return { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
-  }
-}
-
-function toolDescription(name: McpToolName): string {
-  if (name === directAgentToolName) {
-    return "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.";
-  }
-  switch (name) {
-    case "create_work_item":
-      return "Create a governed work item and immediately evaluate it through the policy gate.";
-    case "get_work_item":
-      return "Read one work item by id.";
-    case "list_work_items":
-      return "List work items, optionally filtered by status.";
-    case "approve_work_item":
-      return "Record user approval for the exact policy-evaluated action hash on a work item.";
-    case "unblock_work_item":
-      return "Move a blocked work item back to pending policy evaluation.";
-    case "reject_work_item":
-      return "Reject a work item through a distinct terminal denial state.";
-    case "cancel_work_item":
-      return "Cancel a work item through the work-item state machine.";
-  }
-}
-
-function toolInputSchema(name: McpToolName): Record<string, unknown> {
-  if (name === directAgentToolName) {
-    return {
-      type: "object",
-      required: ["agent", "prompt"],
-      additionalProperties: true,
-      properties: {
-        agent: { type: "string", enum: [...directAgentNames] },
-        prompt: { type: "string", minLength: 1 },
-        cwd: { type: "string" },
-        timeoutSeconds: { type: "integer", minimum: 1 },
-        permissionMode: { type: "string", enum: ["read-only", "readonly", "read_only"], default: "read-only" }
-      }
-    };
-  }
-  switch (name) {
-    case "create_work_item":
-      return {
-        type: "object",
-        required: ["title", "requester", "intent"],
-        properties: {
-          title: { type: "string" },
-          requester: { type: "string", enum: ["user", "agent", "system"] },
-          status: { type: "string", enum: ["draft", "pending_policy"] },
-          intent: { type: "string" },
-          target: { type: "object" },
-          requestedActions: { type: "array", items: { type: "object" } },
-          risk: { type: "string", enum: ["low", "medium", "high", "critical"] }
-        }
-      };
-    case "list_work_items":
-      return {
-        type: "object",
-        properties: {
-          status: {
-            type: "string",
-            enum: [
-              "draft",
-              "pending_policy",
-              "needs_approval",
-              "approved",
-              "running",
-              "succeeded",
-              "failed",
-              "blocked",
-              "cancelled",
-              "rejected"
-            ]
-          }
-        }
-      };
-    case "approve_work_item":
-      return {
-        type: "object",
-        required: ["id", "reason", "actionHash"],
-        properties: {
-          id: { type: "string" },
-          reason: { type: "string" },
-          actionHash: { type: "string" }
-        }
-      };
-    case "reject_work_item":
-    case "cancel_work_item":
-      return {
-        type: "object",
-        required: ["id"],
-        properties: {
-          id: { type: "string" },
-          reason: { type: "string" }
-        }
-      };
-    case "get_work_item":
-    case "unblock_work_item":
-      return {
-        type: "object",
-        required: ["id"],
-        properties: {
-          id: { type: "string" }
-        }
-      };
-  }
 }
 
 function jsonRpcResult(id: JsonRpcId, result: unknown, statusCode = 200): McpHttpResult {

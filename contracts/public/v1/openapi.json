@@ -1,0 +1,1941 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Agent Control Stack public HTTP API",
+    "version": "1.0.0",
+    "description": "Generated from the Zod schemas used by the ACS gateway runtime."
+  },
+  "paths": {
+    "/livez": {
+      "get": {
+        "operationId": "getLiveness",
+        "summary": "Read process liveness.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "operationId": "getReadiness",
+        "summary": "Read control-plane readiness.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "operationId": "getHealth",
+        "summary": "Read control-plane health.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/session/login": {
+      "post": {
+        "operationId": "createSession",
+        "summary": "Create an authenticated operator session.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "token": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "token"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/mcp/tools": {
+      "get": {
+        "operationId": "listMcpTools",
+        "summary": "List gateway MCP tools.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/connectors": {
+      "post": {
+        "operationId": "registerConnector",
+        "summary": "Register an authenticated connector.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "displayName": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "publicKeyPem": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "allowedScopes": {
+                    "minItems": 1,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "enum": [
+                        "acs:work:create",
+                        "acs:work:read",
+                        "acs:work:approve"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "publicKeyPem",
+                  "allowedScopes"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/connectors/{id}/rotate-key": {
+      "post": {
+        "operationId": "rotateConnectorKey",
+        "summary": "Rotate a connector public key.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "publicKeyPem": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "publicKeyPem",
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/connectors/{id}/tunnel-sessions": {
+      "post": {
+        "operationId": "createTunnelSession",
+        "summary": "Create a connector tunnel session.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "tunnelId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "sessionId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "issuedAt": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "tunnelId",
+                  "sessionId",
+                  "expiresAt"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/connectors/{id}/tunnel-sessions/{tunnelId}/{sessionId}/revoke": {
+      "post": {
+        "operationId": "revokeTunnelSession",
+        "summary": "Revoke a connector tunnel session.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "tunnelId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/connectors/{id}/tunnel-sessions/{tunnelId}/{sessionId}/consume": {
+      "post": {
+        "operationId": "consumeTunnelSession",
+        "summary": "Consume a connector tunnel session.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "tunnelId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "sessionId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/mcp": {
+      "post": {
+        "operationId": "callGatewayMcp",
+        "summary": "Send a JSON-RPC request to the gateway MCP endpoint.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "jsonrpc": {
+                    "type": "string",
+                    "const": "2.0"
+                  },
+                  "id": {
+                    "default": null,
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "method": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "params": {}
+                },
+                "required": [
+                  "jsonrpc",
+                  "method"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-protected-resource": {
+      "get": {
+        "operationId": "getOAuthProtectedResource",
+        "summary": "Read OAuth protected-resource metadata.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/.well-known/oauth-protected-resource/mcp": {
+      "get": {
+        "operationId": "getMcpOAuthProtectedResource",
+        "summary": "Read MCP OAuth protected-resource metadata.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items": {
+      "get": {
+        "operationId": "listWorkItems",
+        "summary": "List governed work items.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "post": {
+        "operationId": "createWorkItem",
+        "summary": "Create a governed work item.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "requester": {
+                    "type": "string",
+                    "enum": [
+                      "user",
+                      "agent",
+                      "system"
+                    ]
+                  },
+                  "requesterSubject": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "status": {
+                    "default": "pending_policy",
+                    "type": "string",
+                    "enum": [
+                      "draft",
+                      "pending_policy"
+                    ]
+                  },
+                  "intent": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "target": {
+                    "default": {},
+                    "type": "object",
+                    "properties": {
+                      "repo": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "cwd": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "files": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "services": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  },
+                  "requestedActions": {
+                    "default": [],
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "params": {
+                          "default": {},
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {}
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "description"
+                      ]
+                    }
+                  },
+                  "risk": {
+                    "default": "medium",
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  }
+                },
+                "required": [
+                  "title",
+                  "requester",
+                  "intent"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}": {
+      "get": {
+        "operationId": "getWorkItem",
+        "summary": "Read a governed work item.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/approve": {
+      "post": {
+        "operationId": "approveWorkItem",
+        "summary": "Approve an exact policy-evaluated action.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "actionHash": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "reason",
+                  "actionHash"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/cancel": {
+      "post": {
+        "operationId": "cancelWorkItem",
+        "summary": "Cancel a governed work item.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/reject": {
+      "post": {
+        "operationId": "rejectWorkItem",
+        "summary": "Reject a governed work item.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/unblock": {
+      "post": {
+        "operationId": "unblockWorkItem",
+        "summary": "Return a blocked work item to policy evaluation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {},
+                "additionalProperties": {}
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/results": {
+      "post": {
+        "operationId": "submitWorkResult",
+        "summary": "Submit an authenticated lease-bound worker result.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "workItemId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                  },
+                  "leaseId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                  },
+                  "workerId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                  },
+                  "actionHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "idempotencyKey": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                  },
+                  "outcome": {
+                    "type": "string",
+                    "enum": [
+                      "succeeded",
+                      "failed",
+                      "cancelled",
+                      "worker_infrastructure_failure",
+                      "blocked",
+                      "lease_expired"
+                    ]
+                  },
+                  "startedAt": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  "finishedAt": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  },
+                  "exitCode": {
+                    "anyOf": [
+                      {
+                        "type": "integer",
+                        "minimum": -255,
+                        "maximum": 255
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  },
+                  "stdout": {
+                    "type": "string",
+                    "maxLength": 64000
+                  },
+                  "stderr": {
+                    "type": "string",
+                    "maxLength": 64000
+                  },
+                  "structuredOutput": {
+                    "default": {},
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  },
+                  "artifacts": {
+                    "default": [],
+                    "maxItems": 32,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 256
+                        },
+                        "kind": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128,
+                          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                        },
+                        "mediaType": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        },
+                        "sizeBytes": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 16777216
+                        },
+                        "sha256": {
+                          "type": "string",
+                          "pattern": "^[a-f0-9]{64}$"
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ],
+                      "additionalProperties": false
+                    }
+                  },
+                  "error": {
+                    "type": "string",
+                    "maxLength": 4000
+                  },
+                  "resourceUsage": {
+                    "type": "object",
+                    "properties": {
+                      "durationMs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 86400000
+                      },
+                      "cpuMs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 86400000
+                      },
+                      "memoryBytes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 4294967296
+                      }
+                    },
+                    "additionalProperties": false
+                  },
+                  "simulationMetadata": {
+                    "type": "object",
+                    "properties": {
+                      "executionMode": {
+                        "type": "string",
+                        "const": "dry_run"
+                      },
+                      "simulated": {
+                        "type": "boolean",
+                        "const": true
+                      },
+                      "workerVersion": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                      },
+                      "reason": {
+                        "type": "string",
+                        "maxLength": 512
+                      }
+                    },
+                    "required": [
+                      "executionMode",
+                      "simulated"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "required": [
+                  "workItemId",
+                  "leaseId",
+                  "workerId",
+                  "actionHash",
+                  "idempotencyKey",
+                  "outcome",
+                  "startedAt",
+                  "finishedAt",
+                  "summary",
+                  "simulationMetadata"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/retry": {
+      "post": {
+        "operationId": "retryWorkItem",
+        "summary": "Create an immutable retry work item.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 2000
+                  }
+                },
+                "required": [
+                  "reason"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/clone": {
+      "post": {
+        "operationId": "cloneWorkItem",
+        "summary": "Create an immutable clone work item.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "intent": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  },
+                  "target": {
+                    "default": {},
+                    "type": "object",
+                    "properties": {
+                      "repo": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "cwd": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "files": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      },
+                      "services": {
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    }
+                  },
+                  "requestedActions": {
+                    "maxItems": 32,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "kind": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "params": {
+                          "default": {},
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {}
+                        }
+                      },
+                      "required": [
+                        "kind",
+                        "description"
+                      ]
+                    }
+                  },
+                  "risk": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/actors": {
+      "get": {
+        "operationId": "listActors",
+        "summary": "List registered actors.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "post": {
+        "operationId": "registerActor",
+        "summary": "Register an actor.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "actorType": {
+                    "type": "string",
+                    "enum": [
+                      "HUMAN",
+                      "SYSTEM",
+                      "AGENT",
+                      "SERVICE"
+                    ]
+                  },
+                  "displayName": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "externalRef": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "actorType",
+                  "displayName"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/actors": {
+      "get": {
+        "operationId": "listActorsAlias",
+        "summary": "List registered actors.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "post": {
+        "operationId": "registerActorAlias",
+        "summary": "Register an actor.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "actorType": {
+                    "type": "string",
+                    "enum": [
+                      "HUMAN",
+                      "SYSTEM",
+                      "AGENT",
+                      "SERVICE"
+                    ]
+                  },
+                  "displayName": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "externalRef": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "actorType",
+                  "displayName"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agents": {
+      "get": {
+        "operationId": "listAgents",
+        "summary": "List registered agents.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "post": {
+        "operationId": "registerAgent",
+        "summary": "Register an agent.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "acpRole": {
+                    "type": "string",
+                    "enum": [
+                      "IMPLEMENTATION_AGENT",
+                      "REVIEW_PLANNING_AGENT",
+                      "RESEARCH_BROAD_SCAN_AGENT",
+                      "LOCAL_CODING_AGENT",
+                      "ORCHESTRATION_LAYER",
+                      "DESKTOP_LOCAL_AGENT_BRIDGE"
+                    ]
+                  },
+                  "provider": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "model": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "endpoint": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "UNKNOWN",
+                      "AVAILABLE",
+                      "BUSY",
+                      "DEGRADED",
+                      "OFFLINE",
+                      "ERROR"
+                    ]
+                  },
+                  "lastError": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "id",
+                  "name",
+                  "kind",
+                  "acpRole"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agents/{id}": {
+      "get": {
+        "operationId": "getAgent",
+        "summary": "Read a registered agent.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "patch": {
+        "operationId": "updateAgent",
+        "summary": "Update a registered agent.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "kind": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "acpRole": {
+                    "type": "string",
+                    "enum": [
+                      "IMPLEMENTATION_AGENT",
+                      "REVIEW_PLANNING_AGENT",
+                      "RESEARCH_BROAD_SCAN_AGENT",
+                      "LOCAL_CODING_AGENT",
+                      "ORCHESTRATION_LAYER",
+                      "DESKTOP_LOCAL_AGENT_BRIDGE"
+                    ]
+                  },
+                  "provider": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "model": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "endpoint": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "UNKNOWN",
+                      "AVAILABLE",
+                      "BUSY",
+                      "DEGRADED",
+                      "OFFLINE",
+                      "ERROR"
+                    ]
+                  },
+                  "lastError": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/capabilities": {
+      "get": {
+        "operationId": "getAgentCapabilities",
+        "summary": "Read an agent capability set.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "put": {
+        "operationId": "replaceAgentCapabilities",
+        "summary": "Replace an agent capability set.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "capabilities": {
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "name": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "description": {
+                          "type": "string",
+                          "minLength": 1
+                        },
+                        "inputSchema": {
+                          "type": "object",
+                          "propertyNames": {
+                            "type": "string"
+                          },
+                          "additionalProperties": {}
+                        }
+                      },
+                      "required": [
+                        "name"
+                      ]
+                    }
+                  }
+                },
+                "required": [
+                  "capabilities"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agents/{id}/heartbeat": {
+      "post": {
+        "operationId": "recordAgentHeartbeat",
+        "summary": "Record an agent heartbeat.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "UNKNOWN",
+                      "AVAILABLE",
+                      "BUSY",
+                      "DEGRADED",
+                      "OFFLINE",
+                      "ERROR"
+                    ]
+                  },
+                  "currentTask": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "lastError": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/agents": {
+      "get": {
+        "operationId": "listAcpAgents",
+        "summary": "List agents through the ACP view.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/agents/{id}": {
+      "get": {
+        "operationId": "getAcpAgent",
+        "summary": "Read an agent through the ACP view.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "operationId": "streamEvents",
+        "summary": "Stream audit events over SSE.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    }
+  }
+}
