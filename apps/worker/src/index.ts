@@ -2,10 +2,13 @@ import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/po
 import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { WorkspaceManager } from "@agent-control-stack/workspace-manager";
 
 export interface WorkerOptions {
   dbPath?: string;
   workerId?: string;
+  execute?: typeof executeSandboxed;
+  workspaceManager?: WorkspaceManager;
 }
 
 export interface WorkerResult {
@@ -20,6 +23,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   const workItems = new SqliteWorkItemStore(dbPath);
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const workerId = options.workerId ?? "local-worker";
+  const execute = options.execute ?? executeSandboxed;
 
   try {
     workItems.failExpiredLeases();
@@ -30,18 +34,33 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     if (running.status === "blocked") {
       return { executed: false, workItemId: running.id, reason: "blocked by policy" };
     }
+    if (!running.attemptId || !running.planHash || !running.inputHash || running.fencingEpoch === undefined) {
+      throw new Error("worker claim did not include persisted attempt authority");
+    }
 
+    const workspace = running.attemptId
+      ? await options.workspaceManager?.provision(running.id, {
+          attemptId: running.attemptId,
+          leaseId: running.leaseId,
+          workerId,
+          fencingEpoch: running.fencingEpoch
+        })
+      : undefined;
     const startedAt = new Date().toISOString();
-    const result = await executeSandboxed(running);
+    const result = await execute(workspace ? ({ ...running, workspace } as typeof running) : running);
     const completedAt = new Date().toISOString();
 
     if (result.ok) {
       tools.submit_work_result({
         workItemId: running.id,
+        attemptId: running.attemptId,
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        planHash: running.planHash,
+        inputHash: running.inputHash,
+        fencingEpoch: running.fencingEpoch,
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "succeeded",
         startedAt,
         finishedAt: completedAt,
@@ -55,10 +74,14 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     } else {
       tools.submit_work_result({
         workItemId: running.id,
+        attemptId: running.attemptId,
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        planHash: running.planHash,
+        inputHash: running.inputHash,
+        fencingEpoch: running.fencingEpoch,
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "failed",
         startedAt,
         finishedAt: completedAt,
@@ -73,12 +96,21 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       });
     }
 
+    if (workspace && running.attemptId) {
+      await options.workspaceManager?.teardown(running.id, {
+        attemptId: running.attemptId,
+        leaseId: running.leaseId,
+        workerId,
+        fencingEpoch: running.fencingEpoch
+      });
+    }
+
     return { executed: true, executionMode: result.executionMode, workItemId: running.id, reason: workerId };
   } finally {
     workItems.close();
   }
 }
 
-export function workerResultIdempotencyKey(workItemId: string, leaseId: string, workerId: string): string {
-  return stableHash({ domain: "acs.worker-result", workItemId, leaseId, workerId, attempt: 1 });
+export function workerResultIdempotencyKey(attemptId: string): string {
+  return stableHash({ domain: "acs.attempt-result.v1", attemptId });
 }

@@ -200,7 +200,7 @@ describe("deterministic replay", () => {
       const approved = store.approveWorkItem(workItem.id, domainTransition);
 
       expect(approved?.status).toBe("approved");
-      const running = store.claimNextApprovedWorkItem("eval-worker");
+      const running = store.claimNextApprovedWorkItem("eval-worker", { allowLegacyClaimForTests: true });
       expect(running).toBeDefined();
 
       store.submitWorkResult({

@@ -20,7 +20,7 @@ function createClaimedItem(options: { leaseMs?: number } = {}) {
     risk: "low"
   });
   store.approveWorkItem(workItem.id, transition);
-  const claimed = store.claimNextApprovedWorkItem("worker-a");
+  const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
   if (!claimed) throw new Error("expected a claim");
   return { directory, store, workItem, claimed };
 }
@@ -222,7 +222,7 @@ describe("immutable worker result acceptance", () => {
       risk: "low"
     });
     seed.approveWorkItem(item.id, transition);
-    const claimed = seed.claimNextApprovedWorkItem("worker-a");
+    const claimed = seed.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
     if (!claimed) throw new Error("expected a claim");
     seed.close();
     const first = new SqliteWorkItemStore(dbPath);
@@ -259,7 +259,7 @@ describe("immutable worker result acceptance", () => {
         risk: "low"
       });
       first.approveWorkItem(workItem.id, transition);
-      const claim = first.claimNextApprovedWorkItem("worker-a");
+      const claim = first.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       if (!claim) throw new Error("expected a claim");
       return { claimed: claim };
     })();

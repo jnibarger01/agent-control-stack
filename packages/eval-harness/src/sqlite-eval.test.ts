@@ -23,12 +23,18 @@ describe("deterministic SQLite evaluation", () => {
           WorkItemEvent.NeedsApproval,
           "policy.decided",
           "approval.granted",
+          "execution_plan.created",
+          "execution_plan_approval.granted",
           WorkItemEvent.Approved,
-          WorkItemEvent.Running,
           "policy.decided",
+          "execution_plan.admitted",
+          "execution_attempt.created",
+          "attempt_lease.issued",
+          WorkItemEvent.Running,
           "approval.consumed",
           "execution_result.accepted",
-          WorkItemEvent.Succeeded
+          WorkItemEvent.Succeeded,
+          "execution_attempt.result_accepted"
         ],
         [
           WorkItemEvent.Created,
@@ -36,12 +42,18 @@ describe("deterministic SQLite evaluation", () => {
           WorkItemEvent.NeedsApproval,
           "policy.decided",
           "approval.granted",
+          "execution_plan.created",
+          "execution_plan_approval.granted",
           WorkItemEvent.Approved,
-          WorkItemEvent.Running,
           "policy.decided",
+          "execution_plan.admitted",
+          "execution_attempt.created",
+          "attempt_lease.issued",
+          WorkItemEvent.Running,
           "approval.consumed",
           "execution_result.accepted",
-          WorkItemEvent.Succeeded
+          WorkItemEvent.Succeeded,
+          "execution_attempt.result_accepted"
         ]
       ]);
       expect(result.runs[0]?.semanticDigest).toBe(result.runs[1]?.semanticDigest);

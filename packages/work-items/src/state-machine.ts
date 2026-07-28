@@ -11,7 +11,7 @@ const allowedTransitions: Record<WorkItemStatus, readonly WorkItemStatus[]> = {
   draft: ["pending_policy", "blocked", "cancelled"],
   pending_policy: ["needs_approval", "approved", "blocked", "cancelled"],
   needs_approval: ["approved", "blocked", "cancelled", "rejected"],
-  approved: ["running", "cancelled"],
+  approved: ["running", "blocked", "cancelled"],
   running: ["succeeded", "failed", "blocked", "cancelled", "cancelling", "unknown"],
   cancelling: ["cancelled", "failed", "unknown"],
   succeeded: [],
@@ -23,7 +23,11 @@ const allowedTransitions: Record<WorkItemStatus, readonly WorkItemStatus[]> = {
   quarantined: ["pending_policy"]
 };
 
-export function transitionWorkItem(workItem: WorkItem, status: WorkItemStatus, now = new Date().toISOString()): WorkItem {
+export function transitionWorkItem(
+  workItem: WorkItem,
+  status: WorkItemStatus,
+  now = new Date().toISOString()
+): WorkItem {
   assertCanTransition(workItem.status, status);
   return { ...workItem, status, updatedAt: now };
 }

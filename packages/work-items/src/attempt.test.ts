@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ControlStackError } from "@agent-control-stack/shared";
+import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteWorkItemStore, defaultExecutionPlanForWorkItem } from "./index.js";
 
@@ -596,5 +596,167 @@ describe("leaseAttempt consumes an execution-plan approval atomically (R3)", () 
         { via: "domain_service" }
       )
     ).toThrow();
+  });
+});
+
+describe("authoritative worker attempt lifecycle", () => {
+  let directory: string | undefined;
+
+  afterEach(() => {
+    if (directory) rmSync(directory, { recursive: true, force: true });
+    directory = undefined;
+  });
+
+  function claim() {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    fixture.store.approveWorkItem(fixture.workItem.id, { via: "domain_service" });
+    const claimed = fixture.store.claimNextApprovedWorkItem("worker-1", {
+      attemptAuthority: {
+        planHash: fixture.plan.planHash,
+        admissionId: fixture.admission.admissionId,
+        policyVersion: fixture.admission.policyVersion,
+        policyDecisionHash: fixture.admission.policyDecisionHash
+      }
+    });
+    if (!claimed?.attemptId || !claimed.planHash || !claimed.inputHash || claimed.fencingEpoch === undefined) {
+      throw new Error("expected authoritative claim");
+    }
+    return { ...fixture, claimed };
+  }
+
+  function resultInput(claimed: ReturnType<typeof claim>["claimed"]) {
+    return {
+      workItemId: claimed.id,
+      attemptId: claimed.attemptId!,
+      leaseId: claimed.leaseId,
+      workerId: claimed.workerId,
+      actionHash: claimed.actionHash,
+      planHash: claimed.planHash!,
+      inputHash: claimed.inputHash!,
+      fencingEpoch: claimed.fencingEpoch!,
+      idempotencyKey: stableHash({ domain: "acs.attempt-result.v1", attemptId: claimed.attemptId! }),
+      outcome: "succeeded" as const,
+      startedAt: claimed.startedAt,
+      finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
+      exitCode: 0,
+      summary: "authoritative dry-run result",
+      structuredOutput: { simulated: true },
+      artifacts: [],
+      simulationMetadata: { executionMode: "dry_run" as const, simulated: true as const }
+    };
+  }
+
+  it("creates exactly one running attempt with immutable claim bindings", () => {
+    const fixture = claim();
+    expect(fixture.claimed).toMatchObject({
+      planHash: fixture.plan.planHash,
+      fencingEpoch: 1,
+      workspaceHash: expect.stringMatching(/^[a-f0-9]{64}$/u)
+    });
+    expect(fixture.store.getAttempt(fixture.claimed.attemptId!)).toMatchObject({
+      status: "running",
+      currentFencingEpoch: 1,
+      claimedByWorkerId: "worker-1",
+      inputHash: fixture.claimed.inputHash
+    });
+    expect(fixture.store.claimNextApprovedWorkItem("worker-1")).toBeUndefined();
+  });
+
+  it("refuses a production claim that omits persisted attempt authority", () => {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    fixture.store.approveWorkItem(fixture.workItem.id, { via: "domain_service" });
+    expect(() => fixture.store.claimNextApprovedWorkItem("worker-1")).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "attempt_authority_required" })
+    );
+    expect(fixture.store.get(fixture.workItem.id)?.status).toBe("approved");
+  });
+
+  it("rejects legacy fallback, stale fencing, plan tampering, and input tampering", () => {
+    const fixture = claim();
+    const input = resultInput(fixture.claimed);
+    const legacy: Partial<typeof input> = { ...input };
+    delete legacy.attemptId;
+    delete legacy.planHash;
+    delete legacy.inputHash;
+    delete legacy.fencingEpoch;
+
+    expect(() => fixture.store.submitWorkResult(legacy)).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "attempt_binding_required" })
+    );
+    expect(() => fixture.store.submitWorkResult({ ...input, fencingEpoch: input.fencingEpoch + 1 })).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "attempt_fence_mismatch" })
+    );
+    expect(() => fixture.store.submitWorkResult({ ...input, planHash: hex("f") })).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "attempt_plan_mismatch" })
+    );
+    expect(() => fixture.store.submitWorkResult({ ...input, inputHash: hex("e") })).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "attempt_input_mismatch" })
+    );
+    expect(() => fixture.store.submitWorkResult({ ...input, idempotencyKey: hex("d") })).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "attempt_idempotency_mismatch" })
+    );
+    expect(fixture.store.get(fixture.workItem.id)?.status).toBe("running");
+  });
+
+  it("accepts one result, closes both leases, and replays without another audit event", () => {
+    const fixture = claim();
+    const input = resultInput(fixture.claimed);
+    const accepted = fixture.store.submitWorkResult(input);
+    const eventCount = fixture.store.readEvents().length;
+    expect(fixture.store.submitWorkResult(input)).toEqual(accepted);
+    expect(fixture.store.readEvents()).toHaveLength(eventCount);
+    expect(fixture.store.getAttempt(input.attemptId)?.status).toBe("succeeded");
+
+    const dbAny = fixture.store as unknown as {
+      db: { prepare: (sql: string) => { get: (...args: unknown[]) => unknown } };
+    };
+    expect(dbAny.db.prepare(`SELECT status FROM attempt_leases`).get()).toEqual({ status: "consumed" });
+    expect(dbAny.db.prepare(`SELECT status FROM leases`).get()).toEqual({ status: "consumed" });
+    expect(dbAny.db.prepare(`SELECT COUNT(*) AS count FROM attempt_results`).get()).toEqual({ count: 1 });
+    expect(fixture.store.readEvents().map((event) => event.name)).toContain("execution_attempt.result_accepted");
+  });
+
+  it("rolls back every attempt and compatibility mutation when terminal fencing fails", () => {
+    const fixture = claim();
+    const dbAny = fixture.store as unknown as {
+      db: {
+        exec: (sql: string) => void;
+        prepare: (sql: string) => { get: (...args: unknown[]) => unknown };
+      };
+    };
+    dbAny.db.exec(`
+      CREATE TRIGGER fail_authoritative_attempt_terminal
+      BEFORE UPDATE ON execution_attempts
+      WHEN NEW.status IN ('succeeded', 'failed', 'cancelled')
+      BEGIN
+        SELECT RAISE(ABORT, 'attempt terminal failure');
+      END;
+    `);
+    expect(() => fixture.store.submitWorkResult(resultInput(fixture.claimed))).toThrow("attempt terminal failure");
+    expect(fixture.store.get(fixture.workItem.id)?.status).toBe("running");
+    expect(dbAny.db.prepare(`SELECT COUNT(*) AS count FROM attempt_results`).get()).toEqual({ count: 0 });
+    expect(dbAny.db.prepare(`SELECT COUNT(*) AS count FROM execution_results`).get()).toEqual({ count: 0 });
+    expect(dbAny.db.prepare(`SELECT status FROM attempt_leases`).get()).toEqual({ status: "active" });
+  });
+
+  it("expires a crashed attempt with both lease projections in one transaction", () => {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    fixture.store.approveWorkItem(fixture.workItem.id, { via: "domain_service" });
+    const claimed = fixture.store.claimNextApprovedWorkItem("worker-1", {
+      leaseMs: 1,
+      attemptAuthority: {
+        planHash: fixture.plan.planHash,
+        admissionId: fixture.admission.admissionId,
+        policyVersion: fixture.admission.policyVersion,
+        policyDecisionHash: fixture.admission.policyDecisionHash
+      }
+    });
+    if (!claimed?.attemptId) throw new Error("expected authoritative claim");
+    expect(fixture.store.failExpiredLeases(new Date(Date.parse(claimed.leaseExpiresAt) + 1))).toHaveLength(1);
+    expect(fixture.store.getAttempt(claimed.attemptId)?.status).toBe("unknown");
+    expect(fixture.store.get(fixture.workItem.id)?.status).toBe("failed");
   });
 });
