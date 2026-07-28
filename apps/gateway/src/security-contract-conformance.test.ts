@@ -381,7 +381,7 @@ function seedClaim(dbPath: string): ClaimedWorkItem {
       risk: "low"
     });
     store.approveWorkItem(item.id, { via: "domain_service" });
-    const claimed = store.claimNextApprovedWorkItem(workerAuth.actorId!);
+    const claimed = store.claimNextApprovedWorkItem(workerAuth.actorId!, { allowLegacyClaimForTests: true });
     if (!claimed) {
       throw new Error("expected a claimed work item");
     }
