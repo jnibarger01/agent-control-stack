@@ -76,7 +76,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "blocked",
         startedAt,
         finishedAt: completedAt,
@@ -91,6 +91,14 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
           reason: "worker_read_only_scope"
         }
       });
+      if (workspace && running.attemptId) {
+        await options.workspaceManager?.teardown(running.id, {
+          attemptId: running.attemptId,
+          leaseId: running.leaseId,
+          workerId,
+          fencingEpoch: running.fencingEpoch
+        });
+      }
       return {
         executed: false,
         workItemId: running.id,
