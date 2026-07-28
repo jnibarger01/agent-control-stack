@@ -454,7 +454,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      store.claimNextApprovedWorkItem("worker-a");
+      store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
 
       expectControlError(
         () => store.cancelWorkItem(workItem.id, { actor: "worker-b" }, { via: "domain_service", actorId: "worker-b" }),

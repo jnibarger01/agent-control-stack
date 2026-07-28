@@ -2921,7 +2921,48 @@ export class SqliteWorkItemStore implements WorkItemStore {
     if (parsed.outcome !== "blocked" && parsed.outcome !== "lease_expired") {
       throw new ControlStackError("result_outcome_invalid", "only ACS-derived outcomes may use this path");
     }
-    return this.write(() => this.acceptResultInTransaction(parsed, { allowDerivedOutcome: true }));
+    return this.write(() => {
+      const nowIso = new Date().toISOString();
+      const attemptLease = this.db
+        .prepare(`SELECT * FROM attempt_leases WHERE lease_id = ? AND status = 'active'`)
+        .get(parsed.leaseId) as unknown as AttemptLeaseRow | undefined;
+      if (attemptLease) {
+        const terminalAttempt = this.db
+          .prepare(
+            `UPDATE execution_attempts
+             SET status = 'failed', terminal_at = ?, outcome_code = ?, recovery_reason = ?, updated_at = ?
+             WHERE attempt_id = ? AND status = 'running'
+               AND current_fencing_epoch = ? AND claimed_by_worker_id = ?`
+          )
+          .run(
+            nowIso,
+            parsed.outcome,
+            parsed.summary,
+            nowIso,
+            attemptLease.attempt_id,
+            attemptLease.fencing_epoch,
+            attemptLease.worker_id
+          );
+        if (terminalAttempt.changes !== 1) {
+          throw new ControlStackError("attempt_fence_mismatch", "derived attempt result is stale or inconsistent");
+        }
+        const closedAttemptLease = this.db
+          .prepare(
+            `UPDATE attempt_leases SET status = 'consumed', closed_at = ?
+             WHERE lease_id = ? AND status = 'active'`
+          )
+          .run(nowIso, attemptLease.lease_id);
+        if (closedAttemptLease.changes !== 1) {
+          throw new ControlStackError("attempt_lease_conflict", "attempt lease changed while recording derived result");
+        }
+      }
+      const { attemptId: _attemptId, planHash: _planHash, inputHash: _inputHash, fencingEpoch: _fencingEpoch, ...legacyInput } = parsed;
+      return this.acceptResultInTransaction(legacyInput, {
+        now: nowIso,
+        allowDerivedOutcome: true,
+        allowAttemptProjection: Boolean(attemptLease)
+      });
+    });
   }
 
   getExecutionResult(resultId: string): StoredExecutionResult | undefined {
