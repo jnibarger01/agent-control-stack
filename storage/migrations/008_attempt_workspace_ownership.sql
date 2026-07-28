@@ -1,4 +1,11 @@
-CREATE TABLE IF NOT EXISTS workspace_allocations (
+-- Upgrade legacy work-item-scoped allocations to attempt-scoped ownership.
+-- The migration runner skips this body for fresh databases that already have
+-- the v2 columns from migration 007.
+PRAGMA foreign_keys = OFF;
+
+ALTER TABLE workspace_allocations RENAME TO workspace_allocations_legacy;
+
+CREATE TABLE workspace_allocations (
   allocation_id TEXT PRIMARY KEY,
   work_item_id TEXT NOT NULL REFERENCES work_items(id),
   attempt_id TEXT NOT NULL,
@@ -19,14 +26,19 @@ CREATE TABLE IF NOT EXISTS workspace_allocations (
   UNIQUE (host_path)
 );
 
--- One live allocation per work item at a time - matches WorkspaceManager's
--- one-worktree-per-work-item design (reused across attempts, not
--- reprovisioned per attempt).
-CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_allocations_one_active_attempt
-  ON workspace_allocations(attempt_id)
-  WHERE status <> 'torn_down';
+INSERT INTO workspace_allocations
+  (allocation_id, work_item_id, attempt_id, lease_id, worker_id, fencing_epoch,
+   host_path, branch, base_ref, status, created_at, torn_down_at)
+SELECT allocation_id, work_item_id, allocation_id, allocation_id, 'legacy', 0,
+       host_path, branch, base_ref, status, created_at, torn_down_at
+FROM workspace_allocations_legacy;
 
-CREATE TRIGGER IF NOT EXISTS workspace_allocations_transition_guard
+DROP TABLE workspace_allocations_legacy;
+
+CREATE UNIQUE INDEX idx_workspace_allocations_one_active_attempt
+  ON workspace_allocations(attempt_id) WHERE status <> 'torn_down';
+
+CREATE TRIGGER workspace_allocations_transition_guard
 BEFORE UPDATE ON workspace_allocations
 WHEN NEW.allocation_id IS NOT OLD.allocation_id
   OR NEW.work_item_id IS NOT OLD.work_item_id
@@ -45,7 +57,7 @@ BEGIN
   SELECT RAISE(ABORT, 'workspace_allocations: immutable binding or invalid transition');
 END;
 
-CREATE TRIGGER IF NOT EXISTS workspace_allocations_no_delete
+CREATE TRIGGER workspace_allocations_no_delete
 BEFORE DELETE ON workspace_allocations
 BEGIN
   SELECT RAISE(ABORT, 'workspace_allocations: append-only');
