@@ -340,7 +340,12 @@ describe("multi-process scheduler firing probe (R5)", () => {
 
       const created = results.filter((r) => r.firings[0]?.created === true);
       expect(created).toHaveLength(1);
-      const workItemIds = new Set(results.map((r) => r.firings[0]?.workItemId));
+      // Losing processes may observe the firing while the winning process is still
+      // creating the work item, so their immediate result legitimately has no ID yet.
+      // The invariant is that every defined ID agrees with the sole created work item.
+      const workItemIds = new Set(
+        results.map((r) => r.firings[0]?.workItemId).filter((id): id is string => id !== undefined)
+      );
       expect(workItemIds.size).toBe(1);
 
       const store = new SqliteWorkItemStore(dbPath);
