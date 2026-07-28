@@ -76,6 +76,13 @@ import {
   type RecordWorkspaceAllocationInput,
   type WorkspaceAllocation
 } from "./attempt.js";
+import {
+  claimSchedulerFiringInputSchema,
+  schedulerFiringSchema,
+  type ClaimSchedulerFiringInput,
+  type SchedulerFiring,
+  type SchedulerFiringClaim
+} from "./scheduler-firing.js";
 
 interface WorkItemRow {
   id: string;
@@ -215,6 +222,17 @@ interface WorkspaceAllocationRow {
   status: string;
   created_at: string;
   torn_down_at: string | null;
+}
+
+interface SchedulerFiringRow {
+  firing_id: string;
+  schedule_id: string;
+  scheduled_firing_time: string;
+  idempotency_key: string;
+  status: string;
+  work_item_id: string | null;
+  claimed_at: string;
+  completed_at: string | null;
 }
 
 interface ExecutionPlanApprovalRow {
@@ -666,6 +684,8 @@ export interface WorkItemStore {
   getWorkspaceAllocation(allocationId: string): WorkspaceAllocation | undefined;
   getActiveWorkspaceAllocationForWorkItem(workItemId: string): WorkspaceAllocation | undefined;
   closeWorkspaceAllocation(allocationId: string, options: PrivilegedTransitionOptions): WorkspaceAllocation;
+  claimSchedulerFiring(input: ClaimSchedulerFiringInput, options: PrivilegedTransitionOptions): SchedulerFiringClaim;
+  completeSchedulerFiring(firingId: string, workItemId: string, options: PrivilegedTransitionOptions): SchedulerFiring;
   getCommandAuthority(input: {
     workItemId: string;
     attemptId: string;
@@ -1400,6 +1420,108 @@ export class SqliteWorkItemStore implements WorkItemStore {
         })
       );
       return { value: allocation, events: [event] };
+    });
+  }
+
+  claimSchedulerFiring(input: ClaimSchedulerFiringInput, options: PrivilegedTransitionOptions): SchedulerFiringClaim {
+    requirePrivilegedTransition(options, "claim_scheduler_firing");
+    const parsed = claimSchedulerFiringInputSchema.parse(input);
+    const staleClaimMs = parsed.staleClaimMs ?? 5 * 60 * 1_000;
+    const now = parsed.now ?? new Date();
+    const nowIso = now.toISOString();
+    const scheduledFiringTimeIso = parsed.scheduledFiringTime.toISOString();
+
+    return this.write<SchedulerFiringClaim>(() => {
+      const existing = this.db
+        .prepare(`SELECT * FROM scheduler_firings WHERE schedule_id = ? AND scheduled_firing_time = ?`)
+        .get(parsed.scheduleId, scheduledFiringTimeIso) as unknown as SchedulerFiringRow | undefined;
+
+      if (!existing) {
+        const firingId = createId("firing");
+        this.db
+          .prepare(
+            `INSERT INTO scheduler_firings
+             (firing_id, schedule_id, scheduled_firing_time, idempotency_key, status, claimed_at)
+             VALUES (?, ?, ?, ?, 'claimed', ?)`
+          )
+          .run(firingId, parsed.scheduleId, scheduledFiringTimeIso, parsed.idempotencyKey, nowIso);
+        const firing = rowToSchedulerFiring({
+          firing_id: firingId,
+          schedule_id: parsed.scheduleId,
+          scheduled_firing_time: scheduledFiringTimeIso,
+          idempotency_key: parsed.idempotencyKey,
+          status: "claimed",
+          work_item_id: null,
+          claimed_at: nowIso,
+          completed_at: null
+        });
+        const event = this.appendAuditEvent(
+          createEvent("scheduler_firing.claimed", firing, {
+            "schedule.id": parsed.scheduleId,
+            "firing.id": firingId
+          })
+        );
+        return { value: { firing, owned: true }, events: [event] };
+      }
+
+      if (existing.status !== "claimed") {
+        return { value: { firing: rowToSchedulerFiring(existing), owned: false }, events: [] };
+      }
+
+      const claimedAtMs = Date.parse(existing.claimed_at);
+      const isStale = now.getTime() - claimedAtMs > staleClaimMs;
+      if (!isStale) {
+        return { value: { firing: rowToSchedulerFiring(existing), owned: false }, events: [] };
+      }
+
+      // The process that made the original claim appears to have crashed
+      // before completing it - reclaim so this call can retry the work
+      // item creation, rather than leaving the firing stuck forever.
+      const reclaimedAt = new Date(Math.max(now.getTime(), claimedAtMs + 1)).toISOString();
+      const reclaimed = this.db
+        .prepare(`UPDATE scheduler_firings SET claimed_at = ? WHERE firing_id = ? AND status = 'claimed'`)
+        .run(reclaimedAt, existing.firing_id);
+      if (reclaimed.changes !== 1) {
+        const fresh = this.db
+          .prepare(`SELECT * FROM scheduler_firings WHERE firing_id = ?`)
+          .get(existing.firing_id) as unknown as SchedulerFiringRow;
+        return { value: { firing: rowToSchedulerFiring(fresh), owned: false }, events: [] };
+      }
+      const firing = rowToSchedulerFiring({ ...existing, claimed_at: reclaimedAt });
+      const event = this.appendAuditEvent(
+        createEvent("scheduler_firing.reclaimed", firing, {
+          "schedule.id": parsed.scheduleId,
+          "firing.id": existing.firing_id
+        })
+      );
+      return { value: { firing, owned: true }, events: [event] };
+    });
+  }
+
+  completeSchedulerFiring(firingId: string, workItemId: string, options: PrivilegedTransitionOptions): SchedulerFiring {
+    requirePrivilegedTransition(options, "complete_scheduler_firing");
+    return this.write(() => {
+      const now = new Date().toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE scheduler_firings SET status = 'completed', work_item_id = ?, completed_at = ?
+           WHERE firing_id = ? AND status = 'claimed'`
+        )
+        .run(workItemId, now, firingId);
+      if (updated.changes !== 1) {
+        throw new ControlStackError(
+          "scheduler_firing_conflict",
+          `firing ${firingId} is not in a claimed state (already completed/failed, or unknown id)`
+        );
+      }
+      const row = this.db
+        .prepare(`SELECT * FROM scheduler_firings WHERE firing_id = ?`)
+        .get(firingId) as unknown as SchedulerFiringRow;
+      const firing = rowToSchedulerFiring(row);
+      const event = this.appendAuditEvent(
+        createEvent("scheduler_firing.completed", firing, { "firing.id": firingId, "work_item.id": workItemId })
+      );
+      return { value: firing, events: [event] };
     });
   }
 
@@ -3280,6 +3402,19 @@ function rowToWorkspaceAllocation(row: WorkspaceAllocationRow): WorkspaceAllocat
     status: row.status,
     createdAt: row.created_at,
     ...(row.torn_down_at === null ? {} : { tornDownAt: row.torn_down_at })
+  });
+}
+
+function rowToSchedulerFiring(row: SchedulerFiringRow): SchedulerFiring {
+  return schedulerFiringSchema.parse({
+    firingId: row.firing_id,
+    scheduleId: row.schedule_id,
+    scheduledFiringTime: row.scheduled_firing_time,
+    idempotencyKey: row.idempotency_key,
+    status: row.status,
+    ...(row.work_item_id === null ? {} : { workItemId: row.work_item_id }),
+    claimedAt: row.claimed_at,
+    ...(row.completed_at === null ? {} : { completedAt: row.completed_at })
   });
 }
 

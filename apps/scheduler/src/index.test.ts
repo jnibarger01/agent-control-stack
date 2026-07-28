@@ -1,6 +1,8 @@
+import { spawn } from "node:child_process";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import {
@@ -40,7 +42,11 @@ describe("runSchedulerOnce", () => {
       const now = new Date("2026-07-23T00:01:00.000Z");
 
       const first = await runSchedulerOnce({ dbPath, schedules: readOnlySchedule, now });
-      const second = await runSchedulerOnce({ dbPath, schedules: readOnlySchedule, now: new Date(now.getTime() + 5_000) });
+      const second = await runSchedulerOnce({
+        dbPath,
+        schedules: readOnlySchedule,
+        now: new Date(now.getTime() + 5_000)
+      });
 
       expect(first.firings).toHaveLength(1);
       expect(first.firings[0]?.created).toBe(true);
@@ -119,7 +125,11 @@ describe("runSchedulerOnce", () => {
         }
       ];
 
-      const result = await runSchedulerOnce({ dbPath, schedules: twoSchedules, now: new Date("2026-07-23T00:01:00.000Z") });
+      const result = await runSchedulerOnce({
+        dbPath,
+        schedules: twoSchedules,
+        now: new Date("2026-07-23T00:01:00.000Z")
+      });
 
       expect(result.firings).toHaveLength(2);
       expect(result.firings.every((firing) => firing.created)).toBe(true);
@@ -146,7 +156,8 @@ describe("runSchedulerOnce", () => {
         expect(eventNames).toContain("policy.decided");
 
         const policyDecision = events.find(
-          (event) => event.name === "policy.decided" && (event.body as { workItemId?: string }).workItemId === workItemId
+          (event) =>
+            event.name === "policy.decided" && (event.body as { workItemId?: string }).workItemId === workItemId
         );
         expect(policyDecision).toBeDefined();
         expect((policyDecision?.body as { decision?: string }).decision).toBe("allow");
@@ -286,9 +297,7 @@ describe("scheduleConfigSchema validation", () => {
 
   it("rejects an invalid requester", () => {
     expect(() =>
-      scheduleConfigSchema.parse([
-        { ...valid, workItemTemplate: { ...valid.workItemTemplate, requester: "root" } }
-      ])
+      scheduleConfigSchema.parse([{ ...valid, workItemTemplate: { ...valid.workItemTemplate, requester: "root" } }])
     ).toThrow();
   });
 
@@ -308,3 +317,61 @@ describe("scheduleConfigSchema validation", () => {
     expect(() => scheduleConfigSchema.parse([{ ...valid, cronExpression: "* * * * *" }])).toThrow();
   });
 });
+
+describe("multi-process scheduler firing probe (R5)", () => {
+  it("10 real concurrent scheduler processes racing the same firing produce exactly one work item", async () => {
+    await withTempDb(async (dbPath) => {
+      const now = new Date("2026-07-23T00:01:00.000Z");
+      const workerScript = fileURLToPath(new URL("./concurrency-probe-worker.ts", import.meta.url));
+      const tsxBin = fileURLToPath(new URL("../../../node_modules/.bin/tsx", import.meta.url));
+
+      const runs = await Promise.all(
+        Array.from({ length: 10 }, () =>
+          runWorker(tsxBin, [workerScript, dbPath, now.toISOString(), JSON.stringify(readOnlySchedule)])
+        )
+      );
+
+      const results = runs.map((run) => {
+        if (run.code !== 0) {
+          throw new Error(`worker exited ${run.code}: ${run.stderr}`);
+        }
+        return JSON.parse(run.stdout) as { firings: Array<{ created: boolean; workItemId?: string }> };
+      });
+
+      const created = results.filter((r) => r.firings[0]?.created === true);
+      expect(created).toHaveLength(1);
+      // Losing processes may observe the firing while the winning process is still
+      // creating the work item, so their immediate result legitimately has no ID yet.
+      // The invariant is that every defined ID agrees with the sole created work item.
+      const workItemIds = new Set(
+        results.map((r) => r.firings[0]?.workItemId).filter((id): id is string => id !== undefined)
+      );
+      expect(workItemIds.size).toBe(1);
+
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toHaveLength(1);
+        const firing = store.list().find((item) => item.id === [...workItemIds][0]);
+        expect(firing).toBeDefined();
+      } finally {
+        store.close();
+      }
+    });
+  }, 30_000);
+});
+
+function runWorker(command: string, args: string[]): Promise<{ code: number | null; stdout: string; stderr: string }> {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString("utf8");
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString("utf8");
+    });
+    child.on("error", reject);
+    child.on("close", (code) => resolvePromise({ code, stdout, stderr }));
+  });
+}

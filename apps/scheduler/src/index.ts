@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { stableHash } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore, type WorkItem, type WorkItemStore } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { z } from "zod";
 
 /**
@@ -99,8 +99,6 @@ export interface SchedulerResult {
   firings: SchedulerFiring[];
 }
 
-const IDEMPOTENCY_MARKER_DOMAIN = "acs-scheduler-firing";
-
 /**
  * Deterministic idempotency key for a single scheduled firing, derived from
  * (scheduleId, scheduledFiringTime) only -- matches the pattern used by
@@ -135,22 +133,6 @@ export function loadScheduleConfig(path: string): ScheduleConfig {
   return scheduleConfigSchema.parse(JSON.parse(raw));
 }
 
-function idempotencyMarker(idempotencyKey: string): string {
-  return `[${IDEMPOTENCY_MARKER_DOMAIN}:${idempotencyKey}]`;
-}
-
-/**
- * The work-item store has no dedicated scheduler-idempotency column, so the marker is embedded
- * in the title (the same "reuse an existing field" approach documented as acceptable for this
- * phase) and checked via store.list() before create_work_item is called. This is intentionally
- * simple rather than clever: correctness (never double-create for one firing) matters more than
- * lookup efficiency here.
- */
-function findExistingFiring(store: WorkItemStore, idempotencyKey: string): WorkItem | undefined {
-  const marker = idempotencyMarker(idempotencyKey);
-  return store.list().find((item) => item.title.includes(marker));
-}
-
 function resolveScheduleConfig(options: SchedulerOptions): ScheduleConfig {
   if (options.schedules !== undefined) {
     return scheduleConfigSchema.parse(options.schedules);
@@ -182,27 +164,37 @@ export async function runSchedulerOnce(options: SchedulerOptions = {}): Promise<
       }
 
       const idempotencyKey = scheduledFiringIdempotencyKey(schedule.scheduleId, scheduledFiringTime);
-      const existing = findExistingFiring(store, idempotencyKey);
-      if (existing) {
+      // The store's own UNIQUE(schedule_id, scheduled_firing_time) constraint
+      // (storage/migrations/008) is the actual race resolver across
+      // concurrent scheduler invocations - not this application-level
+      // check-then-act sequence, which exists only to decide what *this*
+      // call should do once the store has already settled who owns the firing.
+      const claim = store.claimSchedulerFiring(
+        { scheduleId: schedule.scheduleId, scheduledFiringTime, idempotencyKey },
+        { via: "domain_service" }
+      );
+
+      if (!claim.owned) {
         firings.push({
           scheduleId: schedule.scheduleId,
           scheduledFiringTime: scheduledFiringTime.toISOString(),
           idempotencyKey,
           created: false,
-          workItemId: existing.id
+          workItemId: claim.firing.workItemId
         });
         continue;
       }
 
       const template = schedule.workItemTemplate;
       const workItem = tools.create_work_item({
-        title: `${template.title} ${idempotencyMarker(idempotencyKey)}`,
+        title: template.title,
         requester: template.requester,
         intent: template.intent,
         target: template.target,
         requestedActions: template.requestedActions,
         risk: template.risk
       });
+      store.completeSchedulerFiring(claim.firing.firingId, workItem.id, { via: "domain_service" });
 
       firings.push({
         scheduleId: schedule.scheduleId,

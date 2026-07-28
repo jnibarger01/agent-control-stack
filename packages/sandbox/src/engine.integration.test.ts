@@ -180,6 +180,87 @@ describe.runIf(runIntegration)("Engine isolation boundary (ADR 0014)", () => {
     }
   }, 20_000);
 
+  it("caps aggregate output by exact bytes rather than buffering an oversized engine response unbounded", async () => {
+    const fixture = createFixture();
+    try {
+      writeScript(fixture.workspace, `process.stdout.write("x".repeat(64 * 1024));`);
+      const request = fixtureRequest(fixture.workspace, "output-cap", [{ host: "127.0.0.1", port: 1 }], {
+        limits: { ...defaultLimits(), outputBytes: 1_024 }
+      });
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts()
+      }).execute(request);
+
+      expect(result.observedSuccess).toBe(true);
+      expect(result.outputBytes).toBe(1_024);
+      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBeLessThanOrEqual(1_024);
+      expect(result.stdoutTruncated || result.stderrTruncated).toBe(true);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("caps output by exact bytes, not string length, when the tail is multibyte UTF-8", async () => {
+    // A 4-byte-per-character emoji, repeated well past the cap. Byte-level
+    // truncation on the raw stream (not a JS string .length/.slice, which
+    // counts UTF-16 code units) is the only way outputBytes can land exactly
+    // on the configured limit regardless of character width.
+    const fixture = createFixture();
+    try {
+      writeScript(fixture.workspace, `process.stdout.write("\\u{1F642}".repeat(64 * 1024));`);
+      const request = fixtureRequest(fixture.workspace, "output-cap-multibyte", [{ host: "127.0.0.1", port: 1 }], {
+        limits: { ...defaultLimits(), outputBytes: 1_024 }
+      });
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts()
+      }).execute(request);
+
+      expect(result.observedSuccess).toBe(true);
+      // 1_024 is an exact multiple of the emoji's 4-byte encoding, so the
+      // cut lands on a character boundary: no partial sequence, no U+FFFD
+      // replacement inflating the decoded string past the byte budget.
+      expect(result.outputBytes).toBe(1_024);
+      expect(Buffer.byteLength(`${result.stdout}${result.stderr}`, "utf8")).toBe(1_024);
+      expect(result.stdout).not.toContain("�");
+      expect(result.stdoutTruncated || result.stderrTruncated).toBe(true);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
+
+  it("still enforces the exact byte cap when a multibyte character straddles the cut", async () => {
+    // Same emoji, but a cap that is NOT a multiple of 4 bytes (the schema
+    // floor is 1_024, so 1_025 is the smallest usable value): the cut falls
+    // mid-character. outputBytes must still equal the configured cap exactly
+    // -- proving the accounting happens on raw bytes before any UTF-8
+    // decoding, so a multibyte tail can never let more raw bytes through
+    // than the limit allows.
+    const fixture = createFixture();
+    try {
+      writeScript(fixture.workspace, `process.stdout.write("\\u{1F642}".repeat(64 * 1024));`);
+      const request = fixtureRequest(
+        fixture.workspace,
+        "output-cap-multibyte-split",
+        [{ host: "127.0.0.1", port: 1 }],
+        {
+          limits: { ...defaultLimits(), outputBytes: 1_025 }
+        }
+      );
+      const result = await createEngineIsolation({
+        authorityVerifier: fixtureAuthority(request),
+        runtimeMounts: nodeRuntimeMounts()
+      }).execute(request);
+
+      expect(result.observedSuccess).toBe(true);
+      expect(result.outputBytes).toBe(1_025);
+      expect(result.stdoutTruncated || result.stderrTruncated).toBe(true);
+    } finally {
+      rmSync(fixture.parent, { recursive: true, force: true });
+    }
+  }, 20_000);
+
   it("kills the complete process tree, including the socat egress bridge, on timeout", async () => {
     const fixture = createFixture();
     try {
