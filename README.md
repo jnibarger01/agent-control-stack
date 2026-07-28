@@ -750,6 +750,13 @@ If `npm test` fails, do not restart the service and call it a deployment. That i
 
 ## Validation
 
+Public HTTP and gateway MCP contracts are generated from the runtime Zod
+boundaries. Verify committed OpenAPI, MCP, example, and client artifacts with:
+
+```sh
+npm run contracts:check
+```
+
 Local validation gate:
 
 ```sh
