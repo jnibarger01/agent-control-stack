@@ -988,11 +988,47 @@ describe("gateway MCP transport", () => {
               securitySchemes: [{ type: "noauth" }]
             }
           })
+          ,
+          expect.objectContaining({
+            name: "open_acs_dashboard",
+            annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+            _meta: expect.objectContaining({ ui: { resourceUri: "ui://acs/dashboard-v1" } })
+          })
         ])
       );
       expect(response.json().result.tools.map((tool: { name: string }) => tool.name)).not.toEqual(
         expect.arrayContaining(["approve_work_item", "claim_next_approved_work_item", "submit_work_result"])
       );
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns structured dashboard data and authoritative execution detail through MCP", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-dashboard-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: testAuth, mcpAuth: { localBearerToken: testAuth.token } });
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        headers: { authorization: `Bearer ${testAuth.token}` },
+        payload: {
+          title: "Dashboard execution",
+          requester: "user",
+          intent: "Show the current execution in the dashboard.",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.read", description: "Read dashboard state", params: {} }],
+          risk: "low"
+        }
+      });
+      const id = created.json().id;
+      const overview = await app.inject({ method: "POST", url: "/mcp", headers: { authorization: `Bearer ${testAuth.token}` }, payload: mcpToolCall("dashboard", "open_acs_dashboard", {}) });
+      expect(overview.statusCode).toBe(200);
+      expect(overview.json().result).toMatchObject({ content: [{ type: "text", text: "ACS Control Center loaded." }], structuredContent: { recentExecutions: expect.arrayContaining([expect.objectContaining({ id })]) } });
+      const detail = await app.inject({ method: "POST", url: "/mcp", headers: { authorization: `Bearer ${testAuth.token}` }, payload: mcpToolCall("detail", "get_execution_detail", { id }) });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().result.structuredContent).toMatchObject({ execution: { id, title: "Dashboard execution" } });
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

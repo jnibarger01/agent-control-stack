@@ -10,6 +10,7 @@ const result = await build({
   bundle: true,
   format: "iife",
   minify: true,
+  outdir: resolve(root, ".widget-build"),
   platform: "browser",
   target: "es2022",
   write: false

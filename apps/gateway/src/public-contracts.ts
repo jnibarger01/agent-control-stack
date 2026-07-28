@@ -108,9 +108,10 @@ export const jsonRpcRequestSchema = z.object({
 });
 
 export const directAgentToolName = "test.agent.run" as const;
-export const mcpToolNames = [...workItemToolNames, directAgentToolName] as const;
+export const dashboardToolNames = ["open_acs_dashboard", "get_execution_detail"] as const;
+export const mcpToolNames = [...workItemToolNames, ...dashboardToolNames, directAgentToolName] as const;
 export type McpToolName = (typeof mcpToolNames)[number];
-export const remoteMcpToolNames = workItemToolNames.filter((name) => name !== "approve_work_item");
+export const remoteMcpToolNames = [...workItemToolNames.filter((name) => name !== "approve_work_item"), ...dashboardToolNames];
 
 export const toolsCallParamsSchema = z.object({
   name: z.enum(mcpToolNames),
@@ -135,12 +136,16 @@ export const gatewayMcpInputSchemas = {
   unblock_work_item: idSchema,
   reject_work_item: reasonSchema,
   cancel_work_item: reasonSchema,
+  open_acs_dashboard: z.object({}),
+  get_execution_detail: idSchema,
   [directAgentToolName]: directAgentInputSchema
 } satisfies Record<McpToolName, z.ZodType>;
 
 export function mcpRequiredScopes(name: McpToolName): McpScope[] {
   if (name === directAgentToolName) return ["acs:work:approve"];
   switch (name) {
+    case "open_acs_dashboard":
+    case "get_execution_detail":
     case "create_work_item":
       return ["acs:work:create"];
     case "get_work_item":
@@ -157,6 +162,8 @@ export function mcpRequiredScopes(name: McpToolName): McpScope[] {
 export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
   if (name === directAgentToolName) return { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
   switch (name) {
+    case "open_acs_dashboard":
+    case "get_execution_detail":
     case "get_work_item":
     case "list_work_items":
       return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
@@ -173,6 +180,10 @@ export function mcpToolDescription(name: McpToolName): string {
     return "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.";
   }
   switch (name) {
+    case "open_acs_dashboard":
+      return "Open the read-only ACS Control Center with current health, governed execution, approval, and operational finding summaries.";
+    case "get_execution_detail":
+      return "Read authoritative detail and recent audit events for one ACS execution.";
     case "create_work_item":
       return "Create a governed work item and immediately evaluate it through the policy gate.";
     case "get_work_item":

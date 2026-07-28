@@ -378,6 +378,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       body: request.body,
       headers: request.headers,
       tools,
+      store: workItems,
       directAgentController: localDevelopmentDirectAgentController,
       auth: mcpAuth,
       requireAuthentication: requiresMcpAuthentication(request, mcpAuth),

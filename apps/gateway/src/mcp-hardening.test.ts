@@ -187,7 +187,7 @@ describe("gateway MCP edge hardening", () => {
     }
   });
 
-  it("returns an empty resource list for connector compatibility", async () => {
+  it("registers the versioned ChatGPT dashboard resource with an exact CSP", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
     const app = buildGateway({
       dbPath: join(dir, "control.db"),
@@ -208,8 +208,31 @@ describe("gateway MCP edge hardening", () => {
       expect(response.json()).toEqual({
         jsonrpc: "2.0",
         id: "resources",
-        result: { resources: [] }
+        result: {
+          resources: [
+            expect.objectContaining({
+              name: "acs-dashboard",
+              uri: "ui://acs/dashboard-v1",
+              mimeType: "text/html;profile=mcp-app",
+              _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } }
+            })
+          ]
+        }
       });
+
+      const resource = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: { jsonrpc: "2.0", id: "dashboard", method: "resources/read", params: { uri: "ui://acs/dashboard-v1" } }
+      });
+      expect(resource.statusCode).toBe(200);
+      expect(resource.json().result.contents[0]).toMatchObject({
+        uri: "ui://acs/dashboard-v1",
+        mimeType: "text/html;profile=mcp-app",
+        _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } }
+      });
+      expect(resource.json().result.contents[0].text).toContain("ACS Control Center");
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
