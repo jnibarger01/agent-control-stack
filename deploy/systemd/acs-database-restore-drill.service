@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Control Stack isolated database restore drill
+After=local-fs.target
+
+[Service]
+Type=oneshot
+User=agent-control-stack
+Group=agent-control-stack
+EnvironmentFile=/etc/agent-control-stack/database-backup.env
+WorkingDirectory=/opt/agent-control-stack
+ExecStart=/usr/bin/npm run db:backup-policy -- drill-latest ${ACS_BACKUP_DIRECTORY} --key-file ${ACS_BACKUP_KEY_FILE} --max-age-hours ${ACS_BACKUP_MAX_AGE_HOURS} --max-rto-seconds ${ACS_BACKUP_MAX_RTO_SECONDS}
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/var/backups/agent-control-stack
