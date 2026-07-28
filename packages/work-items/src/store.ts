@@ -225,10 +225,17 @@ interface AttemptLeaseRow {
 interface WorkspaceAllocationRow {
   allocation_id: string;
   work_item_id: string;
+  attempt_id: string;
+  lease_id: string;
+  worker_id: string;
+  fencing_epoch: number;
   host_path: string;
   branch: string;
   base_ref: string;
   status: string;
+  cleanup_attempts: number;
+  cleanup_requested_at: string | null;
+  cleanup_last_error: string | null;
   created_at: string;
   torn_down_at: string | null;
 }
@@ -701,9 +708,20 @@ export interface WorkItemStore {
   ): WorkspaceAllocation;
   getWorkspaceAllocation(allocationId: string): WorkspaceAllocation | undefined;
   getActiveWorkspaceAllocationForWorkItem(workItemId: string): WorkspaceAllocation | undefined;
+  getActiveWorkspaceAllocationForAttempt(attemptId: string): WorkspaceAllocation | undefined;
+  getWorkspaceAllocationByHostPath(hostPath: string): WorkspaceAllocation | undefined;
   closeWorkspaceAllocation(allocationId: string, options: PrivilegedTransitionOptions): WorkspaceAllocation;
   claimSchedulerFiring(input: ClaimSchedulerFiringInput, options: PrivilegedTransitionOptions): SchedulerFiringClaim;
   completeSchedulerFiring(firingId: string, workItemId: string, options: PrivilegedTransitionOptions): SchedulerFiring;
+  requestWorkspaceCleanup(
+    input: { allocationId: string; leaseId: string; workerId: string; fencingEpoch: number },
+    options: PrivilegedTransitionOptions
+  ): WorkspaceAllocation;
+  recordWorkspaceCleanupFailure(
+    allocationId: string,
+    error: string,
+    options: PrivilegedTransitionOptions
+  ): WorkspaceAllocation;
   getCommandAuthority(input: {
     workItemId: string;
     attemptId: string;
@@ -1370,32 +1388,54 @@ export class SqliteWorkItemStore implements WorkItemStore {
         return { value: rowToWorkspaceAllocation(existing), events: [] };
       }
 
-      const activeForWorkItem = this.db
-        .prepare(`SELECT allocation_id FROM workspace_allocations WHERE work_item_id = ? AND status = 'active'`)
-        .get(parsed.workItemId) as { allocation_id: string } | undefined;
-      if (activeForWorkItem) {
+      const attemptId = parsed.attemptId ?? parsed.workItemId;
+      const leaseId = parsed.leaseId ?? parsed.workItemId;
+      const workerId = parsed.workerId ?? "legacy";
+      const fencingEpoch = parsed.fencingEpoch ?? 0;
+      const activeForAttempt = this.db
+        .prepare(`SELECT allocation_id FROM workspace_allocations WHERE attempt_id = ? AND status <> 'torn_down'`)
+        .get(attemptId) as { allocation_id: string } | undefined;
+      if (activeForAttempt) {
         throw new ControlStackError(
           "workspace_allocation_conflict",
-          `work item ${parsed.workItemId} already has an active allocation (${activeForWorkItem.allocation_id})`
+          `attempt ${attemptId} already has an allocation (${activeForAttempt.allocation_id})`
         );
       }
 
       const now = (parsed.now ?? new Date()).toISOString();
       this.db
         .prepare(
-          `INSERT INTO workspace_allocations (allocation_id, work_item_id, host_path, branch, base_ref, status, created_at)
-           VALUES (?, ?, ?, ?, ?, 'active', ?)`
+          `INSERT INTO workspace_allocations
+             (allocation_id, work_item_id, attempt_id, lease_id, worker_id, fencing_epoch,
+              host_path, branch, base_ref, status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?)`
         )
-        .run(parsed.allocationId, parsed.workItemId, parsed.hostPath, parsed.branch, parsed.baseRef, now);
+        .run(
+          parsed.allocationId,
+          parsed.workItemId,
+          attemptId,
+          leaseId,
+          workerId,
+          fencingEpoch,
+          parsed.hostPath,
+          parsed.branch,
+          parsed.baseRef,
+          now
+        );
 
       const allocation = workspaceAllocationSchema.parse({
         allocationId: parsed.allocationId,
         workItemId: parsed.workItemId,
+        attemptId,
+        leaseId,
+        workerId,
+        fencingEpoch,
         hostPath: parsed.hostPath,
         branch: parsed.branch,
         baseRef: parsed.baseRef,
         status: "active",
-        createdAt: now
+        createdAt: now,
+        cleanupAttempts: 0
       });
       const event = this.appendAuditEvent(
         createEvent("workspace_allocation.recorded", allocation, {
@@ -1416,8 +1456,22 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   getActiveWorkspaceAllocationForWorkItem(workItemId: string): WorkspaceAllocation | undefined {
     const row = this.db
-      .prepare(`SELECT * FROM workspace_allocations WHERE work_item_id = ? AND status = 'active'`)
+      .prepare(`SELECT * FROM workspace_allocations WHERE work_item_id = ? AND status <> 'torn_down'`)
       .get(workItemId) as unknown as WorkspaceAllocationRow | undefined;
+    return row ? rowToWorkspaceAllocation(row) : undefined;
+  }
+
+  getActiveWorkspaceAllocationForAttempt(attemptId: string): WorkspaceAllocation | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM workspace_allocations WHERE attempt_id = ? AND status <> 'torn_down'`)
+      .get(attemptId) as unknown as WorkspaceAllocationRow | undefined;
+    return row ? rowToWorkspaceAllocation(row) : undefined;
+  }
+
+  getWorkspaceAllocationByHostPath(hostPath: string): WorkspaceAllocation | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM workspace_allocations WHERE host_path = ? AND status <> 'torn_down'`)
+      .get(hostPath) as unknown as WorkspaceAllocationRow | undefined;
     return row ? rowToWorkspaceAllocation(row) : undefined;
   }
 
@@ -1438,7 +1492,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const updated = this.db
         .prepare(
           `UPDATE workspace_allocations SET status = 'torn_down', torn_down_at = ?
-           WHERE allocation_id = ? AND status = 'active'`
+           WHERE allocation_id = ? AND status IN ('active', 'cleanup_requested', 'cleanup_failed')`
         )
         .run(now, allocationId);
       if (updated.changes !== 1) {
@@ -1555,6 +1609,65 @@ export class SqliteWorkItemStore implements WorkItemStore {
         createEvent("scheduler_firing.completed", firing, { "firing.id": firingId, "work_item.id": workItemId })
       );
       return { value: firing, events: [event] };
+    });
+  }
+
+  requestWorkspaceCleanup(
+    input: { allocationId: string; leaseId: string; workerId: string; fencingEpoch: number },
+    options: PrivilegedTransitionOptions
+  ): WorkspaceAllocation {
+    requirePrivilegedTransition(options, "request_workspace_cleanup");
+    return this.write(() => {
+      const row = this.db
+        .prepare(`SELECT * FROM workspace_allocations WHERE allocation_id = ?`)
+        .get(input.allocationId) as unknown as WorkspaceAllocationRow | undefined;
+      if (!row) throw new ControlStackError("workspace_allocation_not_found", "no such workspace allocation");
+      if (
+        row.lease_id !== input.leaseId ||
+        row.worker_id !== input.workerId ||
+        row.fencing_epoch !== input.fencingEpoch
+      ) {
+        throw new ControlStackError("workspace_cleanup_fence_stale", "workspace cleanup fence is stale");
+      }
+      if (row.status === "torn_down") return { value: rowToWorkspaceAllocation(row), events: [] };
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `UPDATE workspace_allocations SET status = 'cleanup_requested', cleanup_attempts = cleanup_attempts + 1, cleanup_requested_at = ?, cleanup_last_error = NULL WHERE allocation_id = ?`
+        )
+        .run(now, input.allocationId);
+      const updated = {
+        ...row,
+        status: "cleanup_requested",
+        cleanup_attempts: row.cleanup_attempts + 1,
+        cleanup_requested_at: now,
+        cleanup_last_error: null
+      };
+      return { value: rowToWorkspaceAllocation(updated), events: [] };
+    });
+  }
+
+  recordWorkspaceCleanupFailure(
+    allocationId: string,
+    error: string,
+    options: PrivilegedTransitionOptions
+  ): WorkspaceAllocation {
+    requirePrivilegedTransition(options, "record_workspace_cleanup_failure");
+    return this.write(() => {
+      const row = this.db
+        .prepare(`SELECT * FROM workspace_allocations WHERE allocation_id = ?`)
+        .get(allocationId) as unknown as WorkspaceAllocationRow | undefined;
+      if (!row) throw new ControlStackError("workspace_allocation_not_found", "no such workspace allocation");
+      if (row.status === "torn_down") return { value: rowToWorkspaceAllocation(row), events: [] };
+      this.db
+        .prepare(
+          `UPDATE workspace_allocations SET status = 'cleanup_failed', cleanup_last_error = ? WHERE allocation_id = ?`
+        )
+        .run(error, allocationId);
+      return {
+        value: rowToWorkspaceAllocation({ ...row, status: "cleanup_failed", cleanup_last_error: error }),
+        events: []
+      };
     });
   }
 
@@ -3801,12 +3914,19 @@ function rowToWorkspaceAllocation(row: WorkspaceAllocationRow): WorkspaceAllocat
   return workspaceAllocationSchema.parse({
     allocationId: row.allocation_id,
     workItemId: row.work_item_id,
+    attemptId: row.attempt_id,
+    leaseId: row.lease_id,
+    workerId: row.worker_id,
+    fencingEpoch: row.fencing_epoch,
     hostPath: row.host_path,
     branch: row.branch,
     baseRef: row.base_ref,
     status: row.status,
     createdAt: row.created_at,
-    ...(row.torn_down_at === null ? {} : { tornDownAt: row.torn_down_at })
+    ...(row.torn_down_at === null ? {} : { tornDownAt: row.torn_down_at }),
+    cleanupAttempts: row.cleanup_attempts,
+    ...(row.cleanup_requested_at === null ? {} : { cleanupRequestedAt: row.cleanup_requested_at }),
+    ...(row.cleanup_last_error === null ? {} : { cleanupLastError: row.cleanup_last_error })
   });
 }
 

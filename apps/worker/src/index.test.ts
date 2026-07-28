@@ -55,6 +55,59 @@ describe("worker policy gate", () => {
     }
   });
 
+  it("allocates and fences an attempt workspace around execution", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-workspace-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    const calls: string[] = [];
+    const workspaceManager = {
+      provision: vi.fn(async (_workItemId: string, options: Record<string, unknown>) => {
+        calls.push(`provision:${String(options.attemptId)}`);
+        return {
+          allocationId: "workspace_attempt",
+          workItemId: _workItemId,
+          attemptId: String(options.attemptId),
+          leaseId: String(options.leaseId),
+          workerId: String(options.workerId),
+          fencingEpoch: Number(options.fencingEpoch),
+          hostPath: "/tmp/workspace-attempt",
+          branch: "acs/attempt/attempt",
+          baseRef: "HEAD",
+          createdAt: new Date().toISOString()
+        };
+      }),
+      teardown: vi.fn(async (_workItemId: string, options: Record<string, unknown>) => {
+        calls.push(`teardown:${String(options.attemptId)}:${String(options.fencingEpoch)}`);
+      })
+    } as unknown as import("@agent-control-stack/workspace-manager").WorkspaceManager;
+    try {
+      const workItem = tools.create_work_item(readOnlyInput("Attempt workspace"));
+      store.close();
+      await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        workspaceManager,
+        execute: async (input) => {
+          expect((input as typeof input & { workspace?: unknown }).workspace).toBeDefined();
+          return { ok: true, executionMode: "dry_run", output: "ok" };
+        }
+      });
+      expect(calls[0]).toMatch(/^provision:attempt_/u);
+      expect(calls[1]).toMatch(/^teardown:attempt_[^:]+:1/u);
+      expect(workspaceManager.provision).toHaveBeenCalledTimes(1);
+      expect(workspaceManager.teardown).toHaveBeenCalledTimes(1);
+      expect(workItem.id).toBeDefined();
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // worker setup closes the handle before execution.
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("records a fenced failed attempt when dry-run execution reports failure", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-failed-attempt-"));
     const dbPath = join(dir, "control.db");

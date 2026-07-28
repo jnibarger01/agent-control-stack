@@ -296,4 +296,49 @@ describe("WorkspaceManager", () => {
     ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "workspace_allocation_conflict" }));
     expect(fixture.store.getActiveWorkspaceAllocationForWorkItem(workItemId)?.hostPath).toBe(workspace.hostPath);
   });
+
+  it("allocates by attempt and fences cleanup so retries never reuse an earlier workspace", async () => {
+    const fixture = await createRepoFixture();
+    cleanup = fixture.cleanup;
+    const workItemId = seedWorkItemId(fixture.store, "retry-isolation");
+    const manager = new WorkspaceManager({
+      repoPath: fixture.repoPath,
+      rootDir: fixture.rootDir,
+      store: fixture.store
+    });
+
+    const first = await manager.provision(workItemId, {
+      attemptId: "attempt-first",
+      leaseId: "lease-first",
+      workerId: "worker-a",
+      fencingEpoch: 1
+    });
+    const second = await manager.provision(workItemId, {
+      attemptId: "attempt-second",
+      leaseId: "lease-second",
+      workerId: "worker-a",
+      fencingEpoch: 2
+    });
+
+    expect(second.hostPath).not.toBe(first.hostPath);
+    expect(second.allocationId).not.toBe(first.allocationId);
+    await expect(
+      manager.teardown(workItemId, {
+        attemptId: "attempt-second",
+        leaseId: "lease-first",
+        workerId: "worker-a",
+        fencingEpoch: 1
+      })
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "workspace_cleanup_fence_stale" })
+    );
+    expect(existsSync(second.hostPath)).toBe(true);
+    await manager.teardown(workItemId, {
+      attemptId: "attempt-second",
+      leaseId: "lease-second",
+      workerId: "worker-a",
+      fencingEpoch: 2
+    });
+    expect(fixture.store.getActiveWorkspaceAllocationForAttempt?.("attempt-second")).toBeUndefined();
+  });
 });

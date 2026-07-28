@@ -2,11 +2,13 @@ import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/po
 import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
+import { WorkspaceManager } from "@agent-control-stack/workspace-manager";
 
 export interface WorkerOptions {
   dbPath?: string;
   workerId?: string;
   execute?: typeof executeSandboxed;
+  workspaceManager?: WorkspaceManager;
 }
 
 export interface WorkerResult {
@@ -58,6 +60,14 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       throw new Error("worker claim did not include persisted attempt authority");
     }
 
+    const workspace = running.attemptId
+      ? await options.workspaceManager?.provision(running.id, {
+          attemptId: running.attemptId,
+          leaseId: running.leaseId,
+          workerId,
+          fencingEpoch: running.fencingEpoch
+        })
+      : undefined;
     const startedAt = new Date().toISOString();
     if (!isReadOnlyWorkerWorkItem(running)) {
       const completedAt = new Date().toISOString();
@@ -88,7 +98,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       };
     }
 
-    const result = await execute(running);
+    const result = await execute(workspace ? ({ ...running, workspace } as typeof running) : running);
     const completedAt = new Date().toISOString();
 
     if (result.ok) {
@@ -134,6 +144,15 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         structuredOutput: { simulated: true },
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
+      });
+    }
+
+    if (workspace && running.attemptId) {
+      await options.workspaceManager?.teardown(running.id, {
+        attemptId: running.attemptId,
+        leaseId: running.leaseId,
+        workerId,
+        fencingEpoch: running.fencingEpoch
       });
     }
 
