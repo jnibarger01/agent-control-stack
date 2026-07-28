@@ -4,13 +4,20 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { auditEventHash } from "./audit-chain.js";
 import { backupControlPlaneDatabase, restoreControlPlaneDatabase } from "./database-operations.js";
 import { inspectControlPlaneDatabaseFile } from "./database-health.js";
 import { applyControlPlaneMigrations } from "./migration.js";
 
 describe("control-plane database health", () => {
+  // Each test here creates one or more real SQLite databases and takes a full
+  // backup/restore pass. That measures ~300ms-2s in isolation but can exceed
+  // the 5s default under full-suite parallel load / CI contention.
+  beforeAll(() => {
+    vi.setConfig({ testTimeout: 15_000 });
+  });
+
   const temporaryDirectories: string[] = [];
 
   afterEach(() => {

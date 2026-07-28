@@ -85,9 +85,23 @@ setInterval(() => {}, 1000);
 function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
-    return true;
   } catch (error) {
     return !hasCode(error, "ESRCH");
+  }
+  // kill(pid, 0) succeeds for a zombie: the kernel keeps the PID allocated until
+  // its parent reaps it. This sandbox's PID 1 is not a reaping init, so a killed
+  // descendant can sit as a zombie indefinitely. Treat "zombie" as "not alive" -
+  // the process has already terminated, it just hasn't been waited on yet.
+  return processState(pid) !== "Z";
+}
+
+function processState(pid: number): string | undefined {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trim();
+    return afterComm.split(" ")[0];
+  } catch {
+    return undefined;
   }
 }
 

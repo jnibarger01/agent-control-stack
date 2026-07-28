@@ -9,6 +9,7 @@ This repository is currently a **v0.1.0-alpha dry-run control-plane release**. I
 - [What this repository does](#what-this-repository-does)
 - [What this alpha does not do](#what-this-alpha-does-not-do)
 - [Architecture](#architecture)
+- [Architectural invariants](#architectural-invariants)
 - [Repository layout](#repository-layout)
 - [Runtime flow](#runtime-flow)
 - [Security model](#security-model)
@@ -57,6 +58,8 @@ Do **not** claim this alpha provides:
 
 The current `packages/sandbox` implementation is intentionally dry-run only. Real execution should be added behind that package after isolation, environment allowlisting, path containment, output caps, and network controls pass their own release gate.
 
+This dry-run scope applies to the `apps/worker` / `packages/sandbox` work-item execution pipeline described below. It does **not** describe `packages/machine-controller` (used by the standalone `apps/mcp` stdio server): that component really does spawn read-only diagnostic commands (`git`, `npm`, `node`, etc., per `config.example.yml`'s `allow_readonly` list) with a real subprocess, isolated environment, and process-tree timeout/kill handling. It is deny-by-default, restricted to reviewed per-subcommand flag allowlists, and is not wired into the work-item/policy-gate/audit lifecycle above — see `packages/machine-controller/src/command.ts`.
+
 Wave 2 models completion without claiming execution: result submission accepts only authenticated worker principals with an active matching lease, action hash, and dry-run metadata. Accepted results are immutable. Retry and clone create new work items; they never reopen or edit historical items. External connector proof remains separate from this local lifecycle proof.
 
 ## Architecture
@@ -91,50 +94,78 @@ immutable result + audit evidence
 
 ### Main components
 
-| Component                     | Purpose                                                                                                                                       |
-| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `apps/gateway`                | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events.                                                      |
-| `apps/control-ui`             | Server-rendered mission-control dashboard HTML.                                                                                               |
-| `apps/mcp`                    | stdio MCP server backed by the machine-controller package.                                                                                    |
-| `apps/worker`                 | One-shot local worker that claims the next approved work item and records a dry-run result.                                                   |
-| `packages/work-items`         | Work-item state machine, SQLite store, approvals, leases, immutable results, retry/clone lineage, audit events, registry, audit-chain health. |
-| `packages/policy-gate`        | Policy evaluation, action fingerprinting, approval gating, worker-claim gating.                                                               |
-| `packages/sandbox`            | Execution boundary. Currently dry-run only.                                                                                                   |
-| `packages/shared`             | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers.                                                                    |
-| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary.                                                                               |
-| `packages/acp-adapter`        | Read-only ACP stdio adapter for registering agent status/capabilities.                                                                        |
-| `packages/moa-orchestrator`   | Multi-model/model-routing orchestration support.                                                                                              |
-| `packages/eval-harness`       | Replay and policy validation harness.                                                                                                         |
-| `packages/temporal-memory`    | Source-backed memory events/projections.                                                                                                      |
+| Component                     | Purpose                                                                                                                                                      |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `apps/gateway`                | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events, ChatGPT control-center widget host.                                 |
+| `apps/control-ui`             | Server-rendered mission-control dashboard HTML.                                                                                                              |
+| `apps/mcp`                    | stdio MCP server backed by the machine-controller package.                                                                                                   |
+| `apps/worker`                 | One-shot local worker that claims the next approved work item and records a dry-run result.                                                                  |
+| `apps/chatgpt-widget`         | React source for the ChatGPT control-center widget; built by `npm run build:chatgpt-widget` into a generated file `apps/gateway` serves. Not run standalone. |
+| `packages/work-items`         | Work-item state machine, SQLite store, approvals, leases, immutable results, retry/clone lineage, audit events, registry, audit-chain health.                |
+| `packages/policy-gate`        | Policy evaluation, action fingerprinting, approval gating, worker-claim gating.                                                                              |
+| `packages/sandbox`            | Execution boundary. Currently dry-run only.                                                                                                                  |
+| `packages/shared`             | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers.                                                                                   |
+| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary. Runs real, hardened, read-only diagnostic commands (see above).                              |
+| `packages/acp-adapter`        | Read-only ACP stdio adapter for registering agent status/capabilities.                                                                                       |
+| `packages/moa-orchestrator`   | Multi-model/model-routing orchestration support.                                                                                                             |
+| `packages/eval-harness`       | Replay and policy validation harness.                                                                                                                        |
+| `packages/temporal-memory`    | Source-backed memory events/projections.                                                                                                                     |
+| `packages/agentos-contracts`  | Shared contract types for AgentOS-facing integrations. Not yet consumed by any app path.                                                                     |
+| `packages/engine-adapter`     | Codex engine adapter and command-broker binding to persisted attempt/lease/workspace authority. Not yet consumed by any app path.                            |
+| `packages/secret-broker`      | Credential-leasing primitive that binds leases to a principal with use accounting. Not yet consumed by any app path.                                         |
+| `packages/verification`       | Independent implementer/verifier identity separation and exact-criteria-coverage checking. Not yet wired into the result-submission write path.              |
+| `packages/workspace-manager`  | Git worktree-backed workspace allocation, tied to `work-items`' persisted `WorkspaceAllocation` records. Not yet consumed by any app path.                   |
+
+## Architectural invariants
+
+A handful of structural properties are load-bearing and easy to accidentally break during a refactor: fencing-epoch compare-and-swap on lease claims, the audit-chain write barrier, exact action-hash approval binding, migration checksum enforcement, and the sandbox's single egress chokepoint. Read [`docs/architecture-invariants.md`](docs/architecture-invariants.md) before assuming a simplification near any of those is safe.
 
 ## Repository layout
 
 ```text
 apps/
+  chatgpt-widget/   React source for the ChatGPT control-center widget (build-only, see below)
   control-ui/       Server-rendered dashboard UI
   gateway/          Fastify HTTP/SSE/MCP gateway
   mcp/              stdio MCP server entrypoint
   worker/           One-shot local worker
 packages/
   acp-adapter/      Read-only ACP process adapter
+  agentos-contracts/ Shared AgentOS-facing contract types (not yet consumed)
+  engine-adapter/   Codex engine adapter and command-broker binding (not yet consumed)
   eval-harness/     Replay/evaluation harness
   machine-controller/ Local machine-controller config and direct-agent boundary
   moa-orchestrator/ Model/orchestration support
   policy-gate/      Policy decisions and approval gates
   sandbox/          Dry-run sandbox boundary
+  secret-broker/    Credential-leasing primitive (not yet consumed)
   shared/           Shared schemas, errors, hashing, redaction
   temporal-memory/  Memory event/projection package
+  verification/     Independent implementer/verifier separation (not yet wired in)
   work-items/       SQLite store, state machine, approvals, audit chain
+  workspace-manager/ Git worktree-backed workspace allocation (not yet consumed)
 storage/
   migrations/       SQLite migrations
 docs/
   architecture.md
+  architecture-invariants.md
   oauth-authentication.md
   threat-model.md
   runbooks/local-dev.md
 config.example.yml  Example machine-controller policy config
 .env.example        Environment variable template
 ```
+
+### The ChatGPT control-center widget build
+
+`apps/gateway`'s dashboard embeds a small React widget for ChatGPT-hosted app surfaces. Its source lives in `apps/chatgpt-widget/`, but `apps/gateway` never imports that package directly. Instead:
+
+1. `npm run build` first runs `npm run build:chatgpt-widget`, which runs `scripts/build-chatgpt-widget.mjs`.
+2. That script bundles `apps/chatgpt-widget/src/main.tsx` with esbuild into a single inline HTML/CSS/JS string.
+3. It writes that string as a **generated, checked-in** TypeScript module: `apps/gateway/src/chatgpt-dashboard-widget.generated.ts`.
+4. `tsc -b` then compiles the gateway (and everything else) against that generated file.
+
+If you change `apps/chatgpt-widget/src/`, you must re-run `npm run build:chatgpt-widget` (or `npm run build`) before the gateway picks up the change — editing the `.generated.ts` file directly will be silently overwritten on the next build. There is currently no drift test asserting the generated file matches its source; treat a diff in the generated file as a signal to check that it was produced by the build script, not hand-edited.
 
 ## Runtime flow
 
@@ -320,6 +351,7 @@ security:
   default_policy: deny
   require_approval_for_mutations: true
   redact_secrets: true
+  max_output_bytes: 200000
   command_timeout_ms: 120000
   command_termination_grace_ms: 1000
 paths:
@@ -337,6 +369,12 @@ commands:
     - git
     - npm
     - node
+    - pnpm
+    - bun
+    - python3
+    - docker
+    - df
+    - free
   deny:
     - rm
     - shred
@@ -346,6 +384,8 @@ commands:
     - chown
     - sudo
 ```
+
+The paths above (`/home/jacen/...`) are one maintainer's real local paths, checked in as an example. Replace them with your own before use.
 
 For another machine, copy this file and adjust allowlisted paths. Keep denylisted credential/system paths tighter than your optimism.
 
@@ -452,7 +492,7 @@ curl -fsS -X POST http://127.0.0.1:3000/work-items/<work_item_id>/cancel \
   --data '{"reason":"No longer needed"}'
 ```
 
-Important: `/work-items/:id/results` intentionally returns `501` in this alpha. Worker results go through the local lease-bound store path, not a public result-submission route.
+`POST /work-items/:id/results` is implemented: it requires a bearer/session credential bound to the `agent` role and a matching worker identity, validates the payload against `submitWorkResultSchema`, and rejects ACS-derived outcomes (`blocked`, `lease_expired`) as not worker-submittable. See [Result submission](#5-result-submission) above for the full acceptance path.
 
 ## Use the MCP endpoint
 
@@ -789,9 +829,10 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 
 ## Known limitations
 
-- Worker execution is dry-run only.
+- Worker execution is dry-run only (`packages/machine-controller`'s standalone read-only command execution is real; see [What this alpha does not do](#what-this-alpha-does-not-do)).
 - No real OS sandbox is wired in yet.
-- Public worker result submission is not implemented.
+- `packages/verification`'s independent verifier check is not yet called from the result-submission write path.
+- `packages/secret-broker`, `packages/engine-adapter`, and `packages/workspace-manager` are implemented but not yet consumed by any app path.
 - Production remote connector mode requires OAuth or signed tunnel-session deployment and TLS termination.
 - Docker and Compose artifacts are provided; Kubernetes and a checked-in systemd unit are not.
 - Dashboard approval rendering is intentionally minimal.
@@ -801,6 +842,7 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 ## Related docs
 
 - [`docs/architecture.md`](docs/architecture.md)
+- [`docs/architecture-invariants.md`](docs/architecture-invariants.md)
 - [`docs/threat-model.md`](docs/threat-model.md)
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
