@@ -159,6 +159,18 @@ Returns `{ cwd, command, args, risk, reason }`. `risk` is one of the levels abov
 
 ## Gateway MCP tools
 
+### ChatGPT App dashboard
+
+The gateway exposes `ui://acs/dashboard-v1` through authenticated
+`resources/list` and `resources/read` calls as `text/html;profile=mcp-app`.
+`open_acs_dashboard` and `get_execution_detail` are read-only tools. The
+dashboard returns model-visible structured health, execution, approval, and
+operational-finding summaries; execution detail is retrieved from the ACS store
+and bounded audit events. There is no separate finding service in this gateway:
+findings mean blocked, failed, or quarantined execution state, not vulnerability
+scan results. The widget uses standard MCP Apps `tools/call` and `ui/message`
+bridge methods and contains no approval, cancellation, or other mutation path.
+
 Backed by `createWorkItemTools` (`packages/policy-gate/src/tools.ts`) over a `WorkItemStore`. These tools create and manage work items; they do not execute anything themselves. Execution happens later, out of band, when a worker calls `claim_next_approved_work_item` and `submit_work_result` — those two are **not** exposed as MCP tools (neither locally nor remotely); they're internal harness/worker calls, reached through the gateway's own HTTP endpoints, not `tools/call`.
 
 Remote (HTTP/OAuth) callers get `remoteMcpToolNames`: everything below except `approve_work_item`. Calling `approve_work_item` over MCP — local or remote — is unconditionally rejected with JSON-RPC error `-32002` ("MCP identities cannot grant approval"); approval must go through an authenticated gateway mutation actor via `/work-items/:id/approve`, per [ADR 0004](../adr/0004-request-bound-approval-tokens.md).

@@ -2,6 +2,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
+import type { WorkItemStore } from "@agent-control-stack/work-items";
 import { ZodError, z } from "zod";
 import {
   authorizeMcpRequest,
@@ -10,6 +11,13 @@ import {
   type McpAuthOptions,
   type McpScope
 } from "./auth.js";
+import {
+  ACS_DASHBOARD_CSP,
+  ACS_DASHBOARD_RESOURCE_URI,
+  dashboardOverview,
+  executionDetail
+} from "./chatgpt-dashboard.js";
+import { chatgptDashboardWidgetHtml } from "./chatgpt-dashboard-widget.generated.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
 
@@ -17,9 +25,10 @@ type GatewayWorkItemTools = ReturnType<typeof createWorkItemTools>;
 type GatewayToolName = (typeof workItemToolNames)[number];
 const directAgentToolName = "test.agent.run" as const;
 type DirectAgentToolName = typeof directAgentToolName;
-const mcpToolNames = [...workItemToolNames, directAgentToolName] as const;
+const dashboardToolNames = ["open_acs_dashboard", "get_execution_detail"] as const;
+const mcpToolNames = [...workItemToolNames, ...dashboardToolNames, directAgentToolName] as const;
 type McpToolName = (typeof mcpToolNames)[number];
-const remoteMcpToolNames = workItemToolNames.filter((name) => name !== "approve_work_item");
+const remoteMcpToolNames = [...workItemToolNames.filter((name) => name !== "approve_work_item"), ...dashboardToolNames];
 type JsonRpcId = string | number | null;
 
 export interface GatewayDirectAgentController {
@@ -73,6 +82,7 @@ export async function handleMcpHttpRequest(input: {
   body: unknown;
   headers: IncomingHttpHeaders;
   tools: GatewayWorkItemTools;
+  store: WorkItemStore;
   directAgentController?: GatewayDirectAgentController;
   auth?: McpAuthOptions;
   requireAuthentication?: boolean;
@@ -108,7 +118,7 @@ export async function handleMcpHttpRequest(input: {
     case "initialize":
       return jsonRpcResult(request.data.id, {
         protocolVersion: MCP_PROTOCOL_VERSION,
-        capabilities: { tools: {} },
+        capabilities: { tools: {}, resources: {} },
         serverInfo: {
           name: "agent-control-stack-gateway",
           version: "0.1.0"
@@ -121,7 +131,9 @@ export async function handleMcpHttpRequest(input: {
         tools: mcpToolDefinitions(Boolean(input.directAgentController), Boolean(input.auth?.oauth))
       });
     case "resources/list":
-      return jsonRpcResult(request.data.id, { resources: [] });
+      return jsonRpcResult(request.data.id, { resources: [resourceDefinition()] });
+    case "resources/read":
+      return resourceRead(request.data.id, request.data.params);
     case "tools/call":
       return handleToolsCall({
         id: request.data.id,
@@ -131,6 +143,7 @@ export async function handleMcpHttpRequest(input: {
         auth: input.auth,
         resourceMetadataUrl: input.resourceMetadataUrl,
         tools: input.tools,
+        store: input.store,
         directAgentController: input.directAgentController,
         remoteAddress: input.remoteAddress,
         auditAuthenticatedRequest: input.auditAuthenticatedRequest,
@@ -172,6 +185,7 @@ function isDiscoveryMethod(method: string): boolean {
     method === "ping" ||
     method === "tools/list" ||
     method === "resources/list" ||
+    method === "resources/read" ||
     method.startsWith("notifications/")
   );
 }
@@ -184,6 +198,7 @@ async function handleToolsCall(input: {
   auth?: McpAuthOptions;
   resourceMetadataUrl?: string;
   tools: GatewayWorkItemTools;
+  store: WorkItemStore;
   directAgentController?: GatewayDirectAgentController;
   remoteAddress?: string;
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
@@ -225,6 +240,7 @@ async function handleToolsCall(input: {
   try {
     const result = await callMcpTool({
       tools: input.tools,
+      store: input.store,
       directAgentController: input.directAgentController,
       name: parsed.data.name,
       args: parsed.data.arguments ?? {},
@@ -243,10 +259,22 @@ async function handleToolsCall(input: {
       content: [
         {
           type: "text",
-          text: `${parsed.data.name} completed through the gateway MCP path.`
+          text:
+            parsed.data.name === "open_acs_dashboard"
+              ? "ACS Control Center loaded."
+              : `${parsed.data.name} completed through the gateway MCP path.`
         }
       ],
-      structuredContent: asStructuredContent(result)
+      structuredContent: asStructuredContent(result),
+      ...(parsed.data.name === "open_acs_dashboard"
+        ? {
+            _meta: {
+              dashboard: {
+                presentation: "inline"
+              }
+            }
+          }
+        : {})
     });
   } catch (error) {
     input.auditAuthenticatedRequest?.({
@@ -296,6 +324,7 @@ async function handleProtectedUnsupportedMethod(input: {
 
 async function callMcpTool(input: {
   tools: GatewayWorkItemTools;
+  store: WorkItemStore;
   directAgentController?: GatewayDirectAgentController;
   name: McpToolName;
   args: unknown;
@@ -307,6 +336,13 @@ async function callMcpTool(input: {
       throw new ControlStackError("direct_agent_not_configured", "test.agent.run is not configured on this gateway");
     }
     return await input.directAgentController.callTool(directAgentToolName, input.args);
+  }
+  if (input.name === "open_acs_dashboard") return dashboardOverview(input.store);
+  if (input.name === "get_execution_detail") {
+    const id = z.object({ id: z.string().min(1) }).parse(input.args).id;
+    const detail = executionDetail(input.store, id);
+    if (!detail) throw new ControlStackError("work_item_not_found", "work item not found");
+    return detail;
   }
 
   return callGatewayTool(input.tools, input.name, input.args, input.auth, input.actor);
@@ -323,7 +359,12 @@ function callGatewayTool(
   return handler(bindAuthenticatedActor(name, args, auth, actor));
 }
 
-function bindAuthenticatedActor(name: GatewayToolName, args: unknown, auth: McpAuthenticatedRequest, actor: string): unknown {
+function bindAuthenticatedActor(
+  name: GatewayToolName,
+  args: unknown,
+  auth: McpAuthenticatedRequest,
+  actor: string
+): unknown {
   if (name === "create_work_item") {
     // MCP identities are agents; caller-supplied requester/requesterSubject are untrusted.
     return { ...requestObject(args), requester: "agent", requesterSubject: actor };
@@ -375,7 +416,10 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
       description: toolDescription(name),
       inputSchema: toolInputSchema(name),
       securitySchemes,
-      _meta: { securitySchemes },
+      _meta: {
+        securitySchemes,
+        ...(name === "open_acs_dashboard" ? { ui: { resourceUri: ACS_DASHBOARD_RESOURCE_URI } } : {})
+      },
       annotations: toolAnnotations(name)
     };
   });
@@ -388,6 +432,8 @@ function requiredScopes(name: McpToolName): McpScope[] {
       return ["acs:work:create"];
     case "get_work_item":
     case "list_work_items":
+    case "open_acs_dashboard":
+    case "get_execution_detail":
       return ["acs:work:read"];
     case "approve_work_item":
     case "unblock_work_item":
@@ -399,7 +445,21 @@ function requiredScopes(name: McpToolName): McpScope[] {
 
 function isMutatingTool(name: McpToolName): boolean {
   if (name === directAgentToolName) return true;
-  return !["get_work_item", "list_work_items"].includes(name);
+  return !["get_work_item", "list_work_items", "open_acs_dashboard", "get_execution_detail"].includes(name);
+}
+
+function resourceDefinition() {
+  return {
+    name: "acs-dashboard",
+    uri: ACS_DASHBOARD_RESOURCE_URI,
+    mimeType: "text/html;profile=mcp-app",
+    _meta: { ui: { prefersBorder: true, csp: ACS_DASHBOARD_CSP } }
+  };
+}
+function resourceRead(id: JsonRpcId, params: unknown): McpHttpResult {
+  if (!z.object({ uri: z.literal(ACS_DASHBOARD_RESOURCE_URI) }).safeParse(params).success)
+    return jsonRpcError(id, -32602, "invalid resources/read params", 400);
+  return jsonRpcResult(id, { contents: [{ ...resourceDefinition(), text: chatgptDashboardWidgetHtml }] });
 }
 
 function toolAnnotations(name: McpToolName): Record<string, boolean> {
@@ -407,6 +467,8 @@ function toolAnnotations(name: McpToolName): Record<string, boolean> {
   switch (name) {
     case "get_work_item":
     case "list_work_items":
+    case "open_acs_dashboard":
+    case "get_execution_detail":
       return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
     case "cancel_work_item":
     case "reject_work_item":
@@ -421,6 +483,10 @@ function toolDescription(name: McpToolName): string {
     return "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.";
   }
   switch (name) {
+    case "open_acs_dashboard":
+      return "Open the read-only ACS Control Center with current health, executions, approvals, and operational findings.";
+    case "get_execution_detail":
+      return "Read authoritative detail and recent audit events for one ACS execution.";
     case "create_work_item":
       return "Create a governed work item and immediately evaluate it through the policy gate.";
     case "get_work_item":
@@ -454,6 +520,10 @@ function toolInputSchema(name: McpToolName): Record<string, unknown> {
     };
   }
   switch (name) {
+    case "open_acs_dashboard":
+      return { type: "object", properties: {} };
+    case "get_execution_detail":
+      return { type: "object", required: ["id"], properties: { id: { type: "string" } } };
     case "create_work_item":
       return {
         type: "object",

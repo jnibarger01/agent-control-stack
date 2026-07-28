@@ -12,7 +12,8 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b && npm run build -w apps/public-site",
+    "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site",
+    "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
     "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety",
     "test:vitest": "vitest run",
     "test:agentos": "npm test -w packages/agentos-contracts",

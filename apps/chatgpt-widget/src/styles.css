@@ -1,0 +1,162 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #172033;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+.loading {
+  display: grid;
+  min-height: 200px;
+  place-items: center;
+}
+.app {
+  border: 1px solid #d7dee8;
+  border-radius: 12px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  overflow: hidden;
+}
+.app > section,
+.app > aside {
+  padding: 22px;
+}
+.app > aside {
+  border-left: 1px solid #dbe3ec;
+}
+header {
+  display: flex;
+  justify-content: space-between;
+}
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+h1 {
+  font-size: 25px;
+}
+h2 {
+  font-size: 17px;
+}
+h3 {
+  font-size: 13px;
+  margin-top: 20px;
+}
+p,
+small {
+  color: #64748b;
+  font-size: 12px;
+}
+.health,
+i {
+  border-radius: 6px;
+  padding: 5px 8px;
+  text-transform: capitalize;
+}
+.healthy,
+.running,
+.succeeded {
+  background: #ecfdf5;
+  color: #047857;
+}
+.degraded,
+.needs_approval,
+.pending_policy {
+  background: #fffbeb;
+  color: #b45309;
+}
+.unhealthy,
+.blocked,
+.failed,
+.quarantined {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+.metrics {
+  display: grid;
+  gap: 11px;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 21px 0;
+}
+.metrics article {
+  border: 1px solid #dbe3ec;
+  border-radius: 8px;
+  padding: 15px;
+}
+.metrics span {
+  display: block;
+  font-size: 12px;
+}
+.metrics strong {
+  color: #0f766e;
+  font-size: 30px;
+}
+.metrics .danger strong {
+  color: #b91c1c;
+}
+.metrics .warn strong {
+  color: #b45309;
+}
+.table {
+  border: 1px solid #dbe3ec;
+  border-radius: 8px;
+  overflow: auto;
+}
+table {
+  border-collapse: collapse;
+  min-width: 610px;
+  width: 100%;
+  font-size: 12px;
+}
+th,
+td {
+  border-bottom: 1px solid #e2e8f0;
+  padding: 10px;
+  text-align: left;
+}
+th {
+  background: #f8fafc;
+}
+button {
+  background: #fff;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  cursor: pointer;
+  font: 600 13px inherit;
+  margin: 12px 6px 0 0;
+  padding: 8px;
+}
+dl {
+  display: grid;
+  gap: 7px;
+  grid-template-columns: 70px 1fr;
+  font-size: 12px;
+}
+dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+ul {
+  font-size: 12px;
+  padding-left: 18px;
+}
+.error {
+  color: #b91c1c;
+}
+@media (max-width: 760px) {
+  .app {
+    grid-template-columns: 1fr;
+  }
+  .app > aside {
+    border-left: 0;
+    border-top: 1px solid #dbe3ec;
+  }
+  .metrics {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

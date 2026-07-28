@@ -187,7 +187,7 @@ describe("gateway MCP edge hardening", () => {
     }
   });
 
-  it("returns an empty resource list for connector compatibility", async () => {
+  it("registers the versioned ChatGPT dashboard resource with an exact CSP", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
     const app = buildGateway({
       dbPath: join(dir, "control.db"),
@@ -205,11 +205,57 @@ describe("gateway MCP edge hardening", () => {
       });
 
       expect(response.statusCode).toBe(200);
-      expect(response.json()).toEqual({
-        jsonrpc: "2.0",
-        id: "resources",
-        result: { resources: [] }
+      expect(response.json().result.resources).toEqual([
+        expect.objectContaining({
+          uri: "ui://acs/dashboard-v1",
+          mimeType: "text/html;profile=mcp-app",
+          _meta: { ui: { prefersBorder: true, csp: { connectDomains: [], resourceDomains: [] } } }
+        })
+      ]);
+      const resource = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: { jsonrpc: "2.0", id: "read", method: "resources/read", params: { uri: "ui://acs/dashboard-v1" } }
       });
+      expect(resource.statusCode).toBe(200);
+      expect(resource.json().result.contents[0].text).toContain("ACS Control Center");
+
+      const tools = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: { jsonrpc: "2.0", id: "tools", method: "tools/list" }
+      });
+      expect(tools.statusCode).toBe(200);
+      expect(tools.json().result.tools).toContainEqual(
+        expect.objectContaining({
+          name: "open_acs_dashboard",
+          _meta: expect.objectContaining({ ui: { resourceUri: "ui://acs/dashboard-v1" } })
+        })
+      );
+
+      const dashboard = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-token" },
+        payload: {
+          jsonrpc: "2.0",
+          id: "dashboard",
+          method: "tools/call",
+          params: { name: "open_acs_dashboard", arguments: {} }
+        }
+      });
+      expect(dashboard.statusCode).toBe(200);
+      expect(dashboard.json().result).toEqual(
+        expect.objectContaining({
+          structuredContent: expect.objectContaining({
+            health: expect.objectContaining({ status: expect.any(String) }),
+            recentExecutions: expect.any(Array)
+          }),
+          _meta: { dashboard: { presentation: "inline" } }
+        })
+      );
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
