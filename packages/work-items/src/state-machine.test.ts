@@ -441,6 +441,40 @@ describe("work item state machine", () => {
     }
   });
 
+  it("rejects a privileged transition asserted by a non-owner while a worker lease is active", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-privileged-lease-owner-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Lease-owned cancellation",
+        requester: "agent",
+        intent: "prevent a stale actor from cancelling running work",
+        requestedActions: [{ kind: "manual", description: "cancel" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id, domainTransition);
+      store.claimNextApprovedWorkItem("worker-a");
+
+      expectControlError(
+        () => store.cancelWorkItem(workItem.id, { actor: "worker-b" }, { via: "domain_service", actorId: "worker-b" }),
+        "worker_lease_actor_mismatch"
+      );
+      expect(store.get(workItem.id)?.status).toBe("running");
+
+      const cancelled = store.cancelWorkItem(
+        workItem.id,
+        { actor: "worker-a" },
+        { via: "domain_service", actorId: "worker-a" }
+      );
+      expect(cancelled.status).toBe("cancelled");
+      expect(store.readEvents().at(-1)?.attributes["actor.id"]).toBe("worker-a");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects result submission when request omits worker lease fields", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-fields-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

@@ -674,6 +674,12 @@ export interface StoredExecutionResult {
 
 export interface PrivilegedTransitionOptions {
   via: "policy_gate" | "domain_service";
+  /**
+   * Identity of the worker/actor asserted to be causing this transition, when known.
+   * Cross-checked against the work item's current lease owner (when one exists) so a
+   * caller cannot assert authority on behalf of a worker that does not hold the lease.
+   */
+  actorId?: string;
 }
 
 export interface SqliteWorkItemStoreOptions {
@@ -1819,12 +1825,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
     ) {
       requirePrivilegedTransition(options, status);
     }
-    return this.transitionWithEvent(id, status);
+    return this.transitionWithEvent(id, status, { actorId: options?.actorId });
   }
 
   approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem {
     requirePrivilegedTransition(options, "approve");
-    return this.transitionWithEvent(id, "approved");
+    return this.transitionWithEvent(id, "approved", { actorId: options?.actorId });
   }
 
   blockWorkItem(id: string): WorkItem {
@@ -1833,7 +1839,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   unblockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem {
     requirePrivilegedTransition(options, "unblock");
-    return this.transitionWithEvent(id, "pending_policy");
+    return this.transitionWithEvent(id, "pending_policy", { actorId: options?.actorId });
   }
 
   cancelWorkItem(id: string, input: unknown = {}, options?: PrivilegedTransitionOptions): WorkItem {
@@ -1844,6 +1850,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       attributes["work_item.cancel_reason"] = parsed.reason;
     }
     return this.transitionWithEvent(id, "cancelled", {
+      actorId: options?.actorId,
       eventBody: { actor: parsed.actor, reason: parsed.reason },
       eventAttributes: attributes
     });
@@ -1857,6 +1864,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       attributes["work_item.reject_reason"] = parsed.reason;
     }
     return this.transitionWithEvent(id, "rejected", {
+      actorId: options?.actorId,
       eventBody: { actor: parsed.actor, reason: parsed.reason },
       eventAttributes: attributes
     });
@@ -3517,6 +3525,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     id: string,
     status: WorkItemStatus,
     options: {
+      actorId?: string;
       workerId?: string;
       leaseMs?: number;
       leaseToken?: string;
@@ -3526,6 +3535,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
   ): WorkItem {
     return this.write(() => {
       const current = this.getRequired(id);
+      const actorId = options.actorId === undefined ? undefined : requiredActorId(options.actorId);
+      this.assertActorOwnsActiveLease(id, actorId);
       const updated = transitionWorkItem(current, status);
       const result =
         status === "running"
@@ -3564,9 +3575,26 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
       return {
         value: updated,
-        events: [this.appendAuditEvent(workItemStatusEvent(updated, options.eventBody, options.eventAttributes))]
+        events: [
+          this.appendAuditEvent(
+            workItemStatusEvent(updated, options.eventBody, {
+              ...options.eventAttributes,
+              ...(actorId ? { "actor.id": actorId } : {})
+            })
+          )
+        ]
       };
     });
+  }
+
+  private assertActorOwnsActiveLease(workItemId: string, actorId: string | undefined): void {
+    if (!actorId) return;
+    const lease = this.db
+      .prepare(`SELECT worker_id FROM leases WHERE work_item_id = ? AND status = 'active'`)
+      .get(workItemId) as { worker_id: string } | undefined;
+    if (lease && lease.worker_id !== actorId) {
+      throw new ControlStackError("worker_lease_actor_mismatch", "actor does not own the active worker lease");
+    }
   }
 
   private appendAuditEvent(event: AuditEvent): StoredAuditEvent {
