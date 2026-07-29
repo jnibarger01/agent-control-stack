@@ -160,7 +160,7 @@ config.example.yml  Example machine-controller policy config
 
 ### The ChatGPT control-center widget build
 
-`apps/gateway`'s dashboard embeds a small React widget for ChatGPT-hosted app surfaces. Its source lives in `apps/chatgpt-widget/`, but `apps/gateway` never imports that package directly. Instead:
+This is a ChatGPT-facing MCP resource, not part of the local HTTP dashboard. `apps/gateway/src/mcp.ts`'s `resources/read` handler (`mcp.ts:451-462`) serves a small React widget as an `mcp-app`-profile HTML resource for ChatGPT-hosted app surfaces; the `/` HTTP dashboard is rendered separately by `@agent-control-stack/control-ui` and does not use this widget at all. Its source lives in `apps/chatgpt-widget/`, but `apps/gateway` never imports that package directly. Instead:
 
 1. `npm run build` first runs `npm run build:chatgpt-widget`, which runs `scripts/build-chatgpt-widget.mjs`.
 2. That script bundles `apps/chatgpt-widget/src/main.tsx` with esbuild into a single inline HTML/CSS/JS string.
