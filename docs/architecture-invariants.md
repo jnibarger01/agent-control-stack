@@ -38,13 +38,15 @@ See also [`docs/security-contracts.md`](security-contracts.md) for the broader r
 
 ## 4. Migration checksum enforcement
 
-**What it is:** every applied migration's SQL is hashed (`sha256`), and the checksum is persisted alongside the migration record. On every startup, if a migration with that version was already applied, its recorded checksum must match the current migration source's checksum, or startup fails.
+**What it is:** every applied migration's SQL is hashed (`sha256`), and the checksum is persisted alongside the migration record. On every startup, if a migration with that version was already applied _and already has a recorded checksum_, that checksum must match the current migration source's checksum, or startup fails.
 
 **Where:** `packages/shared/src/migration.ts:37` (checksum computed from SQL text) and `migration.ts:70-95` (applied inside `BEGIN IMMEDIATE`, with the mismatch check at `migration.ts:77-78` throwing `migration checksum mismatch for version ${migration.version}`).
 
-**Why it matters:** this is what stops an already-applied migration file from being silently edited after the fact. Without it, two deployments that believe they are running "migration 007" could actually be running different SQL, with no signal that history was rewritten.
+**Bootstrap exception (not a bug, but not enforcement either):** a database migrated before this checksum column existed reaches this code with `existing.checksum === ""`. `migration.ts:77` short-circuits the mismatch check for a blank checksum, and `migration.ts:80-85` then writes the _current_ source's checksum into that row as a one-time backfill — there is no historical value to compare it against. So on that database's first startup after upgrading to checksum-enforcing code, an already-edited migration file is silently adopted as the new trusted baseline rather than rejected. Enforcement is real and fail-closed only for a version that already has a non-blank recorded checksum; it does not retroactively protect versions applied before checksums were introduced.
 
-**Must not change:** editing an already-released migration file's SQL (add a new migration instead — this is also stated directly in `AGENTS.md`); removing or weakening the checksum comparison; applying a migration without recording its checksum.
+**Why it matters:** this is what stops an already-applied migration file from being silently edited after the fact — once a version has a recorded checksum. Without it, two deployments that believe they are running "migration 007" could actually be running different SQL, with no signal that history was rewritten.
+
+**Must not change:** editing an already-released migration file's SQL (add a new migration instead — this is also stated directly in `AGENTS.md`); removing or weakening the checksum comparison for a version that already has a recorded checksum; applying a migration without recording its checksum.
 
 ## 5. Sandbox egress chokepoint
 

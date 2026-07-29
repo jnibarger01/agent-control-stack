@@ -33,16 +33,18 @@ The `resource` metadata value is `ACS_OAUTH_AUDIENCE`. `authorization_servers` c
 
 ## Scopes
 
-| Tool | Required scope |
-| --- | --- |
-| `create_work_item` | `acs:work:create` |
-| `get_work_item` | `acs:work:read` |
-| `list_work_items` | `acs:work:read` |
+| Tool                | Required scope     |
+| ------------------- | ------------------ |
+| `create_work_item`  | `acs:work:create`  |
+| `get_work_item`     | `acs:work:read`    |
+| `list_work_items`   | `acs:work:read`    |
 | `approve_work_item` | `acs:work:approve` |
 | `unblock_work_item` | `acs:work:approve` |
-| `cancel_work_item` | `acs:work:approve` |
+| `cancel_work_item`  | `acs:work:approve` |
 
-Worker claim and result submission tools are not exposed on the public MCP gateway in `v0.1.0-alpha`. They remain local worker/store paths only.
+Worker claim and result submission are not exposed as _MCP tools_ on the public MCP gateway in `v0.1.0-alpha` — they are not in the table above and have no scope mapping.
+
+This is narrower than "not gateway-exposed": `POST /work-items/:id/results` is a real HTTP route on the same gateway, authenticated separately from MCP (a bearer/session credential bound to the `agent` role and a matching worker identity, not an OAuth/MCP scope — see the README's [Result submission](../README.md#5-result-submission) section). Worker _claiming_ has no HTTP route at all yet and remains local worker/store-only.
 
 ## Local Development
 

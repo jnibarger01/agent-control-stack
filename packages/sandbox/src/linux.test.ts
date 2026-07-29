@@ -1,8 +1,7 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, statfsSync, symlinkSync, type StatsFs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { ControlStackError } from "@agent-control-stack/shared";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SandboxAuthorityVerifier, SandboxExecutionRequest } from "./contracts.js";
 import {
   buildBubblewrapInvocation,
@@ -11,6 +10,17 @@ import {
   launcherEnvironment,
   verifyAuthorityReceipt
 } from "./linux.js";
+
+// probeLinuxHost() calls node:fs's statfsSync("/sys/fs/cgroup") directly rather than
+// through an injectable option, and some CI/dev sandboxes mount a hybrid cgroup v1+v2
+// hierarchy rather than a pure unified v2 tree. Faking this one real syscall - not
+// catching whatever error preflight happens to throw - keeps the "preflights host
+// capabilities" test below host-independent while still exercising every other real
+// preflight check (including the systemd scope probe) for regressions, on every host.
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, statfsSync: vi.fn(actual.statfsSync) };
+});
 
 function validSandboxRequest(overrides: Partial<SandboxExecutionRequest> = {}): SandboxExecutionRequest {
   return {
@@ -43,6 +53,10 @@ function validSandboxRequest(overrides: Partial<SandboxExecutionRequest> = {}): 
 }
 
 describe("Bubblewrap sandbox construction", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("builds a network-denied, clear-environment, workspace-only mount command", () => {
     const request = validSandboxRequest();
     const invocation = buildBubblewrapInvocation(request, request.workspace.hostPath, {
@@ -157,6 +171,17 @@ describe("Bubblewrap sandbox construction", () => {
     const directory = realpathSync(mkdtempSync(join(tmpdir(), "acs-sandbox-preflight-")));
     const request = validSandboxRequest({ workspace: { allocationId: "workspace_test", hostPath: directory } });
     let authorityChecks = 0;
+    const CGROUP2_SUPER_MAGIC = 0x63677270;
+    vi.mocked(statfsSync).mockReturnValueOnce({
+      type: CGROUP2_SUPER_MAGIC,
+      bsize: 4_096,
+      blocks: 0,
+      bfree: 0,
+      bavail: 0,
+      files: 0,
+      ffree: 0,
+      frsize: 4_096
+    } as StatsFs);
     try {
       // requireExecutable() does a real lstatSync/accessSync on these paths before
       // hostCommandRunner ever runs, so faking the runner alone isn't enough to make
@@ -164,37 +189,25 @@ describe("Bubblewrap sandbox construction", () => {
       // installed on the host running the suite. Point every required path at the
       // current Node binary, which is guaranteed to exist and be executable wherever
       // this test runs - only hostCommandRunner's fake output is exercised below.
-      try {
-        await createLinuxSandbox({
-          authorityVerifier: {
-            verify: async () => {
-              authorityChecks += 1;
-              throw new Error("preflight must not request execution authority");
-            }
-          },
-          bwrapPath: process.execPath,
-          systemdRunPath: process.execPath,
-          systemctlPath: process.execPath,
-          nodePath: process.execPath,
-          gitPath: process.execPath,
-          hostCommandRunner: async (command) => ({
-            code: 0,
-            signal: null,
-            stdout: command === process.execPath ? "bubblewrap 0.9.0\n" : "",
-            stderr: ""
-          })
-        }).preflight(request);
-      } catch (error) {
-        // Some CI/dev sandboxes mount a hybrid cgroup v1+v2 hierarchy rather than a
-        // pure cgroup v2 unified tree, so the real (unfaked) verifyCgroupV2() host
-        // probe fails closed here even though nothing under test is broken. That
-        // fail-closed behavior is the correct, security-relevant outcome and must
-        // not be weakened - only tolerate this specific host-capability gap so the
-        // test can still assert its real invariant below.
-        if (!(error instanceof ControlStackError) || error.code !== "sandbox_cgroup_unavailable") {
-          throw error;
-        }
-      }
+      await createLinuxSandbox({
+        authorityVerifier: {
+          verify: async () => {
+            authorityChecks += 1;
+            throw new Error("preflight must not request execution authority");
+          }
+        },
+        bwrapPath: process.execPath,
+        systemdRunPath: process.execPath,
+        systemctlPath: process.execPath,
+        nodePath: process.execPath,
+        gitPath: process.execPath,
+        hostCommandRunner: async (command) => ({
+          code: 0,
+          signal: null,
+          stdout: command === process.execPath ? "bubblewrap 0.9.0\n" : "",
+          stderr: ""
+        })
+      }).preflight(request);
       expect(authorityChecks).toBe(0);
     } finally {
       rmSync(directory, { recursive: true, force: true });

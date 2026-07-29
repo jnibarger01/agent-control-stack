@@ -58,7 +58,9 @@ Do **not** claim this alpha provides:
 
 The current `packages/sandbox` implementation is intentionally dry-run only. Real execution should be added behind that package after isolation, environment allowlisting, path containment, output caps, and network controls pass their own release gate.
 
-This dry-run scope applies to the `apps/worker` / `packages/sandbox` work-item execution pipeline described below. It does **not** describe `packages/machine-controller` (used by the standalone `apps/mcp` stdio server): that component really does spawn read-only diagnostic commands (`git`, `npm`, `node`, etc., per `config.example.yml`'s `allow_readonly` list) with a real subprocess, isolated environment, and process-tree timeout/kill handling. It is deny-by-default, restricted to reviewed per-subcommand flag allowlists, and is not wired into the work-item/policy-gate/audit lifecycle above — see `packages/machine-controller/src/command.ts`.
+This dry-run scope applies to the `apps/worker` / `packages/sandbox` work-item execution pipeline described below. It does **not** describe `packages/machine-controller` (used by the standalone `apps/mcp` stdio server): that component really does spawn read-only diagnostic commands (`git`, `npm`, `node`, etc., per `config.example.yml`'s `allow_readonly` list) with a real subprocess. It is deny-by-default and not wired into the work-item/policy-gate/audit lifecycle above — see `packages/machine-controller/src/command.ts`.
+
+**Known unpatched gap:** `isKnownReadonly()` (`command.ts:186-196`) only checks the _first_ argument (the subcommand) against its allowlist — e.g. `git` + `diff`/`log`/`show`/`status` — and passes every argument after that straight through to the real spawned process unvalidated. Git accepts flags like `--output=<path>` on `diff`/`log`/`show` that write to an arbitrary filesystem path, so `{ command: "git", args: ["diff", "--output=/some/path"] }` is classified `read_only` and actually executes, writing outside `cwd`. An open, unmerged PR (#26) has a reviewed fix (per-subcommand flag allowlists, an isolated environment for the subprocess, and forced `--no-ext-diff --no-textconv`); until it merges, do not describe this path as hardened.
 
 Wave 2 models completion without claiming execution: result submission accepts only authenticated worker principals with an active matching lease, action hash, and dry-run metadata. Accepted results are immutable. Retry and clone create new work items; they never reopen or edit historical items. External connector proof remains separate from this local lifecycle proof.
 
@@ -94,27 +96,27 @@ immutable result + audit evidence
 
 ### Main components
 
-| Component                     | Purpose                                                                                                                                                      |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `apps/gateway`                | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events, ChatGPT control-center widget host.                                 |
-| `apps/control-ui`             | Server-rendered mission-control dashboard HTML.                                                                                                              |
-| `apps/mcp`                    | stdio MCP server backed by the machine-controller package.                                                                                                   |
-| `apps/worker`                 | One-shot local worker that claims the next approved work item and records a dry-run result.                                                                  |
-| `apps/chatgpt-widget`         | React source for the ChatGPT control-center widget; built by `npm run build:chatgpt-widget` into a generated file `apps/gateway` serves. Not run standalone. |
-| `packages/work-items`         | Work-item state machine, SQLite store, approvals, leases, immutable results, retry/clone lineage, audit events, registry, audit-chain health.                |
-| `packages/policy-gate`        | Policy evaluation, action fingerprinting, approval gating, worker-claim gating.                                                                              |
-| `packages/sandbox`            | Execution boundary. Currently dry-run only.                                                                                                                  |
-| `packages/shared`             | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers.                                                                                   |
-| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary. Runs real, hardened, read-only diagnostic commands (see above).                              |
-| `packages/acp-adapter`        | Read-only ACP stdio adapter for registering agent status/capabilities.                                                                                       |
-| `packages/moa-orchestrator`   | Multi-model/model-routing orchestration support.                                                                                                             |
-| `packages/eval-harness`       | Replay and policy validation harness.                                                                                                                        |
-| `packages/temporal-memory`    | Source-backed memory events/projections.                                                                                                                     |
-| `packages/agentos-contracts`  | Shared contract types for AgentOS-facing integrations. Not yet consumed by any app path.                                                                     |
-| `packages/engine-adapter`     | Codex engine adapter and command-broker binding to persisted attempt/lease/workspace authority. Not yet consumed by any app path.                            |
-| `packages/secret-broker`      | Credential-leasing primitive that binds leases to a principal with use accounting. Not yet consumed by any app path.                                         |
-| `packages/verification`       | Independent implementer/verifier identity separation and exact-criteria-coverage checking. Not yet wired into the result-submission write path.              |
-| `packages/workspace-manager`  | Git worktree-backed workspace allocation, tied to `work-items`' persisted `WorkspaceAllocation` records. Not yet consumed by any app path.                   |
+| Component                     | Purpose                                                                                                                                                       |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apps/gateway`                | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events, ChatGPT control-center widget host.                                  |
+| `apps/control-ui`             | Server-rendered mission-control dashboard HTML.                                                                                                               |
+| `apps/mcp`                    | stdio MCP server backed by the machine-controller package.                                                                                                    |
+| `apps/worker`                 | One-shot local worker that claims the next approved work item and records a dry-run result.                                                                   |
+| `apps/chatgpt-widget`         | React source for the ChatGPT control-center widget; built by `npm run build:chatgpt-widget` into a generated file `apps/gateway` serves. Not run standalone.  |
+| `packages/work-items`         | Work-item state machine, SQLite store, approvals, leases, immutable results, retry/clone lineage, audit events, registry, audit-chain health.                 |
+| `packages/policy-gate`        | Policy evaluation, action fingerprinting, approval gating, worker-claim gating.                                                                               |
+| `packages/sandbox`            | Execution boundary. Currently dry-run only.                                                                                                                   |
+| `packages/shared`             | Shared IDs, stable hashing, errors, redaction, schemas, migration helpers.                                                                                    |
+| `packages/machine-controller` | Local machine-controller config and direct agent/tool boundary. Runs real read-only diagnostic commands; has a known unpatched arg-injection gap (see above). |
+| `packages/acp-adapter`        | Read-only ACP stdio adapter for registering agent status/capabilities.                                                                                        |
+| `packages/moa-orchestrator`   | Multi-model/model-routing orchestration support.                                                                                                              |
+| `packages/eval-harness`       | Replay and policy validation harness.                                                                                                                         |
+| `packages/temporal-memory`    | Source-backed memory events/projections.                                                                                                                      |
+| `packages/agentos-contracts`  | Shared contract types for AgentOS-facing integrations. Not yet consumed by any app path.                                                                      |
+| `packages/engine-adapter`     | Codex engine adapter and command-broker binding to persisted attempt/lease/workspace authority. Not yet consumed by any app path.                             |
+| `packages/secret-broker`      | Credential-leasing primitive that binds leases to a principal with use accounting. Not yet consumed by any app path.                                          |
+| `packages/verification`       | Independent implementer/verifier identity separation and exact-criteria-coverage checking. Not yet wired into the result-submission write path.               |
+| `packages/workspace-manager`  | Git worktree-backed workspace allocation, tied to `work-items`' persisted `WorkspaceAllocation` records. Not yet consumed by any app path.                    |
 
 ## Architectural invariants
 
