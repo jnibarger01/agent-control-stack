@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/pushcut/approval.schema.json",
+  "title": "ACS-bound approval decision",
+  "description": "A decision record, not a bearer authorization token.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "approval_id",
+    "work_item_id",
+    "action_hash",
+    "principal_id",
+    "decision",
+    "decided_at",
+    "expires_at",
+    "one_time_use"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "approval_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "work_item_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "action_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "principal_id": { "type": "string", "minLength": 3, "maxLength": 128 },
+    "decision": { "enum": ["approved", "rejected"] },
+    "decided_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "one_time_use": { "const": true },
+    "reason": { "type": "string", "maxLength": 500 }
+  }
+}

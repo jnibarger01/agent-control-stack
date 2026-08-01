@@ -33,6 +33,24 @@ describe("claimSchedulerFiring / completeSchedulerFiring", () => {
     expect(claim.firing).toMatchObject({ scheduleId: "nightly", status: "claimed" });
   });
 
+  it("rolls back a claim when the enclosing work-item transaction crashes", () => {
+    const store = createStore();
+    const input = {
+      scheduleId: "nightly",
+      scheduledFiringTime: new Date("2026-01-01T00:00:00.000Z"),
+      idempotencyKey: hex("b")
+    };
+
+    expect(() =>
+      store.withTransaction(() => {
+        store.claimSchedulerFiring(input, { via: "domain_service" });
+        throw new Error("simulated scheduler crash");
+      })
+    ).toThrow("simulated scheduler crash");
+
+    expect(store.claimSchedulerFiring(input, { via: "domain_service" }).owned).toBe(true);
+  });
+
   it("refuses without a privileged transition option", () => {
     const store = createStore();
     expect(() =>

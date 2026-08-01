@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statfsSync, writeFileSync } from "node:fs";
 import { execFile } from "node:child_process";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { auditEventHash } from "./audit-chain.js";
 import { backupControlPlaneDatabase, restoreControlPlaneDatabase } from "./database-operations.js";
-import { inspectControlPlaneDatabaseFile } from "./database-health.js";
+import { inspectControlPlaneDatabaseFile, inspectDatabaseStorage } from "./database-health.js";
 import { applyControlPlaneMigrations } from "./migration.js";
 
 describe("control-plane database health", () => {
@@ -31,6 +31,19 @@ describe("control-plane database health", () => {
         auditChain: { ok: true }
       }
     });
+  });
+
+  it("reports warning and read-only storage states with non-secret diagnostics", () => {
+    const path = join(temporaryDirectory(), "control.db");
+    const freeBytes = Number(statfsSync(dirname(path)).bavail) * Number(statfsSync(dirname(path)).bsize);
+
+    expect(inspectDatabaseStorage(path, { warnFreeBytes: freeBytes + 1, rejectFreeBytes: 1 })).toMatchObject({
+      ok: true,
+      diagnostics: { mode: "warning", freeBytes }
+    });
+    expect(
+      inspectDatabaseStorage(path, { warnFreeBytes: freeBytes + 1, rejectFreeBytes: freeBytes + 1 })
+    ).toMatchObject({ ok: false, code: "disk_space_low", diagnostics: { mode: "read_only", freeBytes } });
   });
 
   it("rejects a physically corrupted database", () => {

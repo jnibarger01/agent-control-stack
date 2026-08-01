@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
-import { stableHash } from "@agent-control-stack/shared";
+import { loadRuntimeConfig, stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { z } from "zod";
 
@@ -137,7 +137,7 @@ function resolveScheduleConfig(options: SchedulerOptions): ScheduleConfig {
   if (options.schedules !== undefined) {
     return scheduleConfigSchema.parse(options.schedules);
   }
-  const path = options.scheduleConfigPath ?? process.env.ACS_SCHEDULE_CONFIG_PATH;
+  const path = options.scheduleConfigPath ?? loadRuntimeConfig().scheduler.configPath;
   if (!path) {
     return [];
   }
@@ -145,7 +145,7 @@ function resolveScheduleConfig(options: SchedulerOptions): ScheduleConfig {
 }
 
 export async function runSchedulerOnce(options: SchedulerOptions = {}): Promise<SchedulerResult> {
-  const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  const dbPath = options.dbPath ?? loadRuntimeConfig().database.path;
   const now = options.now ?? new Date();
   const schedules = resolveScheduleConfig(options);
 
@@ -164,44 +164,42 @@ export async function runSchedulerOnce(options: SchedulerOptions = {}): Promise<
       }
 
       const idempotencyKey = scheduledFiringIdempotencyKey(schedule.scheduleId, scheduledFiringTime);
-      // The store's own UNIQUE(schedule_id, scheduled_firing_time) constraint
-      // (storage/migrations/008) is the actual race resolver across
-      // concurrent scheduler invocations - not this application-level
-      // check-then-act sequence, which exists only to decide what *this*
-      // call should do once the store has already settled who owns the firing.
-      const claim = store.claimSchedulerFiring(
-        { scheduleId: schedule.scheduleId, scheduledFiringTime, idempotencyKey },
-        { via: "domain_service" }
-      );
+      store.withTransaction(() => {
+        // Claim and sanctioned work-item creation participate in one SQLite
+        // transaction. A crash rolls both back, so a firing cannot be left
+        // claimed without its work item.
+        const claim = store.claimSchedulerFiring(
+          { scheduleId: schedule.scheduleId, scheduledFiringTime, idempotencyKey },
+          { via: "domain_service" }
+        );
+        if (!claim.owned) {
+          firings.push({
+            scheduleId: schedule.scheduleId,
+            scheduledFiringTime: scheduledFiringTime.toISOString(),
+            idempotencyKey,
+            created: false,
+            workItemId: claim.firing.workItemId
+          });
+          return;
+        }
 
-      if (!claim.owned) {
+        const template = schedule.workItemTemplate;
+        const workItem = tools.create_work_item({
+          title: template.title,
+          requester: template.requester,
+          intent: template.intent,
+          target: template.target,
+          requestedActions: template.requestedActions,
+          risk: template.risk
+        });
+        store.completeSchedulerFiring(claim.firing.firingId, workItem.id, { via: "domain_service" });
         firings.push({
           scheduleId: schedule.scheduleId,
           scheduledFiringTime: scheduledFiringTime.toISOString(),
           idempotencyKey,
-          created: false,
-          workItemId: claim.firing.workItemId
+          created: true,
+          workItemId: workItem.id
         });
-        continue;
-      }
-
-      const template = schedule.workItemTemplate;
-      const workItem = tools.create_work_item({
-        title: template.title,
-        requester: template.requester,
-        intent: template.intent,
-        target: template.target,
-        requestedActions: template.requestedActions,
-        risk: template.risk
-      });
-      store.completeSchedulerFiring(claim.firing.firingId, workItem.id, { via: "domain_service" });
-
-      firings.push({
-        scheduleId: schedule.scheduleId,
-        scheduledFiringTime: scheduledFiringTime.toISOString(),
-        idempotencyKey,
-        created: true,
-        workItemId: workItem.id
       });
     }
 

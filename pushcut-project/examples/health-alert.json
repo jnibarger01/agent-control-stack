@@ -1,0 +1,26 @@
+{
+  "title": "Infrastructure check: degraded",
+  "text": "hp-server disk usage needs review. Tap Diagnose for read-only evidence.",
+  "sound": "problem",
+  "isTimeSensitive": true,
+  "input": {
+    "schema_version": "1.0",
+    "request_id": "diag-20260802-001",
+    "idempotency_key": "diag:hp-server:20260802T170000Z",
+    "target": "hp-server",
+    "operation": "health_check",
+    "requested_at": "2026-08-02T17:00:00Z"
+  },
+  "actions": [
+    {
+      "name": "Diagnose",
+      "shortcut": "Diagnose Server",
+      "keepNotification": true
+    },
+    {
+      "name": "Open Dashboard",
+      "url": "https://dashboard.example.invalid/hosts/hp-server",
+      "keepNotification": true
+    }
+  ]
+}

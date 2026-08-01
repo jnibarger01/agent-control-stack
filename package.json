@@ -30,6 +30,7 @@
     "check": "npm run format:check && npm run lint && npm run build && npm test && npm run test:authority-coverage && npm run security:audit",
     "dev:gateway": "tsx apps/gateway/src/index.ts",
     "eval": "tsx packages/eval-harness/src/cli.ts",
+    "eval:deterministic": "tsx packages/eval-harness/src/deterministic-cli.ts",
     "start:mcp": "node apps/mcp/dist/cli.js",
     "start:gateway": "node apps/gateway/dist/cli.js",
     "start:worker": "node apps/worker/dist/cli.js",

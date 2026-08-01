@@ -1,6 +1,6 @@
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { executeSandboxed } from "@agent-control-stack/sandbox";
-import { stableHash } from "@agent-control-stack/shared";
+import { loadRuntimeConfig, stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 
 export interface WorkerOptions {
@@ -38,7 +38,7 @@ export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActi
 }
 
 export async function runWorkerOnce(options: WorkerOptions = {}): Promise<WorkerResult> {
-  const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  const dbPath = options.dbPath ?? loadRuntimeConfig().database.path;
   const workItems = new SqliteWorkItemStore(dbPath);
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const workerId = options.workerId ?? "local-worker";

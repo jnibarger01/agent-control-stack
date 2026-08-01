@@ -16,6 +16,9 @@ CREATE TABLE IF NOT EXISTS scheduler_firings (
 CREATE INDEX IF NOT EXISTS idx_scheduler_firings_status
   ON scheduler_firings(status, claimed_at);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_scheduler_firings_idempotency_key
+  ON scheduler_firings(idempotency_key);
+
 CREATE TRIGGER IF NOT EXISTS scheduler_firings_transition_guard
 BEFORE UPDATE ON scheduler_firings
 WHEN NEW.firing_id IS NOT OLD.firing_id

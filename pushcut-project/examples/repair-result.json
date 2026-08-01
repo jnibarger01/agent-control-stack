@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "request_id": "repair-20260802-001",
+  "work_item_id": "wi-demo-20260802-001",
+  "action_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "idempotency_key": "repair:wi-demo-20260802-001:aaaaaaaa",
+  "target_machine": "hp-server",
+  "status": "not_executed",
+  "summary": "Mock validation completed; no command was run.",
+  "ambiguous": false,
+  "completed_at": "2026-08-02T17:00:01Z"
+}

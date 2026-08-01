@@ -1,4 +1,5 @@
 export * from "./promotion-gate.js";
+export * from "./deterministic.js";
 export * from "./replay.js";
 export * from "./sqlite-eval.js";
 import type { AuditEvent } from "@agent-control-stack/shared";

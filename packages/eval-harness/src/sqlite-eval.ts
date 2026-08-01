@@ -1,4 +1,4 @@
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
@@ -46,6 +46,11 @@ export interface DeterministicSqliteEvaluation {
 
 export function runDeterministicSqliteEvaluation(_rootDir: string): DeterministicSqliteEvaluation {
   mkdirSync(_rootDir, { recursive: true });
+  for (const filename of ["run-1.db", "run-2.db", "tampered.db"]) {
+    rmSync(join(_rootDir, filename), { force: true });
+    rmSync(join(_rootDir, `${filename}-wal`), { force: true });
+    rmSync(join(_rootDir, `${filename}-shm`), { force: true });
+  }
   const first = runGoldenPath(join(_rootDir, "run-1.db"));
   const second = runGoldenPath(join(_rootDir, "run-2.db"));
 

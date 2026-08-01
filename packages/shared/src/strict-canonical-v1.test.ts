@@ -1,4 +1,6 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import {
   STRICT_CANONICAL_SHA256_V1_DOMAIN,
@@ -9,6 +11,74 @@ import {
 } from "./index.js";
 
 describe("strict canonicalization v1", () => {
+  it("is invariant under recursively shuffled object insertion order for a reproducible fuzz seed", () => {
+    const seed = 0x5eed_cafe;
+    let random = seed;
+    const next = (): number => {
+      random = (Math.imul(random, 1664525) + 1013904223) >>> 0;
+      return random;
+    };
+    const value = (depth: number): unknown => {
+      if (depth === 0) return [null, false, true, "seeded", -0, 1.5][next() % 6];
+      if (next() % 3 === 0) {
+        const entries = Array.from(
+          { length: 1 + (next() % 5) },
+          (_, index) => [`key-${index}-${next() % 7}`, value(depth - 1)] as const
+        );
+        entries.reverse();
+        return Object.fromEntries(entries);
+      }
+      return Array.from({ length: next() % 5 }, () => value(depth - 1));
+    };
+    const original = value(4);
+    const shuffleKeys = (input: unknown): unknown => {
+      if (Array.isArray(input)) return input.map(shuffleKeys);
+      if (!input || typeof input !== "object") return input;
+      const entries = Object.entries(input).map(([key, entry]) => [key, shuffleKeys(entry)] as const);
+      entries.sort(() => (next() % 3) - 1);
+      return Object.fromEntries(entries);
+    };
+    const shuffled = shuffleKeys(original);
+
+    expect(() => strictCanonicalJsonV1(original)).not.toThrow();
+    expect(strictCanonicalJsonV1(shuffled)).toBe(strictCanonicalJsonV1(original));
+    expect(strictCanonicalSha256V1(shuffled), `seed ${seed}`).toBe(strictCanonicalSha256V1(original));
+  });
+
+  it("has the same canonical bytes and digest in a separate Node process", () => {
+    const value = { z: [{ b: "two", a: 1 }], a: { "10": false, "2": true } };
+    const fixture = fileURLToPath(new URL("./canonical-cross-process-fixture.ts", import.meta.url));
+    const output = execFileSync(process.execPath, ["--import", "tsx", fixture, JSON.stringify(value)], {
+      encoding: "utf8"
+    }).trim();
+
+    expect(JSON.parse(output)).toEqual({
+      canonical: strictCanonicalJsonV1(value),
+      digest: strictCanonicalSha256V1(value)
+    });
+  });
+
+  it("rejects every ambiguous shape from a reproducible fuzz corpus", () => {
+    const accessor = {} as Record<string, unknown>;
+    Object.defineProperty(accessor, "value", { enumerable: true, get: () => 1 });
+    const cycle: Record<string, unknown> = {};
+    cycle.self = cycle;
+    const prototype = Object.create({ inherited: true }) as Record<string, unknown>;
+    prototype.own = 1;
+    const cases: Array<[string, unknown, RegExp]> = [
+      ["undefined", undefined, /undefined/i],
+      ["NaN", NaN, /non-finite/i],
+      ["infinity", Infinity, /non-finite/i],
+      ["accessor", accessor, /accessor/i],
+      ["cycle", cycle, /cyclic/i],
+      ["prototype", prototype, /non-plain/i]
+    ];
+
+    for (const [label, input, message] of cases) {
+      expect(() => strictCanonicalJsonV1(input), label).toThrow(message);
+    }
+  });
+
   it("sorts object keys recursively", () => {
     const first = {
       z: { beta: 2, alpha: 1 },
@@ -18,21 +88,16 @@ describe("strict canonicalization v1", () => {
       a: { nested: { left: false, right: true } },
       z: { alpha: 1, beta: 2 }
     };
-    const expected =
-      '{"a":{"nested":{"left":false,"right":true}},"z":{"alpha":1,"beta":2}}';
+    const expected = '{"a":{"nested":{"left":false,"right":true}},"z":{"alpha":1,"beta":2}}';
 
     expect(strictCanonicalJsonV1(first)).toBe(expected);
     expect(strictCanonicalJsonV1(second)).toBe(expected);
   });
 
   it("sorts integer-like and magic object keys lexicographically", () => {
-    const value = JSON.parse(
-      '{"2":"two","10":"ten","__proto__":{"safe":true},"a":"letter"}'
-    ) as unknown;
+    const value = JSON.parse('{"2":"two","10":"ten","__proto__":{"safe":true},"a":"letter"}') as unknown;
 
-    expect(strictCanonicalJsonV1(value)).toBe(
-      '{"10":"ten","2":"two","__proto__":{"safe":true},"a":"letter"}'
-    );
+    expect(strictCanonicalJsonV1(value)).toBe('{"10":"ten","2":"two","__proto__":{"safe":true},"a":"letter"}');
   });
 
   it("preserves array order while sorting objects inside arrays", () => {
@@ -94,32 +159,24 @@ describe("strict canonicalization v1", () => {
     const hashFrame = (domain: string): string =>
       createHash("sha256").update(`${domain}\0${canonical}`, "utf8").digest("hex");
 
-    expect(STRICT_CANONICAL_SHA256_V1_DOMAIN).toBe(
-      "agent-control-stack/strict-canonical-json/sha256/v1"
-    );
+    expect(STRICT_CANONICAL_SHA256_V1_DOMAIN).toBe("agent-control-stack/strict-canonical-json/sha256/v1");
     expect(digest).toBe(hashFrame(STRICT_CANONICAL_SHA256_V1_DOMAIN));
     expect(digest).not.toBe(createHash("sha256").update(canonical, "utf8").digest("hex"));
     expect(digest).not.toBe(hashFrame("other-product/strict-canonical-json/sha256/v1"));
-    expect(digest).not.toBe(
-      hashFrame("agent-control-stack/strict-canonical-json/sha256/v2")
-    );
+    expect(digest).not.toBe(hashFrame("agent-control-stack/strict-canonical-json/sha256/v2"));
   });
 
   it("matches the published v1 SHA-256 fixed vector", () => {
     const value = { z: { b: 2, a: 1 }, a: [3, 2, 1] };
 
     expect(strictCanonicalJsonV1(value)).toBe('{"a":[3,2,1],"z":{"a":1,"b":2}}');
-    expect(strictCanonicalSha256V1(value)).toBe(
-      "4d103b25ab1a14ceb5d9a62b67ad7f1d30634a5ba9ca34046c00ec8ff45eb0e1"
-    );
+    expect(strictCanonicalSha256V1(value)).toBe("4d103b25ab1a14ceb5d9a62b67ad7f1d30634a5ba9ca34046c00ec8ff45eb0e1");
   });
 
   it("preserves the legacy stableHash undefined semantics and digest", () => {
     const legacyValue = { z: undefined, a: [undefined, { b: 2, a: 1 }] };
 
     expect(canonicalJson(legacyValue)).toBe('{"a":[null,{"a":1,"b":2}]}');
-    expect(stableHash(legacyValue)).toBe(
-      "613668c0c720f4bd86dba076197de6d614c0a32820aeede2b0d943b69ac82b7c"
-    );
+    expect(stableHash(legacyValue)).toBe("613668c0c720f4bd86dba076197de6d614c0a32820aeede2b0d943b69ac82b7c");
   });
 });

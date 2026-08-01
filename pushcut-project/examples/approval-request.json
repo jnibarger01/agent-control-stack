@@ -1,0 +1,18 @@
+{
+  "schema_version": "1.0",
+  "request_id": "repair-20260802-001",
+  "work_item_id": "wi-demo-20260802-001",
+  "action_hash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "idempotency_key": "repair:wi-demo-20260802-001:aaaaaaaa",
+  "target_machine": "hp-server",
+  "exact_action": {
+    "kind": "command",
+    "program": "systemctl",
+    "arguments": ["restart", "example-demo.service"]
+  },
+  "expected_effect": "Restart only the inert demonstration service after live policy verification.",
+  "risk": "A restart briefly interrupts the selected service; this example must not be run against a real service.",
+  "rollback_method": "Inspect status and logs; stop the demonstration service if it behaves unexpectedly.",
+  "approval_expires_at": "2099-08-02T17:05:00Z",
+  "status": "proposed"
+}

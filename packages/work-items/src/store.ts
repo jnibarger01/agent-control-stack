@@ -9,13 +9,18 @@ import {
   createId,
   createEvent,
   inspectControlPlaneDatabase,
+  inspectDatabaseStorage,
   redactValue,
   stableHash,
   verifyAuditChain,
+  type MigrationFaultPhase,
   type AuditChainEvent,
   type AuditChainVerification,
-  type AuditEvent
+  type AuditEvent,
+  type DatabaseStoragePolicy,
+  type DatabaseStorageDiagnostics
 } from "@agent-control-stack/shared";
+import { searchMemory as searchTemporalMemory, type MemorySearchResult } from "@agent-control-stack/temporal-memory";
 import { transitionWorkItem } from "./state-machine.js";
 import {
   cancelRequestSchema,
@@ -277,6 +282,7 @@ export interface StoreHealth {
     migrations: HealthCheck;
     auditChain: HealthCheck;
     liveness: HealthCheck;
+    storage: HealthCheck & { diagnostics?: DatabaseStorageDiagnostics };
   };
 }
 
@@ -656,6 +662,8 @@ export interface SqliteWorkItemStoreOptions {
   leaseMs?: number;
   heartbeatTtlMs?: number;
   onEvent?: (event: StoredAuditEvent) => void;
+  migrationFaultInjector?: (phase: MigrationFaultPhase, version?: number) => void;
+  storagePolicy?: DatabaseStoragePolicy;
 }
 
 export interface WorkItemStore {
@@ -695,6 +703,7 @@ export interface WorkItemStore {
     workspaceAllocationId: string;
   }): CommandAuthority | undefined;
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
+  searchMemory?(query: string, options?: { asOf?: string; tags?: string[]; limit?: number }): MemorySearchResult[];
   health(): StoreHealth;
   verifyAuditChain(): AuditChainVerification;
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
@@ -767,9 +776,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
   private auditChainValid = true;
+  private readonly dbPath: string;
+  private readonly storagePolicy: DatabaseStoragePolicy;
+  private storageMode: DatabaseStorageDiagnostics["mode"] = "normal";
 
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
     mkdirSync(dirname(dbPath), { recursive: true });
+    this.dbPath = dbPath;
+    this.storagePolicy = options.storagePolicy ?? {};
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
@@ -780,8 +794,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       PRAGMA foreign_keys = ON;
     `);
     try {
-      applyControlPlaneMigrations(this.db);
-      this.backfillAuditChain();
+      applyControlPlaneMigrations(this.db, { faultInjector: options.migrationFaultInjector });
+      this.backfillAuditChain(options.migrationFaultInjector);
       this.auditChainValid = this.verifyAuditChain().ok;
     } catch (error) {
       this.db.close();
@@ -1433,8 +1447,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
     return this.write<SchedulerFiringClaim>(() => {
       const existing = this.db
-        .prepare(`SELECT * FROM scheduler_firings WHERE schedule_id = ? AND scheduled_firing_time = ?`)
-        .get(parsed.scheduleId, scheduledFiringTimeIso) as unknown as SchedulerFiringRow | undefined;
+        .prepare(
+          `SELECT * FROM scheduler_firings
+           WHERE idempotency_key = ? OR (schedule_id = ? AND scheduled_firing_time = ?)
+           LIMIT 1`
+        )
+        .get(parsed.idempotencyKey, parsed.scheduleId, scheduledFiringTimeIso) as unknown as
+        SchedulerFiringRow | undefined;
 
       if (!existing) {
         const firingId = createId("firing");
@@ -1462,6 +1481,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
           })
         );
         return { value: { firing, owned: true }, events: [event] };
+      }
+
+      if (existing.idempotency_key !== parsed.idempotencyKey) {
+        throw new ControlStackError(
+          "scheduler_firing_conflict",
+          "schedule firing identity conflicts with an existing persisted firing"
+        );
       }
 
       if (existing.status !== "claimed") {
@@ -1614,6 +1640,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     ).map(rowToEvent);
   }
 
+  searchMemory(query: string, options: { asOf?: string; tags?: string[]; limit?: number } = {}): MemorySearchResult[] {
+    return searchTemporalMemory(this.db, query, options);
+  }
+
   listActors(): RegistryActor[] {
     return (this.db.prepare(`SELECT * FROM actors ORDER BY display_name ASC`).all() as unknown as ActorRow[]).map(
       rowToActor
@@ -1651,11 +1681,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
   health(): StoreHealth {
     const database = inspectControlPlaneDatabase(this.db);
     this.auditChainValid = database.checks.auditChain.ok;
+    const storage = inspectDatabaseStorage(this.dbPath, this.storagePolicy, this.storageMode);
+    if (storage.diagnostics) this.storageMode = storage.diagnostics.mode;
     const checks = {
       read: this.readHealth(),
       write: this.writeHealth(),
       ...database.checks,
-      liveness: this.livenessHealth()
+      liveness: this.livenessHealth(),
+      storage
     };
     return { ok: Object.values(checks).every((check) => check.ok), checks };
   }
@@ -3171,6 +3204,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     if (!this.auditChainValid) {
       throw new ControlStackError("audit_chain_invalid", "audit chain is invalid; writes are disabled");
     }
+    this.admitMutation();
     if (this.transactionDepth > 0) {
       // Participate in the enclosing transaction; events are notified only if it commits.
       const nested = operation();
@@ -3209,23 +3243,60 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return result.value;
   }
 
+  private admitMutation(): void {
+    const storage = inspectDatabaseStorage(this.dbPath, this.storagePolicy, this.storageMode);
+    if (storage.diagnostics) this.storageMode = storage.diagnostics.mode;
+    if (!storage.ok) {
+      throw new ControlStackError(
+        storage.code === "wal_growth_excessive" ? "wal_growth_excessive" : "disk_space_low",
+        "database mutation admission is closed; storage capacity is unsafe"
+      );
+    }
+    if ((storage.diagnostics?.walBytes ?? 0) >= (this.storagePolicy.walCheckpointBytes ?? 64 * 1024 * 1024)) {
+      try {
+        this.db.exec("PRAGMA wal_checkpoint(PASSIVE)");
+      } catch {
+        throw new ControlStackError("wal_checkpoint_failed", "database WAL checkpoint failed; mutations are disabled");
+      }
+    }
+  }
+
   private latestAuditHash(): string {
     const row = this.db.prepare(`SELECT event_hash FROM audit_events ORDER BY sequence DESC LIMIT 1`).get() as
       { event_hash: string } | undefined;
     return row?.event_hash ?? "";
   }
 
-  private backfillAuditChain(): void {
-    const rows = this.db.prepare(`SELECT * FROM audit_events ORDER BY sequence ASC`).all() as unknown as EventRow[];
-    let previousHash = "";
-    for (const row of rows) {
-      const eventHash = row.event_hash || auditEventHash(rowToEvent({ ...row, previous_hash: previousHash }));
-      if (!row.event_hash) {
-        this.db
-          .prepare(`UPDATE audit_events SET previous_hash = ?, event_hash = ? WHERE sequence = ?`)
-          .run(previousHash, eventHash, row.sequence);
+  private backfillAuditChain(
+    faultInjector: ((phase: MigrationFaultPhase, version?: number) => void) | undefined
+  ): void {
+    const fault = faultInjector ?? (() => undefined);
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      fault("before_audit_initialization");
+      const rows = this.db.prepare(`SELECT * FROM audit_events ORDER BY sequence ASC`).all() as unknown as EventRow[];
+      let previousHash = "";
+      for (const row of rows) {
+        const eventHash = row.event_hash || auditEventHash(rowToEvent({ ...row, previous_hash: previousHash }));
+        if (!row.event_hash) {
+          fault("before_audit_event", row.sequence);
+          this.db
+            .prepare(`UPDATE audit_events SET previous_hash = ?, event_hash = ? WHERE sequence = ?`)
+            .run(previousHash, eventHash, row.sequence);
+          fault("after_audit_event", row.sequence);
+        }
+        previousHash = eventHash;
       }
-      previousHash = eventHash;
+      fault("before_audit_commit");
+      this.db.exec("COMMIT");
+      fault("after_audit_commit");
+    } catch (error) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {
+        // best effort; SQLite may have already closed the transaction.
+      }
+      throw error;
     }
   }
 }

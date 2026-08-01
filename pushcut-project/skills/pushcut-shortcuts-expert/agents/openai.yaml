@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pushcut & Shortcuts Expert"
+  short_description: "Design safe Pushcut and Apple Shortcuts workflows"
+  default_prompt: "Use $pushcut-shortcuts-expert to design and test a safe Pushcut workflow."

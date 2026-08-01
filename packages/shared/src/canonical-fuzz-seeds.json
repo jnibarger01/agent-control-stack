@@ -1,0 +1,4 @@
+{
+  "keyOrderingInvariant": 1592590334,
+  "invalidShapeCorpus": ["undefined", "NaN", "infinity", "accessor", "cycle", "prototype"]
+}

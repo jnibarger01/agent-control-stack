@@ -20,6 +20,25 @@ interface SqliteLike {
   };
 }
 
+export type MigrationFaultPhase =
+  | "before_schema_metadata"
+  | "after_schema_metadata"
+  | "before_migration"
+  | "after_migration_sql"
+  | "after_migration_metadata"
+  | "before_migration_commit"
+  | "after_migration_commit"
+  | "before_audit_initialization"
+  | "before_audit_event"
+  | "after_audit_event"
+  | "before_audit_commit"
+  | "after_audit_commit";
+
+export interface MigrationOptions {
+  /** Throw from this hook to simulate a process crash at a durable boundary. */
+  faultInjector?: (phase: MigrationFaultPhase, version?: number) => void;
+}
+
 const migrationFiles = [
   { version: 1, name: "audit_log", filename: "001_audit_log.sql" },
   { version: 2, name: "agent_registry", filename: "002_agent_registry.sql" },
@@ -28,7 +47,9 @@ const migrationFiles = [
   { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" },
   { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
   { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" },
-  { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" }
+  { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" },
+  { version: 9, name: "temporal_memory", filename: "009_temporal_memory.sql" },
+  { version: 10, name: "scheduler_firing_legacy_markers", filename: "010_scheduler_firing_legacy_markers.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -44,8 +65,12 @@ export function controlPlaneMigrationSql(): string {
     .join("\n");
 }
 
-export function applyControlPlaneMigrations(db: SqliteLike): void {
-  db.exec(`
+export function applyControlPlaneMigrations(db: SqliteLike, options: MigrationOptions = {}): void {
+  const fault = options.faultInjector ?? (() => undefined);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    fault("before_schema_metadata");
+    db.exec(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       version INTEGER PRIMARY KEY,
       name TEXT NOT NULL,
@@ -54,21 +79,33 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       applied_at TEXT NOT NULL
     );
   `);
-  if (!hasColumn(db, "schema_migrations", "checksum")) {
-    db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
+    if (!hasColumn(db, "schema_migrations", "checksum")) {
+      db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
+    }
+    fault("after_schema_metadata");
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // best effort; SQLite may have already closed the transaction.
+    }
+    throw error;
   }
+
   for (const migration of controlPlaneMigrations()) {
-    // The "already applied?" question is answered fresh inside this
-    // migration's own transaction, after BEGIN IMMEDIATE's write lock is
-    // actually held - not from a snapshot taken before the loop started.
-    // Two processes racing a fresh database both reach this point believing
-    // a migration is unapplied; only one gets the lock first, and the
-    // other must re-check rather than blindly re-INSERT once it wakes up,
-    // or it hits a UNIQUE violation on schema_migrations.version and the
-    // whole startup crashes instead of just no-op'ing past what its rival
-    // already committed.
     db.exec("BEGIN IMMEDIATE");
     try {
+      // The "already applied?" question is answered fresh inside the
+      // migration transaction, after BEGIN IMMEDIATE's write lock is
+      // actually held - not from a snapshot taken before the loop started.
+      // Two processes racing a fresh database both reach this point believing
+      // a migration is unapplied; only one gets the lock first, and the
+      // other must re-check rather than blindly re-INSERT once it wakes up,
+      // or it hits a UNIQUE violation on schema_migrations.version and the
+      // whole startup crashes instead of just no-op'ing past what its rival
+      // already committed.
+      fault("before_migration", migration.version);
       const existing = queryMigrationRow(db, migration.version);
       if (existing) {
         if (existing.name !== migration.name || existing.filename !== migration.filename) {
@@ -83,16 +120,19 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
             migration.version
           );
         }
-        db.exec("COMMIT");
-        continue;
+        fault("after_migration_metadata", migration.version);
+      } else {
+        db.exec(migrationSqlForCurrentSchema(db, migration));
+        fault("after_migration_sql", migration.version);
+        db.prepare(
+          `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+             VALUES (?, ?, ?, ?, ?)`
+        ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
+        fault("after_migration_metadata", migration.version);
       }
-
-      db.exec(migrationSqlForCurrentSchema(db, migration));
-      db.prepare(
-        `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
-           VALUES (?, ?, ?, ?, ?)`
-      ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
+      fault("before_migration_commit");
       db.exec("COMMIT");
+      fault("after_migration_commit");
     } catch (error) {
       try {
         db.exec("ROLLBACK");

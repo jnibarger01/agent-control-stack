@@ -1,8 +1,34 @@
 import { DatabaseSync } from "node:sqlite";
+import { statfsSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { verifyAuditChain, type AuditChainEvent } from "./audit-chain.js";
 import { controlPlaneMigrations } from "./migration.js";
 
 export type DatabaseHealthCheck = { ok: true } | { ok: false; code: string };
+
+export interface DatabaseStoragePolicy {
+  /** Warn/read-only threshold. Defaults to 256 MiB. */
+  warnFreeBytes?: number;
+  /** Admission rejection threshold. Defaults to 64 MiB. */
+  rejectFreeBytes?: number;
+  /** Space at which a rejected store may recover. Defaults to 2x rejectFreeBytes. */
+  recoveryFreeBytes?: number;
+  /** WAL size at which writers attempt a passive checkpoint. Defaults to 64 MiB. */
+  walCheckpointBytes?: number;
+  /** WAL size that makes mutation admission fail closed. Defaults to 256 MiB. */
+  walRejectBytes?: number;
+}
+
+export interface DatabaseStorageDiagnostics {
+  freeBytes: number;
+  walBytes: number;
+  walGrowthBytes: number;
+  mode: "normal" | "warning" | "read_only";
+}
+
+export type DatabaseStorageHealth = DatabaseHealthCheck & {
+  diagnostics?: DatabaseStorageDiagnostics;
+};
 
 export interface ControlPlaneDatabaseHealth {
   ok: boolean;
@@ -11,7 +37,51 @@ export interface ControlPlaneDatabaseHealth {
     foreignKeys: DatabaseHealthCheck;
     migrations: DatabaseHealthCheck;
     auditChain: DatabaseHealthCheck;
+    storage?: DatabaseStorageHealth;
   };
+}
+
+const mib = 1024 * 1024;
+
+export function inspectDatabaseStorage(
+  databasePath: string,
+  policy: DatabaseStoragePolicy = {},
+  previousMode: DatabaseStorageDiagnostics["mode"] = "normal"
+): DatabaseStorageHealth {
+  const warn = policy.warnFreeBytes ?? 256 * mib;
+  const reject = policy.rejectFreeBytes ?? 64 * mib;
+  const recovery = policy.recoveryFreeBytes ?? Math.max(warn, reject * 2);
+  const walCheckpoint = policy.walCheckpointBytes ?? 64 * mib;
+  const walReject = policy.walRejectBytes ?? 256 * mib;
+  try {
+    const stats = statfsSync(dirname(databasePath));
+    const freeBytes = Number(stats.bavail) * Number(stats.bsize);
+    const walBytes = readSidecarBytes(`${databasePath}-wal`);
+    const recovered = previousMode === "read_only" && freeBytes >= recovery;
+    const mode = recovered
+      ? freeBytes <= warn || walBytes >= walCheckpoint
+        ? "warning"
+        : "normal"
+      : freeBytes <= reject || walBytes >= walReject
+        ? "read_only"
+        : freeBytes <= warn || walBytes >= walCheckpoint
+          ? "warning"
+          : "normal";
+    const diagnostics: DatabaseStorageDiagnostics = { freeBytes, walBytes, walGrowthBytes: 0, mode };
+    return mode === "read_only"
+      ? { ok: false, code: freeBytes <= reject ? "disk_space_low" : "wal_growth_excessive", diagnostics }
+      : { ok: true, diagnostics };
+  } catch {
+    return { ok: false, code: "storage_probe_failed" };
+  }
+}
+
+function readSidecarBytes(path: string): number {
+  try {
+    return statSync(path).size;
+  } catch {
+    return 0;
+  }
 }
 
 interface AuditEventRow {

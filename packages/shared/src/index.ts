@@ -10,6 +10,7 @@ export * from "./migration.js";
 export * from "./redact.js";
 export * from "./schema.js";
 export * from "./strict-canonical-v1.js";
+export * from "./runtime-config.js";
 
 export function createId(prefix: string): string {
   return `${prefix}_${randomUUID()}`;

@@ -39,3 +39,5 @@ reviews/
 IDEA.md
 logs/
 tunnel_*
+
+.agent/production-readiness.md

@@ -175,6 +175,17 @@ Backed by `createWorkItemTools` (`packages/policy-gate/src/tools.ts`) over a `Wo
 
 Remote (HTTP/OAuth) callers get `remoteMcpToolNames`: everything below except `approve_work_item`. Calling `approve_work_item` over MCP — local or remote — is unconditionally rejected with JSON-RPC error `-32002` ("MCP identities cannot grant approval"); approval must go through an authenticated gateway mutation actor via `/work-items/:id/approve`, per [ADR 0004](../adr/0004-request-bound-approval-tokens.md).
 
+The gateway also advertises the stable public adapter names required by the
+control-plane MVP: `work_item.create`, `work_item.list`, `work_item.get`,
+`work_item.approve`, `tool.execute_approved`, `audit.query`, `memory.search`,
+and `eval.run`. These are compatibility names over the same governed handlers,
+not a second execution implementation. `work_item.approve` remains fail-closed
+for MCP callers; it cannot grant human approval. `tool.execute_approved` can
+only claim an already-approved item and uses the existing sandbox boundary.
+`audit.query` returns the bounded, redacted event projection, `memory.search`
+returns source citations, and `eval.run` runs the deterministic no-network
+evaluation harness.
+
 ### `create_work_item`
 
 ```json

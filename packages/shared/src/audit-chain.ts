@@ -1,5 +1,6 @@
 import type { AuditEvent } from "./schema.js";
 import { stableHash } from "./hash.js";
+import { redactValue } from "./redact.js";
 
 export interface AuditChainEvent extends AuditEvent {
   sequence: number;
@@ -67,4 +68,9 @@ export function verifyAuditChain(events: AuditChainEvent[]): AuditChainVerificat
   }
 
   return { ok: true, eventCount: events.length, headHash: previousHash };
+}
+
+/** Export the canonical, already-redacted event projection without exposing a writable log API. */
+export function exportAuditEventsJsonl(events: AuditChainEvent[]): string {
+  return events.map((event) => `${JSON.stringify(redactValue(event))}\n`).join("");
 }

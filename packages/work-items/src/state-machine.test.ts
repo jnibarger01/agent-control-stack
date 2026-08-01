@@ -768,7 +768,9 @@ describe("work item state machine", () => {
         { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" },
         { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
         { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" },
-        { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" }
+        { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" },
+        { version: 9, name: "temporal_memory", filename: "009_temporal_memory.sql" },
+        { version: 10, name: "scheduler_firing_legacy_markers", filename: "010_scheduler_firing_legacy_markers.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -837,6 +839,47 @@ describe("work item state machine", () => {
     expect(() => new SqliteWorkItemStore(dbPath)).toThrow("migration checksum mismatch for version 1");
   });
 
+  it("rolls back interrupted audit initialization and resumes cleanly", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-audit-initialization-crash-"));
+    const dbPath = join(dir, "control.db");
+    createVersionThreeDatabase(dbPath);
+    const db = new DatabaseSync(dbPath);
+    db.prepare(
+      `INSERT INTO audit_events
+       (id, name, time_unix_nano, attributes, body, previous_hash, event_hash)
+       VALUES (?, ?, ?, ?, ?, '', '')`
+    ).run("legacy-event", "legacy.created", "1780000000000000000", "{}", "{}");
+    db.close();
+
+    expect(
+      () =>
+        new SqliteWorkItemStore(dbPath, {
+          migrationFaultInjector: (phase) => {
+            if (phase === "after_audit_event") {
+              throw new Error("injected audit initialization interruption");
+            }
+          }
+        })
+    ).toThrow("injected audit initialization interruption");
+
+    const resumed = new SqliteWorkItemStore(dbPath);
+    try {
+      expect(resumed.verifyAuditChain()).toMatchObject({ ok: true, eventCount: 1 });
+      expect(migrationRows(dbPath)).toHaveLength(controlPlaneMigrations().length);
+      const check = new DatabaseSync(dbPath);
+      try {
+        expect(
+          check.prepare("SELECT previous_hash, event_hash FROM audit_events WHERE id = ?").get("legacy-event")
+        ).toMatchObject({ previous_hash: "", event_hash: expect.stringMatching(/^[a-f0-9]{64}$/) });
+      } finally {
+        check.close();
+      }
+    } finally {
+      resumed.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("enforces persisted state and JSON constraints without rewriting existing rows", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-state-constraints-"));
     const dbPath = join(dir, "control.db");
@@ -866,7 +909,9 @@ describe("work item state machine", () => {
         { version: 5 },
         { version: 6 },
         { version: 7 },
-        { version: 8 }
+        { version: 8 },
+        { version: 9 },
+        { version: 10 }
       ]);
     } finally {
       db.close();
@@ -974,7 +1019,7 @@ describe("work item state machine", () => {
 
     const store = new SqliteWorkItemStore(copiedPath);
     try {
-      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
       store.close();
@@ -1047,7 +1092,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" })])
       );

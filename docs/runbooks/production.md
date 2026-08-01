@@ -13,7 +13,7 @@ pass.
 
 - Docker 29+ with Compose v2/v5 support.
 - A TLS-terminating reverse proxy for any non-loopback exposure.
-- A persistent volume with enough free space for SQLite WAL growth and backups.
+- A persistent volume with enough free space for SQLite WAL growth and backups. The control plane admits writes only while the database volume is above its configured reserve (default warning at 256 MiB and rejection at 64 MiB); a rejected instance remains read-only until the recovery reserve is met.
 - `ACS_GATEWAY_TOKEN` and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
 - A versioned image tag and a recorded previous image tag.
 
@@ -95,7 +95,7 @@ Restore requires both literal `--replace` and `--writers-stopped` flags. The lat
 - **Audit-chain failure:** stop writers, preserve the DB and logs, restore the last verified backup, and investigate before reopening. Do not rewrite hashes in place.
 - **Expired worker lease:** run one worker; startup marks expired running leases failed. Review the terminal audit event before deliberately recreating work.
 - **Database locked:** identify the competing writer, stop it cleanly, then retry readiness. Do not delete WAL/SHM files from a live database.
-- **Disk full:** stop writes, free space without deleting authoritative DB/WAL files, back up, then recheck readiness and integrity.
+- **Disk full or WAL growth:** the readiness contract reports non-secret `storage` diagnostics and mutation admission fails closed before `BEGIN IMMEDIATE`; free space without deleting authoritative DB/WAL files, back up, then recheck readiness and integrity. WALs above the checkpoint threshold are passively checkpointed before a mutation; an excessive WAL remains rejected.
 - **Migration checksum mismatch:** stop. Historical migration files or recorded metadata changed. Restore the trusted artifact/DB pair; do not update the checksum to make readiness green.
 
 ## Observability and retention

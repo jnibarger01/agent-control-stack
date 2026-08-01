@@ -1,6 +1,11 @@
+import { mkdtempSync, rmSync } from "node:fs";
 import type { IncomingHttpHeaders } from "node:http";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { runDeterministicEvaluation } from "@agent-control-stack/eval-harness";
 import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
+import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { ControlStackError } from "@agent-control-stack/shared";
 import type { WorkItemStore } from "@agent-control-stack/work-items";
 import { ZodError, z } from "zod";
@@ -20,15 +25,31 @@ import {
 import { chatgptDashboardWidgetHtml } from "./chatgpt-dashboard-widget.generated.js";
 
 const MCP_PROTOCOL_VERSION = "2024-11-05";
+const MCP_TOOL_TIMEOUT_MS = 30_000;
+const MCP_TOOL_OUTPUT_BYTES = 256 * 1024;
 
 type GatewayWorkItemTools = ReturnType<typeof createWorkItemTools>;
 type GatewayToolName = (typeof workItemToolNames)[number];
 const directAgentToolName = "test.agent.run" as const;
 type DirectAgentToolName = typeof directAgentToolName;
 const dashboardToolNames = ["open_acs_dashboard", "get_execution_detail"] as const;
-const mcpToolNames = [...workItemToolNames, ...dashboardToolNames, directAgentToolName] as const;
+const publicToolNames = [
+  "work_item.create",
+  "work_item.list",
+  "work_item.get",
+  "work_item.approve",
+  "tool.execute_approved",
+  "audit.query",
+  "memory.search",
+  "eval.run"
+] as const;
+const mcpToolNames = [...workItemToolNames, ...dashboardToolNames, ...publicToolNames, directAgentToolName] as const;
 type McpToolName = (typeof mcpToolNames)[number];
-const remoteMcpToolNames = [...workItemToolNames.filter((name) => name !== "approve_work_item"), ...dashboardToolNames];
+const remoteMcpToolNames = [
+  ...workItemToolNames.filter((name) => name !== "approve_work_item"),
+  ...dashboardToolNames,
+  ...publicToolNames
+];
 type JsonRpcId = string | number | null;
 
 export interface GatewayDirectAgentController {
@@ -219,7 +240,7 @@ async function handleToolsCall(input: {
     return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, requiredScopes(parsed.data.name));
   }
 
-  if (parsed.data.name === "approve_work_item") {
+  if (parsed.data.name === "approve_work_item" || parsed.data.name === "work_item.approve") {
     const actor = resolvedMcpActor(authorization.auth);
     input.auditAuthenticatedRequest?.({
       requestId: input.requestId ?? String(input.id ?? ""),
@@ -238,15 +259,17 @@ async function handleToolsCall(input: {
     return jsonRpcError(input.id, -32001, "MCP actor is not registered", 403);
   }
   try {
-    const result = await callMcpTool({
-      tools: input.tools,
-      store: input.store,
-      directAgentController: input.directAgentController,
-      name: parsed.data.name,
-      args: parsed.data.arguments ?? {},
-      auth: authorization.auth,
-      actor
-    });
+    const result = await withMcpToolLimits(
+      callMcpTool({
+        tools: input.tools,
+        store: input.store,
+        directAgentController: input.directAgentController,
+        name: parsed.data.name,
+        args: parsed.data.arguments ?? {},
+        auth: authorization.auth,
+        actor
+      })
+    );
     input.auditAuthenticatedRequest?.({
       requestId: input.requestId ?? String(input.id ?? ""),
       method: "tools/call",
@@ -285,6 +308,24 @@ async function handleToolsCall(input: {
       auth: authorization.auth
     });
     return jsonRpcError(input.id, errorCode(error), errorMessage(error), errorStatus(error));
+  }
+}
+
+async function withMcpToolLimits(resultPromise: Promise<unknown>): Promise<unknown> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new ControlStackError("mcp_tool_timeout", "MCP tool call exceeded its time limit")), MCP_TOOL_TIMEOUT_MS);
+    timer.unref();
+  });
+  try {
+    const result = await Promise.race([resultPromise, timeout]);
+    const encoded = JSON.stringify(result);
+    if (Buffer.byteLength(encoded, "utf8") > MCP_TOOL_OUTPUT_BYTES) {
+      throw new ControlStackError("mcp_output_limit", "MCP tool output exceeded its size limit");
+    }
+    return result;
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -331,6 +372,48 @@ async function callMcpTool(input: {
   auth: McpAuthenticatedRequest;
   actor: string;
 }): Promise<unknown> {
+  if (input.name === "work_item.create") {
+    return callGatewayTool(input.tools, "create_work_item", bindAuthenticatedActor("create_work_item", input.args, input.auth, input.actor), input.auth, input.actor);
+  }
+  if (input.name === "work_item.list") {
+    return callGatewayTool(input.tools, "list_work_items", input.args, input.auth, input.actor);
+  }
+  if (input.name === "work_item.get") {
+    return callGatewayTool(input.tools, "get_work_item", input.args, input.auth, input.actor);
+  }
+  if (input.name === "work_item.approve") {
+    throw new ControlStackError("mcp_approval_forbidden", "MCP identities cannot grant approval");
+  }
+  if (input.name === "tool.execute_approved") {
+    const workerId = z.object({ workerId: z.string().min(1).optional() }).parse(input.args).workerId ?? input.actor;
+    const { executeApprovedWorkItem } = await import("./tools/execute-approved.js");
+    return executeApprovedWorkItem({ store: input.store, workerId, execute: executeSandboxed });
+  }
+  if (input.name === "audit.query") {
+    const query = z
+      .object({ afterSequence: z.number().int().nonnegative().optional(), workItemId: z.string().min(1).optional(), limit: z.number().int().positive().max(500).optional() })
+      .strict()
+      .parse(input.args);
+    return { events: input.store.readEvents(query) };
+  }
+  if (input.name === "memory.search") {
+    const query = z
+      .object({ query: z.string().min(1).max(1_000), asOf: z.string().datetime({ offset: true }).optional(), tags: z.array(z.string().min(1).max(128)).max(32).optional(), limit: z.number().int().positive().max(500).optional() })
+      .strict()
+      .parse(input.args);
+    if (!input.store.searchMemory) throw new ControlStackError("memory_not_configured", "temporal memory is not available");
+    return { memories: input.store.searchMemory(query.query, query) };
+  }
+  if (input.name === "eval.run") {
+    z.object({}).strict().parse(input.args);
+    const root = mkdtempSync(join(tmpdir(), "acs-mcp-eval-"));
+    try {
+      const result = runDeterministicEvaluation(root);
+      return { verdict: result.verdict, cases: result.cases, tamperDetection: result.sqlite.tamperDetection };
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
   if (input.name === directAgentToolName) {
     if (!input.directAgentController) {
       throw new ControlStackError("direct_agent_not_configured", "test.agent.run is not configured on this gateway");
@@ -428,6 +511,18 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
 function requiredScopes(name: McpToolName): McpScope[] {
   if (name === directAgentToolName) return ["acs:work:approve"];
   switch (name) {
+    case "work_item.create":
+      return ["acs:work:create"];
+    case "work_item.list":
+    case "work_item.get":
+    case "audit.query":
+    case "memory.search":
+      return ["acs:work:read"];
+    case "work_item.approve":
+    case "tool.execute_approved":
+      return ["acs:work:approve"];
+    case "eval.run":
+      return ["acs:work:read"];
     case "create_work_item":
       return ["acs:work:create"];
     case "get_work_item":
@@ -445,7 +540,17 @@ function requiredScopes(name: McpToolName): McpScope[] {
 
 function isMutatingTool(name: McpToolName): boolean {
   if (name === directAgentToolName) return true;
-  return !["get_work_item", "list_work_items", "open_acs_dashboard", "get_execution_detail"].includes(name);
+  return ![
+    "get_work_item",
+    "list_work_items",
+    "open_acs_dashboard",
+    "get_execution_detail",
+    "work_item.list",
+    "work_item.get",
+    "audit.query",
+    "memory.search",
+    "eval.run"
+  ].includes(name);
 }
 
 function resourceDefinition() {
@@ -465,6 +570,10 @@ function resourceRead(id: JsonRpcId, params: unknown): McpHttpResult {
 function toolAnnotations(name: McpToolName): Record<string, boolean> {
   if (name === directAgentToolName) return { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
   switch (name) {
+    case "work_item.list":
+    case "work_item.get":
+    case "audit.query":
+    case "memory.search":
     case "get_work_item":
     case "list_work_items":
     case "open_acs_dashboard":
@@ -483,6 +592,22 @@ function toolDescription(name: McpToolName): string {
     return "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.";
   }
   switch (name) {
+    case "work_item.create":
+      return "Create a governed work item through policy evaluation.";
+    case "work_item.list":
+      return "List governed work items.";
+    case "work_item.get":
+      return "Read one governed work item.";
+    case "work_item.approve":
+      return "Request approval for an exact action; MCP callers cannot grant approval.";
+    case "tool.execute_approved":
+      return "Execute one already-approved work item through the worker and sandbox boundary.";
+    case "audit.query":
+      return "Query redacted, hash-chained ACS audit events.";
+    case "memory.search":
+      return "Search source-backed temporal memory with citations.";
+    case "eval.run":
+      return "Run the deterministic ACS evaluation corpus.";
     case "open_acs_dashboard":
       return "Open the read-only ACS Control Center with current health, executions, approvals, and operational findings.";
     case "get_execution_detail":
@@ -518,6 +643,54 @@ function toolInputSchema(name: McpToolName): Record<string, unknown> {
         permissionMode: { type: "string", enum: ["read-only", "readonly", "read_only"], default: "read-only" }
       }
     };
+  }
+  switch (name) {
+    case "work_item.create":
+      return {
+        type: "object",
+        required: ["title", "intent"],
+        properties: {
+          title: { type: "string" },
+          intent: { type: "string" },
+          target: { type: "object" },
+          requestedActions: { type: "array", items: { type: "object" } },
+          risk: { type: "string", enum: ["low", "medium", "high", "critical"] }
+        }
+      };
+    case "work_item.list":
+      return { type: "object", properties: { status: { type: "string" } } };
+    case "work_item.get":
+      return { type: "object", required: ["id"], properties: { id: { type: "string" } } };
+    case "work_item.approve":
+      return {
+        type: "object",
+        required: ["id", "reason", "actionHash"],
+        properties: { id: { type: "string" }, reason: { type: "string" }, actionHash: { type: "string" } }
+      };
+    case "tool.execute_approved":
+      return { type: "object", properties: { workerId: { type: "string" } } };
+    case "audit.query":
+      return {
+        type: "object",
+        properties: {
+          afterSequence: { type: "integer", minimum: 0 },
+          workItemId: { type: "string" },
+          limit: { type: "integer", minimum: 1, maximum: 500 }
+        }
+      };
+    case "memory.search":
+      return {
+        type: "object",
+        required: ["query"],
+        properties: {
+          query: { type: "string" },
+          asOf: { type: "string", format: "date-time" },
+          tags: { type: "array", items: { type: "string" } },
+          limit: { type: "integer", minimum: 1, maximum: 500 }
+        }
+      };
+    case "eval.run":
+      return { type: "object", properties: {} };
   }
   switch (name) {
     case "open_acs_dashboard":

@@ -8,7 +8,9 @@ paths = [
   '''(^|/)dist/''',
   '''(^|/)\.ijfw/''',
   '''(^|/)apps/gateway/src/server\.test\.ts$''',
-  '''(^|/)packages/agentos-contracts/test/trace\.test\.js$'''
+  '''(^|/)packages/agentos-contracts/test/trace\.test\.js$''',
+  '''(^|/)\.env$''',
+  '''(^|/)\.claude/settings\.local\.json$'''
 ]
 regexes = [
   '''(?i)authorization:\s*bearer\s+(?:change-me-local-dev|local-dev-token)''',

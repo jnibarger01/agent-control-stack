@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -12,7 +12,7 @@ import {
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
 import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
-import { ControlStackError } from "@agent-control-stack/shared";
+import { ControlStackError, loadRuntimeConfig, type DatabaseStoragePolicy } from "@agent-control-stack/shared";
 import {
   createWorkItemSchema,
   listWorkItemsSchema,
@@ -131,6 +131,7 @@ const sessionCookiePayloadSchema = z.object({
   iat: z.number().int().nonnegative(),
   exp: z.number().int().nonnegative()
 });
+const mcpSseSessionQuerySchema = z.object({ sessionId: z.string().uuid() });
 export interface GatewayAuthOptions {
   token: string;
   actor: string;
@@ -141,6 +142,7 @@ export interface GatewayAuthOptions {
 export interface GatewayOptions {
   dbPath?: string;
   heartbeatTtlMs?: number;
+  storagePolicy?: DatabaseStoragePolicy;
   logger?: boolean;
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
@@ -155,14 +157,16 @@ export interface GatewayOptions {
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
-  const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  const dbPath = options.dbPath ?? loadRuntimeConfig().database.path;
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
+  const mcpSseSessions = new Map<string, ServerResponse>();
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
-    heartbeatTtlMs
+    heartbeatTtlMs,
+    ...(options.storagePolicy ? { storagePolicy: options.storagePolicy } : {})
   });
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
@@ -425,7 +429,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       .send(jsonRpcError(null, -32000, "method not allowed"));
   });
 
-  app.post("/mcp", async (request, reply) => {
+  app.post("/mcp", { bodyLimit: MAX_RESULT_BODY_BYTES }, async (request, reply) => {
     if (!isAllowedMcpOrigin(request.headers.origin, mcpAllowedOrigins)) {
       return reply.code(403).send(jsonRpcError(null, -32002, "forbidden origin"));
     }
@@ -454,6 +458,69 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return reply.code(result.statusCode).send();
     }
     return reply.code(result.statusCode).send(result.body);
+  });
+
+  app.get("/sse", async (request, reply) => {
+    if (!isAllowedMcpOrigin(request.headers.origin, mcpAllowedOrigins)) {
+      return reply.code(403).send({ error: "forbidden origin" });
+    }
+    const authorization = await authorizeMcpRequest({
+      headers: request.headers,
+      auth: mcpAuth,
+      requiredScopes: [],
+      remoteAddress: request.socket.remoteAddress ?? request.ip
+    });
+    if (!authorization.ok) {
+      const error = mcpAuthorizationHttpError(authorization, mcpResourceMetadataUrl(request, mcpAuth?.oauth), []);
+      if (error.wwwAuthenticate) reply.header("WWW-Authenticate", error.wwwAuthenticate);
+      return reply.code(error.statusCode).send({ error: error.error });
+    }
+
+    const sessionId = randomUUID();
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache",
+      connection: "keep-alive"
+    });
+    reply.raw.write(`event: endpoint\ndata: /messages?sessionId=${sessionId}\n\n`);
+    mcpSseSessions.set(sessionId, reply.raw);
+    recordAuthenticatedMcpRequest({
+      requestId: request.id,
+      method: "GET",
+      toolName: "mcp/sse",
+      resolvedActor: authorization.auth.connectorId ?? authorization.auth.subject,
+      auth: authorization.auth
+    });
+    request.raw.on("close", () => mcpSseSessions.delete(sessionId));
+  });
+
+  app.post("/messages", { bodyLimit: MAX_RESULT_BODY_BYTES }, async (request, reply) => {
+    const parsedQuery = mcpSseSessionQuerySchema.safeParse(request.query);
+    if (!parsedQuery.success) return reply.code(400).send({ error: "invalid MCP SSE session" });
+    const stream = mcpSseSessions.get(parsedQuery.data.sessionId);
+    if (!stream || stream.destroyed) return reply.code(404).send({ error: "MCP SSE session not found" });
+    if (!isAllowedMcpOrigin(request.headers.origin, mcpAllowedOrigins)) {
+      return reply.code(403).send(jsonRpcError(null, -32002, "forbidden origin"));
+    }
+    const resourceMetadataUrl = mcpResourceMetadataUrl(request, mcpAuth?.oauth);
+    const result = await handleMcpHttpRequest({
+      body: request.body,
+      headers: request.headers,
+      tools,
+      store: workItems,
+      directAgentController: undefined,
+      auth: mcpAuth,
+      requireAuthentication: true,
+      resourceMetadataUrl,
+      requestId: request.id,
+      remoteAddress: request.socket.remoteAddress ?? request.ip,
+      auditAuthenticatedRequest: recordAuthenticatedMcpRequest,
+      resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth)
+    });
+    if (result.wwwAuthenticate) reply.header("WWW-Authenticate", result.wwwAuthenticate);
+    if (result.body) stream.write(`event: message\ndata: ${JSON.stringify(result.body)}\n\n`);
+    return reply.code(result.statusCode === 202 ? 202 : 202).send();
   });
 
   app.get("/.well-known/oauth-protected-resource", async (_request, reply) => {
@@ -811,6 +878,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.addHook("onClose", async () => {
+    for (const stream of mcpSseSessions.values()) stream.end();
+    mcpSseSessions.clear();
     await acpAdapter?.stop();
     workItems.close();
   });
@@ -969,7 +1038,7 @@ function resolveDirectAgentController(options: GatewayOptions): GatewayDirectAge
     );
   }
   if (options.directAgentController) return options.directAgentController;
-  const configPath = options.machineControllerConfigPath ?? process.env.ACS_MACHINE_CONTROLLER_CONFIG;
+  const configPath = options.machineControllerConfigPath ?? loadRuntimeConfig().machineController.configPath;
   if (!configPath) return undefined;
   return new MachineController(loadMachineControllerConfig(configPath), {
     directAgentRunner: options.directAgentRunner,

@@ -174,9 +174,13 @@ function explicitlyAllowsNetwork(context: PolicyContext): boolean {
 }
 
 function hasPathEscape(context: PolicyContext): boolean {
-  if (!context.cwd || !context.paths?.length) {
+  if (!context.paths?.length) {
     return false;
   }
+  // A path cannot be proven to remain inside the project root without a
+  // declared root. Fail closed instead of turning an unbound path into an
+  // approval-scoped mutation.
+  if (!context.cwd) return true;
   const root = realpathForPolicy(resolve(context.cwd));
   return context.paths.some((path) => !isInside(root, realpathForPolicy(resolve(root, path))));
 }

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/pushcut/diagnostic-result.schema.json",
+  "title": "Diagnostic result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "idempotency_key",
+    "target",
+    "health_status",
+    "evidence",
+    "suspected_cause",
+    "recommended_action",
+    "risk_level",
+    "observed_at"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "request_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+    "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 160 },
+    "target": {
+      "enum": ["all", "jacen-ubuntu", "hp-server", "openclaw", "hermes", "acs", "backups", "disk", "tailscale"]
+    },
+    "health_status": { "enum": ["healthy", "degraded", "unhealthy", "unknown"] },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["check", "status", "summary"],
+        "properties": {
+          "check": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "status": { "enum": ["pass", "warn", "fail", "unknown"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 300 }
+        }
+      }
+    },
+    "suspected_cause": { "type": ["string", "null"], "maxLength": 500 },
+    "recommended_action": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "risk_level": { "enum": ["none", "low", "medium", "high", "critical"] },
+    "observed_at": { "type": "string", "format": "date-time" },
+    "expires_at": { "type": "string", "format": "date-time" },
+    "work_item_id": { "type": "string", "minLength": 8, "maxLength": 128 }
+  }
+}

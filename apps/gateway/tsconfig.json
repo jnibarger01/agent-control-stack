@@ -9,10 +9,13 @@
   "references": [
     { "path": "../../apps/control-ui" },
     { "path": "../../packages/acp-adapter" },
+    { "path": "../../packages/eval-harness" },
     { "path": "../../packages/machine-controller" },
     { "path": "../../packages/moa-orchestrator" },
     { "path": "../../packages/policy-gate" },
     { "path": "../../packages/shared" },
+    { "path": "../../packages/sandbox" },
+    { "path": "../../packages/temporal-memory" },
     { "path": "../../packages/work-items" }
   ]
 }

@@ -70,6 +70,17 @@ describe("policy gate", () => {
     );
   });
 
+  it("denies path-bearing actions when the project root is missing", () => {
+    const decision = evaluatePolicy({
+      ...base,
+      cwd: undefined,
+      write: true,
+      paths: ["src/index.ts"]
+    });
+    expect(decision.decision).toBe("deny");
+    expect(decision.matchedRules).toContain("deny:path-escape");
+  });
+
   it("denies shell metacharacters before command allow rules", () => {
     expect(evaluatePolicy({ ...base, command: ["npm", "test", ";", "curl"] }).matchedRules).toContain(
       "deny:shell-metacharacter"

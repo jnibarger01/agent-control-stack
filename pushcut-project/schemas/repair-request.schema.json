@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/pushcut/repair-request.schema.json",
+  "title": "Repair proposal",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "request_id",
+    "work_item_id",
+    "action_hash",
+    "idempotency_key",
+    "target_machine",
+    "exact_action",
+    "expected_effect",
+    "risk",
+    "rollback_method",
+    "approval_expires_at",
+    "status"
+  ],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "request_id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$" },
+    "work_item_id": { "type": "string", "minLength": 8, "maxLength": 128 },
+    "action_hash": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "idempotency_key": { "type": "string", "minLength": 8, "maxLength": 160 },
+    "target_machine": { "enum": ["jacen-ubuntu", "hp-server"] },
+    "exact_action": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "program", "arguments"],
+      "properties": {
+        "kind": { "enum": ["command", "api"] },
+        "program": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "arguments": {
+          "type": "array",
+          "maxItems": 16,
+          "items": { "type": "string", "maxLength": 160 }
+        }
+      }
+    },
+    "expected_effect": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "risk": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "rollback_method": { "type": "string", "minLength": 1, "maxLength": 500 },
+    "approval_expires_at": { "type": "string", "format": "date-time" },
+    "status": { "const": "proposed" }
+  }
+}
