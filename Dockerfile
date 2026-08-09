@@ -6,6 +6,7 @@ COPY packages ./packages
 COPY storage ./storage
 COPY harness ./harness
 COPY evals ./evals
+COPY scripts ./scripts
 COPY tsconfig*.json vitest.config.ts ./
 RUN npm ci
 RUN npm run build
