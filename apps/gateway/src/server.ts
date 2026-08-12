@@ -47,6 +47,8 @@ import {
 } from "./auth.js";
 import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit, type GatewayDirectAgentController } from "./mcp.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
+import { webhookIngestSchema } from "./public-contracts.js";
+import { SqliteMoaIdempotencyStore } from "./moa/idempotency.js";
 import { gatewayListenConfig } from "./runtime-config.js";
 
 const approvalBodySchema = z.object({
@@ -174,6 +176,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     acpAdapterConfig === false || !acpAdapterConfig
       ? undefined
       : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
+  // Idempotency store shared by the webhook ingest path. Same SQLite file as
+  // the work-item store so state is co-located; separate table (moa_idempotency).
+  const workItemIdempotency = new SqliteMoaIdempotencyStore(dbPath);
   const requireRead = async (request: FastifyRequest, reply: FastifyReply) => {
     if (!hasReadAccess(request, auth)) {
       if (request.routeOptions.url === "/" && auth) {
@@ -654,6 +659,89 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         createWorkItemSchema.parse({ ...requestObject(request.body), requester: actor, requesterSubject: undefined })
       );
       return reply.code(201).send(workItem);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  // External webhook ingest: Hermes (or any upstream) -> ACS control plane.
+  // The webhook is a DETERMINISTIC RECEIVER boundary. It does NOT call the
+  // downstream system directly. It authenticates the caller (same fail-closed
+  // gateway auth as every mutation), enforces idempotency, and creates a
+  // governed work item through the exact same policy-gate + audit path as a
+  // manual item. ACS's own worker later claims and executes it under lease
+  // fencing. The caller-supplied body may not set requester/status/source.
+  app.post<{ Params: { source: string } }>("/webhooks/:source", async (request, reply) => {
+    reply.header("x-request-id", request.id);
+    try {
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) {
+        return;
+      }
+      const source = request.params.source;
+      if (!source || !/^[a-z0-9_-]{1,64}$/i.test(source)) {
+        return reply.code(400).send({ error: "invalid webhook source", code: "invalid_webhook_source" });
+      }
+      const body = webhookIngestSchema.parse(requestObject(request.body));
+      const idempotencyKey = firstHeader(request.headers["idempotency-key"]);
+      if (idempotencyKey && !/^[A-Za-z0-9._:-]{1,256}$/.test(idempotencyKey)) {
+        return reply.code(400).send({ error: "invalid idempotency-key", code: "invalid_idempotency_key" });
+      }
+
+      const workItemInput = {
+        title: body.title,
+        intent: body.intent,
+        requester: "agent" as const,
+        requesterSubject: `${source}:${actor}`,
+        target: body.target ?? { cwd: process.cwd() },
+        requestedActions: body.requestedActions ?? [{ kind: "manual", description: body.intent }],
+        risk: body.risk ?? "medium",
+        ...(body.correlationId ? { metadata: { webhookSource: source, correlationId: body.correlationId } } : {})
+      };
+
+      // Idempotency: replay returns the first accepted work item without
+      // creating a duplicate. The store is only consulted when a key is given.
+      const idemKey = idempotencyKey ? `webhook:${source}:${idempotencyKey}` : undefined;
+      let prior: unknown | undefined;
+      if (idemKey) {
+        try {
+          prior = await workItemIdempotency.get(idemKey);
+        } catch {
+          prior = undefined;
+        }
+      }
+      if (prior !== undefined) {
+        const replayed = prior as { workItemId: string; status: string; approvalRequired: boolean };
+        request.log.info({ requestId: request.id, source, workItemId: replayed.workItemId }, "webhook replay (idempotent)");
+        workItems.recordConnectorRequest({
+          actor,
+          source: `webhook:${source}`,
+          route: `/webhooks/${source}`,
+          toolName: "ingest_webhook",
+          workItemId: replayed.workItemId,
+          requestId: request.id,
+          authMethod: "gateway_bearer",
+          authSubject: actor
+        });
+        return reply.code(200).send({ ...replayed, replayed: true });
+      }
+
+      const workItem = tools.create_work_item(createWorkItemSchema.parse(workItemInput));
+      const approvalRequired = workItem.status === "needs_approval";
+      const response = {
+        workItemId: workItem.id,
+        status: workItem.status,
+        approvalRequired
+      };
+      if (idemKey) {
+        try {
+          await workItemIdempotency.put(idemKey, response);
+        } catch (idemError) {
+          request.log.warn({ requestId: request.id, err: idemError }, "webhook idempotency write failed (non-fatal)");
+        }
+      }
+      request.log.info({ requestId: request.id, source, workItemId: workItem.id }, "webhook accepted");
+      return reply.code(201).send(response);
     } catch (error) {
       return sendError(reply, error);
     }
