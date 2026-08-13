@@ -119,4 +119,39 @@ describe("webhook ingest receiver", () => {
     expect(res.statusCode).toBe(400);
     await app.close();
   });
+
+  it("handles simultaneous concurrent requests with the same idempotency key safely without duplicates", async () => {
+    const app = testGateway();
+    const [res1, res2] = await Promise.all([
+      app.inject({
+        method: "POST",
+        url: "/webhooks/hermes",
+        headers: { "idempotency-key": "evt-concurrent" },
+        payload: validBody
+      }),
+      app.inject({
+        method: "POST",
+        url: "/webhooks/hermes",
+        headers: { "idempotency-key": "evt-concurrent" },
+        payload: validBody
+      })
+    ]);
+
+    const statuses = [res1.statusCode, res2.statusCode].sort();
+    // One must succeed with 201 Created (or 200 replayed if polled) and the other returns 200 replayed or 409 conflict
+    expect([200, 201]).toContain(res1.statusCode);
+    expect([200, 201, 409]).toContain(res2.statusCode);
+
+    const body1 = res1.json() as { workItemId?: string };
+    const body2 = res2.json() as { workItemId?: string };
+    if (body1.workItemId && body2.workItemId) {
+      expect(body1.workItemId).toBe(body2.workItemId);
+    }
+
+    const listed = await app.inject({ method: "GET", url: "/work-items" });
+    const items = (listed.json() as { workItems: { id: string }[] }).workItems;
+    const matching = items.filter((item) => item.id === (body1.workItemId || body2.workItemId));
+    expect(matching).toHaveLength(1);
+    await app.close();
+  });
 });

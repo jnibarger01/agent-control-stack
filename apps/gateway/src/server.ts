@@ -699,34 +699,40 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         ...(body.correlationId ? { metadata: { webhookSource: source, correlationId: body.correlationId } } : {})
       };
 
-      // Idempotency: replay returns the first accepted work item without
-      // creating a duplicate. The store is only consulted when a key is given.
+      // Idempotency: atomic reservation prevents concurrent requests from creating duplicate work items.
       const idemKey = idempotencyKey ? `webhook:${source}:${idempotencyKey}` : undefined;
-      let prior: unknown | undefined;
       if (idemKey) {
-        try {
-          prior = await workItemIdempotency.get(idemKey);
-        } catch {
-          prior = undefined;
+        const reservation = await workItemIdempotency.tryReserve(idemKey);
+        if (!reservation.reserved) {
+          if (reservation.existing !== undefined) {
+            const replayed = reservation.existing as { workItemId: string; status: string; approvalRequired: boolean };
+            request.log.info({ requestId: request.id, source, workItemId: replayed.workItemId }, "webhook replay (idempotent)");
+            workItems.recordConnectorRequest({
+              actor,
+              source: `webhook:${source}`,
+              route: `/webhooks/${source}`,
+              toolName: "ingest_webhook",
+              workItemId: replayed.workItemId,
+              requestId: request.id,
+              authMethod: "gateway_bearer",
+              authSubject: actor
+            });
+            return reply.code(200).send({ ...replayed, replayed: true });
+          }
+          return reply.code(409).send({ error: "concurrent webhook request in progress", code: "concurrent_idempotency_conflict" });
         }
       }
-      if (prior !== undefined) {
-        const replayed = prior as { workItemId: string; status: string; approvalRequired: boolean };
-        request.log.info({ requestId: request.id, source, workItemId: replayed.workItemId }, "webhook replay (idempotent)");
-        workItems.recordConnectorRequest({
-          actor,
-          source: `webhook:${source}`,
-          route: `/webhooks/${source}`,
-          toolName: "ingest_webhook",
-          workItemId: replayed.workItemId,
-          requestId: request.id,
-          authMethod: "gateway_bearer",
-          authSubject: actor
-        });
-        return reply.code(200).send({ ...replayed, replayed: true });
+
+      let workItem;
+      try {
+        workItem = tools.create_work_item(createWorkItemSchema.parse(workItemInput));
+      } catch (createError) {
+        if (idemKey) {
+          await workItemIdempotency.remove(idemKey);
+        }
+        throw createError;
       }
 
-      const workItem = tools.create_work_item(createWorkItemSchema.parse(workItemInput));
       const approvalRequired = workItem.status === "needs_approval";
       const response = {
         workItemId: workItem.id,
