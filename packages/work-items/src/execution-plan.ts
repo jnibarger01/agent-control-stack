@@ -189,6 +189,8 @@ export function executionAttemptInputHash(input: {
   workItemId: string;
   planHash: string;
   subjectInputHash: string;
+  actionHash?: string;
+  workspaceHash?: string;
 }): string {
   return domainHash("acs:execution-attempt-input:v1", input);
 }

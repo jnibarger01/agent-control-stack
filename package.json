@@ -16,18 +16,23 @@
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
     "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety",
     "test:vitest": "vitest run",
+    "test:protocol-conformance": "npm run build && vitest run apps/gateway/src/security-contract-conformance.test.ts",
     "test:agentos": "npm test -w packages/agentos-contracts",
     "test:public-site-safety": "npm run verify:safety -w apps/public-site",
     "test:sandbox-integration": "ACS_SANDBOX_INTEGRATION=1 vitest run --coverage \"--coverage.include=packages/sandbox/src/*.ts\" --coverage.reportsDirectory=coverage/sandbox --coverage.thresholds.perFile --coverage.thresholds.lines=85 --coverage.thresholds.statements=85 --coverage.thresholds.branches=65 --coverage.thresholds.functions=85 packages/sandbox/src",
     "test:coverage": "vitest run --coverage",
     "test:authority-coverage": "npm run test:coverage && node scripts/check-authority-coverage.mjs",
+    "contracts:generate": "tsx scripts/public-contracts.ts",
+    "contracts:baseline": "tsx scripts/public-contracts.ts --update-baseline",
+    "contracts:check": "tsx scripts/public-contracts.ts --check",
     "typecheck": "tsc -b --pretty false",
     "lint": "eslint apps packages harness evals scripts --max-warnings=0",
-    "format:check": "git diff --check && prettier --check README.md docs/architecture.md docs/threat-model.md docs/releases/v0.1.0-alpha.md docs/protocol/worker-leases.md docs/protocol/worker-results.md apps/gateway/src/lifecycle.ts apps/gateway/src/lifecycle.test.ts apps/gateway/src/runtime-config.ts apps/gateway/src/runtime-config.test.ts apps/gateway/src/server.ts apps/gateway/src/server.test.ts apps/gateway/src/result-submission.test.ts apps/gateway/src/tools/execute-approved.ts apps/gateway/src/tools/execute-approved.test.ts apps/worker/src/index.ts apps/worker/src/index.test.ts packages/eval-harness/src/replay.test.ts packages/policy-gate/src/tools.ts packages/shared/src/migration.ts packages/sandbox/src/contracts.ts packages/sandbox/src/contracts.test.ts packages/sandbox/src/index.ts packages/sandbox/src/index.test.ts packages/sandbox/src/linux.ts packages/sandbox/src/linux.test.ts packages/sandbox/src/linux.integration.test.ts packages/work-items/src/execution-plan.ts packages/work-items/src/execution-plan.test.ts packages/work-items/src/state-machine.test.ts packages/work-items/src/store.ts packages/work-items/src/work-item.ts packages/work-items/src/result-submission.test.ts packages/work-items/src/retry-clone.test.ts scripts/check-authority-coverage.mjs scripts/db-ops.mjs docs/wave-2-result-retry-design.md docs/runbooks/local-dev.md docs/runbooks/production.md eslint.config.js .prettierrc.json compose.production.yml",
+    "format:check": "git diff --check && prettier --check README.md docs/architecture.md docs/threat-model.md docs/releases/v0.1.0-alpha.md docs/protocol/mcp-tools.md docs/protocol/worker-leases.md docs/protocol/worker-results.md contracts/public/README.md contracts/public/breaking-changes.json apps/gateway/src/lifecycle.ts apps/gateway/src/lifecycle.test.ts apps/gateway/src/public-contract-compatibility.ts apps/gateway/src/public-contract-compatibility.test.ts apps/gateway/src/public-contracts.ts apps/gateway/src/public-contracts.test.ts apps/gateway/src/runtime-config.ts apps/gateway/src/runtime-config.test.ts apps/gateway/src/server.ts apps/gateway/src/server.test.ts apps/gateway/src/result-submission.test.ts apps/gateway/src/security-contract-conformance.test.ts apps/gateway/src/tools/execute-approved.ts apps/gateway/src/tools/execute-approved.test.ts apps/worker/src/index.ts apps/worker/src/index.test.ts packages/eval-harness/src/replay.test.ts packages/policy-gate/src/tools.ts packages/shared/src/database-backup-policy.ts packages/shared/src/database-backup-policy.test.ts packages/shared/src/migration.ts packages/sandbox/src/contracts.ts packages/sandbox/src/contracts.test.ts packages/sandbox/src/index.ts packages/sandbox/src/index.test.ts packages/sandbox/src/linux.ts packages/sandbox/src/linux.test.ts packages/sandbox/src/linux.integration.test.ts packages/work-items/src/execution-plan.ts packages/work-items/src/execution-plan.test.ts packages/work-items/src/state-machine.test.ts packages/work-items/src/store.ts packages/work-items/src/work-item.ts packages/work-items/src/result-submission.test.ts packages/work-items/src/retry-clone.test.ts scripts/check-authority-coverage.mjs scripts/db-backup-policy.mjs scripts/db-ops.mjs scripts/public-contracts.ts docs/wave-2-result-retry-design.md docs/runbooks/local-dev.md docs/runbooks/production.md eslint.config.js .prettierrc.json compose.production.yml",
     "db:ops": "node scripts/db-ops.mjs",
+    "db:backup-policy": "node scripts/db-backup-policy.mjs",
     "security:audit": "npm audit --audit-level=high",
     "security:secrets": "docker run --rm -v \"$PWD:/repo:ro\" zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml --exit-code=1",
-    "check": "npm run format:check && npm run lint && npm run build && npm test && npm run test:authority-coverage && npm run security:audit",
+    "check": "npm run format:check && npm run lint && npm run build && npm run contracts:check && npm test && npm run test:authority-coverage && npm run security:audit",
     "dev:gateway": "tsx apps/gateway/src/index.ts",
     "eval": "tsx packages/eval-harness/src/cli.ts",
     "start:mcp": "node apps/mcp/dist/cli.js",
@@ -49,5 +54,8 @@
   "allowScripts": {
     "esbuild@0.25.12": true,
     "esbuild@0.28.1": true
+  },
+  "dependencies": {
+    "openai": "^7.0.0"
   }
 }

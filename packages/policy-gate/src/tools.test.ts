@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { createPolicyEngine, type PolicyDecision, type PolicyEngine, type PolicyOperation } from "./policy.js";
@@ -220,7 +221,7 @@ describe("policy-gated work item tools", () => {
         id: workItem.id,
         approvedBy: "approver",
         reason: "approve one",
-        actionHash: "hash_0"
+        actionHash: testActionHash(0)
       });
 
       expect(first.approvals).toHaveLength(1);
@@ -231,7 +232,7 @@ describe("policy-gated work item tools", () => {
         id: workItem.id,
         approvedBy: "approver",
         reason: "approve two",
-        actionHash: "hash_1"
+        actionHash: testActionHash(1)
       });
 
       expect(second.approvals).toHaveLength(1);
@@ -260,10 +261,14 @@ describe("policy-gated work item tools", () => {
       if (!claimed) throw new Error("expected source claim");
       tools.submit_work_result({
         workItemId: claimed.id,
+        attemptId: claimed.attemptId,
         leaseId: claimed.leaseId,
         workerId: claimed.workerId,
         actionHash: claimed.actionHash,
-        idempotencyKey: "policy-lineage-source",
+        planHash: claimed.planHash,
+        inputHash: claimed.inputHash,
+        fencingEpoch: claimed.fencingEpoch,
+        idempotencyKey: stableHash({ domain: "acs.attempt-result.v1", attemptId: claimed.attemptId }),
         outcome: "succeeded",
         startedAt: claimed.startedAt,
         finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
@@ -308,7 +313,7 @@ function fakePolicy(decision: PolicyDecision["decision"]): PolicyEngine {
     evaluateWorkItem(workItem: WorkItem, actor: string, operation: PolicyOperation) {
       return workItem.requestedActions.map((action, index) => ({
         action,
-        actionHash: `hash_${index}`,
+        actionHash: testActionHash(index),
         context: {
           workItemId: workItem.id,
           actor,
@@ -324,4 +329,8 @@ function fakePolicy(decision: PolicyDecision["decision"]): PolicyEngine {
       return evaluations[0]?.decision ?? { decision: "deny", reason: "no actions", matchedRules: ["test:deny"] };
     }
   };
+}
+
+function testActionHash(index: number): string {
+  return index.toString(16).padStart(64, "0");
 }
