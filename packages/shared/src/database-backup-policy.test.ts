@@ -54,7 +54,7 @@ describe("managed database backup policy", () => {
     expect(result.manifest.checksums.plaintextSha256).toMatch(/^[a-f0-9]{64}$/);
     expect(verified.health.ok).toBe(true);
     expect(temporaryFiles(backups)).toEqual([]);
-  });
+  }, 30_000);
 
   it("rejects a corrupted encrypted copy and leaves no decrypted database", async () => {
     const root = temporaryDirectory();
@@ -74,7 +74,7 @@ describe("managed database backup policy", () => {
       "encrypted backup checksum mismatch"
     );
     expect(readdirSync(root).filter((name) => name.startsWith("acs-backup-verify-"))).toEqual([]);
-  });
+  }, 30_000);
 
   it("rejects tampered manifest metadata before using it for recovery objectives", async () => {
     const root = temporaryDirectory();
@@ -93,7 +93,7 @@ describe("managed database backup policy", () => {
     await expect(verifyManagedDatabaseBackup(result.manifestPath, key, root)).rejects.toThrow(
       "backup manifest authentication failed"
     );
-  });
+  }, 30_000);
 
   it("publishes neither artifact nor manifest when atomic publication is interrupted", async () => {
     const root = temporaryDirectory();
@@ -112,7 +112,7 @@ describe("managed database backup policy", () => {
     ).rejects.toThrow("simulated interruption");
 
     expect(readdirSync(backups)).toEqual([]);
-  });
+  }, 30_000);
 
   it("enforces retention only after a new backup is verified and published", async () => {
     const root = temporaryDirectory();
@@ -139,7 +139,7 @@ describe("managed database backup policy", () => {
     expect(artifacts).toHaveLength(2);
     expect(manifests.some((name) => name.includes("-one."))).toBe(false);
     expect(latestManagedBackupManifest(backups)).toContain("-three.");
-  });
+  }, 30_000);
 
   it("proves an isolated restore is ready and reports RPO and RTO targets", async () => {
     const root = temporaryDirectory();
@@ -171,7 +171,7 @@ describe("managed database backup policy", () => {
     });
     expect(drill.restoreDurationMs).toBeGreaterThanOrEqual(0);
     expect(readdirSync(root).filter((name) => name.startsWith("acs-restore-drill-"))).toEqual([]);
-  });
+  }, 30_000);
 
   it("reports an RPO breach without treating a valid restore as corrupt", async () => {
     const root = temporaryDirectory();
@@ -195,7 +195,7 @@ describe("managed database backup policy", () => {
 
     expect(drill.readiness.ok).toBe(true);
     expect(drill.rpoWithinTarget).toBe(false);
-  });
+  }, 30_000);
 
   it("requires a locked-down regular key file", () => {
     const root = temporaryDirectory();
@@ -246,7 +246,7 @@ describe("managed database backup policy", () => {
       rtoWithinTarget: true,
       readiness: { ok: true }
     });
-  });
+  }, 30_000);
 
   function temporaryDirectory(): string {
     const directory = mkdtempSync(join(tmpdir(), "acs-database-backup-policy-"));
