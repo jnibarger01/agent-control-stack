@@ -2956,7 +2956,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
           throw new ControlStackError("attempt_lease_conflict", "attempt lease changed while recording derived result");
         }
       }
-      const { attemptId: _attemptId, planHash: _planHash, inputHash: _inputHash, fencingEpoch: _fencingEpoch, ...legacyInput } = parsed;
+      const {
+        attemptId: _attemptId,
+        planHash: _planHash,
+        inputHash: _inputHash,
+        fencingEpoch: _fencingEpoch,
+        ...legacyInput
+      } = parsed;
       return this.acceptResultInTransaction(legacyInput, {
         now: nowIso,
         allowDerivedOutcome: true,
