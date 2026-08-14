@@ -6,6 +6,7 @@ on:
       - reconciliation/canonical-20260813
     paths:
       - scripts/pr30-remediate.mjs
+      - scripts/pr30-correct-tests.mjs
       - .github/workflows/pr30-remediation.yml
 
 permissions:
@@ -38,13 +39,15 @@ jobs:
         run: npm run build
 
       - name: Add regression tests
-        run: node scripts/pr30-remediate.mjs --tests
+        run: |
+          node scripts/pr30-remediate.mjs --tests
+          node scripts/pr30-correct-tests.mjs
 
       - name: Prove regression tests fail before fixes
         shell: bash
         run: |
           set +e
-          npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/pr30-cleanup.test.ts
+          npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts apps/worker/src/pr30-cleanup.test.ts
           status=$?
           set -e
           if [ "$status" -eq 0 ]; then
@@ -57,13 +60,16 @@ jobs:
         run: node scripts/pr30-remediate.mjs --fixes
 
       - name: Format remediation TypeScript
-        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts
+        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts
 
-      - name: Rebuild fixed workspace packages
-        run: npm run build
+      - name: Clean and rebuild fixed workspace packages
+        run: |
+          find apps packages -type d -name dist -prune -exec rm -rf {} +
+          find . -name '*.tsbuildinfo' -delete
+          npm run build
 
       - name: Verify regression tests
-        run: npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/pr30-cleanup.test.ts
+        run: npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts apps/worker/src/pr30-cleanup.test.ts
 
       - name: Full repository check
         run: npm run check
@@ -78,7 +84,7 @@ jobs:
         run: docker build -t agent-control-stack:pr30-remediation .
 
       - name: Remove temporary remediation scaffolding
-        run: git rm .github/workflows/pr30-remediation.yml scripts/pr30-remediate.mjs
+        run: git rm .github/workflows/pr30-remediation.yml scripts/pr30-remediate.mjs scripts/pr30-correct-tests.mjs
 
       - name: Commit verified remediation
         shell: bash
