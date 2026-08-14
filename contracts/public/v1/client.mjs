@@ -60,6 +60,10 @@ const operations = {
     "method": "POST",
     "path": "/work-items"
   },
+  "ingestWebhook": {
+    "method": "POST",
+    "path": "/webhooks/{source}"
+  },
   "getWorkItem": {
     "method": "GET",
     "path": "/work-items/{id}"

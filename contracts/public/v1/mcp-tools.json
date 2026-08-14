@@ -307,6 +307,50 @@
       }
     },
     {
+      "name": "open_acs_dashboard",
+      "exposure": "remote",
+      "description": "Open the read-only ACS Control Center with current health, executions, approvals, and operational findings.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "get_execution_detail",
+      "exposure": "remote",
+      "description": "Read authoritative detail and recent audit events for one ACS execution.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
       "name": "test.agent.run",
       "exposure": "development_only",
       "description": "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.",
