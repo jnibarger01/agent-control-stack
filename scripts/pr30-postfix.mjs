@@ -21,6 +21,11 @@ replaceExact(
 
 replaceExact(
   "packages/work-items/src/attempt.test.ts",
+  `import { afterEach, describe, expect, it } from "vitest";`,
+  `import { afterEach, describe, expect, it, vi } from "vitest";`
+);
+replaceExact(
+  "packages/work-items/src/attempt.test.ts",
   `    const allocation = fixture.store.recordWorkspaceAllocation(
       {
         allocationId: "workspace_1",
@@ -54,18 +59,32 @@ replaceExact(
     const fixture = leasedFixture({ ttlMs: 1_000, now: past });
     directory = fixture.directory;
 
-    const authority = fixture.store.getCommandAuthority({`,
+    const authority = fixture.store.getCommandAuthority({
+      workItemId: fixture.workItem.id,
+      attemptId: fixture.attempt.attemptId,
+      leaseId: fixture.lease.leaseId,
+      workerId: "worker-1",
+      fencingToken: 1,
+      workspaceAllocationId: "workspace_1"
+    });
+    expect(authority).toBeUndefined();
+  });`,
   `  it("rejects an expired lease even though every identifier otherwise matches", () => {
     const fixture = leasedFixture();
     directory = fixture.directory;
-    const dbAny = fixture.store as unknown as {
-      db: { prepare: (sql: string) => { run: (...a: unknown[]) => unknown } };
-    };
-    dbAny.db
-      .prepare("UPDATE attempt_leases SET expires_at = ? WHERE lease_id = ?")
-      .run(new Date(Date.now() - 1_000).toISOString(), fixture.lease.leaseId);
-
-    const authority = fixture.store.getCommandAuthority({`
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.parse(fixture.lease.expiresAt) + 1));
+    const authority = fixture.store.getCommandAuthority({
+      workItemId: fixture.workItem.id,
+      attemptId: fixture.attempt.attemptId,
+      leaseId: fixture.lease.leaseId,
+      workerId: "worker-1",
+      fencingToken: 1,
+      workspaceAllocationId: "workspace_1"
+    });
+    vi.useRealTimers();
+    expect(authority).toBeUndefined();
+  });`
 );
 
 replaceExact(
@@ -78,7 +97,6 @@ replaceExact(
   `import { WorkspaceManager } from "./index.js";`,
   `import { WorkspaceManager, type WorkspaceAllocationStore } from "./index.js";`
 );
-
 replaceExact(
   "packages/workspace-manager/src/index.test.ts",
   `    const manager = new WorkspaceManager({
