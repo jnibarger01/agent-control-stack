@@ -13,10 +13,7 @@ function hex(seed: string): string {
   return seed.repeat(64).slice(0, 64);
 }
 
-async function race(
-  input: Record<string, unknown>,
-  rounds = 8
-): Promise<Array<{ ok: boolean; value?: any; error?: any }>> {
+async function race(input: Record<string, unknown>): Promise<Array<{ ok: boolean; value?: any; error?: any }>> {
   const barrier = new SharedArrayBuffer(4);
   const workers = [0, 1].map(
     (index) =>
