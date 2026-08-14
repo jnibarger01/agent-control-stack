@@ -111,14 +111,14 @@ replaceExact(
       },
       closeWorkspaceAllocation(id) {
         const current = allocations.get(id);
-        if (!current) throw new Error(`missing allocation ${id}`);
+        if (!current) throw new Error("missing allocation " + id);
         const closed = { ...current, status: "torn_down" as const, tornDownAt: new Date().toISOString() };
         allocations.set(id, closed);
         return closed;
       },
       requestWorkspaceCleanup(input) {
         const current = allocations.get(input.allocationId);
-        if (!current) throw new Error(`missing allocation ${input.allocationId}`);
+        if (!current) throw new Error("missing allocation " + input.allocationId);
         return current;
       }
     };
