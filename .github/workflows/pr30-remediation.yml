@@ -63,7 +63,7 @@ jobs:
           node scripts/pr30-postfix.mjs
 
       - name: Format remediation TypeScript
-        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/attempt.test.ts packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts
+        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/attempt.test.ts packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts packages/workspace-manager/src/index.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts
 
       - name: Clean and rebuild fixed workspace packages
         run: |
