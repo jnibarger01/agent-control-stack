@@ -34,6 +34,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Build workspace packages for test resolution
+        run: npm run build
+
       - name: Add regression tests
         run: node scripts/pr30-remediate.mjs --tests
 
@@ -53,8 +56,11 @@ jobs:
       - name: Apply validated review fixes
         run: node scripts/pr30-remediate.mjs --fixes
 
-      - name: Format remediation files
-        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts storage/migrations/007_workspace_allocations.sql storage/migrations/009_attempt_workspace_ownership.sql
+      - name: Format remediation TypeScript
+        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts
+
+      - name: Rebuild fixed workspace packages
+        run: npm run build
 
       - name: Verify regression tests
         run: npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/pr30-cleanup.test.ts
