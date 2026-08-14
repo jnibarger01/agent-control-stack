@@ -7,6 +7,7 @@ on:
     paths:
       - scripts/pr30-remediate.mjs
       - scripts/pr30-correct-tests.mjs
+      - scripts/pr30-postfix.mjs
       - .github/workflows/pr30-remediation.yml
 
 permissions:
@@ -57,10 +58,12 @@ jobs:
           echo "Expected pre-fix failure observed (exit $status)"
 
       - name: Apply validated review fixes
-        run: node scripts/pr30-remediate.mjs --fixes
+        run: |
+          node scripts/pr30-remediate.mjs --fixes
+          node scripts/pr30-postfix.mjs
 
       - name: Format remediation TypeScript
-        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts
+        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/attempt.test.ts packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts
 
       - name: Clean and rebuild fixed workspace packages
         run: |
@@ -69,7 +72,7 @@ jobs:
           npm run build
 
       - name: Verify regression tests
-        run: npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts apps/worker/src/pr30-cleanup.test.ts
+        run: npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts packages/policy-gate/src/pr30-cancel-regression.test.ts apps/worker/src/pr30-cleanup.test.ts packages/work-items/src/attempt.test.ts packages/workspace-manager/src/index.test.ts
 
       - name: Full repository check
         run: npm run check
@@ -84,7 +87,7 @@ jobs:
         run: docker build -t agent-control-stack:pr30-remediation .
 
       - name: Remove temporary remediation scaffolding
-        run: git rm .github/workflows/pr30-remediation.yml scripts/pr30-remediate.mjs scripts/pr30-correct-tests.mjs
+        run: git rm .github/workflows/pr30-remediation.yml scripts/pr30-remediate.mjs scripts/pr30-correct-tests.mjs scripts/pr30-postfix.mjs
 
       - name: Commit verified remediation
         shell: bash
