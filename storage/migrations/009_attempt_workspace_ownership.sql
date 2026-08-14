@@ -29,8 +29,10 @@ CREATE TABLE workspace_allocations (
 INSERT INTO workspace_allocations
   (allocation_id, work_item_id, attempt_id, lease_id, worker_id, fencing_epoch,
    host_path, branch, base_ref, status, created_at, torn_down_at)
-SELECT allocation_id, work_item_id, allocation_id, allocation_id, 'legacy', 0,
-       host_path, branch, base_ref, status, created_at, torn_down_at
+SELECT allocation_id, work_item_id,
+       CASE WHEN status = 'active' THEN work_item_id ELSE allocation_id END,
+       CASE WHEN status = 'active' THEN work_item_id ELSE allocation_id END,
+       'legacy', 0, host_path, branch, base_ref, status, created_at, torn_down_at
 FROM workspace_allocations_legacy;
 
 DROP TABLE workspace_allocations_legacy;

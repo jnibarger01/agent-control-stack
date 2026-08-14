@@ -1,46 +1,33 @@
 CREATE TABLE IF NOT EXISTS workspace_allocations (
   allocation_id TEXT PRIMARY KEY,
   work_item_id TEXT NOT NULL REFERENCES work_items(id),
-  attempt_id TEXT NOT NULL,
-  lease_id TEXT NOT NULL,
-  worker_id TEXT NOT NULL,
-  fencing_epoch INTEGER NOT NULL CHECK (fencing_epoch >= 0),
   host_path TEXT NOT NULL CHECK (length(trim(host_path)) > 0),
   branch TEXT NOT NULL CHECK (length(trim(branch)) > 0),
   base_ref TEXT NOT NULL CHECK (length(trim(base_ref)) > 0),
-  status TEXT NOT NULL CHECK (status IN ('active', 'cleanup_requested', 'cleanup_failed', 'torn_down')),
-  cleanup_attempts INTEGER NOT NULL DEFAULT 0 CHECK (cleanup_attempts >= 0),
-  cleanup_requested_at TEXT,
-  cleanup_last_error TEXT,
+  status TEXT NOT NULL CHECK (status IN ('active', 'torn_down')),
   created_at TEXT NOT NULL CHECK (julianday(created_at) IS NOT NULL),
   torn_down_at TEXT CHECK (torn_down_at IS NULL OR julianday(torn_down_at) IS NOT NULL),
-  UNIQUE (allocation_id, work_item_id),
-  UNIQUE (attempt_id),
-  UNIQUE (host_path)
+  UNIQUE (allocation_id, work_item_id)
 );
 
 -- One live allocation per work item at a time - matches WorkspaceManager's
 -- one-worktree-per-work-item design (reused across attempts, not
 -- reprovisioned per attempt).
-CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_allocations_one_active_attempt
-  ON workspace_allocations(attempt_id)
-  WHERE status <> 'torn_down';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_allocations_one_active_work_item
+  ON workspace_allocations(work_item_id)
+  WHERE status = 'active';
 
 CREATE TRIGGER IF NOT EXISTS workspace_allocations_transition_guard
 BEFORE UPDATE ON workspace_allocations
 WHEN NEW.allocation_id IS NOT OLD.allocation_id
   OR NEW.work_item_id IS NOT OLD.work_item_id
-  OR NEW.attempt_id IS NOT OLD.attempt_id
-  OR NEW.lease_id IS NOT OLD.lease_id
-  OR NEW.worker_id IS NOT OLD.worker_id
-  OR NEW.fencing_epoch IS NOT OLD.fencing_epoch
   OR NEW.host_path IS NOT OLD.host_path
   OR NEW.branch IS NOT OLD.branch
   OR NEW.base_ref IS NOT OLD.base_ref
   OR NEW.created_at IS NOT OLD.created_at
-  OR OLD.status = 'torn_down'
-  OR NEW.status NOT IN ('cleanup_requested', 'cleanup_failed', 'torn_down')
-  OR (NEW.status = 'torn_down' AND NEW.torn_down_at IS NULL)
+  OR OLD.status <> 'active'
+  OR NEW.status <> 'torn_down'
+  OR NEW.torn_down_at IS NULL
 BEGIN
   SELECT RAISE(ABORT, 'workspace_allocations: immutable binding or invalid transition');
 END;

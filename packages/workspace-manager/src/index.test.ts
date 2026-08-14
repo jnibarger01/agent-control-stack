@@ -4,9 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ControlStackError } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore, type WorkItemStore } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore, type WorkspaceAllocation, type WorkItemStore } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
-import { WorkspaceManager } from "./index.js";
+import { WorkspaceManager, type WorkspaceAllocationStore } from "./index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -301,10 +301,48 @@ describe("WorkspaceManager", () => {
     const fixture = await createRepoFixture();
     cleanup = fixture.cleanup;
     const workItemId = seedWorkItemId(fixture.store, "retry-isolation");
+    const allocations = new Map<string, WorkspaceAllocation>();
+    const attemptStore: WorkspaceAllocationStore = {
+      recordWorkspaceAllocation(input) {
+        const allocation: WorkspaceAllocation = {
+          ...input,
+          attemptId: input.attemptId ?? input.workItemId,
+          leaseId: input.leaseId ?? input.workItemId,
+          workerId: input.workerId ?? "legacy",
+          fencingEpoch: input.fencingEpoch ?? 0,
+          status: "active",
+          createdAt: new Date().toISOString()
+        };
+        allocations.set(allocation.allocationId, allocation);
+        return allocation;
+      },
+      getActiveWorkspaceAllocationForWorkItem(id) {
+        return [...allocations.values()].find(
+          (allocation) => allocation.workItemId === id && allocation.status === "active"
+        );
+      },
+      getActiveWorkspaceAllocationForAttempt(id) {
+        return [...allocations.values()].find(
+          (allocation) => allocation.attemptId === id && allocation.status === "active"
+        );
+      },
+      closeWorkspaceAllocation(id) {
+        const current = allocations.get(id);
+        if (!current) throw new Error("missing allocation " + id);
+        const closed = { ...current, status: "torn_down" as const, tornDownAt: new Date().toISOString() };
+        allocations.set(id, closed);
+        return closed;
+      },
+      requestWorkspaceCleanup(input) {
+        const current = allocations.get(input.allocationId);
+        if (!current) throw new Error("missing allocation " + input.allocationId);
+        return current;
+      }
+    };
     const manager = new WorkspaceManager({
       repoPath: fixture.repoPath,
       rootDir: fixture.rootDir,
-      store: fixture.store
+      store: attemptStore
     });
 
     const first = await manager.provision(workItemId, {
@@ -339,6 +377,6 @@ describe("WorkspaceManager", () => {
       workerId: "worker-a",
       fencingEpoch: 2
     });
-    expect(fixture.store.getActiveWorkspaceAllocationForAttempt?.("attempt-second")).toBeUndefined();
+    expect(attemptStore.getActiveWorkspaceAllocationForAttempt?.("attempt-second")).toBeUndefined();
   });
 });

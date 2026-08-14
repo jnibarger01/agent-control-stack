@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SqliteWorkItemStore, defaultExecutionPlanForWorkItem } from "./index.js";
 
 function hex(seed: string): string {
@@ -298,6 +298,10 @@ describe("getCommandAuthority", () => {
       {
         allocationId: "workspace_1",
         workItemId: fixture.workItem.id,
+        attemptId: attempt.attemptId,
+        leaseId: lease.leaseId,
+        workerId: lease.workerId,
+        fencingEpoch: lease.fencingEpoch,
         hostPath: "/repo/wrk_1",
         branch: "acs/job/wrk_1",
         baseRef: "main"
@@ -378,10 +382,10 @@ describe("getCommandAuthority", () => {
   });
 
   it("rejects an expired lease even though every identifier otherwise matches", () => {
-    const past = new Date(Date.now() - 60 * 60 * 1_000);
-    const fixture = leasedFixture({ ttlMs: 1_000, now: past });
+    const fixture = leasedFixture();
     directory = fixture.directory;
-
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.parse(fixture.lease.expiresAt) + 1));
     const authority = fixture.store.getCommandAuthority({
       workItemId: fixture.workItem.id,
       attemptId: fixture.attempt.attemptId,
@@ -390,6 +394,7 @@ describe("getCommandAuthority", () => {
       fencingToken: 1,
       workspaceAllocationId: "workspace_1"
     });
+    vi.useRealTimers();
     expect(authority).toBeUndefined();
   });
 

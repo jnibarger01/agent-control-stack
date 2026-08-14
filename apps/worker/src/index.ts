@@ -46,6 +46,8 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const workerId = options.workerId ?? "local-worker";
   const execute = options.execute ?? executeSandboxed;
+  let cleanupWorkspace:
+    { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch: number } | undefined;
 
   try {
     workItems.failExpiredLeases();
@@ -68,6 +70,15 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
           fencingEpoch: running.fencingEpoch
         })
       : undefined;
+    if (workspace && running.attemptId) {
+      cleanupWorkspace = {
+        workItemId: running.id,
+        attemptId: running.attemptId,
+        leaseId: running.leaseId,
+        workerId,
+        fencingEpoch: running.fencingEpoch
+      };
+    }
     const startedAt = new Date().toISOString();
     if (!isReadOnlyWorkerWorkItem(running)) {
       const completedAt = new Date().toISOString();
@@ -95,14 +106,6 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
           reason: "worker_read_only_scope"
         }
       });
-      if (workspace && running.attemptId) {
-        await options.workspaceManager?.teardown(running.id, {
-          attemptId: running.attemptId,
-          leaseId: running.leaseId,
-          workerId,
-          fencingEpoch: running.fencingEpoch
-        });
-      }
       return {
         executed: false,
         workItemId: running.id,
@@ -159,18 +162,20 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       });
     }
 
-    if (workspace && running.attemptId) {
-      await options.workspaceManager?.teardown(running.id, {
-        attemptId: running.attemptId,
-        leaseId: running.leaseId,
-        workerId,
-        fencingEpoch: running.fencingEpoch
-      });
-    }
-
     return { executed: true, executionMode: result.executionMode, workItemId: running.id, reason: workerId };
   } finally {
-    workItems.close();
+    try {
+      if (cleanupWorkspace) {
+        await options.workspaceManager?.teardown(cleanupWorkspace.workItemId, {
+          attemptId: cleanupWorkspace.attemptId,
+          leaseId: cleanupWorkspace.leaseId,
+          workerId: cleanupWorkspace.workerId,
+          fencingEpoch: cleanupWorkspace.fencingEpoch
+        });
+      }
+    } finally {
+      workItems.close();
+    }
   }
 }
 

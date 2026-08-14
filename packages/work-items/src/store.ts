@@ -1119,6 +1119,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("execution_plan_not_current", "only the current execution plan can be approved");
       }
 
+      const createdAt = (parsed.now ?? new Date()).toISOString();
       const existing = this.db
         .prepare(
           `SELECT * FROM execution_plan_approvals
@@ -1126,11 +1127,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
         .get(parsed.workItemId, parsed.planHash, parsed.actionHash) as unknown as ExecutionPlanApprovalRow | undefined;
       if (existing) {
-        return { value: rowToExecutionPlanApproval(existing), events: [] };
+        if (Date.parse(existing.expires_at) > Date.parse(createdAt)) {
+          return { value: rowToExecutionPlanApproval(existing), events: [] };
+        }
+        const expired = this.db
+          .prepare(
+            `UPDATE execution_plan_approvals SET status = 'expired' WHERE approval_id = ? AND status = 'granted' AND expires_at <= ?`
+          )
+          .run(existing.approval_id, createdAt);
+        if (expired.changes !== 1) {
+          throw new ControlStackError(
+            "execution_plan_approval_conflict",
+            "expired approval changed while replacing it"
+          );
+        }
       }
 
       const approvalId = createId("plan_approval");
-      const createdAt = (parsed.now ?? new Date()).toISOString();
       const expiresAt = new Date(Date.parse(createdAt) + (parsed.expiresInMs ?? 10 * 60 * 1_000)).toISOString();
       const reason = parsed.reason ?? "approved";
       const requestHash = executionPlanApprovalRequestHash({
@@ -1398,6 +1411,44 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const leaseId = parsed.leaseId ?? parsed.workItemId;
       const workerId = parsed.workerId ?? "legacy";
       const fencingEpoch = parsed.fencingEpoch ?? 0;
+      const hasAttemptAuthority =
+        parsed.attemptId !== undefined ||
+        parsed.leaseId !== undefined ||
+        parsed.workerId !== undefined ||
+        parsed.fencingEpoch !== undefined;
+      const isLegacyAuthority =
+        attemptId === parsed.workItemId && leaseId === parsed.workItemId && workerId === "legacy" && fencingEpoch === 0;
+      if (hasAttemptAuthority && !isLegacyAuthority) {
+        if (!parsed.attemptId || !parsed.leaseId || !parsed.workerId || parsed.fencingEpoch === undefined) {
+          throw new ControlStackError(
+            "workspace_allocation_authority_invalid",
+            "attempt-scoped workspace allocation requires the complete lease authority tuple"
+          );
+        }
+        const nowMs = Date.parse((parsed.now ?? new Date()).toISOString());
+        const authoritativeLease = this.db
+          .prepare(
+            `SELECT * FROM attempt_leases WHERE attempt_id = ? AND work_item_id = ? AND lease_id = ? AND worker_id = ? AND fencing_epoch = ? AND status = 'active'`
+          )
+          .get(parsed.attemptId, parsed.workItemId, parsed.leaseId, parsed.workerId, parsed.fencingEpoch) as unknown as
+          AttemptLeaseRow | undefined;
+        const authoritativeAttempt = this.db
+          .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`)
+          .get(parsed.attemptId, parsed.workItemId) as unknown as ExecutionAttemptRow | undefined;
+        if (
+          !authoritativeLease ||
+          Date.parse(authoritativeLease.expires_at) <= nowMs ||
+          !authoritativeAttempt ||
+          authoritativeAttempt.claimed_by_worker_id !== parsed.workerId ||
+          authoritativeAttempt.current_fencing_epoch !== parsed.fencingEpoch ||
+          (authoritativeAttempt.status !== "leased" && authoritativeAttempt.status !== "running")
+        ) {
+          throw new ControlStackError(
+            "workspace_allocation_authority_invalid",
+            "workspace allocation authority is stale, expired, or mismatched"
+          );
+        }
+      }
       const activeForAttempt = this.db
         .prepare(`SELECT allocation_id FROM workspace_allocations WHERE attempt_id = ? AND status <> 'torn_down'`)
         .get(attemptId) as { allocation_id: string } | undefined;
@@ -1711,7 +1762,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
       (attemptRow.status === "leased" ||
         attemptRow.status === "running" ||
         attemptRow.status === "cancellation_requested") &&
-      allocationRow.status === "active";
+      allocationRow.status === "active" &&
+      allocationRow.attempt_id === input.attemptId &&
+      allocationRow.lease_id === input.leaseId &&
+      allocationRow.worker_id === input.workerId &&
+      allocationRow.fencing_epoch === input.fencingToken;
     if (!valid) return undefined;
 
     return commandAuthoritySchema.parse({
@@ -3619,6 +3674,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
         this.db
           .prepare(`UPDATE leases SET status = 'revoked', closed_at = ? WHERE work_item_id = ? AND status = 'active'`)
           .run(updated.updatedAt, id);
+        if (status === "cancelled") {
+          this.db
+            .prepare(
+              `UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE work_item_id = ? AND status = 'active'`
+            )
+            .run(updated.updatedAt, id);
+          this.db
+            .prepare(
+              `UPDATE execution_attempts SET status = 'cancelled', terminal_at = ?, outcome_code = 'cancelled', updated_at = ? WHERE work_item_id = ? AND status IN ('leased', 'running', 'cancellation_requested')`
+            )
+            .run(updated.updatedAt, updated.updatedAt, id);
+        }
       }
       return {
         value: updated,
