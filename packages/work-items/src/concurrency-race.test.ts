@@ -21,7 +21,6 @@ async function race(
   const workers = [0, 1].map(
     (index) =>
       new Worker(workerUrl, {
-        type: "module",
         execArgv: ["--import", "tsx"],
         workerData: { ...input, workerId: `race-${index}`, barrier }
       })
@@ -181,7 +180,6 @@ describe("deterministic multi-connection concurrency invariants", () => {
     const workers = (["retry", "cancel"] as const).map(
       (op) =>
         new Worker(workerUrl, {
-          type: "module",
           execArgv: ["--import", "tsx"],
           workerData: { kind: "mixed", op, dbPath: path, workItemId: workItem.id, actor: "seed", barrier }
         })

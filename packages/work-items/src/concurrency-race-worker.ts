@@ -8,7 +8,7 @@ type Race =
   | { kind: "retry"; dbPath: string; workItemId: string; actor: string }
   | { kind: "cancel"; dbPath: string; workItemId: string; actor: string }
   | { kind: "mixed"; dbPath: string; workItemId: string; actor: string; op: "retry" | "cancel" }
-  | { kind: "lease"; dbPath: string; input: any };
+  | { kind: "lease"; dbPath: string; input: any; workerId: string };
 
 const input = workerData as Race & { barrier: SharedArrayBuffer };
 const barrier = new Int32Array(input.barrier);
