@@ -1,0 +1,85 @@
+name: pr30-remediation
+
+on:
+  push:
+    branches:
+      - reconciliation/canonical-20260813
+    paths:
+      - scripts/pr30-remediate.mjs
+      - .github/workflows/pr30-remediation.yml
+
+permissions:
+  contents: write
+
+jobs:
+  remediate:
+    if: github.repository == 'jnibarger01/agent-control-stack'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout remediation branch
+        uses: actions/checkout@v4
+        with:
+          ref: reconciliation/canonical-20260813
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.16.0
+          cache: npm
+
+      - name: Pin npm
+        run: npm install --global npm@11.17.0
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Add regression tests
+        run: node scripts/pr30-remediate.mjs --tests
+
+      - name: Prove regression tests fail before fixes
+        shell: bash
+        run: |
+          set +e
+          npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/pr30-cleanup.test.ts
+          status=$?
+          set -e
+          if [ "$status" -eq 0 ]; then
+            echo "Regression tests unexpectedly passed before remediation"
+            exit 1
+          fi
+          echo "Expected pre-fix failure observed (exit $status)"
+
+      - name: Apply validated review fixes
+        run: node scripts/pr30-remediate.mjs --fixes
+
+      - name: Format remediation files
+        run: npx prettier --write packages/work-items/src/store.ts packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/index.ts apps/worker/src/pr30-cleanup.test.ts storage/migrations/007_workspace_allocations.sql storage/migrations/009_attempt_workspace_ownership.sql
+
+      - name: Verify regression tests
+        run: npx vitest run packages/work-items/src/pr30-authority-regressions.test.ts apps/worker/src/pr30-cleanup.test.ts
+
+      - name: Full repository check
+        run: npm run check
+
+      - name: Coverage gate
+        run: npm run test:coverage
+
+      - name: Secret scan
+        run: npm run security:secrets
+
+      - name: Production image build
+        run: docker build -t agent-control-stack:pr30-remediation .
+
+      - name: Remove temporary remediation scaffolding
+        run: git rm .github/workflows/pr30-remediation.yml scripts/pr30-remediate.mjs
+
+      - name: Commit verified remediation
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --check
+          git commit -m "fix: close PR30 authority and cleanup review findings"
+          git push origin HEAD:reconciliation/canonical-20260813
