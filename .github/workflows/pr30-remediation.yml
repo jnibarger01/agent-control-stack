@@ -64,8 +64,8 @@ jobs:
 
       - name: Clean and rebuild fixed workspace packages
         run: |
-          find apps packages -type d -name dist -prune -exec rm -rf {} +
-          find . -name '*.tsbuildinfo' -delete
+          rm -rf apps/*/dist packages/*/dist
+          find . -name '*.tsbuildinfo' -not -path '*/node_modules/*' -delete
           npm run build
 
       - name: Verify regression tests
