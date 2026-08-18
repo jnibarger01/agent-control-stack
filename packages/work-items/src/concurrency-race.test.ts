@@ -97,6 +97,7 @@ describe("deterministic multi-connection concurrency invariants", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 
+  // Eight real worker-process races can exceed Vitest's 5s default on hosted runners.
   it("lets exactly one claimant win, repeatedly", async () => {
     for (let round = 0; round < 8; round++) {
       const dir = mkdtempSync(join(tmpdir(), "acs-race-claim-"));
@@ -110,7 +111,7 @@ describe("deterministic multi-connection concurrency invariants", () => {
       expect(results.filter((r) => r.ok && !r.value)).toHaveLength(1);
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("consumes an approval once and emits one audit event", async () => {
     for (let round = 0; round < 8; round++) {
