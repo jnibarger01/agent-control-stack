@@ -793,7 +793,9 @@ describe("work item state machine", () => {
         ["gemini-cli", "Gemini CLI", "RESEARCH_BROAD_SCAN_AGENT"],
         ["opencode-local", "OpenCode", "LOCAL_CODING_AGENT"],
         ["hermes-local", "Hermes Agent", "ORCHESTRATION_LAYER"],
-        ["openclaw-bridge", "OpenClaw", "DESKTOP_LOCAL_AGENT_BRIDGE"]
+        ["openclaw-bridge", "OpenClaw", "DESKTOP_LOCAL_AGENT_BRIDGE"],
+        ["grok-cli", "Grok CLI", "RESEARCH_BROAD_SCAN_AGENT"],
+        ["pi-cli", "Pi CLI", "REVIEW_PLANNING_AGENT"]
       ] as const;
 
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["actors", "agents", "capabilities", "heartbeats"]));
@@ -806,7 +808,8 @@ describe("work item state machine", () => {
         { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
         { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" },
         { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" },
-        { version: 9, name: "attempt_workspace_ownership", filename: "009_attempt_workspace_ownership.sql" }
+        { version: 9, name: "attempt_workspace_ownership", filename: "009_attempt_workspace_ownership.sql" },
+        { version: 10, name: "grok_pi_registry", filename: "010_grok_pi_registry.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -905,7 +908,8 @@ describe("work item state machine", () => {
         { version: 6 },
         { version: 7 },
         { version: 8 },
-        { version: 9 }
+        { version: 9 },
+        { version: 10 }
       ]);
     } finally {
       db.close();
@@ -1013,7 +1017,7 @@ describe("work item state machine", () => {
 
     const store = new SqliteWorkItemStore(copiedPath);
     try {
-      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
       store.close();
@@ -1086,9 +1090,13 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
       expect(store.listRegistryAgents()).toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" })])
+        expect.arrayContaining([
+          expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" }),
+          expect.objectContaining({ id: "grok-cli", acpRole: "RESEARCH_BROAD_SCAN_AGENT" }),
+          expect.objectContaining({ id: "pi-cli", acpRole: "REVIEW_PLANNING_AGENT" })
+        ])
       );
     } finally {
       store.close();
