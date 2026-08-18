@@ -6,7 +6,6 @@ on:
   workflow_dispatch:
 
 permissions:
-  id-token: write
   contents: write
   pull-requests: write
   issues: read
@@ -72,7 +71,7 @@ jobs:
       - name: Run engineering worker
         if: steps.preflight.outputs.mode != 'skip'
         id: opencode
-        uses: anomalyco/opencode/github@2c14fc5586fe0b88e5c04732d2e846769cc35671
+        uses: anomalyco/opencode/github@31406ccc51b4bd2a4e1e086b2bcaa5f7f804f26d
         env:
           FREEMODEL_API_KEY: ${{ secrets.FREEMODEL_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
@@ -82,6 +81,15 @@ jobs:
           share: false
           prompt: ${{ steps.prompt.outputs.prompt }}
 
+      - name: Enforce worker gates
+        if: always() && steps.preflight.outputs.idempotency_key != ''
+        id: gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CYCLE_ID: ${{ steps.preflight.outputs.cycle_id }}
+          CYCLE_MODE: ${{ steps.preflight.outputs.mode }}
+        run: python3 scripts/hourly_pr.py verify
+
       - name: Reconcile cycle
         if: always() && steps.preflight.outputs.idempotency_key != ''
         env:
@@ -90,6 +98,7 @@ jobs:
           CYCLE_ID: ${{ steps.preflight.outputs.cycle_id }}
           CYCLE_MODE: ${{ steps.preflight.outputs.mode }}
           ACTION_OUTCOME: ${{ steps.opencode.outcome }}
+          GATE_OUTCOME: ${{ steps.gate.outcome }}
         run: python3 scripts/hourly_pr.py reconcile
 
       - name: Persist task ledger

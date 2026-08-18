@@ -111,6 +111,7 @@ def preflight():
 def reconcile():
     repo, key = need("GITHUB_REPOSITORY"), need("IDEMPOTENCY_KEY")
     mode, outcome = os.environ.get("CYCLE_MODE", ""), os.environ.get("ACTION_OUTCOME", "")
+    gate_outcome = os.environ.get("GATE_OUTCOME", "")
     try:
         result = json.loads(RESULT.read_text()) if RESULT.exists() else {}
     except json.JSONDecodeError:
@@ -122,7 +123,9 @@ def reconcile():
     created = [p for p in recent if p["head"]["ref"].startswith("auto/")
                and dt(p["created_at"]) >= start]
 
-    if len(created) > 1:
+    if gate_outcome == "failure":
+        status, result["reason"] = "failed", "fail-closed worker gate rejected the cycle"
+    elif len(created) > 1:
         status, result["reason"] = "failed", "safety violation: >1 automated PR in cycle"
     elif created:
         p, status = created[0], "pr_open"
@@ -156,7 +159,72 @@ def reconcile():
     print(json.dumps(result, indent=2))
 
 
+def verify():
+    """Enforce machine-checkable worker and PR gates before reconciliation."""
+    repo = need("GITHUB_REPOSITORY")
+    mode = os.environ.get("CYCLE_MODE", "")
+    try:
+        result = json.loads(RESULT.read_text())
+    except (FileNotFoundError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"invalid or missing runtime result: {exc}")
+
+    status = result.get("status")
+    terminal_without_pr = {"skipped", "blocked", "failed", "escalated"}
+    if status in terminal_without_pr:
+        if not result.get("reason"):
+            raise SystemExit("terminal worker result must include a reason")
+        print(json.dumps({"status": status, "verified": True}, indent=2))
+        return
+    if status not in {"pr_open", "completed"}:
+        raise SystemExit("worker result must declare a known terminal or publishable status")
+
+    criteria = result.get("acceptance_criteria")
+    validation = result.get("validation")
+    if not isinstance(criteria, list) or not criteria:
+        raise SystemExit("non-terminal result requires non-empty acceptance_criteria")
+    if not all(isinstance(item, dict) and item.get("passed") is True for item in criteria):
+        raise SystemExit("every acceptance criterion must be machine-marked passed")
+    if not isinstance(validation, list) or not validation:
+        raise SystemExit("non-terminal result requires validation evidence")
+    if not all(isinstance(item, dict) and item.get("exit_code") == 0 for item in validation):
+        raise SystemExit("every reported validation command must have exit_code 0")
+
+    branch = result.get("branch")
+    number = result.get("pr_number")
+    risk = str(result.get("risk_level") or "").upper()
+    if not isinstance(branch, str) or not branch.startswith("auto/"):
+        raise SystemExit("publishable result requires an auto/* branch")
+    if not isinstance(number, int) or number <= 0:
+        raise SystemExit("publishable result requires a PR number")
+    if risk not in {"LOW", "MEDIUM", "HIGH", "CRITICAL"}:
+        raise SystemExit("publishable result requires a recognized risk level")
+    if risk == "CRITICAL":
+        raise SystemExit("CRITICAL work cannot produce a PR")
+
+    pr = api(f"repos/{repo}/pulls/{number}")
+    if pr.get("head", {}).get("ref") != branch:
+        raise SystemExit("PR head branch does not match worker result")
+    default_branch = api(f"repos/{repo}")["default_branch"]
+    if pr.get("base", {}).get("ref") != default_branch:
+        raise SystemExit("PR base branch does not match repository default")
+    if risk == "HIGH" and pr.get("draft") is not True:
+        raise SystemExit("HIGH-risk PR must remain draft")
+    body = pr.get("body") or ""
+    required_sections = ("## Problem", "## Change", "## Acceptance", "## Validation", "## Risk", "## Rollback")
+    missing = [section for section in required_sections if section not in body]
+    if missing:
+        raise SystemExit(f"PR body missing required sections: {', '.join(missing)}")
+
+    if mode == "maintenance":
+        cycle = os.environ.get("CYCLE_ID")
+        if cycle:
+            start = datetime.strptime(cycle, "%Y%m%d-%H").replace(tzinfo=timezone.utc)
+            if dt(pr["created_at"]) >= start:
+                raise SystemExit("maintenance mode cannot create a new PR")
+    print(json.dumps({"status": status, "verified": True, "pr": number, "risk": risk}, indent=2))
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2 or sys.argv[1] not in {"preflight", "reconcile"}:
-        raise SystemExit("usage: hourly_pr.py <preflight|reconcile>")
-    preflight() if sys.argv[1] == "preflight" else reconcile()
+    if len(sys.argv) != 2 or sys.argv[1] not in {"preflight", "verify", "reconcile"}:
+        raise SystemExit("usage: hourly_pr.py <preflight|verify|reconcile>")
+    {"preflight": preflight, "verify": verify, "reconcile": reconcile}[sys.argv[1]]()
