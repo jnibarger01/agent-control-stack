@@ -123,7 +123,7 @@ def reconcile():
     created = [p for p in recent if p["head"]["ref"].startswith("auto/")
                and dt(p["created_at"]) >= start]
 
-    if gate_outcome == "failure":
+    if gate_outcome != "success":
         status, result["reason"] = "failed", "fail-closed worker gate rejected the cycle"
     elif len(created) > 1:
         status, result["reason"] = "failed", "safety violation: >1 automated PR in cycle"
@@ -186,8 +186,15 @@ def verify():
         raise SystemExit("every acceptance criterion must be machine-marked passed")
     if not isinstance(validation, list) or not validation:
         raise SystemExit("non-terminal result requires validation evidence")
-    if not all(isinstance(item, dict) and item.get("exit_code") == 0 for item in validation):
-        raise SystemExit("every reported validation command must have exit_code 0")
+    if not all(
+        isinstance(item, dict)
+        and isinstance(item.get("command"), str)
+        and bool(item["command"].strip())
+        and item.get("exit_code") == 0
+        and (item.get("evidence") or item.get("output"))
+        for item in validation
+    ):
+        raise SystemExit("every validation entry requires command, exit_code 0, and evidence")
 
     branch = result.get("branch")
     number = result.get("pr_number")
@@ -212,8 +219,14 @@ def verify():
     body = pr.get("body") or ""
     required_sections = ("## Problem", "## Change", "## Acceptance", "## Validation", "## Risk", "## Rollback")
     missing = [section for section in required_sections if section not in body]
+    required_metadata = ("Affected:", "Automation", "Human review required: yes")
+    missing.extend(item for item in required_metadata if item not in body)
+    lower_body = body.lower()
+    for item in ("category:", "source:", "cycle id:"):
+        if item not in lower_body:
+            missing.append(item)
     if missing:
-        raise SystemExit(f"PR body missing required sections: {', '.join(missing)}")
+        raise SystemExit(f"PR body missing required sections or metadata: {', '.join(missing)}")
 
     if mode == "maintenance":
         cycle = os.environ.get("CYCLE_ID")

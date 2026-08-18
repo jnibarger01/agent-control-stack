@@ -11,7 +11,7 @@ It is excluded from git. Never commit it or put secrets in it. Update it again b
 
 ## Modes
 - `skip`: make no changes and open no PR. Record why.
-- `maintenance`: create no new PR. Repair at most one existing `auto/` PR that has failing CI, a trivial conflict, requested review changes, or obvious staleness. Validate and stop. Never merge.
+- `maintenance`: create no new PR. Repair at most one existing `auto/` PR that has failing CI, a trivial conflict, requested review changes, or obvious staleness. A repaired existing PR must be recorded with its PR number; if no repair is made, record `status: "skipped"` with a reason. Validate and stop. Never merge.
 - `create`: first check urgent overrides in this order: production regression, confirmed critical/high security issue, broken required CI, release blocker, then scheduled category.
 
 ## Candidate rules
