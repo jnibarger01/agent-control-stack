@@ -22,6 +22,7 @@ This repository is currently a **v0.1.0-alpha dry-run control-plane release**. I
 - [Deploy](#deploy)
 - [Operations](#operations)
 - [Validation](#validation)
+- [Autonomous development-agent supervisor](#autonomous-development-agent-supervisor)
 - [Known limitations](#known-limitations)
 - [Related docs](#related-docs)
 
@@ -794,6 +795,18 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 ```
 
+## Autonomous development-agent supervisor
+
+The repository-local development loop can repeatedly invoke a configured
+coding agent against this worktree and independently verify its completion:
+
+```sh
+python scripts/autonomous_agent.py prompts/acs-implementation.md
+```
+
+See [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
+for executor selection, verification overrides, exit codes, and log behavior.
+
 ## Known limitations
 
 - Worker execution is dry-run only.
@@ -813,6 +826,7 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
 - [`docs/runbooks/production.md`](docs/runbooks/production.md)
+- [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)
 
 ## License

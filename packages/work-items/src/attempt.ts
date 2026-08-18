@@ -52,6 +52,18 @@ export const createAttemptInputSchema = z
 
 export const attemptLeaseStatusSchema = z.enum(["active", "consumed", "expired", "revoked"]);
 
+export const transitionAttemptInputSchema = z
+  .object({
+    attemptId: identifierSchema,
+    workItemId: identifierSchema,
+    workerId: identifierSchema,
+    fencingEpoch: z.number().int().positive(),
+    status: z.enum(["running", "cancellation_requested", "interrupted", "succeeded", "failed", "cancelled", "unknown", "quarantined"]),
+    outcomeCode: z.string().min(1).max(256).optional(),
+    now: z.date().optional()
+  })
+  .strict();
+
 export const attemptLeaseSchema = z
   .object({
     leaseId: identifierSchema,
@@ -163,6 +175,7 @@ export type CreateAttemptInput = z.infer<typeof createAttemptInputSchema>;
 export type AttemptLeaseStatus = z.infer<typeof attemptLeaseStatusSchema>;
 export type AttemptLease = z.infer<typeof attemptLeaseSchema>;
 export type IssueLeaseInput = z.infer<typeof issueLeaseInputSchema>;
+export type TransitionAttemptInput = z.infer<typeof transitionAttemptInputSchema>;
 export type WorkspaceAllocationStatus = z.infer<typeof workspaceAllocationStatusSchema>;
 export type WorkspaceAllocation = z.infer<typeof workspaceAllocationSchema>;
 export type RecordWorkspaceAllocationInput = z.infer<typeof recordWorkspaceAllocationInputSchema>;

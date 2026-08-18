@@ -1,3 +1,4 @@
+import { runSkillsCommand } from "@agent-control-stack/procedural-learning";
 import { installGracefulShutdown, startGateway } from "@agent-control-stack/gateway";
 import { MachineController, loadMachineControllerConfig } from "@agent-control-stack/machine-controller";
 import { McpStdioServer } from "@agent-control-stack/mcp";
@@ -20,6 +21,8 @@ export interface AcsAdapters {
   runSchedulerOnce: typeof runSchedulerOnce;
   startMcp: (args: string[]) => void;
   startGateway: () => Promise<void>;
+  readStatus: () => { health: { ok: boolean }; audit: { ok: boolean } };
+  listPublications: () => unknown[];
 }
 
 const defaultIo: AcsIo = {
@@ -53,13 +56,30 @@ export async function discoverConfiguredActors(): Promise<void> {
   }
 }
 
+export function readControlPlaneStatus() {
+  const dbPath = process.env.ACS_DB_PATH ?? "storage/local.db";
+  const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
+  try {
+    return { health: store.health(), audit: store.verifyAuditChain() };
+  } finally {
+    store.close();
+  }
+}
+
+export function listControlPlanePublications() {
+  const store = new SqliteWorkItemStore(process.env.ACS_DB_PATH ?? "storage/local.db");
+  try { return store.listPublications(); } finally { store.close(); }
+}
+
 export const defaultAcsAdapters: AcsAdapters = {
   discoverLocalActors: discoverConfiguredActors,
   listAvailableActors,
   runWorkerOnce,
   runSchedulerOnce,
   startMcp: startMcpFromArgs,
-  startGateway: startGatewayFromCli
+  startGateway: startGatewayFromCli,
+  readStatus: readControlPlaneStatus,
+  listPublications: listControlPlanePublications
 };
 
 async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapters): Promise<number> {
@@ -100,6 +120,27 @@ async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapt
     case "gateway":
       await adapters.startGateway();
       return 0;
+    case "status": {
+      const status = adapters.readStatus();
+      io.stdout.write(command.json ? `${JSON.stringify(status)}\n` : `health=${status.health.ok} audit=${status.audit.ok}\n`);
+      return status.health.ok && status.audit.ok ? 0 : 1;
+    }
+    case "doctor": {
+      const status = adapters.readStatus();
+      io.stdout.write(command.json ? `${JSON.stringify(status)}\n` : `health=${status.health.ok} audit=${status.audit.ok}\n`);
+      return status.health.ok && status.audit.ok ? 0 : 1;
+    }
+    case "publication-list": {
+      const publications = adapters.listPublications();
+      io.stdout.write(command.json ? `${JSON.stringify(publications)}\n` : publications.length ? `${publications.map((publication) => JSON.stringify(publication)).join("\n")}\n` : "No publications.\n");
+      return 0;
+    }
+    case "skills":
+      return runSkillsCommand(command.args, io);
+    default: {
+      const _exhaustive: never = command;
+      throw new Error(`unhandled command ${JSON.stringify(_exhaustive)}`);
+    }
   }
 }
 

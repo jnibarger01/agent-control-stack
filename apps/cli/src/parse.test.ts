@@ -35,6 +35,14 @@ describe("parseAcsArgs", () => {
     expect(parseAcsArgs(["gateway", "serve"])).toEqual({ kind: "gateway", forwarded: [] });
   });
 
+  it("parses skills operator commands", () => {
+    expect(parseAcsArgs(["skills", "list"])).toEqual({ kind: "skills", args: ["list"] });
+    expect(parseAcsArgs(["skills", "retrieve", "--problem", "invalid hook call"])).toEqual({
+      kind: "skills",
+      args: ["retrieve", "--problem", "invalid hook call"]
+    });
+  });
+
   it("rejects unknown commands and flags", () => {
     expect(() => parseAcsArgs(["widgets"])).toThrow(/unknown command/);
     expect(() => parseAcsArgs(["worker", "--daemon"])).toThrow(/invalid worker argument/);

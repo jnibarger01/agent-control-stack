@@ -36,6 +36,8 @@ function adapters(overrides: Partial<AcsAdapters> = {}): AcsAdapters {
     runSchedulerOnce: vi.fn(async () => ({ firings: [] })),
     startMcp: vi.fn(),
     startGateway: vi.fn(async () => undefined),
+    readStatus: vi.fn(() => ({ health: { ok: true }, audit: { ok: true } })),
+    listPublications: vi.fn(() => []),
     ...overrides
   };
 }
@@ -122,5 +124,58 @@ describe("runAcsCli", () => {
     expect(order).toEqual(["discover", "list"]);
     expect(discover).toHaveBeenCalledOnce();
     expect(JSON.parse(collected.stdout)).toEqual([]);
+  });
+
+  describe("status", () => {
+    it("prints a human-readable summary by default and exits 0 when healthy", async () => {
+      const collected = collectIo();
+      const injected = adapters({ readStatus: vi.fn(() => ({ health: { ok: true }, audit: { ok: true } })) });
+      expect(await runAcsCli(["status"], collected.io, injected)).toBe(0);
+      expect(collected.stdout).toBe("health=true audit=true\n");
+    });
+
+    it("prints JSON when --json is passed", async () => {
+      const collected = collectIo();
+      const injected = adapters({ readStatus: vi.fn(() => ({ health: { ok: true }, audit: { ok: true } })) });
+      expect(await runAcsCli(["status", "--json"], collected.io, injected)).toBe(0);
+      expect(JSON.parse(collected.stdout)).toEqual({ health: { ok: true }, audit: { ok: true } });
+    });
+
+    it("exits 1 when unhealthy, in both text and json modes", async () => {
+      const collected = collectIo();
+      const injected = adapters({ readStatus: vi.fn(() => ({ health: { ok: false }, audit: { ok: true } })) });
+      expect(await runAcsCli(["status"], collected.io, injected)).toBe(1);
+
+      const collectedJson = collectIo();
+      expect(await runAcsCli(["status", "--json"], collectedJson.io, injected)).toBe(1);
+      expect(JSON.parse(collectedJson.stdout)).toEqual({ health: { ok: false }, audit: { ok: true } });
+    });
+  });
+
+  describe("doctor", () => {
+    it("prints a human-readable summary by default and exits 0 when healthy", async () => {
+      const collected = collectIo();
+      const injected = adapters({ readStatus: vi.fn(() => ({ health: { ok: true }, audit: { ok: true } })) });
+      expect(await runAcsCli(["doctor"], collected.io, injected)).toBe(0);
+      expect(collected.stdout).toBe("health=true audit=true\n");
+    });
+
+    it("prints JSON when --json is passed, matching the status command's contract", async () => {
+      const collected = collectIo();
+      const injected = adapters({ readStatus: vi.fn(() => ({ health: { ok: true }, audit: { ok: true } })) });
+      expect(await runAcsCli(["doctor", "--json"], collected.io, injected)).toBe(0);
+      expect(collected.stdout.trim().startsWith("{")).toBe(true);
+      expect(JSON.parse(collected.stdout)).toEqual({ health: { ok: true }, audit: { ok: true } });
+    });
+
+    it("exits 1 when unhealthy, in both text and json modes", async () => {
+      const collected = collectIo();
+      const injected = adapters({ readStatus: vi.fn(() => ({ health: { ok: true }, audit: { ok: false } })) });
+      expect(await runAcsCli(["doctor"], collected.io, injected)).toBe(1);
+
+      const collectedJson = collectIo();
+      expect(await runAcsCli(["doctor", "--json"], collectedJson.io, injected)).toBe(1);
+      expect(JSON.parse(collectedJson.stdout)).toEqual({ health: { ok: true }, audit: { ok: false } });
+    });
   });
 });

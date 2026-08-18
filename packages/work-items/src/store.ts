@@ -68,6 +68,7 @@ import {
   hashAttemptLeaseToken,
   issueLeaseInputSchema,
   recordWorkspaceAllocationInputSchema,
+  transitionAttemptInputSchema,
   workspaceAllocationSchema,
   type AttemptLease,
   type CommandAuthority,
@@ -75,8 +76,38 @@ import {
   type ExecutionAttempt,
   type IssueLeaseInput,
   type RecordWorkspaceAllocationInput,
+  type TransitionAttemptInput,
   type WorkspaceAllocation
 } from "./attempt.js";
+import {
+  actorReliabilitySchema,
+  actorRoutingDecisionSchema,
+  recordActorReliabilityInputSchema,
+  recordActorRoutingDecisionInputSchema,
+  type ActorReliability,
+  type ActorRoutingDecision,
+  type RecordActorReliabilityInput,
+  type RecordActorRoutingDecisionInput
+} from "./routing.js";
+import {
+  recordValidationRunInputSchema,
+  validationCheckSchema,
+  validationRunSchema,
+  type RecordValidationRunInput,
+  type ValidationRun
+} from "./validation.js";
+import {
+  recoveryRecordSchema,
+  recordRecoveryDecisionInputSchema,
+  type RecoveryRecord,
+  type RecordRecoveryDecisionInput
+} from "./recovery.js";
+import {
+  publicationRecordSchema,
+  recordPublicationInputSchema,
+  type PublicationRecord,
+  type RecordPublicationInput
+} from "./publication.js";
 import {
   claimSchedulerFiringInputSchema,
   schedulerFiringSchema,
@@ -198,6 +229,67 @@ interface ExecutionAttemptRow {
   started_at: string | null;
   created_at: string;
   updated_at: string;
+}
+
+interface RoutingDecisionRow {
+  decision_id: string;
+  work_item_id: string;
+  attempt_id: string | null;
+  selected_actor_id: string | null;
+  eligible_json: string;
+  excluded_json: string;
+  scores_json: string;
+  idempotency_key: string;
+  created_at: string;
+}
+
+interface ReliabilityRow {
+  actor_id: string;
+  success_count: number;
+  failure_count: number;
+  updated_at: string;
+}
+
+interface ValidationRunRow {
+  run_id: string;
+  attempt_id: string;
+  work_item_id: string;
+  passed: number;
+  idempotency_key: string;
+  created_at: string;
+}
+
+interface ValidationCheckRow {
+  check_id: string;
+  run_id: string;
+  name: string;
+  passed: number;
+  detail: string;
+  stdout: string | null;
+  stderr: string | null;
+}
+
+interface RecoveryRow {
+  record_id: string;
+  attempt_id: string;
+  work_item_id: string;
+  decision: string;
+  retry_allowed: number;
+  reason: string;
+  retry_after_ms: number | null;
+  idempotency_key: string;
+  created_at: string;
+}
+
+interface PublicationRow {
+  publication_id: string;
+  work_item_id: string;
+  attempt_id: string;
+  branch: string;
+  commit_sha: string;
+  pull_request_url: string;
+  idempotency_key: string;
+  created_at: string;
 }
 
 interface AttemptLeaseRow {
@@ -708,6 +800,22 @@ export interface WorkItemStore {
   createAttempt(input: CreateAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
   getAttempt(attemptId: string): ExecutionAttempt | undefined;
   leaseAttempt(input: IssueLeaseInput, options: PrivilegedTransitionOptions): AttemptLease;
+  transitionAttempt(input: TransitionAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
+  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): ActorRoutingDecision;
+  getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined;
+  getActorRoutingDecisionForWorkItem(workItemId: string): ActorRoutingDecision | undefined;
+  recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability;
+  getActorReliability(actorId: string): ActorReliability | undefined;
+  recordValidationRun(input: RecordValidationRunInput, options: PrivilegedTransitionOptions): ValidationRun;
+  getValidationRun(runId: string): ValidationRun | undefined;
+  getValidationRunForAttempt(attemptId: string): ValidationRun | undefined;
+  recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord;
+  getRecoveryDecisionForAttempt(attemptId: string): RecoveryRecord | undefined;
+  recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord;
+  getPublicationByIdempotency(idempotencyKey: string): PublicationRecord | undefined;
+  listPublications(workItemId?: string): PublicationRecord[];
+  /** Most recent lease for the attempt, active or not - startup reconciliation needs the real status, not an assumption. */
+  getActiveLeaseForAttempt(attemptId: string): AttemptLease | undefined;
   recordWorkspaceAllocation(
     input: RecordWorkspaceAllocationInput,
     options: PrivilegedTransitionOptions
@@ -1279,6 +1387,65 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  transitionAttempt(input: TransitionAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt {
+    requirePrivilegedTransition(options, "transition_attempt");
+    const parsed = transitionAttemptInputSchema.parse(input);
+    return this.write(() => {
+      const current = this.db
+        .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`)
+        .get(parsed.attemptId, parsed.workItemId) as unknown as ExecutionAttemptRow | undefined;
+      if (!current) throw new ControlStackError("attempt_not_found", "no such execution attempt");
+      if (current.claimed_by_worker_id !== parsed.workerId || current.current_fencing_epoch !== parsed.fencingEpoch) {
+        throw new ControlStackError("attempt_transition_fence_stale", "attempt transition fence is stale");
+      }
+      const now = (parsed.now ?? new Date()).toISOString();
+      const terminal = new Set(["succeeded", "failed", "cancelled", "unknown", "quarantined"]);
+      const startedAt = parsed.status === "running" ? current.started_at ?? now : current.started_at;
+      const terminalAt = terminal.has(parsed.status) ? now : null;
+      const outcomeCode = terminal.has(parsed.status) ? parsed.outcomeCode ?? parsed.status : null;
+      const cancellationRequestedAt = parsed.status === "cancellation_requested" ? now : null;
+      const updated = this.db
+        .prepare(
+          `UPDATE execution_attempts
+           SET status = ?, started_at = ?, cancellation_requested_at = ?, terminal_at = ?, outcome_code = ?, updated_at = ?
+           WHERE attempt_id = ? AND work_item_id = ? AND claimed_by_worker_id = ? AND current_fencing_epoch = ?`
+        )
+        .run(
+          parsed.status,
+          startedAt,
+          cancellationRequestedAt,
+          terminalAt,
+          outcomeCode,
+          now,
+          parsed.attemptId,
+          parsed.workItemId,
+          parsed.workerId,
+          parsed.fencingEpoch
+        );
+      if (updated.changes !== 1) throw new ControlStackError("attempt_transition_conflict", "attempt changed concurrently");
+      const row = this.db
+        .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ?`)
+        .get(parsed.attemptId) as unknown as ExecutionAttemptRow;
+      const attempt = rowToExecutionAttempt(row);
+      const event = this.appendAuditEvent(
+        createEvent("execution_attempt.transitioned", {
+          attemptId: parsed.attemptId,
+          workItemId: parsed.workItemId,
+          workerId: parsed.workerId,
+          fencingEpoch: parsed.fencingEpoch,
+          status: parsed.status,
+          outcomeCode: outcomeCode ?? undefined
+        }, {
+          "attempt.id": parsed.attemptId,
+          "work_item.id": parsed.workItemId,
+          "worker.id": parsed.workerId,
+          "attempt.status": parsed.status
+        })
+      );
+      return { value: attempt, events: [event] };
+    });
+  }
+
   getAttempt(attemptId: string): ExecutionAttempt | undefined {
     const row = this.db.prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ?`).get(attemptId) as unknown as
       ExecutionAttemptRow | undefined;
@@ -1385,6 +1552,150 @@ export class SqliteWorkItemStore implements WorkItemStore {
       );
       return { value: lease, events: [event] };
     });
+  }
+
+  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): ActorRoutingDecision {
+    requirePrivilegedTransition(options, "record_actor_routing_decision");
+    const parsed = recordActorRoutingDecisionInputSchema.parse(input);
+    return this.write(() => {
+      const existing = this.db.prepare(`SELECT * FROM actor_routing_decisions WHERE idempotency_key = ?`).get(parsed.idempotencyKey) as unknown as RoutingDecisionRow | undefined;
+      if (existing) return { value: rowToActorRoutingDecision(existing), events: [] };
+      const decisionId = createId("routing");
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db.prepare(`INSERT INTO actor_routing_decisions
+        (decision_id, work_item_id, attempt_id, selected_actor_id, eligible_json, excluded_json, scores_json, idempotency_key, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(decisionId, parsed.workItemId, parsed.attemptId ?? null, parsed.selectedActorId ?? null, JSON.stringify(parsed.eligible), JSON.stringify(parsed.excluded), JSON.stringify(parsed.scores), parsed.idempotencyKey, createdAt);
+      const decision = actorRoutingDecisionSchema.parse({ ...parsed, decisionId, createdAt });
+      const event = this.appendAuditEvent(createEvent("actor.routing_decision.recorded", decision, {
+        "work_item.id": decision.workItemId,
+        "routing.decision_id": decisionId,
+        "actor.id": decision.selectedActorId ?? "none"
+      }));
+      return { value: decision, events: [event] };
+    });
+  }
+
+  getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined {
+    const row = this.db.prepare(`SELECT * FROM actor_routing_decisions WHERE decision_id = ?`).get(decisionId) as unknown as RoutingDecisionRow | undefined;
+    return row ? rowToActorRoutingDecision(row) : undefined;
+  }
+
+  getActorRoutingDecisionForWorkItem(workItemId: string): ActorRoutingDecision | undefined {
+    const row = this.db.prepare(`SELECT * FROM actor_routing_decisions WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1`).get(workItemId) as unknown as RoutingDecisionRow | undefined;
+    return row ? rowToActorRoutingDecision(row) : undefined;
+  }
+
+  recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability {
+    requirePrivilegedTransition(options, "record_actor_reliability");
+    const parsed = recordActorReliabilityInputSchema.parse(input);
+    return this.write(() => {
+      const now = (parsed.now ?? new Date()).toISOString();
+      this.db.prepare(`INSERT INTO actor_reliability_stats (actor_id, success_count, failure_count, updated_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(actor_id) DO UPDATE SET success_count = success_count + excluded.success_count, failure_count = failure_count + excluded.failure_count, updated_at = excluded.updated_at`).run(parsed.actorId, parsed.outcome === "success" ? 1 : 0, parsed.outcome === "failure" ? 1 : 0, now);
+      const row = this.db.prepare(`SELECT * FROM actor_reliability_stats WHERE actor_id = ?`).get(parsed.actorId) as unknown as ReliabilityRow;
+      const reliability = actorReliabilitySchema.parse(rowToActorReliability(row));
+      const event = this.appendAuditEvent(createEvent("actor.reliability.updated", reliability, { "actor.id": parsed.actorId }));
+      return { value: reliability, events: [event] };
+    });
+  }
+
+  getActorReliability(actorId: string): ActorReliability | undefined {
+    const row = this.db.prepare(`SELECT * FROM actor_reliability_stats WHERE actor_id = ?`).get(actorId) as unknown as ReliabilityRow | undefined;
+    return row ? rowToActorReliability(row) : undefined;
+  }
+
+  recordValidationRun(input: RecordValidationRunInput, options: PrivilegedTransitionOptions): ValidationRun {
+    requirePrivilegedTransition(options, "record_validation_run");
+    const parsed = recordValidationRunInputSchema.parse(input);
+    return this.write(() => {
+      const existing = this.db.prepare(`SELECT * FROM validation_runs WHERE idempotency_key = ?`).get(parsed.idempotencyKey) as unknown as ValidationRunRow | undefined;
+      if (existing) return { value: this.loadValidationRun(existing.run_id), events: [] };
+      const runId = createId("validation");
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db.prepare(`INSERT INTO validation_runs (run_id, attempt_id, work_item_id, passed, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(runId, parsed.attemptId, parsed.workItemId, parsed.passed ? 1 : 0, parsed.idempotencyKey, createdAt);
+      for (const check of parsed.checks) {
+        this.db.prepare(`INSERT INTO validation_checks (check_id, run_id, name, passed, detail, stdout, stderr) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(createId("validation-check"), runId, check.name, check.passed ? 1 : 0, check.detail, check.stdout ?? null, check.stderr ?? null);
+      }
+      const run = this.loadValidationRun(runId);
+      const event = this.appendAuditEvent(createEvent("validation.run.recorded", run, { "validation.run_id": runId, "attempt.id": run.attemptId, "validation.passed": run.passed }));
+      return { value: run, events: [event] };
+    });
+  }
+
+  getValidationRun(runId: string): ValidationRun | undefined {
+    const row = this.db.prepare(`SELECT * FROM validation_runs WHERE run_id = ?`).get(runId) as unknown as ValidationRunRow | undefined;
+    return row ? this.loadValidationRun(runId) : undefined;
+  }
+
+  getValidationRunForAttempt(attemptId: string): ValidationRun | undefined {
+    const row = this.db.prepare(`SELECT * FROM validation_runs WHERE attempt_id = ? ORDER BY created_at DESC LIMIT 1`).get(attemptId) as unknown as ValidationRunRow | undefined;
+    return row ? this.loadValidationRun(row.run_id) : undefined;
+  }
+
+  private loadValidationRun(runId: string): ValidationRun {
+    const row = this.db.prepare(`SELECT * FROM validation_runs WHERE run_id = ?`).get(runId) as unknown as ValidationRunRow;
+    const checks = this.db.prepare(`SELECT * FROM validation_checks WHERE run_id = ? ORDER BY rowid ASC`).all(runId) as unknown as ValidationCheckRow[];
+    return validationRunSchema.parse({
+      runId: row.run_id,
+      attemptId: row.attempt_id,
+      workItemId: row.work_item_id,
+      passed: row.passed === 1,
+      idempotencyKey: row.idempotency_key,
+      createdAt: row.created_at,
+      checks: checks.map((check) => validationCheckSchema.parse({ checkId: check.check_id, runId: check.run_id, name: check.name, passed: check.passed === 1, detail: check.detail, ...(check.stdout === null ? {} : { stdout: check.stdout }), ...(check.stderr === null ? {} : { stderr: check.stderr }) }))
+    });
+  }
+
+  recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord {
+    requirePrivilegedTransition(options, "record_recovery_decision");
+    const parsed = recordRecoveryDecisionInputSchema.parse(input);
+    return this.write(() => {
+      const existing = this.db.prepare(`SELECT * FROM recovery_records WHERE idempotency_key = ?`).get(parsed.idempotencyKey) as unknown as RecoveryRow | undefined;
+      if (existing) return { value: recoveryRecordSchema.parse({ recordId: existing.record_id, attemptId: existing.attempt_id, workItemId: existing.work_item_id, decision: existing.decision, retryAllowed: existing.retry_allowed === 1, reason: existing.reason, ...(existing.retry_after_ms === null ? {} : { retryAfterMs: existing.retry_after_ms }), idempotencyKey: existing.idempotency_key, createdAt: existing.created_at }), events: [] };
+      const recordId = createId("recovery");
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db.prepare(`INSERT INTO recovery_records (record_id, attempt_id, work_item_id, decision, retry_allowed, reason, retry_after_ms, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(recordId, parsed.attemptId, parsed.workItemId, parsed.decision, parsed.retryAllowed ? 1 : 0, parsed.reason, parsed.retryAfterMs ?? null, parsed.idempotencyKey, createdAt);
+      const record = recoveryRecordSchema.parse({ ...parsed, recordId, createdAt });
+      const event = this.appendAuditEvent(createEvent("attempt.recovery_decision.recorded", record, { "attempt.id": record.attemptId, "recovery.decision": record.decision }));
+      return { value: record, events: [event] };
+    });
+  }
+
+  getRecoveryDecisionForAttempt(attemptId: string): RecoveryRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM recovery_records WHERE attempt_id = ? ORDER BY created_at DESC LIMIT 1`).get(attemptId) as unknown as RecoveryRow | undefined;
+    return row ? recoveryRecordSchema.parse({ recordId: row.record_id, attemptId: row.attempt_id, workItemId: row.work_item_id, decision: row.decision, retryAllowed: row.retry_allowed === 1, reason: row.reason, ...(row.retry_after_ms === null ? {} : { retryAfterMs: row.retry_after_ms }), idempotencyKey: row.idempotency_key, createdAt: row.created_at }) : undefined;
+  }
+
+  recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord {
+    requirePrivilegedTransition(options, "record_publication");
+    const parsed = recordPublicationInputSchema.parse(input);
+    return this.write(() => {
+      const existing = this.db.prepare(`SELECT * FROM publication_records WHERE idempotency_key = ?`).get(parsed.idempotencyKey) as unknown as PublicationRow | undefined;
+      if (existing) return { value: publicationRecordSchema.parse({ publicationId: existing.publication_id, workItemId: existing.work_item_id, attemptId: existing.attempt_id, branch: existing.branch, commitSha: existing.commit_sha, pullRequestUrl: existing.pull_request_url, idempotencyKey: existing.idempotency_key, createdAt: existing.created_at }), events: [] };
+      const publicationId = createId("publication");
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db.prepare(`INSERT INTO publication_records (publication_id, work_item_id, attempt_id, branch, commit_sha, pull_request_url, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(publicationId, parsed.workItemId, parsed.attemptId, parsed.branch, parsed.commitSha, parsed.pullRequestUrl, parsed.idempotencyKey, createdAt);
+      const record = publicationRecordSchema.parse({ ...parsed, publicationId, createdAt });
+      const event = this.appendAuditEvent(createEvent("publication.recorded", record, { "work_item.id": record.workItemId, "attempt.id": record.attemptId, "publication.id": record.publicationId }));
+      return { value: record, events: [event] };
+    });
+  }
+
+  getPublicationByIdempotency(idempotencyKey: string): PublicationRecord | undefined {
+    const row = this.db.prepare(`SELECT * FROM publication_records WHERE idempotency_key = ?`).get(idempotencyKey) as unknown as PublicationRow | undefined;
+    return row ? publicationRecordSchema.parse({ publicationId: row.publication_id, workItemId: row.work_item_id, attemptId: row.attempt_id, branch: row.branch, commitSha: row.commit_sha, pullRequestUrl: row.pull_request_url, idempotencyKey: row.idempotency_key, createdAt: row.created_at }) : undefined;
+  }
+
+  listPublications(workItemId?: string): PublicationRecord[] {
+    const rows = (workItemId ? this.db.prepare(`SELECT * FROM publication_records WHERE work_item_id = ? ORDER BY created_at DESC`).all(workItemId) : this.db.prepare(`SELECT * FROM publication_records ORDER BY created_at DESC`).all()) as unknown as PublicationRow[];
+    return rows.map((row) => publicationRecordSchema.parse({ publicationId: row.publication_id, workItemId: row.work_item_id, attemptId: row.attempt_id, branch: row.branch, commitSha: row.commit_sha, pullRequestUrl: row.pull_request_url, idempotencyKey: row.idempotency_key, createdAt: row.created_at }));
+  }
+
+  getActiveLeaseForAttempt(attemptId: string): AttemptLease | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM attempt_leases WHERE attempt_id = ? ORDER BY issued_at DESC LIMIT 1`)
+      .get(attemptId) as unknown as AttemptLeaseRow | undefined;
+    return row ? rowToAttemptLease(row) : undefined;
   }
 
   recordWorkspaceAllocation(
@@ -4007,6 +4318,29 @@ function rowToExecutionPlanApproval(row: ExecutionPlanApprovalRow): ExecutionPla
     ...(row.consumed_at === null ? {} : { consumedAt: row.consumed_at }),
     ...(row.invalidated_at === null ? {} : { invalidatedAt: row.invalidated_at }),
     ...(row.invalidation_reason === null ? {} : { invalidationReason: row.invalidation_reason })
+  });
+}
+
+function rowToActorRoutingDecision(row: RoutingDecisionRow): ActorRoutingDecision {
+  return actorRoutingDecisionSchema.parse({
+    decisionId: row.decision_id,
+    workItemId: row.work_item_id,
+    ...(row.attempt_id === null ? {} : { attemptId: row.attempt_id }),
+    ...(row.selected_actor_id === null ? {} : { selectedActorId: row.selected_actor_id }),
+    eligible: JSON.parse(row.eligible_json),
+    excluded: JSON.parse(row.excluded_json),
+    scores: JSON.parse(row.scores_json),
+    idempotencyKey: row.idempotency_key,
+    createdAt: row.created_at
+  });
+}
+
+function rowToActorReliability(row: ReliabilityRow): ActorReliability {
+  return actorReliabilitySchema.parse({
+    actorId: row.actor_id,
+    successCount: row.success_count,
+    failureCount: row.failure_count,
+    updatedAt: row.updated_at
   });
 }
 

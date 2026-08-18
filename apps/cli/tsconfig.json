@@ -12,6 +12,7 @@
     { "path": "../../apps/scheduler" },
     { "path": "../../apps/worker" },
     { "path": "../../packages/machine-controller" },
-    { "path": "../../packages/work-items" }
+    { "path": "../../packages/work-items" },
+    { "path": "../../packages/procedural-learning" }
   ]
 }

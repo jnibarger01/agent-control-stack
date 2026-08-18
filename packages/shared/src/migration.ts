@@ -32,7 +32,11 @@ const migrationFiles = [
   { version: 9, name: "temporal_memory", filename: "009_temporal_memory.sql" },
   { version: 10, name: "grok_pi_registry", filename: "010_grok_pi_registry.sql" },
   { version: 11, name: "scheduler_firing_legacy_markers", filename: "011_scheduler_firing_legacy_markers.sql" },
-  { version: 12, name: "attempt_workspace_ownership", filename: "012_attempt_workspace_ownership.sql" }
+  { version: 12, name: "attempt_workspace_ownership", filename: "012_attempt_workspace_ownership.sql" },
+  { version: 13, name: "actor_routing", filename: "013_actor_routing.sql" },
+  { version: 14, name: "validation_runs", filename: "014_validation_runs.sql" },
+  { version: 15, name: "recovery_records", filename: "015_recovery_records.sql" },
+  { version: 16, name: "publication_records", filename: "016_publication_records.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

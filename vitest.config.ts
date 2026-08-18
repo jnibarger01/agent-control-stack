@@ -6,6 +6,9 @@ export default defineConfig({
     alias: {
       "@agent-control-stack/moa-orchestrator": fileURLToPath(
         new URL("./packages/moa-orchestrator/src/index.ts", import.meta.url)
+      ),
+      "@agent-control-stack/procedural-learning": fileURLToPath(
+        new URL("./packages/procedural-learning/src/index.ts", import.meta.url)
       )
     }
   },

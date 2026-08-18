@@ -233,6 +233,15 @@ describe("runSchedulerOnce", () => {
       }
     });
   });
+
+  it("invokes the authoritative controller callback only after firing creation", async () => {
+    await withTempDb(async (dbPath) => {
+      const seen: string[] = [];
+      const result = await runSchedulerOnce({ dbPath, schedules: readOnlySchedule, now: new Date("2026-07-23T00:01:00.000Z"), onWorkItemCreated: async (workItemId) => { seen.push(workItemId); } });
+      expect(result.firings[0]?.created).toBe(true);
+      expect(seen).toEqual([result.firings[0]?.workItemId]);
+    });
+  });
 });
 
 describe("mostRecentScheduledFiring", () => {

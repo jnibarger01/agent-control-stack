@@ -765,3 +765,83 @@ describe("authoritative worker attempt lifecycle", () => {
     expect(fixture.store.get(fixture.workItem.id)?.status).toBe("failed");
   });
 });
+
+describe("transitionAttempt", () => {
+  let directory: string | undefined;
+
+  afterEach(() => {
+    if (directory) rmSync(directory, { recursive: true, force: true });
+    directory = undefined;
+  });
+
+  it("transitions a leased attempt to running with the matching worker fence", () => {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    const lease = fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        admissionId: fixture.admission.admissionId,
+        workerId: "worker-1",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("1"),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+
+    const transitioned = fixture.store.transitionAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        workerId: "worker-1",
+        fencingEpoch: lease.fencingEpoch,
+        status: "running"
+      },
+      { via: "domain_service" }
+    );
+
+    expect(transitioned.status).toBe("running");
+    expect(transitioned.claimedByWorkerId).toBe("worker-1");
+    expect(fixture.store.readEvents().map((event) => event.name)).toContain("execution_attempt.transitioned");
+  });
+
+  it("rejects a stale fencing transition without mutating the attempt", () => {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        admissionId: fixture.admission.admissionId,
+        workerId: "worker-1",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("1"),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+
+    expect(() => fixture.store.transitionAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        workerId: "stale-worker",
+        fencingEpoch: 1,
+        status: "running"
+      },
+      { via: "domain_service" }
+    )).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "attempt_transition_fence_stale" }));
+    expect(fixture.store.getAttempt(attempt.attemptId)?.status).toBe("leased");
+  });
+});

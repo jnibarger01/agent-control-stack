@@ -8,6 +8,17 @@ Commands:
   scheduler [run]
   mcp [serve] [--config <path>]
   gateway [serve]
+  skills list
+  skills show <skill>
+  skills history <skill>
+  skills candidates
+  skills usages <skill>
+  skills quarantine <skill>
+  skills retrieve --problem <text>
+  skills targets
+  status [--json]
+  doctor [--json]
+  publication list [--json]
 
 Legacy binaries remain available: acs-worker, acs-scheduler, acs-mcp, acs-gateway.
 `;
@@ -19,7 +30,11 @@ export type AcsCommand =
   | { kind: "worker"; forwarded: string[] }
   | { kind: "scheduler"; forwarded: string[] }
   | { kind: "mcp"; forwarded: string[] }
-  | { kind: "gateway"; forwarded: string[] };
+  | { kind: "gateway"; forwarded: string[] }
+  | { kind: "status"; json: boolean }
+  | { kind: "doctor"; json: boolean }
+  | { kind: "publication-list"; json: boolean }
+  | { kind: "skills"; args: string[] };
 
 export class AcsUsageError extends Error {
   readonly usage = true;
@@ -90,6 +105,16 @@ function rejectUnexpectedArgs(command: string, args: string[]): string[] {
   return args;
 }
 
+function parseStatusArgs(command: "status" | "doctor", args: string[]): AcsCommand {
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--json")) throw new AcsUsageError(`Usage: acs ${command} [--json]`);
+  return { kind: command, json: args[0] === "--json" };
+}
+
+function parsePublicationArgs(args: string[]): AcsCommand {
+  if (args[0] !== "list" || args.length > 2 || (args[1] && args[1] !== "--json")) throw new AcsUsageError("Usage: acs publication list [--json]");
+  return { kind: "publication-list", json: args[1] === "--json" };
+}
+
 export function parseAcsArgs(args: string[]): AcsCommand {
   if (args.length === 0 || args.includes("--help") || args.includes("-h") || args[0] === "help") {
     return { kind: "help" };
@@ -110,6 +135,14 @@ export function parseAcsArgs(args: string[]): AcsCommand {
       return parseMcpArgs(rest);
     case "gateway":
       return { kind: "gateway", forwarded: rejectUnexpectedArgs("gateway", takeOptionalServe(rest, "gateway")) };
+    case "status":
+      return parseStatusArgs("status", rest);
+    case "doctor":
+      return parseStatusArgs("doctor", rest);
+    case "publication":
+      return parsePublicationArgs(rest);
+    case "skills":
+      return { kind: "skills", args: rest };
     default:
       throw new AcsUsageError(`unknown command: ${command}`);
   }
