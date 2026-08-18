@@ -134,6 +134,7 @@ docs/
   threat-model.md
   runbooks/local-dev.md
 config.example.yml  Example machine-controller policy config
+acs.config.example.yaml  Example `acs serve` runtime topology
 .env.example        Environment variable template
 ```
 
@@ -386,6 +387,26 @@ The gateway also serves an SSE audit stream at:
 ```text
 /events
 ```
+
+## Run the local ACS runtime
+
+`acs serve` is the all-in-one local entrypoint. It starts the gateway, invokes
+the existing scheduler and bounded worker on their configured intervals, and
+reconciles expired leases plus stale actor/tunnel liveness. It does not own
+policy or approvals: those remain in the existing ACS core packages.
+
+```sh
+cp acs.config.example.yaml acs.config.yaml
+npm run build
+npm run acs -- serve
+```
+
+The runtime keeps gateway transport on `http://127.0.0.1:3000` by default and
+exposes loopback-only component and actor-discovery status on
+`http://127.0.0.1:3001/status`; `/livez` and `/readyz` are also available on
+that status listener. `acs.config.yaml` contains topology only—no credentials,
+policy rules, or approval settings—and its values can be overridden with the
+documented `ACS_*` runtime environment variables.
 
 ## Use the HTTP gateway
 

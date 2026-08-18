@@ -26,6 +26,7 @@
     { "path": "apps/gateway" },
     { "path": "apps/worker" },
     { "path": "apps/scheduler" },
-    { "path": "apps/cli" }
+    { "path": "apps/cli" },
+    { "path": "apps/runtime" }
   ]
 }
