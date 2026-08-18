@@ -19,6 +19,7 @@
     { "path": "apps/mcp" },
     { "path": "apps/gateway" },
     { "path": "apps/worker" },
-    { "path": "apps/scheduler" }
+    { "path": "apps/scheduler" },
+    { "path": "apps/runtime" }
   ]
 }

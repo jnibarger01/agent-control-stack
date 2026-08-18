@@ -38,6 +38,27 @@ Open `http://127.0.0.1:3000`.
 
 For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send it as `Authorization: Bearer <token>` on `/mcp` requests. OAuth and tunnel ID setup are documented in `docs/oauth-authentication.md`.
 
+## Run the composed local runtime
+
+For a local gateway, scheduler, worker, actor discovery, and reconciliation
+process, use the canonical `acs serve` entrypoint instead of manually keeping
+separate long-running commands aligned:
+
+```sh
+cp acs.config.example.yaml acs.config.yaml
+npm run build
+npm run acs -- serve
+```
+
+The config supports loopback gateway address/port and runtime cadence only.
+Authorization, policy, approvals, and adapter credentials remain under their
+existing configuration contracts. Check composed runtime state with:
+
+```sh
+curl -fsS http://127.0.0.1:3001/readyz
+curl -fsS http://127.0.0.1:3001/status
+```
+
 ## ChatGPT App UI
 
 Build the self-contained React widget with `npm run build:chatgpt-widget`.
