@@ -10,18 +10,33 @@ This document defines the MCP tool contracts exposed by `agent-control-stack`.
 
 The protocol is intentionally narrow. A broad generic shell tool is not a feature; it is a way to turn documentation into an apology letter.
 
+## Generated contract
+
+The machine-readable gateway catalog is generated at
+`contracts/public/v1/mcp-tools.json`; the corresponding HTTP OpenAPI document,
+validated examples, generated client, hashes, and compatibility baseline live
+beside it. `apps/gateway/src/public-contracts.ts` is the executable source for
+gateway boundary schemas and MCP advertisement, so the runtime and generated
+artifacts do not maintain separate schema copies.
+
+Run `npm run contracts:generate` after an intentional contract change and
+`npm run contracts:check` to reproduce the artifacts, validate examples, detect
+manual edits, and reject undocumented breaking changes. The human-readable
+details below remain normative for authority and lifecycle semantics that JSON
+Schema cannot express.
+
 ## Two tool surfaces
 
 There is no single tool catalog. Two independent MCP servers exist, with different transports, different tool names, and different backing state:
 
-| | Local stdio MCP | Gateway MCP |
-|---|---|---|
-| Entry point | `apps/mcp/src/server.ts` (`McpStdioServer`) | `apps/gateway/src/mcp.ts` (`handleMcpHttpRequest`) |
-| Backed by | `MachineController` (`packages/machine-controller`) | work-item tools (`packages/policy-gate/src/tools.ts`, `packages/work-items`) |
-| Transport | stdio, `Content-Length`-framed JSON-RPC | HTTP JSON-RPC (`apps/gateway`), per [ADR 0007](../adr/0007-chatgpt-https-mcp-transport.md) |
-| Tool naming | dotted (`system.status`, `fs.read`, ...) | snake_case (`create_work_item`, `approve_work_item`, ...) |
-| What it does | Reads the local machine directly (files, command previews, one read-only command execution) | Creates and manages governed work items that a separate worker later claims and executes |
-| Auth | none (local process, trusted caller) | `authorizeMcpRequest` — bearer/OAuth scopes, per `apps/gateway/src/auth.ts` |
+|              | Local stdio MCP                                                                             | Gateway MCP                                                                                |
+| ------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| Entry point  | `apps/mcp/src/server.ts` (`McpStdioServer`)                                                 | `apps/gateway/src/mcp.ts` (`handleMcpHttpRequest`)                                         |
+| Backed by    | `MachineController` (`packages/machine-controller`)                                         | work-item tools (`packages/policy-gate/src/tools.ts`, `packages/work-items`)               |
+| Transport    | stdio, `Content-Length`-framed JSON-RPC                                                     | HTTP JSON-RPC (`apps/gateway`), per [ADR 0007](../adr/0007-chatgpt-https-mcp-transport.md) |
+| Tool naming  | dotted (`system.status`, `fs.read`, ...)                                                    | snake_case (`create_work_item`, `approve_work_item`, ...)                                  |
+| What it does | Reads the local machine directly (files, command previews, one read-only command execution) | Creates and manages governed work items that a separate worker later claims and executes   |
+| Auth         | none (local process, trusted caller)                                                        | `authorizeMcpRequest` — bearer/OAuth scopes, per `apps/gateway/src/auth.ts`                |
 
 There is no naming convention that unifies the two — the local server's tool names are the literal `MachineController.callTool` dispatch keys (dots), and the gateway's are the literal `createWorkItemTools` keys (underscores). Do not assume one implies the other.
 
@@ -37,7 +52,7 @@ Success (`tools/call`):
   "id": 1,
   "result": {
     "content": [{ "type": "text", "text": "<tool.name> completed." }],
-    "structuredContent": { }
+    "structuredContent": {}
   }
 }
 ```
@@ -63,33 +78,33 @@ Failure is a JSON-RPC error, not a result with `ok: false`:
 
 Error codes are `ControlStackError.code` values, not a fixed enum owned by this doc — the canonical list lives in the source and will drift out of sync with anything duplicated here. Identify which one occurred from the `message` text in the JSON-RPC error. The ones a caller of the tools below can actually hit:
 
-| Code | Surface | Meaning |
-|---|---|---|
-| `path_outside_allowlist` | local fs.* | Resolved path is outside `paths.allow`. |
-| `path_denied` | local fs.* | Resolved path matches `paths.deny`. |
-| `path_restricted` | local fs.* | Path looks credential-like (`.env`, `id_rsa`, `.ssh/`, `.aws/credentials`, etc.) and wasn't explicitly allowed. |
-| `fs_not_file` | local fs.read | Target is not a regular file. |
-| `fs_too_large` | local fs.read | File exceeds `security.max_output_bytes`. |
-| `fs_binary_refused` | local fs.read | File looks binary; refused rather than dumped. |
-| `command_refused` | local cmd.run | Command did not classify as `read_only` (see below — `cmd.run` never executes anything else). |
-| `work_item_not_found` | gateway | No work item with the given `id`. |
-| `approval_action_hash_required` | gateway approve_work_item | Caller omitted `actionHash`. |
-| `approval_action_mismatch` | gateway approve_work_item | `actionHash` doesn't match a currently-evaluated action on the work item. |
-| `approval_not_required` | gateway approve_work_item | `actionHash` matches an action that policy didn't flag as `require_approval`. |
-| `invalid_work_item_transition` | gateway | Requested transition isn't legal from the item's current status. |
-| `direct_agent_not_configured` | gateway test.agent.run | Gateway wasn't wired with a direct-agent controller. |
+| Code                            | Surface                   | Meaning                                                                                                         |
+| ------------------------------- | ------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `path_outside_allowlist`        | local fs.*                | Resolved path is outside `paths.allow`.                                                                         |
+| `path_denied`                   | local fs.*                | Resolved path matches `paths.deny`.                                                                             |
+| `path_restricted`               | local fs.*                | Path looks credential-like (`.env`, `id_rsa`, `.ssh/`, `.aws/credentials`, etc.) and wasn't explicitly allowed. |
+| `fs_not_file`                   | local fs.read             | Target is not a regular file.                                                                                   |
+| `fs_too_large`                  | local fs.read             | File exceeds `security.max_output_bytes`.                                                                       |
+| `fs_binary_refused`             | local fs.read             | File looks binary; refused rather than dumped.                                                                  |
+| `command_refused`               | local cmd.run             | Command did not classify as `read_only` (see below — `cmd.run` never executes anything else).                   |
+| `work_item_not_found`           | gateway                   | No work item with the given `id`.                                                                               |
+| `approval_action_hash_required` | gateway approve_work_item | Caller omitted `actionHash`.                                                                                    |
+| `approval_action_mismatch`      | gateway approve_work_item | `actionHash` doesn't match a currently-evaluated action on the work item.                                       |
+| `approval_not_required`         | gateway approve_work_item | `actionHash` matches an action that policy didn't flag as `require_approval`.                                   |
+| `invalid_work_item_transition`  | gateway                   | Requested transition isn't legal from the item's current status.                                                |
+| `direct_agent_not_configured`   | gateway test.agent.run    | Gateway wasn't wired with a direct-agent controller.                                                            |
 
 ## Risk levels
 
 Both surfaces share the same risk vocabulary (`riskLevelSchema` in `packages/machine-controller/src/command.ts`, `PolicyRiskLevel` in `packages/policy-gate/src/rules.ts`):
 
-| Risk | Meaning |
-|---|---|
-| `read_only` | Inspects state without mutation. |
-| `safe_mutation` | Low-risk mutation. Currently only ever produced by the policy gate's agent-prompt-dispatch rule (`packages/policy-gate/src/rules.ts`) — no local `cmd.*` classification path returns it today. |
-| `requires_approval` | Mutating action; a gateway work item classified this way moves to `needs_approval` until `approve_work_item` is called with a matching action hash. |
-| `destructive` | High-impact operation (`rm`, `dd`, `mkfs`, `--force`, ...). |
-| `forbidden` | Categorically denied — includes anything with shell metacharacters, a `/` in the command name, or on the deny list. |
+| Risk                | Meaning                                                                                                                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `read_only`         | Inspects state without mutation.                                                                                                                                                               |
+| `safe_mutation`     | Low-risk mutation. Currently only ever produced by the policy gate's agent-prompt-dispatch rule (`packages/policy-gate/src/rules.ts`) — no local `cmd.*` classification path returns it today. |
+| `requires_approval` | Mutating action; a gateway work item classified this way moves to `needs_approval` until `approve_work_item` is called with a matching action hash.                                            |
+| `destructive`       | High-impact operation (`rm`, `dd`, `mkfs`, `--force`, ...).                                                                                                                                    |
+| `forbidden`         | Categorically denied — includes anything with shell metacharacters, a `/` in the command name, or on the deny list.                                                                            |
 
 ## Local stdio MCP tools
 
@@ -100,11 +115,13 @@ Backed by `MachineController`. All paths are resolved and validated by `resolveS
 Returns host OS/process info. No input required.
 
 ```json
-{ "os": { "platform": "linux", "release": "...", "cpus": 8 },
+{
+  "os": { "platform": "linux", "release": "...", "cpus": 8 },
   "uptimeSeconds": 1234,
   "memory": { "totalBytes": 0, "freeBytes": 0 },
   "loadAverage": [0, 0, 0],
-  "server": { "name": "personal-machine-controller", "version": "0.1.0", "transport": "stdio" } }
+  "server": { "name": "personal-machine-controller", "version": "0.1.0", "transport": "stdio" }
+}
 ```
 
 ### `fs.list`
@@ -233,7 +250,13 @@ Two distinct terminal states (`rejected` vs `cancelled`).
 Runs one direct agent invocation (`pi`, `openclaw`, `codex`, `claude`, `gemini`, `opencode`) from a clean prompt, through the gateway's approval-scoped path. This tool does **not** exist on the local stdio server described above — `apps/mcp/src/server.ts` unconditionally excludes `test.agent.run` from its accepted tool names (`standaloneMcpToolNames`), regardless of any configuration. It exists only here, on the gateway MCP surface (`apps/gateway/src/mcp.ts`).
 
 ```json
-{ "agent": "codex", "prompt": "list the files in this directory", "cwd": "/home/user/project", "timeoutSeconds": 60, "permissionMode": "read-only" }
+{
+  "agent": "codex",
+  "prompt": "list the files in this directory",
+  "cwd": "/home/user/project",
+  "timeoutSeconds": 60,
+  "permissionMode": "read-only"
+}
 ```
 
 Requires the `acs:work:approve` OAuth scope — the same scope `approve_work_item` requires, not a separate lower bar. Always forces `permissionMode: read-only`; anything else throws `agent_permission_denied` (`normalizePermissionMode`, `packages/machine-controller/src/direct-agent.ts`) — no write-capable direct run exists through any documented path yet.

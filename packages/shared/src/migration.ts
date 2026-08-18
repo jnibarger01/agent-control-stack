@@ -28,7 +28,15 @@ const migrationFiles = [
   { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" },
   { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
   { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" },
-  { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" }
+  { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" },
+  { version: 9, name: "temporal_memory", filename: "009_temporal_memory.sql" },
+  { version: 10, name: "grok_pi_registry", filename: "010_grok_pi_registry.sql" },
+  { version: 11, name: "scheduler_firing_legacy_markers", filename: "011_scheduler_firing_legacy_markers.sql" },
+  { version: 12, name: "attempt_workspace_ownership", filename: "012_attempt_workspace_ownership.sql" },
+  { version: 13, name: "actor_routing", filename: "013_actor_routing.sql" },
+  { version: 14, name: "validation_runs", filename: "014_validation_runs.sql" },
+  { version: 15, name: "recovery_records", filename: "015_recovery_records.sql" },
+  { version: 16, name: "publication_records", filename: "016_publication_records.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -74,7 +82,13 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
         if (existing.name !== migration.name || existing.filename !== migration.filename) {
           throw new Error(`migration metadata mismatch for version ${migration.version}`);
         }
-        if (existing.checksum && existing.checksum !== migration.checksum) {
+        // Deployed databases may carry an older checksum for the workspace_allocations
+        // migration (version 7) from before its schema was extended; accept that one
+        // known legacy checksum instead of treating it as drift.
+        const legacyWorkspaceMigration =
+          migration.version === 7 &&
+          existing.checksum === "c7b213f900a6f8b06c4155665f60ee7d3127fd60f75a2583ed6088c86f3f7cf4";
+        if (existing.checksum && existing.checksum !== migration.checksum && !legacyWorkspaceMigration) {
           throw new Error(`migration checksum mismatch for version ${migration.version}`);
         }
         if (!existing.checksum) {
@@ -116,6 +130,9 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
   }
   if (migration.version === 6) {
     validateExecutionPlanPreflight(db);
+  }
+  if (migration.version === 12 && hasColumn(db, "workspace_allocations", "attempt_id")) {
+    return "SELECT 1;";
   }
   return migration.sql;
 }

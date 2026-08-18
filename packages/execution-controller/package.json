@@ -1,0 +1,22 @@
+{
+  "name": "@agent-control-stack/execution-controller",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agent-control-stack/engine-adapter": "0.1.0",
+    "@agent-control-stack/procedural-learning": "0.1.0",
+    "@agent-control-stack/result-validation": "0.1.0",
+    "@agent-control-stack/shared": "0.1.0",
+    "@agent-control-stack/work-items": "0.1.0",
+    "@agent-control-stack/workspace-manager": "0.1.0"
+  }
+}
