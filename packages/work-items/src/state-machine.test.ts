@@ -808,8 +808,10 @@ describe("work item state machine", () => {
         { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
         { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" },
         { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" },
-        { version: 9, name: "attempt_workspace_ownership", filename: "009_attempt_workspace_ownership.sql" },
-        { version: 10, name: "grok_pi_registry", filename: "010_grok_pi_registry.sql" }
+        { version: 9, name: "temporal_memory", filename: "009_temporal_memory.sql" },
+        { version: 10, name: "grok_pi_registry", filename: "010_grok_pi_registry.sql" },
+        { version: 11, name: "scheduler_firing_legacy_markers", filename: "011_scheduler_firing_legacy_markers.sql" },
+        { version: 12, name: "attempt_workspace_ownership", filename: "012_attempt_workspace_ownership.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -909,7 +911,9 @@ describe("work item state machine", () => {
         { version: 7 },
         { version: 8 },
         { version: 9 },
-        { version: 10 }
+        { version: 10 },
+        { version: 11 },
+        { version: 12 }
       ]);
     } finally {
       db.close();
@@ -1017,7 +1021,7 @@ describe("work item state machine", () => {
 
     const store = new SqliteWorkItemStore(copiedPath);
     try {
-      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
       store.close();
@@ -1090,7 +1094,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" }),
