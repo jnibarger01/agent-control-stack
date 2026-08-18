@@ -163,6 +163,7 @@ def verify():
     """Enforce machine-checkable worker and PR gates before reconciliation."""
     repo = need("GITHUB_REPOSITORY")
     mode = os.environ.get("CYCLE_MODE", "")
+    repository_check = os.environ.get("REPOSITORY_CHECK_OUTCOME", "")
     try:
         result = json.loads(RESULT.read_text())
     except (FileNotFoundError, json.JSONDecodeError) as exc:
@@ -177,6 +178,8 @@ def verify():
         return
     if status not in {"pr_open", "completed"}:
         raise SystemExit("worker result must declare a known terminal or publishable status")
+    if repository_check != "success":
+        raise SystemExit("independent repository validation did not pass")
 
     criteria = result.get("acceptance_criteria")
     validation = result.get("validation")

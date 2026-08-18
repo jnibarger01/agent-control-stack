@@ -81,6 +81,11 @@ jobs:
           share: false
           prompt: ${{ steps.prompt.outputs.prompt }}
 
+      - name: Independent repository validation
+        if: always() && steps.preflight.outputs.mode != 'skip'
+        id: repository_validation
+        run: npm run check
+
       - name: Enforce worker gates
         if: always() && steps.preflight.outputs.idempotency_key != ''
         id: gate
@@ -88,6 +93,7 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
           CYCLE_ID: ${{ steps.preflight.outputs.cycle_id }}
           CYCLE_MODE: ${{ steps.preflight.outputs.mode }}
+          REPOSITORY_CHECK_OUTCOME: ${{ steps.repository_validation.outcome }}
         run: python3 scripts/hourly_pr.py verify
 
       - name: Reconcile cycle
@@ -99,6 +105,7 @@ jobs:
           CYCLE_MODE: ${{ steps.preflight.outputs.mode }}
           ACTION_OUTCOME: ${{ steps.opencode.outcome }}
           GATE_OUTCOME: ${{ steps.gate.outcome }}
+          REPOSITORY_CHECK_OUTCOME: ${{ steps.repository_validation.outcome }}
         run: python3 scripts/hourly_pr.py reconcile
 
       - name: Persist task ledger

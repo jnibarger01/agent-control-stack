@@ -35,7 +35,7 @@ Before opening a PR:
 - run `git diff --check`, inspect `git diff --stat`, and review the complete diff
 - reject unrelated changes, debug code, disabled checks, swallowed errors, broad type suppression, credentials, or unexplained lockfile churn
 
-If required validation cannot run or fails, do not open a PR.
+If required validation cannot run or fails, do not open a PR. The workflow independently runs `npm run check`; worker-reported validation text is not authoritative.
 
 ## Branch, commit, risk
 New branch: `auto/<category>/<short-slug>-<cycle-id>`.
