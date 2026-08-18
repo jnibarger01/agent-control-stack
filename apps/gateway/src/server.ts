@@ -706,7 +706,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         if (!reservation.reserved) {
           if (reservation.existing !== undefined) {
             const replayed = reservation.existing as { workItemId: string; status: string; approvalRequired: boolean };
-            request.log.info({ requestId: request.id, source, workItemId: replayed.workItemId }, "webhook replay (idempotent)");
+            request.log.info(
+              { requestId: request.id, source, workItemId: replayed.workItemId },
+              "webhook replay (idempotent)"
+            );
             workItems.recordConnectorRequest({
               actor,
               source: `webhook:${source}`,
@@ -719,7 +722,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             });
             return reply.code(200).send({ ...replayed, replayed: true });
           }
-          return reply.code(409).send({ error: "concurrent webhook request in progress", code: "concurrent_idempotency_conflict" });
+          return reply
+            .code(409)
+            .send({ error: "concurrent webhook request in progress", code: "concurrent_idempotency_conflict" });
         }
       }
 
