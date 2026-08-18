@@ -801,7 +801,10 @@ export interface WorkItemStore {
   getAttempt(attemptId: string): ExecutionAttempt | undefined;
   leaseAttempt(input: IssueLeaseInput, options: PrivilegedTransitionOptions): AttemptLease;
   transitionAttempt(input: TransitionAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
-  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): ActorRoutingDecision;
+  recordActorRoutingDecision(
+    input: RecordActorRoutingDecisionInput,
+    options: PrivilegedTransitionOptions
+  ): ActorRoutingDecision;
   getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined;
   getActorRoutingDecisionForWorkItem(workItemId: string): ActorRoutingDecision | undefined;
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability;
@@ -1400,9 +1403,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
       const now = (parsed.now ?? new Date()).toISOString();
       const terminal = new Set(["succeeded", "failed", "cancelled", "unknown", "quarantined"]);
-      const startedAt = parsed.status === "running" ? current.started_at ?? now : current.started_at;
+      const startedAt = parsed.status === "running" ? (current.started_at ?? now) : current.started_at;
       const terminalAt = terminal.has(parsed.status) ? now : null;
-      const outcomeCode = terminal.has(parsed.status) ? parsed.outcomeCode ?? parsed.status : null;
+      const outcomeCode = terminal.has(parsed.status) ? (parsed.outcomeCode ?? parsed.status) : null;
       const cancellationRequestedAt = parsed.status === "cancellation_requested" ? now : null;
       const updated = this.db
         .prepare(
@@ -1422,25 +1425,30 @@ export class SqliteWorkItemStore implements WorkItemStore {
           parsed.workerId,
           parsed.fencingEpoch
         );
-      if (updated.changes !== 1) throw new ControlStackError("attempt_transition_conflict", "attempt changed concurrently");
+      if (updated.changes !== 1)
+        throw new ControlStackError("attempt_transition_conflict", "attempt changed concurrently");
       const row = this.db
         .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ?`)
         .get(parsed.attemptId) as unknown as ExecutionAttemptRow;
       const attempt = rowToExecutionAttempt(row);
       const event = this.appendAuditEvent(
-        createEvent("execution_attempt.transitioned", {
-          attemptId: parsed.attemptId,
-          workItemId: parsed.workItemId,
-          workerId: parsed.workerId,
-          fencingEpoch: parsed.fencingEpoch,
-          status: parsed.status,
-          outcomeCode: outcomeCode ?? undefined
-        }, {
-          "attempt.id": parsed.attemptId,
-          "work_item.id": parsed.workItemId,
-          "worker.id": parsed.workerId,
-          "attempt.status": parsed.status
-        })
+        createEvent(
+          "execution_attempt.transitioned",
+          {
+            attemptId: parsed.attemptId,
+            workItemId: parsed.workItemId,
+            workerId: parsed.workerId,
+            fencingEpoch: parsed.fencingEpoch,
+            status: parsed.status,
+            outcomeCode: outcomeCode ?? undefined
+          },
+          {
+            "attempt.id": parsed.attemptId,
+            "work_item.id": parsed.workItemId,
+            "worker.id": parsed.workerId,
+            "attempt.status": parsed.status
+          }
+        )
       );
       return { value: attempt, events: [event] };
     });
@@ -1554,34 +1562,59 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): ActorRoutingDecision {
+  recordActorRoutingDecision(
+    input: RecordActorRoutingDecisionInput,
+    options: PrivilegedTransitionOptions
+  ): ActorRoutingDecision {
     requirePrivilegedTransition(options, "record_actor_routing_decision");
     const parsed = recordActorRoutingDecisionInputSchema.parse(input);
     return this.write(() => {
-      const existing = this.db.prepare(`SELECT * FROM actor_routing_decisions WHERE idempotency_key = ?`).get(parsed.idempotencyKey) as unknown as RoutingDecisionRow | undefined;
+      const existing = this.db
+        .prepare(`SELECT * FROM actor_routing_decisions WHERE idempotency_key = ?`)
+        .get(parsed.idempotencyKey) as unknown as RoutingDecisionRow | undefined;
       if (existing) return { value: rowToActorRoutingDecision(existing), events: [] };
       const decisionId = createId("routing");
       const createdAt = (parsed.now ?? new Date()).toISOString();
-      this.db.prepare(`INSERT INTO actor_routing_decisions
+      this.db
+        .prepare(
+          `INSERT INTO actor_routing_decisions
         (decision_id, work_item_id, attempt_id, selected_actor_id, eligible_json, excluded_json, scores_json, idempotency_key, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(decisionId, parsed.workItemId, parsed.attemptId ?? null, parsed.selectedActorId ?? null, JSON.stringify(parsed.eligible), JSON.stringify(parsed.excluded), JSON.stringify(parsed.scores), parsed.idempotencyKey, createdAt);
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          decisionId,
+          parsed.workItemId,
+          parsed.attemptId ?? null,
+          parsed.selectedActorId ?? null,
+          JSON.stringify(parsed.eligible),
+          JSON.stringify(parsed.excluded),
+          JSON.stringify(parsed.scores),
+          parsed.idempotencyKey,
+          createdAt
+        );
       const decision = actorRoutingDecisionSchema.parse({ ...parsed, decisionId, createdAt });
-      const event = this.appendAuditEvent(createEvent("actor.routing_decision.recorded", decision, {
-        "work_item.id": decision.workItemId,
-        "routing.decision_id": decisionId,
-        "actor.id": decision.selectedActorId ?? "none"
-      }));
+      const event = this.appendAuditEvent(
+        createEvent("actor.routing_decision.recorded", decision, {
+          "work_item.id": decision.workItemId,
+          "routing.decision_id": decisionId,
+          "actor.id": decision.selectedActorId ?? "none"
+        })
+      );
       return { value: decision, events: [event] };
     });
   }
 
   getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined {
-    const row = this.db.prepare(`SELECT * FROM actor_routing_decisions WHERE decision_id = ?`).get(decisionId) as unknown as RoutingDecisionRow | undefined;
+    const row = this.db
+      .prepare(`SELECT * FROM actor_routing_decisions WHERE decision_id = ?`)
+      .get(decisionId) as unknown as RoutingDecisionRow | undefined;
     return row ? rowToActorRoutingDecision(row) : undefined;
   }
 
   getActorRoutingDecisionForWorkItem(workItemId: string): ActorRoutingDecision | undefined {
-    const row = this.db.prepare(`SELECT * FROM actor_routing_decisions WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1`).get(workItemId) as unknown as RoutingDecisionRow | undefined;
+    const row = this.db
+      .prepare(`SELECT * FROM actor_routing_decisions WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(workItemId) as unknown as RoutingDecisionRow | undefined;
     return row ? rowToActorRoutingDecision(row) : undefined;
   }
 
@@ -1590,17 +1623,26 @@ export class SqliteWorkItemStore implements WorkItemStore {
     const parsed = recordActorReliabilityInputSchema.parse(input);
     return this.write(() => {
       const now = (parsed.now ?? new Date()).toISOString();
-      this.db.prepare(`INSERT INTO actor_reliability_stats (actor_id, success_count, failure_count, updated_at)
-        VALUES (?, ?, ?, ?) ON CONFLICT(actor_id) DO UPDATE SET success_count = success_count + excluded.success_count, failure_count = failure_count + excluded.failure_count, updated_at = excluded.updated_at`).run(parsed.actorId, parsed.outcome === "success" ? 1 : 0, parsed.outcome === "failure" ? 1 : 0, now);
-      const row = this.db.prepare(`SELECT * FROM actor_reliability_stats WHERE actor_id = ?`).get(parsed.actorId) as unknown as ReliabilityRow;
+      this.db
+        .prepare(
+          `INSERT INTO actor_reliability_stats (actor_id, success_count, failure_count, updated_at)
+        VALUES (?, ?, ?, ?) ON CONFLICT(actor_id) DO UPDATE SET success_count = success_count + excluded.success_count, failure_count = failure_count + excluded.failure_count, updated_at = excluded.updated_at`
+        )
+        .run(parsed.actorId, parsed.outcome === "success" ? 1 : 0, parsed.outcome === "failure" ? 1 : 0, now);
+      const row = this.db
+        .prepare(`SELECT * FROM actor_reliability_stats WHERE actor_id = ?`)
+        .get(parsed.actorId) as unknown as ReliabilityRow;
       const reliability = actorReliabilitySchema.parse(rowToActorReliability(row));
-      const event = this.appendAuditEvent(createEvent("actor.reliability.updated", reliability, { "actor.id": parsed.actorId }));
+      const event = this.appendAuditEvent(
+        createEvent("actor.reliability.updated", reliability, { "actor.id": parsed.actorId })
+      );
       return { value: reliability, events: [event] };
     });
   }
 
   getActorReliability(actorId: string): ActorReliability | undefined {
-    const row = this.db.prepare(`SELECT * FROM actor_reliability_stats WHERE actor_id = ?`).get(actorId) as unknown as ReliabilityRow | undefined;
+    const row = this.db.prepare(`SELECT * FROM actor_reliability_stats WHERE actor_id = ?`).get(actorId) as unknown as
+      ReliabilityRow | undefined;
     return row ? rowToActorReliability(row) : undefined;
   }
 
@@ -1608,33 +1650,64 @@ export class SqliteWorkItemStore implements WorkItemStore {
     requirePrivilegedTransition(options, "record_validation_run");
     const parsed = recordValidationRunInputSchema.parse(input);
     return this.write(() => {
-      const existing = this.db.prepare(`SELECT * FROM validation_runs WHERE idempotency_key = ?`).get(parsed.idempotencyKey) as unknown as ValidationRunRow | undefined;
+      const existing = this.db
+        .prepare(`SELECT * FROM validation_runs WHERE idempotency_key = ?`)
+        .get(parsed.idempotencyKey) as unknown as ValidationRunRow | undefined;
       if (existing) return { value: this.loadValidationRun(existing.run_id), events: [] };
       const runId = createId("validation");
       const createdAt = (parsed.now ?? new Date()).toISOString();
-      this.db.prepare(`INSERT INTO validation_runs (run_id, attempt_id, work_item_id, passed, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?)`).run(runId, parsed.attemptId, parsed.workItemId, parsed.passed ? 1 : 0, parsed.idempotencyKey, createdAt);
+      this.db
+        .prepare(
+          `INSERT INTO validation_runs (run_id, attempt_id, work_item_id, passed, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(runId, parsed.attemptId, parsed.workItemId, parsed.passed ? 1 : 0, parsed.idempotencyKey, createdAt);
       for (const check of parsed.checks) {
-        this.db.prepare(`INSERT INTO validation_checks (check_id, run_id, name, passed, detail, stdout, stderr) VALUES (?, ?, ?, ?, ?, ?, ?)`).run(createId("validation-check"), runId, check.name, check.passed ? 1 : 0, check.detail, check.stdout ?? null, check.stderr ?? null);
+        this.db
+          .prepare(
+            `INSERT INTO validation_checks (check_id, run_id, name, passed, detail, stdout, stderr) VALUES (?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            createId("validation-check"),
+            runId,
+            check.name,
+            check.passed ? 1 : 0,
+            check.detail,
+            check.stdout ?? null,
+            check.stderr ?? null
+          );
       }
       const run = this.loadValidationRun(runId);
-      const event = this.appendAuditEvent(createEvent("validation.run.recorded", run, { "validation.run_id": runId, "attempt.id": run.attemptId, "validation.passed": run.passed }));
+      const event = this.appendAuditEvent(
+        createEvent("validation.run.recorded", run, {
+          "validation.run_id": runId,
+          "attempt.id": run.attemptId,
+          "validation.passed": run.passed
+        })
+      );
       return { value: run, events: [event] };
     });
   }
 
   getValidationRun(runId: string): ValidationRun | undefined {
-    const row = this.db.prepare(`SELECT * FROM validation_runs WHERE run_id = ?`).get(runId) as unknown as ValidationRunRow | undefined;
+    const row = this.db.prepare(`SELECT * FROM validation_runs WHERE run_id = ?`).get(runId) as unknown as
+      ValidationRunRow | undefined;
     return row ? this.loadValidationRun(runId) : undefined;
   }
 
   getValidationRunForAttempt(attemptId: string): ValidationRun | undefined {
-    const row = this.db.prepare(`SELECT * FROM validation_runs WHERE attempt_id = ? ORDER BY created_at DESC LIMIT 1`).get(attemptId) as unknown as ValidationRunRow | undefined;
+    const row = this.db
+      .prepare(`SELECT * FROM validation_runs WHERE attempt_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(attemptId) as unknown as ValidationRunRow | undefined;
     return row ? this.loadValidationRun(row.run_id) : undefined;
   }
 
   private loadValidationRun(runId: string): ValidationRun {
-    const row = this.db.prepare(`SELECT * FROM validation_runs WHERE run_id = ?`).get(runId) as unknown as ValidationRunRow;
-    const checks = this.db.prepare(`SELECT * FROM validation_checks WHERE run_id = ? ORDER BY rowid ASC`).all(runId) as unknown as ValidationCheckRow[];
+    const row = this.db
+      .prepare(`SELECT * FROM validation_runs WHERE run_id = ?`)
+      .get(runId) as unknown as ValidationRunRow;
+    const checks = this.db
+      .prepare(`SELECT * FROM validation_checks WHERE run_id = ? ORDER BY rowid ASC`)
+      .all(runId) as unknown as ValidationCheckRow[];
     return validationRunSchema.parse({
       runId: row.run_id,
       attemptId: row.attempt_id,
@@ -1642,7 +1715,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
       passed: row.passed === 1,
       idempotencyKey: row.idempotency_key,
       createdAt: row.created_at,
-      checks: checks.map((check) => validationCheckSchema.parse({ checkId: check.check_id, runId: check.run_id, name: check.name, passed: check.passed === 1, detail: check.detail, ...(check.stdout === null ? {} : { stdout: check.stdout }), ...(check.stderr === null ? {} : { stderr: check.stderr }) }))
+      checks: checks.map((check) =>
+        validationCheckSchema.parse({
+          checkId: check.check_id,
+          runId: check.run_id,
+          name: check.name,
+          passed: check.passed === 1,
+          detail: check.detail,
+          ...(check.stdout === null ? {} : { stdout: check.stdout }),
+          ...(check.stderr === null ? {} : { stderr: check.stderr })
+        })
+      )
     });
   }
 
@@ -1650,45 +1733,158 @@ export class SqliteWorkItemStore implements WorkItemStore {
     requirePrivilegedTransition(options, "record_recovery_decision");
     const parsed = recordRecoveryDecisionInputSchema.parse(input);
     return this.write(() => {
-      const existing = this.db.prepare(`SELECT * FROM recovery_records WHERE idempotency_key = ?`).get(parsed.idempotencyKey) as unknown as RecoveryRow | undefined;
-      if (existing) return { value: recoveryRecordSchema.parse({ recordId: existing.record_id, attemptId: existing.attempt_id, workItemId: existing.work_item_id, decision: existing.decision, retryAllowed: existing.retry_allowed === 1, reason: existing.reason, ...(existing.retry_after_ms === null ? {} : { retryAfterMs: existing.retry_after_ms }), idempotencyKey: existing.idempotency_key, createdAt: existing.created_at }), events: [] };
+      const existing = this.db
+        .prepare(`SELECT * FROM recovery_records WHERE idempotency_key = ?`)
+        .get(parsed.idempotencyKey) as unknown as RecoveryRow | undefined;
+      if (existing)
+        return {
+          value: recoveryRecordSchema.parse({
+            recordId: existing.record_id,
+            attemptId: existing.attempt_id,
+            workItemId: existing.work_item_id,
+            decision: existing.decision,
+            retryAllowed: existing.retry_allowed === 1,
+            reason: existing.reason,
+            ...(existing.retry_after_ms === null ? {} : { retryAfterMs: existing.retry_after_ms }),
+            idempotencyKey: existing.idempotency_key,
+            createdAt: existing.created_at
+          }),
+          events: []
+        };
       const recordId = createId("recovery");
       const createdAt = (parsed.now ?? new Date()).toISOString();
-      this.db.prepare(`INSERT INTO recovery_records (record_id, attempt_id, work_item_id, decision, retry_allowed, reason, retry_after_ms, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(recordId, parsed.attemptId, parsed.workItemId, parsed.decision, parsed.retryAllowed ? 1 : 0, parsed.reason, parsed.retryAfterMs ?? null, parsed.idempotencyKey, createdAt);
+      this.db
+        .prepare(
+          `INSERT INTO recovery_records (record_id, attempt_id, work_item_id, decision, retry_allowed, reason, retry_after_ms, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          recordId,
+          parsed.attemptId,
+          parsed.workItemId,
+          parsed.decision,
+          parsed.retryAllowed ? 1 : 0,
+          parsed.reason,
+          parsed.retryAfterMs ?? null,
+          parsed.idempotencyKey,
+          createdAt
+        );
       const record = recoveryRecordSchema.parse({ ...parsed, recordId, createdAt });
-      const event = this.appendAuditEvent(createEvent("attempt.recovery_decision.recorded", record, { "attempt.id": record.attemptId, "recovery.decision": record.decision }));
+      const event = this.appendAuditEvent(
+        createEvent("attempt.recovery_decision.recorded", record, {
+          "attempt.id": record.attemptId,
+          "recovery.decision": record.decision
+        })
+      );
       return { value: record, events: [event] };
     });
   }
 
   getRecoveryDecisionForAttempt(attemptId: string): RecoveryRecord | undefined {
-    const row = this.db.prepare(`SELECT * FROM recovery_records WHERE attempt_id = ? ORDER BY created_at DESC LIMIT 1`).get(attemptId) as unknown as RecoveryRow | undefined;
-    return row ? recoveryRecordSchema.parse({ recordId: row.record_id, attemptId: row.attempt_id, workItemId: row.work_item_id, decision: row.decision, retryAllowed: row.retry_allowed === 1, reason: row.reason, ...(row.retry_after_ms === null ? {} : { retryAfterMs: row.retry_after_ms }), idempotencyKey: row.idempotency_key, createdAt: row.created_at }) : undefined;
+    const row = this.db
+      .prepare(`SELECT * FROM recovery_records WHERE attempt_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(attemptId) as unknown as RecoveryRow | undefined;
+    return row
+      ? recoveryRecordSchema.parse({
+          recordId: row.record_id,
+          attemptId: row.attempt_id,
+          workItemId: row.work_item_id,
+          decision: row.decision,
+          retryAllowed: row.retry_allowed === 1,
+          reason: row.reason,
+          ...(row.retry_after_ms === null ? {} : { retryAfterMs: row.retry_after_ms }),
+          idempotencyKey: row.idempotency_key,
+          createdAt: row.created_at
+        })
+      : undefined;
   }
 
   recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord {
     requirePrivilegedTransition(options, "record_publication");
     const parsed = recordPublicationInputSchema.parse(input);
     return this.write(() => {
-      const existing = this.db.prepare(`SELECT * FROM publication_records WHERE idempotency_key = ?`).get(parsed.idempotencyKey) as unknown as PublicationRow | undefined;
-      if (existing) return { value: publicationRecordSchema.parse({ publicationId: existing.publication_id, workItemId: existing.work_item_id, attemptId: existing.attempt_id, branch: existing.branch, commitSha: existing.commit_sha, pullRequestUrl: existing.pull_request_url, idempotencyKey: existing.idempotency_key, createdAt: existing.created_at }), events: [] };
+      const existing = this.db
+        .prepare(`SELECT * FROM publication_records WHERE idempotency_key = ?`)
+        .get(parsed.idempotencyKey) as unknown as PublicationRow | undefined;
+      if (existing)
+        return {
+          value: publicationRecordSchema.parse({
+            publicationId: existing.publication_id,
+            workItemId: existing.work_item_id,
+            attemptId: existing.attempt_id,
+            branch: existing.branch,
+            commitSha: existing.commit_sha,
+            pullRequestUrl: existing.pull_request_url,
+            idempotencyKey: existing.idempotency_key,
+            createdAt: existing.created_at
+          }),
+          events: []
+        };
       const publicationId = createId("publication");
       const createdAt = (parsed.now ?? new Date()).toISOString();
-      this.db.prepare(`INSERT INTO publication_records (publication_id, work_item_id, attempt_id, branch, commit_sha, pull_request_url, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(publicationId, parsed.workItemId, parsed.attemptId, parsed.branch, parsed.commitSha, parsed.pullRequestUrl, parsed.idempotencyKey, createdAt);
+      this.db
+        .prepare(
+          `INSERT INTO publication_records (publication_id, work_item_id, attempt_id, branch, commit_sha, pull_request_url, idempotency_key, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          publicationId,
+          parsed.workItemId,
+          parsed.attemptId,
+          parsed.branch,
+          parsed.commitSha,
+          parsed.pullRequestUrl,
+          parsed.idempotencyKey,
+          createdAt
+        );
       const record = publicationRecordSchema.parse({ ...parsed, publicationId, createdAt });
-      const event = this.appendAuditEvent(createEvent("publication.recorded", record, { "work_item.id": record.workItemId, "attempt.id": record.attemptId, "publication.id": record.publicationId }));
+      const event = this.appendAuditEvent(
+        createEvent("publication.recorded", record, {
+          "work_item.id": record.workItemId,
+          "attempt.id": record.attemptId,
+          "publication.id": record.publicationId
+        })
+      );
       return { value: record, events: [event] };
     });
   }
 
   getPublicationByIdempotency(idempotencyKey: string): PublicationRecord | undefined {
-    const row = this.db.prepare(`SELECT * FROM publication_records WHERE idempotency_key = ?`).get(idempotencyKey) as unknown as PublicationRow | undefined;
-    return row ? publicationRecordSchema.parse({ publicationId: row.publication_id, workItemId: row.work_item_id, attemptId: row.attempt_id, branch: row.branch, commitSha: row.commit_sha, pullRequestUrl: row.pull_request_url, idempotencyKey: row.idempotency_key, createdAt: row.created_at }) : undefined;
+    const row = this.db
+      .prepare(`SELECT * FROM publication_records WHERE idempotency_key = ?`)
+      .get(idempotencyKey) as unknown as PublicationRow | undefined;
+    return row
+      ? publicationRecordSchema.parse({
+          publicationId: row.publication_id,
+          workItemId: row.work_item_id,
+          attemptId: row.attempt_id,
+          branch: row.branch,
+          commitSha: row.commit_sha,
+          pullRequestUrl: row.pull_request_url,
+          idempotencyKey: row.idempotency_key,
+          createdAt: row.created_at
+        })
+      : undefined;
   }
 
   listPublications(workItemId?: string): PublicationRecord[] {
-    const rows = (workItemId ? this.db.prepare(`SELECT * FROM publication_records WHERE work_item_id = ? ORDER BY created_at DESC`).all(workItemId) : this.db.prepare(`SELECT * FROM publication_records ORDER BY created_at DESC`).all()) as unknown as PublicationRow[];
-    return rows.map((row) => publicationRecordSchema.parse({ publicationId: row.publication_id, workItemId: row.work_item_id, attemptId: row.attempt_id, branch: row.branch, commitSha: row.commit_sha, pullRequestUrl: row.pull_request_url, idempotencyKey: row.idempotency_key, createdAt: row.created_at }));
+    const rows = (workItemId
+      ? this.db
+          .prepare(`SELECT * FROM publication_records WHERE work_item_id = ? ORDER BY created_at DESC`)
+          .all(workItemId)
+      : this.db
+          .prepare(`SELECT * FROM publication_records ORDER BY created_at DESC`)
+          .all()) as unknown as PublicationRow[];
+    return rows.map((row) =>
+      publicationRecordSchema.parse({
+        publicationId: row.publication_id,
+        workItemId: row.work_item_id,
+        attemptId: row.attempt_id,
+        branch: row.branch,
+        commitSha: row.commit_sha,
+        pullRequestUrl: row.pull_request_url,
+        idempotencyKey: row.idempotency_key,
+        createdAt: row.created_at
+      })
+    );
   }
 
   getActiveLeaseForAttempt(attemptId: string): AttemptLease | undefined {
