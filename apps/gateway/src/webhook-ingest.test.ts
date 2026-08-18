@@ -137,7 +137,6 @@ describe("webhook ingest receiver", () => {
       })
     ]);
 
-    const statuses = [res1.statusCode, res2.statusCode].sort();
     // One must succeed with 201 Created (or 200 replayed if polled) and the other returns 200 replayed or 409 conflict
     expect([200, 201]).toContain(res1.statusCode);
     expect([200, 201, 409]).toContain(res2.statusCode);
