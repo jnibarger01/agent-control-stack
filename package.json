@@ -3,6 +3,9 @@
   "version": "0.1.0-alpha",
   "private": true,
   "type": "module",
+  "bin": {
+    "acs": "./apps/cli/dist/cli.js"
+  },
   "packageManager": "npm@11.17.0",
   "engines": {
     "node": ">=24.16.0"

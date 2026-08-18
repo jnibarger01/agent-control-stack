@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+  "include": ["src/**/*.ts"],
+  "references": [
+    { "path": "../../apps/gateway" },
+    { "path": "../../apps/mcp" },
+    { "path": "../../apps/scheduler" },
+    { "path": "../../apps/worker" },
+    { "path": "../../packages/machine-controller" },
+    { "path": "../../packages/work-items" }
+  ]
+}
