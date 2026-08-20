@@ -1,6 +1,8 @@
 import {
   DEFAULT_HEARTBEAT_ONLINE_WINDOW_MS,
   DEFAULT_HEARTBEAT_TTL_MS,
+  type AttemptLease,
+  type ExecutionAttempt,
   type ExecutionPlanAdmission,
   type ExecutionPlanRecord,
   type RegistryAgentDetail,
@@ -23,6 +25,31 @@ export interface MissionControlAgent {
   metadata: Record<string, string>;
 }
 
+export type MissionControlAttemptLease = Omit<AttemptLease, "tokenHash">;
+
+export function toMissionControlAttemptLease(lease: AttemptLease): MissionControlAttemptLease {
+  return {
+    leaseId: lease.leaseId,
+    attemptId: lease.attemptId,
+    workItemId: lease.workItemId,
+    admissionId: lease.admissionId,
+    ...(lease.approvalId ? { approvalId: lease.approvalId } : {}),
+    workerId: lease.workerId,
+    planHash: lease.planHash,
+    inputHash: lease.inputHash,
+    fencingEpoch: lease.fencingEpoch,
+    protocolVersion: lease.protocolVersion,
+    policyVersion: lease.policyVersion,
+    policyDecisionHash: lease.policyDecisionHash,
+    issuedAt: lease.issuedAt,
+    expiresAt: lease.expiresAt,
+    maxExpiresAt: lease.maxExpiresAt,
+    lastRenewedAt: lease.lastRenewedAt,
+    status: lease.status,
+    ...(lease.closedAt ? { closedAt: lease.closedAt } : {})
+  };
+}
+
 export interface MissionControlViewModel {
   workItems: WorkItem[];
   events: StoredAuditEvent[];
@@ -33,6 +60,10 @@ export interface MissionControlViewModel {
   executionPlansByWorkItem?: Record<string, ExecutionPlanRecord>;
   /** Current plan's admission outcome per work item, when it has been admitted (getExecutionPlanAdmission). */
   executionPlanAdmissionsByWorkItem?: Record<string, ExecutionPlanAdmission>;
+  /** Persisted execution attempts for each work item. */
+  executionAttemptsByWorkItem?: Record<string, ExecutionAttempt[]>;
+  /** Dashboard-safe lease projections. Raw token hashes are never accepted by this view model. */
+  attemptLeasesByWorkItem?: Record<string, MissionControlAttemptLease[]>;
   now?: Date;
 }
 
@@ -55,6 +86,8 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
   const recentEvents = [...events].slice(-10).reverse();
   const executionPlansByWorkItem = model.executionPlansByWorkItem ?? {};
   const executionPlanAdmissionsByWorkItem = model.executionPlanAdmissionsByWorkItem ?? {};
+  const executionAttemptsByWorkItem = model.executionAttemptsByWorkItem ?? {};
+  const attemptLeasesByWorkItem = model.attemptLeasesByWorkItem ?? {};
 
   return `<!doctype html>
 <html lang="en">
@@ -85,7 +118,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <section id="overview" class="cards">${overviewCards(stats)}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem)}</article>
+        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, executionAttemptsByWorkItem, attemptLeasesByWorkItem)}</article>
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
@@ -242,7 +275,9 @@ function agentDetailPanel(): string {
 function workQueue(
   workItems: WorkItem[],
   executionPlansByWorkItem: Record<string, ExecutionPlanRecord>,
-  executionPlanAdmissionsByWorkItem: Record<string, ExecutionPlanAdmission>
+  executionPlanAdmissionsByWorkItem: Record<string, ExecutionPlanAdmission>,
+  executionAttemptsByWorkItem: Record<string, ExecutionAttempt[]>,
+  attemptLeasesByWorkItem: Record<string, MissionControlAttemptLease[]>
 ): string {
   if (!workItems.length) return `<p class="empty">No work items.</p>`;
   return `<div class="queue">${workItems
@@ -251,7 +286,9 @@ function workQueue(
       const attention = needsOperatorAttention(item.status);
       const plan = executionPlansByWorkItem[item.id];
       const admission = executionPlanAdmissionsByWorkItem[item.id];
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${workItemError(item)}</button>`;
+      const attempts = executionAttemptsByWorkItem[item.id] ?? [];
+      const leases = attemptLeasesByWorkItem[item.id] ?? [];
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
     .join("")}</div><section id="work-detail" class="detail-panel work-detail" aria-live="polite"><div class="detail-empty"><h3>No work item selected</h3><p>Timeline pending.</p></div></section>`;
 }
@@ -267,6 +304,14 @@ function executionPlanBadge(plan?: ExecutionPlanRecord, admission?: ExecutionPla
   }
   const approvalLabel = admission.requiresApproval ? "requires approval" : "auto-admitted";
   return `<small class="plan-status plan-admitted">Execution plan admitted &middot; ${escapeHtml(approvalLabel)}</small>`;
+}
+
+function executionSummary(attempts: ExecutionAttempt[], leases: MissionControlAttemptLease[]): string {
+  const attempt = attempts.at(-1);
+  if (!attempt) return "";
+  const lease = [...leases].reverse().find((candidate) => candidate.attemptId === attempt.attemptId);
+  const worker = lease?.workerId ?? attempt.claimedByWorkerId;
+  return `<small class="execution-status">Attempt #${attempt.attemptNumber} &middot; ${escapeHtml(attempt.status)}${worker ? ` &middot; ${escapeHtml(worker)}` : ""}${lease ? ` &middot; lease ${escapeHtml(lease.status)}` : ""}</small>`;
 }
 
 function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Record<string, string[]>): string {
@@ -435,7 +480,7 @@ function bindWorkItems() {
       target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
       try {
         const body = await fetchJson('/work-items/' + encodeURIComponent(button.dataset.workItem));
-        renderWorkDetail(target, body.workItem, body.events || []);
+        renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
       } catch (error) {
         target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
       }
@@ -580,7 +625,50 @@ function eventClientTime(event) {
   return Number.isFinite(nanos) ? formatClientTime(new Date(Math.floor(nanos / 1000000)).toISOString()) : '—';
 }
 
-function renderWorkDetail(target, workItem, events) {
+function shortHash(value) {
+  const text = String(value || '');
+  return text.length > 16 ? text.slice(0, 12) + '…' : text;
+}
+
+function renderExecutionAuthority(executionAttempts, attemptLeases) {
+  const attempts = Array.isArray(executionAttempts) ? executionAttempts.slice() : [];
+  const leases = Array.isArray(attemptLeases) ? attemptLeases : [];
+  if (!attempts.length) {
+    return '<div class="detail-section"><h4>Execution Authority</h4><p class="muted">No execution attempts recorded.</p></div>';
+  }
+  attempts.sort(function (left, right) { return Number(right.attemptNumber || 0) - Number(left.attemptNumber || 0); });
+  return '<div class="detail-section"><h4>Execution Authority</h4><div class="execution-stack">' + attempts.map(function (attempt) {
+    const matching = leases.filter(function (lease) { return lease.attemptId === attempt.attemptId; }).sort(function (left, right) { return Number(right.fencingEpoch || 0) - Number(left.fencingEpoch || 0); });
+    const lease = matching[0];
+    const worker = (lease && lease.workerId) || attempt.claimedByWorkerId || '—';
+    const leaseMarkup = lease
+      ? '<div class="lease-block"><div class="lease-head"><strong>Lease ' + escapeClient(lease.leaseId) + '</strong>' + pillMarkup(lease.status || 'unknown') + '</div><dl class="detail-grid compact">' +
+          detailRow('Worker', worker) +
+          detailRow('Fencing epoch', String(lease.fencingEpoch ?? attempt.currentFencingEpoch ?? 0)) +
+          detailRow('Admission', lease.admissionId) +
+          detailRow('Approval', lease.approvalId || 'not required / not bound') +
+          detailRow('Policy', lease.policyVersion) +
+          detailRow('Policy decision', shortHash(lease.policyDecisionHash)) +
+          detailRow('Issued', formatClientTime(lease.issuedAt)) +
+          detailRow('Expires', formatClientTime(lease.expiresAt)) +
+          detailRow('Last renewed', formatClientTime(lease.lastRenewedAt)) +
+          detailRow('Max expiry', formatClientTime(lease.maxExpiresAt)) +
+        '</dl></div>'
+      : '<p class="muted">No lease recorded for this attempt.</p>';
+    return '<article class="execution-card"><div class="execution-head"><div><strong>Attempt #' + escapeClient(attempt.attemptNumber) + '</strong><small>' + escapeClient(attempt.attemptId) + '</small></div>' + pillMarkup(attempt.status || 'unknown') + '</div><dl class="detail-grid compact">' +
+      detailRow('Worker', worker) +
+      detailRow('Fencing epoch', String(attempt.currentFencingEpoch ?? 0)) +
+      detailRow('Plan', attempt.planId) +
+      detailRow('Plan hash', shortHash(attempt.planHash)) +
+      detailRow('Input hash', shortHash(attempt.inputHash)) +
+      detailRow('Protocol', attempt.protocolVersion) +
+      detailRow('Started', formatClientTime(attempt.startedAt)) +
+      detailRow('Updated', formatClientTime(attempt.updatedAt)) +
+    '</dl>' + leaseMarkup + '</article>';
+  }).join('') + '</div></div>';
+}
+
+function renderWorkDetail(target, workItem, events, executionAttempts, attemptLeases) {
   if (!workItem) {
     target.innerHTML = '<div class="detail-error">Work item not found.</div>';
     return;
@@ -594,6 +682,7 @@ function renderWorkDetail(target, workItem, events) {
       detailRow('Created', formatClientTime(workItem.createdAt)) +
     '</dl>' +
     '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(action.description) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
+    renderExecutionAuthority(executionAttempts, attemptLeases) +
     '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
 }
 
@@ -748,9 +837,10 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: #f0b8b2; background: #fff1ef; }
 .queue-item.attention { border-left: 3px solid var(--red); background: #fff8f7; }
 .attention-badge { color: var(--red); font-weight: 700; margin-left: 6px; font-size: 11px; }
-.plan-status { display: block; margin-top: 4px; }
+.plan-status, .execution-status { display: block; margin-top: 4px; }
 .plan-pending { color: var(--amber); }
 .plan-admitted { color: var(--green); }
+.execution-status { color: #43536a !important; }
 .queue { display: grid; }
 .queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid #edf1f5; padding: 12px 14px; cursor: pointer; }
 .queue-item:hover { background: #f4f8ff; }
@@ -782,11 +872,18 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .detail-head h3 { margin: 0; font-size: 16px; }
 .detail-head small { color: var(--muted); }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; margin: 0; }
+.detail-grid.compact { margin-top: 10px; }
 .detail-grid div { min-width: 0; }
 .detail-grid dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
 .detail-grid dd { margin: 2px 0 0; overflow-wrap: anywhere; }
 .detail-section { margin-top: 14px; }
 .detail-section h4 { margin: 0 0 8px; font-size: 13px; color: var(--ink); }
+.execution-stack { display: grid; gap: 10px; }
+.execution-card { border: 1px solid #dbe4ee; background: #ffffff; border-radius: 8px; padding: 10px; }
+.execution-head, .lease-head { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
+.execution-head small { display: block; color: var(--muted); margin-top: 2px; }
+.lease-block { border-top: 1px solid #e6ecf2; margin-top: 10px; padding-top: 10px; }
+.lease-head strong { font-size: 12px; }
 .chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { border: 1px solid #ccd6e2; background: #ffffff; border-radius: 999px; padding: 4px 8px; font-size: 12px; color: #344256; }
 .detail-events { list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }
