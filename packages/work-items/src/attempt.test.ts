@@ -211,11 +211,30 @@ describe("recordWorkspaceAllocation / getWorkspaceAllocation", () => {
   it("records a workspace allocation and is idempotent for the same binding", () => {
     const fixture = createFixture();
     directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    const lease = fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        admissionId: fixture.admission.admissionId,
+        workerId: "worker-1",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("1"),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+    const authority = { attemptId: attempt.attemptId, leaseId: lease.leaseId, workerId: lease.workerId, fencingEpoch: lease.fencingEpoch };
 
     const first = fixture.store.recordWorkspaceAllocation(
       {
         allocationId: "workspace_1",
         workItemId: fixture.workItem.id,
+        ...authority,
         hostPath: "/repo/wrk_1",
         branch: "acs/job/wrk_1",
         baseRef: "main"
@@ -226,6 +245,7 @@ describe("recordWorkspaceAllocation / getWorkspaceAllocation", () => {
       {
         allocationId: "workspace_1",
         workItemId: fixture.workItem.id,
+        ...authority,
         hostPath: "/repo/wrk_1",
         branch: "acs/job/wrk_1",
         baseRef: "main"
@@ -240,10 +260,29 @@ describe("recordWorkspaceAllocation / getWorkspaceAllocation", () => {
   it("refuses to reuse an allocation id with a different host path (substitution attempt)", () => {
     const fixture = createFixture();
     directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    const lease = fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        admissionId: fixture.admission.admissionId,
+        workerId: "worker-1",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("1"),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+    const authority = { attemptId: attempt.attemptId, leaseId: lease.leaseId, workerId: lease.workerId, fencingEpoch: lease.fencingEpoch };
     fixture.store.recordWorkspaceAllocation(
       {
         allocationId: "workspace_1",
         workItemId: fixture.workItem.id,
+        ...authority,
         hostPath: "/repo/wrk_1",
         branch: "acs/job/wrk_1",
         baseRef: "main"
@@ -256,6 +295,7 @@ describe("recordWorkspaceAllocation / getWorkspaceAllocation", () => {
         {
           allocationId: "workspace_1",
           workItemId: fixture.workItem.id,
+          ...authority,
           hostPath: "/tmp/attacker-controlled-path",
           branch: "acs/job/wrk_1",
           baseRef: "main"
@@ -298,6 +338,10 @@ describe("getCommandAuthority", () => {
       {
         allocationId: "workspace_1",
         workItemId: fixture.workItem.id,
+        attemptId: attempt.attemptId,
+        leaseId: lease.leaseId,
+        workerId: lease.workerId,
+        fencingEpoch: lease.fencingEpoch,
         hostPath: "/repo/wrk_1",
         branch: "acs/job/wrk_1",
         baseRef: "main"

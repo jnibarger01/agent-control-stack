@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ControlStackError } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore, type WorkItemStore } from "@agent-control-stack/work-items";
+import {
+  SqliteWorkItemStore,
+  defaultExecutionPlanForWorkItem,
+  type WorkItemStore
+} from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
 import { WorkspaceManager } from "./index.js";
 
@@ -44,6 +48,39 @@ function seedWorkItemId(store: WorkItemStore, label: string): string {
     requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: [], write: false } }],
     risk: "low"
   });
+  const plan = store.createExecutionPlan({
+    workItemId: workItem.id,
+    definition: defaultExecutionPlanForWorkItem(workItem),
+    createdByActorId: "workspace-test"
+  });
+  const admission = store.admitExecutionPlan(
+    {
+      workItemId: workItem.id,
+      planHash: plan.planHash,
+      policyVersion: "acs.policy.v1",
+      policyDecisionHash: "1".repeat(64),
+      requiresApproval: false,
+      admittedByActorId: "workspace-test"
+    },
+    { via: "policy_gate" }
+  );
+  const attempt = store.createAttempt(
+    { workItemId: workItem.id, planHash: plan.planHash, inputHash: "2".repeat(64) },
+    { via: "domain_service" }
+  );
+  store.leaseAttempt(
+    {
+      attemptId: attempt.attemptId,
+      workItemId: workItem.id,
+      admissionId: admission.admissionId,
+      workerId: "workspace-test",
+      leaseToken: "workspace-test-token-1234567890",
+      policyVersion: "acs.policy.v1",
+      policyDecisionHash: "1".repeat(64),
+      ttlMs: 60_000
+    },
+    { via: "domain_service" }
+  );
   return workItem.id;
 }
 
@@ -278,6 +315,9 @@ describe("WorkspaceManager", () => {
       store: fixture.store
     });
     const workspace = await manager.provision(workItemId);
+    const authority = fixture.store.getActiveAttemptAuthorityForWorkItem(workItemId);
+    expect(authority).toBeDefined();
+    if (!authority) throw new Error("expected active workspace authority");
 
     // A second, independent attempt to record an allocation for the same
     // work item (simulating a losing racer in a real concurrent provision)
@@ -287,6 +327,7 @@ describe("WorkspaceManager", () => {
         {
           allocationId: "workspace_racer",
           workItemId,
+          ...authority,
           hostPath: "/tmp/attacker-would-be-path",
           branch: "acs/job/racer",
           baseRef: "main"

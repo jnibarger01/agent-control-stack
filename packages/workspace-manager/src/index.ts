@@ -41,11 +41,33 @@ export type Workspace = z.infer<typeof workspaceSchema>;
  */
 export interface WorkspaceAllocationStore {
   recordWorkspaceAllocation(
-    input: { allocationId: string; workItemId: string; hostPath: string; branch: string; baseRef: string },
+    input: {
+      allocationId: string;
+      workItemId: string;
+      attemptId: string;
+      leaseId: string;
+      workerId: string;
+      fencingEpoch: number;
+      hostPath: string;
+      branch: string;
+      baseRef: string;
+    },
     options: PrivilegedTransitionOptions
   ): WorkspaceAllocation;
   getActiveWorkspaceAllocationForWorkItem(workItemId: string): WorkspaceAllocation | undefined;
-  closeWorkspaceAllocation(allocationId: string, options: PrivilegedTransitionOptions): WorkspaceAllocation;
+  getActiveAttemptAuthorityForWorkItem(
+    workItemId: string
+  ): { attemptId: string; leaseId: string; workerId: string; fencingEpoch: number } | undefined;
+  closeWorkspaceAllocation(
+    allocationId: string,
+    options: PrivilegedTransitionOptions,
+    authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch: number }
+  ): WorkspaceAllocation;
+  markWorkspaceCleanupFailure(
+    allocationId: string,
+    authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch: number },
+    error: string
+  ): WorkspaceAllocation;
 }
 
 export interface WorkspaceManagerOptions {
@@ -61,6 +83,7 @@ export interface WorkspaceManagerOptions {
 export interface ProvisionOptions {
   /** Ref the new worktree branches from. Defaults to "HEAD". */
   baseRef?: string;
+  authority?: { attemptId: string; leaseId: string; workerId: string; fencingEpoch: number };
 }
 
 interface WorktreeListEntry {
@@ -154,10 +177,21 @@ export class WorkspaceManager {
     }
 
     const allocationId = createId("workspace");
+    const authority = options.authority ?? this.store.getActiveAttemptAuthorityForWorkItem(parsedId);
+    if (!authority) {
+      throw new ControlStackError("workspace_authority_required", "workspace provisioning requires attempt authority");
+    }
     let allocation: WorkspaceAllocation;
     try {
       allocation = this.store.recordWorkspaceAllocation(
-        { allocationId, workItemId: parsedId, hostPath, branch, baseRef },
+        {
+          allocationId,
+          workItemId: parsedId,
+          ...authority,
+          hostPath,
+          branch,
+          baseRef
+        },
         { via: "domain_service" }
       );
     } catch (error) {
@@ -175,8 +209,15 @@ export class WorkspaceManager {
     return workspaceFromAllocation(allocation);
   }
 
-  async teardown(workItemId: string): Promise<void> {
+  async teardown(
+    workItemId: string,
+    authority?: { attemptId: string; leaseId: string; workerId: string; fencingEpoch: number }
+  ): Promise<void> {
     const parsedId = identifierSchema.parse(workItemId);
+    const resolvedAuthority = authority ?? this.store.getActiveAttemptAuthorityForWorkItem(parsedId);
+    if (!resolvedAuthority) {
+      throw new ControlStackError("workspace_authority_required", "workspace teardown requires attempt authority");
+    }
     const persisted = this.store.getActiveWorkspaceAllocationForWorkItem(parsedId);
     if (!persisted) {
       // No authoritative record of this work item ever owning a workspace.
@@ -226,7 +267,16 @@ export class WorkspaceManager {
         // the directory remains; fall back to direct removal - still bound
         // to the persisted, realpath-verified target, never to an unchecked
         // "whatever is at the deterministic path" value.
-        rmSync(targetPath, { recursive: true, force: true });
+        try {
+          rmSync(targetPath, { recursive: true, force: true });
+        } catch (cleanupError) {
+          this.store.markWorkspaceCleanupFailure(
+            persisted.allocationId,
+            { workItemId: parsedId, ...resolvedAuthority },
+            errorMessage(cleanupError)
+          );
+          throw cleanupError;
+        }
       }
       await this.git(["worktree", "prune"]).catch(() => undefined);
     }
@@ -235,12 +285,21 @@ export class WorkspaceManager {
     // failure above throws before this point, leaving the store's record
     // active so a retry (or an operator) can find and finish the job.
     if (existsSync(targetPath)) {
+      this.store.markWorkspaceCleanupFailure(
+        persisted.allocationId,
+        { workItemId: parsedId, ...resolvedAuthority },
+        `${targetPath} still exists after removal was attempted`
+      );
       throw new ControlStackError(
         "workspace_teardown_incomplete",
         `${targetPath} still exists after removal was attempted`
       );
     }
-    this.store.closeWorkspaceAllocation(persisted.allocationId, { via: "domain_service" });
+    this.store.closeWorkspaceAllocation(
+      persisted.allocationId,
+      { via: "domain_service" },
+      { workItemId: parsedId, ...resolvedAuthority }
+    );
   }
 
   get(workItemId: string): Workspace | undefined {

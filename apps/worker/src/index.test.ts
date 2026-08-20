@@ -2,7 +2,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exec, fork, spawn } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
+import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { runWorkerOnce } from "./index.js";
@@ -46,10 +48,102 @@ describe("worker policy gate", () => {
       try {
         expect(result.executed).toBe(true);
         expect(check.get(workItem.id)?.status).toBe("succeeded");
+        const db = new DatabaseSync(dbPath, { readOnly: true });
+        try {
+          expect(db.prepare("SELECT COUNT(*) AS count FROM execution_attempts").get()).toEqual({ count: 1 });
+          expect(db.prepare("SELECT COUNT(*) AS count FROM attempt_leases").get()).toEqual({ count: 1 });
+          expect(db.prepare("SELECT status FROM execution_attempts").get()).toEqual({ status: "succeeded" });
+          expect(db.prepare("SELECT status FROM attempt_leases").get()).toEqual({ status: "consumed" });
+        } finally {
+          db.close();
+        }
       } finally {
         check.close();
       }
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not manufacture a second active attempt after a worker restart", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-restart-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Restart authority",
+        requester: "user",
+        intent: "preserve one active execution authority",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      const claimed = tools.claim_next_approved_work_item({ workerId: "test-worker" });
+      expect(claimed?.id).toBe(workItem.id);
+      expect((claimed as (typeof claimed & { attemptId?: string }) | undefined)?.attemptId).toMatch(/^attempt_/u);
+      expect(tools.claim_next_approved_work_item({ workerId: "test-worker" })).toBeUndefined();
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects stale or tampered attempt result bindings before terminalization", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-authority-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      tools.create_work_item({
+        title: "Fenced result",
+        requester: "user",
+        intent: "reject forged result authority",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["README.md"] } }],
+        risk: "low"
+      });
+      const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
+      if (!claimed?.attemptId || !claimed.planHash || !claimed.inputHash || claimed.fencingEpoch === undefined) {
+        throw new Error("expected authoritative claim");
+      }
+      const startedAt = new Date().toISOString();
+      const result = {
+        workItemId: claimed.id,
+        attemptId: claimed.attemptId,
+        leaseId: claimed.leaseId,
+        workerId: "worker-a",
+        actionHash: claimed.actionHash,
+        planHash: claimed.planHash,
+        inputHash: claimed.inputHash,
+        fencingEpoch: claimed.fencingEpoch,
+        idempotencyKey: stableAttemptResultKey(claimed.attemptId),
+        outcome: "succeeded" as const,
+        startedAt,
+        finishedAt: startedAt,
+        exitCode: 0,
+        summary: "dry-run result",
+        structuredOutput: { simulated: true },
+        artifacts: [],
+        simulationMetadata: { executionMode: "dry_run" as const, simulated: true }
+      };
+      expect(() => tools.submit_work_result({ ...result, workerId: "worker-b" })).toThrow(
+        "result lease epoch is stale or mismatched"
+      );
+      expect(() => tools.submit_work_result({ ...result, fencingEpoch: result.fencingEpoch + 1 })).toThrow(
+        "result lease epoch is stale or mismatched"
+      );
+      expect(() => tools.submit_work_result({ ...result, planHash: "f".repeat(64) })).toThrow(
+        "result plan does not match"
+      );
+      expect(() => tools.submit_work_result({ ...result, inputHash: "e".repeat(64) })).toThrow(
+        "result inputs do not match"
+      );
+      expect(store.get(claimed.id)?.status).toBe("running");
+    } finally {
+      store.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -220,3 +314,7 @@ describe("worker policy gate", () => {
     }
   });
 });
+
+function stableAttemptResultKey(attemptId: string): string {
+  return stableHash({ domain: "acs.attempt-result.v1", attemptId });
+}

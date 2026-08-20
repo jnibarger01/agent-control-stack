@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Worker leases prevent untrusted or stale workers from submitting results for work they did not claim. The lease is one part of authority: result submission also requires an authenticated worker principal, a matching worker identity, the execution action hash, and a bounded canonical payload.
+Worker leases prevent untrusted or stale workers from submitting results for work they did not claim. The canonical authority chain is `WorkItem -> ExecutionPlan -> PlanAdmission -> approval -> ExecutionAttempt -> AttemptLease`. The legacy work-item lease remains only as a transitional projection; production worker claims cannot downgrade to it.
 
 ## Work lifecycle
 
@@ -31,9 +31,12 @@ Claim response:
 ```json
 {
   "work_item_id": "wrk_...",
+  "attempt_id": "attempt_...",
   "lease_id": "lease_...",
-  "lease_token": "lease_once_...",
   "worker_id": "worker_local_1",
+  "plan_hash": "<64 lowercase hex characters>",
+  "input_hash": "<64 lowercase hex characters>",
+  "fencing_epoch": 1,
   "action_hash": "<64 lowercase hex characters>",
   "lease_expires_at": "2026-07-05T18:00:00Z"
 }
@@ -52,13 +55,15 @@ The server stores:
 - `status` (`active`, `consumed`, `expired`, or `revoked`)
 - `action_hash`
 
+Canonical attempt leases additionally bind `attempt_id`, `plan_hash`, `input_hash`, `fencing_epoch`, admission/approval identifiers, protocol version, and policy decision hash. A worker may execute only while the persisted attempt and lease are active, unexpired, and owned by that worker at the current fencing epoch. Raw lease tokens are never returned in UI or client-visible read models.
+
 Raw lease tokens are never stored.
 
 ## Result submission
 
 The canonical result contract and HTTP response matrix are documented in [`worker-results.md`](worker-results.md). The worker sends the opaque `lease_id`, not the persisted token hash, to `POST /work-items/:id/results` along with its authenticated worker identity and `action_hash`. The gateway never accepts an unauthenticated result route.
 
-The store validates the work item, active lease, worker binding, action hash, expiry, result state, timestamp order, output bounds, dry-run metadata, and idempotency key in one transaction. It inserts one immutable result, transitions the work item, closes the lease, and appends audit events atomically.
+The store validates the work item, current execution attempt, active attempt lease, worker binding, plan hash, input hash, fencing epoch, expiry, result state, timestamp order, output bounds, dry-run metadata, and idempotency key in one transaction. It inserts one immutable result, terminalizes the attempt, transitions the work item, closes the lease, and appends audit events atomically.
 
 ## Failure behavior
 
@@ -85,4 +90,4 @@ When added, renewal must require:
 
 ## Security rule
 
-Worker identity without an active matching lease is not authority. A lease without the authenticated worker binding and action hash is not authority. Both are required, and results remain dry-run records until a separately gated sandbox wave exists.
+Worker identity without an active matching attempt lease is not authority. A lease without the authenticated worker binding, attempt, plan/input hashes, and fencing epoch is not authority. Both are required, and results remain dry-run records until a separately gated sandbox wave exists.

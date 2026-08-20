@@ -158,9 +158,13 @@ export const rejectRequestSchema = cancelRequestSchema;
 export const submitWorkResultSchema = z
   .object({
     workItemId: identifierSchema,
+    attemptId: identifierSchema.optional(),
     leaseId: identifierSchema,
     workerId: identifierSchema,
     actionHash: hashSchema,
+    planHash: hashSchema.optional(),
+    inputHash: hashSchema.optional(),
+    fencingEpoch: z.number().int().positive().optional(),
     idempotencyKey: identifierSchema,
     outcome: z.enum(["succeeded", "failed", "cancelled", "worker_infrastructure_failure", "blocked", "lease_expired"]),
     startedAt: timestampSchema,
@@ -234,6 +238,11 @@ export type ClaimedWorkItem = WorkItem & {
   leaseToken: string;
   leaseId: string;
   actionHash: string;
+  attemptId?: string;
+  planHash?: string;
+  inputHash?: string;
+  fencingEpoch?: number;
+  workspaceHash?: string;
   startedAt: string;
   leaseExpiresAt: string;
 };

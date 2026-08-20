@@ -264,6 +264,10 @@ describe("CommandBroker store-backed authority", () => {
       workspaceAllocation: {
         allocationId: "workspace_test",
         workItemId: "wrk_test",
+        attemptId: "attempt_test",
+        leaseId: "lease_test",
+        workerId: "worker_test",
+        fencingEpoch: 1,
         hostPath: overrides.workspaceHostPath ?? "/tmp/workspace_test",
         branch: "acs/job/wrk_test",
         baseRef: "main",

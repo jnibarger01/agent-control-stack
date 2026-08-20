@@ -101,16 +101,23 @@ export const issueLeaseInputSchema = z
   })
   .strict();
 
-export const workspaceAllocationStatusSchema = z.enum(["active", "torn_down"]);
+export const workspaceAllocationStatusSchema = z.enum(["active", "cleanup_requested", "cleanup_failed", "torn_down"]);
 
 export const workspaceAllocationSchema = z
   .object({
     allocationId: identifierSchema,
     workItemId: identifierSchema,
+    attemptId: identifierSchema,
+    leaseId: identifierSchema,
+    workerId: identifierSchema,
+    fencingEpoch: z.number().int().nonnegative(),
     hostPath: z.string().min(1).max(4_096),
     branch: z.string().min(1).max(256),
     baseRef: z.string().min(1).max(256),
     status: workspaceAllocationStatusSchema,
+    cleanupAttempts: z.number().int().nonnegative().optional(),
+    cleanupRequestedAt: timestampSchema.optional(),
+    cleanupLastError: z.string().max(4_000).optional(),
     createdAt: timestampSchema,
     tornDownAt: timestampSchema.optional()
   })
@@ -120,6 +127,10 @@ export const recordWorkspaceAllocationInputSchema = z
   .object({
     allocationId: identifierSchema,
     workItemId: identifierSchema,
+    attemptId: identifierSchema,
+    leaseId: identifierSchema,
+    workerId: identifierSchema,
+    fencingEpoch: z.number().int().nonnegative(),
     hostPath: z.string().min(1).max(4_096),
     branch: z.string().min(1).max(256),
     baseRef: z.string().min(1).max(256),

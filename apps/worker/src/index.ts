@@ -2,10 +2,13 @@ import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/po
 import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
+import type { WorkspaceManager } from "@agent-control-stack/workspace-manager";
 
 export interface WorkerOptions {
   dbPath?: string;
   workerId?: string;
+  execute?: typeof executeSandboxed;
+  workspaceManager?: WorkspaceManager;
 }
 
 export interface WorkerResult {
@@ -16,10 +19,9 @@ export interface WorkerResult {
 }
 
 /**
- * The one-shot worker is the first safe execution slice. Until authoritative
- * attempt/workspace wiring is complete, it may only simulate filesystem
- * inspection. Approval alone must never turn a mutation into a successful
- * worker result.
+ * The one-shot worker remains dry-run-only. Approval alone must never turn a
+ * mutation into a successful worker result, and every result is bound to the
+ * persisted attempt authority returned by the claim transaction.
  */
 const readOnlyWorkerActionKinds = new Set(["system.status", "fs.list", "fs.stat", "fs.read", "fs.search_name"]);
 
@@ -42,6 +44,14 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   const workItems = new SqliteWorkItemStore(dbPath);
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const workerId = options.workerId ?? "local-worker";
+  const execute = options.execute ?? executeSandboxed;
+  let workspace: Awaited<ReturnType<NonNullable<WorkerOptions["workspaceManager"]>["provision"]>> | undefined;
+  let cleanupAuthority: { attemptId: string; leaseId: string; workerId: string; fencingEpoch: number } | undefined;
+  const cleanupWorkspace = async (): Promise<void> => {
+    if (workspace && cleanupAuthority) {
+      await options.workspaceManager?.teardown(workspace.workItemId, cleanupAuthority);
+    }
+  };
 
   try {
     workItems.failExpiredLeases();
@@ -52,16 +62,37 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     if (running.status === "blocked") {
       return { executed: false, workItemId: running.id, reason: "blocked by policy" };
     }
+    if (!running.attemptId || !running.planHash || !running.inputHash || running.fencingEpoch === undefined) {
+      throw new Error("worker claim did not include persisted attempt authority");
+    }
+    cleanupAuthority = {
+      attemptId: running.attemptId,
+      leaseId: running.leaseId,
+      workerId,
+      fencingEpoch: running.fencingEpoch
+    };
 
+    workspace = await options.workspaceManager?.provision(running.id, {
+      authority: {
+        attemptId: running.attemptId,
+        leaseId: running.leaseId,
+        workerId,
+        fencingEpoch: running.fencingEpoch
+      }
+    });
     const startedAt = new Date().toISOString();
     if (!isReadOnlyWorkerWorkItem(running)) {
       const completedAt = new Date().toISOString();
       workItems.recordDerivedWorkResult({
         workItemId: running.id,
+        attemptId: running.attemptId,
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        planHash: running.planHash,
+        inputHash: running.inputHash,
+        fencingEpoch: running.fencingEpoch,
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "blocked",
         startedAt,
         finishedAt: completedAt,
@@ -76,6 +107,12 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
           reason: "worker_read_only_scope"
         }
       });
+      try {
+        await cleanupWorkspace();
+      } catch {
+        // Cleanup failure is persisted by the workspace manager without
+        // changing the already durable blocked result.
+      }
       return {
         executed: false,
         workItemId: running.id,
@@ -83,16 +120,20 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       };
     }
 
-    const result = await executeSandboxed(running);
+    const result = await execute(workspace ? ({ ...running, workspace } as typeof running) : running);
     const completedAt = new Date().toISOString();
 
     if (result.ok) {
       tools.submit_work_result({
         workItemId: running.id,
+        attemptId: running.attemptId,
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        planHash: running.planHash,
+        inputHash: running.inputHash,
+        fencingEpoch: running.fencingEpoch,
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "succeeded",
         startedAt,
         finishedAt: completedAt,
@@ -106,10 +147,14 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     } else {
       tools.submit_work_result({
         workItemId: running.id,
+        attemptId: running.attemptId,
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        planHash: running.planHash,
+        inputHash: running.inputHash,
+        fencingEpoch: running.fencingEpoch,
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "failed",
         startedAt,
         finishedAt: completedAt,
@@ -123,13 +168,26 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
     }
-
+    try {
+      await cleanupWorkspace();
+    } catch {
+      // Cleanup failure is persisted by the workspace manager without
+      // changing the already durable execution result.
+    }
     return { executed: true, executionMode: result.executionMode, workItemId: running.id, reason: workerId };
+  } catch (error) {
+    try {
+      await cleanupWorkspace();
+    } catch {
+      // Preserve the original execution error; cleanup remains auditable and
+      // retryable through the workspace manager.
+    }
+    throw error;
   } finally {
     workItems.close();
   }
 }
 
-export function workerResultIdempotencyKey(workItemId: string, leaseId: string, workerId: string): string {
-  return stableHash({ domain: "acs.worker-result", workItemId, leaseId, workerId, attempt: 1 });
+export function workerResultIdempotencyKey(attemptId: string): string {
+  return stableHash({ domain: "acs.attempt-result.v1", attemptId });
 }

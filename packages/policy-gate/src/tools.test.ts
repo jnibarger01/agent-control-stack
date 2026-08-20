@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { createPolicyEngine, type PolicyDecision, type PolicyEngine, type PolicyOperation } from "./policy.js";
@@ -260,10 +261,14 @@ describe("policy-gated work item tools", () => {
       if (!claimed) throw new Error("expected source claim");
       tools.submit_work_result({
         workItemId: claimed.id,
+        attemptId: claimed.attemptId,
         leaseId: claimed.leaseId,
         workerId: claimed.workerId,
         actionHash: claimed.actionHash,
-        idempotencyKey: "policy-lineage-source",
+        planHash: claimed.planHash,
+        inputHash: claimed.inputHash,
+        fencingEpoch: claimed.fencingEpoch,
+        idempotencyKey: stableHash({ domain: "acs.attempt-result.v1", attemptId: claimed.attemptId }),
         outcome: "succeeded",
         startedAt: claimed.startedAt,
         finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),

@@ -13,9 +13,13 @@ Authentication is required. The configured credential must resolve to the `agent
 ```json
 {
   "workItemId": "wrk_...",
+  "attemptId": "attempt_...",
   "leaseId": "lease_...",
   "workerId": "worker_local_1",
   "actionHash": "<64 lowercase hex characters>",
+  "planHash": "<64 lowercase hex characters>",
+  "inputHash": "<64 lowercase hex characters>",
+  "fencingEpoch": 1,
   "idempotencyKey": "attempt-1",
   "outcome": "succeeded",
   "startedAt": "2026-07-20T18:00:00.000Z",
@@ -38,14 +42,14 @@ Worker-submittable outcomes are `succeeded`, `failed`, `cancelled`, and `worker_
 
 One `BEGIN IMMEDIATE` transaction:
 
-1. Loads the running work item and active lease.
-2. Verifies lease/item/worker/action-hash binding and expiry.
-3. Resolves the durable `(workerId, idempotencyKey)` record.
+1. Loads the running work item, current execution attempt, and active attempt lease.
+2. Verifies attempt/item/lease/worker/plan/input/fencing binding and expiry.
+3. Resolves the durable attempt-derived idempotency record.
 4. Returns the original result for an exact replay or rejects a conflict.
 5. Inserts the immutable execution result.
-6. Transitions the work item to the outcome-derived terminal state.
-7. Consumes the lease and clears its legacy token material from the work item.
-8. Appends `execution_result.accepted` and the terminal work-item event.
+6. Terminalizes the execution attempt and transitions the work item to the outcome-derived terminal state.
+7. Consumes the attempt lease and clears its legacy token material from the work item.
+8. Appends attempt and work-item audit evidence.
 
 Any failure rolls back result, state, lease, and audit writes together.
 
@@ -65,6 +69,6 @@ The response contains the bounded stored result and work-item projection. It doe
 
 ## Immutability and retry
 
-Execution results are append-only and unique per work item. A terminal work item cannot be reopened or edited. A retry or clone creates a new work-item ID, fresh execution action hash, and lineage record, then returns to normal policy and approval evaluation. The source item and its result remain unchanged.
+Execution results are append-only and unique per execution attempt. A terminal attempt and work item cannot be reopened or edited. A retry or clone creates a new work-item ID, fresh execution plan/attempt authority, and lineage record, then returns to normal policy and approval evaluation. The source item and its result remain unchanged.
 
 This contract proves local ACS lifecycle behavior only. The worker and sandbox remain simulated, and external ChatGPT connector proof is a separate acceptance boundary.
