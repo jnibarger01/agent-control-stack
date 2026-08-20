@@ -63,6 +63,17 @@ describe("renderDashboard", () => {
     expect(html).not.toContain("location.reload");
   });
 
+  it("surfaces persisted recovery and execution gate state from audit events", () => {
+    const html = renderDashboard({ workItems: [workItem], events: [
+      { sequence: 1, id: "r", name: "recovery.decision", timeUnixNano: String(Date.parse("2026-07-05T00:00:00.000Z") * 1_000_000), attributes: {}, body: { workItemId: "wrk_test", attemptId: "attempt-1", decision: "retryable" }, previousHash: "", eventHash: "hash" },
+      { sequence: 2, id: "v", name: "validation.run.recorded", timeUnixNano: String(Date.parse("2026-07-05T00:00:01.000Z") * 1_000_000), attributes: {}, body: { workItemId: "wrk_test", passed: false }, previousHash: "hash", eventHash: "hash2" }
+    ] });
+    expect(html).toContain("Governed Execution State");
+    expect(html).toContain("recovery: retryable");
+    expect(html).toContain("validation: false");
+    expect(html).toContain("persisted backend state");
+  });
+
   it("posts reject actions to the reject route instead of cancellation", () => {
     const html = renderDashboard({ workItems: [workItem], events: [], now: new Date("2026-07-05T00:01:00.000Z") });
 

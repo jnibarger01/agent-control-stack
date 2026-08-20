@@ -85,10 +85,13 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <section id="overview" class="cards">${overviewCards(stats)}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem)}</article>
+        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, events)}</article>
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
+      </section>
+      <section class="grid governance-grid">
+        <article id="governance" class="panel wide"><div class="panel-head"><h2>Governed Execution State</h2><span>persisted backend state</span></div>${governancePanel(events)}</article>
       </section>
       <section class="grid lower">
         <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(recentEvents)}</article>
@@ -102,6 +105,26 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <script>${clientScript()}</script>
   </body>
 </html>`;
+}
+
+function governancePanel(events: StoredAuditEvent[]): string {
+  const rows = new Map<string, { workItemId: string; attemptId?: string; recovery?: string; retry?: string; cleanup?: string; validation?: string; publication?: string; at: string }>();
+  for (const event of events) {
+    const body = asRecord(event.body);
+    const workItemId = typeof body.workItemId === "string" ? body.workItemId : undefined;
+    if (!workItemId) continue;
+    const current = rows.get(workItemId) ?? { workItemId, at: nanoToIso(event.timeUnixNano) };
+    const attemptId = typeof body.attemptId === "string" ? body.attemptId : current.attemptId;
+    const next = { ...current, ...(attemptId ? { attemptId } : {}), at: nanoToIso(event.timeUnixNano) };
+    if (event.name === "recovery.decision" || event.name === "recovery.recorded") next.recovery = String(body.decision ?? event.name);
+    if (event.name.includes("retry")) next.retry = String(body.decision ?? body.outcome ?? event.name);
+    if (event.name.includes("workspace") || event.name.includes("cleanup")) next.cleanup = String(body.status ?? body.outcome ?? event.name);
+    if (event.name.startsWith("validation.")) next.validation = String(body.passed ?? body.outcome ?? event.name);
+    if (event.name.startsWith("publication.")) next.publication = String(body.status ?? body.outcome ?? event.name);
+    rows.set(workItemId, next);
+  }
+  if (!rows.size) return `<p class="empty">No recovery, retry, cleanup, validation, or publication records yet.</p>`;
+  return `<div class="governance-list">${[...rows.values()].map((row) => `<div class="governance-row"><strong>${escapeHtml(row.workItemId)}</strong><span>recovery: ${escapeHtml(row.recovery ?? "—")}</span><span>retry: ${escapeHtml(row.retry ?? "—")}</span><span>cleanup: ${escapeHtml(row.cleanup ?? "—")}</span><span>validation: ${escapeHtml(row.validation ?? "—")}</span><span>publication: ${escapeHtml(row.publication ?? "—")}</span></div>`).join("")}</div>`;
 }
 
 export function projectAgents(
@@ -242,7 +265,8 @@ function agentDetailPanel(): string {
 function workQueue(
   workItems: WorkItem[],
   executionPlansByWorkItem: Record<string, ExecutionPlanRecord>,
-  executionPlanAdmissionsByWorkItem: Record<string, ExecutionPlanAdmission>
+  executionPlanAdmissionsByWorkItem: Record<string, ExecutionPlanAdmission>,
+  events: StoredAuditEvent[] = []
 ): string {
   if (!workItems.length) return `<p class="empty">No work items.</p>`;
   return `<div class="queue">${workItems
@@ -251,9 +275,29 @@ function workQueue(
       const attention = needsOperatorAttention(item.status);
       const plan = executionPlansByWorkItem[item.id];
       const admission = executionPlanAdmissionsByWorkItem[item.id];
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${workItemError(item)}</button>`;
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${governanceStateBadge(item.id, events)}${workItemError(item)}</button>`;
     })
     .join("")}</div><section id="work-detail" class="detail-panel work-detail" aria-live="polite"><div class="detail-empty"><h3>No work item selected</h3><p>Timeline pending.</p></div></section>`;
+}
+
+/** Project persisted audit events; the UI never invents recovery state locally. */
+export function governanceStateBadge(workItemId: string, events: StoredAuditEvent[]): string {
+  const relevant = events.filter((event) => event.attributes["work_item.id"] === workItemId);
+  const latest = (prefix: string): string | undefined =>
+    [...relevant].reverse().find((event) => event.name.startsWith(prefix))?.name;
+  const recovery = latest("recovery.");
+  const validation = latest("validation");
+  const publication = latest("publication");
+  const cleanup = latest("workspace_allocation.");
+  const retry = latest("work_item.retry") ?? latest("execution_attempt.retry");
+  const values = [
+    recovery && `recovery:${recovery.replace("recovery.", "")}`,
+    retry && "retry:recorded",
+    cleanup && `cleanup:${cleanup.replace("workspace_allocation.", "")}`,
+    validation && `validation:${validation.replace("validation.", "")}`,
+    publication && `publication:${publication.replace("publication.", "")}`
+  ].filter(Boolean);
+  return values.length ? `<small class="governance-state">${escapeHtml(values.join(" · "))}</small>` : "";
 }
 
 function attentionBadge(): string {

@@ -46,3 +46,4 @@ export function planRecovery(input: RecoveryInput): RecoveryPlan {
 }
 
 export * from "./startup.js";
+export * from "./service.js";

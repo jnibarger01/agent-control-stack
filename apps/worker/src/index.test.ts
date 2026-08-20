@@ -8,11 +8,10 @@ import { SqliteWorkItemStore, type ClaimedWorkItem, type WorkItem } from "@agent
 import { describe, expect, it, vi } from "vitest";
 import { runWorkerOnce, workerResultIdempotencyKey } from "./index.js";
 
-vi.mock("node:child_process", () => ({
-  exec: vi.fn(),
-  fork: vi.fn(),
-  spawn: vi.fn()
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return { ...actual, exec: vi.fn(), fork: vi.fn(), spawn: vi.fn() };
+});
 
 const domainTransition = { via: "domain_service" } as const;
 
@@ -25,6 +24,20 @@ function approvalActionHash(workItem: WorkItem, actor: string): string {
 }
 
 describe("worker policy gate", () => {
+  it("reconciles persisted workspaces before claiming new work", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-startup-recovery-"));
+    const dbPath = join(dir, "control.db");
+    const reconcile = vi.fn(async () => ({ orphaned: [] }));
+    const workspaceManager = { reconcile, provision: vi.fn(), teardown: vi.fn() } as unknown as import("@agent-control-stack/workspace-manager").WorkspaceManager;
+    try {
+      const result = await runWorkerOnce({ dbPath, workspaceManager, workerId: "startup-worker" });
+      expect(result).toEqual({ executed: false, reason: "no approved work item" });
+      expect(reconcile).toHaveBeenCalledOnce();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("simulates approved read-only work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");

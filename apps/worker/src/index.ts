@@ -1,3 +1,4 @@
+import { dirname, join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import {
   ExecutionLearningBridge,
@@ -8,6 +9,7 @@ import { executeSandboxed, type SandboxResult } from "@agent-control-stack/sandb
 import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { WorkspaceManager } from "@agent-control-stack/workspace-manager";
+import { executeStartupReconciliation } from "@agent-control-stack/recovery";
 
 export interface WorkerExecuteResult extends SandboxResult {
   usedSkillNames?: string[];
@@ -77,9 +79,30 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   const execute: WorkerExecute = options.execute ?? (async (item) => executeSandboxed(item));
   let cleanupWorkspace:
     { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch: number } | undefined;
+  const workspaceManager: WorkspaceManager = options.workspaceManager ?? new WorkspaceManager({
+    repoPath: process.env.ACS_REPO_PATH ?? process.cwd(),
+    rootDir: process.env.ACS_WORKSPACE_ROOT ?? join(dirname(dbPath), "workspaces"),
+    store: workItems
+  });
 
   try {
     workItems.failExpiredLeases();
+    if (typeof (workspaceManager as WorkspaceManager & { reconcile?: unknown }).reconcile === "function") {
+      const activeWorkItemIds = new Set(
+        workItems.list().filter((item) => item.status === "running").map((item) => item.id)
+      );
+      await executeStartupReconciliation(
+        {
+          activeWorkItemIds,
+          maxAttempts: Number(process.env.ACS_MAX_ATTEMPTS ?? 3),
+          attemptNumberById: {},
+          store: workItems,
+          workspaceManager,
+          now: () => new Date()
+        },
+        { store: workItems, workspaceManager, maxAttempts: Number(process.env.ACS_MAX_ATTEMPTS ?? 3) }
+      );
+    }
     const running = tools.claim_next_approved_work_item({ workerId });
     if (!running) {
       return { executed: false, reason: "no approved work item" };
@@ -92,7 +115,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
 
     const workspace = running.attemptId
-      ? await options.workspaceManager?.provision(running.id, {
+      ? await workspaceManager.provision(running.id, {
           attemptId: running.attemptId,
           leaseId: running.leaseId,
           workerId,
@@ -237,7 +260,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   } finally {
     try {
       if (cleanupWorkspace) {
-        await options.workspaceManager?.teardown(cleanupWorkspace.workItemId, {
+        await workspaceManager.teardown(cleanupWorkspace.workItemId, {
           attemptId: cleanupWorkspace.attemptId,
           leaseId: cleanupWorkspace.leaseId,
           workerId: cleanupWorkspace.workerId,

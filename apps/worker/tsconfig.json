@@ -7,9 +7,13 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
+    { "path": "../../packages/actor-router" },
+    { "path": "../../packages/engine-adapter" },
+    { "path": "../../packages/execution-controller" },
     { "path": "../../packages/policy-gate" },
     { "path": "../../packages/procedural-learning" },
     { "path": "../../packages/sandbox" },
-    { "path": "../../packages/work-items" }
+    { "path": "../../packages/work-items" },
+    { "path": "../../packages/result-validation" }
   ]
 }

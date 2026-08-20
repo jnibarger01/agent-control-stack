@@ -28,7 +28,8 @@ describe("reconcileStartup", () => {
       workspaceManager
     });
 
-    expect(plans[0]).toMatchObject({ decision: "retryable", retryAllowed: true });
+    expect(plans[0]?.plan).toMatchObject({ decision: "retryable", retryAllowed: true });
+    expect(plans[0]).toMatchObject({ attemptId: "attempt-1", workItemId: "work-1" });
     expect(store.recordRecoveryDecision).toHaveBeenCalledWith(expect.objectContaining({ attemptId: "attempt-1", decision: "retryable" }), { via: "domain_service" });
   });
 
@@ -44,8 +45,8 @@ describe("reconcileStartup", () => {
     });
 
     expect(store.getValidationRunForAttempt).toHaveBeenCalledWith("attempt-1");
-    expect(plans[0]?.decision).not.toBe("retryable");
-    expect(plans[0]).toMatchObject({ decision: "cleanup_pending", retryAllowed: false });
+    expect(plans[0]?.plan.decision).not.toBe("retryable");
+    expect(plans[0]?.plan).toMatchObject({ decision: "cleanup_pending", retryAllowed: false });
   });
 
   it("terminates a validated failure instead of retrying it", async () => {
@@ -59,7 +60,7 @@ describe("reconcileStartup", () => {
       workspaceManager
     });
 
-    expect(plans[0]).toMatchObject({ decision: "terminal_failed", retryAllowed: false });
+    expect(plans[0]?.plan).toMatchObject({ decision: "terminal_failed", retryAllowed: false });
     expect(store.recordRecoveryDecision).toHaveBeenCalledWith(expect.objectContaining({ decision: "terminal_failed" }), { via: "domain_service" });
   });
 
