@@ -5,7 +5,7 @@ import {
   ReadonlyAcpAdapter,
   type ReadonlyAcpAdapterConfig
 } from "@agent-control-stack/acp-adapter";
-import { projectAgents, renderDashboard } from "@agent-control-stack/control-ui";
+import { projectAgents, renderDashboard, toMissionControlAttemptLease } from "@agent-control-stack/control-ui";
 import {
   MachineController,
   loadMachineControllerConfig,
@@ -18,6 +18,7 @@ import {
   listWorkItemsSchema,
   submitWorkResultSchema,
   requesterSchema,
+  SqliteExecutionReadStore,
   SqliteWorkItemStore,
   DEFAULT_EVENT_LIMIT,
   MAX_EVENT_LIMIT,
@@ -166,6 +167,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     onEvent: broadcast,
     heartbeatTtlMs
   });
+  const executionReads = new SqliteExecutionReadStore(dbPath);
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
   const auth = resolveAuth(options);
@@ -285,12 +287,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const workItemList = workItems.list();
       const events = workItems.readEvents(eventReadOptions(request.query));
+      const visibleWorkItems = workItemList.slice(0, 12);
       reply.type("text/html").send(
         renderDashboard({
           workItems: workItemList,
           events,
           registeredAgents: workItems.listRegistryAgents(),
-          approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(policy, workItemList, auth?.actor)
+          approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(policy, workItemList, auth?.actor),
+          executionAttemptsByWorkItem: Object.fromEntries(
+            visibleWorkItems.map((workItem) => [workItem.id, executionReads.listExecutionAttempts(workItem.id)])
+          ),
+          attemptLeasesByWorkItem: Object.fromEntries(
+            visibleWorkItems.map((workItem) => [
+              workItem.id,
+              executionReads.listAttemptLeases(workItem.id).map(toMissionControlAttemptLease)
+            ])
+          )
         })
       );
     } catch (error) {
@@ -642,7 +654,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
       return {
         workItem,
-        events: workItems.readEvents(eventReadOptions(request.query, { workItemId: request.params.id }))
+        events: workItems.readEvents(eventReadOptions(request.query, { workItemId: request.params.id })),
+        executionAttempts: executionReads.listExecutionAttempts(request.params.id),
+        attemptLeases: executionReads.listAttemptLeases(request.params.id).map(toMissionControlAttemptLease)
       };
     } catch (error) {
       return sendError(reply, error);
@@ -911,6 +925,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.addHook("onClose", async () => {
     await acpAdapter?.stop();
+    executionReads.close();
     workItems.close();
   });
 
