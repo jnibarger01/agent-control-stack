@@ -25,7 +25,8 @@ describe("gateway runtime configuration", () => {
       gatewayListenConfig({
         NODE_ENV: "production",
         HOST: "0.0.0.0",
-        ACS_GATEWAY_CREDENTIALS_JSON: "[{\"id\":\"operator\",\"token\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"actor\":\"operator\",\"actorId\":\"operator-1\",\"roles\":[\"operator\"],\"scopes\":[\"acs:read\",\"acs:write\"]}]",
+        ACS_GATEWAY_CREDENTIALS_JSON:
+          '[{"id":"operator","token":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","actor":"operator","actorId":"operator-1","roles":["operator"],"scopes":["acs:read","acs:write"]}]',
         ACS_OAUTH_ISSUER: "https://issuer.example",
         ACS_OAUTH_AUDIENCE: "https://acs.example/mcp",
         ACS_OAUTH_JWKS_URI: "https://issuer.example/jwks",
