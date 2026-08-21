@@ -942,6 +942,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  // Read-only JSON projection of the audit event log, unscoped by work item
+  // or agent (unlike the `events` fields on GET /work-items/:id and
+  // GET /api/agents/:id). Reuses the exact same workItems.readEvents() +
+  // eventReadOptions() pagination already used internally by the HTML
+  // dashboard (GET /) and GET /agents -- this route only exposes that
+  // existing read path as JSON for API consumers that need the full,
+  // unscoped ledger (e.g. building an incidents/approvals view) without
+  // holding open the /events SSE stream.
+  app.get("/api/events", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      return { events: workItems.readEvents(eventReadOptions(request.query)) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.get("/events", { preHandler: requireRead }, (request, reply) => {
     reply.hijack();
     reply.raw.writeHead(200, {

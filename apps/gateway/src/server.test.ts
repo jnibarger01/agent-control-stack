@@ -526,6 +526,56 @@ describe("mission control gateway", () => {
     }
   }, 30_000);
 
+  it("serves the unscoped audit event log as JSON, paginated and read-gated", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-api-events-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    const workItem = seed.create({
+      title: "Unscoped events check",
+      requester: "user",
+      intent: "verify /api/events",
+      requestedActions: [{ kind: "manual", description: "bound" }],
+      risk: "low"
+    });
+    seed.recordPolicyDecision({
+      workItemId: workItem.id,
+      actionHash: "hash-1",
+      decision: "deny",
+      reason: "unknown action kind is denied",
+      matchedRules: ["deny:unknown-action"],
+      context: {}
+    });
+    seed.close();
+
+    const anonymousApp = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const anonymous = await anonymousApp.inject({ method: "GET", url: "/api/events" });
+      const list = await app.inject({ method: "GET", url: "/api/events" });
+      const paged = await app.inject({ method: "GET", url: "/api/events?limit=1" });
+      const invalidLimit = await app.inject({ method: "GET", url: "/api/events?limit=abc" });
+
+      expect(anonymous.statusCode).toBe(401);
+
+      expect(list.statusCode).toBe(200);
+      const events = list.json().events as Array<{ name: string; sequence: number }>;
+      expect(events.some((event) => event.name === "work_item.created")).toBe(true);
+      expect(events.some((event) => event.name === "policy.decided")).toBe(true);
+      // Ascending by sequence, same ordering guarantee as the work-item/agent-scoped event fields.
+      expect(events).toEqual([...events].sort((a, b) => a.sequence - b.sequence));
+
+      expect(paged.statusCode).toBe(200);
+      expect(paged.json().events).toHaveLength(1);
+
+      expect(invalidLimit.statusCode).toBe(400);
+    } finally {
+      await app.close();
+      await anonymousApp.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("serves the attributed agent registry API", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-agent-registry-api-"));
     const dbPath = join(dir, "control.db");
