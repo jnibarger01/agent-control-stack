@@ -7,6 +7,14 @@ untrusted capability adapters; they do not own policy, approval, lifecycle,
 leases, result acceptance, or audit. See
 [ADR 0009](adr/0009-engine-harness-authority-and-dependencies.md).
 
+External agent runtimes and launch protocols—including OpenClaw, Hermes,
+Codex, Claude, Gemini, OpenCode, Pi, ACP, and ACPX—remain below this authority
+boundary. They may execute or transport an ACS-approved attempt, but they must
+not introduce a parallel registry, policy engine, approval store, queue/lease
+lifecycle, result authority, or canonical audit sink. Migration notes from the
+retired OpenClaw Agent Orchestrator are captured in
+[`openclaw-agent-orchestrator-migration.md`](openclaw-agent-orchestrator-migration.md).
+
 ## Layers
 
 - `packages/shared`: IDs, redaction, errors, hash helpers, migrations, and OpenTelemetry-shaped event schemas.
