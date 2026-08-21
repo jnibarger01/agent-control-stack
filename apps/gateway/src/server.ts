@@ -1,4 +1,4 @@
-import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -197,16 +197,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     acpAdapterConfig === false || !acpAdapterConfig
       ? undefined
       : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
-  app.addHook("onRequest", async (request, reply) => {
+  app.addHook("preHandler", async (request, reply) => {
     requestStartTimes.set(request, performance.now());
     if (request.method === "GET" || !isRateLimitedRoute(request.url)) return;
-    const decision = rateLimiter.check(rateLimitKey(request));
+    const decision = rateLimiter.check(rateLimitKey(request, auth));
     reply.header("x-ratelimit-remaining", String(decision.remaining));
     if (!decision.allowed) {
-      return reply
-        .header("retry-after", String(decision.retryAfterSeconds))
-        .code(429)
-        .send({ error: "rate limit exceeded", code: "rate_limited" });
+      const limitedReply = reply.header("retry-after", String(decision.retryAfterSeconds)).code(429);
+      if (request.routeOptions.url === "/mcp") {
+        return limitedReply.send(jsonRpcError(jsonRpcRequestId(request.body), -32029, "rate limit exceeded"));
+      }
+      return limitedReply.send({ error: "rate limit exceeded", code: "rate_limited" });
     }
   });
   app.addHook("onResponse", async (request, reply) => {
@@ -238,10 +239,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       await registerMoaGateway(instance, {
         dbPath,
         store: workItems,
-        authenticate: async (moaRequest) =>
-          auth && gatewayCredentialForRequest(moaRequest, auth)
-            ? { actor: gatewayCredentialForRequest(moaRequest, auth)?.actor ?? "" }
-            : null,
+        authenticate: async (moaRequest) => {
+          if (!auth) return null;
+          const credential = gatewayCredentialForRequest(moaRequest, auth);
+          return credential && gatewayCredentialCanMutate(credential)
+            ? { actor: mutationActorForCredential(credential) }
+            : null;
+        },
         ...(options.moa ? { overrides: options.moa } : {})
       });
     });
@@ -723,8 +727,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
         return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
       }
+      const credential = gatewayCredentialForRequest(request, auth);
+      if (!credential) return reply.code(401).send({ error: "unauthorized" });
       const workItem = tools.create_work_item(
-        createWorkItemSchema.parse({ ...requestObject(request.body), requester: actor, requesterSubject: undefined })
+        createWorkItemSchema.parse({
+          ...requestObject(request.body),
+          requester: requesterForCredential(credential),
+          requesterSubject: actor
+        })
       );
       return reply.code(201).send(workItem);
     } catch (error) {
@@ -751,9 +761,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return reply.code(400).send({ error: "invalid webhook source", code: "invalid_webhook_source" });
       }
       const body = webhookIngestSchema.parse(requestObject(request.body));
-      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
-        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
-      }
       const idempotencyKey = firstHeader(request.headers["idempotency-key"]);
       if (idempotencyKey && !/^[A-Za-z0-9._:-]{1,256}$/.test(idempotencyKey)) {
         return reply.code(400).send({ error: "invalid idempotency-key", code: "invalid_idempotency_key" });
@@ -799,6 +806,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         }
       }
 
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        if (idemKey) await workItemIdempotency.remove(idemKey);
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
+
       let workItem;
       try {
         workItem = tools.create_work_item(createWorkItemSchema.parse(workItemInput));
@@ -831,7 +843,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.post<{ Params: { id: string } }>("/work-items/:id/approve", async (request, reply) => {
     try {
-      const actor = requireMutationActor(request, reply, auth);
+      const actor = requireMutationActor(request, reply, auth, "acs:approve");
       if (!actor) {
         return;
       }
@@ -948,6 +960,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const actor = requireMutationActor(request, reply, auth);
       if (!actor) return;
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
       const workItem = tools.retry_work_item({ ...requestObject(request.body), id: request.params.id, actor });
       return reply.code(201).send({ workItem });
     } catch (error) {
@@ -959,6 +974,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const actor = requireMutationActor(request, reply, auth);
       if (!actor) return;
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
       const workItem = tools.clone_work_item({ ...requestObject(request.body), id: request.params.id, actor });
       return reply.code(201).send({ workItem });
     } catch (error) {
@@ -1236,10 +1254,16 @@ function isRateLimitedRoute(url: string): boolean {
   );
 }
 
-function rateLimitKey(request: FastifyRequest): string {
-  const authorization = firstHeader(request.headers.authorization);
-  const principal = authorization ? createHash("sha256").update(authorization).digest("hex").slice(0, 24) : request.ip;
-  return `${request.method}:${request.url.split("?", 1)[0]}:${principal}`;
+function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
+  const credential = gatewayCredentialForRequest(request, auth);
+  const principal = credential ? `credential:${credential.id}` : `ip:${request.ip}`;
+  return `${request.method}:${request.routeOptions.url ?? "<unmatched>"}:${principal}`;
+}
+
+function jsonRpcRequestId(body: unknown): string | number | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const id = (body as Record<string, unknown>).id;
+  return typeof id === "string" || typeof id === "number" ? id : null;
 }
 
 function isAllowedMcpOrigin(origin: string | undefined, allowedOrigins: string[]): boolean {
@@ -1300,7 +1324,8 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
 function requireMutationActor(
   request: FastifyRequest,
   reply: FastifyReply,
-  auth: GatewayAuthOptions | undefined
+  auth: GatewayAuthOptions | undefined,
+  requiredScope: "acs:write" | "acs:approve" = "acs:write"
 ): string | undefined {
   if (!auth) {
     reply.code(503).send({ error: "mutation auth is not configured" });
@@ -1315,11 +1340,28 @@ function requireMutationActor(
     reply.code(403).send({ error: "operator or service role is required", code: "insufficient_gateway_role" });
     return undefined;
   }
-  if (!credential.scopes.includes("acs:write")) {
-    reply.code(403).send({ error: "write scope is required", code: "insufficient_gateway_scope" });
+  if (!credential.scopes.includes(requiredScope)) {
+    reply.code(403).send({ error: `${requiredScope} scope is required`, code: "insufficient_gateway_scope" });
     return undefined;
   }
-  return credential.actor;
+  return mutationActorForCredential(credential);
+}
+
+function gatewayCredentialCanMutate(credential: GatewayCredential): boolean {
+  return (
+    (credential.roles.includes("operator") || credential.roles.includes("service")) &&
+    credential.scopes.includes("acs:write")
+  );
+}
+
+function mutationActorForCredential(credential: GatewayCredential): string {
+  return credential.actorId || (credential.id === "legacy" ? credential.actor : credential.id);
+}
+
+function requesterForCredential(credential: GatewayCredential): "user" | "agent" | "system" {
+  const requester = requesterSchema.safeParse(credential.actor);
+  if (requester.success) return requester.data;
+  return credential.roles.includes("service") ? "system" : "user";
 }
 
 function requireWorkerIdentity(
@@ -1345,7 +1387,7 @@ function requireWorkerIdentity(
 
 function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {
   if (auth) {
-    return Boolean(gatewayCredentialForRequest(request, auth));
+    return Boolean(gatewayCredentialForRequest(request, auth)?.scopes.includes("acs:read"));
   }
   return isDevelopmentLoopbackRequest(request);
 }
@@ -1454,10 +1496,12 @@ function gatewayCredentialForSessionCookie(
   }
   try {
     const parsed = sessionCookiePayloadSchema.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
+    const configuredCredential = parsed.credentialId
+      ? auth.credentials?.find((candidate) => candidate.id === parsed.credentialId)
+      : undefined;
     const credential =
-      parsed.credentialId && parsed.credentialId !== "legacy"
-        ? auth.credentials?.find((candidate) => candidate.id === parsed.credentialId)
-        : gatewayCredentialForToken(auth.token, auth);
+      configuredCredential ??
+      (parsed.credentialId === "legacy" ? gatewayCredentialForToken(auth.token, auth) : undefined);
     if (!credential || !constantTimeEqual(signature, sessionSignature(credential.token, payload))) return undefined;
     const nowSeconds = Math.floor(now.getTime() / 1000);
     return parsed.actor === credential.actor &&

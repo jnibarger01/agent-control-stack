@@ -15,11 +15,16 @@ export class SlidingWindowRateLimiter {
   private readonly buckets = new Map<string, Bucket>();
 
   constructor(private readonly options: RateLimitOptions) {
-    if (!Number.isInteger(options.windowMs) || options.windowMs <= 0) throw new Error("rate-limit window must be positive");
-    if (!Number.isInteger(options.maxRequests) || options.maxRequests <= 0) throw new Error("rate-limit max must be positive");
+    if (!Number.isInteger(options.windowMs) || options.windowMs <= 0)
+      throw new Error("rate-limit window must be positive");
+    if (!Number.isInteger(options.maxRequests) || options.maxRequests <= 0)
+      throw new Error("rate-limit max must be positive");
   }
 
   check(key: string, now = Date.now()): RateLimitDecision {
+    for (const [bucketKey, bucket] of this.buckets) {
+      if (now - bucket.startedAt >= this.options.windowMs) this.buckets.delete(bucketKey);
+    }
     const current = this.buckets.get(key);
     if (!current || now - current.startedAt >= this.options.windowMs) {
       this.buckets.set(key, { startedAt: now, count: 1 });
