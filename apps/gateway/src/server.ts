@@ -208,7 +208,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
   app.addHook("onResponse", async (request, reply) => {
-    metrics.observeRequest(request.method, request.url.split("?", 1)[0], reply.statusCode, performance.now() - (requestStartTimes.get(request) ?? performance.now()));
+    metrics.observeRequest(
+      request.method,
+      request.url.split("?", 1)[0],
+      reply.statusCode,
+      performance.now() - (requestStartTimes.get(request) ?? performance.now())
+    );
   });
   // Idempotency store shared by the webhook ingest path. Same SQLite file as
   // the work-item store so state is co-located; separate table (moa_idempotency).
@@ -1178,21 +1183,35 @@ function resolveMcpAllowedOrigins(options: GatewayOptions): string[] {
 
 function resolveRateLimitFromEnv(env: NodeJS.ProcessEnv = process.env): RateLimitOptions {
   return {
-    windowMs: z.coerce.number().int().min(1_000).max(3_600_000).parse(env.ACS_RATE_LIMIT_WINDOW_MS ?? 60_000),
-    maxRequests: z.coerce.number().int().min(1).max(100_000).parse(env.ACS_RATE_LIMIT_MAX_REQUESTS ?? 120)
+    windowMs: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(3_600_000)
+      .parse(env.ACS_RATE_LIMIT_WINDOW_MS ?? 60_000),
+    maxRequests: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(100_000)
+      .parse(env.ACS_RATE_LIMIT_MAX_REQUESTS ?? 120)
   };
 }
 
 function isRateLimitedRoute(url: string): boolean {
   const path = url.split("?", 1)[0];
-  return path === "/mcp" || path === "/session/login" || path === "/work-items" || path.startsWith("/work-items/") || path.startsWith("/webhooks/");
+  return (
+    path === "/mcp" ||
+    path === "/session/login" ||
+    path === "/work-items" ||
+    path.startsWith("/work-items/") ||
+    path.startsWith("/webhooks/")
+  );
 }
 
 function rateLimitKey(request: FastifyRequest): string {
   const authorization = firstHeader(request.headers.authorization);
-  const principal = authorization
-    ? createHash("sha256").update(authorization).digest("hex").slice(0, 24)
-    : request.ip;
+  const principal = authorization ? createHash("sha256").update(authorization).digest("hex").slice(0, 24) : request.ip;
   return `${request.method}:${request.url.split("?", 1)[0]}:${principal}`;
 }
 
@@ -1342,10 +1361,7 @@ function gatewayCredentialForRequest(
   return cookie ? gatewayCredentialForSessionCookie(cookie, auth) : undefined;
 }
 
-function gatewayCredentialForToken(
-  token: string | undefined,
-  auth: GatewayAuthOptions
-): GatewayCredential | undefined {
+function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
   if (!token) return undefined;
   const credential = auth.credentials?.find((candidate) => constantTimeEqual(token, candidate.token));
   if (credential) return credential;
@@ -1396,19 +1412,27 @@ function sessionCookieValue(auth: GatewayAuthOptions, credential: GatewayCredent
   return `${payload}.${sessionSignature(credential.token, payload)}`;
 }
 
-function gatewayCredentialForSessionCookie(value: string, auth: GatewayAuthOptions, now = new Date()): GatewayCredential | undefined {
+function gatewayCredentialForSessionCookie(
+  value: string,
+  auth: GatewayAuthOptions,
+  now = new Date()
+): GatewayCredential | undefined {
   const [payload, signature, extra] = value.split(".");
   if (!payload || !signature || extra !== undefined) {
     return undefined;
   }
   try {
     const parsed = sessionCookiePayloadSchema.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
-    const credential = parsed.credentialId && parsed.credentialId !== "legacy"
-      ? auth.credentials?.find((candidate) => candidate.id === parsed.credentialId)
-      : gatewayCredentialForToken(auth.token, auth);
+    const credential =
+      parsed.credentialId && parsed.credentialId !== "legacy"
+        ? auth.credentials?.find((candidate) => candidate.id === parsed.credentialId)
+        : gatewayCredentialForToken(auth.token, auth);
     if (!credential || !constantTimeEqual(signature, sessionSignature(credential.token, payload))) return undefined;
     const nowSeconds = Math.floor(now.getTime() / 1000);
-    return parsed.actor === credential.actor && (parsed.actorId ?? "") === credential.actorId && parsed.iat <= nowSeconds && parsed.exp > nowSeconds
+    return parsed.actor === credential.actor &&
+      (parsed.actorId ?? "") === credential.actorId &&
+      parsed.iat <= nowSeconds &&
+      parsed.exp > nowSeconds
       ? credential
       : undefined;
   } catch {
