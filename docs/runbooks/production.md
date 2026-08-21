@@ -16,6 +16,7 @@ pass.
 - A persistent volume with enough free space for SQLite WAL growth and backups.
 - `ACS_GATEWAY_CREDENTIALS_JSON` containing credential-bound operator/service/worker identities and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
 - `ACS_MCP_ALLOWED_ORIGINS` containing the explicit browser origins permitted to call MCP; non-browser clients without an `Origin` header remain supported.
+- `ACS_MAX_PENDING_WORK_ITEMS` set to an operationally safe queue ceiling.
 - A versioned image tag and a recorded previous image tag.
 
 ## Build and verify

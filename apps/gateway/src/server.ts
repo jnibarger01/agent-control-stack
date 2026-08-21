@@ -169,6 +169,7 @@ export interface GatewayOptions {
   acpAdapter?: ReadonlyAcpAdapterConfig | false;
   moa?: MoaGatewayOverrides | false;
   rateLimit?: RateLimitOptions;
+  maxPendingWorkItems?: number;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -188,6 +189,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
   const rateLimiter = new SlidingWindowRateLimiter(options.rateLimit ?? resolveRateLimitFromEnv());
+  const maxPendingWorkItems = options.maxPendingWorkItems ?? resolveMaxPendingWorkItemsFromEnv();
   const metrics = new GatewayMetrics();
   const requestStartTimes = new WeakMap<object, number>();
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
@@ -510,7 +512,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       requestId: request.id,
       remoteAddress: request.socket.remoteAddress ?? request.ip,
       auditAuthenticatedRequest: recordAuthenticatedMcpRequest,
-      resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth)
+      resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth),
+      maxPendingWorkItems
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);
@@ -717,6 +720,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!actor) {
         return;
       }
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
       const workItem = tools.create_work_item(
         createWorkItemSchema.parse({ ...requestObject(request.body), requester: actor, requesterSubject: undefined })
       );
@@ -745,6 +751,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return reply.code(400).send({ error: "invalid webhook source", code: "invalid_webhook_source" });
       }
       const body = webhookIngestSchema.parse(requestObject(request.body));
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
       const idempotencyKey = firstHeader(request.headers["idempotency-key"]);
       if (idempotencyKey && !/^[A-Za-z0-9._:-]{1,256}$/.test(idempotencyKey)) {
         return reply.code(400).send({ error: "invalid idempotency-key", code: "invalid_idempotency_key" });
@@ -1196,6 +1205,24 @@ function resolveRateLimitFromEnv(env: NodeJS.ProcessEnv = process.env): RateLimi
       .max(100_000)
       .parse(env.ACS_RATE_LIMIT_MAX_REQUESTS ?? 120)
   };
+}
+
+function resolveMaxPendingWorkItemsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000_000)
+    .parse(env.ACS_MAX_PENDING_WORK_ITEMS ?? 1_000);
+}
+
+function hasPendingWorkItemCapacity(store: { list: () => WorkItem[] }, maxPendingWorkItems: number): boolean {
+  const pending = store
+    .list()
+    .filter((workItem) =>
+      ["draft", "pending_policy", "needs_approval", "approved", "running"].includes(workItem.status)
+    ).length;
+  return pending < maxPendingWorkItems;
 }
 
 function isRateLimitedRoute(url: string): boolean {

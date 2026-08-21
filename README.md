@@ -315,6 +315,7 @@ Do not commit `.env` or real secrets.
 | `ACS_OLLAMA_BASE_URL`           | Local Ollama endpoint.                                                                           | `http://127.0.0.1:11434`          |
 | `ACS_RATE_LIMIT_WINDOW_MS`      | Mutation/MCP/webhook rate-limit window.                                                          | `60000`                           |
 | `ACS_RATE_LIMIT_MAX_REQUESTS`   | Maximum requests per credential fingerprint/IP and route within the window.                      | `120`                             |
+| `ACS_MAX_PENDING_WORK_ITEMS`    | Maximum draft/pending/approved/running work items before new intake is rejected.                 | `1000`                            |
 
 ### Machine-controller config
 
