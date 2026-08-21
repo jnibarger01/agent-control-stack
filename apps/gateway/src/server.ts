@@ -212,7 +212,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.addHook("onResponse", async (request, reply) => {
     metrics.observeRequest(
       request.method,
-      request.url.split("?", 1)[0],
+      request.routeOptions.url ?? "<unmatched>",
       reply.statusCode,
       performance.now() - (requestStartTimes.get(request) ?? performance.now())
     );
@@ -1407,7 +1407,11 @@ function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthO
 
 function bearerToken(authorization: string | string[] | undefined): string | undefined {
   if (Array.isArray(authorization)) return undefined;
-  return /^Bearer\s+(.+)$/u.exec(authorization ?? "")?.[1];
+  const value = authorization ?? "";
+  const prefix = "Bearer ";
+  if (!value.startsWith(prefix)) return undefined;
+  const token = value.slice(prefix.length).trim();
+  return token || undefined;
 }
 
 function sessionCookie(auth: GatewayAuthOptions, secure: boolean, credential: GatewayCredential): string {
