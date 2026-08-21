@@ -5,7 +5,7 @@ import { exec, fork, spawn } from "node:child_process";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
-import { runWorkerOnce } from "./index.js";
+import { assertDryRunExecutionMode, runWorkerOnce } from "./index.js";
 
 vi.mock("node:child_process", () => ({
   exec: vi.fn(),
@@ -24,6 +24,13 @@ function approvalActionHash(workItem: WorkItem, actor: string): string {
 }
 
 describe("worker policy gate", () => {
+  it("rejects a non-dry-run execution mode in production", () => {
+    expect(() => assertDryRunExecutionMode("live", "production")).toThrow(
+      "production worker requires dry_run execution mode"
+    );
+    expect(() => assertDryRunExecutionMode("dry_run", "production")).not.toThrow();
+  });
+
   it("simulates approved read-only work", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");
