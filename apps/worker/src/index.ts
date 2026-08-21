@@ -15,6 +15,20 @@ export interface WorkerResult {
   reason?: string;
 }
 
+const DRY_RUN_EXECUTION_MODE = "dry_run" as const;
+
+export function assertWorkerExecutionMode(
+  executionMode: unknown,
+  env: { NODE_ENV?: string } = process.env
+): asserts executionMode is typeof DRY_RUN_EXECUTION_MODE {
+  if (executionMode === DRY_RUN_EXECUTION_MODE) {
+    return;
+  }
+
+  const scope = env.NODE_ENV === "production" ? "production worker" : "worker";
+  throw new Error(`${scope} rejected unsupported execution mode: ${String(executionMode)}`);
+}
+
 /**
  * The one-shot worker is the first safe execution slice. Until authoritative
  * attempt/workspace wiring is complete, it may only simulate filesystem
@@ -84,6 +98,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
 
     const result = await executeSandboxed(running);
+    assertWorkerExecutionMode(result.executionMode);
     const completedAt = new Date().toISOString();
 
     if (result.ok) {
