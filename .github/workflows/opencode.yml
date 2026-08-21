@@ -17,18 +17,17 @@ jobs:
       )
     runs-on: ubuntu-latest
     permissions:
-      id-token: write
       contents: read
       pull-requests: read
       issues: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
 
       - name: Run opencode
-        uses: anomalyco/opencode/github@latest
+        uses: anomalyco/opencode/github@5e75e5e9901f0d178f425bfb47f1bd46cbe78a59 # pinned review commit
         env:
           FREEMODEL_API_KEY: ${{ secrets.FREEMODEL_API_KEY }}
         with:

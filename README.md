@@ -287,11 +287,13 @@ Do not commit `.env` or real secrets.
 | `HOST`                          | Gateway bind host if supported by runtime wrapper. Prefer loopback locally.        | `127.0.0.1`                       |
 | `PORT`                          | Gateway port.                                                                      | `3000`                            |
 | `ACS_DB_PATH`                   | SQLite database path.                                                              | `storage/local.db`                |
-| `ACS_GATEWAY_TOKEN`             | Dashboard/API bearer token. Required for HTTP mutations.                           | generate a secret                 |
+| `ACS_GATEWAY_TOKEN`             | Legacy local-development dashboard/API bearer token. Not accepted for remote production binding. | generate a local secret |
+| `ACS_GATEWAY_CREDENTIALS_JSON`  | Production credential set with credential-bound actor IDs, roles, and scopes.     | secret-managed JSON               |
 | `ACS_GATEWAY_ACTOR`             | Requester/actor label for gateway-authenticated mutations.                         | `user`                            |
 | `ACS_GATEWAY_ACTOR_ID`          | Registry actor id bound to gateway mutations that require actor registry identity. | optional locally                  |
 | `ACS_MCP_BEARER_TOKEN`          | Local development bearer token for `/mcp`. Ignored in production.                  | generate a local token            |
 | `ACS_MCP_RESOURCE_METADATA_URL` | Override OAuth protected-resource metadata URL.                                    | optional                          |
+| `ACS_MCP_ALLOWED_ORIGINS`      | Explicit browser origins allowed to call remote MCP.                                | `https://acs.example`             |
 | `ACS_OAUTH_ISSUER`              | OAuth issuer for production MCP auth.                                              | provider URL                      |
 | `ACS_OAUTH_AUDIENCE`            | OAuth audience/resource, usually public `/mcp` URL.                                | `https://gateway.example.com/mcp` |
 | `ACS_OAUTH_JWKS_URI`            | JWKS URI for JWT verification.                                                     | provider JWKS URL                 |
@@ -311,6 +313,8 @@ Do not commit `.env` or real secrets.
 | `ACS_OPENROUTER_API_KEY`        | Optional model provider key for MoA routes.                                        | secret                            |
 | `ACS_OPENAI_API_KEY`            | Optional OpenAI/Codex provider key for MoA routes.                                 | secret                            |
 | `ACS_OLLAMA_BASE_URL`           | Local Ollama endpoint.                                                             | `http://127.0.0.1:11434`          |
+| `ACS_RATE_LIMIT_WINDOW_MS`      | Mutation/MCP/webhook rate-limit window.                                            | `60000`                            |
+| `ACS_RATE_LIMIT_MAX_REQUESTS`   | Maximum requests per credential fingerprint/IP and route within the window.       | `120`                              |
 
 ### Machine-controller config
 
