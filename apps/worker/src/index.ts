@@ -45,6 +45,21 @@ export interface WorkerResult {
   validationPassed?: boolean;
 }
 
+export const DRY_RUN_EXECUTION_MODE = "dry_run" as const;
+
+export function assertDryRunExecutionMode(
+  mode: unknown,
+  nodeEnv = process.env.NODE_ENV
+): asserts mode is typeof DRY_RUN_EXECUTION_MODE {
+  if (mode === DRY_RUN_EXECUTION_MODE) {
+    return;
+  }
+  if (nodeEnv === "production") {
+    throw new Error("production worker requires dry_run execution mode");
+  }
+  throw new Error("worker requires dry_run execution mode");
+}
+
 /**
  * The one-shot worker is the first safe execution slice. Until authoritative
  * attempt/workspace wiring is complete, it may only simulate filesystem
@@ -149,6 +164,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       retrievedSkills: prepared.retrievedSkills,
       ...(workspace ? { workspace } : {})
     });
+    assertDryRunExecutionMode(result.executionMode);
     const completedAt = new Date().toISOString();
     const usedSkills = result.usedSkillNames ?? [];
     const validation = options.validator
@@ -179,7 +195,8 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       validationPassed: validation?.passed ?? null
     };
 
-    if (result.ok) {
+    const validationFailed = validation !== undefined && validation.passed === false;
+    if (result.ok && !validationFailed) {
       tools.submit_work_result({
         workItemId: running.id,
         attemptId: running.attemptId,
@@ -215,8 +232,15 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         startedAt,
         finishedAt: completedAt,
         exitCode: null,
-        summary: "dry-run simulation failed; no real command ran",
-        error: result.error ?? "dry-run sandbox simulation failed",
+        summary: validationFailed
+          ? "dry-run simulation completed but result validation failed"
+          : "dry-run simulation failed; no real command ran",
+        error: validationFailed
+          ? `result validation failed: ${validation?.checks
+              .filter((check) => !check.passed)
+              .map((check) => check.name)
+              .join(", ") || "unspecified check"}`
+          : (result.error ?? "dry-run sandbox simulation failed"),
         stdout: result.output,
         stderr: result.error,
         structuredOutput: learningOutput,
