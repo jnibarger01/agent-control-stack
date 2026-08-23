@@ -71,6 +71,8 @@ import {
 import { SlidingWindowRateLimiter, type RateLimitOptions } from "./rate-limit.js";
 import { GatewayMetrics } from "./metrics.js";
 import { gatewayListenConfig } from "./runtime-config.js";
+import { DeviceAuthStore } from "./device-auth-store.js";
+import { registerDeviceAuthRoutes } from "./device-auth.js";
 
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
@@ -91,7 +93,7 @@ const gatewayCredentialSchema = z.object({
   roles: z.array(z.enum(["operator", "service", "worker"])).min(1),
   scopes: z.array(z.string().min(1)).min(1)
 });
-type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
+export type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
 export interface GatewayAuthOptions {
   token: string;
   actor: string;
@@ -129,6 +131,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     heartbeatTtlMs
   });
   const executionReads = new SqliteExecutionReadStore(dbPath);
+  const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
   const auth = resolveAuth(options);
@@ -266,6 +269,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     } catch (error) {
       return sendError(reply, error);
     }
+  });
+
+  registerDeviceAuthRoutes(app, {
+    store: deviceAuthStore,
+    auth,
+    publicOriginOverride: process.env.ACS_PUBLIC_URL
   });
 
   if (acpAdapter) {
@@ -950,6 +959,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.addHook("onClose", async () => {
     await acpAdapter?.stop();
     executionReads.close();
+    deviceAuthStore.close();
     workItems.close();
   });
 
@@ -1212,6 +1222,9 @@ function isRateLimitedRoute(url: string): boolean {
   return (
     path === "/mcp" ||
     path === "/session/login" ||
+    path === "/oauth/device/code" ||
+    path === "/oauth/token" ||
+    path === "/device/verify" ||
     path === "/work-items" ||
     path.startsWith("/work-items/") ||
     path.startsWith("/webhooks/")
@@ -1311,7 +1324,7 @@ function requireMutationActor(
   return mutationActorForCredential(credential);
 }
 
-function gatewayCredentialCanMutate(credential: GatewayCredential): boolean {
+export function gatewayCredentialCanMutate(credential: GatewayCredential): boolean {
   return (
     (credential.roles.includes("operator") || credential.roles.includes("service")) &&
     credential.scopes.includes("acs:write")
@@ -1382,7 +1395,7 @@ function requireBoundActorId(
   return boundActorId;
 }
 
-function gatewayCredentialForRequest(
+export function gatewayCredentialForRequest(
   request: FastifyRequest,
   auth: GatewayAuthOptions | undefined
 ): GatewayCredential | undefined {
@@ -1503,7 +1516,8 @@ function constantTimeEqual(left: string, right: string): boolean {
   return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer);
 }
 
-function renderLoginPage(): string {
+export function renderLoginPage(redirectTo = "/"): string {
+  const safeRedirect = redirectTo.startsWith("/") && !redirectTo.startsWith("//") ? redirectTo : "/";
   return `<!doctype html>
 <html lang="en">
   <head>
@@ -1529,6 +1543,7 @@ function renderLoginPage(): string {
       <output></output>
     </form>
     <script>
+      const redirectTo = ${JSON.stringify(safeRedirect)};
       document.querySelector('#login-form').addEventListener('submit', async (event) => {
         event.preventDefault();
         const form = new FormData(event.currentTarget);
@@ -1537,7 +1552,7 @@ function renderLoginPage(): string {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ token: String(form.get('token') || '') })
         });
-        if (res.ok) location.assign('/');
+        if (res.ok) location.assign(redirectTo);
         else document.querySelector('output').textContent = 'Unauthorized';
       });
     </script>

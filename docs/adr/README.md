@@ -28,6 +28,7 @@ ADR status values:
 | [0013](0013-systemd-timer-worker-invocation.md)           | Systemd-timer-driven worker invocation, not a daemon             | Accepted                          |
 | [0014](0014-engine-isolation-boundary.md)                 | Engines get an ACS-enforced isolation boundary independent of the CommandBroker sandbox | Accepted |
 | [0015](0015-advisory-reasoning-evidence-and-independent-verification.md) | Advisory reasoning, machine evidence, and independent verification (four principal roles) | Accepted |
+| [0016](0016-public-oauth-device-authorization.md)         | Public HTTPS OAuth resource + RFC 8628 CLI device authorization | Accepted |
 
 ## Decision rules
 

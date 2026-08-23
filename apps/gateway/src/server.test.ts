@@ -2150,7 +2150,7 @@ describe("gateway MCP transport", () => {
         resource: oauthResource,
         resource_name: "Agent Control Stack MCP Gateway",
         authorization_servers: [oauthIssuer],
-        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve"],
+        scopes_supported: ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:device"],
         bearer_methods_supported: ["header"]
       });
       expect(response.json().scopes_supported).not.toContain("acs:worker:claim");

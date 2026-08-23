@@ -53,7 +53,8 @@ const migrationFiles = [
     version: 21,
     name: "advisory_evidence_and_verification",
     filename: "021_advisory_evidence_and_verification.sql"
-  }
+  },
+  { version: 22, name: "device_auth", filename: "022_device_auth.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
