@@ -188,6 +188,37 @@ describe("work item state machine", () => {
     }
   });
 
+  it("disables the legacy claim and direct-start test escape hatches outright in production, even with the opt-in flag set", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-test-only-api-production-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const originalNodeEnv = process.env.NODE_ENV;
+    try {
+      const workItem = store.create({
+        title: "Production-blocked legacy claim",
+        requester: "agent",
+        intent: "verify test-only escape hatches are unreachable in production",
+        requestedActions: [{ kind: "manual", description: "claim" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id, domainTransition);
+
+      process.env.NODE_ENV = "production";
+      expectControlError(
+        () => store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true }),
+        "test_only_api_disabled_in_production"
+      );
+      expectControlError(
+        () => store.startWorkItem(workItem.id, "worker-a", { allowDirectStartForTests: true }),
+        "test_only_api_disabled_in_production"
+      );
+      // Neither call left the work item claimed/running.
+      expect(store.get(workItem.id)?.status).toBe("approved");
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
+      store.close();
+    }
+  });
+
   it("rejects direct privileged transitions without a domain guard", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-privileged-transition-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
@@ -815,7 +846,14 @@ describe("work item state machine", () => {
         { version: 13, name: "actor_routing", filename: "013_actor_routing.sql" },
         { version: 14, name: "validation_runs", filename: "014_validation_runs.sql" },
         { version: 15, name: "recovery_records", filename: "015_recovery_records.sql" },
-        { version: 16, name: "publication_records", filename: "016_publication_records.sql" }
+        { version: 16, name: "publication_records", filename: "016_publication_records.sql" },
+        {
+          version: 17,
+          name: "scheduler_firing_callback_pending",
+          filename: "017_scheduler_firing_callback_pending.sql"
+        },
+        { version: 18, name: "attempt_lease_approvals", filename: "018_attempt_lease_approvals.sql" },
+        { version: 19, name: "work_item_metadata", filename: "019_work_item_metadata.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -921,7 +959,10 @@ describe("work item state machine", () => {
         { version: 13 },
         { version: 14 },
         { version: 15 },
-        { version: 16 }
+        { version: 16 },
+        { version: 17 },
+        { version: 18 },
+        { version: 19 }
       ]);
     } finally {
       db.close();
@@ -1030,7 +1071,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(copiedPath);
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1105,7 +1146,7 @@ describe("work item state machine", () => {
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([
