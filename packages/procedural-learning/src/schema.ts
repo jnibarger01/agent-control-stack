@@ -124,17 +124,18 @@ export interface GateResult {
 }
 
 export function slugifySkillName(name: string): string {
-  const slug = name
+  let slug = name
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    // Two anchored, non-global replaces instead of one global alternation
-    // (/^-+|-+$/g): each is only ever tried at a single fixed position (the
-    // very start, the very end), not rescanned across the whole string, so
-    // there is no quadratic-time re-attempt on a model-supplied name made
-    // of a long run of separator characters.
-    .replace(/^-+/, "")
-    .replace(/-+$/, "");
+    .replace(/[^a-z0-9]+/g, "-");
+  // The collapse above already merges every run of non-alphanumeric
+  // characters (including any run of "-") into a single "-", so at most
+  // one leading and one trailing "-" can remain - plain index checks
+  // remove it in O(1), with no regex (and so no possible ReDoS shape,
+  // unlike the original /^-+|-+$/g CodeQL flagged as polynomial-time on
+  // a model-supplied name) needed to trim it.
+  if (slug.startsWith("-")) slug = slug.slice(1);
+  if (slug.endsWith("-")) slug = slug.slice(0, -1);
   if (!slug) {
     throw new Error("skill name must contain a letter or digit");
   }
