@@ -236,10 +236,12 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
           ? "dry-run simulation completed but result validation failed"
           : "dry-run simulation failed; no real command ran",
         error: validationFailed
-          ? `result validation failed: ${validation?.checks
-              .filter((check) => !check.passed)
-              .map((check) => check.name)
-              .join(", ") || "unspecified check"}`
+          ? `result validation failed: ${
+              validation?.checks
+                .filter((check) => !check.passed)
+                .map((check) => check.name)
+                .join(", ") || "unspecified check"
+            }`
           : (result.error ?? "dry-run sandbox simulation failed"),
         stdout: result.output,
         stderr: result.error,
