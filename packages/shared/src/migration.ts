@@ -28,7 +28,8 @@ const migrationFiles = [
   { version: 5, name: "execution_results_and_lineage", filename: "005_execution_results_and_lineage.sql" },
   { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
   { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" },
-  { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" }
+  { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" },
+  { version: 9, name: "device_auth", filename: "009_device_auth.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
