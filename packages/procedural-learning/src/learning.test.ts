@@ -378,6 +378,58 @@ describe("crash recovery, concurrency, secrets, and policy", () => {
   });
 });
 
+describe("authoritative evidence verification (fabricated experience resistance)", () => {
+  function openVerifiedStore(evidence: Record<string, { completed: boolean; validationPassed: boolean } | undefined>) {
+    const dir = mkdtempSync(join(tmpdir(), "acs-learning-verified-"));
+    const store = new ProceduralLearning(join(dir, "learning.db"), {
+      verifyEvidence: ({ taskId, attemptId }) => evidence[`${taskId}:${attemptId}`]
+    });
+    stores.push(store);
+    return store;
+  }
+
+  it("rejects a fabricated experience claiming success and passing validation for a task/attempt the store never recorded", () => {
+    const learning = openVerifiedStore({});
+    const recorded = learning.recordTaskExperience(
+      viteExperience({ taskId: "wrk_fabricated", attemptId: "att_fabricated" })
+    );
+    expect(recorded.candidate.state).toBe("REJECTED");
+    expect(recorded.skill).toBeUndefined();
+    expect(recorded.candidate.rejectReasons).toContain("task_not_completed");
+    expect(recorded.candidate.rejectReasons).toContain("validation_failed");
+  });
+
+  it("rejects a self-reported success/passing-validation claim when authoritative evidence says validation actually failed", () => {
+    const learning = openVerifiedStore({
+      "wrk_lied:att_lied": { completed: true, validationPassed: false }
+    });
+    const recorded = learning.recordTaskExperience(
+      // The caller claims completed: true and validation.passed: true...
+      viteExperience({ taskId: "wrk_lied", attemptId: "att_lied" })
+    );
+    // ...but the authoritative record says validation actually failed, so
+    // promotion must not happen on the caller's word alone.
+    expect(recorded.candidate.state).toBe("REJECTED");
+    expect(recorded.skill).toBeUndefined();
+    expect(recorded.candidate.rejectReasons).toContain("validation_failed");
+  });
+
+  it("promotes normally when authoritative evidence actually confirms the claimed completion and passing validation", () => {
+    const learning = openVerifiedStore({
+      "wrk_real:att_real": { completed: true, validationPassed: true }
+    });
+    const recorded = learning.recordTaskExperience(viteExperience({ taskId: "wrk_real", attemptId: "att_real" }));
+    expect(recorded.candidate.state).toBe("PROMOTED");
+    expect(recorded.skill?.name).toBe("vite-duplicate-react-debugging");
+  });
+
+  it("keeps trusting self-reported input when no verifier is configured (unverified/back-compat mode)", () => {
+    const learning = openStore();
+    const recorded = learning.recordTaskExperience(viteExperience({ taskId: "wrk_unverified" }));
+    expect(recorded.candidate.state).toBe("PROMOTED");
+  });
+});
+
 describe("first-class target ingest", () => {
   it("ingests existing manual skills without inventing missing procedures", () => {
     const learning = openStore();
