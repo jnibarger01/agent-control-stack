@@ -80,7 +80,7 @@ export const taskExperienceInputSchema = z.object({
   contradictoryEvidence: z.boolean(),
   validation: validationEvidenceSchema,
   procedure: procedureSchema,
-  proposedSkillName: z.string().min(1),
+  proposedSkillName: z.string().min(1).max(256),
   explicitSecrets: z.array(z.string()).default([])
 });
 
@@ -128,7 +128,13 @@ export function slugifySkillName(name: string): string {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    // Two anchored, non-global replaces instead of one global alternation
+    // (/^-+|-+$/g): each is only ever tried at a single fixed position (the
+    // very start, the very end), not rescanned across the whole string, so
+    // there is no quadratic-time re-attempt on a model-supplied name made
+    // of a long run of separator characters.
+    .replace(/^-+/, "")
+    .replace(/-+$/, "");
   if (!slug) {
     throw new Error("skill name must contain a letter or digit");
   }

@@ -2,11 +2,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  FIRST_CLASS_TARGETS,
-  ProceduralLearning,
-  type TaskExperienceInput
-} from "./learning.js";
+import { FIRST_CLASS_TARGETS, ProceduralLearning, type TaskExperienceInput } from "./learning.js";
+import { slugifySkillName, taskExperienceInputSchema } from "./schema.js";
 
 const stores: ProceduralLearning[] = [];
 
@@ -427,6 +424,49 @@ describe("authoritative evidence verification (fabricated experience resistance)
     const learning = openStore();
     const recorded = learning.recordTaskExperience(viteExperience({ taskId: "wrk_unverified" }));
     expect(recorded.candidate.state).toBe("PROMOTED");
+  });
+});
+
+describe("slugifySkillName (bounded against ReDoS on model-supplied names)", () => {
+  it("slugifies a normal proposed skill name", () => {
+    expect(slugifySkillName("  Vite Duplicate React Debugging!! ")).toBe("vite-duplicate-react-debugging");
+  });
+
+  it("collapses and trims separator runs at both ends without a global backtracking-prone alternation", () => {
+    expect(slugifySkillName("---leading-and-trailing---")).toBe("leading-and-trailing");
+  });
+
+  it("still slugifies correctly on a long run of separator characters at both ends", () => {
+    // CodeQL flags the original /^-+|-+$/g as a polynomial-time ReDoS sink
+    // on a caller-supplied name (a global alternation re-attempted at every
+    // position). The anchored non-global replaces used instead have a
+    // provably linear worst case regardless of JS engine internals; this
+    // pins the still-correct behavior on the adversarial shape the alert
+    // was about, independent of the schema's max-length bound.
+    const huge = `${"-".repeat(2_000_000)}ok${"-".repeat(2_000_000)}`;
+    expect(slugifySkillName(huge)).toBe("ok");
+  });
+
+  it("rejects an empty-after-slugification name", () => {
+    expect(() => slugifySkillName("!!!")).toThrowError(/skill name must contain a letter or digit/);
+  });
+});
+
+describe("taskExperienceInputSchema bounds proposedSkillName", () => {
+  it("rejects a proposedSkillName beyond the persisted-record length bound", () => {
+    const result = taskExperienceInputSchema.safeParse({
+      ...viteExperience({ taskId: "wrk_bound" }),
+      proposedSkillName: "a".repeat(257)
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a proposedSkillName at the length bound", () => {
+    const result = taskExperienceInputSchema.safeParse({
+      ...viteExperience({ taskId: "wrk_bound" }),
+      proposedSkillName: "a".repeat(256)
+    });
+    expect(result.success).toBe(true);
   });
 });
 
