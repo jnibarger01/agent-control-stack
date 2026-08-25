@@ -87,6 +87,37 @@ describe("test.agent.run direct agent runner", () => {
     }
   });
 
+  it("runs only an explicitly registered process and bounds timeout/output", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-bounds-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    const bounded = config(dir, allowed);
+    bounded.security.maxOutputBytes = 32;
+    bounded.agents = [
+      { id: "fixture", command: "node", args: ["-e", "process.stdout.write('x'.repeat(200))"], permissionMode: "read-only" }
+    ];
+
+    try {
+      const output = await runDirectAgent(bounded, { agent: "fixture", prompt: "bounded", cwd: allowed });
+      expect(output.ok).toBe(true);
+      expect(output.stdout).toContain("[truncated]");
+
+      bounded.agents = [
+        { id: "fixture", command: "node", args: ["-e", "setTimeout(() => {}, 5000)"], permissionMode: "read-only" }
+      ];
+      const timedOut = await runDirectAgent(bounded, {
+        agent: "fixture",
+        prompt: "timeout",
+        cwd: allowed,
+        timeoutSeconds: 1
+      });
+      expect(timedOut.ok).toBe(false);
+      expect(timedOut.stderr).toContain("timed out");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects missing or empty prompts", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-agent-prompt-"));
     const allowed = join(dir, "allowed");
@@ -223,6 +254,7 @@ function config(dir: string, allowed: string): MachineControllerConfig {
     },
     paths: { allow: [allowed], deny: [] },
     commands: { allowReadonly: ["node"], deny: [] },
+    agents: [{ id: "codex", command: "codex", args: [], permissionMode: "read-only" }],
     audit: { logPath: join(dir, "audit.jsonl") }
   };
 }

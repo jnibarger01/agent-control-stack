@@ -61,6 +61,40 @@ describe("work item state machine", () => {
     }
   });
 
+  it("records local-agent lifecycle events with a bounded fingerprint and redacted failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-local-agent-audit-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      store.recordLocalAgentEvent({
+        eventType: "failed",
+        actor: "oauth-user",
+        agentId: "codex",
+        requestId: "req_local_agent",
+        requestHash: "a".repeat(64),
+        scope: "acs:work:approve",
+        outcome: "failed",
+        reason: "Bearer secret-value",
+        outputBytes: 12,
+        exitCode: null
+      });
+      const event = store.readEvents()[0];
+      expect(event).toMatchObject({
+        name: "local_agent.failed",
+        attributes: {
+          "agent.id": "codex",
+          "local_agent.request_hash": "a".repeat(64),
+          "local_agent.scope": "acs:work:approve"
+        }
+      });
+      expect(JSON.stringify(event)).not.toContain("secret-value");
+      expect(store.verifyAuditChain().ok).toBe(true);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("applies a default audit event limit", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-event-default-limit-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
