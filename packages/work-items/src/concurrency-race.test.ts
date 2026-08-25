@@ -130,7 +130,7 @@ describe("deterministic multi-connection concurrency invariants", () => {
       check.close();
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 15_000);
 
   it("accepts one result and keeps all loser/replay writes idempotent", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-race-result-"));

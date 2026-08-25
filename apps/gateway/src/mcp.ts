@@ -97,6 +97,7 @@ export async function handleMcpHttpRequest(input: {
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
   auditLocalAgentEvent?: (event: LocalAgentAuditEvent) => void;
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
+  maxPendingWorkItems?: number;
 }): Promise<McpHttpResult> {
   const request = jsonRpcRequestSchema.safeParse(input.body);
   if (!request.success) {
@@ -154,7 +155,8 @@ export async function handleMcpHttpRequest(input: {
         remoteAddress: input.remoteAddress,
         auditAuthenticatedRequest: input.auditAuthenticatedRequest,
         auditLocalAgentEvent: input.auditLocalAgentEvent,
-        resolveActorId: input.resolveActorId
+        resolveActorId: input.resolveActorId,
+        maxPendingWorkItems: input.maxPendingWorkItems
       });
     default:
       return handleProtectedUnsupportedMethod({
@@ -211,6 +213,7 @@ async function handleToolsCall(input: {
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
   auditLocalAgentEvent?: (event: LocalAgentAuditEvent) => void;
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
+  maxPendingWorkItems?: number;
 }): Promise<McpHttpResult> {
   const parsed = toolsCallParamsSchema.safeParse(input.params);
   if (!parsed.success) {
@@ -255,6 +258,14 @@ async function handleToolsCall(input: {
     : resolvedMcpActor(authorization.auth);
   if (!actor) {
     return jsonRpcError(input.id, -32001, "MCP actor is not registered", 403);
+  }
+  if (parsed.data.name === "create_work_item" && input.maxPendingWorkItems !== undefined) {
+    const pending = input.store.list().filter((workItem) =>
+      ["draft", "pending_policy", "needs_approval", "approved", "running"].includes(workItem.status)
+    ).length;
+    if (pending >= input.maxPendingWorkItems) {
+      return jsonRpcError(input.id, -32029, "pending work-item limit reached", 429);
+    }
   }
   try {
     const localAgent = parsed.data.name === directAgentToolName

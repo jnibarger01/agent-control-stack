@@ -14,7 +14,9 @@ pass.
 - Docker 29+ with Compose v2/v5 support.
 - A TLS-terminating reverse proxy for any non-loopback exposure.
 - A persistent volume with enough free space for SQLite WAL growth and backups.
-- `ACS_GATEWAY_TOKEN` and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
+- `ACS_GATEWAY_CREDENTIALS_JSON` containing credential-bound operator/service/worker identities and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
+- `ACS_MCP_ALLOWED_ORIGINS` containing the explicit browser origins permitted to call MCP; non-browser clients without an `Origin` header remain supported.
+- `ACS_MAX_PENDING_WORK_ITEMS` set to an operationally safe queue ceiling.
 - A versioned image tag and a recorded previous image tag.
 
 ## Build and verify
@@ -25,7 +27,8 @@ npm run check
 npm run test:sandbox-integration
 npm audit --audit-level=high
 docker build -t agent-control-stack:$GIT_SHA .
-ACS_GATEWAY_TOKEN=... \
+ACS_GATEWAY_CREDENTIALS_JSON='[{"id":"operator-1","token":"<32+ character secret>","actor":"operator","actorId":"operator-1","roles":["operator"],"scopes":["acs:read","acs:write","acs:approve"]}]' \
+ACS_MCP_ALLOWED_ORIGINS=https://acs.example \
 ACS_OAUTH_ISSUER=... \
 ACS_OAUTH_AUDIENCE=... \
 ACS_OAUTH_JWKS_URI=... \
@@ -59,7 +62,7 @@ Keep real secrets in the deployment secret store or process environment. Do not 
    docker compose -f compose.production.yml logs --tail=100 gateway
    ```
 
-`/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain. Route traffic only when readiness is HTTP 200.
+`/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain. Route traffic only when readiness is HTTP 200. Authenticated operators can scrape `/metrics` for request latency/status, rate-limit outcomes, audit lifecycle events, and SQLite readiness.
 
 ## Shutdown
 
@@ -148,4 +151,4 @@ directory.
 
 Gateway request logs are structured JSON on stdout and include Fastify request IDs. MCP authenticated requests also persist `connector.requested` audit events with actor, auth method, request ID, and tool. Work-item lifecycle events live in SQLite. Configure container log rotation in the deployment platform. Managed backup retention applies only to encrypted backup artifacts and their manifests; this repository does not silently delete audit history from the live database.
 
-There is no metrics exporter in this release. Alert on container health/readiness, restart count, nonzero exits, disk usage, and error-level structured logs. This is a documented limitation, not a substitute for metrics in a multi-instance or SLO-bound deployment.
+The gateway exposes a Prometheus-compatible `/metrics` endpoint, but it is intentionally local to this service. Alert on container health/readiness, restart count, nonzero exits, disk usage, rate-limit responses, lease/worker lifecycle counters, and error-level structured logs. A hosted metrics/alerting backend remains a deployment responsibility.

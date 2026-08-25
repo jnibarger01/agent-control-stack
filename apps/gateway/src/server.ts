@@ -5,7 +5,7 @@ import {
   ReadonlyAcpAdapter,
   type ReadonlyAcpAdapterConfig
 } from "@agent-control-stack/acp-adapter";
-import { projectAgents, renderDashboard } from "@agent-control-stack/control-ui";
+import { projectAgents, renderDashboard, toMissionControlAttemptLease } from "@agent-control-stack/control-ui";
 import {
   MachineController,
   loadMachineControllerConfig,
@@ -17,6 +17,7 @@ import {
   listWorkItemsSchema,
   submitWorkResultSchema,
   requesterSchema,
+  SqliteExecutionReadStore,
   SqliteWorkItemStore,
   DEFAULT_EVENT_LIMIT,
   MAX_EVENT_LIMIT,
@@ -67,6 +68,8 @@ import {
   unblockBodySchema,
   webhookIngestSchema
 } from "./public-contracts.js";
+import { SlidingWindowRateLimiter, type RateLimitOptions } from "./rate-limit.js";
+import { GatewayMetrics } from "./metrics.js";
 import { gatewayListenConfig } from "./runtime-config.js";
 
 const sessionCookieName = "acs_session";
@@ -74,16 +77,27 @@ const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
 const MAX_RESULT_BODY_BYTES = 256 * 1024;
 const sessionCookiePayloadSchema = z.object({
   v: z.literal(1),
+  credentialId: z.string().min(1).optional(),
   actor: z.string().min(1),
   actorId: z.string().min(1).optional(),
   iat: z.number().int().nonnegative(),
   exp: z.number().int().nonnegative()
 });
+const gatewayCredentialSchema = z.object({
+  id: z.string().min(1),
+  token: z.string().min(32),
+  actor: z.string().min(1),
+  actorId: z.string().min(1),
+  roles: z.array(z.enum(["operator", "service", "worker"])).min(1),
+  scopes: z.array(z.string().min(1)).min(1)
+});
+type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
 export interface GatewayAuthOptions {
   token: string;
   actor: string;
   /** Registry actor ID this credential is bound to; registry mutations fail closed without it. */
   actorId?: string;
+  credentials?: readonly GatewayCredential[];
 }
 
 export interface GatewayOptions {
@@ -100,6 +114,8 @@ export interface GatewayOptions {
   enableTestAgentRunForLocalDevelopment?: boolean;
   acpAdapter?: ReadonlyAcpAdapterConfig | false;
   moa?: MoaGatewayOverrides | false;
+  rateLimit?: RateLimitOptions;
+  maxPendingWorkItems?: number;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -112,16 +128,42 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     onEvent: broadcast,
     heartbeatTtlMs
   });
+  const executionReads = new SqliteExecutionReadStore(dbPath);
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
+  const rateLimiter = new SlidingWindowRateLimiter(options.rateLimit ?? resolveRateLimitFromEnv());
+  const maxPendingWorkItems = options.maxPendingWorkItems ?? resolveMaxPendingWorkItemsFromEnv();
+  const metrics = new GatewayMetrics();
+  const requestStartTimes = new WeakMap<object, number>();
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
   const acpAdapter =
     acpAdapterConfig === false || !acpAdapterConfig
       ? undefined
       : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
+  app.addHook("preHandler", async (request, reply) => {
+    requestStartTimes.set(request, performance.now());
+    if (request.method === "GET" || !isRateLimitedRoute(request.url)) return;
+    const decision = rateLimiter.check(rateLimitKey(request, auth));
+    reply.header("x-ratelimit-remaining", String(decision.remaining));
+    if (!decision.allowed) {
+      const limitedReply = reply.header("retry-after", String(decision.retryAfterSeconds)).code(429);
+      if (request.routeOptions.url === "/mcp") {
+        return limitedReply.send(jsonRpcError(jsonRpcRequestId(request.body), -32029, "rate limit exceeded"));
+      }
+      return limitedReply.send({ error: "rate limit exceeded", code: "rate_limited" });
+    }
+  });
+  app.addHook("onResponse", async (request, reply) => {
+    metrics.observeRequest(
+      request.method,
+      request.routeOptions.url ?? "<unmatched>",
+      reply.statusCode,
+      performance.now() - (requestStartTimes.get(request) ?? performance.now())
+    );
+  });
   // Idempotency store shared by the webhook ingest path. Same SQLite file as
   // the work-item store so state is co-located; separate table (moa_idempotency).
   const workItemIdempotency = new SqliteMoaIdempotencyStore(dbPath);
@@ -143,16 +185,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       await registerMoaGateway(instance, {
         dbPath,
         store: workItems,
-        authenticate: async (moaRequest) =>
-          auth && (hasBearerAuth(moaRequest, auth) || hasSessionCookie(moaRequest, auth))
-            ? { actor: auth.actor }
-            : null,
+        authenticate: async (moaRequest) => {
+          if (!auth) return null;
+          const credential = gatewayCredentialForRequest(moaRequest, auth);
+          return credential && gatewayCredentialCanMutate(credential)
+            ? { actor: mutationActorForCredential(credential) }
+            : null;
+        },
         ...(options.moa ? { overrides: options.moa } : {})
       });
     });
   }
 
   function broadcast(event: StoredAuditEvent): void {
+    metrics.increment("acs_audit_events_total", { event_name: event.name });
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const client of sseClients) {
       try {
@@ -197,6 +243,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   };
   app.get("/readyz", readiness);
   app.get("/health", readiness);
+  app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
+    const health = workItems.health();
+    metrics.setSqliteReady(health.ok);
+    return reply.type("text/plain; version=0.0.4").send(metrics.render());
+  });
 
   app.post("/session/login", async (request, reply) => {
     try {
@@ -204,11 +255,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return reply.code(503).send({ error: "dashboard auth is not configured" });
       }
       const body = sessionLoginBodySchema.parse(request.body);
-      if (!constantTimeEqual(body.token, auth.token)) {
+      const credential = gatewayCredentialForToken(body.token, auth);
+      if (!credential) {
         return reply.code(401).send({ error: "unauthorized" });
       }
       return reply
-        .header("set-cookie", sessionCookie(auth, process.env.NODE_ENV === "production"))
+        .header("set-cookie", sessionCookie(auth, process.env.NODE_ENV === "production", credential))
         .code(204)
         .send();
     } catch (error) {
@@ -231,12 +283,26 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const workItemList = workItems.list();
       const events = workItems.readEvents(eventReadOptions(request.query));
+      const visibleWorkItems = workItemList.slice(0, 12);
       reply.type("text/html").send(
         renderDashboard({
           workItems: workItemList,
           events,
           registeredAgents: workItems.listRegistryAgents(),
-          approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(policy, workItemList, auth?.actor)
+          approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(
+            policy,
+            workItemList,
+            gatewayCredentialForRequest(request, auth)?.actor
+          ),
+          executionAttemptsByWorkItem: Object.fromEntries(
+            visibleWorkItems.map((workItem) => [workItem.id, executionReads.listExecutionAttempts(workItem.id)])
+          ),
+          attemptLeasesByWorkItem: Object.fromEntries(
+            visibleWorkItems.map((workItem) => [
+              workItem.id,
+              executionReads.listAttemptLeases(workItem.id).map(toMissionControlAttemptLease)
+            ])
+          )
         })
       );
     } catch (error) {
@@ -397,7 +463,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       remoteAddress: request.socket.remoteAddress ?? request.ip,
       auditAuthenticatedRequest: recordAuthenticatedMcpRequest,
       auditLocalAgentEvent: recordLocalAgentEvent,
-      resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth)
+      resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth),
+      maxPendingWorkItems
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);
@@ -589,7 +656,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
       return {
         workItem,
-        events: workItems.readEvents(eventReadOptions(request.query, { workItemId: request.params.id }))
+        events: workItems.readEvents(eventReadOptions(request.query, { workItemId: request.params.id })),
+        executionAttempts: executionReads.listExecutionAttempts(request.params.id),
+        attemptLeases: executionReads.listAttemptLeases(request.params.id).map(toMissionControlAttemptLease)
       };
     } catch (error) {
       return sendError(reply, error);
@@ -602,8 +671,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!actor) {
         return;
       }
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
+      const credential = gatewayCredentialForRequest(request, auth);
+      if (!credential) return reply.code(401).send({ error: "unauthorized" });
       const workItem = tools.create_work_item(
-        createWorkItemSchema.parse({ ...requestObject(request.body), requester: actor, requesterSubject: undefined })
+        createWorkItemSchema.parse({
+          ...requestObject(request.body),
+          requester: requesterForCredential(credential),
+          requesterSubject: actor
+        })
       );
       return reply.code(201).send(workItem);
     } catch (error) {
@@ -675,6 +753,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         }
       }
 
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        if (idemKey) await workItemIdempotency.remove(idemKey);
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
+
       let workItem;
       try {
         workItem = tools.create_work_item(createWorkItemSchema.parse(workItemInput));
@@ -707,7 +790,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.post<{ Params: { id: string } }>("/work-items/:id/approve", async (request, reply) => {
     try {
-      const actor = requireMutationActor(request, reply, auth);
+      const actor = requireMutationActor(request, reply, auth, "acs:approve");
       if (!actor) {
         return;
       }
@@ -824,6 +907,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const actor = requireMutationActor(request, reply, auth);
       if (!actor) return;
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
       const body = retryBodySchema.parse(requestObject(request.body));
       const workItem = tools.retry_work_item({ ...body, id: request.params.id, actor });
       return reply.code(201).send({ workItem });
@@ -836,6 +922,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const actor = requireMutationActor(request, reply, auth);
       if (!actor) return;
+      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+      }
       const body = cloneBodySchema.parse(requestObject(request.body));
       const workItem = tools.clone_work_item({ ...body, id: request.params.id, actor });
       return reply.code(201).send({ workItem });
@@ -860,6 +949,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.addHook("onClose", async () => {
     await acpAdapter?.stop();
+    executionReads.close();
     workItems.close();
   });
 
@@ -1014,7 +1104,21 @@ function resolveAuth(options: GatewayOptions): GatewayAuthOptions | undefined {
   if (options.auth) {
     return options.auth;
   }
+  const credentialsJson = process.env.ACS_GATEWAY_CREDENTIALS_JSON;
+  if (credentialsJson) {
+    const credentials = gatewayCredentialSchema.array().parse(JSON.parse(credentialsJson));
+    const ids = new Set<string>();
+    for (const credential of credentials) {
+      if (ids.has(credential.id)) throw new Error(`duplicate gateway credential id: ${credential.id}`);
+      ids.add(credential.id);
+    }
+    if (credentials.length === 0) throw new Error("ACS_GATEWAY_CREDENTIALS_JSON must contain at least one credential");
+    return { token: "", actor: "", credentials };
+  }
   const token = process.env.ACS_GATEWAY_TOKEN;
+  if (process.env.NODE_ENV === "production" && !token) {
+    return undefined;
+  }
   const actor = requesterSchema.parse(process.env.ACS_GATEWAY_ACTOR ?? "user");
   const actorId = process.env.ACS_GATEWAY_ACTOR_ID;
   return token ? { token, actor, ...(actorId ? { actorId } : {}) } : undefined;
@@ -1066,6 +1170,64 @@ function resolveMcpAllowedOrigins(options: GatewayOptions): string[] {
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
+}
+
+function resolveRateLimitFromEnv(env: NodeJS.ProcessEnv = process.env): RateLimitOptions {
+  return {
+    windowMs: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(3_600_000)
+      .parse(env.ACS_RATE_LIMIT_WINDOW_MS ?? 60_000),
+    maxRequests: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(100_000)
+      .parse(env.ACS_RATE_LIMIT_MAX_REQUESTS ?? 120)
+  };
+}
+
+function resolveMaxPendingWorkItemsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(1_000_000)
+    .parse(env.ACS_MAX_PENDING_WORK_ITEMS ?? 1_000);
+}
+
+function hasPendingWorkItemCapacity(store: { list: () => WorkItem[] }, maxPendingWorkItems: number): boolean {
+  const pending = store
+    .list()
+    .filter((workItem) =>
+      ["draft", "pending_policy", "needs_approval", "approved", "running"].includes(workItem.status)
+    ).length;
+  return pending < maxPendingWorkItems;
+}
+
+function isRateLimitedRoute(url: string): boolean {
+  const path = url.split("?", 1)[0];
+  return (
+    path === "/mcp" ||
+    path === "/session/login" ||
+    path === "/work-items" ||
+    path.startsWith("/work-items/") ||
+    path.startsWith("/webhooks/")
+  );
+}
+
+function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
+  const credential = gatewayCredentialForRequest(request, auth);
+  const principal = credential ? `credential:${credential.id}` : `ip:${request.ip}`;
+  return `${request.method}:${request.routeOptions.url ?? "<unmatched>"}:${principal}`;
+}
+
+function jsonRpcRequestId(body: unknown): string | number | null {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const id = (body as Record<string, unknown>).id;
+  return typeof id === "string" || typeof id === "number" ? id : null;
 }
 
 function isAllowedMcpOrigin(origin: string | undefined, allowedOrigins: string[]): boolean {
@@ -1126,17 +1288,44 @@ function firstHeader(value: string | string[] | undefined): string | undefined {
 function requireMutationActor(
   request: FastifyRequest,
   reply: FastifyReply,
-  auth: GatewayAuthOptions | undefined
+  auth: GatewayAuthOptions | undefined,
+  requiredScope: "acs:write" | "acs:approve" = "acs:write"
 ): string | undefined {
   if (!auth) {
     reply.code(503).send({ error: "mutation auth is not configured" });
     return undefined;
   }
-  if (!hasBearerAuth(request, auth) && !hasSessionCookie(request, auth)) {
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (!credential) {
     reply.code(401).send({ error: "unauthorized" });
     return undefined;
   }
-  return auth.actor;
+  if (!credential.roles.includes("operator") && !credential.roles.includes("service")) {
+    reply.code(403).send({ error: "operator or service role is required", code: "insufficient_gateway_role" });
+    return undefined;
+  }
+  if (!credential.scopes.includes(requiredScope)) {
+    reply.code(403).send({ error: `${requiredScope} scope is required`, code: "insufficient_gateway_scope" });
+    return undefined;
+  }
+  return mutationActorForCredential(credential);
+}
+
+function gatewayCredentialCanMutate(credential: GatewayCredential): boolean {
+  return (
+    (credential.roles.includes("operator") || credential.roles.includes("service")) &&
+    credential.scopes.includes("acs:write")
+  );
+}
+
+function mutationActorForCredential(credential: GatewayCredential): string {
+  return credential.actorId || (credential.id === "legacy" ? credential.actor : credential.id);
+}
+
+function requesterForCredential(credential: GatewayCredential): "user" | "agent" | "system" {
+  const requester = requesterSchema.safeParse(credential.actor);
+  if (requester.success) return requester.data;
+  return credential.roles.includes("service") ? "system" : "user";
 }
 
 function requireWorkerIdentity(
@@ -1148,20 +1337,21 @@ function requireWorkerIdentity(
     reply.code(503).send({ error: "worker auth is not configured", code: "worker_auth_unconfigured" });
     return undefined;
   }
-  if (!hasBearerAuth(request, auth) && !hasSessionCookie(request, auth)) {
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (!credential) {
     reply.code(401).send({ error: "unauthorized" });
     return undefined;
   }
-  if (auth.actor !== "agent" || !auth.actorId) {
+  if (!credential.roles.includes("worker") || !credential.scopes.includes("acs:worker") || !credential.actorId) {
     reply.code(403).send({ error: "worker role is required", code: "insufficient_worker_authority" });
     return undefined;
   }
-  return auth.actorId;
+  return credential.actorId;
 }
 
 function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {
   if (auth) {
-    return hasBearerAuth(request, auth) || hasSessionCookie(request, auth);
+    return Boolean(gatewayCredentialForRequest(request, auth)?.scopes.includes("acs:read"));
   }
   return isDevelopmentLoopbackRequest(request);
 }
@@ -1179,7 +1369,7 @@ function requireBoundActorId(
   reply: FastifyReply,
   auth: GatewayAuthOptions | undefined
 ): string | undefined {
-  const boundActorId = auth?.actorId;
+  const boundActorId = gatewayCredentialForRequest(request, auth)?.actorId;
   if (!boundActorId) {
     reply.code(503).send({ error: "registry actor binding is not configured; set ACS_GATEWAY_ACTOR_ID" });
     return undefined;
@@ -1192,18 +1382,47 @@ function requireBoundActorId(
   return boundActorId;
 }
 
-function hasBearerAuth(request: FastifyRequest, auth: GatewayAuthOptions): boolean {
-  return request.headers.authorization === `Bearer ${auth.token}`;
+function gatewayCredentialForRequest(
+  request: FastifyRequest,
+  auth: GatewayAuthOptions | undefined
+): GatewayCredential | undefined {
+  if (!auth) return undefined;
+  const token = bearerToken(request.headers.authorization);
+  const bearerCredential = gatewayCredentialForToken(token, auth);
+  if (bearerCredential) return bearerCredential;
+  const cookie = cookies(request.headers.cookie)[sessionCookieName];
+  return cookie ? gatewayCredentialForSessionCookie(cookie, auth) : undefined;
 }
 
-function hasSessionCookie(request: FastifyRequest, auth: GatewayAuthOptions): boolean {
-  const value = cookies(request.headers.cookie)[sessionCookieName];
-  return value ? verifySessionCookie(value, auth) : false;
+function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
+  if (!token) return undefined;
+  const credential = auth.credentials?.find((candidate) => constantTimeEqual(token, candidate.token));
+  if (credential) return credential;
+  if (auth.token && constantTimeEqual(token, auth.token)) {
+    return {
+      id: "legacy",
+      token: auth.token,
+      actor: auth.actor,
+      actorId: auth.actorId ?? "",
+      roles: auth.actor === "agent" ? ["operator", "worker"] : ["operator"],
+      scopes: ["acs:read", "acs:write", "acs:approve", "acs:worker"]
+    };
+  }
+  return undefined;
 }
 
-function sessionCookie(auth: GatewayAuthOptions, secure: boolean): string {
+function bearerToken(authorization: string | string[] | undefined): string | undefined {
+  if (Array.isArray(authorization)) return undefined;
+  const value = authorization ?? "";
+  const prefix = "Bearer ";
+  if (!value.startsWith(prefix)) return undefined;
+  const token = value.slice(prefix.length).trim();
+  return token || undefined;
+}
+
+function sessionCookie(auth: GatewayAuthOptions, secure: boolean, credential: GatewayCredential): string {
   const parts = [
-    `${sessionCookieName}=${sessionCookieValue(auth)}`,
+    `${sessionCookieName}=${sessionCookieValue(auth, credential)}`,
     "Path=/",
     "HttpOnly",
     "SameSite=Strict",
@@ -1215,44 +1434,53 @@ function sessionCookie(auth: GatewayAuthOptions, secure: boolean): string {
   return parts.join("; ");
 }
 
-function sessionCookieValue(auth: GatewayAuthOptions, now = new Date()): string {
+function sessionCookieValue(auth: GatewayAuthOptions, credential: GatewayCredential, now = new Date()): string {
   const iat = Math.floor(now.getTime() / 1000);
   const payload = Buffer.from(
     JSON.stringify({
       v: 1,
-      actor: auth.actor,
-      ...(auth.actorId ? { actorId: auth.actorId } : {}),
+      credentialId: credential.id,
+      actor: credential.actor,
+      ...(credential.actorId ? { actorId: credential.actorId } : {}),
       iat,
       exp: iat + sessionCookieMaxAgeSeconds
     })
   ).toString("base64url");
-  return `${payload}.${sessionSignature(auth, payload)}`;
+  return `${payload}.${sessionSignature(credential.token, payload)}`;
 }
 
-function verifySessionCookie(value: string, auth: GatewayAuthOptions, now = new Date()): boolean {
+function gatewayCredentialForSessionCookie(
+  value: string,
+  auth: GatewayAuthOptions,
+  now = new Date()
+): GatewayCredential | undefined {
   const [payload, signature, extra] = value.split(".");
   if (!payload || !signature || extra !== undefined) {
-    return false;
-  }
-  if (!constantTimeEqual(signature, sessionSignature(auth, payload))) {
-    return false;
+    return undefined;
   }
   try {
     const parsed = sessionCookiePayloadSchema.parse(JSON.parse(Buffer.from(payload, "base64url").toString("utf8")));
+    const configuredCredential = parsed.credentialId
+      ? auth.credentials?.find((candidate) => candidate.id === parsed.credentialId)
+      : undefined;
+    const credential =
+      configuredCredential ??
+      (parsed.credentialId === "legacy" ? gatewayCredentialForToken(auth.token, auth) : undefined);
+    if (!credential || !constantTimeEqual(signature, sessionSignature(credential.token, payload))) return undefined;
     const nowSeconds = Math.floor(now.getTime() / 1000);
-    return (
-      parsed.actor === auth.actor &&
-      (parsed.actorId ?? "") === (auth.actorId ?? "") &&
+    return parsed.actor === credential.actor &&
+      (parsed.actorId ?? "") === credential.actorId &&
       parsed.iat <= nowSeconds &&
       parsed.exp > nowSeconds
-    );
+      ? credential
+      : undefined;
   } catch {
-    return false;
+    return undefined;
   }
 }
 
-function sessionSignature(auth: GatewayAuthOptions, payload: string): string {
-  return createHmac("sha256", auth.token).update(`acs-session-v2:${payload}`).digest("base64url");
+function sessionSignature(token: string, payload: string): string {
+  return createHmac("sha256", token).update(`acs-session-v2:${payload}`).digest("base64url");
 }
 
 function cookies(header: string | undefined): Record<string, string> {

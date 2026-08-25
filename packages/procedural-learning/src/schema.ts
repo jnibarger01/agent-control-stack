@@ -124,11 +124,23 @@ export interface GateResult {
 }
 
 export function slugifySkillName(name: string): string {
-  const slug = name
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+  let slug = "";
+  let separatorPending = false;
+
+  for (const char of name.trim().toLowerCase()) {
+    const code = char.charCodeAt(0);
+    const isAsciiLetter = code >= 97 && code <= 122;
+    const isDigit = code >= 48 && code <= 57;
+
+    if (isAsciiLetter || isDigit) {
+      if (separatorPending && slug) slug += "-";
+      slug += char;
+      separatorPending = false;
+    } else if (slug) {
+      separatorPending = true;
+    }
+  }
+
   if (!slug) {
     throw new Error("skill name must contain a letter or digit");
   }
