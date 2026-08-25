@@ -112,6 +112,24 @@ describe("publishValidatedAttempt", () => {
     expect(github.createOrUpdate).not.toHaveBeenCalled();
   });
 
+  it("refuses option-like git remotes before they reach git", async () => {
+    const runner = defaultGitRunner();
+    const github = { createOrUpdate: vi.fn() };
+
+    await expect(
+      publishValidatedAttempt(
+        input({ remote: "--upload-pack=malicious-command", gitRunner: runner }),
+        { getByIdempotency: () => undefined, record: (record) => record },
+        github
+      )
+    ).rejects.toThrow(/git remote must not begin/);
+
+    expect(runner).not.toHaveBeenCalledWith(
+      expect.arrayContaining(["--upload-pack=malicious-command"])
+    );
+    expect(github.createOrUpdate).not.toHaveBeenCalled();
+  });
+
   it("refuses publication when git push fails, without opening a PR", async () => {
     const runner: GitRunner = vi.fn(async (args: string[]): Promise<GitResult> => {
       if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "", exitCode: 0 };

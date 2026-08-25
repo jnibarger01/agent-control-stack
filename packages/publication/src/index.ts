@@ -7,6 +7,13 @@ const DEFAULT_COMMIT_AUTHOR_NAME = "ACS Autonomous Publisher";
 const DEFAULT_COMMIT_AUTHOR_EMAIL = "acs-bot@users.noreply.github.com";
 const DEFAULT_REMOTE = "origin";
 
+function validateGitRemote(remote: string): string {
+  if (remote.startsWith("-")) {
+    throw new Error("publication refused: git remote must not begin with '-'");
+  }
+  return remote;
+}
+
 export interface PublicationRecord {
   publicationId: string;
   workItemId: string;
@@ -100,7 +107,7 @@ async function publishValidatedAttemptUnlocked(input: PublicationInput, store: P
   if (!staged.stdout.trim()) {
     const current = await run(["rev-parse", "HEAD"]);
     if (current.exitCode !== 0 || !current.stdout.trim()) throw new Error("publication refused: no staged changes to publish after git add -A");
-    const remote = input.remote ?? DEFAULT_REMOTE;
+    const remote = validateGitRemote(input.remote ?? DEFAULT_REMOTE);
     const remoteHead = await run(["ls-remote", "--heads", remote, input.branch]);
     const remoteSha = remoteHead.stdout.trim().split(/\s+/u)[0];
     if (remoteHead.exitCode !== 0 || remoteSha !== current.stdout.trim()) {
@@ -124,7 +131,7 @@ async function publishValidatedAttemptUnlocked(input: PublicationInput, store: P
   if (!(await input.leaseIsCurrent())) throw new Error("lease became stale before publication push");
 
   if (!alreadyPushed) {
-    const remote = input.remote ?? DEFAULT_REMOTE;
+    const remote = validateGitRemote(input.remote ?? DEFAULT_REMOTE);
     const push = await run(["push", "--set-upstream", remote, `HEAD:refs/heads/${input.branch}`]);
     if (push.exitCode !== 0) throw new Error(`git push failed: ${push.stderr || push.stdout}`);
   }

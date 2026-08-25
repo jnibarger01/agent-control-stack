@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "NODE_ENV=production vite build",
     "preview": "vite preview",
     "verify:safety": "node scripts/verify-safety.mjs",
     "check": "npm run build && npm run verify:safety"
