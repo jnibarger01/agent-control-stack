@@ -1,0 +1,64 @@
+enabled: true
+scope:
+  repository: jnibarger01/agent-control-stack
+cadence:
+  max_prs_per_hour: 1
+  schedule_utc: "0 * * * *"
+rotation: [feature, bugfix, security, architecture, refactor, tests, docs]
+priority_overrides: [production-regression, critical-high-security, broken-main, release-blocker]
+
+limits:
+  max_open_automated_prs: 5
+  max_open_per_subsystem: 1
+  max_failed_attempts_per_task: 2
+  target_production_files: 5
+  target_diff_lines: 250
+  hard_diff_lines: 500
+
+selection:
+  minimum_confidence: 0.80
+  prefer:
+    - confirmed bugs, failing CI/tests, reproducible issues
+    - security/dependency findings
+    - explicit issues and reviewer requests
+    - issue-linked TODOs and verified missing tests/docs
+    - directly demonstrated coupling, duplication, validation gaps, deprecated APIs
+  reject:
+    - style-only or formatting-only churn
+    - speculative abstractions or arbitrary renames
+    - broad cleanup or repository-wide rewrites
+    - dependency replacement without evidence
+
+validation:
+  acceptance_criteria_before_editing: true
+  discover_commands_from_repository: true
+  require_targeted_tests: true
+  require_repository_required_checks: true
+  require_diff_review: true
+  skip_if_validation_cannot_run: true
+
+risk:
+  max_autonomous_level: medium
+  draft_for:
+    - authentication
+    - authorization
+    - cryptography
+    - database-migration
+    - persistent-data
+    - ci-cd
+    - deployment-config
+    - security-policy
+  never_autonomous:
+    - credential-rotation
+    - destructive-migration
+    - privilege-model-redesign
+    - production-infrastructure-remediation
+
+prohibited:
+  - bypass-branch-protection
+  - disable-or-weaken-tests-lint-types-security
+  - force-push-shared-branches
+  - production-deployment
+  - read-print-or-modify-secrets
+  - expose-credentials
+  - auto-merge
