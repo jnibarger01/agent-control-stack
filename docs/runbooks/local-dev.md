@@ -38,6 +38,41 @@ Open `http://127.0.0.1:3000`.
 
 For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send it as `Authorization: Bearer <token>` on `/mcp` requests. OAuth and tunnel ID setup are documented in `docs/oauth-authentication.md`.
 
+The real loopback MCP interoperability smoke path uses a temporary SQLite
+database, deterministic OAuth test keys, and an explicitly registered harmless
+fixture agent. It starts the gateway on `127.0.0.1` and sends the actual
+`initialize`, `tools/list`, and `tools/call` JSON-RPC requests through `/mcp`:
+
+```sh
+npx vitest run apps/gateway/src/server.test.ts -t 'runs an explicitly registered deterministic agent through the real loopback MCP boundary'
+```
+
+This proves local MCP protocol interoperability and ACS authorization,
+approval-scope, bounded-output, timeout, and audit behavior only. It does not
+prove Claude, ChatGPT, OpenCode, OpenClaw, or Hermes interoperability.
+
+The installed Claude Code interoperability test uses only a temporary Claude
+home and inline `--mcp-config`, a loopback Anthropic-format model mock, and the
+real Claude CLI. It does not read global Claude credentials or call an external
+model:
+
+```sh
+npx vitest run apps/gateway/src/claude-interoperability.test.ts
+```
+
+This proves Claude Code's local MCP client path can authorize and invoke the
+explicit fixture agent through ACS. Claude's model report may contain provider
+metadata synthesized by the CLI; the test's provider requests are served only
+by the loopback mock. It does not prove Claude-hosted, ChatGPT, trusted-LAN, or
+production interoperability.
+
+The installed-CLI interoperability tests (Claude Code, OpenCode, Hermes,
+OpenClaw) resolve their client executable from `PATH` or an explicit override
+(`ACS_TEST_CLAUDE_EXECUTABLE`, `ACS_TEST_OPENCODE_EXECUTABLE`,
+`ACS_TEST_HERMES_EXECUTABLE`, `ACS_TEST_OPENCLAW_EXECUTABLE`) and skip
+automatically when the client is not installed on the machine running the
+tests.
+
 ## Run the composed local runtime
 
 For a local gateway, scheduler, worker, actor discovery, and reconciliation
