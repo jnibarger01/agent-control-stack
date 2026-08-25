@@ -1,8 +1,10 @@
 import { createHmac, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import { spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { auditEventHash } from "@agent-control-stack/shared";
 import {
@@ -18,6 +20,20 @@ import { buildGateway } from "./server.js";
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
 const oauthResource = "https://acs.example.test/mcp";
+
+function resolveInstalledCli(envVar: string, command: string): string | undefined {
+  const override = process.env[envVar]?.trim();
+  if (override) return existsSync(override) ? override : undefined;
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!dir) continue;
+    const candidate = join(dir, command);
+    if (existsSync(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+const opencodeExecutable = resolveInstalledCli("ACS_TEST_OPENCODE_EXECUTABLE", "opencode");
+const hermesExecutable = resolveInstalledCli("ACS_TEST_HERMES_EXECUTABLE", "hermes");
 
 function buildTestGateway(options: NonNullable<Parameters<typeof buildGateway>[0]>) {
   if (options.dbPath) {
@@ -1065,6 +1081,685 @@ describe("gateway MCP transport", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("runs an explicitly registered deterministic agent through the real loopback MCP boundary and audits the lifecycle", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-local-agent-e2e-"));
+    const allowed = join(dir, "allowed");
+    const configPath = join(dir, "machine-controller.json");
+    const dbPath = join(dir, "control.db");
+    mkdirSync(allowed);
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        paths: { allow: [allowed], deny: [] },
+        security: { max_output_bytes: 64, command_timeout_ms: 5_000 },
+        agents: [
+          {
+            id: "fixture-agent",
+            command: "node",
+            args: [
+              "-e",
+              "const prompt = process.argv.at(-1); if (prompt === 'timeout check') { setTimeout(() => {}, 5_000); } else if (prompt === 'bounded output check') { process.stdout.write('x'.repeat(200)); } else { process.stdout.write('fixture-response:' + prompt); }"
+            ],
+            permission_mode: "read-only"
+          }
+        ],
+        audit: { log_path: join(dir, "machine-audit.jsonl") }
+      })
+    );
+    const oauth = createTestOAuth();
+    seedActor(dbPath, "oauth-user", "oauth_jwt:user_123");
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      mcpAuth: { oauth: oauth.options },
+      machineControllerConfigPath: configPath,
+      enableTestAgentRunForLocalDevelopment: true
+    });
+
+    try {
+      await app.listen({ host: "127.0.0.1", port: 0 });
+      const address = app.server.address();
+      if (!address || typeof address === "string") throw new Error("gateway did not expose a loopback socket");
+      expect(address.address).toBe("127.0.0.1");
+      const authorizedHeaders = {
+        authorization: `Bearer ${oauth.token({ scope: "acs:work:approve" })}`,
+        host: `127.0.0.1:${address.port}`
+      };
+      const call = async (payload: unknown, headers: Record<string, string> = authorizedHeaders) =>
+        fetch(`http://127.0.0.1:${address.port}/mcp`, {
+          method: "POST",
+          headers: { ...headers, "content-type": "application/json" },
+          body: JSON.stringify(payload)
+        });
+      const initialize = await call({ jsonrpc: "2.0", id: "initialize", method: "initialize" });
+      expect(initialize.status).toBe(200);
+      expect(await initialize.json()).toMatchObject({
+        result: {
+          protocolVersion: "2024-11-05",
+          serverInfo: { name: "agent-control-stack-gateway" }
+        }
+      });
+
+      const listed = await call({ jsonrpc: "2.0", id: "tools", method: "tools/list" });
+      expect(listed.status).toBe(200);
+      const listedBody = (await listed.json()) as { result: { tools: Array<{ name: string }> } };
+      expect(listedBody.result.tools.map((tool) => tool.name)).toContain("test.agent.run");
+
+      const unauthenticated = await call(
+        mcpToolCall("unauthenticated", "test.agent.run", {
+          agent: "fixture-agent",
+          prompt: "must be rejected",
+          cwd: allowed
+        }),
+        { host: `127.0.0.1:${address.port}` }
+      );
+      expect(unauthenticated.status).toBe(401);
+      expect((await unauthenticated.json()).result.structuredContent).toMatchObject({
+        authError: "missing_token",
+        requiredScopes: ["acs:work:approve"]
+      });
+
+      const insufficientScope = await call(
+        mcpToolCall("insufficient-scope", "test.agent.run", {
+          agent: "fixture-agent",
+          prompt: "must be rejected",
+          cwd: allowed
+        }),
+        {
+          authorization: `Bearer ${oauth.token({ scope: "acs:work:read" })}`,
+          host: `127.0.0.1:${address.port}`
+        }
+      );
+      expect(insufficientScope.status).toBe(403);
+      expect((await insufficientScope.json()).result.structuredContent).toMatchObject({
+        authError: "insufficient_scope",
+        requiredScopes: ["acs:work:approve"]
+      });
+
+      const unknownAgent = await call(
+        mcpToolCall("unknown-agent", "test.agent.run", {
+          agent: "not-registered",
+          prompt: "must be rejected",
+          cwd: allowed
+        })
+      );
+      expect(unknownAgent.status).toBe(409);
+      expect((await unknownAgent.json()).error.message).toContain("not explicitly configured");
+
+      const response = await call(
+        mcpToolCall("local-agent-e2e", "test.agent.run", {
+          agent: "fixture-agent",
+          prompt: "deterministic local check",
+          cwd: allowed,
+          timeoutSeconds: 5
+        })
+      );
+
+      expect(response.status).toBe(200);
+      const responseBody = (await response.json()) as { result: { structuredContent: Record<string, unknown> } };
+      expect(responseBody.result.structuredContent).toMatchObject({
+        ok: true,
+        agent: "fixture-agent",
+        stdout: "fixture-response:deterministic local check"
+      });
+
+      const bounded = await call(
+        mcpToolCall("bounded-output", "test.agent.run", {
+          agent: "fixture-agent",
+          prompt: "bounded output check",
+          cwd: allowed
+        })
+      );
+      expect(bounded.status).toBe(200);
+      expect((await bounded.json()).result.structuredContent.stdout).toContain("[truncated]");
+
+      const timedOut = await call(
+        mcpToolCall("timeout", "test.agent.run", {
+          agent: "fixture-agent",
+          prompt: "timeout check",
+          cwd: allowed,
+          timeoutSeconds: 1
+        })
+      );
+      expect(timedOut.status).toBe(200);
+      expect((await timedOut.json()).result.structuredContent).toMatchObject({
+        ok: false,
+        error: expect.stringContaining("timed out")
+      });
+
+      const events = new SqliteWorkItemStore(dbPath);
+      try {
+        const storedEvents = events.readEvents();
+        expect(storedEvents.map((event) => event.name)).toEqual(
+          expect.arrayContaining([
+            "local_agent.authorization",
+            "local_agent.dispatch.started",
+            "local_agent.completed",
+            "local_agent.rejected",
+            "local_agent.failed"
+          ])
+        );
+        expect(
+          storedEvents.find(
+            (event) => event.name === "local_agent.authorization" && event.attributes["agent.id"] === "fixture-agent"
+          )?.attributes
+        ).toMatchObject({
+          "agent.id": "fixture-agent",
+          "local_agent.scope": "acs:work:approve"
+        });
+        expect(storedEvents.some((event) => event.attributes["local_agent.request_hash"])).toBe(true);
+        expect(events.verifyAuditChain().ok).toBe(true);
+        expect(JSON.stringify(storedEvents)).not.toContain("deterministic local check");
+        expect(JSON.stringify(storedEvents)).not.toContain("must be rejected");
+      } finally {
+        events.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!opencodeExecutable)(
+    "proves real OpenCode CLI interoperability through a temporary local model and gateway",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "acs-gateway-opencode-e2e-"));
+      const allowed = join(dir, "allowed");
+      const configPath = join(dir, "machine-controller.json");
+      const dbPath = join(dir, "control.db");
+      const opencodeConfigPath = join(dir, "opencode.json");
+      const isolatedConfigHome = join(dir, "config");
+      const isolatedDataHome = join(dir, "data");
+      mkdirSync(allowed);
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          paths: { allow: [allowed], deny: [] },
+          security: { max_output_bytes: 256, command_timeout_ms: 5_000 },
+          agents: [
+            {
+              id: "fixture-agent",
+              command: "node",
+              args: ["-e", "process.stdout.write('fixture-response:' + process.argv.at(-1))"],
+              permission_mode: "read-only"
+            }
+          ],
+          audit: { log_path: join(dir, "machine-audit.jsonl") }
+        })
+      );
+
+      const modelRequests: Array<Record<string, unknown>> = [];
+      const modelServer = createServer((request, response) => {
+        if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+          response.writeHead(404).end();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+          modelRequests.push(body);
+          const messages = Array.isArray(body.messages) ? body.messages : [];
+          const hasToolResult = messages.some(
+            (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
+          );
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          if (hasToolResult) {
+            response.end(
+              `data: ${JSON.stringify({
+                id: "fixture-completion-2",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: "assistant", content: "OpenCode fixture invocation completed" },
+                    finish_reason: null
+                  }
+                ]
+              })}\n\ndata: ${JSON.stringify({
+                id: "fixture-completion-2",
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+              })}\n\ndata: [DONE]\n\n`
+            );
+            return;
+          }
+          const tools = Array.isArray(body.tools) ? body.tools : [];
+          const tool = tools.find(
+            (candidate) =>
+              candidate &&
+              typeof candidate === "object" &&
+              typeof (candidate as Record<string, unknown>).function === "object" &&
+              String(((candidate as Record<string, unknown>).function as Record<string, unknown>).name).includes(
+                "test_agent_run"
+              )
+          ) as Record<string, unknown> | undefined;
+          if (!tool) {
+            response.end(
+              `data: ${JSON.stringify({
+                id: "fixture-completion-no-tool",
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: { role: "assistant", content: "No ACS direct-agent tool was advertised" },
+                    finish_reason: "stop"
+                  }
+                ]
+              })}\n\ndata: [DONE]\n\n`
+            );
+            return;
+          }
+          const functionName = String((tool.function as Record<string, unknown>).name);
+          const argumentsValue = JSON.stringify({
+            agent: "fixture-agent",
+            prompt: "OpenCode real CLI check",
+            cwd: allowed,
+            timeoutSeconds: 5,
+            permissionMode: "read-only"
+          });
+          response.end(
+            `data: ${JSON.stringify({
+              id: "fixture-completion-1",
+              object: "chat.completion.chunk",
+              choices: [
+                {
+                  index: 0,
+                  delta: {
+                    role: "assistant",
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: "fixture-call-1",
+                        type: "function",
+                        function: { name: functionName, arguments: argumentsValue }
+                      }
+                    ]
+                  },
+                  finish_reason: null
+                }
+              ]
+            })}\n\ndata: ${JSON.stringify({
+              id: "fixture-completion-1",
+              object: "chat.completion.chunk",
+              choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }]
+            })}\n\ndata: [DONE]\n\n`
+          );
+        });
+      });
+      await new Promise<void>((resolve) => modelServer.listen(0, "127.0.0.1", resolve));
+      const modelAddress = modelServer.address();
+      if (!modelAddress || typeof modelAddress === "string") throw new Error("local model did not expose a socket");
+
+      writeFileSync(
+        opencodeConfigPath,
+        JSON.stringify({
+          $schema: "https://opencode.ai/config.json",
+          provider: {
+            fixture: {
+              npm: "@ai-sdk/openai-compatible",
+              name: "Local fixture model",
+              options: { baseURL: `http://127.0.0.1:${modelAddress.port}/v1`, apiKey: "fixture-key" },
+              models: { "fixture-model": { name: "Local fixture model" } }
+            }
+          },
+          model: "fixture/fixture-model",
+          mcp: {
+            "acs-gateway": {
+              type: "remote",
+              url: "PLACEHOLDER",
+              headers: { Authorization: "Bearer deterministic-opencode-token" }
+            }
+          }
+        })
+      );
+
+      const app = buildGateway({
+        dbPath,
+        logger: false,
+        mcpAuth: { localBearerToken: "deterministic-opencode-token" },
+        machineControllerConfigPath: configPath,
+        enableTestAgentRunForLocalDevelopment: true
+      });
+      seedActor(dbPath, "local-dev", "local_bearer:local-dev");
+      let opencodeProcess: ReturnType<typeof spawn> | undefined;
+      try {
+        await app.listen({ host: "127.0.0.1", port: 0 });
+        const gatewayAddress = app.server.address();
+        if (!gatewayAddress || typeof gatewayAddress === "string") throw new Error("gateway did not expose a socket");
+        const config = JSON.parse(readFileSync(opencodeConfigPath, "utf8")) as Record<string, unknown>;
+        (config.mcp as Record<string, Record<string, unknown>>)["acs-gateway"].url =
+          `http://127.0.0.1:${gatewayAddress.port}/mcp`;
+        writeFileSync(opencodeConfigPath, JSON.stringify(config));
+        opencodeProcess = spawn(
+          "opencode",
+          ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          {
+            cwd: allowed,
+            env: {
+              ...process.env,
+              HOME: dir,
+              XDG_CONFIG_HOME: isolatedConfigHome,
+              XDG_DATA_HOME: isolatedDataHome,
+              OPENCODE_CONFIG: opencodeConfigPath,
+              OPENCODE_DISABLE_AUTOUPDATE: "1"
+            },
+            stdio: ["ignore", "pipe", "pipe"]
+          }
+        );
+        let stdout = "";
+        let stderr = "";
+        opencodeProcess.stdout?.on("data", (chunk: Buffer) => (stdout += chunk.toString("utf8")));
+        opencodeProcess.stderr?.on("data", (chunk: Buffer) => (stderr += chunk.toString("utf8")));
+        const exitCode = await new Promise<number | null>((resolve, reject) => {
+          opencodeProcess?.once("error", reject);
+          opencodeProcess?.once("close", resolve);
+        });
+        expect(exitCode, stderr).toBe(0);
+        expect(stdout).toContain("OpenCode fixture invocation completed");
+        expect(modelRequests.some((request) => Array.isArray(request.tools))).toBe(true);
+        const invalidConfig = JSON.parse(readFileSync(opencodeConfigPath, "utf8")) as Record<string, unknown>;
+        (
+          (invalidConfig.mcp as Record<string, Record<string, unknown>>)["acs-gateway"].headers as Record<
+            string,
+            string
+          >
+        )["Authorization"] = "Bearer invalid-opencode-token";
+        writeFileSync(opencodeConfigPath, JSON.stringify(invalidConfig));
+        const invalidRun = spawn(
+          "opencode",
+          ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          {
+            cwd: allowed,
+            env: {
+              ...process.env,
+              HOME: dir,
+              XDG_CONFIG_HOME: isolatedConfigHome,
+              XDG_DATA_HOME: isolatedDataHome,
+              OPENCODE_CONFIG: opencodeConfigPath,
+              OPENCODE_DISABLE_AUTOUPDATE: "1"
+            },
+            stdio: ["ignore", "pipe", "pipe"]
+          }
+        );
+        let invalidOutput = "";
+        invalidRun.stdout?.on("data", (chunk: Buffer) => (invalidOutput += chunk.toString("utf8")));
+        invalidRun.stderr?.on("data", (chunk: Buffer) => (invalidOutput += chunk.toString("utf8")));
+        const invalidExitCode = await new Promise<number | null>((resolve, reject) => {
+          invalidRun.once("error", reject);
+          invalidRun.once("close", resolve);
+        });
+        expect(invalidExitCode).toBe(0);
+        expect(invalidOutput).toContain("No ACS direct-agent tool was advertised");
+        expect(
+          modelRequests.some(
+            (request) =>
+              Array.isArray(request.tools) &&
+              !request.tools.some(
+                (tool) =>
+                  tool &&
+                  typeof tool === "object" &&
+                  typeof (tool as Record<string, unknown>).function === "object" &&
+                  String(((tool as Record<string, unknown>).function as Record<string, unknown>).name).includes(
+                    "test_agent_run"
+                  )
+              )
+          )
+        ).toBe(true);
+        const events = new SqliteWorkItemStore(dbPath);
+        try {
+          expect(
+            events.readEvents().map((event) => event.name),
+            `${stdout}\nSTDERR:\n${stderr}\nMODEL:${JSON.stringify(modelRequests)}`
+          ).toEqual(
+            expect.arrayContaining([
+              "local_agent.authorization",
+              "local_agent.dispatch.started",
+              "local_agent.completed"
+            ])
+          );
+          expect(events.verifyAuditChain().ok).toBe(true);
+        } finally {
+          events.close();
+        }
+        expect(readFileSync(join(dir, "machine-audit.jsonl"), "utf8")).toContain('"tool":"test.agent.run"');
+      } finally {
+        if (opencodeProcess && opencodeProcess.exitCode === null) opencodeProcess.kill("SIGTERM");
+        await app.close();
+        await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+        rmSync(dir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.skipIf(!hermesExecutable)(
+    "proves real Hermes CLI interoperability through the tool-search bridge and gateway",
+    async () => {
+      const dir = mkdtempSync(join(tmpdir(), "acs-gateway-hermes-e2e-"));
+      const allowed = join(dir, "allowed");
+      const dbPath = join(dir, "control.db");
+      const configPath = join(dir, "machine-controller.json");
+      const hermesHome = join(dir, "hermes-home");
+      mkdirSync(allowed);
+      mkdirSync(hermesHome);
+      writeFileSync(
+        configPath,
+        JSON.stringify({
+          paths: { allow: [allowed], deny: [] },
+          security: { max_output_bytes: 256, command_timeout_ms: 5_000 },
+          agents: [
+            {
+              id: "fixture-agent",
+              command: "node",
+              args: ["-e", "process.stdout.write('fixture-response:' + process.argv.at(-1))"],
+              permission_mode: "read-only"
+            }
+          ],
+          audit: { log_path: join(dir, "machine-audit.jsonl") }
+        })
+      );
+
+      const modelTrace: Array<{
+        advertisedTools: string[];
+        emitted: { name: string; arguments: Record<string, unknown> } | undefined;
+      }> = [];
+      const modelServer = createServer((request, response) => {
+        if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
+          response.writeHead(404).end();
+          return;
+        }
+        const chunks: Buffer[] = [];
+        request.on("data", (chunk: Buffer) => chunks.push(chunk));
+        request.on("end", () => {
+          const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Record<string, unknown>;
+          const messages = Array.isArray(body.messages) ? body.messages : [];
+          const tools = Array.isArray(body.tools) ? body.tools : [];
+          const advertisedTools = tools.flatMap((candidate) => {
+            if (!candidate || typeof candidate !== "object") return [];
+            const fn = (candidate as Record<string, unknown>).function;
+            const name =
+              fn && typeof fn === "object"
+                ? (fn as Record<string, unknown>).name
+                : (candidate as Record<string, unknown>).name;
+            return typeof name === "string" ? [name] : [];
+          });
+          const toolResults = messages.filter(
+            (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
+          );
+          const resultText =
+            toolResults.length > 0 && typeof (toolResults.at(-1) as Record<string, unknown>)?.content === "string"
+              ? String((toolResults.at(-1) as Record<string, unknown>).content)
+              : "";
+          const jsonStart = resultText.indexOf("{");
+          const jsonEnd = resultText.lastIndexOf("}");
+          const result =
+            jsonStart >= 0 && jsonEnd > jsonStart
+              ? (JSON.parse(resultText.slice(jsonStart, jsonEnd + 1)) as Record<string, unknown>)
+              : undefined;
+          const emit = (name: string, args: Record<string, unknown>) => {
+            if (!advertisedTools.includes(name)) {
+              const firstToolKeys = tools[0] && typeof tools[0] === "object" ? Object.keys(tools[0]).join(",") : "none";
+              throw new Error(
+                `unadvertised Hermes bridge: ${name}; advertised=${advertisedTools.join(",")}; body=${Object.keys(body).join(",")}; firstToolKeys=${firstToolKeys}`
+              );
+            }
+            modelTrace.push({
+              advertisedTools,
+              emitted: { name, arguments: Object.fromEntries(Object.keys(args).map((key) => [key, "<redacted>"])) }
+            });
+            return { name, args };
+          };
+
+          let call: { name: string; args: Record<string, unknown> } | undefined;
+          if (tools.length === 0) {
+            // Hermes performs a provider capability/metadata probe before the
+            // first tool-bearing turn. It is not the model-facing smoke path.
+          } else if (toolResults.length === 0) {
+            call = emit("tool_search", { query: "ACS test agent run", limit: 5 });
+          } else if (Array.isArray(result?.matches)) {
+            const match = result.matches[0] as Record<string, unknown> | undefined;
+            if (typeof match?.name !== "string") throw new Error("tool_search returned no exact tool name");
+            call = emit("tool_describe", { name: match.name });
+          } else if (typeof result?.name === "string" && result.parameters) {
+            call = emit("tool_call", {
+              name: result.name,
+              arguments: {
+                agent: "fixture-agent",
+                prompt: "Hermes deterministic interoperability check",
+                cwd: allowed,
+                timeoutSeconds: 5,
+                permissionMode: "read-only"
+              }
+            });
+          }
+
+          response.writeHead(200, { "content-type": "text/event-stream" });
+          const id = `hermes-fixture-${modelTrace.length}`;
+          if (call) {
+            response.end(
+              `data: ${JSON.stringify({
+                id,
+                object: "chat.completion.chunk",
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      role: "assistant",
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: `hermes-call-${modelTrace.length}`,
+                          type: "function",
+                          function: { name: call.name, arguments: JSON.stringify(call.args) }
+                        }
+                      ]
+                    },
+                    finish_reason: null
+                  }
+                ]
+              })}\n\ndata: ${JSON.stringify({
+                id,
+                object: "chat.completion.chunk",
+                choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }]
+              })}\n\ndata: [DONE]\n\n`
+            );
+            return;
+          }
+          const finalContent = tools.length === 0 ? "{}" : "Hermes fixture invocation completed";
+          response.end(
+            `data: ${JSON.stringify({
+              id,
+              object: "chat.completion.chunk",
+              choices: [{ index: 0, delta: { role: "assistant", content: finalContent }, finish_reason: null }]
+            })}\n\ndata: ${JSON.stringify({
+              id,
+              object: "chat.completion.chunk",
+              choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
+            })}\n\ndata: [DONE]\n\n`
+          );
+        });
+      });
+      await new Promise<void>((resolve) => modelServer.listen(0, "127.0.0.1", resolve));
+      const modelAddress = modelServer.address();
+      if (!modelAddress || typeof modelAddress === "string") throw new Error("local model did not expose a socket");
+
+      const app = buildGateway({
+        dbPath,
+        logger: false,
+        mcpAuth: { localBearerToken: "deterministic-hermes-token" },
+        machineControllerConfigPath: configPath,
+        enableTestAgentRunForLocalDevelopment: true
+      });
+      seedActor(dbPath, "local-dev", "local_bearer:local-dev");
+      let hermesProcess: ReturnType<typeof spawn> | undefined;
+      let hermesOutput = "";
+      try {
+        await app.listen({ host: "127.0.0.1", port: 0 });
+        const gatewayAddress = app.server.address();
+        if (!gatewayAddress || typeof gatewayAddress === "string") throw new Error("gateway did not expose a socket");
+        writeFileSync(
+          join(hermesHome, "config.yaml"),
+          `model:\n  provider: custom\n  default: fixture-model\n  base_url: http://127.0.0.1:${modelAddress.port}/v1\n  api_key: fixture-key\n  context_length: 65536\n  max_tokens: 512\nmcp_servers:\n  acs-gateway:\n    url: http://127.0.0.1:${gatewayAddress.port}/mcp\n    headers:\n      Authorization: Bearer deterministic-hermes-token\ntools:\n  tool_search:\n    enabled: on\n`
+        );
+        hermesProcess = spawn(
+          "hermes",
+          [
+            "--ignore-rules",
+            "--no-restore-cwd",
+            "-z",
+            "Run the explicitly registered ACS fixture agent and report its result."
+          ],
+          {
+            cwd: allowed,
+            env: { ...process.env, HOME: dir, HERMES_HOME: hermesHome, HERMES_ACCEPT_HOOKS: "1" },
+            stdio: ["ignore", "pipe", "pipe"]
+          }
+        );
+        hermesProcess.stdout?.on("data", (chunk: Buffer) => (hermesOutput += chunk.toString("utf8")));
+        hermesProcess.stderr?.on("data", (chunk: Buffer) => (hermesOutput += chunk.toString("utf8")));
+        const exitCode = await new Promise<number | null>((resolve, reject) => {
+          hermesProcess?.once("error", reject);
+          hermesProcess?.once("close", resolve);
+        });
+        expect(exitCode, hermesOutput).toBe(0);
+        expect(hermesOutput).toContain("Hermes fixture invocation completed");
+        expect(modelTrace.map((entry) => entry.emitted?.name)).toEqual(["tool_search", "tool_describe", "tool_call"]);
+        expect(
+          modelTrace.every((entry) =>
+            ["tool_search", "tool_describe", "tool_call"].every((name) => entry.advertisedTools.includes(name))
+          ),
+          JSON.stringify(modelTrace)
+        ).toBe(true);
+
+        const events = new SqliteWorkItemStore(dbPath);
+        try {
+          const storedEvents = events.readEvents();
+          expect(storedEvents.map((event) => event.name)).toEqual(
+            expect.arrayContaining([
+              "local_agent.authorization",
+              "local_agent.dispatch.started",
+              "local_agent.completed"
+            ])
+          );
+          expect(events.verifyAuditChain().ok).toBe(true);
+          expect(JSON.stringify(storedEvents)).not.toContain("Hermes deterministic interoperability check");
+        } finally {
+          events.close();
+        }
+        expect(readFileSync(join(dir, "machine-audit.jsonl"), "utf8")).toContain('"tool":"test.agent.run"');
+      } finally {
+        if (hermesProcess && hermesProcess.exitCode === null) hermesProcess.kill("SIGTERM");
+        await app.close();
+        await new Promise<void>((resolve) => modelServer.close(() => resolve()));
+        rmSync(dir, { recursive: true, force: true });
+      }
+      expect(app.server.listening).toBe(false);
+      expect(modelServer.listening).toBe(false);
+      expect(existsSync(dir)).toBe(false);
+    },
+    30_000
+  );
 
   it("keeps direct agent MCP runs disabled by default when machine config and a fake runner exist", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-direct-agent-config-disabled-"));
