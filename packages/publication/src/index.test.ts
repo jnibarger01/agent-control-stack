@@ -88,7 +88,7 @@ describe("publishValidatedAttempt", () => {
 
     expect(calls.some((call) => call[0] === "add" && call.includes("-A"))).toBe(true);
     expect(calls.some((call) => call.includes("commit") && call.includes("-m"))).toBe(true);
-    expect(calls.some((call) => call[0] === "push" && call.includes("HEAD:refs/heads/acs/attempt/attempt-1"))).toBe(true);
+    expect(calls.some((call) => call[0] === "push" && call.includes("--") && call.includes("HEAD:refs/heads/acs/attempt/attempt-1"))).toBe(true);
     expect(record.commitSha).toBe("real-sha-789");
     expect(github.createOrUpdate).toHaveBeenCalledWith(expect.objectContaining({ commitSha: "real-sha-789", branch: "acs/attempt/attempt-1" }));
 
@@ -112,22 +112,44 @@ describe("publishValidatedAttempt", () => {
     expect(github.createOrUpdate).not.toHaveBeenCalled();
   });
 
-  it("refuses option-like git remotes before they reach git", async () => {
-    const runner = defaultGitRunner();
-    const github = { createOrUpdate: vi.fn() };
+  it.each(["--upload-pack=malicious-command", "-upload-pack=malicious-command", "---upload-pack=malicious-command"])(
+    "refuses leading-dash git remote %s before it reaches git",
+    async (remote) => {
+      const runner = defaultGitRunner();
+      const github = { createOrUpdate: vi.fn() };
 
-    await expect(
-      publishValidatedAttempt(
-        input({ remote: "--upload-pack=malicious-command", gitRunner: runner }),
-        { getByIdempotency: () => undefined, record: (record) => record },
-        github
-      )
-    ).rejects.toThrow(/git remote must not begin/);
+      await expect(
+        publishValidatedAttempt(
+          input({ remote, gitRunner: runner }),
+          { getByIdempotency: () => undefined, record: (record) => record },
+          github
+        )
+      ).rejects.toThrow(/configured remote name/);
 
-    expect(runner).not.toHaveBeenCalledWith(
-      expect.arrayContaining(["--upload-pack=malicious-command"])
+      expect(runner).not.toHaveBeenCalledWith(expect.arrayContaining([remote]));
+      expect(github.createOrUpdate).not.toHaveBeenCalled();
+    }
+  );
+
+  it("accepts a normal configured remote name and terminates git options before it", async () => {
+    const calls: string[][] = [];
+    const runner: GitRunner = vi.fn(async (args: string[]): Promise<GitResult> => {
+      calls.push(args);
+      if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "", exitCode: 0 };
+      if (args[0] === "diff" && args.includes("--name-only")) return { stdout: "", stderr: "", exitCode: 0 };
+      if (args[0] === "ls-remote") return { stdout: "abc123\trefs/heads/acs/attempt/attempt-1\n", stderr: "", exitCode: 0 };
+      return { stdout: "", stderr: "", exitCode: 0 };
+    });
+
+    const record = await publishValidatedAttempt(
+      input({ remote: "origin", gitRunner: runner }),
+      { getByIdempotency: () => undefined, record: (value) => value },
+      { createOrUpdate: vi.fn(async () => ({ url: "https://github.com/acme/repo/pull/3" })) }
     );
-    expect(github.createOrUpdate).not.toHaveBeenCalled();
+
+    expect(record.commitSha).toBe("abc123");
+    expect(calls).toContainEqual(["ls-remote", "--heads", "--", "origin", "acs/attempt/attempt-1"]);
+    expect(calls.some((call) => call[0] === "push")).toBe(false);
   });
 
   it("refuses publication when git push fails, without opening a PR", async () => {
