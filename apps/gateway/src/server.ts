@@ -41,7 +41,12 @@ import {
   type McpAuthOptions,
   type McpOAuthOptions
 } from "./auth.js";
-import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit, type GatewayDirectAgentController } from "./mcp.js";
+import {
+  handleMcpHttpRequest,
+  type AuthenticatedMcpRequestAudit,
+  type GatewayDirectAgentController,
+  type LocalAgentAuditEvent
+} from "./mcp.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
 import { SqliteMoaIdempotencyStore } from "./moa/idempotency.js";
 import {
@@ -457,6 +462,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       requestId: request.id,
       remoteAddress: request.socket.remoteAddress ?? request.ip,
       auditAuthenticatedRequest: recordAuthenticatedMcpRequest,
+      auditLocalAgentEvent: recordLocalAgentEvent,
       resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth),
       maxPendingWorkItems
     });
@@ -962,6 +968,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       authTunnelId: event.auth.tunnelId,
       authSessionId: event.auth.sessionId,
       authScopes: event.auth.scopes
+    });
+  }
+
+  function recordLocalAgentEvent(event: LocalAgentAuditEvent): void {
+    workItems.recordLocalAgentEvent({
+      eventType: event.eventType,
+      actor: event.actor,
+      agentId: event.agentId,
+      requestId: event.requestId,
+      requestHash: event.requestHash,
+      scope: event.scope,
+      outcome: event.outcome,
+      reason: event.reason,
+      outputBytes: event.outputBytes,
+      exitCode: event.exitCode
     });
   }
 

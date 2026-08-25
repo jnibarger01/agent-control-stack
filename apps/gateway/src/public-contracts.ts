@@ -142,9 +142,9 @@ const idSchema = z.object({ id: z.string().min(1) });
 const reasonSchema = idSchema.extend({ reason: z.string().min(1).optional() });
 const directAgentInputSchema = z.object({
   agent: z.enum(directAgentNames),
-  prompt: z.string().min(1),
-  cwd: z.string().optional(),
-  timeoutSeconds: z.number().int().positive().optional(),
+  prompt: z.string().min(1).max(32_000),
+  cwd: z.string().min(1).optional(),
+  timeoutSeconds: z.number().int().positive().max(3_600).optional(),
   permissionMode: z.enum(["read-only", "readonly", "read_only"]).default("read-only")
 });
 
