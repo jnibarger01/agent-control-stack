@@ -429,6 +429,30 @@ export interface ConnectorRequestRecord {
   authScopes?: string[];
 }
 
+export const localAgentEventTypes = [
+  "authorization",
+  "dispatch.started",
+  "completed",
+  "failed",
+  "cancelled",
+  "rejected"
+] as const;
+export type LocalAgentEventType = (typeof localAgentEventTypes)[number];
+
+export interface LocalAgentEventRecord {
+  eventType: LocalAgentEventType;
+  actor: string;
+  agentId: string;
+  requestId?: string;
+  requestHash?: string;
+  scope?: string;
+  target?: string;
+  outcome?: string;
+  reason?: string;
+  outputBytes?: number;
+  exitCode?: number | null;
+}
+
 export const acpTimelineEventTypes = [
   "initialized",
   "message",
@@ -729,6 +753,7 @@ export interface WorkItemStore {
   reconcileStaleTunnelSessions(options?: LivenessReconciliationOptions): RegisteredTunnelSession[];
   getTunnelSession(input: TunnelSessionRef): TunnelSessionAuthorizationRecord | undefined;
   recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent;
+  recordLocalAgentEvent(input: LocalAgentEventRecord): StoredAuditEvent;
   recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
@@ -2260,6 +2285,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
       if (input.authTunnelId) attributes["auth.tunnel_id"] = input.authTunnelId;
       if (input.authSessionId) attributes["auth.session_id"] = input.authSessionId;
       const event = this.appendAuditEvent(createEvent("connector.requested", { ...input }, attributes));
+      return { value: event, events: [event] };
+    });
+  }
+
+  recordLocalAgentEvent(input: LocalAgentEventRecord): StoredAuditEvent {
+    return this.write(() => {
+      assertOneOf(input.eventType, localAgentEventTypes, "eventType");
+      const attributes: Record<string, string | number | boolean> = {
+        "agent.id": requiredString(input.agentId, "agentId"),
+        "local_agent.actor": requiredString(input.actor, "actor"),
+        "local_agent.event_type": input.eventType
+      };
+      if (input.requestId) attributes["local_agent.request_id"] = input.requestId;
+      if (input.requestHash) attributes["local_agent.request_hash"] = input.requestHash;
+      if (input.scope) attributes["local_agent.scope"] = input.scope;
+      if (input.target) attributes["local_agent.target"] = input.target;
+      const event = this.appendAuditEvent(createEvent(`local_agent.${input.eventType}`, { ...input }, attributes));
       return { value: event, events: [event] };
     });
   }
