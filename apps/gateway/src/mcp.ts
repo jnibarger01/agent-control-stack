@@ -1,7 +1,7 @@
 import type { IncomingHttpHeaders } from "node:http";
 import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
-import { ControlStackError } from "@agent-control-stack/shared";
-import type { WorkItemStore } from "@agent-control-stack/work-items";
+import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import type { LocalAgentEventType, WorkItemStore } from "@agent-control-stack/work-items";
 import { ZodError, z } from "zod";
 import {
   authorizeMcpRequest,
@@ -36,7 +36,20 @@ type DirectAgentToolName = typeof directAgentToolName;
 type JsonRpcId = string | number | null;
 
 export interface GatewayDirectAgentController {
-  callTool(name: DirectAgentToolName, args: unknown): Promise<unknown> | unknown;
+  callTool(name: DirectAgentToolName, args: unknown, context?: { requestHash: string; actor: string }): Promise<unknown> | unknown;
+}
+
+export interface LocalAgentAuditEvent {
+  eventType: LocalAgentEventType;
+  actor: string;
+  agentId: string;
+  requestId: string;
+  requestHash: string;
+  scope: string;
+  outcome?: string;
+  reason?: string;
+  outputBytes?: number;
+  exitCode?: number | null;
 }
 
 type JsonRpcSuccess = {
@@ -82,6 +95,7 @@ export async function handleMcpHttpRequest(input: {
   requestId?: string;
   remoteAddress?: string;
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
+  auditLocalAgentEvent?: (event: LocalAgentAuditEvent) => void;
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
 }): Promise<McpHttpResult> {
   const request = jsonRpcRequestSchema.safeParse(input.body);
@@ -139,6 +153,7 @@ export async function handleMcpHttpRequest(input: {
         directAgentController: input.directAgentController,
         remoteAddress: input.remoteAddress,
         auditAuthenticatedRequest: input.auditAuthenticatedRequest,
+        auditLocalAgentEvent: input.auditLocalAgentEvent,
         resolveActorId: input.resolveActorId
       });
     default:
@@ -194,6 +209,7 @@ async function handleToolsCall(input: {
   directAgentController?: GatewayDirectAgentController;
   remoteAddress?: string;
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
+  auditLocalAgentEvent?: (event: LocalAgentAuditEvent) => void;
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
 }): Promise<McpHttpResult> {
   const parsed = toolsCallParamsSchema.safeParse(input.params);
@@ -208,6 +224,17 @@ async function handleToolsCall(input: {
     remoteAddress: input.remoteAddress
   });
   if (!authorization.ok) {
+    if (parsed.data.name === directAgentToolName) {
+      input.auditLocalAgentEvent?.({
+        eventType: "rejected",
+        actor: "unauthenticated",
+        agentId: directAgentId(parsed.data.arguments),
+        requestId: input.requestId ?? String(input.id ?? ""),
+        requestHash: directAgentRequestHash(parsed.data.arguments, "unauthenticated", []),
+        scope: mcpRequiredScopes(parsed.data.name)[0] ?? "",
+        reason: authorization.error
+      });
+    }
     return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, mcpRequiredScopes(parsed.data.name));
   }
 
@@ -230,6 +257,31 @@ async function handleToolsCall(input: {
     return jsonRpcError(input.id, -32001, "MCP actor is not registered", 403);
   }
   try {
+    const localAgent = parsed.data.name === directAgentToolName
+      ? {
+          agentId: directAgentId(parsed.data.arguments),
+          requestHash: directAgentRequestHash(parsed.data.arguments, actor, authorization.auth.scopes)
+        }
+      : undefined;
+    if (localAgent) {
+      input.auditLocalAgentEvent?.({
+        eventType: "authorization",
+        actor,
+        agentId: localAgent.agentId,
+        requestId: input.requestId ?? String(input.id ?? ""),
+        requestHash: localAgent.requestHash,
+        scope: mcpRequiredScopes(parsed.data.name)[0] ?? "",
+        outcome: "authorized"
+      });
+      input.auditLocalAgentEvent?.({
+        eventType: "dispatch.started",
+        actor,
+        agentId: localAgent.agentId,
+        requestId: input.requestId ?? String(input.id ?? ""),
+        requestHash: localAgent.requestHash,
+        scope: mcpRequiredScopes(parsed.data.name)[0] ?? ""
+      });
+    }
     const result = await callMcpTool({
       tools: input.tools,
       store: input.store,
@@ -239,6 +291,22 @@ async function handleToolsCall(input: {
       auth: authorization.auth,
       actor
     });
+    if (localAgent) {
+      const structured = asStructuredContent(result);
+      const stdout = typeof structured.stdout === "string" ? structured.stdout : "";
+      const stderr = typeof structured.stderr === "string" ? structured.stderr : "";
+      input.auditLocalAgentEvent?.({
+        eventType: structured.ok === false ? "failed" : "completed",
+        actor,
+        agentId: localAgent.agentId,
+        requestId: input.requestId ?? String(input.id ?? ""),
+        requestHash: localAgent.requestHash,
+        scope: mcpRequiredScopes(parsed.data.name)[0] ?? "",
+        outcome: structured.ok === false ? "failed" : "succeeded",
+        outputBytes: Buffer.byteLength(stdout, "utf8") + Buffer.byteLength(stderr, "utf8"),
+        exitCode: typeof structured.exitCode === "number" ? structured.exitCode : null
+      });
+    }
     input.auditAuthenticatedRequest?.({
       requestId: input.requestId ?? String(input.id ?? ""),
       method: "tools/call",
@@ -269,6 +337,18 @@ async function handleToolsCall(input: {
         : {})
     });
   } catch (error) {
+    if (parsed.data.name === directAgentToolName) {
+      input.auditLocalAgentEvent?.({
+        eventType: "failed",
+        actor,
+        agentId: directAgentId(parsed.data.arguments),
+        requestId: input.requestId ?? String(input.id ?? ""),
+        requestHash: directAgentRequestHash(parsed.data.arguments, actor, authorization.auth.scopes),
+        scope: mcpRequiredScopes(parsed.data.name)[0] ?? "",
+        outcome: "failed",
+        reason: errorMessage(error)
+      });
+    }
     input.auditAuthenticatedRequest?.({
       requestId: input.requestId ?? String(input.id ?? ""),
       method: "tools/call",
@@ -327,7 +407,10 @@ async function callMcpTool(input: {
     if (!input.directAgentController) {
       throw new ControlStackError("direct_agent_not_configured", "test.agent.run is not configured on this gateway");
     }
-    return await input.directAgentController.callTool(directAgentToolName, input.args);
+    return await input.directAgentController.callTool(directAgentToolName, input.args, {
+      requestHash: directAgentRequestHash(input.args, input.actor, input.auth.scopes),
+      actor: input.actor
+    });
   }
   if (input.name === "open_acs_dashboard") return dashboardOverview(input.store);
   if (input.name === "get_execution_detail") {
@@ -420,6 +503,26 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
 function isMutatingTool(name: McpToolName): boolean {
   if (name === directAgentToolName) return true;
   return !["get_work_item", "list_work_items", "open_acs_dashboard", "get_execution_detail"].includes(name);
+}
+
+function directAgentId(input: unknown): string {
+  return input && typeof input === "object" && typeof (input as { agent?: unknown }).agent === "string"
+    ? (input as { agent: string }).agent
+    : "unknown";
+}
+
+function directAgentRequestHash(input: unknown, actor: string, scopes: string[]): string {
+  const value = input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+  return stableHash({
+    schemaVersion: "acs.gateway.local-agent-request.v1",
+    actor,
+    scopes: [...scopes].sort(),
+    agent: directAgentId(input),
+    prompt: typeof value.prompt === "string" ? value.prompt : "",
+    cwd: typeof value.cwd === "string" ? value.cwd : "",
+    timeoutSeconds: typeof value.timeoutSeconds === "number" ? value.timeoutSeconds : null,
+    permissionMode: typeof value.permissionMode === "string" ? value.permissionMode : "read-only"
+  });
 }
 
 function resourceDefinition() {
