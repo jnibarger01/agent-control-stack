@@ -85,6 +85,7 @@ export interface SchedulerOptions {
   /** Path to a JSON file holding a ScheduleConfig, validated with scheduleConfigSchema. */
   scheduleConfigPath?: string;
   now?: Date;
+  onWorkItemCreated?: (workItemId: string) => Promise<void>;
 }
 
 export interface SchedulerFiring {
@@ -195,6 +196,7 @@ export async function runSchedulerOnce(options: SchedulerOptions = {}): Promise<
         risk: template.risk
       });
       store.completeSchedulerFiring(claim.firing.firingId, workItem.id, { via: "domain_service" });
+      if (options.onWorkItemCreated) await options.onWorkItemCreated(workItem.id);
 
       firings.push({
         scheduleId: schedule.scheduleId,

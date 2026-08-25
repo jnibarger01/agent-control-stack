@@ -49,7 +49,6 @@ export class SqliteMoaIdempotencyStore implements IdempotencyStore {
         if (row.response_json === "PENDING") {
           // Another request reserved this key and is processing.
           // Poll briefly for the pending creation to complete.
-          db.close();
           for (let i = 0; i < 30; i++) {
             await new Promise((resolve) => setTimeout(resolve, 50));
             const freshDb = this.open();

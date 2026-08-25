@@ -8,6 +8,8 @@ paths = [
   '''(^|/)dist/''',
   '''(^|/)\.ijfw/''',
   '''(^|/)apps/gateway/src/server\.test\.ts$''',
+  '''(^|/)packages/engine-adapter/src/registry\.test\.ts$''',
+  '''(^|/)packages/execution-controller/src/index\.test\.ts$''',
   '''(^|/)packages/agentos-contracts/test/trace\.test\.js$'''
 ]
 regexes = [
