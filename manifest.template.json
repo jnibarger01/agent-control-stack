@@ -138,6 +138,26 @@
     {
       "name": "get_prompts",
       "description": "Browse and retrieve curated Desktop Commander prompts for various tasks and workflows."
+    },
+    {
+      "name": "acpx_list_sessions",
+      "description": "List local ACPX sessions for a validated working directory and allowlisted agent without starting an agent."
+    },
+    {
+      "name": "acpx_get_session",
+      "description": "Inspect an already-registered ACPX session by opaque session ID with bounded optional history."
+    },
+    {
+      "name": "acpx_exec",
+      "description": "Run one bounded ACPX prompt for a validated directory and allowlisted agent."
+    },
+    {
+      "name": "acpx_prompt",
+      "description": "Prompt an existing registered ACPX session using its validated scope."
+    },
+    {
+      "name": "acpx_cancel",
+      "description": "Cooperatively cancel an existing registered ACPX session prompt."
     }
   ],
   "keywords": [

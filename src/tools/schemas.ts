@@ -241,6 +241,39 @@ export const TrackUiEventArgsSchema = z.object({
   params: z.record(z.union([z.string(), z.number(), z.boolean(), z.null()])).optional().default({}),
 });
 
+// ACPX tool schemas
+export const AcpxListSessionsArgsSchema = z.object({
+  cwd: z.string().min(1),
+  agent: z.string().min(1),
+  max_results: z.number().int().min(1).max(100).optional().default(20),
+});
+
+export const AcpxGetSessionArgsSchema = z.object({
+  session_id: z.string().min(1),
+  include_history: z.boolean().optional().default(false),
+  history_limit: z.number().int().min(1).max(500).optional().default(20),
+});
+
+export const AcpxExecArgsSchema = z.object({
+  cwd: z.string().min(1),
+  agent: z.string().min(1),
+  prompt: z.string().min(1).max(100000),
+  timeout_ms: z.number().int().min(1000).max(900000),
+  max_output_chars: z.number().int().min(1).max(2000000).optional().default(200000),
+});
+
+export const AcpxPromptArgsSchema = z.object({
+  session_id: z.string().min(1),
+  prompt: z.string().min(1).max(100000),
+  wait: z.boolean().optional().default(true),
+  timeout_ms: z.number().int().min(1000).max(900000).optional().default(120000),
+  max_output_chars: z.number().int().min(1).max(2000000).optional().default(200000),
+});
+
+export const AcpxCancelArgsSchema = z.object({
+  session_id: z.string().min(1),
+});
+
 /**
  * Map of tool name -> argument schema, used by the dispatcher to detect and warn
  * about parameters a caller sent that the tool does not support. Keep in sync
@@ -274,4 +307,9 @@ export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   give_feedback_to_desktop_commander: GiveFeedbackArgsSchema,
   get_prompts: GetPromptsArgsSchema,
   track_ui_event: TrackUiEventArgsSchema,
+  acpx_list_sessions: AcpxListSessionsArgsSchema,
+  acpx_get_session: AcpxGetSessionArgsSchema,
+  acpx_exec: AcpxExecArgsSchema,
+  acpx_prompt: AcpxPromptArgsSchema,
+  acpx_cancel: AcpxCancelArgsSchema,
 };

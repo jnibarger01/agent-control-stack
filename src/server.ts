@@ -51,8 +51,14 @@ import {
     GetPromptsArgsSchema,
     GetRecentToolCallsArgsSchema,
     WritePdfArgsSchema,
+    AcpxListSessionsArgsSchema,
+    AcpxGetSessionArgsSchema,
+    AcpxExecArgsSchema,
+    AcpxPromptArgsSchema,
+    AcpxCancelArgsSchema,
     toolArgSchemas,
 } from './tools/schemas.js';
+import { ACPX_AGENT_ALLOWLIST } from './tools/acpx.js';
 import {
     detectUnsupportedParams,
     getSupportedParams,
@@ -1228,6 +1234,121 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     title: "Get Prompts",
                     readOnlyHint: true,
                 },
+            },
+
+            // ACPX tools
+            {
+                name: "acpx_list_sessions",
+                description: `
+                        List local ACPX sessions for a given working directory and agent.
+
+                        Local-only: reads ACPX's local session records (acpx sessions list --local,
+                        scoped with --filter-cwd) and never creates, ensures, starts, or connects
+                        to an agent process.
+
+                        'agent' must be one of: ${ACPX_AGENT_ALLOWLIST.join(', ')}.
+                        'cwd' must be an existing directory within an allowed directory.
+                        Returns up to 'max_results' sessions (default 20), each with an opaque
+                        session_id you can pass to acpx_get_session, acpx_prompt, or acpx_cancel.
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(AcpxListSessionsArgsSchema),
+                annotations: {
+                    title: "List ACPX Sessions",
+                    readOnlyHint: true,
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "acpx_get_session",
+                description: `
+                        Inspect an existing ACPX session by its opaque session_id (as returned by
+                        acpx_list_sessions or acpx_exec).
+
+                        Never creates or ensures a session — only inspects one already known to this
+                        server. Unknown or stale session_ids fail with an error rather than falling
+                        back to any other session.
+
+                        Set 'include_history' to true to also fetch recent session history entries,
+                        bounded by 'history_limit' (default 20, max 500).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(AcpxGetSessionArgsSchema),
+                annotations: {
+                    title: "Get ACPX Session",
+                    readOnlyHint: true,
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "acpx_exec",
+                description: `
+                        Run a single one-shot ACPX prompt (acpx <agent> exec) against 'cwd' and wait
+                        for it to finish, up to 'timeout_ms'.
+
+                        'agent' must be one of: ${ACPX_AGENT_ALLOWLIST.join(', ')}.
+                        'cwd' must be an existing directory within an allowed directory.
+                        'prompt' (1-100000 chars) is always sent as literal prompt text — shell
+                        metacharacters, "$(...)", ";", "&&", or flag-like text such as
+                        "--approve-all" or "--policy" inside it are never interpreted as options or
+                        shell syntax.
+
+                        Returns stdout, stderr, the real exit code, whether the timeout fired,
+                        whether stdout/stderr were truncated at 'max_output_chars' (default 200000,
+                        max 2000000), and parsed JSON from ACPX's output when it is valid.
+                        Never passes through raw ACPX flags, --approve-all, or a raw --policy value.
+
+                        ${PATH_GUIDANCE}
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(AcpxExecArgsSchema),
+                annotations: {
+                    title: "ACPX One-Shot Exec",
+                    readOnlyHint: false,
+                    destructiveHint: true,
+                    openWorldHint: true,
+                },
+            },
+            {
+                name: "acpx_prompt",
+                description: `
+                        Send a prompt to an existing ACPX session identified by 'session_id' (as
+                        returned by acpx_list_sessions or acpx_exec).
+
+                        Never starts a new agent or creates a session — only prompts one already
+                        known to this server; unknown session_ids fail closed. Set 'wait' to false
+                        to queue the prompt and return immediately instead of blocking for a result.
+
+                        'prompt' (1-100000 chars) is always sent as literal prompt text, never
+                        reinterpreted as flags or shell syntax. Bounded by 'timeout_ms' (default
+                        120000) and 'max_output_chars' (default 200000, max 2000000).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(AcpxPromptArgsSchema),
+                annotations: {
+                    title: "ACPX Prompt",
+                    readOnlyHint: false,
+                    destructiveHint: true,
+                    openWorldHint: true,
+                },
+            },
+            {
+                name: "acpx_cancel",
+                description: `
+                        Cooperatively cancel the in-flight prompt for an existing ACPX session
+                        identified by 'session_id' (acpx <agent> cancel).
+
+                        Resolves the session from this server's registry first (never kills an
+                        arbitrary PID). Reports one of: accepted (cancellation requested),
+                        no_active_prompt (nothing to cancel), or failed.
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(AcpxCancelArgsSchema),
+                annotations: {
+                    title: "ACPX Cancel",
+                    readOnlyHint: false,
+                    destructiveHint: false,
+                    openWorldHint: false,
+                },
             }
         ];
 
@@ -1526,6 +1647,27 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
 
             case "edit_block":
                 result = await handlers.handleEditBlock(args);
+                break;
+
+            // ACPX tools
+            case "acpx_list_sessions":
+                result = await handlers.handleAcpxListSessions(args);
+                break;
+
+            case "acpx_get_session":
+                result = await handlers.handleAcpxGetSession(args);
+                break;
+
+            case "acpx_exec":
+                result = await handlers.handleAcpxExec(args);
+                break;
+
+            case "acpx_prompt":
+                result = await handlers.handleAcpxPrompt(args);
+                break;
+
+            case "acpx_cancel":
+                result = await handlers.handleAcpxCancel(args);
                 break;
 
             default:
