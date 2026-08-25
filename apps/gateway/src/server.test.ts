@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
-import { auditEventHash } from "@agent-control-stack/shared";
+import { auditEventHash, stableHash } from "@agent-control-stack/shared";
 import {
   DEFAULT_EVENT_LIMIT,
   MAX_EVENT_LIMIT,
@@ -4165,10 +4165,14 @@ describe("gateway work-item routes", () => {
 
       const submitted = tools.submit_work_result({
         workItemId: workItem.id,
+        attemptId: claimed?.attemptId,
         leaseId: claimed?.leaseId,
         workerId: "worker-a",
         actionHash: claimed?.actionHash,
-        idempotencyKey: "gateway-result-redaction-1",
+        planHash: claimed?.planHash,
+        inputHash: claimed?.inputHash,
+        fencingEpoch: claimed?.fencingEpoch,
+        idempotencyKey: stableHash({ domain: "acs.attempt-result.v1", attemptId: claimed?.attemptId }),
         outcome: "succeeded",
         startedAt: claimed?.startedAt,
         finishedAt: new Date().toISOString(),
