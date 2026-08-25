@@ -522,6 +522,8 @@ Current public MCP work-item tools:
 
 Worker claim/result tools exist only in the local worker/store path. They are not exposed through the public MCP gateway in this alpha.
 
+With the gateway running as above, this repo's root [`.mcp.json`](.mcp.json) registers `acs` as a project-scoped MCP server for Claude Code. Export `ACS_MCP_BEARER_TOKEN` (matching the value the gateway was started with) before launching `claude` from this directory and it connects automatically; no separate `claude mcp add` step is required.
+
 For stdio MCP machine-controller mode:
 
 ```sh
