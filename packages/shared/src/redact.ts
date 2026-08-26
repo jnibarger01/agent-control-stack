@@ -1,8 +1,19 @@
 const sensitiveKeyPattern = /authorization|password|secret|token|api[-_]?key/i;
 const nonSecretTokenMetricKeyPattern =
   /^(?:inputTokens|outputTokens|cacheReadInputTokens|cacheCreationInputTokens|maxTokens)$/i;
+// The URL-credentials alternative bounds every quantifier that can run
+// unbounded over a near-total character class: the scheme
+// (`[A-Za-z0-9+.-]{0,31}` - no real scheme name is longer) and both
+// credential halves (`{1,256}` - real usernames/passwords are never
+// remotely this long). Any one of these left unbounded reproduces
+// catastrophic backtracking on its own: two adjacent unbounded quantifiers
+// over overlapping character classes, gated on a literal ("://" or "@")
+// that a long non-matching string never contains, is a textbook
+// exponential/quadratic-backtracking shape - a multi-megabyte, non-
+// matching input (e.g. captured command stdout) previously hung the
+// process for tens of seconds testing this pattern alone.
 const sensitiveValuePattern =
-  /\bBearer\s+[A-Za-z0-9._~+/-]+=*\b|\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]+\b|\bsk-[A-Za-z0-9_-]{20,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[A-Za-z][A-Za-z0-9+.-]*:\/\/[^\s/@]+:[^\s/@]+@|(?:^|\n)[A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|PASSWORD)[A-Z0-9_]*=[^\s]+/i;
+  /\bBearer\s+[A-Za-z0-9._~+/-]+=*\b|\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]+\b|\bsk-[A-Za-z0-9_-]{20,}\b|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----|[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s/@]{1,256}:[^\s/@]{1,256}@|(?:^|\n)[A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|PASSWORD)[A-Z0-9_]*=[^\s]+/i;
 
 export function redactValue(value: unknown, explicitSecrets: readonly string[] = []): unknown {
   const ancestors = new WeakSet<object>();

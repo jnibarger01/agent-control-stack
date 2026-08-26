@@ -1,6 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { ControlStackError } from "@agent-control-stack/shared";
-import { ClaudeEngineAdapter, EngineAdapterRegistry, type EngineAdapter } from "./index.js";
+import {
+  ClaudeEngineAdapter,
+  EngineAdapterRegistry,
+  GeminiEngineAdapter,
+  GrokEngineAdapter,
+  OpenCodeEngineAdapter,
+  PiEngineAdapter,
+  type EngineAdapter
+} from "./index.js";
 import type { EngineIsolation } from "@agent-control-stack/sandbox";
 import type { EngineTask } from "./types.js";
 
@@ -48,5 +56,47 @@ describe("CliEngineAdapter", () => {
 
     expect(result).toMatchObject({ status: "completed", exitCode: 0 });
     expect(isolation.execute).toHaveBeenCalledWith(expect.objectContaining({ engineId: "claude", executable: "/usr/bin/claude", workspace: task.workspace }), expect.any(Object));
+  });
+
+  const taskWithDefaultEgress: EngineTask = { ...task, egressAllowlist: [] };
+
+  it.each([
+    { name: "Claude", Adapter: ClaudeEngineAdapter, binaryPath: "/usr/bin/claude", host: "api.anthropic.com" },
+    { name: "Gemini", Adapter: GeminiEngineAdapter, binaryPath: "/usr/bin/gemini", host: "generativelanguage.googleapis.com" },
+    { name: "Grok", Adapter: GrokEngineAdapter, binaryPath: "/usr/bin/grok", host: "api.x.ai" },
+    { name: "OpenCode", Adapter: OpenCodeEngineAdapter, binaryPath: "/usr/bin/opencode", host: "api.openai.com" },
+    { name: "Pi", Adapter: PiEngineAdapter, binaryPath: "/usr/bin/pi", host: "api.openai.com" }
+  ])("$name defaults to its own provider's egress endpoint, not api.openai.com for a non-OpenAI provider", async ({ Adapter, binaryPath, host }) => {
+    const isolation = fakeIsolation();
+    const adapter = new Adapter({
+      binaryPath,
+      authorityVerifier: { verify: vi.fn(async () => { throw new Error("not used"); }) },
+      credentialSource: () => "secret-not-logged",
+      isolationFactory: () => isolation
+    });
+
+    await adapter.invoke(taskWithDefaultEgress);
+
+    expect(isolation.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ egressAllowlist: [{ host, port: 443 }] }),
+      expect.any(Object)
+    );
+  });
+
+  it("lets an explicit task egressAllowlist override the provider default", async () => {
+    const isolation = fakeIsolation();
+    const adapter = new ClaudeEngineAdapter({
+      binaryPath: "/usr/bin/claude",
+      authorityVerifier: { verify: vi.fn(async () => { throw new Error("not used"); }) },
+      credentialSource: () => "secret-not-logged",
+      isolationFactory: () => isolation
+    });
+
+    await adapter.invoke(task);
+
+    expect(isolation.execute).toHaveBeenCalledWith(
+      expect.objectContaining({ egressAllowlist: task.egressAllowlist }),
+      expect.any(Object)
+    );
   });
 });

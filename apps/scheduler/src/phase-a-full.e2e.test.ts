@@ -21,7 +21,7 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 const limits = { wallClockMs: 60_000, terminationGraceMs: 100, cpuQuotaPercent: 100, memoryBytes: 64 * 1024 * 1024, pids: 16, outputBytes: 100_000, tmpfsBytes: 16 * 1024 * 1024 };
 
  describe("Phase A scheduler/controller/validation/publication E2E", () => {
-  it("executes one scheduled task through the authoritative controller to a bare-remote PR", async () => {
+  it("executes one scheduled task through the authoritative controller, validates it, then refuses publication under the dry-run-only plan boundary", async () => {
     const root = mkdtempSync(join(tmpdir(), "acs-phase-a-full-"));
     const repo = join(root, "repo");
     const bare = join(root, "remote.git");
@@ -38,7 +38,7 @@ const limits = { wallClockMs: 60_000, terminationGraceMs: 100, cpuQuotaPercent: 
       await execFileAsync("git", ["commit", "--allow-empty", "-m", "initial"], { cwd: repo });
       await execFileAsync("git", ["push", "origin", "main"], { cwd: repo });
 
-      const schedules: ScheduleConfig = [{ scheduleId: "phase-a", intervalMs: 60_000, workItemTemplate: { title: "Phase A task", requester: "system", intent: "modify the repository", target: { cwd: repo }, requestedActions: [{ kind: "fs.read", description: "inspect repository", params: { paths: ["README.md"] } }], risk: "low" } }];
+      const schedules: ScheduleConfig = [{ scheduleId: "phase-a", intervalMs: 60_000, workItemTemplate: { title: "Phase A task", requester: "system", intent: "modify the repository", target: { cwd: repo }, requestedActions: [{ kind: "fs.write", description: "update readme", params: { paths: ["README.md"], write: true } }], risk: "low" } }];
       const github = { createOrUpdate: vi.fn(async () => ({ url: "https://github.com/acme/repo/pull/99" })) };
 
       const scheduled = await runSchedulerOnce({ dbPath, schedules, now: new Date("2026-08-18T00:01:00.000Z"), onWorkItemCreated: async (workItemId) => {
@@ -55,7 +55,7 @@ const limits = { wallClockMs: 60_000, terminationGraceMs: 100, cpuQuotaPercent: 
           workspaceManager,
           engine,
           validator: new ResultValidator(),
-          buildValidationInput: ({ outcome, workspace }) => { phases.push("validation"); return { workspacePath: workspace.hostPath, outcome, allowedPaths: ["README.md"] }; },
+          buildValidationInput: ({ outcome, workspace }) => { phases.push("validation"); return { workspacePath: workspace.hostPath, outcome }; },
           input: {
             workerId: "worker-phase-a",
             leaseToken: "phase-a-lease-token-long-enough",
@@ -68,17 +68,23 @@ const limits = { wallClockMs: 60_000, terminationGraceMs: 100, cpuQuotaPercent: 
         expect(result.validation?.passed).toBe(true);
         publishedBranch = result.workspace.branch;
         phases.push("publication");
-        const publication = await publishValidatedAttempt({ workItemId, attemptId: result.attempt.attemptId, workspacePath: result.workspace.hostPath, branch: result.workspace.branch, remote: "origin", title: workItem.title, body: "independently validated", validationPassed: true, leaseIsCurrent: async () => true }, createSqlitePublicationStore(store), github);
+        // Every execution plan under the current production-hardened schema
+        // is unconditionally dry-run-only (constraints.allowPush is a
+        // hardcoded `false`), so even a fully validated, successfully
+        // executed attempt must still have its publication refused - the
+        // dry-run boundary holds all the way through the pipeline, not
+        // just at the engine invocation step.
+        await expect(
+          publishValidatedAttempt({ workItemId, attemptId: result.attempt.attemptId, workspacePath: result.workspace.hostPath, branch: result.workspace.branch, remote: "origin", title: workItem.title, body: "independently validated", leaseIsCurrent: async () => true }, createSqlitePublicationStore(store), github)
+        ).rejects.toThrow(/does not authorize a push/);
         await workspaceManager.teardown(workItemId, { attemptId: result.attempt.attemptId, leaseId: result.lease.leaseId, workerId: result.lease.workerId, fencingEpoch: result.lease.fencingEpoch });
-        expect(publication.pullRequestUrl).toContain("/pull/99");
         store.close();
       }});
 
       expect(scheduled.firings[0]?.created).toBe(true);
       expect(phases).toEqual(["scheduler", "controller", "validation", "publication"]);
-      expect(github.createOrUpdate).toHaveBeenCalledTimes(1);
-      const branch = await git(bare, "show-ref", "--hash", `refs/heads/${publishedBranch}`);
-      expect(branch.length).toBeGreaterThan(6);
+      expect(github.createOrUpdate).not.toHaveBeenCalled();
+      await expect(git(bare, "show-ref", "--hash", `refs/heads/${publishedBranch}`)).rejects.toThrow();
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

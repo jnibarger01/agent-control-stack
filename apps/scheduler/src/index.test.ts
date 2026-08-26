@@ -242,6 +242,77 @@ describe("runSchedulerOnce", () => {
       expect(seen).toEqual([result.firings[0]?.workItemId]);
     });
   });
+
+  it("does not durably complete the firing when the controller callback rejects, and retries the callback (without duplicating the work item) once the claim goes stale", async () => {
+    await withTempDb(async (dbPath) => {
+      const dailySchedule: ScheduleConfig = [
+        {
+          scheduleId: "daily-report",
+          intervalMs: 24 * 60 * 60 * 1_000,
+          workItemTemplate: readOnlySchedule[0]!.workItemTemplate
+        }
+      ];
+      const firstAttempt = new Date("2026-07-23T00:01:00.000Z");
+
+      await expect(
+        runSchedulerOnce({
+          dbPath,
+          schedules: dailySchedule,
+          now: firstAttempt,
+          onWorkItemCreated: async () => {
+            throw new Error("simulated controller crash");
+          }
+        })
+      ).rejects.toThrow("simulated controller crash");
+
+      const afterCrash = new SqliteWorkItemStore(dbPath);
+      try {
+        // The work item was created (so the crash didn't lose the handoff
+        // entirely), but the firing must not be marked completed while the
+        // callback never actually succeeded.
+        expect(afterCrash.list()).toHaveLength(1);
+      } finally {
+        afterCrash.close();
+      }
+
+      // A same-instant retry sees the firing still owned by the (still
+      // fresh, from its perspective) prior claim and does nothing.
+      const tooSoon = await runSchedulerOnce({
+        dbPath,
+        schedules: dailySchedule,
+        now: new Date(firstAttempt.getTime() + 1_000),
+        onWorkItemCreated: async () => {
+          throw new Error("should not be invoked before the claim is stale");
+        }
+      });
+      expect(tooSoon.firings[0]?.created).toBe(false);
+
+      // Once the claim goes stale (default staleClaimMs is 5 minutes), a
+      // retry reclaims the same firing, reuses the already-created work
+      // item instead of duplicating it, and only now the callback succeeds.
+      const seen: string[] = [];
+      const retried = await runSchedulerOnce({
+        dbPath,
+        schedules: dailySchedule,
+        now: new Date(firstAttempt.getTime() + 6 * 60 * 1_000),
+        onWorkItemCreated: async (workItemId) => {
+          seen.push(workItemId);
+        }
+      });
+      expect(retried.firings[0]?.created).toBe(true);
+      expect(seen).toHaveLength(1);
+
+      const finalStore = new SqliteWorkItemStore(dbPath);
+      try {
+        const items = finalStore.list();
+        expect(items).toHaveLength(1);
+        expect(items[0]?.id).toBe(seen[0]);
+        expect(items[0]?.id).toBe(retried.firings[0]?.workItemId);
+      } finally {
+        finalStore.close();
+      }
+    });
+  });
 });
 
 describe("mostRecentScheduledFiring", () => {

@@ -23,9 +23,57 @@ from typing import Callable, Sequence
 ACS_CONTINUE = "<ACS_CONTINUE>"
 ACS_MILESTONE_COMPLETE = "<ACS_MILESTONE_COMPLETE>"
 ACS_BLOCKED = "<ACS_BLOCKED>"
+PROTOCOL_MARKERS = (ACS_CONTINUE, ACS_MILESTONE_COMPLETE, ACS_BLOCKED)
 
 DEFAULT_MAX_INVOCATIONS = 100
 DEFAULT_TIMEOUT_SECONDS = 30 * 60
+
+MAX_PERSISTED_OUTPUT_CHARS = 200_000
+
+# Mirrors packages/shared/src/redact.ts's sensitiveValuePattern: known secret
+# shapes only, not a general secret detector. The URL-credentials
+# alternative bounds both quantifiers ({1,256}) and the scheme ({0,31}) for
+# the same reason that file does - unbounded twin quantifiers over a near-
+# total character class, gated on a literal that a long non-matching
+# string never contains, is a textbook catastrophic-backtracking shape.
+_SENSITIVE_VALUE_PATTERN = re.compile(
+    r"Bearer\s+[A-Za-z0-9._~+/-]+=*\b"
+    r"|\b(?:ghp|gho|ghu|ghs|github_pat)_[A-Za-z0-9_]+\b"
+    r"|\bsk-[A-Za-z0-9_-]{20,}\b"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
+    r"|[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/@]{1,256}:[^\s/@]{1,256}@"
+    r"|(?:^|\n)[A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|PASSWORD)[A-Z0-9_]*=\S+",
+    re.IGNORECASE,
+)
+
+
+def redact_text(value: str) -> str:
+    """Best-effort redaction of known secret shapes - not a guarantee, so
+    callers must still bound what they persist rather than relying on this
+    alone."""
+    return _SENSITIVE_VALUE_PATTERN.sub("[redacted]", value)
+
+
+def redact_and_bound(value: str) -> str:
+    redacted = redact_text(value)
+    if len(redacted) > MAX_PERSISTED_OUTPUT_CHARS:
+        return redacted[:MAX_PERSISTED_OUTPUT_CHARS] + "\n[truncated]"
+    return redacted
+
+
+def extract_protocol_marker(text: str) -> str | None:
+    """A marker counts only when it appears as an exact, standalone
+    protocol line - not merely quoted or mentioned in prose (e.g. an agent
+    saying 'I will not emit <ACS_BLOCKED>' must never itself terminate the
+    loop as blocked). If multiple distinct markers somehow appear as
+    standalone lines, ACS_BLOCKED takes priority over
+    ACS_MILESTONE_COMPLETE over ACS_CONTINUE, matching the caller's
+    original check order."""
+    found = {line.strip() for line in text.splitlines()} & set(PROTOCOL_MARKERS)
+    for marker in (ACS_BLOCKED, ACS_MILESTONE_COMPLETE, ACS_CONTINUE):
+        if marker in found:
+            return marker
+    return None
 
 DEFAULT_AGENT_COMMANDS: dict[str, list[str]] = {
     "codex": ["codex", "exec", "--full-auto", "--skip-git-repo-check", "-"],
@@ -176,13 +224,20 @@ class Supervisor:
 
     def _write_log(self, name: str, content: str) -> None:
         self.log_directory.mkdir(parents=True, exist_ok=True)
-        (self.log_directory / name).write_text(content, encoding="utf-8")
+        os.chmod(self.log_directory, 0o700)
+        path = self.log_directory / name
+        path.write_text(content, encoding="utf-8")
+        # .gitignore is not a security boundary - a model-produced prompt,
+        # stdout, or stderr may contain credentials or sensitive file
+        # content, and other local users or backup tooling can otherwise
+        # read a file left at the process umask.
+        os.chmod(path, 0o600)
 
     def _log_agent(self, iteration: int, prompt: str, result: AgentResult) -> None:
         self._write_log(
             f"run-{iteration:04d}.log",
-            "COMMAND: " + shlex.join(result.command) + "\n\nPROMPT:\n" + prompt +
-            "\n\nSTDOUT:\n" + result.stdout + "\n\nSTDERR:\n" + result.stderr +
+            "COMMAND: " + shlex.join(result.command) + "\n\nPROMPT:\n" + redact_and_bound(prompt) +
+            "\n\nSTDOUT:\n" + redact_and_bound(result.stdout) + "\n\nSTDERR:\n" + redact_and_bound(result.stderr) +
             f"\n\nRETURNCODE: {result.returncode}\nTIMED_OUT: {result.timed_out}\n",
         )
 
@@ -215,7 +270,7 @@ class Supervisor:
             try:
                 completed = subprocess.run(command, cwd=self.repository, text=True, capture_output=True, check=False)
                 returncode = completed.returncode
-                command_output = completed.stdout + completed.stderr
+                command_output = redact_and_bound(completed.stdout + completed.stderr)
             except OSError as exc:
                 returncode = 127
                 command_output = f"verification command failed to start: {exc}\n"
@@ -242,9 +297,10 @@ class Supervisor:
                 output = result.combined_output
                 if result.timed_out or result.returncode != 0:
                     evidence = f"Agent invocation failed (exit={result.returncode}, timed_out={result.timed_out}).\n{output}"
-                if ACS_BLOCKED in output:
+                marker = extract_protocol_marker(output)
+                if marker == ACS_BLOCKED:
                     return SupervisorResult(2, "agent reported a genuine external blocker", iteration)
-                if ACS_MILESTONE_COMPLETE in output:
+                if marker == ACS_MILESTONE_COMPLETE:
                     self._current_iteration = iteration
                     verification = self.verify_repository()
                     if verification.passed:

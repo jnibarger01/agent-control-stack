@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -8,6 +8,7 @@ import { ResultValidator } from "./index.js";
 const success: EngineOutcome = { status: "completed", exitCode: 0, stdout: "", stderr: "", durationMs: 1, stdoutTruncated: false, stderrTruncated: false };
 const runner = (files: string[], commandExit = 0) => async (command: string[]) => {
   if (command[1] === "diff") return { stdout: files.join("\n"), stderr: "", exitCode: 0 };
+  if (command[1] === "ls-files") return { stdout: "", stderr: "", exitCode: 0 };
   return { stdout: "check output", stderr: commandExit ? "failed" : "", exitCode: commandExit };
 };
 
@@ -60,6 +61,40 @@ describe("ResultValidator", () => {
     expect(result.checks.find((check) => check.name === "git_diff")?.passed).toBe(false);
   });
 
+  it("includes untracked files in changedPaths, not just unstaged tracked diffs", async () => {
+    const result = await new ResultValidator().validate({
+      workspacePath: "/workspace",
+      outcome: success,
+      forbiddenPaths: [".env"],
+      commandRunner: async (command: string[]) => {
+        if (command[1] === "diff") return { stdout: "", stderr: "", exitCode: 0 };
+        if (command[1] === "ls-files") return { stdout: ".env\n", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+    });
+
+    expect(result.changedPaths).toContain(".env");
+    expect(result.passed).toBe(false);
+    expect(result.checks.find((check) => check.name === "forbidden_paths")?.passed).toBe(false);
+  });
+
+  it("inspects the complete HEAD-to-worktree diff (not just the unstaged worktree) so staged changes are included", async () => {
+    const seenArgs: string[][] = [];
+    const result = await new ResultValidator().validate({
+      workspacePath: "/workspace",
+      outcome: success,
+      commandRunner: async (command: string[]) => {
+        seenArgs.push(command);
+        if (command[1] === "diff") return { stdout: "staged-secret.env\n", stderr: "", exitCode: 0 };
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }
+    });
+
+    const diffCall = seenArgs.find((args) => args[1] === "diff");
+    expect(diffCall).toEqual(["git", "diff", "--name-only", "HEAD"]);
+    expect(result.changedPaths).toContain("staged-secret.env");
+  });
+
   describe("expectedArtifacts path containment", () => {
     let workspace: string;
 
@@ -109,6 +144,43 @@ describe("ResultValidator", () => {
       const check = result.checks.find((entry) => entry.name === "artifact:report.txt");
       expect(check?.passed).toBe(true);
       expect(check?.detail).toBe("artifact exists");
+    });
+
+    it("rejects a symlink artifact that resolves outside the workspace", async () => {
+      workspace = mkdtempSync(join(tmpdir(), "acs-validation-"));
+      const outsideDir = mkdtempSync(join(tmpdir(), "acs-validation-outside-"));
+      const secretPath = join(outsideDir, "secret.txt");
+      writeFileSync(secretPath, "outside-workspace-secret");
+      symlinkSync(secretPath, join(workspace, "artifact"));
+
+      const result = await new ResultValidator().validate({
+        workspacePath: workspace,
+        outcome: success,
+        expectedArtifacts: ["artifact"],
+        commandRunner: runner([])
+      });
+
+      const check = result.checks.find((entry) => entry.name === "artifact:artifact");
+      expect(check?.passed).toBe(false);
+      expect(check?.detail).toBe("artifact is a symlink that escapes the workspace");
+      expect(result.passed).toBe(false);
+      rmSync(outsideDir, { recursive: true, force: true });
+    });
+
+    it("accepts a symlink artifact whose real target stays inside the workspace", async () => {
+      workspace = mkdtempSync(join(tmpdir(), "acs-validation-"));
+      writeFileSync(join(workspace, "real-report.txt"), "ok");
+      symlinkSync(join(workspace, "real-report.txt"), join(workspace, "artifact"));
+
+      const result = await new ResultValidator().validate({
+        workspacePath: workspace,
+        outcome: success,
+        expectedArtifacts: ["artifact"],
+        commandRunner: runner([])
+      });
+
+      const check = result.checks.find((entry) => entry.name === "artifact:artifact");
+      expect(check?.passed).toBe(true);
     });
   });
 });

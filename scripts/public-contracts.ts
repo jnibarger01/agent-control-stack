@@ -67,7 +67,7 @@ const openapi = {
             }
           : {}),
         responses: {
-          "200": { description: "Successful response." },
+          [String(operation.successStatus ?? 200)]: { description: "Successful response." },
           "400": { description: "Boundary validation failed." },
           "401": { description: "Authentication is required." },
           "403": { description: "The authenticated principal is not authorized." }
