@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
 
       - name: Restore task ledger
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .automation/state/tasks.db
           key: hourly-pr-ledger-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -94,7 +94,7 @@ jobs:
 
       - name: Persist task ledger
         if: always() && steps.preflight.outputs.idempotency_key != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .automation/state/tasks.db
           key: hourly-pr-ledger-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
