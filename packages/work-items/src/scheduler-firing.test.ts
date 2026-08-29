@@ -80,6 +80,46 @@ describe("claimSchedulerFiring / completeSchedulerFiring", () => {
     expect(retry.firing.workItemId).toBe("wrk_123");
   });
 
+  it("records the crash-safe work-item handoff, then lets completion follow it idempotently", () => {
+    const store = createStore();
+    const claim = store.claimSchedulerFiring(
+      { scheduleId: "nightly", scheduledFiringTime: new Date(), idempotencyKey: hex("a") },
+      { via: "domain_service" }
+    );
+
+    const recorded = store.recordSchedulerFiringWorkItem(claim.firing.firingId, "wrk_crash_safe", {
+      via: "domain_service"
+    });
+    expect(recorded.status).toBe("claimed");
+    expect(recorded.workItemId).toBe("wrk_crash_safe");
+
+    // A retry after a crash between record and complete must be a no-op,
+    // not a conflict - the work item was already created.
+    const reRecorded = store.recordSchedulerFiringWorkItem(claim.firing.firingId, "wrk_crash_safe", {
+      via: "domain_service"
+    });
+    expect(reRecorded.workItemId).toBe("wrk_crash_safe");
+
+    const completed = store.completeSchedulerFiring(claim.firing.firingId, "wrk_crash_safe", {
+      via: "domain_service"
+    });
+    expect(completed.status).toBe("completed");
+    expect(completed.workItemId).toBe("wrk_crash_safe");
+  });
+
+  it("refuses to record a work item against a firing already bound to a different one", () => {
+    const store = createStore();
+    const claim = store.claimSchedulerFiring(
+      { scheduleId: "nightly", scheduledFiringTime: new Date(), idempotencyKey: hex("a") },
+      { via: "domain_service" }
+    );
+    store.recordSchedulerFiringWorkItem(claim.firing.firingId, "wrk_first", { via: "domain_service" });
+
+    expect(() =>
+      store.recordSchedulerFiringWorkItem(claim.firing.firingId, "wrk_second", { via: "domain_service" })
+    ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "scheduler_firing_conflict" }));
+  });
+
   it("refuses to complete a firing twice", () => {
     const store = createStore();
     const claim = store.claimSchedulerFiring(

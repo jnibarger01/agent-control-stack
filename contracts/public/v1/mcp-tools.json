@@ -1,0 +1,428 @@
+{
+  "schemaVersion": "acs.gateway-mcp.1.0.0",
+  "protocolVersion": "2024-11-05",
+  "tools": [
+    {
+      "name": "create_work_item",
+      "exposure": "remote",
+      "description": "Create a governed work item and immediately evaluate it through the policy gate.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string",
+            "minLength": 1
+          },
+          "requester": {
+            "type": "string",
+            "enum": [
+              "user",
+              "agent",
+              "system"
+            ]
+          },
+          "requesterSubject": {
+            "type": "string",
+            "minLength": 1
+          },
+          "status": {
+            "default": "pending_policy",
+            "type": "string",
+            "enum": [
+              "draft",
+              "pending_policy"
+            ]
+          },
+          "intent": {
+            "type": "string",
+            "minLength": 1
+          },
+          "target": {
+            "default": {},
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string",
+                "minLength": 1
+              },
+              "cwd": {
+                "type": "string",
+                "minLength": 1
+              },
+              "files": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              },
+              "services": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                }
+              }
+            }
+          },
+          "requestedActions": {
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "kind": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "description": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "params": {
+                  "default": {},
+                  "type": "object",
+                  "propertyNames": {
+                    "type": "string"
+                  },
+                  "additionalProperties": {}
+                }
+              },
+              "required": [
+                "kind",
+                "description"
+              ]
+            }
+          },
+          "risk": {
+            "default": "medium",
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "metadata": {
+            "type": "object",
+            "properties": {
+              "webhookSource": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9_-]{1,64}$"
+              },
+              "correlationId": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "title",
+          "requester",
+          "intent"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:create"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "get_work_item",
+      "exposure": "remote",
+      "description": "Read one work item by id.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "list_work_items",
+      "exposure": "remote",
+      "description": "List work items, optionally filtered by status.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "draft",
+              "pending_policy",
+              "needs_approval",
+              "approved",
+              "running",
+              "cancelling",
+              "succeeded",
+              "failed",
+              "blocked",
+              "cancelled",
+              "rejected",
+              "unknown",
+              "quarantined"
+            ]
+          }
+        }
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "approve_work_item",
+      "exposure": "prohibited_over_mcp",
+      "description": "Record user approval for the exact policy-evaluated action hash on a work item.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actionHash": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id",
+          "reason",
+          "actionHash"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:approve"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "unblock_work_item",
+      "exposure": "remote",
+      "description": "Move a blocked work item back to pending policy evaluation.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:approve"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "reject_work_item",
+      "exposure": "remote",
+      "description": "Reject a work item through a distinct terminal denial state.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:approve"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "cancel_work_item",
+      "exposure": "remote",
+      "description": "Cancel a work item through the work-item state machine.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:approve"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": true,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "open_acs_dashboard",
+      "exposure": "remote",
+      "description": "Open the read-only ACS Control Center with current health, executions, approvals, and operational findings.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {}
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "get_execution_detail",
+      "exposure": "remote",
+      "description": "Read authoritative detail and recent audit events for one ACS execution.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "test.agent.run",
+      "exposure": "development_only",
+      "description": "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "agent": {
+            "type": "string",
+            "enum": [
+              "pi",
+              "openclaw",
+              "codex",
+              "claude",
+              "gemini",
+              "opencode"
+            ]
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32000
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1
+          },
+          "timeoutSeconds": {
+            "type": "integer",
+            "exclusiveMinimum": 0,
+            "maximum": 3600
+          },
+          "permissionMode": {
+            "default": "read-only",
+            "type": "string",
+            "enum": [
+              "read-only",
+              "readonly",
+              "read_only"
+            ]
+          }
+        },
+        "required": [
+          "agent",
+          "prompt"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:approve"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": true
+      }
+    }
+  ]
+}

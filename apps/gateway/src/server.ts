@@ -14,7 +14,6 @@ import {
 import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
-  createWorkItemSchema,
   listWorkItemsSchema,
   submitWorkResultSchema,
   requesterSchema,
@@ -25,9 +24,6 @@ import {
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
   validateHeartbeatTtl,
-  acpRoles,
-  actorTypes,
-  registryStatuses,
   type ReadEventsOptions,
   type RegistryAgentDetail,
   type RegistryStatus,
@@ -40,92 +36,42 @@ import {
   authorizeMcpRequest,
   createProtectedResourceMetadata,
   mcpAuthorizationHttpError,
-  MCP_SCOPES,
   resolveMcpAuthOptions,
   type McpAuthenticatedRequest,
   type McpAuthOptions,
   type McpOAuthOptions
 } from "./auth.js";
-import { handleMcpHttpRequest, type AuthenticatedMcpRequestAudit, type GatewayDirectAgentController } from "./mcp.js";
+import {
+  handleMcpHttpRequest,
+  type AuthenticatedMcpRequestAudit,
+  type GatewayDirectAgentController,
+  type LocalAgentAuditEvent
+} from "./mcp.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
-import { webhookIngestSchema } from "./public-contracts.js";
 import { SqliteMoaIdempotencyStore } from "./moa/idempotency.js";
+import {
+  actorBodySchema,
+  agentBodySchema,
+  agentPatchSchema,
+  approvalBodySchema,
+  cancelBodySchema,
+  capabilitiesBodySchema,
+  connectorBodySchema,
+  connectorKeyRotationBodySchema,
+  cloneBodySchema,
+  createWorkItemSchema,
+  eventQuerySchema,
+  heartbeatBodySchema,
+  retryBodySchema,
+  sessionLoginBodySchema,
+  tunnelSessionBodySchema,
+  unblockBodySchema,
+  webhookIngestSchema
+} from "./public-contracts.js";
 import { SlidingWindowRateLimiter, type RateLimitOptions } from "./rate-limit.js";
 import { GatewayMetrics } from "./metrics.js";
 import { gatewayListenConfig } from "./runtime-config.js";
 
-const approvalBodySchema = z.object({
-  reason: z.string().min(1),
-  actionHash: z.string().min(1)
-});
-const cancelBodySchema = z.object({ reason: z.string().min(1).optional() });
-const unblockBodySchema = z.object({}).passthrough();
-const mcpScopeSchema = z.enum(MCP_SCOPES);
-const connectorBodySchema = z.object({
-  id: z.string().min(1),
-  displayName: z.string().min(1).optional(),
-  publicKeyPem: z.string().min(1),
-  allowedScopes: z.array(mcpScopeSchema).min(1)
-});
-const connectorKeyRotationBodySchema = z.object({
-  publicKeyPem: z.string().min(1),
-  reason: z.string().min(1)
-});
-const tunnelSessionBodySchema = z.object({
-  tunnelId: z.string().min(1),
-  sessionId: z.string().min(1),
-  issuedAt: z.string().min(1).optional(),
-  expiresAt: z.string().min(1)
-});
-const acpRoleSchema = z.enum(acpRoles);
-const registryStatusSchema = z.enum(registryStatuses);
-const optionalStringSchema = z.string().min(1).optional();
-const nullableStringSchema = z.string().min(1).nullable().optional();
-const agentBodySchema = z.object({
-  id: z.string().min(1),
-  name: z.string().min(1),
-  kind: z.string().min(1),
-  acpRole: acpRoleSchema,
-  provider: optionalStringSchema,
-  model: optionalStringSchema,
-  endpoint: optionalStringSchema,
-  status: registryStatusSchema.optional(),
-  lastError: optionalStringSchema
-});
-const agentPatchSchema = z.object({
-  name: optionalStringSchema,
-  kind: optionalStringSchema,
-  acpRole: acpRoleSchema.optional(),
-  provider: nullableStringSchema,
-  model: nullableStringSchema,
-  endpoint: nullableStringSchema,
-  status: registryStatusSchema.optional(),
-  lastError: nullableStringSchema
-});
-const capabilitySchema = z.object({
-  name: z.string().min(1),
-  description: optionalStringSchema,
-  inputSchema: z.record(z.string(), z.unknown()).optional()
-});
-const capabilitiesBodySchema = z.object({ capabilities: z.array(capabilitySchema) });
-const actorBodySchema = z.object({
-  id: z.string().min(1),
-  actorType: z.enum(actorTypes),
-  displayName: z.string().min(1),
-  externalRef: optionalStringSchema
-});
-const heartbeatBodySchema = z.object({
-  status: registryStatusSchema,
-  currentTask: optionalStringSchema,
-  lastError: optionalStringSchema
-});
-const eventQuerySchema = z
-  .object({
-    limit: z.coerce.number().int().positive().optional(),
-    afterSequence: z.coerce.number().int().nonnegative().optional()
-  })
-  .passthrough();
-const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
 const MAX_RESULT_BODY_BYTES = 256 * 1024;
@@ -516,6 +462,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       requestId: request.id,
       remoteAddress: request.socket.remoteAddress ?? request.ip,
       auditAuthenticatedRequest: recordAuthenticatedMcpRequest,
+      auditLocalAgentEvent: recordLocalAgentEvent,
       resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth),
       maxPendingWorkItems
     });
@@ -963,7 +910,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
         return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
       }
-      const workItem = tools.retry_work_item({ ...requestObject(request.body), id: request.params.id, actor });
+      const body = retryBodySchema.parse(requestObject(request.body));
+      const workItem = tools.retry_work_item({ ...body, id: request.params.id, actor });
       return reply.code(201).send({ workItem });
     } catch (error) {
       return sendError(reply, error);
@@ -977,7 +925,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
         return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
       }
-      const workItem = tools.clone_work_item({ ...requestObject(request.body), id: request.params.id, actor });
+      const body = cloneBodySchema.parse(requestObject(request.body));
+      const workItem = tools.clone_work_item({ ...body, id: request.params.id, actor });
       return reply.code(201).send({ workItem });
     } catch (error) {
       return sendError(reply, error);
@@ -1019,6 +968,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       authTunnelId: event.auth.tunnelId,
       authSessionId: event.auth.sessionId,
       authScopes: event.auth.scopes
+    });
+  }
+
+  function recordLocalAgentEvent(event: LocalAgentAuditEvent): void {
+    workItems.recordLocalAgentEvent({
+      eventType: event.eventType,
+      actor: event.actor,
+      agentId: event.agentId,
+      requestId: event.requestId,
+      requestHash: event.requestHash,
+      scope: event.scope,
+      outcome: event.outcome,
+      reason: event.reason,
+      outputBytes: event.outputBytes,
+      exitCode: event.exitCode
     });
   }
 
