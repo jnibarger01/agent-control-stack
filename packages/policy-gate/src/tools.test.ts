@@ -243,6 +243,64 @@ describe("policy-gated work item tools", () => {
     }
   });
 
+  it("binds and consumes every required approval for a multi-action plan on claim, not just the first", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-tools-multi-approval-lease-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, fakePolicy("require_approval"));
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Multi-action work",
+        requester: "user",
+        intent: "verify all required approvals are bound to the lease",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          { kind: "fs.write", description: "write first", params: { paths: ["src/one.ts"] } },
+          { kind: "fs.write", description: "write second", params: { paths: ["src/two.ts"] } }
+        ],
+        risk: "high"
+      });
+
+      tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "approver",
+        reason: "approve one",
+        actionHash: testActionHash(0)
+      });
+      tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "approver",
+        reason: "approve two",
+        actionHash: testActionHash(1)
+      });
+
+      const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
+      expect(claimed?.status).toBe("running");
+
+      const dbAny = store as unknown as {
+        db: {
+          prepare: (sql: string) => { all: (...a: unknown[]) => Array<{ status: string }> };
+        };
+      };
+      const approvalRows = dbAny.db
+        .prepare(`SELECT status FROM execution_plan_approvals WHERE work_item_id = ?`)
+        .all(workItem.id);
+      // Both action approvals were bound to the lease's authority and
+      // consumed transactionally with it - not just the first one.
+      expect(approvalRows).toHaveLength(2);
+      for (const row of approvalRows) {
+        expect(row.status).toBe("consumed");
+      }
+      const leaseRows = dbAny.db
+        .prepare(`SELECT approval_id FROM attempt_lease_approvals WHERE work_item_id = ?`)
+        .all(workItem.id);
+      expect(leaseRows).toHaveLength(1);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("re-evaluates policy for retry and clone lineage instead of copying approval", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-lineage-policy-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

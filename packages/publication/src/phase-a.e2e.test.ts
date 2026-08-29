@@ -14,7 +14,13 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 
 function store() {
   const records = new Map<string, PublicationRecord>();
-  return { getByIdempotency: (key: string) => records.get(key), record: (record: PublicationRecord) => { records.set(record.idempotencyKey, record); return record; }, records };
+  return {
+    getByIdempotency: (key: string) => records.get(key),
+    record: (record: PublicationRecord) => { records.set(record.idempotencyKey, record); return record; },
+    getValidationRunForAttempt: () => ({ passed: true }),
+    planAllowsPush: () => true,
+    records
+  };
 }
 
 describe("Phase A publication E2E", () => {
@@ -39,7 +45,7 @@ describe("Phase A publication E2E", () => {
       const github = { createOrUpdate: vi.fn()
         .mockRejectedValueOnce(new Error("simulated process crash after push"))
         .mockResolvedValue({ url: "https://github.com/acme/repo/pull/42" }) };
-      const input = { workItemId: "work-e2e", attemptId: "attempt-e2e", workspacePath: repo, branch: "acs/attempt/attempt-e2e", remote: "origin", title: "Validated change", body: "Evidence", validationPassed: true, leaseIsCurrent: vi.fn(async () => true) };
+      const input = { workItemId: "work-e2e", attemptId: "attempt-e2e", workspacePath: repo, branch: "acs/attempt/attempt-e2e", remote: "origin", title: "Validated change", body: "Evidence", leaseIsCurrent: vi.fn(async () => true) };
 
       await expect(publishValidatedAttempt(input, firstStore, github)).rejects.toThrow("simulated process crash");
       const pushedSha = await git(repo, "rev-parse", "HEAD");

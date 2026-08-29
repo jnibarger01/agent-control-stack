@@ -1,9 +1,11 @@
+import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
-import { gatewayMcpInputSchemas, publicContractExamples } from "./public-contracts.js";
+import { gatewayMcpInputSchemas, publicContractExamples, publicHttpOperations } from "./public-contracts.js";
 import { buildGateway } from "./server.js";
 
 type GeneratedTransportRequest = {
@@ -87,6 +89,101 @@ describe("generated public contract clients", () => {
       gatewayMcpInputSchemas.create_work_item.safeParse({ title: "", requester: "user", intent: "" }).success
     ).toBe(false);
     await app.close();
+  });
+});
+
+describe("public contract success statuses", () => {
+  it("declares the exact status code the runtime handler actually sends", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-public-contracts-status-"));
+    directories.push(directory);
+    const dbPath = join(directory, "gateway.db");
+    const boundActorId = "contract-status-actor";
+    const seed = new SqliteWorkItemStore(dbPath);
+    try {
+      seed.registerActor({ id: boundActorId, actorType: "HUMAN", displayName: boundActorId });
+    } finally {
+      seed.close();
+    }
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: { token: "test-token", actor: "user", actorId: boundActorId },
+      mcpAuth: { localBearerToken: "test-token" },
+      acpAdapter: false,
+      moa: false
+    });
+    const headers = { authorization: "Bearer test-token" };
+    const expectedStatus = (operationId: string): number => {
+      const operation = publicHttpOperations.find((candidate) => candidate.operationId === operationId);
+      if (!operation) throw new Error(`unknown operation ${operationId}`);
+      return operation.successStatus ?? 200;
+    };
+
+    try {
+      const { publicKey } = generateKeyPairSync("ed25519");
+      const connector = await app.inject({
+        method: "POST",
+        url: "/connectors",
+        headers,
+        payload: {
+          id: "contract-connector",
+          publicKeyPem: String(publicKey.export({ type: "spki", format: "pem" })),
+          allowedScopes: ["acs:work:create"]
+        }
+      });
+      expect(connector.statusCode).toBe(expectedStatus("registerConnector"));
+
+      const actor = await app.inject({
+        method: "POST",
+        url: "/api/actors",
+        headers,
+        payload: { id: "contract-registered-actor", actorType: "HUMAN", displayName: "Contract Actor" }
+      });
+      expect(actor.statusCode).toBe(expectedStatus("registerActor"));
+
+      const agent = await app.inject({
+        method: "POST",
+        url: "/api/agents",
+        headers,
+        payload: { id: "contract-agent", name: "Contract Agent", kind: "cli", acpRole: "IMPLEMENTATION_AGENT" }
+      });
+      expect(agent.statusCode).toBe(expectedStatus("registerAgent"));
+
+      const heartbeat = await app.inject({
+        method: "POST",
+        url: "/api/agents/contract-agent/heartbeat",
+        headers,
+        payload: { status: "AVAILABLE" }
+      });
+      expect(heartbeat.statusCode).toBe(expectedStatus("recordAgentHeartbeat"));
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        headers,
+        payload: publicContractExamples.createWorkItem
+      });
+      expect(created.statusCode).toBe(expectedStatus("createWorkItem"));
+      const workItem = created.json() as { id: string };
+
+      // cloneWorkItem requires a terminal source work item.
+      await app.inject({
+        method: "POST",
+        url: `/work-items/${workItem.id}/cancel`,
+        headers,
+        payload: {}
+      });
+
+      const cloned = await app.inject({
+        method: "POST",
+        url: `/work-items/${workItem.id}/clone`,
+        headers,
+        payload: {}
+      });
+      expect(cloned.statusCode).toBe(expectedStatus("cloneWorkItem"));
+    } finally {
+      await app.close();
+    }
   });
 });
 

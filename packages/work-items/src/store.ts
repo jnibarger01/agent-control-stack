@@ -75,6 +75,7 @@ import {
   type CreateAttemptInput,
   type ExecutionAttempt,
   type IssueLeaseInput,
+  type LeaseApprovalBinding,
   type RecordWorkspaceAllocationInput,
   type TransitionAttemptInput,
   type WorkspaceAllocation
@@ -127,6 +128,7 @@ interface WorkItemRow {
   requested_actions_json: string;
   risk: WorkItemRisk;
   result_json: string | null;
+  metadata_json: string | null;
   worker_id: string | null;
   started_at: string | null;
   lease_expires_at: string | null;
@@ -537,6 +539,30 @@ export interface ConnectorRequestRecord {
   authScopes?: string[];
 }
 
+export const localAgentEventTypes = [
+  "authorization",
+  "dispatch.started",
+  "completed",
+  "failed",
+  "cancelled",
+  "rejected"
+] as const;
+export type LocalAgentEventType = (typeof localAgentEventTypes)[number];
+
+export interface LocalAgentEventRecord {
+  eventType: LocalAgentEventType;
+  actor: string;
+  agentId: string;
+  requestId?: string;
+  requestHash?: string;
+  scope?: string;
+  target?: string;
+  outcome?: string;
+  reason?: string;
+  outputBytes?: number;
+  exitCode?: number | null;
+}
+
 export const acpTimelineEventTypes = [
   "initialized",
   "message",
@@ -736,6 +762,8 @@ export interface ClaimOptions {
     planHash: string;
     admissionId: string;
     approvalId?: string;
+    /** Every additional required-plan-action approval beyond `approvalId`. */
+    additionalApprovals?: LeaseApprovalBinding[];
     policyVersion: string;
     policyDecisionHash: string;
   };
@@ -829,11 +857,24 @@ export interface WorkItemStore {
   getWorkspaceAllocationByHostPath(hostPath: string): WorkspaceAllocation | undefined;
   closeWorkspaceAllocation(allocationId: string, options: PrivilegedTransitionOptions): WorkspaceAllocation;
   claimSchedulerFiring(input: ClaimSchedulerFiringInput, options: PrivilegedTransitionOptions): SchedulerFiringClaim;
+  recordSchedulerFiringWorkItem(
+    firingId: string,
+    workItemId: string,
+    options: PrivilegedTransitionOptions
+  ): SchedulerFiring;
   completeSchedulerFiring(firingId: string, workItemId: string, options: PrivilegedTransitionOptions): SchedulerFiring;
   requestWorkspaceCleanup(
     input: { allocationId: string; leaseId: string; workerId: string; fencingEpoch: number },
     options: PrivilegedTransitionOptions
   ): WorkspaceAllocation;
+  getWorkspaceCleanupAuthority(input: {
+    workItemId: string;
+    attemptId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    workspaceAllocationId: string;
+  }): boolean;
   recordWorkspaceCleanupFailure(
     allocationId: string,
     error: string,
@@ -882,6 +923,7 @@ export interface WorkItemStore {
   reconcileStaleTunnelSessions(options?: LivenessReconciliationOptions): RegisteredTunnelSession[];
   getTunnelSession(input: TunnelSessionRef): TunnelSessionAuthorizationRecord | undefined;
   recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent;
+  recordLocalAgentEvent(input: LocalAgentEventRecord): StoredAuditEvent;
   recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
@@ -948,8 +990,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.db
         .prepare(
           `INSERT INTO work_items
-           (id, title, requester, requester_subject, status, intent, target_json, requested_actions_json, risk, result_json, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)`
+           (id, title, requester, requester_subject, status, intent, target_json, requested_actions_json, risk, result_json, metadata_json, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`
         )
         .run(
           workItem.id,
@@ -961,6 +1003,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           JSON.stringify(workItem.target),
           JSON.stringify(workItem.requestedActions),
           workItem.risk,
+          workItem.metadata ? JSON.stringify(workItem.metadata) : null,
           workItem.createdAt,
           workItem.updatedAt
         );
@@ -1402,6 +1445,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("attempt_transition_fence_stale", "attempt transition fence is stale");
       }
       const now = (parsed.now ?? new Date()).toISOString();
+      const nowMsForLease = Date.parse(now);
+      const authoritativeLease = this.db
+        .prepare(
+          `SELECT * FROM attempt_leases
+           WHERE attempt_id = ? AND work_item_id = ? AND worker_id = ? AND fencing_epoch = ? AND status = 'active'`
+        )
+        .get(parsed.attemptId, parsed.workItemId, parsed.workerId, parsed.fencingEpoch) as unknown as
+        AttemptLeaseRow | undefined;
+      if (!authoritativeLease || Date.parse(authoritativeLease.expires_at) <= nowMsForLease) {
+        throw new ControlStackError("attempt_transition_fence_stale", "attempt lease is missing, inactive, or expired");
+      }
       const terminal = new Set(["succeeded", "failed", "cancelled", "unknown", "quarantined"]);
       const startedAt = parsed.status === "running" ? (current.started_at ?? now) : current.started_at;
       const terminalAt = terminal.has(parsed.status) ? now : null;
@@ -1530,12 +1584,26 @@ export class SqliteWorkItemStore implements WorkItemStore {
           now
         );
 
+      const additionalApprovals = parsed.additionalApprovals ?? [];
+      for (const additional of additionalApprovals) {
+        this.db
+          .prepare(
+            `INSERT INTO attempt_lease_approvals
+             (lease_id, approval_id, attempt_id, work_item_id, action_hash, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)`
+          )
+          .run(leaseId, additional.approvalId, parsed.attemptId, parsed.workItemId, additional.actionHash, now);
+      }
+
       const lease = attemptLeaseSchema.parse({
         leaseId,
         attemptId: parsed.attemptId,
         workItemId: parsed.workItemId,
         admissionId: parsed.admissionId,
         ...(parsed.approvalId ? { approvalId: parsed.approvalId } : {}),
+        ...(additionalApprovals.length
+          ? { additionalApprovalIds: additionalApprovals.map((approval) => approval.approvalId) }
+          : {}),
         workerId: parsed.workerId,
         tokenHash,
         planHash: attemptRow.plan_hash,
@@ -1672,8 +1740,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
             check.name,
             check.passed ? 1 : 0,
             check.detail,
-            check.stdout ?? null,
-            check.stderr ?? null
+            redactedBoundedOutput(check.stdout),
+            redactedBoundedOutput(check.stderr)
           );
       }
       const run = this.loadValidationRun(runId);
@@ -2149,6 +2217,51 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  recordSchedulerFiringWorkItem(
+    firingId: string,
+    workItemId: string,
+    options: PrivilegedTransitionOptions
+  ): SchedulerFiring {
+    requirePrivilegedTransition(options, "record_scheduler_firing_work_item");
+    return this.write(() => {
+      const existing = this.db
+        .prepare(`SELECT * FROM scheduler_firings WHERE firing_id = ?`)
+        .get(firingId) as unknown as SchedulerFiringRow | undefined;
+      if (!existing) {
+        throw new ControlStackError("scheduler_firing_not_found", `no such scheduler firing: ${firingId}`);
+      }
+      if (existing.status === "claimed" && existing.work_item_id === workItemId) {
+        // Already recorded by a prior attempt that then crashed before the
+        // callback completed - idempotent no-op so a retry can proceed
+        // straight to invoking the callback.
+        return { value: rowToSchedulerFiring(existing), events: [] };
+      }
+      const updated = this.db
+        .prepare(
+          `UPDATE scheduler_firings SET work_item_id = ?
+           WHERE firing_id = ? AND status = 'claimed' AND work_item_id IS NULL`
+        )
+        .run(workItemId, firingId);
+      if (updated.changes !== 1) {
+        throw new ControlStackError(
+          "scheduler_firing_conflict",
+          `firing ${firingId} cannot record work item ${workItemId} (not claimed, or already bound to a different work item)`
+        );
+      }
+      const row = this.db
+        .prepare(`SELECT * FROM scheduler_firings WHERE firing_id = ?`)
+        .get(firingId) as unknown as SchedulerFiringRow;
+      const firing = rowToSchedulerFiring(row);
+      const event = this.appendAuditEvent(
+        createEvent("scheduler_firing.work_item_recorded", firing, {
+          "firing.id": firingId,
+          "work_item.id": workItemId
+        })
+      );
+      return { value: firing, events: [event] };
+    });
+  }
+
   completeSchedulerFiring(firingId: string, workItemId: string, options: PrivilegedTransitionOptions): SchedulerFiring {
     requirePrivilegedTransition(options, "complete_scheduler_firing");
     return this.write(() => {
@@ -2156,9 +2269,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const updated = this.db
         .prepare(
           `UPDATE scheduler_firings SET status = 'completed', work_item_id = ?, completed_at = ?
-           WHERE firing_id = ? AND status = 'claimed'`
+           WHERE firing_id = ? AND status = 'claimed' AND (work_item_id IS NULL OR work_item_id = ?)`
         )
-        .run(workItemId, now, firingId);
+        .run(workItemId, now, firingId, workItemId);
       if (updated.changes !== 1) {
         throw new ControlStackError(
           "scheduler_firing_conflict",
@@ -2194,6 +2307,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("workspace_cleanup_fence_stale", "workspace cleanup fence is stale");
       }
       if (row.status === "torn_down") return { value: rowToWorkspaceAllocation(row), events: [] };
+      if (!this.isWorkspaceCleanupAuthorityCurrent(row, input)) {
+        throw new ControlStackError(
+          "workspace_cleanup_fence_stale",
+          "workspace cleanup lease is missing, inactive, expired, or superseded"
+        );
+      }
       const now = new Date().toISOString();
       this.db
         .prepare(
@@ -2209,6 +2328,63 @@ export class SqliteWorkItemStore implements WorkItemStore {
       };
       return { value: rowToWorkspaceAllocation(updated), events: [] };
     });
+  }
+
+  /**
+   * Whether the caller's presented worker/lease/epoch authority is still
+   * current for this allocation's attempt - re-verified against the
+   * attempt's own live current_fencing_epoch/claimed_by_worker_id, not the
+   * tuple copied onto the allocation at provision time. A terminal attempt
+   * (succeeded/failed/cancelled/unknown/quarantined) can never be
+   * re-leased, so a matching epoch there is sufficient; a still-live
+   * attempt additionally requires its lease to still be active and
+   * unexpired, since a still-live attempt *can* be re-leased out from
+   * under a stale worker.
+   */
+  private isWorkspaceCleanupAuthorityCurrent(
+    row: WorkspaceAllocationRow,
+    input: { leaseId: string; workerId: string; fencingEpoch: number }
+  ): boolean {
+    const isLegacyAuthority =
+      row.attempt_id === row.work_item_id && row.lease_id === row.work_item_id && row.worker_id === "legacy";
+    if (isLegacyAuthority) return true;
+
+    const terminalStatuses = new Set(["succeeded", "failed", "cancelled", "unknown", "quarantined"]);
+    const attemptRow = this.db
+      .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`)
+      .get(row.attempt_id, row.work_item_id) as unknown as ExecutionAttemptRow | undefined;
+    const epochCurrent =
+      attemptRow !== undefined &&
+      attemptRow.current_fencing_epoch === input.fencingEpoch &&
+      attemptRow.claimed_by_worker_id === input.workerId;
+    if (!epochCurrent || !attemptRow) return false;
+    if (terminalStatuses.has(attemptRow.status)) return true;
+
+    const nowMs = Date.now();
+    const authoritativeLease = this.db
+      .prepare(
+        `SELECT * FROM attempt_leases
+         WHERE lease_id = ? AND attempt_id = ? AND work_item_id = ? AND worker_id = ? AND fencing_epoch = ? AND status = 'active'`
+      )
+      .get(input.leaseId, row.attempt_id, row.work_item_id, input.workerId, input.fencingEpoch) as unknown as
+      AttemptLeaseRow | undefined;
+    return Boolean(authoritativeLease) && Date.parse(authoritativeLease!.expires_at) > nowMs;
+  }
+
+  getWorkspaceCleanupAuthority(input: {
+    workItemId: string;
+    attemptId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    workspaceAllocationId: string;
+  }): boolean {
+    const row = this.db
+      .prepare(`SELECT * FROM workspace_allocations WHERE allocation_id = ? AND work_item_id = ? AND attempt_id = ?`)
+      .get(input.workspaceAllocationId, input.workItemId, input.attemptId) as unknown as
+      WorkspaceAllocationRow | undefined;
+    if (!row) return false;
+    return this.isWorkspaceCleanupAuthorityCurrent(row, input);
   }
 
   recordWorkspaceCleanupFailure(
@@ -2980,6 +3156,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  recordLocalAgentEvent(input: LocalAgentEventRecord): StoredAuditEvent {
+    return this.write(() => {
+      assertOneOf(input.eventType, localAgentEventTypes, "eventType");
+      const attributes: Record<string, string | number | boolean> = {
+        "agent.id": requiredString(input.agentId, "agentId"),
+        "local_agent.actor": requiredString(input.actor, "actor"),
+        "local_agent.event_type": input.eventType
+      };
+      if (input.requestId) attributes["local_agent.request_id"] = input.requestId;
+      if (input.requestHash) attributes["local_agent.request_hash"] = input.requestHash;
+      if (input.scope) attributes["local_agent.scope"] = input.scope;
+      if (input.target) attributes["local_agent.target"] = input.target;
+      const event = this.appendAuditEvent(createEvent(`local_agent.${input.eventType}`, { ...input }, attributes));
+      return { value: event, events: [event] };
+    });
+  }
+
   recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent {
     return this.write(() => {
       this.getActorRequired(input.actorId);
@@ -3169,6 +3362,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         "direct startWorkItem is test-only; use claimNextApprovedWorkItem"
       );
     }
+    assertTestOnlyStoreApiAllowed("startWorkItem direct-start path");
     const leaseToken = createLeaseToken();
     const leaseMs = options.leaseMs ?? this.leaseMs;
     return this.write(() => {
@@ -3231,6 +3425,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "legacy work-item claims are test-only; production claims require persisted attempt authority"
         );
       }
+      assertTestOnlyStoreApiAllowed("claimNextApprovedWorkItem legacy claim path");
       const updated = transitionWorkItem(current, "running");
       const startedAt = updated.updatedAt;
       const leaseExpiry = leaseExpiresAt(startedAt, options.leaseMs ?? this.leaseMs);
@@ -3328,6 +3523,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         workItemId: current.id,
         admissionId: authority.admissionId,
         ...(authority.approvalId ? { approvalId: authority.approvalId } : {}),
+        additionalApprovals: authority.additionalApprovals ?? [],
         workerId,
         leaseToken,
         policyVersion: authority.policyVersion,
@@ -4409,6 +4605,7 @@ function rowToWorkItem(row: WorkItemRow): WorkItem {
     requestedActions: JSON.parse(row.requested_actions_json),
     risk: row.risk,
     ...(row.result_json ? { result: JSON.parse(row.result_json) as Record<string, unknown> } : {}),
+    ...(row.metadata_json ? { metadata: JSON.parse(row.metadata_json) as Record<string, unknown> } : {}),
     ...(row.source_work_item_id ? { sourceWorkItemId: row.source_work_item_id } : {}),
     ...(row.lineage_type ? { lineageType: row.lineage_type } : {}),
     ...(row.retry_reason ? { retryReason: row.retry_reason } : {}),
@@ -4849,6 +5046,23 @@ function redactedOptionalString(value: string | null | undefined): string | null
   return typeof redacted === "string" ? redacted : "[redacted]";
 }
 
+const MAX_PERSISTED_COMMAND_OUTPUT_CHARS = 32_000;
+
+/**
+ * Validation command stdout/stderr may contain secrets the canonical
+ * redaction heuristic doesn't recognize (an arbitrary internal credential
+ * format, for instance) - so beyond redacting known patterns, this also
+ * bounds what's kept, on the theory that unbounded raw process output is
+ * itself an unsafe stream to persist durably regardless of content.
+ */
+function redactedBoundedOutput(value: string | null | undefined): string | null {
+  const redacted = redactedOptionalString(value);
+  if (redacted === null) return null;
+  return redacted.length > MAX_PERSISTED_COMMAND_OUTPUT_CHARS
+    ? `${redacted.slice(0, MAX_PERSISTED_COMMAND_OUTPUT_CHARS)}\n[truncated]`
+    : redacted;
+}
+
 function normalizeInputSchema(value: Record<string, unknown> | undefined): string | null {
   if (value === undefined) return null;
   if (value === null || Array.isArray(value) || typeof value !== "object") {
@@ -4865,6 +5079,22 @@ function normalizeInputSchema(value: Record<string, unknown> | undefined): strin
 function assertOneOf<T extends string>(value: string, allowed: readonly T[], field: string): asserts value is T {
   if (!allowed.includes(value as T)) {
     throw new ControlStackError("invalid_agent_registration", `${field} is not supported`);
+  }
+}
+
+/**
+ * The second, environment-level gate for every *ForTests escape hatch in
+ * this file: a caller passing the opt-in boolean is not, by itself, proof
+ * of a test context - an accidental or compromised internal production
+ * caller could pass it too. This makes the legacy/direct-start bypass
+ * paths categorically unreachable wherever NODE_ENV=production is set
+ * (every real deployment), regardless of what flag value a caller passes,
+ * mirroring the same idiom apps/worker's assertDryRunExecutionMode already
+ * uses for the equivalent production/test boundary.
+ */
+function assertTestOnlyStoreApiAllowed(apiName: string, nodeEnv = process.env.NODE_ENV): void {
+  if (nodeEnv === "production") {
+    throw new ControlStackError("test_only_api_disabled_in_production", `${apiName} is disabled in production`);
   }
 }
 

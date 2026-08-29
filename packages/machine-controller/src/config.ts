@@ -32,6 +32,18 @@ const rawConfigSchema = z.object({
       deny: z.array(z.string().min(1)).default([])
     })
     .optional(),
+  agents: z
+    .array(
+      z
+        .object({
+          id: z.string().regex(/^[A-Za-z0-9._-]+$/),
+          command: z.string().min(1).refine((value) => !value.includes("/"), "agent command must be a PATH command"),
+          args: z.array(z.string()).default([]),
+          permission_mode: z.literal("read-only").default("read-only")
+        })
+        .strict()
+    )
+    .default([]),
   audit: z
     .object({
       log_path: z.string().min(1).default(".acs/audit/mcp.jsonl")
@@ -61,6 +73,12 @@ export interface MachineControllerConfig {
     allowReadonly: string[];
     deny: string[];
   };
+  agents?: Array<{
+    id: string;
+    command: string;
+    args: string[];
+    permissionMode: "read-only";
+  }>;
   audit: {
     logPath: string;
   };
@@ -101,6 +119,7 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
     command_termination_grace_ms: 1_000
   };
   const commands = raw.commands ?? { allow_readonly: [], deny: [] };
+  const agents = raw.agents;
   const audit = raw.audit ?? { log_path: ".acs/audit/mcp.jsonl" };
 
   return {
@@ -121,6 +140,12 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
       allowReadonly: commands.allow_readonly,
       deny: commands.deny
     },
+    agents: agents.map((agent) => ({
+      id: agent.id,
+      command: agent.command,
+      args: [...agent.args],
+      permissionMode: agent.permission_mode
+    })),
     audit: {
       logPath: absolutePath(audit.log_path, baseDir)
     }
