@@ -191,6 +191,7 @@ describe("control-plane database health", () => {
     expect(inspectControlPlaneDatabaseFile(destination).ok).toBe(true);
   });
 
+  // Full restore verification includes multiple integrity passes and can exceed Vitest's 5s default on hosted runners.
   it("preserves the destination and removes the sibling temporary file on pre-rename interruption", async () => {
     const source = createHealthyDatabase();
     const destination = createHealthyDatabase();
@@ -210,7 +211,7 @@ describe("control-plane database health", () => {
     expect(readFileSync(destination)).toEqual(before);
     expect(readActorIds(destination)).toContain("destination-only");
     expect(restoreTemporaryFiles(destination)).toEqual([]);
-  });
+  }, 15_000);
 
   it("re-verifies the sibling temporary file after the pre-rename hook", async () => {
     const source = createHealthyDatabase();
@@ -228,7 +229,7 @@ describe("control-plane database health", () => {
     expect(readFileSync(destination)).toEqual(before);
     expect(readActorIds(destination)).toContain("destination-only");
     expect(restoreTemporaryFiles(destination)).toEqual([]);
-  });
+  }, 15_000);
 
   it("preserves the destination when the backup fails full verification", async () => {
     const source = createHealthyDatabase();
@@ -245,7 +246,7 @@ describe("control-plane database health", () => {
 
     expect(readFileSync(destination)).toEqual(before);
     expect(restoreTemporaryFiles(destination)).toEqual([]);
-  });
+  }, 15_000);
 
   it("fails closed while another connection holds the destination writer lock", async () => {
     const source = createHealthyDatabase();
