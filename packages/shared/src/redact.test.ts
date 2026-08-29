@@ -61,4 +61,21 @@ describe("audit redaction", () => {
     cyclic.self = cyclic;
     expect(redactValue(cyclic)).toEqual({ self: "[circular]" });
   });
+
+  it("redacts a long, non-matching string in linear time instead of hanging on catastrophic regex backtracking", () => {
+    // A large non-matching string (e.g. captured command stdout with no
+    // ":"/"@" anywhere) previously drove the URL-credentials pattern's
+    // twin unbounded quantifiers into quadratic-to-exponential
+    // backtracking. This must stay fast regardless of input size.
+    const huge = "x".repeat(2_000_000);
+    const start = Date.now();
+    const result = redactValue(huge);
+    expect(Date.now() - start).toBeLessThan(2_000);
+    expect(result).toBe(huge);
+  });
+
+  it("still redacts a real URL credential and a Bearer token after bounding the redaction pattern's quantifiers", () => {
+    expect(redactValue("connect to https://user:pass@example.com/path")).toBe("[redacted]");
+    expect(redactValue("Authorization: Bearer sk-abcDEF1234567890abcdefghijklmnop")).toBe("[redacted]");
+  });
 });

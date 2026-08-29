@@ -1,0 +1,36 @@
+{
+  "schemaVersion": "acs.public-contract-examples.1.0.0",
+  "examples": {
+    "createWorkItem": {
+      "title": "Run repository tests",
+      "requester": "user",
+      "intent": "Run the repository test suite.",
+      "target": {
+        "cwd": "/workspace/agent-control-stack"
+      },
+      "requestedActions": [
+        {
+          "kind": "command",
+          "description": "npm test",
+          "params": {}
+        }
+      ],
+      "risk": "medium"
+    },
+    "approveWorkItem": {
+      "reason": "Reviewed against the exact action fingerprint.",
+      "actionHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    "listWorkItemsMcp": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "method": "tools/call",
+      "params": {
+        "name": "list_work_items",
+        "arguments": {
+          "status": "approved"
+        }
+      }
+    }
+  }
+}

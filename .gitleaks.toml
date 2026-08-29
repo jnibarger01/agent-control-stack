@@ -8,7 +8,11 @@ paths = [
   '''(^|/)dist/''',
   '''(^|/)\.ijfw/''',
   '''(^|/)apps/gateway/src/server\.test\.ts$''',
-  '''(^|/)packages/agentos-contracts/test/trace\.test\.js$'''
+  '''(^|/)packages/engine-adapter/src/registry\.test\.ts$''',
+  '''(^|/)packages/execution-controller/src/index\.test\.ts$''',
+  '''(^|/)packages/agentos-contracts/test/trace\.test\.js$''',
+  '''(^|/)packages/work-items/src/validation\.test\.ts$''',
+  '''(^|/)scripts/test_autonomous_agent\.py$'''
 ]
 regexes = [
   '''(?i)authorization:\s*bearer\s+(?:change-me-local-dev|local-dev-token)''',

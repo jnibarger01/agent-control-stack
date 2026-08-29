@@ -1,0 +1,26 @@
+{
+  "name": "@agent-control-stack/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/dispatch.js",
+  "types": "./dist/dispatch.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/dispatch.d.ts",
+      "default": "./dist/dispatch.js"
+    }
+  },
+  "bin": {
+    "acs": "./dist/cli.js"
+  },
+  "dependencies": {
+    "@agent-control-stack/gateway": "0.1.0",
+    "@agent-control-stack/machine-controller": "0.1.0",
+    "@agent-control-stack/mcp": "0.1.0",
+    "@agent-control-stack/procedural-learning": "0.1.0",
+    "@agent-control-stack/scheduler": "0.1.0",
+    "@agent-control-stack/work-items": "0.1.0",
+    "@agent-control-stack/worker": "0.1.0"
+  }
+}
