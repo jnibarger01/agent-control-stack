@@ -11,7 +11,11 @@ import { createMoaAcsClient, verifyExecutableGrant } from "./acs-client.js";
 
 const actor = "operator";
 const auth = { token: "token", actor } as const;
-const proposedAction = { category: "filesystem_write" as const, summary: "Apply approved patch", requires_mutation: true };
+const proposedAction = {
+  category: "filesystem_write" as const,
+  summary: "Apply approved patch",
+  requires_mutation: true
+};
 const expectedActionHash = sha256(stableStringify(proposedAction));
 
 const advisorJson = JSON.stringify({
@@ -104,12 +108,22 @@ describe("MoA ACS adapter", () => {
     const store = tempStore();
     try {
       const workItem = await createApprovedMoaWork(store);
-      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), task_id: "task_wrong" })).toThrow("binding mismatch");
-      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), actor: "other" })).toThrow("actor binding mismatch");
-      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), session_id: "session-b" })).toThrow("binding mismatch");
-      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), expected_action_hash: "wrong" })).toThrow("hash binding mismatch");
-      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), expected_category: "read_only" })).toThrow("binding mismatch");
-      store.claimNextApprovedWorkItem("worker-a");
+      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), task_id: "task_wrong" })).toThrow(
+        "binding mismatch"
+      );
+      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), actor: "other" })).toThrow(
+        "actor binding mismatch"
+      );
+      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), session_id: "session-b" })).toThrow(
+        "binding mismatch"
+      );
+      expect(() => verifyExecutableGrant(store, { ...grantInput(workItem.id), expected_action_hash: "wrong" })).toThrow(
+        "hash binding mismatch"
+      );
+      expect(() =>
+        verifyExecutableGrant(store, { ...grantInput(workItem.id), expected_category: "read_only" })
+      ).toThrow("binding mismatch");
+      store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       expect(() => verifyExecutableGrant(store, grantInput(workItem.id))).toThrow("not approved");
     } finally {
       store.close();
@@ -162,8 +176,18 @@ describe("MoA ACS adapter", () => {
       preset: "cheap",
       task: { goal: "Review gateway auth", risk: "high", kind: "code_review", files: ["apps/gateway/src/mcp.ts"] }
     };
-    const first = await app.inject({ method: "POST", url: "/agent/run", headers: { authorization: `Bearer ${auth.token}` }, payload });
-    const second = await app.inject({ method: "POST", url: "/agent/run", headers: { authorization: `Bearer ${auth.token}` }, payload });
+    const first = await app.inject({
+      method: "POST",
+      url: "/agent/run",
+      headers: { authorization: `Bearer ${auth.token}` },
+      payload
+    });
+    const second = await app.inject({
+      method: "POST",
+      url: "/agent/run",
+      headers: { authorization: `Bearer ${auth.token}` },
+      payload
+    });
     expect(first.statusCode).toBe(200);
     expect(second.statusCode).toBe(200);
     expect(second.json().replayed).toBe(true);

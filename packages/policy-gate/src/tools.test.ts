@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { createPolicyEngine, type PolicyDecision, type PolicyEngine, type PolicyOperation } from "./policy.js";
@@ -220,7 +221,7 @@ describe("policy-gated work item tools", () => {
         id: workItem.id,
         approvedBy: "approver",
         reason: "approve one",
-        actionHash: "hash_0"
+        actionHash: testActionHash(0)
       });
 
       expect(first.approvals).toHaveLength(1);
@@ -231,11 +232,69 @@ describe("policy-gated work item tools", () => {
         id: workItem.id,
         approvedBy: "approver",
         reason: "approve two",
-        actionHash: "hash_1"
+        actionHash: testActionHash(1)
       });
 
       expect(second.approvals).toHaveLength(1);
       expect(second.workItem.status).toBe("approved");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("binds and consumes every required approval for a multi-action plan on claim, not just the first", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-tools-multi-approval-lease-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, fakePolicy("require_approval"));
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Multi-action work",
+        requester: "user",
+        intent: "verify all required approvals are bound to the lease",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          { kind: "fs.write", description: "write first", params: { paths: ["src/one.ts"] } },
+          { kind: "fs.write", description: "write second", params: { paths: ["src/two.ts"] } }
+        ],
+        risk: "high"
+      });
+
+      tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "approver",
+        reason: "approve one",
+        actionHash: testActionHash(0)
+      });
+      tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "approver",
+        reason: "approve two",
+        actionHash: testActionHash(1)
+      });
+
+      const claimed = tools.claim_next_approved_work_item({ workerId: "worker-a" });
+      expect(claimed?.status).toBe("running");
+
+      const dbAny = store as unknown as {
+        db: {
+          prepare: (sql: string) => { all: (...a: unknown[]) => Array<{ status: string }> };
+        };
+      };
+      const approvalRows = dbAny.db
+        .prepare(`SELECT status FROM execution_plan_approvals WHERE work_item_id = ?`)
+        .all(workItem.id);
+      // Both action approvals were bound to the lease's authority and
+      // consumed transactionally with it - not just the first one.
+      expect(approvalRows).toHaveLength(2);
+      for (const row of approvalRows) {
+        expect(row.status).toBe("consumed");
+      }
+      const leaseRows = dbAny.db
+        .prepare(`SELECT approval_id FROM attempt_lease_approvals WHERE work_item_id = ?`)
+        .all(workItem.id);
+      expect(leaseRows).toHaveLength(1);
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });
@@ -260,10 +319,14 @@ describe("policy-gated work item tools", () => {
       if (!claimed) throw new Error("expected source claim");
       tools.submit_work_result({
         workItemId: claimed.id,
+        attemptId: claimed.attemptId,
         leaseId: claimed.leaseId,
         workerId: claimed.workerId,
         actionHash: claimed.actionHash,
-        idempotencyKey: "policy-lineage-source",
+        planHash: claimed.planHash,
+        inputHash: claimed.inputHash,
+        fencingEpoch: claimed.fencingEpoch,
+        idempotencyKey: stableHash({ domain: "acs.attempt-result.v1", attemptId: claimed.attemptId }),
         outcome: "succeeded",
         startedAt: claimed.startedAt,
         finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
@@ -308,7 +371,7 @@ function fakePolicy(decision: PolicyDecision["decision"]): PolicyEngine {
     evaluateWorkItem(workItem: WorkItem, actor: string, operation: PolicyOperation) {
       return workItem.requestedActions.map((action, index) => ({
         action,
-        actionHash: `hash_${index}`,
+        actionHash: testActionHash(index),
         context: {
           workItemId: workItem.id,
           actor,
@@ -324,4 +387,8 @@ function fakePolicy(decision: PolicyDecision["decision"]): PolicyEngine {
       return evaluations[0]?.decision ?? { decision: "deny", reason: "no actions", matchedRules: ["test:deny"] };
     }
   };
+}
+
+function testActionHash(index: number): string {
+  return index.toString(16).padStart(64, "0");
 }

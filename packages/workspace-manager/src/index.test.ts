@@ -4,9 +4,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ControlStackError } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore, type WorkItemStore } from "@agent-control-stack/work-items";
+import {
+  defaultExecutionPlanForWorkItem,
+  SqliteWorkItemStore,
+  type WorkspaceAllocation,
+  type WorkItemStore
+} from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
-import { WorkspaceManager } from "./index.js";
+import { WorkspaceManager, type WorkspaceAllocationStore } from "./index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -179,6 +184,38 @@ describe("WorkspaceManager", () => {
     expect(withJobActive.map((w) => w.workItemId)).not.toContain(workItemId);
   });
 
+  it("crash window: a worktree left behind before its allocation was ever persisted is reported as an orphan, not thrown on", async () => {
+    const fixture = await createRepoFixture();
+    cleanup = fixture.cleanup;
+
+    // Simulate the exact P1-L crash window: `git worktree add` succeeds,
+    // then the process dies before recordWorkspaceAllocation ever commits -
+    // so the store has *no* allocation record for this worktree at all,
+    // unlike the ordinary orphan case where the record survives a crash.
+    const orphanPath = join(fixture.rootDir, "crash-window-workitem");
+    await execFileAsync("git", ["worktree", "add", "-b", "acs/job/crash-window-workitem", orphanPath, "main"], {
+      cwd: fixture.repoPath
+    });
+    expect(existsSync(orphanPath)).toBe(true);
+
+    const manager = new WorkspaceManager({ repoPath: fixture.repoPath, rootDir: fixture.rootDir, store: fixture.store });
+
+    // Must not throw a Zod validation error and abort reconciliation.
+    const { orphaned } = await manager.reconcile(new Set());
+
+    const found = orphaned.find((w) => w.hostPath === orphanPath);
+    expect(found).toBeDefined();
+    // No ownership fields exist to report - this must be the distinct
+    // orphan shape, not forced through the ownership-required Workspace
+    // schema.
+    expect(found).not.toHaveProperty("attemptId");
+    expect(found).not.toHaveProperty("leaseId");
+    expect(found).not.toHaveProperty("workerId");
+    expect(found).not.toHaveProperty("fencingEpoch");
+    // Never touched - reconciliation only reports, never deletes.
+    expect(existsSync(orphanPath)).toBe(true);
+  });
+
   it("rejects work item ids that cannot map to a single safe path segment", async () => {
     const fixture = await createRepoFixture();
     cleanup = fixture.cleanup;
@@ -295,5 +332,240 @@ describe("WorkspaceManager", () => {
       )
     ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "workspace_allocation_conflict" }));
     expect(fixture.store.getActiveWorkspaceAllocationForWorkItem(workItemId)?.hostPath).toBe(workspace.hostPath);
+  });
+
+  it("allocates by attempt and fences cleanup so retries never reuse an earlier workspace", async () => {
+    const fixture = await createRepoFixture();
+    cleanup = fixture.cleanup;
+    const workItemId = seedWorkItemId(fixture.store, "retry-isolation");
+    const allocations = new Map<string, WorkspaceAllocation>();
+    const attemptStore: WorkspaceAllocationStore = {
+      recordWorkspaceAllocation(input) {
+        const allocation: WorkspaceAllocation = {
+          ...input,
+          attemptId: input.attemptId ?? input.workItemId,
+          leaseId: input.leaseId ?? input.workItemId,
+          workerId: input.workerId ?? "legacy",
+          fencingEpoch: input.fencingEpoch ?? 0,
+          status: "active",
+          createdAt: new Date().toISOString()
+        };
+        allocations.set(allocation.allocationId, allocation);
+        return allocation;
+      },
+      getActiveWorkspaceAllocationForWorkItem(id) {
+        return [...allocations.values()].find(
+          (allocation) => allocation.workItemId === id && allocation.status === "active"
+        );
+      },
+      getActiveWorkspaceAllocationForAttempt(id) {
+        return [...allocations.values()].find(
+          (allocation) => allocation.attemptId === id && allocation.status === "active"
+        );
+      },
+      closeWorkspaceAllocation(id) {
+        const current = allocations.get(id);
+        if (!current) throw new Error("missing allocation " + id);
+        const closed = { ...current, status: "torn_down" as const, tornDownAt: new Date().toISOString() };
+        allocations.set(id, closed);
+        return closed;
+      },
+      requestWorkspaceCleanup(input) {
+        const current = allocations.get(input.allocationId);
+        if (!current) throw new Error("missing allocation " + input.allocationId);
+        return current;
+      }
+    };
+    const manager = new WorkspaceManager({
+      repoPath: fixture.repoPath,
+      rootDir: fixture.rootDir,
+      store: attemptStore
+    });
+
+    const first = await manager.provision(workItemId, {
+      attemptId: "attempt-first",
+      leaseId: "lease-first",
+      workerId: "worker-a",
+      fencingEpoch: 1
+    });
+    const second = await manager.provision(workItemId, {
+      attemptId: "attempt-second",
+      leaseId: "lease-second",
+      workerId: "worker-a",
+      fencingEpoch: 2
+    });
+
+    expect(second.hostPath).not.toBe(first.hostPath);
+    expect(second.allocationId).not.toBe(first.allocationId);
+    await expect(
+      manager.teardown(workItemId, {
+        attemptId: "attempt-second",
+        leaseId: "lease-first",
+        workerId: "worker-a",
+        fencingEpoch: 1
+      })
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "workspace_cleanup_fence_stale" })
+    );
+    expect(existsSync(second.hostPath)).toBe(true);
+    await manager.teardown(workItemId, {
+      attemptId: "attempt-second",
+      leaseId: "lease-second",
+      workerId: "worker-a",
+      fencingEpoch: 2
+    });
+    expect(attemptStore.getActiveWorkspaceAllocationForAttempt?.("attempt-second")).toBeUndefined();
+  });
+
+  it("adversarial: refuses to tear down once the bound lease has expired, even though the worker/lease/epoch tuple copied onto the allocation still matches exactly", async () => {
+    const fixture = await createRepoFixture();
+    cleanup = fixture.cleanup;
+    const manager = new WorkspaceManager({
+      repoPath: fixture.repoPath,
+      rootDir: fixture.rootDir,
+      store: fixture.store
+    });
+    const workItemId = seedWorkItemId(fixture.store, "expired-lease-cleanup");
+
+    const definition = defaultExecutionPlanForWorkItem(fixture.store.get(workItemId)!);
+    const plan = fixture.store.createExecutionPlan({ workItemId, definition, createdByActorId: "actor-user" });
+    const admission = fixture.store.admitExecutionPlan(
+      {
+        workItemId,
+        planHash: plan.planHash,
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: "1".repeat(64),
+        requiresApproval: false,
+        admittedByActorId: "policy-gate"
+      },
+      { via: "policy_gate" }
+    );
+    const attempt = fixture.store.createAttempt(
+      { workItemId, planHash: plan.planHash, inputHash: "a".repeat(64) },
+      { via: "domain_service" }
+    );
+    const lease = fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId,
+        admissionId: admission.admissionId,
+        workerId: "worker-a",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: "1".repeat(64),
+        ttlMs: 50
+      },
+      { via: "domain_service" }
+    );
+
+    await manager.provision(workItemId, {
+      attemptId: attempt.attemptId,
+      leaseId: lease.leaseId,
+      workerId: "worker-a",
+      fencingEpoch: lease.fencingEpoch
+    });
+    const workspace = manager.get(workItemId, attempt.attemptId)!;
+    expect(existsSync(workspace.hostPath)).toBe(true);
+
+    // Let the lease's TTL genuinely elapse without anything reaping it -
+    // its row stays status='active' the whole time (failExpiredLeases was
+    // never called), and the allocation's own copied worker/lease/epoch
+    // tuple is untouched and still matches exactly what the now-stale
+    // worker presents. Only the lease's own expires_at has actually passed.
+    await new Promise((resolve) => setTimeout(resolve, 75));
+
+    await expect(
+      manager.teardown(workItemId, {
+        attemptId: attempt.attemptId,
+        leaseId: lease.leaseId,
+        workerId: "worker-a",
+        fencingEpoch: lease.fencingEpoch
+      })
+    ).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "workspace_cleanup_fence_stale" })
+    );
+    // Refused before ever touching the filesystem.
+    expect(existsSync(workspace.hostPath)).toBe(true);
+  });
+
+  it("still authorizes cleanup by the same worker/epoch immediately after the attempt reaches a terminal (succeeded) state", async () => {
+    const fixture = await createRepoFixture();
+    cleanup = fixture.cleanup;
+    const manager = new WorkspaceManager({
+      repoPath: fixture.repoPath,
+      rootDir: fixture.rootDir,
+      store: fixture.store
+    });
+    const workItemId = seedWorkItemId(fixture.store, "terminal-attempt-cleanup");
+
+    const definition = defaultExecutionPlanForWorkItem(fixture.store.get(workItemId)!);
+    const plan = fixture.store.createExecutionPlan({ workItemId, definition, createdByActorId: "actor-user" });
+    const admission = fixture.store.admitExecutionPlan(
+      {
+        workItemId,
+        planHash: plan.planHash,
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: "1".repeat(64),
+        requiresApproval: false,
+        admittedByActorId: "policy-gate"
+      },
+      { via: "policy_gate" }
+    );
+    const attempt = fixture.store.createAttempt(
+      { workItemId, planHash: plan.planHash, inputHash: "a".repeat(64) },
+      { via: "domain_service" }
+    );
+    const lease = fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId,
+        admissionId: admission.admissionId,
+        workerId: "worker-a",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: "1".repeat(64),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+
+    await manager.provision(workItemId, {
+      attemptId: attempt.attemptId,
+      leaseId: lease.leaseId,
+      workerId: "worker-a",
+      fencingEpoch: lease.fencingEpoch
+    });
+
+    fixture.store.transitionAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId,
+        workerId: "worker-a",
+        fencingEpoch: lease.fencingEpoch,
+        status: "running"
+      },
+      { via: "domain_service" }
+    );
+    fixture.store.transitionAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId,
+        workerId: "worker-a",
+        fencingEpoch: lease.fencingEpoch,
+        status: "succeeded"
+      },
+      { via: "domain_service" }
+    );
+
+    // Cleanup right after success, by the exact worker/epoch that completed
+    // the attempt, must not be treated as unauthorized just because the
+    // attempt is no longer "live" - this is the normal, expected path.
+    await manager.teardown(workItemId, {
+      attemptId: attempt.attemptId,
+      leaseId: lease.leaseId,
+      workerId: "worker-a",
+      fencingEpoch: lease.fencingEpoch
+    });
+    expect(fixture.store.getActiveWorkspaceAllocationForAttempt?.(attempt.attemptId)).toBeUndefined();
   });
 });

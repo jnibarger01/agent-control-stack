@@ -1,18 +1,18 @@
 import { spawn } from "node:child_process";
-import { ControlStackError, redactValue } from "@agent-control-stack/shared";
+import { ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
 import { z } from "zod";
 import type { MachineControllerConfig } from "./config.js";
 import { subprocessEnv } from "./command.js";
 import { resolveSafePath } from "./path.js";
 
 export const directAgentNames = ["pi", "openclaw", "codex", "claude", "gemini", "opencode"] as const;
-export type DirectAgentName = (typeof directAgentNames)[number];
+export type DirectAgentName = string;
 export type DirectAgentPermissionMode = "read-only";
 
 const directAgentInputSchema = z
   .object({
-    agent: z.enum(directAgentNames),
-    prompt: z.string().min(1),
+    agent: z.string().regex(/^[A-Za-z0-9._-]+$/),
+    prompt: z.string().min(1).max(32_000),
     cwd: z.string().min(1).optional(),
     timeoutSeconds: z.number().int().positive().max(3_600).optional(),
     permissionMode: z.string().min(1).optional().default("read-only")
@@ -27,6 +27,7 @@ export interface DirectAgentRunnerRequest {
   timeoutMs: number;
   permissionMode: DirectAgentPermissionMode;
   maxOutputBytes: number;
+  requestHash: string;
 }
 
 export interface DirectAgentRunnerResult {
@@ -46,6 +47,7 @@ export interface DirectAgentResult {
   exitCode: number | null;
   durationMs: number;
   error: string | null;
+  requestHash: string;
 }
 
 export interface SanitizedDirectAgentAuditArgs {
@@ -60,7 +62,8 @@ export interface SanitizedDirectAgentAuditArgs {
 export async function runDirectAgent(
   config: MachineControllerConfig,
   input: unknown,
-  runner: DirectAgentRunner = spawnDirectAgent
+  runner: DirectAgentRunner = spawnDirectAgent,
+  requestHashOverride?: string
 ): Promise<DirectAgentResult> {
   const parsed = directAgentInputSchema.safeParse(input);
   if (!parsed.success) {
@@ -72,21 +75,36 @@ export async function runDirectAgent(
     throw new ControlStackError("agent_prompt_required", "test.agent.run requires a non-empty prompt");
   }
 
-  const permissionMode = normalizePermissionMode(parsed.data.permissionMode);
   const cwd = resolveSafePath(config, parsed.data.cwd ?? config.paths.allow[0]).realPath;
   const timeoutMs = parsed.data.timeoutSeconds ? parsed.data.timeoutSeconds * 1_000 : config.security.commandTimeoutMs;
+  const registration = config.agents?.find((agent) => agent.id === parsed.data.agent);
+  if (!registration) {
+    throw new ControlStackError("agent_not_configured", `agent is not explicitly configured: ${parsed.data.agent}`);
+  }
+  const permissionMode = normalizePermissionMode(parsed.data.permissionMode);
+  if (registration.permissionMode !== permissionMode) {
+    throw new ControlStackError("agent_permission_denied", "requested permission mode is not registered for this agent");
+  }
+  const requestHash = requestHashOverride ?? stableHash({
+    schemaVersion: "acs.local-agent-request.v1",
+    agent: parsed.data.agent,
+    prompt,
+    cwd,
+    timeoutMs,
+    permissionMode
+  });
   const started = Date.now();
 
   try {
-    const commandSpec = directAgentCommand(parsed.data.agent, prompt, permissionMode);
     const result = await runner({
       agent: parsed.data.agent,
-      command: commandSpec.command,
-      args: commandSpec.args,
+      command: registration.command,
+      args: [...registration.args, prompt],
       cwd,
       timeoutMs,
       permissionMode,
-      maxOutputBytes: config.security.maxOutputBytes
+      maxOutputBytes: config.security.maxOutputBytes,
+      requestHash
     });
     const ok = result.exitCode === 0;
     const stdout = redactText(result.stdout);
@@ -98,7 +116,8 @@ export async function runDirectAgent(
       stderr,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
-      error: ok ? null : stderr || `agent exited with code ${result.exitCode}`
+      error: ok ? null : stderr || `agent exited with code ${result.exitCode}`,
+      requestHash
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : "unknown agent execution error";
@@ -109,7 +128,8 @@ export async function runDirectAgent(
       stderr: redactText(message),
       exitCode: null,
       durationMs: Date.now() - started,
-      error: redactText(message)
+      error: redactText(message),
+      requestHash
     };
   }
 }
@@ -136,46 +156,6 @@ function normalizePermissionMode(value: string): DirectAgentPermissionMode {
     "agent_permission_denied",
     "test.agent.run defaults to no writes; write-capable direct runs require a separate approval path"
   );
-}
-
-function directAgentCommand(
-  agent: DirectAgentName,
-  prompt: string,
-  permissionMode: DirectAgentPermissionMode
-): { command: string; args: string[] } {
-  const commandOverride = process.env[`ACS_DIRECT_AGENT_${agent.toUpperCase()}_COMMAND`]?.trim();
-  const argsOverride = process.env[`ACS_DIRECT_AGENT_${agent.toUpperCase()}_ARGS_JSON`];
-  if (commandOverride) {
-    return { command: commandOverride, args: [...parseArgsOverride(argsOverride), prompt] };
-  }
-
-  switch (agent) {
-    case "codex":
-      return { command: "codex", args: ["exec", "--sandbox", permissionMode, prompt] };
-    case "claude":
-      return { command: "claude", args: ["-p", prompt] };
-    case "gemini":
-      return { command: "gemini", args: ["-p", prompt] };
-    case "opencode":
-      return { command: "opencode", args: ["run", prompt] };
-    case "openclaw":
-      return { command: "openclaw", args: [prompt] };
-    case "pi":
-      return { command: "pi", args: [prompt] };
-  }
-}
-
-function parseArgsOverride(value: string | undefined): string[] {
-  if (!value) return [];
-  try {
-    const parsed = JSON.parse(value);
-    if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string")) {
-      return parsed;
-    }
-  } catch {
-    // Fall through to the explicit configuration error below.
-  }
-  throw new ControlStackError("agent_command_invalid", "direct agent args override must be a JSON string array");
 }
 
 async function spawnDirectAgent(request: DirectAgentRunnerRequest): Promise<DirectAgentRunnerResult> {
