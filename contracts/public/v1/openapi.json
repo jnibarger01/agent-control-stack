@@ -173,7 +173,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -294,7 +294,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -631,6 +631,23 @@
                       "high",
                       "critical"
                     ]
+                  },
+                  "metadata": {
+                    "type": "object",
+                    "properties": {
+                      "webhookSource": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "pattern": "^[a-z0-9_-]{1,64}$"
+                      },
+                      "correlationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 512
+                      }
+                    },
+                    "additionalProperties": false
                   }
                 },
                 "required": [
@@ -643,7 +660,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -773,7 +790,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -1252,7 +1269,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -1304,7 +1321,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -1424,7 +1441,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -1501,7 +1518,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -1578,7 +1595,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -1685,7 +1702,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {
@@ -2000,7 +2017,7 @@
           }
         },
         "responses": {
-          "200": {
+          "201": {
             "description": "Successful response."
           },
           "400": {

@@ -71,6 +71,8 @@ export const attemptLeaseSchema = z
     workItemId: identifierSchema,
     admissionId: identifierSchema,
     approvalId: identifierSchema.optional(),
+    /** Every additional required-plan-action approval consumed by this lease, beyond `approvalId`. */
+    additionalApprovalIds: z.array(identifierSchema).optional(),
     workerId: identifierSchema,
     tokenHash: hashSchema,
     planHash: hashSchema,
@@ -88,12 +90,27 @@ export const attemptLeaseSchema = z
   })
   .strict();
 
+export const leaseApprovalBindingSchema = z
+  .object({
+    approvalId: identifierSchema,
+    actionHash: hashSchema
+  })
+  .strict();
+
 export const issueLeaseInputSchema = z
   .object({
     attemptId: identifierSchema,
     workItemId: identifierSchema,
     admissionId: identifierSchema,
     approvalId: identifierSchema.optional(),
+    /**
+     * Every additional required-plan-action approval beyond `approvalId`
+     * (which alone can only ever cover a single action), so a multi-action
+     * approval-required plan binds and atomically consumes its complete
+     * approval set through the lease's authority rather than just the
+     * first one.
+     */
+    additionalApprovals: z.array(leaseApprovalBindingSchema).max(64).optional(),
     workerId: identifierSchema,
     leaseToken: z.string().min(16).max(512),
     policyVersion: z.string().min(1).max(128),
@@ -174,6 +191,7 @@ export type ExecutionAttempt = z.infer<typeof executionAttemptSchema>;
 export type CreateAttemptInput = z.infer<typeof createAttemptInputSchema>;
 export type AttemptLeaseStatus = z.infer<typeof attemptLeaseStatusSchema>;
 export type AttemptLease = z.infer<typeof attemptLeaseSchema>;
+export type LeaseApprovalBinding = z.infer<typeof leaseApprovalBindingSchema>;
 export type IssueLeaseInput = z.infer<typeof issueLeaseInputSchema>;
 export type TransitionAttemptInput = z.infer<typeof transitionAttemptInputSchema>;
 export type WorkspaceAllocationStatus = z.infer<typeof workspaceAllocationStatusSchema>;

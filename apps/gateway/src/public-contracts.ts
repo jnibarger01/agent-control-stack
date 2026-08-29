@@ -142,9 +142,9 @@ const idSchema = z.object({ id: z.string().min(1) });
 const reasonSchema = idSchema.extend({ reason: z.string().min(1).optional() });
 const directAgentInputSchema = z.object({
   agent: z.enum(directAgentNames),
-  prompt: z.string().min(1),
-  cwd: z.string().optional(),
-  timeoutSeconds: z.number().int().positive().optional(),
+  prompt: z.string().min(1).max(32_000),
+  cwd: z.string().min(1).optional(),
+  timeoutSeconds: z.number().int().positive().max(3_600).optional(),
   permissionMode: z.enum(["read-only", "readonly", "read_only"]).default("read-only")
 });
 
@@ -227,6 +227,13 @@ export type PublicHttpOperation = {
   operationId: string;
   summary: string;
   requestSchema?: z.ZodType;
+  /**
+   * The status code the gateway actually sends on success. Defaults to 200
+   * when omitted - only set this when the runtime handler in server.ts
+   * sends something else (e.g. 201 for a resource-creating POST), so the
+   * generated OpenAPI document keeps matching the real response.
+   */
+  successStatus?: number;
 };
 
 export const publicHttpOperations: readonly PublicHttpOperation[] = [
@@ -246,7 +253,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/connectors",
     operationId: "registerConnector",
     summary: "Register an authenticated connector.",
-    requestSchema: connectorBodySchema
+    requestSchema: connectorBodySchema,
+    successStatus: 201
   },
   {
     method: "post",
@@ -260,7 +268,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/connectors/{id}/tunnel-sessions",
     operationId: "createTunnelSession",
     summary: "Create a connector tunnel session.",
-    requestSchema: tunnelSessionBodySchema
+    requestSchema: tunnelSessionBodySchema,
+    successStatus: 201
   },
   {
     method: "post",
@@ -299,14 +308,16 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/work-items",
     operationId: "createWorkItem",
     summary: "Create a governed work item.",
-    requestSchema: createWorkItemSchema
+    requestSchema: createWorkItemSchema,
+    successStatus: 201
   },
   {
     method: "post",
     path: "/webhooks/{source}",
     operationId: "ingestWebhook",
     summary: "Ingest an external webhook as a governed ACS work item.",
-    requestSchema: webhookIngestSchema
+    requestSchema: webhookIngestSchema,
+    successStatus: 201
   },
   { method: "get", path: "/work-items/{id}", operationId: "getWorkItem", summary: "Read a governed work item." },
   {
@@ -342,21 +353,24 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/work-items/{id}/results",
     operationId: "submitWorkResult",
     summary: "Submit an authenticated lease-bound worker result.",
-    requestSchema: submitWorkResultSchema
+    requestSchema: submitWorkResultSchema,
+    successStatus: 201
   },
   {
     method: "post",
     path: "/work-items/{id}/retry",
     operationId: "retryWorkItem",
     summary: "Create an immutable retry work item.",
-    requestSchema: retryBodySchema
+    requestSchema: retryBodySchema,
+    successStatus: 201
   },
   {
     method: "post",
     path: "/work-items/{id}/clone",
     operationId: "cloneWorkItem",
     summary: "Create an immutable clone work item.",
-    requestSchema: cloneBodySchema
+    requestSchema: cloneBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/api/actors", operationId: "listActors", summary: "List registered actors." },
   {
@@ -364,7 +378,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/actors",
     operationId: "registerActor",
     summary: "Register an actor.",
-    requestSchema: actorBodySchema
+    requestSchema: actorBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/actors", operationId: "listActorsAlias", summary: "List registered actors." },
   {
@@ -372,7 +387,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/actors",
     operationId: "registerActorAlias",
     summary: "Register an actor.",
-    requestSchema: actorBodySchema
+    requestSchema: actorBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/api/agents", operationId: "listAgents", summary: "List registered agents." },
   {
@@ -380,7 +396,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/agents",
     operationId: "registerAgent",
     summary: "Register an agent.",
-    requestSchema: agentBodySchema
+    requestSchema: agentBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/api/agents/{id}", operationId: "getAgent", summary: "Read a registered agent." },
   {
@@ -408,7 +425,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/agents/{id}/heartbeat",
     operationId: "recordAgentHeartbeat",
     summary: "Record an agent heartbeat.",
-    requestSchema: heartbeatBodySchema
+    requestSchema: heartbeatBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/agents", operationId: "listAcpAgents", summary: "List agents through the ACP view." },
   {

@@ -80,7 +80,7 @@ export const taskExperienceInputSchema = z.object({
   contradictoryEvidence: z.boolean(),
   validation: validationEvidenceSchema,
   procedure: procedureSchema,
-  proposedSkillName: z.string().min(1),
+  proposedSkillName: z.string().min(1).max(256),
   explicitSecrets: z.array(z.string()).default([])
 });
 

@@ -60,18 +60,39 @@ export function previewCommand(config: MachineControllerConfig, input: unknown):
   return { cwd, command, args, risk: "forbidden", reason: "no read-only allow rule matched" };
 }
 
-export async function runReadonlyCommand(config: MachineControllerConfig, input: unknown): Promise<CommandRunResult> {
-  const preview = previewCommand(config, input);
-  if (preview.risk !== "read_only") {
-    throw new ControlStackError("command_refused", `command refused: ${preview.reason}`);
-  }
+export interface BoundedCommandOptions {
+  cwd: string;
+  command: string;
+  args: string[];
+  env?: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  terminationGraceMs: number;
+  maxOutputBytes: number;
+}
 
+export interface BoundedCommandResult {
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  durationMs: number;
+}
+
+/**
+ * The single hardened subprocess boundary for the whole repo: bounded
+ * timeout with SIGTERM->SIGKILL escalation of the full process group,
+ * capped/redacted output, no shell interpretation, and no environment
+ * beyond what the caller explicitly passes. Every repository-controlled
+ * command (readonly diagnostics, result validation, publication git
+ * operations) must run through this rather than a bespoke exec call.
+ */
+export async function runBoundedCommand(options: BoundedCommandOptions): Promise<BoundedCommandResult> {
   const started = Date.now();
   return await new Promise((resolvePromise) => {
     const useProcessGroup = process.platform !== "win32";
-    const child = spawn(preview.command, preview.args, {
-      cwd: preview.cwd,
-      env: subprocessEnv(),
+    const child = spawn(options.command, options.args, {
+      cwd: options.cwd,
+      env: options.env ?? subprocessEnv(),
       detached: useProcessGroup,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"]
@@ -96,7 +117,6 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
       if (completionTimer) clearTimeout(completionTimer);
       const error = spawnError ?? terminationError;
       resolvePromise({
-        preview,
         exitCode: closeExitCode,
         stdout: redactText(stdout),
         stderr: redactText(`${stderr}${error ? `${stderr ? "\n" : ""}${error.message}` : ""}`),
@@ -121,16 +141,16 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
             terminationError ??= new Error("command process tree did not exit after SIGKILL");
             settle();
           },
-          Math.min(config.security.commandTerminationGraceMs, 1_000)
+          Math.min(options.terminationGraceMs, 1_000)
         );
-      }, config.security.commandTerminationGraceMs);
-    }, config.security.commandTimeoutMs);
+      }, options.terminationGraceMs);
+    }, options.timeoutMs);
 
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout = appendCapped(stdout, chunk.toString("utf8"), config.security.maxOutputBytes);
+      stdout = appendCapped(stdout, chunk.toString("utf8"), options.maxOutputBytes);
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr = appendCapped(stderr, chunk.toString("utf8"), config.security.maxOutputBytes);
+      stderr = appendCapped(stderr, chunk.toString("utf8"), options.maxOutputBytes);
     });
     child.on("error", (error) => {
       spawnError = error;
@@ -150,6 +170,24 @@ export async function runReadonlyCommand(config: MachineControllerConfig, input:
       }
     });
   });
+}
+
+export async function runReadonlyCommand(config: MachineControllerConfig, input: unknown): Promise<CommandRunResult> {
+  const preview = previewCommand(config, input);
+  if (preview.risk !== "read_only") {
+    throw new ControlStackError("command_refused", `command refused: ${preview.reason}`);
+  }
+
+  const result = await runBoundedCommand({
+    cwd: preview.cwd,
+    command: preview.command,
+    args: preview.args,
+    env: subprocessEnv(),
+    timeoutMs: config.security.commandTimeoutMs,
+    terminationGraceMs: config.security.commandTerminationGraceMs,
+    maxOutputBytes: config.security.maxOutputBytes
+  });
+  return { preview, ...result };
 }
 
 function signalCommandTree(

@@ -2,11 +2,8 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import {
-  FIRST_CLASS_TARGETS,
-  ProceduralLearning,
-  type TaskExperienceInput
-} from "./learning.js";
+import { FIRST_CLASS_TARGETS, ProceduralLearning, type TaskExperienceInput } from "./learning.js";
+import { slugifySkillName, taskExperienceInputSchema } from "./schema.js";
 
 const stores: ProceduralLearning[] = [];
 
@@ -375,6 +372,101 @@ describe("crash recovery, concurrency, secrets, and policy", () => {
         action: "merge"
       })
     ).toThrow(/guidance_only|cannot authorize/i);
+  });
+});
+
+describe("authoritative evidence verification (fabricated experience resistance)", () => {
+  function openVerifiedStore(evidence: Record<string, { completed: boolean; validationPassed: boolean } | undefined>) {
+    const dir = mkdtempSync(join(tmpdir(), "acs-learning-verified-"));
+    const store = new ProceduralLearning(join(dir, "learning.db"), {
+      verifyEvidence: ({ taskId, attemptId }) => evidence[`${taskId}:${attemptId}`]
+    });
+    stores.push(store);
+    return store;
+  }
+
+  it("rejects a fabricated experience claiming success and passing validation for a task/attempt the store never recorded", () => {
+    const learning = openVerifiedStore({});
+    const recorded = learning.recordTaskExperience(
+      viteExperience({ taskId: "wrk_fabricated", attemptId: "att_fabricated" })
+    );
+    expect(recorded.candidate.state).toBe("REJECTED");
+    expect(recorded.skill).toBeUndefined();
+    expect(recorded.candidate.rejectReasons).toContain("task_not_completed");
+    expect(recorded.candidate.rejectReasons).toContain("validation_failed");
+  });
+
+  it("rejects a self-reported success/passing-validation claim when authoritative evidence says validation actually failed", () => {
+    const learning = openVerifiedStore({
+      "wrk_lied:att_lied": { completed: true, validationPassed: false }
+    });
+    const recorded = learning.recordTaskExperience(
+      // The caller claims completed: true and validation.passed: true...
+      viteExperience({ taskId: "wrk_lied", attemptId: "att_lied" })
+    );
+    // ...but the authoritative record says validation actually failed, so
+    // promotion must not happen on the caller's word alone.
+    expect(recorded.candidate.state).toBe("REJECTED");
+    expect(recorded.skill).toBeUndefined();
+    expect(recorded.candidate.rejectReasons).toContain("validation_failed");
+  });
+
+  it("promotes normally when authoritative evidence actually confirms the claimed completion and passing validation", () => {
+    const learning = openVerifiedStore({
+      "wrk_real:att_real": { completed: true, validationPassed: true }
+    });
+    const recorded = learning.recordTaskExperience(viteExperience({ taskId: "wrk_real", attemptId: "att_real" }));
+    expect(recorded.candidate.state).toBe("PROMOTED");
+    expect(recorded.skill?.name).toBe("vite-duplicate-react-debugging");
+  });
+
+  it("keeps trusting self-reported input when no verifier is configured (unverified/back-compat mode)", () => {
+    const learning = openStore();
+    const recorded = learning.recordTaskExperience(viteExperience({ taskId: "wrk_unverified" }));
+    expect(recorded.candidate.state).toBe("PROMOTED");
+  });
+});
+
+describe("slugifySkillName (bounded against ReDoS on model-supplied names)", () => {
+  it("slugifies a normal proposed skill name", () => {
+    expect(slugifySkillName("  Vite Duplicate React Debugging!! ")).toBe("vite-duplicate-react-debugging");
+  });
+
+  it("collapses and trims separator runs at both ends without a global backtracking-prone alternation", () => {
+    expect(slugifySkillName("---leading-and-trailing---")).toBe("leading-and-trailing");
+  });
+
+  it("still slugifies correctly on a long run of separator characters at both ends", () => {
+    // CodeQL flags the original /^-+|-+$/g as a polynomial-time ReDoS sink
+    // on a caller-supplied name (a global alternation re-attempted at every
+    // position). The anchored non-global replaces used instead have a
+    // provably linear worst case regardless of JS engine internals; this
+    // pins the still-correct behavior on the adversarial shape the alert
+    // was about, independent of the schema's max-length bound.
+    const huge = `${"-".repeat(2_000_000)}ok${"-".repeat(2_000_000)}`;
+    expect(slugifySkillName(huge)).toBe("ok");
+  });
+
+  it("rejects an empty-after-slugification name", () => {
+    expect(() => slugifySkillName("!!!")).toThrowError(/skill name must contain a letter or digit/);
+  });
+});
+
+describe("taskExperienceInputSchema bounds proposedSkillName", () => {
+  it("rejects a proposedSkillName beyond the persisted-record length bound", () => {
+    const result = taskExperienceInputSchema.safeParse({
+      ...viteExperience({ taskId: "wrk_bound" }),
+      proposedSkillName: "a".repeat(257)
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it("accepts a proposedSkillName at the length bound", () => {
+    const result = taskExperienceInputSchema.safeParse({
+      ...viteExperience({ taskId: "wrk_bound" }),
+      proposedSkillName: "a".repeat(256)
+    });
+    expect(result.success).toBe(true);
   });
 });
 

@@ -1,10 +1,11 @@
-import { execFile } from "node:child_process";
-import { access } from "node:fs/promises";
+import { access, lstat, realpath } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
-import { promisify } from "node:util";
+import { runBoundedCommand, subprocessEnv } from "@agent-control-stack/machine-controller";
 import type { EngineOutcome } from "@agent-control-stack/engine-adapter";
 
-const execFileAsync = promisify(execFile);
+const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
+const DEFAULT_TERMINATION_GRACE_MS = 5_000;
+const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 export interface ValidationCheck {
   name: string;
@@ -50,14 +51,27 @@ export class ResultValidator {
     }
 
     for (const artifact of input.expectedArtifacts ?? []) {
-      const escapesWorkspace =
-        isAbsolute(artifact) || !resolve(input.workspacePath, artifact).startsWith(`${resolve(input.workspacePath)}/`);
+      const workspaceRoot = resolve(input.workspacePath);
+      const artifactPath = resolve(input.workspacePath, artifact);
+      const escapesWorkspace = isAbsolute(artifact) || !artifactPath.startsWith(`${workspaceRoot}/`);
       if (escapesWorkspace) {
         add(`artifact:${artifact}`, false, "artifact path escapes workspace");
         continue;
       }
       try {
-        await access(resolve(input.workspacePath, artifact));
+        const artifactStat = await lstat(artifactPath);
+        if (artifactStat.isSymbolicLink()) {
+          const [realTarget, realWorkspaceRoot] = await Promise.all([
+            realpath(artifactPath),
+            realpath(workspaceRoot)
+          ]);
+          const withinWorkspace = realTarget === realWorkspaceRoot || realTarget.startsWith(`${realWorkspaceRoot}/`);
+          if (!withinWorkspace) {
+            add(`artifact:${artifact}`, false, "artifact is a symlink that escapes the workspace");
+            continue;
+          }
+        }
+        await access(artifactPath);
         add(`artifact:${artifact}`, true, "artifact exists");
       } catch {
         add(`artifact:${artifact}`, false, "artifact is missing");
@@ -72,21 +86,41 @@ export class ResultValidator {
   }
 
   private async changedPaths(input: ValidationInput): Promise<{ paths: string[]; exitCode: number }> {
-    const result = await (input.commandRunner ?? defaultCommandRunner)([input.gitPath ?? "git", "diff", "--name-only"], input.workspacePath);
-    return { paths: result.stdout.split("\n").map((line) => line.trim()).filter(Boolean), exitCode: result.exitCode };
+    const runner = input.commandRunner ?? defaultCommandRunner;
+    const git = input.gitPath ?? "git";
+    // Compare the complete worktree (staged, unstaged, deleted) against HEAD
+    // in one shot, and separately list untracked files - together this is
+    // the exact set `git add -A` would stage for publication. Plain
+    // `git diff --name-only` alone omits staged and untracked changes.
+    const [trackedResult, untrackedResult] = await Promise.all([
+      runner([git, "diff", "--name-only", "HEAD"], input.workspacePath),
+      runner([git, "ls-files", "--others", "--exclude-standard"], input.workspacePath)
+    ]);
+    const exitCode = trackedResult.exitCode !== 0 ? trackedResult.exitCode : untrackedResult.exitCode;
+    const paths = new Set<string>();
+    for (const line of [...trackedResult.stdout.split("\n"), ...untrackedResult.stdout.split("\n")]) {
+      const trimmed = line.trim();
+      if (trimmed) paths.add(trimmed);
+    }
+    return { paths: [...paths], exitCode };
   }
 }
 
 async function defaultCommandRunner(command: string[], cwd: string): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  try {
-    const executable = command[0];
-    const args = command.slice(1);
-    const result = await execFileAsync(executable, args, { cwd, maxBuffer: 4 * 1024 * 1024 });
-    return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
-  } catch (error) {
-    const failure = error as { stdout?: string; stderr?: string; code?: number };
-    return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", exitCode: typeof failure.code === "number" ? failure.code : 1 };
+  const [executable, ...args] = command;
+  if (!executable) {
+    return { stdout: "", stderr: "empty command", exitCode: 1 };
   }
+  const result = await runBoundedCommand({
+    cwd,
+    command: executable,
+    args,
+    env: subprocessEnv(),
+    timeoutMs: DEFAULT_COMMAND_TIMEOUT_MS,
+    terminationGraceMs: DEFAULT_TERMINATION_GRACE_MS,
+    maxOutputBytes: DEFAULT_MAX_OUTPUT_BYTES
+  });
+  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode ?? 1 };
 }
 
 function matchesPath(path: string, patterns: string[]): boolean {

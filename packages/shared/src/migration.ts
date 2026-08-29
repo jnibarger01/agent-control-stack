@@ -36,7 +36,14 @@ const migrationFiles = [
   { version: 13, name: "actor_routing", filename: "013_actor_routing.sql" },
   { version: 14, name: "validation_runs", filename: "014_validation_runs.sql" },
   { version: 15, name: "recovery_records", filename: "015_recovery_records.sql" },
-  { version: 16, name: "publication_records", filename: "016_publication_records.sql" }
+  { version: 16, name: "publication_records", filename: "016_publication_records.sql" },
+  {
+    version: 17,
+    name: "scheduler_firing_callback_pending",
+    filename: "017_scheduler_firing_callback_pending.sql"
+  },
+  { version: 18, name: "attempt_lease_approvals", filename: "018_attempt_lease_approvals.sql" },
+  { version: 19, name: "work_item_metadata", filename: "019_work_item_metadata.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
