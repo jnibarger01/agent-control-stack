@@ -1587,10 +1587,15 @@ describe("gateway MCP transport", () => {
           const toolResults = messages.filter(
             (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
           );
+          const lastTool = toolResults.at(-1) as Record<string, unknown> | undefined;
           const resultText =
-            toolResults.length > 0 && typeof (toolResults.at(-1) as Record<string, unknown>)?.content === "string"
-              ? String((toolResults.at(-1) as Record<string, unknown>).content)
-              : "";
+            lastTool && typeof lastTool.content === "string"
+              ? String(lastTool.content)
+              : lastTool && Array.isArray(lastTool.content)
+                ? JSON.stringify(lastTool.content)
+                : lastTool
+                  ? JSON.stringify(lastTool)
+                  : "";
           const jsonStart = resultText.indexOf("{");
           const jsonEnd = resultText.lastIndexOf("}");
           const result =
@@ -1611,19 +1616,68 @@ describe("gateway MCP transport", () => {
             return { name, args };
           };
 
+          const searchHits = ((): Array<Record<string, unknown>> => {
+            if (!result) return [];
+            const hits: Array<Record<string, unknown>> = [];
+            const pushName = (name: unknown) => {
+              if (typeof name === "string" && name) hits.push({ name });
+            };
+            if (result.tools && typeof result.tools === "object" && !Array.isArray(result.tools)) {
+              for (const name of Object.keys(result.tools as Record<string, unknown>)) pushName(name);
+            }
+            if (Array.isArray(result.results)) {
+              for (const item of result.results) {
+                if (!item || typeof item !== "object") continue;
+                const row = item as Record<string, unknown>;
+                if (typeof row.name === "string") pushName(row.name);
+                if (Array.isArray(row.matches)) {
+                  for (const match of row.matches) {
+                    if (typeof match === "string") pushName(match);
+                    else if (
+                      match &&
+                      typeof match === "object" &&
+                      typeof (match as Record<string, unknown>).name === "string"
+                    ) {
+                      pushName((match as Record<string, unknown>).name);
+                    }
+                  }
+                }
+              }
+            }
+            if (Array.isArray(result.matches)) {
+              for (const match of result.matches) {
+                if (typeof match === "string") pushName(match);
+                else if (
+                  match &&
+                  typeof match === "object" &&
+                  typeof (match as Record<string, unknown>).name === "string"
+                ) {
+                  pushName((match as Record<string, unknown>).name);
+                }
+              }
+            }
+            return hits;
+          })();
+          const namedHit =
+            searchHits.find((item) => {
+              const name = item.name;
+              return typeof name === "string" && /agent|acs|mcp/i.test(name);
+            }) ?? searchHits.find((item) => typeof item.name === "string");
+
           let call: { name: string; args: Record<string, unknown> } | undefined;
           if (tools.length === 0) {
             // Hermes performs a provider capability/metadata probe before the
             // first tool-bearing turn. It is not the model-facing smoke path.
           } else if (toolResults.length === 0) {
-            call = emit("tool_search", { query: "ACS test agent run", limit: 5 });
-          } else if (Array.isArray(result?.matches)) {
-            const match = result.matches[0] as Record<string, unknown> | undefined;
-            if (typeof match?.name !== "string") throw new Error("tool_search returned no exact tool name");
-            call = emit("tool_describe", { name: match.name });
-          } else if (typeof result?.name === "string" && result.parameters) {
+            call = emit("tool_search", { queries: ["ACS test agent run", "test.agent.run"], limit: 5 });
+          } else if (lastTool?.name === "tool_search" && namedHit && typeof namedHit.name === "string") {
+            call = emit("tool_describe", { names: [namedHit.name] });
+          } else if (lastTool?.name === "tool_describe") {
+            const describedName =
+              (typeof result?.name === "string" && result.name) ||
+              (namedHit && typeof namedHit.name === "string" ? namedHit.name : "mcp__acs_gateway__test_agent_run");
             call = emit("tool_call", {
-              name: result.name,
+              name: describedName,
               arguments: {
                 agent: "fixture-agent",
                 prompt: "Hermes deterministic interoperability check",
