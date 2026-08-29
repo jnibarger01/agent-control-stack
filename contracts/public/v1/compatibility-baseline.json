@@ -1,0 +1,739 @@
+{
+  "operations": {
+    "GET /livez": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "GET /readyz": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "GET /health": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /session/login": {
+      "required": [
+        "token"
+      ],
+      "properties": [
+        "token"
+      ],
+      "propertyTypes": {
+        "token": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "GET /mcp/tools": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /connectors": {
+      "required": [
+        "allowedScopes",
+        "id",
+        "publicKeyPem"
+      ],
+      "properties": [
+        "allowedScopes",
+        "displayName",
+        "id",
+        "publicKeyPem"
+      ],
+      "propertyTypes": {
+        "id": "\"string\"",
+        "displayName": "\"string\"",
+        "publicKeyPem": "\"string\"",
+        "allowedScopes": "\"array\""
+      },
+      "propertyEnums": {}
+    },
+    "POST /connectors/{id}/rotate-key": {
+      "required": [
+        "publicKeyPem",
+        "reason"
+      ],
+      "properties": [
+        "publicKeyPem",
+        "reason"
+      ],
+      "propertyTypes": {
+        "publicKeyPem": "\"string\"",
+        "reason": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "POST /connectors/{id}/tunnel-sessions": {
+      "required": [
+        "expiresAt",
+        "sessionId",
+        "tunnelId"
+      ],
+      "properties": [
+        "expiresAt",
+        "issuedAt",
+        "sessionId",
+        "tunnelId"
+      ],
+      "propertyTypes": {
+        "tunnelId": "\"string\"",
+        "sessionId": "\"string\"",
+        "issuedAt": "\"string\"",
+        "expiresAt": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "POST /connectors/{id}/tunnel-sessions/{tunnelId}/{sessionId}/revoke": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /connectors/{id}/tunnel-sessions/{tunnelId}/{sessionId}/consume": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /mcp": {
+      "required": [
+        "jsonrpc",
+        "method"
+      ],
+      "properties": [
+        "id",
+        "jsonrpc",
+        "method",
+        "params"
+      ],
+      "propertyTypes": {
+        "jsonrpc": "\"string\"",
+        "id": "null",
+        "method": "\"string\"",
+        "params": "null"
+      },
+      "propertyEnums": {}
+    },
+    "GET /.well-known/oauth-protected-resource": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "GET /.well-known/oauth-protected-resource/mcp": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "GET /work-items": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /work-items": {
+      "required": [
+        "intent",
+        "requester",
+        "title"
+      ],
+      "properties": [
+        "intent",
+        "requestedActions",
+        "requester",
+        "requesterSubject",
+        "risk",
+        "status",
+        "target",
+        "title"
+      ],
+      "propertyTypes": {
+        "title": "\"string\"",
+        "requester": "\"string\"",
+        "requesterSubject": "\"string\"",
+        "status": "\"string\"",
+        "intent": "\"string\"",
+        "target": "\"object\"",
+        "requestedActions": "\"array\"",
+        "risk": "\"string\""
+      },
+      "propertyEnums": {
+        "requester": [
+          "agent",
+          "system",
+          "user"
+        ],
+        "status": [
+          "draft",
+          "pending_policy"
+        ],
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
+    },
+    "GET /work-items/{id}": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /work-items/{id}/approve": {
+      "required": [
+        "actionHash",
+        "reason"
+      ],
+      "properties": [
+        "actionHash",
+        "reason"
+      ],
+      "propertyTypes": {
+        "reason": "\"string\"",
+        "actionHash": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "POST /work-items/{id}/cancel": {
+      "required": [],
+      "properties": [
+        "reason"
+      ],
+      "propertyTypes": {
+        "reason": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "POST /work-items/{id}/reject": {
+      "required": [],
+      "properties": [
+        "reason"
+      ],
+      "propertyTypes": {
+        "reason": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "POST /work-items/{id}/unblock": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /work-items/{id}/results": {
+      "required": [
+        "actionHash",
+        "finishedAt",
+        "idempotencyKey",
+        "leaseId",
+        "outcome",
+        "simulationMetadata",
+        "startedAt",
+        "summary",
+        "workItemId",
+        "workerId"
+      ],
+      "properties": [
+        "actionHash",
+        "artifacts",
+        "error",
+        "exitCode",
+        "finishedAt",
+        "idempotencyKey",
+        "leaseId",
+        "outcome",
+        "resourceUsage",
+        "simulationMetadata",
+        "startedAt",
+        "stderr",
+        "stdout",
+        "structuredOutput",
+        "summary",
+        "workItemId",
+        "workerId"
+      ],
+      "propertyTypes": {
+        "workItemId": "\"string\"",
+        "leaseId": "\"string\"",
+        "workerId": "\"string\"",
+        "actionHash": "\"string\"",
+        "idempotencyKey": "\"string\"",
+        "outcome": "\"string\"",
+        "startedAt": "\"string\"",
+        "finishedAt": "\"string\"",
+        "exitCode": "null",
+        "summary": "\"string\"",
+        "stdout": "\"string\"",
+        "stderr": "\"string\"",
+        "structuredOutput": "\"object\"",
+        "artifacts": "\"array\"",
+        "error": "\"string\"",
+        "resourceUsage": "\"object\"",
+        "simulationMetadata": "\"object\""
+      },
+      "propertyEnums": {
+        "outcome": [
+          "blocked",
+          "cancelled",
+          "failed",
+          "lease_expired",
+          "succeeded",
+          "worker_infrastructure_failure"
+        ]
+      }
+    },
+    "POST /work-items/{id}/retry": {
+      "required": [
+        "reason"
+      ],
+      "properties": [
+        "reason"
+      ],
+      "propertyTypes": {
+        "reason": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "POST /work-items/{id}/clone": {
+      "required": [],
+      "properties": [
+        "intent",
+        "requestedActions",
+        "risk",
+        "target",
+        "title"
+      ],
+      "propertyTypes": {
+        "title": "\"string\"",
+        "intent": "\"string\"",
+        "target": "\"object\"",
+        "requestedActions": "\"array\"",
+        "risk": "\"string\""
+      },
+      "propertyEnums": {
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
+    },
+    "GET /api/actors": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /api/actors": {
+      "required": [
+        "actorType",
+        "displayName",
+        "id"
+      ],
+      "properties": [
+        "actorType",
+        "displayName",
+        "externalRef",
+        "id"
+      ],
+      "propertyTypes": {
+        "id": "\"string\"",
+        "actorType": "\"string\"",
+        "displayName": "\"string\"",
+        "externalRef": "\"string\""
+      },
+      "propertyEnums": {
+        "actorType": [
+          "AGENT",
+          "HUMAN",
+          "SERVICE",
+          "SYSTEM"
+        ]
+      }
+    },
+    "GET /actors": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /actors": {
+      "required": [
+        "actorType",
+        "displayName",
+        "id"
+      ],
+      "properties": [
+        "actorType",
+        "displayName",
+        "externalRef",
+        "id"
+      ],
+      "propertyTypes": {
+        "id": "\"string\"",
+        "actorType": "\"string\"",
+        "displayName": "\"string\"",
+        "externalRef": "\"string\""
+      },
+      "propertyEnums": {
+        "actorType": [
+          "AGENT",
+          "HUMAN",
+          "SERVICE",
+          "SYSTEM"
+        ]
+      }
+    },
+    "GET /api/agents": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "POST /api/agents": {
+      "required": [
+        "acpRole",
+        "id",
+        "kind",
+        "name"
+      ],
+      "properties": [
+        "acpRole",
+        "endpoint",
+        "id",
+        "kind",
+        "lastError",
+        "model",
+        "name",
+        "provider",
+        "status"
+      ],
+      "propertyTypes": {
+        "id": "\"string\"",
+        "name": "\"string\"",
+        "kind": "\"string\"",
+        "acpRole": "\"string\"",
+        "provider": "\"string\"",
+        "model": "\"string\"",
+        "endpoint": "\"string\"",
+        "status": "\"string\"",
+        "lastError": "\"string\""
+      },
+      "propertyEnums": {
+        "acpRole": [
+          "DESKTOP_LOCAL_AGENT_BRIDGE",
+          "IMPLEMENTATION_AGENT",
+          "LOCAL_CODING_AGENT",
+          "ORCHESTRATION_LAYER",
+          "RESEARCH_BROAD_SCAN_AGENT",
+          "REVIEW_PLANNING_AGENT"
+        ],
+        "status": [
+          "AVAILABLE",
+          "BUSY",
+          "DEGRADED",
+          "ERROR",
+          "OFFLINE",
+          "UNKNOWN"
+        ]
+      }
+    },
+    "GET /api/agents/{id}": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "PATCH /api/agents/{id}": {
+      "required": [],
+      "properties": [
+        "acpRole",
+        "endpoint",
+        "kind",
+        "lastError",
+        "model",
+        "name",
+        "provider",
+        "status"
+      ],
+      "propertyTypes": {
+        "name": "\"string\"",
+        "kind": "\"string\"",
+        "acpRole": "\"string\"",
+        "provider": "null",
+        "model": "null",
+        "endpoint": "null",
+        "status": "\"string\"",
+        "lastError": "null"
+      },
+      "propertyEnums": {
+        "acpRole": [
+          "DESKTOP_LOCAL_AGENT_BRIDGE",
+          "IMPLEMENTATION_AGENT",
+          "LOCAL_CODING_AGENT",
+          "ORCHESTRATION_LAYER",
+          "RESEARCH_BROAD_SCAN_AGENT",
+          "REVIEW_PLANNING_AGENT"
+        ],
+        "status": [
+          "AVAILABLE",
+          "BUSY",
+          "DEGRADED",
+          "ERROR",
+          "OFFLINE",
+          "UNKNOWN"
+        ]
+      }
+    },
+    "GET /api/agents/{id}/capabilities": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "PUT /api/agents/{id}/capabilities": {
+      "required": [
+        "capabilities"
+      ],
+      "properties": [
+        "capabilities"
+      ],
+      "propertyTypes": {
+        "capabilities": "\"array\""
+      },
+      "propertyEnums": {}
+    },
+    "POST /api/agents/{id}/heartbeat": {
+      "required": [
+        "status"
+      ],
+      "properties": [
+        "currentTask",
+        "lastError",
+        "status"
+      ],
+      "propertyTypes": {
+        "status": "\"string\"",
+        "currentTask": "\"string\"",
+        "lastError": "\"string\""
+      },
+      "propertyEnums": {
+        "status": [
+          "AVAILABLE",
+          "BUSY",
+          "DEGRADED",
+          "ERROR",
+          "OFFLINE",
+          "UNKNOWN"
+        ]
+      }
+    },
+    "GET /agents": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "GET /agents/{id}": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "GET /events": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    }
+  },
+  "tools": {
+    "create_work_item": {
+      "required": [
+        "intent",
+        "requester",
+        "title"
+      ],
+      "properties": [
+        "intent",
+        "requestedActions",
+        "requester",
+        "requesterSubject",
+        "risk",
+        "status",
+        "target",
+        "title"
+      ],
+      "propertyTypes": {
+        "title": "\"string\"",
+        "requester": "\"string\"",
+        "requesterSubject": "\"string\"",
+        "status": "\"string\"",
+        "intent": "\"string\"",
+        "target": "\"object\"",
+        "requestedActions": "\"array\"",
+        "risk": "\"string\""
+      },
+      "propertyEnums": {
+        "requester": [
+          "agent",
+          "system",
+          "user"
+        ],
+        "status": [
+          "draft",
+          "pending_policy"
+        ],
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
+    },
+    "get_work_item": {
+      "required": [
+        "id"
+      ],
+      "properties": [
+        "id"
+      ],
+      "propertyTypes": {
+        "id": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "list_work_items": {
+      "required": [],
+      "properties": [
+        "status"
+      ],
+      "propertyTypes": {
+        "status": "\"string\""
+      },
+      "propertyEnums": {
+        "status": [
+          "approved",
+          "blocked",
+          "cancelled",
+          "cancelling",
+          "draft",
+          "failed",
+          "needs_approval",
+          "pending_policy",
+          "quarantined",
+          "rejected",
+          "running",
+          "succeeded",
+          "unknown"
+        ]
+      }
+    },
+    "approve_work_item": {
+      "required": [
+        "actionHash",
+        "id",
+        "reason"
+      ],
+      "properties": [
+        "actionHash",
+        "id",
+        "reason"
+      ],
+      "propertyTypes": {
+        "id": "\"string\"",
+        "reason": "\"string\"",
+        "actionHash": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "unblock_work_item": {
+      "required": [
+        "id"
+      ],
+      "properties": [
+        "id"
+      ],
+      "propertyTypes": {
+        "id": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "reject_work_item": {
+      "required": [
+        "id"
+      ],
+      "properties": [
+        "id",
+        "reason"
+      ],
+      "propertyTypes": {
+        "id": "\"string\"",
+        "reason": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "cancel_work_item": {
+      "required": [
+        "id"
+      ],
+      "properties": [
+        "id",
+        "reason"
+      ],
+      "propertyTypes": {
+        "id": "\"string\"",
+        "reason": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "test.agent.run": {
+      "required": [
+        "agent",
+        "prompt"
+      ],
+      "properties": [
+        "agent",
+        "cwd",
+        "permissionMode",
+        "prompt",
+        "timeoutSeconds"
+      ],
+      "propertyTypes": {
+        "agent": "\"string\"",
+        "prompt": "\"string\"",
+        "cwd": "\"string\"",
+        "timeoutSeconds": "\"integer\"",
+        "permissionMode": "\"string\""
+      },
+      "propertyEnums": {
+        "agent": [
+          "claude",
+          "codex",
+          "gemini",
+          "openclaw",
+          "opencode",
+          "pi"
+        ],
+        "permissionMode": [
+          "read-only",
+          "read_only",
+          "readonly"
+        ]
+      }
+    }
+  }
+}

@@ -21,6 +21,10 @@ export const workspaceSchema = z
   .object({
     allocationId: identifierSchema,
     workItemId: identifierSchema,
+    attemptId: identifierSchema,
+    leaseId: identifierSchema,
+    workerId: identifierSchema,
+    fencingEpoch: z.number().int().nonnegative(),
     hostPath: z.string().min(1),
     branch: z.string().min(1),
     baseRef: z.string().min(1),
@@ -29,6 +33,30 @@ export const workspaceSchema = z
   .strict();
 
 export type Workspace = z.infer<typeof workspaceSchema>;
+
+/**
+ * A worktree observed on disk (or in the store) with no confirmed attempt
+ * ownership - discovered after a crash window (e.g. `git worktree add`
+ * succeeded but the process died before the allocation was persisted), or
+ * any other case where reconciliation cannot establish a lease/worker/
+ * fencing-epoch authority tuple for it. Deliberately a distinct shape from
+ * `Workspace` rather than an all-optional variant of it: an owned
+ * workspace's ownership fields must stay required everywhere that isn't
+ * reconciliation, so orphan status can never be represented by "just don't
+ * check the fields."
+ */
+export const orphanedWorkspaceSchema = z
+  .object({
+    allocationId: identifierSchema,
+    workItemId: identifierSchema,
+    hostPath: z.string().min(1),
+    branch: z.string().min(1),
+    baseRef: z.string().min(1),
+    createdAt: z.string()
+  })
+  .strict();
+
+export type OrphanedWorkspace = z.infer<typeof orphanedWorkspaceSchema>;
 
 /**
  * The persisted ownership record WorkspaceManager is built around (ADR-
@@ -41,11 +69,48 @@ export type Workspace = z.infer<typeof workspaceSchema>;
  */
 export interface WorkspaceAllocationStore {
   recordWorkspaceAllocation(
-    input: { allocationId: string; workItemId: string; hostPath: string; branch: string; baseRef: string },
+    input: {
+      allocationId: string;
+      workItemId: string;
+      attemptId?: string;
+      leaseId?: string;
+      workerId?: string;
+      fencingEpoch?: number;
+      hostPath: string;
+      branch: string;
+      baseRef: string;
+    },
     options: PrivilegedTransitionOptions
   ): WorkspaceAllocation;
   getActiveWorkspaceAllocationForWorkItem(workItemId: string): WorkspaceAllocation | undefined;
+  getActiveWorkspaceAllocationForAttempt?(attemptId: string): WorkspaceAllocation | undefined;
+  getWorkspaceAllocationByHostPath?(hostPath: string): WorkspaceAllocation | undefined;
   closeWorkspaceAllocation(allocationId: string, options: PrivilegedTransitionOptions): WorkspaceAllocation;
+  requestWorkspaceCleanup?(
+    input: { allocationId: string; leaseId: string; workerId: string; fencingEpoch: number },
+    options: PrivilegedTransitionOptions
+  ): WorkspaceAllocation;
+  /**
+   * The authoritative check required before any destructive filesystem
+   * cleanup that a caller claims authority for. Unlike comparing against
+   * the worker/lease/epoch tuple *copied onto the allocation at provision
+   * time*, this re-verifies against the attempt's live current fencing
+   * epoch/worker (and, while the attempt is still live, its active lease):
+   * expired, revoked, or superseded (re-leased to a new worker/epoch)
+   * authority is rejected even when the stale copy on the allocation still
+   * matches. A terminal attempt's own worker/epoch remains authorized to
+   * clean up after itself - cleanup is the normal, expected next step
+   * after a successful (or failed) attempt, not just a live-execution
+   * privilege.
+   */
+  getWorkspaceCleanupAuthority?(input: {
+    workItemId: string;
+    attemptId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    workspaceAllocationId: string;
+  }): boolean;
 }
 
 export interface WorkspaceManagerOptions {
@@ -61,6 +126,10 @@ export interface WorkspaceManagerOptions {
 export interface ProvisionOptions {
   /** Ref the new worktree branches from. Defaults to "HEAD". */
   baseRef?: string;
+  attemptId?: string;
+  leaseId?: string;
+  workerId?: string;
+  fencingEpoch?: number;
 }
 
 interface WorktreeListEntry {
@@ -118,8 +187,11 @@ export class WorkspaceManager {
 
   async provision(workItemId: string, options: ProvisionOptions = {}): Promise<Workspace> {
     const parsedId = identifierSchema.parse(workItemId);
+    const attemptId = identifierSchema.parse(options.attemptId ?? parsedId);
 
-    const persisted = this.store.getActiveWorkspaceAllocationForWorkItem(parsedId);
+    const persisted = this.store.getActiveWorkspaceAllocationForAttempt
+      ? this.store.getActiveWorkspaceAllocationForAttempt(attemptId)
+      : this.store.getActiveWorkspaceAllocationForWorkItem(parsedId);
     if (persisted) {
       if (existsSync(persisted.hostPath)) {
         return workspaceFromAllocation(persisted);
@@ -134,7 +206,7 @@ export class WorkspaceManager {
       );
     }
 
-    const targetPath = join(this.rootDir, parsedId);
+    const targetPath = join(this.rootDir, attemptId);
     if (existsSync(targetPath)) {
       throw new ControlStackError(
         "workspace_path_collision",
@@ -143,7 +215,7 @@ export class WorkspaceManager {
     }
 
     const baseRef = options.baseRef ?? "HEAD";
-    const branch = `acs/job/${parsedId}`;
+    const branch = options.attemptId ? `acs/attempt/${attemptId}` : `acs/job/${parsedId}`;
     await this.git(["worktree", "add", "-b", branch, targetPath, baseRef]);
 
     const rootReal = realpathSync(this.rootDir);
@@ -157,7 +229,17 @@ export class WorkspaceManager {
     let allocation: WorkspaceAllocation;
     try {
       allocation = this.store.recordWorkspaceAllocation(
-        { allocationId, workItemId: parsedId, hostPath, branch, baseRef },
+        {
+          allocationId,
+          workItemId: parsedId,
+          attemptId,
+          leaseId: options.leaseId ?? parsedId,
+          workerId: options.workerId ?? "legacy",
+          fencingEpoch: options.fencingEpoch ?? 0,
+          hostPath,
+          branch,
+          baseRef
+        },
         { via: "domain_service" }
       );
     } catch (error) {
@@ -175,16 +257,22 @@ export class WorkspaceManager {
     return workspaceFromAllocation(allocation);
   }
 
-  async teardown(workItemId: string): Promise<void> {
+  async teardown(
+    workItemId: string,
+    options: Pick<ProvisionOptions, "attemptId" | "leaseId" | "workerId" | "fencingEpoch"> = {}
+  ): Promise<void> {
     const parsedId = identifierSchema.parse(workItemId);
-    const persisted = this.store.getActiveWorkspaceAllocationForWorkItem(parsedId);
+    const attemptId = identifierSchema.parse(options.attemptId ?? parsedId);
+    const persisted = this.store.getActiveWorkspaceAllocationForAttempt
+      ? this.store.getActiveWorkspaceAllocationForAttempt(attemptId)
+      : this.store.getActiveWorkspaceAllocationForWorkItem(parsedId);
     if (!persisted) {
       // No authoritative record of this work item ever owning a workspace.
       // A directory that happens to sit at the deterministic path is not
       // proof of ownership - refuse rather than delete it. This is the
       // exact hazard the R4 finding named: never recursively delete a
       // directory merely because it matches rootDir/<workItemId>.
-      const targetPath = join(this.rootDir, parsedId);
+      const targetPath = join(this.rootDir, attemptId);
       if (existsSync(targetPath)) {
         throw new ControlStackError(
           "workspace_untracked_teardown_refused",
@@ -195,6 +283,36 @@ export class WorkspaceManager {
     }
 
     const targetPath = persisted.hostPath;
+    if (options.workerId !== undefined) {
+      if (this.store.getWorkspaceCleanupAuthority) {
+        // Re-verify against the attempt's live current fencing epoch (and,
+        // while still live, its active lease) - not the worker/lease/epoch
+        // tuple frozen onto the allocation at provision time: an expired,
+        // revoked, or superseded (re-leased) authority must be rejected
+        // even though that stale copy still matches what the caller
+        // presents.
+        const authorized = this.store.getWorkspaceCleanupAuthority({
+          workItemId: parsedId,
+          attemptId,
+          leaseId: persisted.leaseId ?? options.leaseId ?? "",
+          workerId: options.workerId,
+          fencingEpoch: options.fencingEpoch ?? -1,
+          workspaceAllocationId: persisted.allocationId
+        });
+        if (!authorized) {
+          throw new ControlStackError(
+            "workspace_cleanup_fence_stale",
+            "workspace cleanup fence is stale, expired, or superseded by a newer lease"
+          );
+        }
+      } else if (
+        persisted.workerId !== options.workerId ||
+        persisted.leaseId !== options.leaseId ||
+        persisted.fencingEpoch !== options.fencingEpoch
+      ) {
+        throw new ControlStackError("workspace_cleanup_fence_stale", "workspace cleanup fence is stale");
+      }
+    }
     let onDisk: boolean;
     try {
       const stat = lstatSync(targetPath);
@@ -218,6 +336,15 @@ export class WorkspaceManager {
       onDisk = false;
     }
 
+    this.store.requestWorkspaceCleanup?.(
+      {
+        allocationId: persisted.allocationId,
+        leaseId: persisted.leaseId ?? options.leaseId ?? "",
+        workerId: persisted.workerId ?? options.workerId ?? "",
+        fencingEpoch: persisted.fencingEpoch ?? options.fencingEpoch ?? 0
+      },
+      { via: "domain_service" }
+    );
     if (onDisk) {
       try {
         await this.git(["worktree", "remove", "--force", targetPath]);
@@ -243,31 +370,45 @@ export class WorkspaceManager {
     this.store.closeWorkspaceAllocation(persisted.allocationId, { via: "domain_service" });
   }
 
-  get(workItemId: string): Workspace | undefined {
+  get(workItemId: string, attemptId = workItemId): Workspace | undefined {
     // Always the store, never the in-memory cache: a different
     // WorkspaceManager instance (a different process, or a fresh instance
     // after a restart) may have torn this allocation down since this
     // instance last touched it, and get() must not report a stale answer.
     const parsedId = identifierSchema.parse(workItemId);
-    const persisted = this.store.getActiveWorkspaceAllocationForWorkItem(parsedId);
+    const parsedAttemptId = identifierSchema.parse(attemptId);
+    const persisted = this.store.getActiveWorkspaceAllocationForAttempt
+      ? this.store.getActiveWorkspaceAllocationForAttempt(parsedAttemptId)
+      : this.store.getActiveWorkspaceAllocationForWorkItem(parsedId);
     return persisted ? workspaceFromAllocation(persisted) : undefined;
   }
 
-  async reconcile(activeWorkItemIds: ReadonlySet<string>): Promise<{ orphaned: Workspace[] }> {
+  async reconcile(activeWorkItemIds: ReadonlySet<string>): Promise<{ orphaned: Array<Workspace | OrphanedWorkspace> }> {
     const { stdout } = await this.git(["worktree", "list", "--porcelain"]);
     const rootReal = realpathSync(this.rootDir);
-    const orphaned: Workspace[] = [];
+    const orphaned: Array<Workspace | OrphanedWorkspace> = [];
 
     for (const entry of parseWorktreeList(stdout)) {
       if (!isContained(rootReal, entry.path)) continue; // not ours
-      const workItemId = entry.path.slice(rootReal.length + 1);
-      if (activeWorkItemIds.has(workItemId)) continue;
-
-      const persisted = this.store.getActiveWorkspaceAllocationForWorkItem(workItemId);
+      const pathSegment = entry.path.slice(rootReal.length + 1);
+      const persisted = this.store.getWorkspaceAllocationByHostPath
+        ? this.store.getWorkspaceAllocationByHostPath(entry.path)
+        : this.store.getActiveWorkspaceAllocationForWorkItem(pathSegment);
+      const workItemId = persisted?.workItemId ?? pathSegment;
+      if (activeWorkItemIds.has(workItemId) || (persisted && activeWorkItemIds.has(persisted.attemptId ?? "")))
+        continue;
       orphaned.push(
         persisted
           ? workspaceFromAllocation(persisted)
-          : workspaceSchema.parse({
+          // A worktree with no persisted allocation at all - most likely
+          // the P1-L crash window (`git worktree add` succeeded, the
+          // process died before recordWorkspaceAllocation committed). No
+          // attemptId/leaseId/workerId/fencingEpoch authority tuple exists
+          // to report, so this is reported through the distinct orphan
+          // shape rather than forced through workspaceSchema's ownership
+          // requirement (which would throw and abort startup
+          // reconciliation entirely).
+          : orphanedWorkspaceSchema.parse({
               allocationId: createId("workspace"),
               workItemId,
               hostPath: entry.path,
@@ -297,6 +438,10 @@ function workspaceFromAllocation(allocation: WorkspaceAllocation): Workspace {
   return workspaceSchema.parse({
     allocationId: allocation.allocationId,
     workItemId: allocation.workItemId,
+    attemptId: allocation.attemptId,
+    leaseId: allocation.leaseId,
+    workerId: allocation.workerId,
+    fencingEpoch: allocation.fencingEpoch,
     hostPath: allocation.hostPath,
     branch: allocation.branch,
     baseRef: allocation.baseRef,

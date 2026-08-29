@@ -125,9 +125,13 @@ export const jsonRpcRequestSchema = z.object({
 });
 
 export const directAgentToolName = "test.agent.run" as const;
-export const mcpToolNames = [...workItemToolNames, directAgentToolName] as const;
+export const dashboardToolNames = ["open_acs_dashboard", "get_execution_detail"] as const;
+export const mcpToolNames = [...workItemToolNames, ...dashboardToolNames, directAgentToolName] as const;
 export type McpToolName = (typeof mcpToolNames)[number];
-export const remoteMcpToolNames = workItemToolNames.filter((name) => name !== "approve_work_item");
+export const remoteMcpToolNames = [
+  ...workItemToolNames.filter((name) => name !== "approve_work_item"),
+  ...dashboardToolNames
+];
 
 export const toolsCallParamsSchema = z.object({
   name: z.enum(mcpToolNames),
@@ -138,9 +142,9 @@ const idSchema = z.object({ id: z.string().min(1) });
 const reasonSchema = idSchema.extend({ reason: z.string().min(1).optional() });
 const directAgentInputSchema = z.object({
   agent: z.enum(directAgentNames),
-  prompt: z.string().min(1),
-  cwd: z.string().optional(),
-  timeoutSeconds: z.number().int().positive().optional(),
+  prompt: z.string().min(1).max(32_000),
+  cwd: z.string().min(1).optional(),
+  timeoutSeconds: z.number().int().positive().max(3_600).optional(),
   permissionMode: z.enum(["read-only", "readonly", "read_only"]).default("read-only")
 });
 
@@ -152,6 +156,8 @@ export const gatewayMcpInputSchemas = {
   unblock_work_item: idSchema,
   reject_work_item: reasonSchema,
   cancel_work_item: reasonSchema,
+  open_acs_dashboard: z.object({}),
+  get_execution_detail: idSchema,
   [directAgentToolName]: directAgentInputSchema
 } satisfies Record<McpToolName, z.ZodType>;
 
@@ -162,6 +168,8 @@ export function mcpRequiredScopes(name: McpToolName): McpScope[] {
       return ["acs:work:create"];
     case "get_work_item":
     case "list_work_items":
+    case "open_acs_dashboard":
+    case "get_execution_detail":
       return ["acs:work:read"];
     case "approve_work_item":
     case "unblock_work_item":
@@ -176,6 +184,8 @@ export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
   switch (name) {
     case "get_work_item":
     case "list_work_items":
+    case "open_acs_dashboard":
+    case "get_execution_detail":
       return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
     case "cancel_work_item":
     case "reject_work_item":
@@ -190,6 +200,10 @@ export function mcpToolDescription(name: McpToolName): string {
     return "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.";
   }
   switch (name) {
+    case "open_acs_dashboard":
+      return "Open the read-only ACS Control Center with current health, executions, approvals, and operational findings.";
+    case "get_execution_detail":
+      return "Read authoritative detail and recent audit events for one ACS execution.";
     case "create_work_item":
       return "Create a governed work item and immediately evaluate it through the policy gate.";
     case "get_work_item":
@@ -213,6 +227,13 @@ export type PublicHttpOperation = {
   operationId: string;
   summary: string;
   requestSchema?: z.ZodType;
+  /**
+   * The status code the gateway actually sends on success. Defaults to 200
+   * when omitted - only set this when the runtime handler in server.ts
+   * sends something else (e.g. 201 for a resource-creating POST), so the
+   * generated OpenAPI document keeps matching the real response.
+   */
+  successStatus?: number;
 };
 
 export const publicHttpOperations: readonly PublicHttpOperation[] = [
@@ -232,7 +253,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/connectors",
     operationId: "registerConnector",
     summary: "Register an authenticated connector.",
-    requestSchema: connectorBodySchema
+    requestSchema: connectorBodySchema,
+    successStatus: 201
   },
   {
     method: "post",
@@ -246,7 +268,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/connectors/{id}/tunnel-sessions",
     operationId: "createTunnelSession",
     summary: "Create a connector tunnel session.",
-    requestSchema: tunnelSessionBodySchema
+    requestSchema: tunnelSessionBodySchema,
+    successStatus: 201
   },
   {
     method: "post",
@@ -285,14 +308,16 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/work-items",
     operationId: "createWorkItem",
     summary: "Create a governed work item.",
-    requestSchema: createWorkItemSchema
+    requestSchema: createWorkItemSchema,
+    successStatus: 201
   },
   {
     method: "post",
     path: "/webhooks/{source}",
     operationId: "ingestWebhook",
     summary: "Ingest an external webhook as a governed ACS work item.",
-    requestSchema: webhookIngestSchema
+    requestSchema: webhookIngestSchema,
+    successStatus: 201
   },
   { method: "get", path: "/work-items/{id}", operationId: "getWorkItem", summary: "Read a governed work item." },
   {
@@ -328,21 +353,24 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/work-items/{id}/results",
     operationId: "submitWorkResult",
     summary: "Submit an authenticated lease-bound worker result.",
-    requestSchema: submitWorkResultSchema
+    requestSchema: submitWorkResultSchema,
+    successStatus: 201
   },
   {
     method: "post",
     path: "/work-items/{id}/retry",
     operationId: "retryWorkItem",
     summary: "Create an immutable retry work item.",
-    requestSchema: retryBodySchema
+    requestSchema: retryBodySchema,
+    successStatus: 201
   },
   {
     method: "post",
     path: "/work-items/{id}/clone",
     operationId: "cloneWorkItem",
     summary: "Create an immutable clone work item.",
-    requestSchema: cloneBodySchema
+    requestSchema: cloneBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/api/actors", operationId: "listActors", summary: "List registered actors." },
   {
@@ -350,7 +378,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/actors",
     operationId: "registerActor",
     summary: "Register an actor.",
-    requestSchema: actorBodySchema
+    requestSchema: actorBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/actors", operationId: "listActorsAlias", summary: "List registered actors." },
   {
@@ -358,7 +387,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/actors",
     operationId: "registerActorAlias",
     summary: "Register an actor.",
-    requestSchema: actorBodySchema
+    requestSchema: actorBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/api/agents", operationId: "listAgents", summary: "List registered agents." },
   {
@@ -366,7 +396,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/agents",
     operationId: "registerAgent",
     summary: "Register an agent.",
-    requestSchema: agentBodySchema
+    requestSchema: agentBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/api/agents/{id}", operationId: "getAgent", summary: "Read a registered agent." },
   {
@@ -394,7 +425,8 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/agents/{id}/heartbeat",
     operationId: "recordAgentHeartbeat",
     summary: "Record an agent heartbeat.",
-    requestSchema: heartbeatBodySchema
+    requestSchema: heartbeatBodySchema,
+    successStatus: 201
   },
   { method: "get", path: "/agents", operationId: "listAcpAgents", summary: "List agents through the ACP view." },
   {
