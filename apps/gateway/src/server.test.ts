@@ -1609,7 +1609,7 @@ describe("gateway MCP transport", () => {
 
       expect(created.statusCode).toBe(201);
       expect(created.json().requester).toBe("user");
-      expect(created.json().requesterSubject).toBeUndefined();
+      expect(created.json().requesterSubject).toBe("user");
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

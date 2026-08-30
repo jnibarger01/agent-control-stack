@@ -15,7 +15,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site",
+    "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site && npm run release:dry-run-gate",
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
     "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety",
     "test:vitest": "vitest run",
@@ -35,7 +35,8 @@
     "db:backup-policy": "node scripts/db-backup-policy.mjs",
     "security:audit": "npm audit --audit-level=high",
     "security:secrets": "docker run --rm -v \"$PWD:/repo:ro\" zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml --exit-code=1",
-    "check": "npm run format:check && npm run lint && npm run build && npm run contracts:check && npm test && npm run test:authority-coverage && npm run security:audit",
+    "release:dry-run-gate": "node scripts/check-dry-run-boundary.mjs",
+    "check": "npm run format:check && npm run lint && npm run build && npm run contracts:check && npm run release:dry-run-gate && npm test && npm run test:authority-coverage && npm run security:audit",
     "dev:gateway": "tsx apps/gateway/src/index.ts",
     "eval": "tsx packages/eval-harness/src/cli.ts",
     "start:mcp": "node apps/mcp/dist/cli.js",

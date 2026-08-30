@@ -45,6 +45,21 @@ export interface WorkerResult {
   validationPassed?: boolean;
 }
 
+export const DRY_RUN_EXECUTION_MODE = "dry_run" as const;
+
+export function assertDryRunExecutionMode(
+  mode: unknown,
+  nodeEnv = process.env.NODE_ENV
+): asserts mode is typeof DRY_RUN_EXECUTION_MODE {
+  if (mode === DRY_RUN_EXECUTION_MODE) {
+    return;
+  }
+  if (nodeEnv === "production") {
+    throw new Error("production worker requires dry_run execution mode");
+  }
+  throw new Error("worker requires dry_run execution mode");
+}
+
 /**
  * The one-shot worker is the first safe execution slice. Until authoritative
  * attempt/workspace wiring is complete, it may only simulate filesystem
@@ -149,6 +164,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       retrievedSkills: prepared.retrievedSkills,
       ...(workspace ? { workspace } : {})
     });
+    assertDryRunExecutionMode(result.executionMode);
     const completedAt = new Date().toISOString();
     const usedSkills = result.usedSkillNames ?? [];
     const validation = options.validator
