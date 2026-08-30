@@ -184,6 +184,36 @@
         ]
       }
     },
+    "POST /webhooks/{source}": {
+      "required": [
+        "intent",
+        "title"
+      ],
+      "properties": [
+        "correlationId",
+        "intent",
+        "requestedActions",
+        "risk",
+        "target",
+        "title"
+      ],
+      "propertyTypes": {
+        "title": "\"string\"",
+        "intent": "\"string\"",
+        "target": "\"object\"",
+        "requestedActions": "\"array\"",
+        "risk": "\"string\"",
+        "correlationId": "\"string\""
+      },
+      "propertyEnums": {
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
+    },
     "GET /work-items/{id}": {
       "required": [],
       "properties": [],
@@ -247,12 +277,16 @@
       "properties": [
         "actionHash",
         "artifacts",
+        "attemptId",
         "error",
         "exitCode",
+        "fencingEpoch",
         "finishedAt",
         "idempotencyKey",
+        "inputHash",
         "leaseId",
         "outcome",
+        "planHash",
         "resourceUsage",
         "simulationMetadata",
         "startedAt",
@@ -265,9 +299,13 @@
       ],
       "propertyTypes": {
         "workItemId": "\"string\"",
+        "attemptId": "\"string\"",
         "leaseId": "\"string\"",
         "workerId": "\"string\"",
         "actionHash": "\"string\"",
+        "planHash": "\"string\"",
+        "inputHash": "\"string\"",
+        "fencingEpoch": "\"integer\"",
         "idempotencyKey": "\"string\"",
         "outcome": "\"string\"",
         "startedAt": "\"string\"",
@@ -280,7 +318,7 @@
         "artifacts": "\"array\"",
         "error": "\"string\"",
         "resourceUsage": "\"object\"",
-        "simulationMetadata": "\"object\""
+        "simulationMetadata": "null"
       },
       "propertyEnums": {
         "outcome": [
@@ -697,6 +735,24 @@
       "propertyTypes": {
         "id": "\"string\"",
         "reason": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "open_acs_dashboard": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "get_execution_detail": {
+      "required": [
+        "id"
+      ],
+      "properties": [
+        "id"
+      ],
+      "propertyTypes": {
+        "id": "\"string\""
       },
       "propertyEnums": {}
     },

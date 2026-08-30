@@ -11,6 +11,7 @@
     { "path": "packages/temporal-memory" },
     { "path": "packages/procedural-learning" },
     { "path": "packages/sandbox" },
+    { "path": "packages/desktop-commander-adapter" },
     { "path": "packages/workspace-manager" },
     { "path": "packages/engine-adapter" },
     { "path": "./packages/execution-controller" },

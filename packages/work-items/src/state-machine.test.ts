@@ -815,7 +815,12 @@ describe("work item state machine", () => {
         { version: 13, name: "actor_routing", filename: "013_actor_routing.sql" },
         { version: 14, name: "validation_runs", filename: "014_validation_runs.sql" },
         { version: 15, name: "recovery_records", filename: "015_recovery_records.sql" },
-        { version: 16, name: "publication_records", filename: "016_publication_records.sql" }
+        { version: 16, name: "publication_records", filename: "016_publication_records.sql" },
+        {
+          version: 17,
+          name: "desktop_commander_execution_mode",
+          filename: "017_desktop_commander_execution_mode.sql"
+        }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -921,7 +926,8 @@ describe("work item state machine", () => {
         { version: 13 },
         { version: 14 },
         { version: 15 },
-        { version: 16 }
+        { version: 16 },
+        { version: 17 }
       ]);
     } finally {
       db.close();
@@ -1030,7 +1036,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(copiedPath);
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1105,7 +1111,7 @@ describe("work item state machine", () => {
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([

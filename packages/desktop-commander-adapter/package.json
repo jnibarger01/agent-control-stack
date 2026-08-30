@@ -1,5 +1,5 @@
 {
-  "name": "@agent-control-stack/worker",
+  "name": "@agent-control-stack/desktop-commander-adapter",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -11,15 +11,11 @@
       "default": "./dist/index.js"
     }
   },
-  "bin": {
-    "acs-worker": "./dist/cli.js"
-  },
   "dependencies": {
-    "@agent-control-stack/desktop-commander-adapter": "0.1.0",
+    "@agent-control-stack/machine-controller": "0.1.0",
     "@agent-control-stack/policy-gate": "0.1.0",
-    "@agent-control-stack/procedural-learning": "0.1.0",
-    "@agent-control-stack/sandbox": "0.1.0",
+    "@agent-control-stack/shared": "0.1.0",
     "@agent-control-stack/work-items": "0.1.0",
-    "@agent-control-stack/workspace-manager": "0.1.0"
+    "zod": "^4.0.0"
   }
 }

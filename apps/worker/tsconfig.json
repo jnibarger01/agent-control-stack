@@ -8,6 +8,7 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../../apps/scheduler" },
+    { "path": "../../packages/desktop-commander-adapter" },
     { "path": "../../packages/policy-gate" },
     { "path": "../../packages/procedural-learning" },
     { "path": "../../packages/sandbox" },

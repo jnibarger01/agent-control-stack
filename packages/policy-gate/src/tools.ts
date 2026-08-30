@@ -5,6 +5,7 @@ import {
   approvalRequestSchema,
   cancelRequestSchema,
   defaultExecutionPlanForWorkItem,
+  resolveExecutionBackend,
   rejectRequestSchema,
   type ClaimedWorkItem,
   type PrivilegedTransitionOptions,
@@ -314,7 +315,11 @@ function ensureExecutionPlan(store: WorkItemStore, workItem: WorkItem, actor: st
     store.getCurrentExecutionPlan(workItem.id) ??
     store.createExecutionPlan({
       workItemId: workItem.id,
-      definition: defaultExecutionPlanForWorkItem(workItem),
+      // The execution backend is a process-wide deployment setting. Gateway
+      // (approval) and worker (claim) must share ACS_EXECUTION_BACKEND so the
+      // plan hash is consistent; the worker additionally fails closed if the
+      // admitted plan's mode does not match its configured backend.
+      definition: defaultExecutionPlanForWorkItem(workItem, { executionMode: resolveExecutionBackend() }),
       createdByActorId: actor
     })
   );

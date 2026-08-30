@@ -12,6 +12,7 @@ import {
   redactValue,
   stableHash,
   verifyAuditChain,
+  type AttributeValue,
   type AuditChainEvent,
   type AuditChainVerification,
   type AuditEvent
@@ -537,6 +538,31 @@ export interface ConnectorRequestRecord {
   authScopes?: string[];
 }
 
+/**
+ * Real-execution audit evidence (Phase 12 of the Desktop Commander integration).
+ * Event names are namespaced so this cannot be used as a generic audit-append
+ * primitive - only `execution.*` and `desktop_commander.*` are accepted, and the
+ * body/attributes still pass through `createEvent`'s redaction.
+ */
+export interface ExecutionAuditEventRecord {
+  name: string;
+  workItemId: string;
+  body?: Record<string, unknown>;
+  attributes?: Record<string, AttributeValue>;
+}
+
+const executionAuditEventNames = new Set([
+  "execution.authorization_requested",
+  "execution.authorization_granted",
+  "execution.authorization_denied",
+  "execution.started",
+  "execution.result_persisted",
+  "execution.completed",
+  "desktop_commander.tool_called",
+  "desktop_commander.tool_succeeded",
+  "desktop_commander.tool_failed"
+]);
+
 export const acpTimelineEventTypes = [
   "initialized",
   "message",
@@ -883,6 +909,7 @@ export interface WorkItemStore {
   getTunnelSession(input: TunnelSessionRef): TunnelSessionAuthorizationRecord | undefined;
   recordConnectorRequest(input: ConnectorRequestRecord): StoredAuditEvent;
   recordAgentTimelineEvent(input: AgentTimelineEventRecord): StoredAuditEvent;
+  recordExecutionEvent(input: ExecutionAuditEventRecord): StoredAuditEvent;
   recordPolicyDecision(input: PolicyDecisionRecord): StoredAuditEvent;
   recordApproval(input: ApprovalRecord): ApprovalGrant;
   hasApproval(workItemId: string, actionHash: string): boolean;
@@ -3008,6 +3035,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
           attributes
         )
       );
+      return { value: event, events: [event] };
+    });
+  }
+
+  recordExecutionEvent(input: ExecutionAuditEventRecord): StoredAuditEvent {
+    if (!executionAuditEventNames.has(input.name)) {
+      throw new ControlStackError(
+        "execution_audit_event_name_invalid",
+        `recordExecutionEvent only accepts execution.* / desktop_commander.* events, got ${input.name}`
+      );
+    }
+    const workItemId = requiredString(input.workItemId, "workItemId");
+    return this.write(() => {
+      const attributes: Record<string, AttributeValue> = {
+        "work_item.id": workItemId,
+        ...(input.attributes ?? {})
+      };
+      const event = this.appendAuditEvent(createEvent(input.name, { workItemId, ...(input.body ?? {}) }, attributes));
       return { value: event, events: [event] };
     });
   }

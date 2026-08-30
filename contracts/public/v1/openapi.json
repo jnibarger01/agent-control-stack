@@ -1206,32 +1206,97 @@
                     "additionalProperties": false
                   },
                   "simulationMetadata": {
-                    "type": "object",
-                    "properties": {
-                      "executionMode": {
-                        "type": "string",
-                        "const": "dry_run"
+                    "oneOf": [
+                      {
+                        "type": "object",
+                        "properties": {
+                          "executionMode": {
+                            "type": "string",
+                            "const": "dry_run"
+                          },
+                          "simulated": {
+                            "type": "boolean",
+                            "const": true
+                          },
+                          "workerVersion": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "maxLength": 512
+                          }
+                        },
+                        "required": [
+                          "executionMode",
+                          "simulated"
+                        ],
+                        "additionalProperties": false
                       },
-                      "simulated": {
-                        "type": "boolean",
-                        "const": true
-                      },
-                      "workerVersion": {
-                        "type": "string",
-                        "minLength": 1,
-                        "maxLength": 128,
-                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
-                      },
-                      "reason": {
-                        "type": "string",
-                        "maxLength": 512
+                      {
+                        "type": "object",
+                        "properties": {
+                          "executionMode": {
+                            "type": "string",
+                            "const": "desktop_commander"
+                          },
+                          "simulated": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "backend": {
+                            "type": "string",
+                            "const": "desktop-commander-mcp"
+                          },
+                          "backendVersion": {
+                            "type": "string",
+                            "maxLength": 128
+                          },
+                          "toolName": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128
+                          },
+                          "invocationFingerprint": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "requestId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                          },
+                          "approvalId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                          },
+                          "workerVersion": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "maxLength": 512
+                          }
+                        },
+                        "required": [
+                          "executionMode",
+                          "simulated",
+                          "backend",
+                          "toolName",
+                          "invocationFingerprint",
+                          "requestId"
+                        ],
+                        "additionalProperties": false
                       }
-                    },
-                    "required": [
-                      "executionMode",
-                      "simulated"
-                    ],
-                    "additionalProperties": false
+                    ]
                   }
                 },
                 "required": [

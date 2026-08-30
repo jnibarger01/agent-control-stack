@@ -94,14 +94,34 @@ const resourceUsageSchema = z
   })
   .strict();
 
-const simulationMetadataSchema = z
-  .object({
-    executionMode: z.literal("dry_run"),
-    simulated: z.literal(true),
-    workerVersion: identifierSchema.optional(),
-    reason: z.string().max(512).optional()
-  })
-  .strict();
+// Discriminated on `executionMode`. The `dry_run` branch is byte-identical to
+// the schema that has always shipped; the `desktop_commander` branch is the
+// only way a non-simulated result can be persisted, and it can only be produced
+// by the ACS worker after the full execution-authorization chain has passed.
+const simulationMetadataSchema = z.discriminatedUnion("executionMode", [
+  z
+    .object({
+      executionMode: z.literal("dry_run"),
+      simulated: z.literal(true),
+      workerVersion: identifierSchema.optional(),
+      reason: z.string().max(512).optional()
+    })
+    .strict(),
+  z
+    .object({
+      executionMode: z.literal("desktop_commander"),
+      simulated: z.literal(false),
+      backend: z.literal("desktop-commander-mcp"),
+      backendVersion: z.string().max(128).optional(),
+      toolName: z.string().min(1).max(128),
+      invocationFingerprint: hashSchema,
+      requestId: identifierSchema,
+      approvalId: identifierSchema.optional(),
+      workerVersion: identifierSchema.optional(),
+      reason: z.string().max(512).optional()
+    })
+    .strict()
+]);
 
 const structuredOutputSchema = z.record(z.string(), z.unknown()).superRefine((value, context) => {
   validateStructuredValue(value, context, "structuredOutput", 0);
