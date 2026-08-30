@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -30,7 +31,7 @@ function config(): DesktopCommanderAdapterConfig {
   };
 }
 
-function authFor(tool: string, args: Record<string, unknown>) {
+function authFor(tool: string, args: Record<string, unknown>, approvalId?: string) {
   const workItem = makeWorkItem(root, {
     requestedActions: [{ kind: "fs.read", description: tool, params: { tool, arguments: args } }]
   });
@@ -38,7 +39,7 @@ function authFor(tool: string, args: Record<string, unknown>) {
   return authorizeDesktopCommanderExecution({
     claimed,
     trustedWorkItem: workItem,
-    lease: makeLease(claimed),
+    lease: makeLease(claimed, approvalId ? { approvalId } : {}),
     workerId: "worker_1",
     containment: containment(),
     requestId: `live_${tool}`,
@@ -50,6 +51,10 @@ describe.skipIf(!ENABLED)("Desktop Commander live integration (harmless read-onl
   beforeAll(async () => {
     root = realpathSync(mkdtempSync(join(tmpdir(), "dc-live-")));
     writeFileSync(join(root, "hello.txt"), "live integration hello\n");
+    // A git repo with a distinctive untracked file, so `git status` output is
+    // unambiguous proof that the process ran in this working directory.
+    execFileSync("git", ["init", "-q"], { cwd: root });
+    writeFileSync(join(root, "MARKER_IN_CONTAINED_CWD.txt"), "cwd proof\n");
     executor = new DesktopCommanderMachineExecutor(config());
     const info = await executor.preflight();
     expect(info.toolCount).toBeGreaterThan(0);
@@ -85,5 +90,20 @@ describe.skipIf(!ENABLED)("Desktop Commander live integration (harmless read-onl
       authorization: authFor("get_file_info", { path: join(root, "hello.txt") })
     });
     expect(result.isError).toBe(false);
+  });
+
+  it("start_process enforces the ACS-supplied contained working directory", async () => {
+    const auth = authFor("start_process", { command: "git status", timeout_ms: 8000, cwd: root }, "appr_live_cwd");
+    expect(auth.normalizedArguments.cwd).toBe(root);
+    const result = await executor.execute({ authorization: auth });
+    expect(result.isError).toBe(false);
+    // The process ran in `root`, not in Desktop Commander's own cwd.
+    expect(result.output).toContain("MARKER_IN_CONTAINED_CWD.txt");
+  });
+
+  it("start_process rejects a working directory outside the allow root before any MCP call", async () => {
+    expect(() =>
+      authFor("start_process", { command: "git status", timeout_ms: 8000, cwd: "/etc" }, "appr_live_cwd")
+    ).toThrow(/outside every allow root/);
   });
 });

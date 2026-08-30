@@ -96,13 +96,22 @@ export function normalizeInvocation(
 
   const { args, canonicalPaths } = normalizePaths(policy, validated, containment);
 
+  const commandCwd =
+    policy.cwdArgs.length > 0 && typeof args[policy.cwdArgs[0] as string] === "string"
+      ? (args[policy.cwdArgs[0] as string] as string)
+      : undefined;
+
   for (const key of policy.commandArgs) {
     const commandLine = args[key];
     if (typeof commandLine !== "string") {
       throw new ControlStackError("desktop_commander_argument_invalid", `expected string command for '${key}'`);
     }
-    // Throws on any forbidden/destructive command.
-    validateProcessCommand(commandLine, containment.allowedRoots);
+    // Throws on any forbidden/destructive command. The contained cwd (already
+    // canonicalised + proven inside an allow root) is the command policy's base.
+    validateProcessCommand(commandLine, [
+      commandCwd ?? (containment.allowedRoots[0] as string),
+      ...containment.allowedRoots
+    ]);
   }
 
   return {

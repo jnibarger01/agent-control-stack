@@ -108,6 +108,8 @@ const editBlockArgs = z
 const startProcessArgs = z
   .object({
     command: commandString,
+    // ACS always runs a process in an explicit, contained working directory.
+    cwd: pathString,
     timeout_ms: z
       .number()
       .int()
@@ -341,7 +343,7 @@ const policies: readonly DesktopCommanderToolPolicy[] = [
     argsSchema: startProcessArgs,
     pathArgs: [],
     multiPathArgs: [],
-    cwdArgs: [],
+    cwdArgs: ["cwd"],
     commandArgs: ["command"],
     timeoutMs: 15 * 60 * 1_000,
     maxResultBytes: 256 * 1024

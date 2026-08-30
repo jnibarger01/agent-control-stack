@@ -46,11 +46,29 @@ describe("normalizeInvocation", () => {
   });
 
   it("validates the command line for start_process", () => {
-    expect(() => normalizeInvocation("start_process", { command: "rm -rf /", timeout_ms: 1000 }, config)).toThrow(
-      /forbidden|destructive|metacharacter/
-    );
-    const ok = normalizeInvocation("start_process", { command: "git status", timeout_ms: 1000 }, config);
+    expect(() =>
+      normalizeInvocation("start_process", { command: "rm -rf /", timeout_ms: 1000, cwd: root }, config)
+    ).toThrow(/forbidden|destructive|metacharacter/);
+    const ok = normalizeInvocation("start_process", { command: "git status", timeout_ms: 1000, cwd: root }, config);
     expect(ok.toolName).toBe("start_process");
+    expect(ok.validatedArguments.cwd).toBe(root);
+    expect(ok.canonicalPaths).toContain(root);
+  });
+
+  it("start_process requires an explicit contained cwd", () => {
+    expect(() => normalizeInvocation("start_process", { command: "git status", timeout_ms: 1000 }, config)).toThrow(
+      /invalid arguments/
+    );
+    expect(() =>
+      normalizeInvocation("start_process", { command: "git status", timeout_ms: 1000, cwd: "/etc" }, config)
+    ).toThrow(/outside every allow root/);
+    expect(() =>
+      normalizeInvocation(
+        "start_process",
+        { command: "git status", timeout_ms: 1000, cwd: join(root, "does-not-exist") },
+        config
+      )
+    ).toThrow(/does not exist/);
   });
 
   it("changing any argument changes the fingerprint", () => {
