@@ -1,11 +1,23 @@
-import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
+import {
+  createPolicyEngine,
+  createWorkItemTools,
+  evaluateVerificationRequirement
+} from "@agent-control-stack/policy-gate";
 import {
   ExecutionLearningBridge,
   ProceduralLearning,
   type InjectedSkill
 } from "@agent-control-stack/procedural-learning";
 import { executeSandboxed, type SandboxResult } from "@agent-control-stack/sandbox";
-import { stableHash } from "@agent-control-stack/shared";
+import { ControlStackError, domainHash, stableHash } from "@agent-control-stack/shared";
+import {
+  admittedPlanHash,
+  capabilityProfileHash,
+  validationProfileHash,
+  workspaceIdentityFromContainment,
+  type AdmittedPlanBinding
+} from "@agent-control-stack/advisory";
+import { buildEvidenceManifest, computeWorkspaceRevision, observation } from "@agent-control-stack/evidence";
 import {
   resolveExecutionBackend,
   SqliteWorkItemStore,
@@ -28,6 +40,8 @@ import {
   toolCalledEvent,
   toolOutcomeEvent,
   type AuditEventDraft,
+  type ExecutionAuthorization,
+  type MachineExecutionResult,
   type MachineExecutor
 } from "@agent-control-stack/desktop-commander-adapter";
 
@@ -116,6 +130,22 @@ export function assertExecutionModeForBackend(
  * (dry_run) backend it may only simulate filesystem inspection. Approval alone
  * must never turn a mutation into a successful worker result.
  */
+/**
+ * ADR 0015 verification policy mode. `off` (default) keeps the existing
+ * behaviour: no evidence manifest, no verification requirement, the result
+ * acceptance guard is inert. `enforce` records an ACS-owned evidence manifest
+ * and verification requirement for every governed desktop_commander execution,
+ * and leaves the attempt awaiting an independent reviewer + ACS decision when
+ * reviewers are required.
+ */
+export type VerificationPolicyMode = "off" | "enforce";
+export function resolveVerificationPolicyMode(env: NodeJS.ProcessEnv = process.env): VerificationPolicyMode {
+  const raw = env.ACS_VERIFICATION_POLICY?.trim();
+  if (raw === undefined || raw === "" || raw === "off") return "off";
+  if (raw === "enforce") return "enforce";
+  throw new ControlStackError("verification_policy_mode_invalid", `unknown ACS_VERIFICATION_POLICY: ${raw}`);
+}
+
 const readOnlyWorkerActionKinds = new Set(["system.status", "fs.list", "fs.stat", "fs.read", "fs.search_name"]);
 
 export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActions">): boolean {
@@ -465,6 +495,30 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
   const submittedExecutionMode: typeof DESKTOP_COMMANDER_EXECUTION_MODE = DESKTOP_COMMANDER_EXECUTION_MODE;
   assertExecutionModeForBackend(submittedExecutionMode, "desktop_commander");
 
+  // --- ADR 0015: machine evidence + verification requirement (gated) ---------
+  if (ok && resolveVerificationPolicyMode() === "enforce") {
+    const awaiting = await recordGovernedExecutionEvidence({
+      workItems,
+      running,
+      plan,
+      trustedWorkItem,
+      lease,
+      authorization,
+      executionResult,
+      workerId,
+      startedAt,
+      finishedAt
+    });
+    if (awaiting) {
+      return {
+        executed: true,
+        executionMode: "desktop_commander",
+        workItemId: running.id,
+        reason: "awaiting_independent_verification"
+      };
+    }
+  }
+
   try {
     tools.submit_work_result({
       workItemId: running.id,
@@ -563,6 +617,154 @@ function submitDesktopCommanderFailure(
     simulationMetadata: { executionMode: "dry_run", simulated: true, reason: code }
   });
   return { executed: false, workItemId: running.id, reason: `desktop_commander authorization denied: ${code}` };
+}
+
+interface GovernedEvidenceInput {
+  workItems: WorkItemStore;
+  running: ClaimedWorkItem;
+  plan: { planId: string; planHash: string };
+  trustedWorkItem: Pick<WorkItem, "id" | "risk" | "requestedActions" | "target">;
+  lease: { policyVersion: string };
+  authorization: ExecutionAuthorization;
+  executionResult: MachineExecutionResult;
+  workerId: string;
+  startedAt: string;
+  finishedAt: string;
+}
+
+/**
+ * ADR 0015: build + record an ACS-owned evidence manifest and a verification
+ * requirement for a governed desktop_commander execution. Returns `true` when
+ * the attempt must await an independent reviewer + ACS verification decision
+ * (reviewers required), in which case the caller does NOT submit a result and
+ * the `submitWorkResult` guard keeps `succeeded` unreachable until a decision.
+ */
+async function recordGovernedExecutionEvidence(input: GovernedEvidenceInput): Promise<boolean> {
+  const { workItems, running, plan, trustedWorkItem, lease, authorization, executionResult } = input;
+  const attemptId = running.attemptId!;
+  const via = { via: "domain_service" as const, actorId: input.workerId };
+  const containment = machineExecutorContainmentFromEnv();
+  const allowedRoot = containment.allowedRoots[0] ?? "none";
+  const workspaceId = workspaceIdentityFromContainment(containment.allowedRoots);
+
+  let baseRevision = `unavailable:${domainHash("acs:no-workspace:v1", { attemptId })}`;
+  try {
+    baseRevision = (await computeWorkspaceRevision(allowedRoot)).revision;
+  } catch {
+    // Not a git worktree — the sentinel revision is deterministic and honest.
+  }
+
+  const binding: AdmittedPlanBinding = {
+    schemaVersion: "acs.admitted-plan.v1",
+    workItemId: running.id,
+    proposalHash: null,
+    executionPlanHash: plan.planHash,
+    requestedActionsHash: domainHash("acs:requested-actions:v1", trustedWorkItem.requestedActions),
+    workspace: { workspaceId, baseRevision },
+    sandboxProfile: "desktop_commander",
+    networkProfile: "none",
+    capabilityProfileHash: capabilityProfileHash([authorization.toolName]),
+    validationProfileHash: validationProfileHash({}),
+    policyVersion: lease.policyVersion
+  };
+  const boundPlanHash = admittedPlanHash(binding);
+
+  const manifest = buildEvidenceManifest({
+    attemptId,
+    workItemId: running.id,
+    admittedPlanHash: boundPlanHash,
+    planHash: plan.planHash,
+    actionHash: authorization.actionHash,
+    baseWorkspaceRevision: baseRevision,
+    resultWorkspaceRevision: baseRevision,
+    changedPaths: [...authorization.canonicalPaths],
+    diffHash: executionResult.resultHash || domainHash("acs:no-diff:v1", { attemptId }),
+    commands: [
+      {
+        executable: authorization.toolName,
+        argvHash: domainHash("acs:dc-argv:v1", authorization.normalizedArguments),
+        exitCode: executionResult.isError ? 1 : 0,
+        stdoutHash: executionResult.resultHash || domainHash("acs:empty:v1", {}),
+        stderrHash: domainHash("acs:empty:v1", {}),
+        durationMs: executionResult.durationMs
+      }
+    ],
+    testEvidence: null,
+    sandboxProfile: "desktop_commander",
+    networkProfile: "none",
+    networkDecisions: { allowed: 0, denied: 0 },
+    observations: [
+      observation("desktop_commander.result_hash", "execution-controller", executionResult.resultHash),
+      observation("desktop_commander.truncated", "execution-controller", executionResult.truncated),
+      observation("workspace.identity", "execution-controller", workspaceId)
+    ],
+    workerId: input.workerId,
+    startedAt: input.startedAt,
+    finishedAt: input.finishedAt
+  });
+
+  workItems.recordAttemptPhase({ attemptId, workItemId: running.id, phase: "collecting_evidence" }, via);
+  workItems.recordEvidenceManifest(
+    {
+      manifestHash: manifest.manifestHash,
+      attemptId,
+      workItemId: running.id,
+      admittedPlanHash: boundPlanHash,
+      planHash: plan.planHash,
+      actionHash: authorization.actionHash,
+      baseWorkspaceRevision: baseRevision,
+      resultWorkspaceRevision: baseRevision,
+      manifest: manifest as unknown as Record<string, unknown>
+    },
+    via
+  );
+
+  const requirement = evaluateVerificationRequirement({
+    riskClass: trustedWorkItem.risk,
+    actionKinds: trustedWorkItem.requestedActions.map((a) => a.kind),
+    executorPrincipalId: input.workerId,
+    executorProvider: "desktop-commander"
+  });
+  workItems.recordVerificationRequirement(
+    {
+      attemptId,
+      workItemId: running.id,
+      policyVersion: requirement.policyVersion,
+      reviewersRequired: requirement.reviewersRequired,
+      requirement: requirement as unknown as Record<string, unknown>
+    },
+    via
+  );
+
+  if (requirement.reviewersRequired === 0) {
+    workItems.recordVerificationDecision(
+      {
+        attemptId,
+        workItemId: running.id,
+        outcome: "attempt_accepted",
+        evidenceManifestHash: manifest.manifestHash,
+        reviewFindingHashes: [],
+        verificationPolicyVersion: requirement.policyVersion
+      },
+      via
+    );
+    workItems.recordAttemptPhase({ attemptId, workItemId: running.id, phase: "accepted" }, via);
+    return false;
+  }
+
+  // Pause here. Reviewer submission + ACS verification resolution are a later
+  // control-plane milestone (ADR 0015). Terminal success stays blocked until
+  // ACS records an attempt_accepted decision.
+  workItems.recordAttemptPhase(
+    {
+      attemptId,
+      workItemId: running.id,
+      phase: "reviewing",
+      note: `awaiting ${requirement.reviewersRequired} independent reviewer(s)`
+    },
+    via
+  );
+  return true;
 }
 
 function machineExecutorContainmentFromEnv(): { allowedRoots: string[]; deniedRoots: string[] } {

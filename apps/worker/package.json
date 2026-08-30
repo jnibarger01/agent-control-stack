@@ -15,7 +15,9 @@
     "acs-worker": "./dist/cli.js"
   },
   "dependencies": {
+    "@agent-control-stack/advisory": "0.1.0",
     "@agent-control-stack/desktop-commander-adapter": "0.1.0",
+    "@agent-control-stack/evidence": "0.1.0",
     "@agent-control-stack/policy-gate": "0.1.0",
     "@agent-control-stack/procedural-learning": "0.1.0",
     "@agent-control-stack/sandbox": "0.1.0",

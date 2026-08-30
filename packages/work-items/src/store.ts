@@ -116,6 +116,30 @@ import {
   type SchedulerFiring,
   type SchedulerFiringClaim
 } from "./scheduler-firing.js";
+import {
+  attemptPhaseSchema,
+  issueReviewerGrantInputSchema,
+  recordAttemptPhaseInputSchema,
+  recordEvidenceManifestInputSchema,
+  recordPlanProposalInputSchema,
+  recordReviewFindingInputSchema,
+  recordVerificationDecisionInputSchema,
+  recordVerificationRequirementInputSchema,
+  type AttemptPhase,
+  type EvidenceManifestProjection,
+  type IssueReviewerGrantInput,
+  type PlanProposalProjection,
+  type RecordAttemptPhaseInput,
+  type RecordEvidenceManifestInput,
+  type RecordPlanProposalInput,
+  type RecordReviewFindingInput,
+  type RecordVerificationDecisionInput,
+  type RecordVerificationRequirementInput,
+  type ReviewFindingProjection,
+  type ReviewerGrantProjection,
+  type VerificationDecisionProjection,
+  type VerificationRequirementProjection
+} from "./governance.js";
 
 interface WorkItemRow {
   id: string;
@@ -843,6 +867,40 @@ export interface WorkItemStore {
   recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord;
   getPublicationByIdempotency(idempotencyKey: string): PublicationRecord | undefined;
   listPublications(workItemId?: string): PublicationRecord[];
+
+  // --- ADR 0015 governance projections (append-only; canonical audit-backed) ---
+  recordPlanProposal(input: RecordPlanProposalInput, options: PrivilegedTransitionOptions): PlanProposalProjection;
+  markPlanProposalAdmitted(proposalHash: string, options: PrivilegedTransitionOptions): PlanProposalProjection;
+  getPlanProposal(proposalHash: string): PlanProposalProjection | undefined;
+  recordEvidenceManifest(
+    input: RecordEvidenceManifestInput,
+    options: PrivilegedTransitionOptions
+  ): EvidenceManifestProjection;
+  getEvidenceManifest(manifestHash: string): EvidenceManifestProjection | undefined;
+  getEvidenceManifestForAttempt(attemptId: string): EvidenceManifestProjection | undefined;
+  recordReviewFinding(input: RecordReviewFindingInput, options: PrivilegedTransitionOptions): ReviewFindingProjection;
+  listReviewFindings(attemptId: string): ReviewFindingProjection[];
+  issueReviewerGrant(input: IssueReviewerGrantInput, options: PrivilegedTransitionOptions): ReviewerGrantProjection;
+  getReviewerGrant(grantHash: string): ReviewerGrantProjection | undefined;
+  consumeReviewerGrant(grantHash: string, options: PrivilegedTransitionOptions): ReviewerGrantProjection;
+  recordAttemptPhase(input: RecordAttemptPhaseInput, options: PrivilegedTransitionOptions): AttemptPhase;
+  getAttemptPhase(attemptId: string): AttemptPhase | undefined;
+  recordVerificationRequirement(
+    input: RecordVerificationRequirementInput,
+    options: PrivilegedTransitionOptions
+  ): VerificationRequirementProjection;
+  getVerificationRequirement(attemptId: string): VerificationRequirementProjection | undefined;
+  recordVerificationDecision(
+    input: RecordVerificationDecisionInput,
+    options: PrivilegedTransitionOptions
+  ): VerificationDecisionProjection;
+  getVerificationDecision(attemptId: string): VerificationDecisionProjection | undefined;
+  /**
+   * The fail-closed verification gate used by result acceptance. `satisfied` is
+   * true when the attempt has no verification requirement, OR it has one and ACS
+   * has recorded an `attempt_accepted` verification decision.
+   */
+  isVerificationSatisfiedForAttempt(attemptId: string): { satisfied: boolean; reason: string };
   /** Most recent lease for the attempt, active or not - startup reconciliation needs the real status, not an assumption. */
   getActiveLeaseForAttempt(attemptId: string): AttemptLease | undefined;
   recordWorkspaceAllocation(
@@ -1823,6 +1881,605 @@ export class SqliteWorkItemStore implements WorkItemStore {
           createdAt: row.created_at
         })
       : undefined;
+  }
+
+  // === ADR 0015 governance projections ===================================
+
+  recordPlanProposal(input: RecordPlanProposalInput, options: PrivilegedTransitionOptions): PlanProposalProjection {
+    requirePrivilegedTransition(options, "record_plan_proposal");
+    const parsed = recordPlanProposalInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      const existing = this.readPlanProposal(parsed.proposalHash);
+      if (existing) return { value: existing, events: [] };
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO plan_proposals (proposal_hash, proposal_id, work_item_id, principal_id, proposal_json, created_at, admitted_at)
+           VALUES (?, ?, ?, ?, ?, ?, NULL)`
+        )
+        .run(
+          parsed.proposalHash,
+          parsed.proposalId,
+          parsed.workItemId,
+          parsed.principalId,
+          JSON.stringify(parsed.proposal),
+          createdAt
+        );
+      const value = this.readPlanProposal(parsed.proposalHash)!;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "advisory.plan_proposal_recorded",
+          { proposalHash: parsed.proposalHash, workItemId: parsed.workItemId, principalId: parsed.principalId },
+          {
+            "work_item.id": parsed.workItemId,
+            "advisory.principal_id": parsed.principalId,
+            "advisory.proposal_hash": parsed.proposalHash,
+            "advisory.role": "ADVISORY_REASONER"
+          }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  markPlanProposalAdmitted(proposalHash: string, options: PrivilegedTransitionOptions): PlanProposalProjection {
+    requirePrivilegedTransition(options, "admit_plan_proposal");
+    return this.write(() => {
+      const existing = this.readPlanProposal(proposalHash);
+      if (!existing) throw new ControlStackError("plan_proposal_missing", `unknown plan proposal ${proposalHash}`);
+      if (existing.admittedAt) return { value: existing, events: [] };
+      const admittedAt = new Date().toISOString();
+      this.db
+        .prepare(`UPDATE plan_proposals SET admitted_at = ? WHERE proposal_hash = ? AND admitted_at IS NULL`)
+        .run(admittedAt, proposalHash);
+      const value = this.readPlanProposal(proposalHash)!;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "advisory.plan_proposal_admitted",
+          { proposalHash, workItemId: value.workItemId },
+          { "work_item.id": value.workItemId, "advisory.proposal_hash": proposalHash }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  getPlanProposal(proposalHash: string): PlanProposalProjection | undefined {
+    return this.readPlanProposal(proposalHash);
+  }
+
+  private readPlanProposal(proposalHash: string): PlanProposalProjection | undefined {
+    const row = this.db.prepare(`SELECT * FROM plan_proposals WHERE proposal_hash = ?`).get(proposalHash) as
+      | {
+          proposal_hash: string;
+          work_item_id: string;
+          principal_id: string;
+          proposal_json: string;
+          created_at: string;
+          admitted_at: string | null;
+        }
+      | undefined;
+    return row
+      ? {
+          proposalHash: row.proposal_hash,
+          workItemId: row.work_item_id,
+          principalId: row.principal_id,
+          proposal: JSON.parse(row.proposal_json) as Record<string, unknown>,
+          createdAt: row.created_at,
+          admittedAt: row.admitted_at
+        }
+      : undefined;
+  }
+
+  recordEvidenceManifest(
+    input: RecordEvidenceManifestInput,
+    options: PrivilegedTransitionOptions
+  ): EvidenceManifestProjection {
+    requirePrivilegedTransition(options, "record_evidence_manifest");
+    const parsed = recordEvidenceManifestInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      const attempt = this.db
+        .prepare(`SELECT 1 FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`)
+        .get(parsed.attemptId, parsed.workItemId) as unknown;
+      if (!attempt) {
+        throw new ControlStackError(
+          "evidence_manifest_attempt_missing",
+          `no attempt ${parsed.attemptId} for work item ${parsed.workItemId}`
+        );
+      }
+      const existing = this.readEvidenceManifest(parsed.manifestHash);
+      if (existing) {
+        if (JSON.stringify(existing.manifest) !== JSON.stringify(parsed.manifest)) {
+          throw new ControlStackError(
+            "evidence_manifest_conflict",
+            "evidence manifest hash conflict: a different manifest body already exists for this content hash"
+          );
+        }
+        return { value: existing, events: [] };
+      }
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO evidence_manifests
+           (manifest_hash, attempt_id, work_item_id, admitted_plan_hash, plan_hash, action_hash,
+            base_workspace_revision, result_workspace_revision, manifest_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parsed.manifestHash,
+          parsed.attemptId,
+          parsed.workItemId,
+          parsed.admittedPlanHash,
+          parsed.planHash,
+          parsed.actionHash,
+          parsed.baseWorkspaceRevision,
+          parsed.resultWorkspaceRevision,
+          JSON.stringify(parsed.manifest),
+          createdAt
+        );
+      const value = this.readEvidenceManifest(parsed.manifestHash)!;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "evidence.manifest_recorded",
+          {
+            manifestHash: parsed.manifestHash,
+            attemptId: parsed.attemptId,
+            workItemId: parsed.workItemId,
+            admittedPlanHash: parsed.admittedPlanHash,
+            baseWorkspaceRevision: parsed.baseWorkspaceRevision,
+            resultWorkspaceRevision: parsed.resultWorkspaceRevision
+          },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "evidence.manifest_hash": parsed.manifestHash,
+            "evidence.admitted_plan_hash": parsed.admittedPlanHash
+          }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  getEvidenceManifest(manifestHash: string): EvidenceManifestProjection | undefined {
+    return this.readEvidenceManifest(manifestHash);
+  }
+
+  getEvidenceManifestForAttempt(attemptId: string): EvidenceManifestProjection | undefined {
+    const row = this.db
+      .prepare(`SELECT manifest_hash FROM evidence_manifests WHERE attempt_id = ? ORDER BY created_at DESC LIMIT 1`)
+      .get(attemptId) as { manifest_hash: string } | undefined;
+    return row ? this.readEvidenceManifest(row.manifest_hash) : undefined;
+  }
+
+  private readEvidenceManifest(manifestHash: string): EvidenceManifestProjection | undefined {
+    const row = this.db.prepare(`SELECT * FROM evidence_manifests WHERE manifest_hash = ?`).get(manifestHash) as
+      | { manifest_hash: string; attempt_id: string; work_item_id: string; manifest_json: string; created_at: string }
+      | undefined;
+    return row
+      ? {
+          manifestHash: row.manifest_hash,
+          attemptId: row.attempt_id,
+          workItemId: row.work_item_id,
+          manifest: JSON.parse(row.manifest_json) as Record<string, unknown>,
+          createdAt: row.created_at
+        }
+      : undefined;
+  }
+
+  recordReviewFinding(input: RecordReviewFindingInput, options: PrivilegedTransitionOptions): ReviewFindingProjection {
+    requirePrivilegedTransition(options, "record_review_finding");
+    const parsed = recordReviewFindingInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      // A review finding is advisory EVIDENCE and MUST reference an existing
+      // machine evidence manifest (the DB FK also enforces this).
+      if (!this.readEvidenceManifest(parsed.evidenceManifestHash)) {
+        throw new ControlStackError(
+          "review_finding_evidence_missing",
+          `review finding references unknown evidence manifest ${parsed.evidenceManifestHash}`
+        );
+      }
+      const existing = this.readReviewFinding(parsed.findingHash);
+      if (existing) return { value: existing, events: [] };
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO review_findings
+           (finding_hash, finding_id, work_item_id, attempt_id, reviewer_principal_id, reviewer_provider,
+            evidence_manifest_hash, verdict, finding_json, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parsed.findingHash,
+          parsed.findingId,
+          parsed.workItemId,
+          parsed.attemptId,
+          parsed.reviewerPrincipalId,
+          parsed.reviewerProvider,
+          parsed.evidenceManifestHash,
+          parsed.verdict,
+          JSON.stringify(parsed.finding),
+          createdAt
+        );
+      const value = this.readReviewFinding(parsed.findingHash)!;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "review.finding_recorded",
+          {
+            findingHash: parsed.findingHash,
+            attemptId: parsed.attemptId,
+            workItemId: parsed.workItemId,
+            reviewerPrincipalId: parsed.reviewerPrincipalId,
+            verdict: parsed.verdict,
+            evidenceManifestHash: parsed.evidenceManifestHash
+          },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "review.reviewer_principal_id": parsed.reviewerPrincipalId,
+            "review.verdict": parsed.verdict,
+            "review.evidence_manifest_hash": parsed.evidenceManifestHash,
+            "advisory.role": "ADVISORY_REASONER"
+          }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  listReviewFindings(attemptId: string): ReviewFindingProjection[] {
+    const rows = this.db
+      .prepare(`SELECT finding_hash FROM review_findings WHERE attempt_id = ? ORDER BY created_at ASC`)
+      .all(attemptId) as Array<{ finding_hash: string }>;
+    return rows.map((r) => this.readReviewFinding(r.finding_hash)!);
+  }
+
+  private readReviewFinding(findingHash: string): ReviewFindingProjection | undefined {
+    const row = this.db.prepare(`SELECT * FROM review_findings WHERE finding_hash = ?`).get(findingHash) as
+      | {
+          finding_hash: string;
+          attempt_id: string;
+          work_item_id: string;
+          reviewer_principal_id: string;
+          reviewer_provider: string;
+          evidence_manifest_hash: string;
+          verdict: ReviewFindingProjection["verdict"];
+          finding_json: string;
+          created_at: string;
+        }
+      | undefined;
+    return row
+      ? {
+          findingHash: row.finding_hash,
+          attemptId: row.attempt_id,
+          workItemId: row.work_item_id,
+          reviewerPrincipalId: row.reviewer_principal_id,
+          reviewerProvider: row.reviewer_provider,
+          evidenceManifestHash: row.evidence_manifest_hash,
+          verdict: row.verdict,
+          finding: JSON.parse(row.finding_json) as Record<string, unknown>,
+          createdAt: row.created_at
+        }
+      : undefined;
+  }
+
+  issueReviewerGrant(input: IssueReviewerGrantInput, options: PrivilegedTransitionOptions): ReviewerGrantProjection {
+    requirePrivilegedTransition(options, "issue_reviewer_grant");
+    const parsed = issueReviewerGrantInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      const existing = this.readReviewerGrant(parsed.grantHash);
+      if (existing) return { value: existing, events: [] };
+      this.db
+        .prepare(
+          `INSERT INTO reviewer_grants
+           (grant_hash, grant_id, principal_id, work_item_id, plan_id, admitted_plan_hash, attempt_id,
+            workspace_id, workspace_revision, status, grant_json, issued_at, expires_at, consumed_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'issued', ?, ?, ?, NULL)`
+        )
+        .run(
+          parsed.grantHash,
+          parsed.grantId,
+          parsed.principalId,
+          parsed.workItemId,
+          parsed.planId,
+          parsed.admittedPlanHash,
+          parsed.attemptId,
+          parsed.workspaceId,
+          parsed.workspaceRevision,
+          JSON.stringify(parsed.grant),
+          parsed.issuedAt,
+          parsed.expiresAt
+        );
+      const value = this.readReviewerGrant(parsed.grantHash)!;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "reviewer.grant_issued",
+          {
+            grantHash: parsed.grantHash,
+            attemptId: parsed.attemptId,
+            workItemId: parsed.workItemId,
+            principalId: parsed.principalId,
+            workspaceRevision: parsed.workspaceRevision
+          },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "reviewer.grant_hash": parsed.grantHash,
+            "reviewer.principal_id": parsed.principalId
+          }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  consumeReviewerGrant(grantHash: string, options: PrivilegedTransitionOptions): ReviewerGrantProjection {
+    requirePrivilegedTransition(options, "consume_reviewer_grant");
+    return this.write(() => {
+      const existing = this.readReviewerGrant(grantHash);
+      if (!existing) throw new ControlStackError("reviewer_grant_missing", `unknown reviewer grant ${grantHash}`);
+      if (existing.status === "consumed") return { value: existing, events: [] };
+      if (existing.status !== "issued") {
+        throw new ControlStackError("reviewer_grant_not_consumable", `reviewer grant is ${existing.status}`);
+      }
+      const consumedAt = new Date().toISOString();
+      const changed = this.db
+        .prepare(
+          `UPDATE reviewer_grants SET status = 'consumed', consumed_at = ? WHERE grant_hash = ? AND status = 'issued'`
+        )
+        .run(consumedAt, grantHash);
+      if (changed.changes !== 1) throw new ControlStackError("reviewer_grant_consume_conflict", "concurrent consume");
+      const value = this.readReviewerGrant(grantHash)!;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "reviewer.grant_consumed",
+          { grantHash, attemptId: value.attemptId, workItemId: value.workItemId },
+          { "work_item.id": value.workItemId, "attempt.id": value.attemptId, "reviewer.grant_hash": grantHash }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  getReviewerGrant(grantHash: string): ReviewerGrantProjection | undefined {
+    return this.readReviewerGrant(grantHash);
+  }
+
+  private readReviewerGrant(grantHash: string): ReviewerGrantProjection | undefined {
+    const row = this.db.prepare(`SELECT * FROM reviewer_grants WHERE grant_hash = ?`).get(grantHash) as
+      | {
+          grant_hash: string;
+          attempt_id: string;
+          work_item_id: string;
+          principal_id: string;
+          status: ReviewerGrantProjection["status"];
+          workspace_revision: string;
+          admitted_plan_hash: string;
+          grant_json: string;
+          issued_at: string;
+          expires_at: string;
+          consumed_at: string | null;
+        }
+      | undefined;
+    return row
+      ? {
+          grantHash: row.grant_hash,
+          attemptId: row.attempt_id,
+          workItemId: row.work_item_id,
+          principalId: row.principal_id,
+          status: row.status,
+          workspaceRevision: row.workspace_revision,
+          admittedPlanHash: row.admitted_plan_hash,
+          grant: JSON.parse(row.grant_json) as Record<string, unknown>,
+          issuedAt: row.issued_at,
+          expiresAt: row.expires_at,
+          consumedAt: row.consumed_at
+        }
+      : undefined;
+  }
+
+  recordAttemptPhase(input: RecordAttemptPhaseInput, options: PrivilegedTransitionOptions): AttemptPhase {
+    requirePrivilegedTransition(options, "record_attempt_phase");
+    const parsed = recordAttemptPhaseInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      const recordedAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO attempt_phases (attempt_id, work_item_id, phase, note, recorded_at) VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(parsed.attemptId, parsed.workItemId, parsed.phase, parsed.note ?? null, recordedAt);
+      // The attempt's current phase is a non-authoritative projection derived
+      // from the latest attempt_phases row (getAttemptPhase). The work-item
+      // lifecycle and the execution_attempts immutable guard are untouched.
+      const event = this.appendAuditEvent(
+        createEvent(
+          `attempt.phase.${parsed.phase}`,
+          { attemptId: parsed.attemptId, workItemId: parsed.workItemId, phase: parsed.phase, note: parsed.note },
+          { "work_item.id": parsed.workItemId, "attempt.id": parsed.attemptId, "attempt.phase": parsed.phase }
+        )
+      );
+      return { value: parsed.phase, events: [event] };
+    });
+  }
+
+  getAttemptPhase(attemptId: string): AttemptPhase | undefined {
+    const row = this.db
+      .prepare(`SELECT phase FROM attempt_phases WHERE attempt_id = ? ORDER BY id DESC LIMIT 1`)
+      .get(attemptId) as { phase: string } | undefined;
+    return row ? attemptPhaseSchema.parse(row.phase) : undefined;
+  }
+
+  recordVerificationRequirement(
+    input: RecordVerificationRequirementInput,
+    options: PrivilegedTransitionOptions
+  ): VerificationRequirementProjection {
+    requirePrivilegedTransition(options, "record_verification_requirement");
+    const parsed = recordVerificationRequirementInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      const existing = this.getVerificationRequirement(parsed.attemptId);
+      if (existing) return { value: existing, events: [] };
+      const recordedAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO verification_requirements
+           (attempt_id, work_item_id, policy_version, reviewers_required, requirement_json, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parsed.attemptId,
+          parsed.workItemId,
+          parsed.policyVersion,
+          parsed.reviewersRequired,
+          JSON.stringify(parsed.requirement),
+          recordedAt
+        );
+      const value = this.getVerificationRequirement(parsed.attemptId)!;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "verification.requirement_recorded",
+          {
+            attemptId: parsed.attemptId,
+            workItemId: parsed.workItemId,
+            policyVersion: parsed.policyVersion,
+            reviewersRequired: parsed.reviewersRequired
+          },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "verification.policy_version": parsed.policyVersion,
+            "verification.reviewers_required": parsed.reviewersRequired
+          }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  getVerificationRequirement(attemptId: string): VerificationRequirementProjection | undefined {
+    const row = this.db.prepare(`SELECT * FROM verification_requirements WHERE attempt_id = ?`).get(attemptId) as
+      | {
+          attempt_id: string;
+          work_item_id: string;
+          policy_version: string;
+          reviewers_required: number;
+          requirement_json: string;
+          recorded_at: string;
+        }
+      | undefined;
+    return row
+      ? {
+          attemptId: row.attempt_id,
+          workItemId: row.work_item_id,
+          policyVersion: row.policy_version,
+          reviewersRequired: row.reviewers_required,
+          requirement: JSON.parse(row.requirement_json) as Record<string, unknown>,
+          recordedAt: row.recorded_at
+        }
+      : undefined;
+  }
+
+  recordVerificationDecision(
+    input: RecordVerificationDecisionInput,
+    options: PrivilegedTransitionOptions
+  ): VerificationDecisionProjection {
+    requirePrivilegedTransition(options, "record_verification_decision");
+    const parsed = recordVerificationDecisionInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      if (!this.readEvidenceManifest(parsed.evidenceManifestHash)) {
+        throw new ControlStackError(
+          "verification_decision_evidence_missing",
+          `verification decision references unknown evidence manifest ${parsed.evidenceManifestHash}`
+        );
+      }
+      const decidedAt = (parsed.now ?? new Date()).toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO verification_decisions
+           (attempt_id, work_item_id, outcome, evidence_manifest_hash, review_finding_hashes_json,
+            verification_policy_version, decided_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parsed.attemptId,
+          parsed.workItemId,
+          parsed.outcome,
+          parsed.evidenceManifestHash,
+          JSON.stringify(parsed.reviewFindingHashes),
+          parsed.verificationPolicyVersion,
+          decidedAt
+        );
+      const value: VerificationDecisionProjection = {
+        attemptId: parsed.attemptId,
+        workItemId: parsed.workItemId,
+        outcome: parsed.outcome,
+        evidenceManifestHash: parsed.evidenceManifestHash,
+        reviewFindingHashes: parsed.reviewFindingHashes,
+        verificationPolicyVersion: parsed.verificationPolicyVersion,
+        decidedAt
+      };
+      const event = this.appendAuditEvent(
+        createEvent(
+          "verification.decision",
+          { ...value },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "verification.outcome": parsed.outcome,
+            "verification.evidence_manifest_hash": parsed.evidenceManifestHash
+          }
+        )
+      );
+      return { value, events: [event] };
+    });
+  }
+
+  getVerificationDecision(attemptId: string): VerificationDecisionProjection | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM verification_decisions WHERE attempt_id = ? ORDER BY id DESC LIMIT 1`)
+      .get(attemptId) as
+      | {
+          attempt_id: string;
+          work_item_id: string;
+          outcome: VerificationDecisionProjection["outcome"];
+          evidence_manifest_hash: string;
+          review_finding_hashes_json: string;
+          verification_policy_version: string;
+          decided_at: string;
+        }
+      | undefined;
+    return row
+      ? {
+          attemptId: row.attempt_id,
+          workItemId: row.work_item_id,
+          outcome: row.outcome,
+          evidenceManifestHash: row.evidence_manifest_hash,
+          reviewFindingHashes: JSON.parse(row.review_finding_hashes_json) as string[],
+          verificationPolicyVersion: row.verification_policy_version,
+          decidedAt: row.decided_at
+        }
+      : undefined;
+  }
+
+  isVerificationSatisfiedForAttempt(attemptId: string): { satisfied: boolean; reason: string } {
+    const requirement = this.db
+      .prepare(`SELECT reviewers_required FROM verification_requirements WHERE attempt_id = ?`)
+      .get(attemptId) as { reviewers_required: number } | undefined;
+    if (!requirement) {
+      return { satisfied: true, reason: "no verification requirement for this attempt" };
+    }
+    const accepted = this.db
+      .prepare(`SELECT 1 FROM verification_decisions WHERE attempt_id = ? AND outcome = 'attempt_accepted' LIMIT 1`)
+      .get(attemptId) as unknown;
+    return accepted
+      ? { satisfied: true, reason: "attempt_accepted verification decision on record" }
+      : { satisfied: false, reason: "verification requirement without an attempt_accepted decision" };
   }
 
   recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord {
@@ -3838,6 +4495,22 @@ export class SqliteWorkItemStore implements WorkItemStore {
     }
     if (input.outcome === "blocked" || input.outcome === "lease_expired") {
       throw new ControlStackError("result_outcome_forbidden", "ACS-derived outcomes cannot be submitted by a worker");
+    }
+
+    // ADR 0015 fail-closed verification guard. When a verification requirement
+    // is on record for this attempt (governed attempt), a terminal `succeeded`
+    // is only accepted after ACS has recorded an `attempt_accepted` verification
+    // decision. This strengthens result acceptance; it does not move authority
+    // out of packages/work-items. Attempts with no requirement row (the default
+    // dry-run path) are unaffected.
+    if (input.outcome === "succeeded") {
+      const gate = this.isVerificationSatisfiedForAttempt(input.attemptId);
+      if (!gate.satisfied) {
+        throw new ControlStackError(
+          "verification_not_satisfied",
+          `attempt ${input.attemptId} cannot be accepted as succeeded: ${gate.reason}`
+        );
+      }
     }
 
     const resultId = createId("attempt_result");

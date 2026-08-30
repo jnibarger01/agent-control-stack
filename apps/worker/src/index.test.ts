@@ -8,11 +8,15 @@ import { SqliteWorkItemStore, type ClaimedWorkItem, type WorkItem } from "@agent
 import { describe, expect, it, vi } from "vitest";
 import { assertDryRunExecutionMode, runWorkerOnce, workerResultIdempotencyKey } from "./index.js";
 
-vi.mock("node:child_process", () => ({
-  exec: vi.fn(),
-  fork: vi.fn(),
-  spawn: vi.fn()
-}));
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...actual,
+    exec: vi.fn(),
+    fork: vi.fn(),
+    spawn: vi.fn()
+  };
+});
 
 const domainTransition = { via: "domain_service" } as const;
 

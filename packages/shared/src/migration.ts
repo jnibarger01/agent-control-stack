@@ -41,6 +41,11 @@ const migrationFiles = [
     version: 17,
     name: "desktop_commander_execution_mode",
     filename: "017_desktop_commander_execution_mode.sql"
+  },
+  {
+    version: 18,
+    name: "advisory_evidence_and_verification",
+    filename: "018_advisory_evidence_and_verification.sql"
   }
 ] as const;
 

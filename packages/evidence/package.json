@@ -1,5 +1,5 @@
 {
-  "name": "@agent-control-stack/policy-gate",
+  "name": "@agent-control-stack/evidence",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -15,7 +15,6 @@
     "@agent-control-stack/advisory": "0.1.0",
     "@agent-control-stack/shared": "0.1.0",
     "@agent-control-stack/work-items": "0.1.0",
-    "agentos-contracts": "0.1.0",
     "zod": "^4.0.0"
   }
 }
