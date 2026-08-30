@@ -28,6 +28,10 @@ export const StartProcessArgsSchema = z.object({
   command: z.string(),
   timeout_ms: z.number(),
   shell: z.string().optional(),
+  // Working directory for the spawned process. When provided it is validated
+  // against allowedDirectories (symlinks resolved) and must be an existing
+  // directory; otherwise the process inherits the server's cwd.
+  cwd: z.string().optional(),
   verbose_timing: z.boolean().optional(),
   // 'ui' marks widget-fired calls (e.g. open-in-folder/editor buttons);
   // excluded from tool-call telemetry (see isUiOriginCall in server.ts).

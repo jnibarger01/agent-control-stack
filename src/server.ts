@@ -910,7 +910,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                         
                         BINARY FILE SUPPORT:
                         For PDF, Excel, Word, archives, databases, and other binary formats, use process tools with appropriate libraries or command-line utilities.
-                        
+
+                        WORKING DIRECTORY (cwd parameter):
+                        Pass cwd to run the process in a specific directory. It is validated
+                        against allowedDirectories (symlinks resolved) and must be an existing
+                        directory; otherwise the process inherits the server's working directory.
+
                         INTERACTIVE PROCESSES FOR DATA ANALYSIS:
                         For code/calculations, use in this priority order:
                         1. start_process("python3 -i") - Python REPL (preferred)

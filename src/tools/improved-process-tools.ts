@@ -1,6 +1,7 @@
 import { terminalManager, MAX_BUFFERED_OUTPUT_CHARS } from '../terminal-manager.js';
 import { commandManager } from '../command-manager.js';
 import { StartProcessArgsSchema, ReadProcessOutputArgsSchema, InteractWithProcessArgsSchema, ForceTerminateArgsSchema, ListSessionsArgsSchema } from './schemas.js';
+import { validatePath } from './filesystem.js';
 import { capture } from "../utils/capture.js";
 import { ServerResult } from '../types.js';
 import { analyzeProcessState, cleanProcessOutput, formatProcessStateMessage, ProcessState } from '../utils/process-detection.js';
@@ -150,6 +151,35 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
     };
   }
 
+  // Resolve and validate an explicit working directory when provided. It must
+  // pass the same allowedDirectories / symlink checks as any other path and
+  // must be an existing directory.
+  let resolvedCwd: string | undefined;
+  if (parsed.data.cwd !== undefined && parsed.data.cwd !== '') {
+    try {
+      resolvedCwd = await validatePath(parsed.data.cwd);
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: Invalid cwd for start_process: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+    try {
+      const stat = await fs.stat(resolvedCwd);
+      if (!stat.isDirectory()) {
+        return {
+          content: [{ type: "text", text: `Error: cwd is not a directory: ${parsed.data.cwd}` }],
+          isError: true,
+        };
+      }
+    } catch {
+      return {
+        content: [{ type: "text", text: `Error: cwd does not exist: ${parsed.data.cwd}` }],
+        isError: true,
+      };
+    }
+  }
+
   let shellUsed: string | undefined = parsed.data.shell;
 
   if (!shellUsed) {
@@ -172,7 +202,8 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
     commandToRun,
     parsed.data.timeout_ms,
     shellUsed,
-    parsed.data.verbose_timing || false
+    parsed.data.verbose_timing || false,
+    resolvedCwd
   );
 
   if (result.pid === -1) {

@@ -174,7 +174,7 @@ export class TerminalManager {
     }
   }
   
-  async executeCommand(command: string, timeoutMs: number = DEFAULT_COMMAND_TIMEOUT, shell?: string, collectTiming: boolean = false): Promise<CommandExecutionResult> {
+  async executeCommand(command: string, timeoutMs: number = DEFAULT_COMMAND_TIMEOUT, shell?: string, collectTiming: boolean = false, cwd?: string): Promise<CommandExecutionResult> {
     // Get the shell from config if not specified
     let shellToUse: string | boolean | undefined = shell;
     if (!shellToUse) {
@@ -250,6 +250,11 @@ export class TerminalManager {
     // because PowerShell/pwsh have different quote rules and must NOT use verbatim.
     if (process.platform === 'win32' && spawnConfig.windowsVerbatim) {
       spawnOptions.windowsVerbatimArguments = true;
+    }
+
+    // Run in an explicit, pre-validated working directory when one was provided.
+    if (cwd) {
+      spawnOptions.cwd = cwd;
     }
 
     // Spawn the process with appropriate arguments
