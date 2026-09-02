@@ -974,6 +974,12 @@ export interface WorkItemStore {
   consumeApproval(workItemId: string, actionHash: string, options?: Date | ConsumeApprovalOptions): StoredAuditEvent;
   startWorkItem(id: string, workerId?: string, options?: ClaimOptions): ClaimedWorkItem;
   claimNextApprovedWorkItem(workerId: string, options?: ClaimOptions): ClaimedWorkItem | undefined;
+  claimApprovedWorkItemById(
+    id: string,
+    expectedActionHash: string,
+    workerId: string,
+    options?: ClaimOptions
+  ): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
   submitWorkResult(input: unknown): WorkItem;
   recordDerivedWorkResult(input: unknown): WorkItem;
@@ -4116,6 +4122,94 @@ export class SqliteWorkItemStore implements WorkItemStore {
       )
     );
     return { value: running, events: [event] };
+  }
+
+  /**
+   * Sibling of claimNextApprovedWorkItem that claims one exact work item by
+   * id instead of "the oldest approved item", closing a TOCTOU gap where a
+   * caller that inspected a specific work item (e.g. to resume a proxied
+   * Desktop Commander call) could otherwise have a *different* approved
+   * item silently claimed out from under it.
+   *
+   * expectedActionHash is defense-in-depth, not the caller's authority: it
+   * must equal the executionActionHash freshly recomputed here, from the
+   * row loaded inside this same write() transaction, immediately before
+   * the atomic UPDATE. A caller-supplied hash that does not match current
+   * canonical state is rejected; nothing about the claim is ever decided
+   * from a hash the caller asserts on its own.
+   */
+  claimApprovedWorkItemById(
+    id: string,
+    expectedActionHash: string,
+    workerId: string,
+    options: ClaimOptions = {}
+  ): ClaimedWorkItem | undefined {
+    return this.write(() => {
+      const row = this.db
+        .prepare(`SELECT * FROM work_items WHERE id = ? AND status = 'approved'`)
+        .get(id) as unknown as WorkItemRow | undefined;
+      if (!row) {
+        return { value: undefined, events: [] };
+      }
+
+      const current = rowToWorkItem(row);
+      const actualActionHash = executionActionHash(current);
+      if (actualActionHash !== expectedActionHash) {
+        throw new ControlStackError(
+          "execution_action_hash_mismatch",
+          `execution action hash does not match the current work item: ${id}`
+        );
+      }
+
+      if (options.attemptAuthority) {
+        return this.claimAttemptAuthoritatively(current, workerId, options);
+      }
+      if (options.allowLegacyClaimForTests !== true) {
+        throw new ControlStackError(
+          "attempt_authority_required",
+          "legacy work-item claims are test-only; production claims require persisted attempt authority"
+        );
+      }
+
+      const updated = transitionWorkItem(current, "running");
+      const startedAt = updated.updatedAt;
+      const leaseExpiry = leaseExpiresAt(startedAt, options.leaseMs ?? this.leaseMs);
+      const leaseToken = createLeaseToken();
+      const leaseHash = hashLeaseToken(updated.id, workerId, leaseToken);
+      const leaseId = createId("lease");
+      const result = this.db
+        .prepare(
+          `UPDATE work_items
+           SET status = ?, updated_at = ?, worker_id = ?, started_at = ?, lease_expires_at = ?, lease_token_hash = ?
+           WHERE id = ? AND status = 'approved'`
+        )
+        .run(updated.status, updated.updatedAt, workerId, startedAt, leaseExpiry, leaseHash, updated.id);
+      if (result.changes !== 1) {
+        throw new ControlStackError("work_item_conflict", `work item changed while claiming: ${updated.id}`);
+      }
+      this.insertLease({
+        leaseId,
+        workItemId: updated.id,
+        workerId,
+        leaseToken,
+        actionHash: actualActionHash,
+        issuedAt: startedAt,
+        expiresAt: leaseExpiry
+      });
+
+      return {
+        value: { ...updated, workerId, leaseToken, leaseId, actionHash: actualActionHash, startedAt, leaseExpiresAt: leaseExpiry },
+        events: [
+          this.appendAuditEvent(
+            workItemStatusEvent(
+              updated,
+              { workerId, leaseId, actionHash: actualActionHash, leaseExpiresAt: leaseExpiry },
+              { "worker.id": workerId, "lease.id": leaseId, "action.hash": actualActionHash }
+            )
+          )
+        ]
+      };
+    });
   }
 
   failExpiredLeases(now = new Date()): WorkItem[] {

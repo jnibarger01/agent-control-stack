@@ -5,6 +5,7 @@ import {
   approvalRequestSchema,
   cancelRequestSchema,
   defaultExecutionPlanForWorkItem,
+  executionActionHash,
   resolveExecutionBackend,
   rejectRequestSchema,
   type ClaimedWorkItem,
@@ -26,9 +27,18 @@ export const workItemToolNames = [
   "cancel_work_item"
 ] as const;
 
+// Note: claim_next_approved_work_item and claim_approved_work_item_by_id are
+// intentionally not listed in workItemToolNames (a pre-existing omission this
+// slice preserves rather than changes) -- both are reached only via
+// createWorkItemTools()/gateWorkerClaim(ById), never off this name list.
+
 const idInputSchema = z.object({ id: z.string().min(1) });
 const unblockInputSchema = idInputSchema.extend({ actor: z.string().min(1) });
 const claimInputSchema = z.object({
+  workerId: z.string().min(1),
+  leaseMs: z.number().int().positive().optional()
+});
+const claimByIdInputSchema = idInputSchema.extend({
   workerId: z.string().min(1),
   leaseMs: z.number().int().positive().optional()
 });
@@ -310,6 +320,95 @@ function gateWorkerClaimInTransaction(
   return running;
 }
 
+/**
+ * Exact-id sibling of gateWorkerClaim, for resuming a specific work item
+ * (e.g. resume_dc_call) rather than claiming whatever is oldest-approved.
+ * Mirrors gateWorkerClaimInTransaction step for step -- same claim-time
+ * policy re-evaluation, same execution-plan admission, same post-claim
+ * approval consumption -- scoped to one work item id, and the execution
+ * action hash passed to the store is always recomputed here from the
+ * freshly loaded candidate, never accepted from a caller.
+ */
+export function gateWorkerClaimById(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  input: unknown
+): ClaimedWorkItem | undefined {
+  const parsed = claimByIdInputSchema.parse(input);
+  return store.withTransaction(() => gateWorkerClaimByIdInTransaction(store, policy, parsed));
+}
+
+function gateWorkerClaimByIdInTransaction(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  parsed: z.infer<typeof claimByIdInputSchema>
+): ClaimedWorkItem | undefined {
+  const candidate = store.get(parsed.id);
+  if (!candidate || candidate.status !== "approved") {
+    return undefined;
+  }
+
+  const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
+  const plan = ensureExecutionPlan(store, candidate, parsed.workerId);
+  const policyDecisionHash = stableHash({
+    schemaVersion: "acs.execution-plan-policy-decision.v1",
+    planHash: plan.planHash,
+    steps: evaluations.map((evaluation) => ({
+      actionHash: evaluation.actionHash,
+      decision: evaluation.decision.decision
+    }))
+  });
+  const admission =
+    decision.decision === "deny"
+      ? undefined
+      : store.admitExecutionPlan(
+          {
+            workItemId: candidate.id,
+            planHash: plan.planHash,
+            policyVersion: "acs.policy.v1",
+            policyDecisionHash,
+            requiresApproval: decision.decision === "require_approval",
+            admittedByActorId: parsed.workerId
+          },
+          policyTransition
+        );
+  const required = approvalRequired(evaluations);
+  const missing = required.find((evaluation) => !store.hasApproval(candidate.id, evaluation.actionHash));
+  const planApprovals = required.map((evaluation) =>
+    store.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)
+  );
+  if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
+    const blocked = store.blockWorkItem(candidate.id);
+    return {
+      ...blocked,
+      workerId: parsed.workerId,
+      leaseToken: "",
+      leaseId: "",
+      actionHash: "",
+      startedAt: blocked.updatedAt,
+      leaseExpiresAt: blocked.updatedAt
+    };
+  }
+
+  const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
+    leaseMs: parsed.leaseMs,
+    attemptAuthority: {
+      planHash: plan.planHash,
+      admissionId: admission.admissionId,
+      ...(planApprovals[0] ? { approvalId: planApprovals[0].approvalId } : {}),
+      policyVersion: admission.policyVersion,
+      policyDecisionHash: admission.policyDecisionHash
+    }
+  });
+  if (!running) return undefined;
+  for (const evaluation of required) {
+    store.consumeApproval(running.id, evaluation.actionHash, {
+      requestHash: approvalRequestHash(running.id, evaluation.actionHash)
+    });
+  }
+  return running;
+}
+
 function ensureExecutionPlan(store: WorkItemStore, workItem: WorkItem, actor: string) {
   return (
     store.getCurrentExecutionPlan(workItem.id) ??
@@ -394,6 +493,9 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
     },
     claim_next_approved_work_item(input: unknown): ClaimedWorkItem | undefined {
       return gateWorkerClaim(store, policy, input);
+    },
+    claim_approved_work_item_by_id(input: unknown): ClaimedWorkItem | undefined {
+      return gateWorkerClaimById(store, policy, input);
     },
     submit_work_result(input: unknown): WorkItem {
       return store.submitWorkResult(input);
