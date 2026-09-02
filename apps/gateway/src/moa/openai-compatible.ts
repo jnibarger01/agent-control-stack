@@ -3,11 +3,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
-import {
-  auditEventHash,
-  createEvent,
-  type AuditChainEvent
-} from "@agent-control-stack/shared";
+import { auditEventHash, createEvent, type AuditChainEvent } from "@agent-control-stack/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 
@@ -200,8 +196,7 @@ async function proxyUpstream(
     upstream = await fetchImpl(`${deps.upstreamBaseUrl.replace(/\/$/, "")}${path.slice(3)}`, {
       method: request.method,
       headers: upstreamHeaders(request, deps.apiKey),
-      body: request.method === "GET" || request.method === "DELETE" ? undefined : JSON.stringify(request.body),
-      signal: request.raw.signal
+      body: request.method === "GET" || request.method === "DELETE" ? undefined : JSON.stringify(request.body)
     });
   } catch {
     deps.audit.record({
