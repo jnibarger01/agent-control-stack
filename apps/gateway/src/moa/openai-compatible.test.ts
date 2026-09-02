@@ -10,28 +10,40 @@ interface CapturedCall {
   init?: RequestInit;
 }
 
-function testApp(options: { allowedModels?: ReadonlySet<string> | "*"; upstreamBody?: string; upstreamType?: string } = {}) {
+function testApp(
+  options: {
+    allowedModels?: ReadonlySet<string> | "*";
+    upstreamBody?: string;
+    upstreamType?: string;
+    rateLimit?: { windowMs: number; maxRequests: number };
+  } = {}
+) {
   const calls: CapturedCall[] = [];
   const events: InferenceAuditEvent[] = [];
   const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
     calls.push({ url: String(input), init });
-    return new Response(options.upstreamBody ?? JSON.stringify({ id: "resp_test", object: "response", status: "completed" }), {
-      status: 200,
-      headers: {
-        "content-type": options.upstreamType ?? "application/json",
-        "x-request-id": "req_openai_test"
+    return new Response(
+      options.upstreamBody ?? JSON.stringify({ id: "resp_test", object: "response", status: "completed" }),
+      {
+        status: 200,
+        headers: {
+          "content-type": options.upstreamType ?? "application/json",
+          "x-request-id": "req_openai_test"
+        }
       }
-    });
+    );
   }) as typeof fetch;
   const app = Fastify({ logger: false });
   registerOpenAiCompatibleGateway(app, {
-    authenticate: async (request) => request.headers.authorization === "Bearer acs-token" ? { actor: "operator" } : null,
+    authenticate: async (request) =>
+      request.headers.authorization === "Bearer acs-token" ? { actor: "operator" } : null,
     apiKey: "upstream-secret",
     upstreamBaseUrl: "https://api.openai.com/v1",
     allowedModels: options.allowedModels ?? new Set(["gpt-5.6-sol"]),
     audit: { record: (event) => events.push(event) },
     fetchImpl,
-    newRequestId: () => "inf_test"
+    newRequestId: () => "inf_test",
+    ...(options.rateLimit ? { rateLimit: options.rateLimit } : {})
   });
   return { app, calls, events };
 }
@@ -84,8 +96,50 @@ describe("OpenAI-compatible inference gateway", () => {
     await app.close();
   });
 
+  it("rate limits Responses and Models independently before a second upstream call", async () => {
+    const responses = testApp({ rateLimit: { windowMs: 60_000, maxRequests: 1 } });
+    const firstResponse = await responses.app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: { authorization: "Bearer acs-token" },
+      payload: { model: "gpt-5.6-sol", input: "hello" }
+    });
+    const limitedResponse = await responses.app.inject({
+      method: "POST",
+      url: "/v1/responses",
+      headers: { authorization: "Bearer acs-token" },
+      payload: { model: "gpt-5.6-sol", input: "hello again" }
+    });
+    expect(firstResponse.statusCode).toBe(200);
+    expect(limitedResponse.statusCode).toBe(429);
+    expect(limitedResponse.headers["retry-after"]).toBeDefined();
+    expect(responses.calls).toHaveLength(1);
+    expect(responses.events.at(-1)).toMatchObject({ type: "request_denied", code: "rate_limited" });
+    await responses.app.close();
+
+    const models = testApp({ rateLimit: { windowMs: 60_000, maxRequests: 1 } });
+    const firstModels = await models.app.inject({
+      method: "GET",
+      url: "/v1/models",
+      headers: { authorization: "Bearer acs-token" }
+    });
+    const limitedModels = await models.app.inject({
+      method: "GET",
+      url: "/v1/models",
+      headers: { authorization: "Bearer acs-token" }
+    });
+    expect(firstModels.statusCode).toBe(200);
+    expect(limitedModels.statusCode).toBe(429);
+    expect(models.calls).toHaveLength(1);
+    expect(models.events.at(-1)).toMatchObject({ type: "request_denied", code: "rate_limited" });
+    await models.app.close();
+  });
+
   it("preserves SSE response bodies and rejects recursive proxy hops", async () => {
-    const streaming = testApp({ upstreamBody: "data: {\"type\":\"response.completed\"}\n\n", upstreamType: "text/event-stream" });
+    const streaming = testApp({
+      upstreamBody: "data: {\"type\":\"response.completed\"}\n\n",
+      upstreamType: "text/event-stream"
+    });
     const streamed = await streaming.app.inject({
       method: "POST",
       url: "/v1/responses",
