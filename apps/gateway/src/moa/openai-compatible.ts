@@ -6,10 +6,12 @@ import type { ReadableStream as NodeReadableStream } from "node:stream/web";
 import { auditEventHash, createEvent, type AuditChainEvent } from "@agent-control-stack/shared";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
+import { SlidingWindowRateLimiter, type RateLimitOptions } from "../rate-limit.js";
 
 const DEFAULT_UPSTREAM_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
 const MAX_BODY_BYTES = 64 * 1024 * 1024;
+const DEFAULT_INFERENCE_RATE_LIMIT: RateLimitOptions = { windowMs: 60_000, maxRequests: 120 };
 
 const responseCreateSchema = z
   .object({
@@ -46,6 +48,7 @@ export interface OpenAiCompatibleGatewayDeps {
   fetchImpl?: typeof fetch;
   newRequestId?: () => string;
   maxBodyBytes?: number;
+  rateLimit?: RateLimitOptions;
 }
 
 export interface OpenAiCompatibleConfig {
@@ -91,11 +94,14 @@ export function registerOpenAiCompatibleGateway(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const newRequestId = deps.newRequestId ?? (() => `inf_${randomUUID()}`);
   const bodyLimit = deps.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const rateLimiter = new SlidingWindowRateLimiter(deps.rateLimit ?? DEFAULT_INFERENCE_RATE_LIMIT);
 
   app.post("/v1/responses", { bodyLimit }, async (request, reply) => {
     const requestId = newRequestId();
     reply.header("x-acs-request-id", requestId);
     const path = "/v1/responses";
+    if (!enforceInferenceRateLimit(rateLimiter, request, reply, deps.audit, requestId, path)) return reply;
+
     const auth = await authenticateRequest(request, reply, deps, requestId, path);
     if (!auth) return reply;
 
@@ -146,6 +152,8 @@ export function registerOpenAiCompatibleGateway(
     const requestId = newRequestId();
     reply.header("x-acs-request-id", requestId);
     const path = "/v1/models";
+    if (!enforceInferenceRateLimit(rateLimiter, request, reply, deps.audit, requestId, path)) return reply;
+
     const auth = await authenticateRequest(request, reply, deps, requestId, path);
     if (!auth) return reply;
     if (isRecursiveRequest(request)) {
@@ -164,6 +172,26 @@ export function registerOpenAiCompatibleGateway(
     });
     return proxyUpstream(request, reply, deps, fetchImpl, requestId, auth.actor, path);
   });
+}
+
+function enforceInferenceRateLimit(
+  limiter: SlidingWindowRateLimiter,
+  request: FastifyRequest,
+  reply: FastifyReply,
+  audit: InferenceAuditSink,
+  requestId: string,
+  path: string
+): boolean {
+  const decision = limiter.check(`${request.method}:${path}:ip:${request.ip}`);
+  reply.header("x-ratelimit-remaining", String(decision.remaining));
+  if (decision.allowed) return true;
+
+  recordDenied(audit, requestId, undefined, request.method, path, "rate_limited");
+  reply
+    .header("retry-after", String(decision.retryAfterSeconds))
+    .code(429)
+    .send(openAiError("rate limit exceeded", "rate_limited", "rate_limit_error"));
+  return false;
 }
 
 async function authenticateRequest(
