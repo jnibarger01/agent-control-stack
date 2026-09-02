@@ -173,6 +173,212 @@ describe("policy gate", () => {
     expect(evaluation?.context.action.kind).toBe("fs.read");
   });
 
+  describe("Slice 1: credential and canonical-path hardening", () => {
+    it("denies fs.write to a literal credential path, not just reads", () => {
+      const result = evaluatePolicy({
+        ...base,
+        action: { kind: "fs.write", description: "overwrite env", params: {} },
+        write: true,
+        paths: [".env"]
+      });
+      expect(result.decision).toBe("deny");
+      expect(result.matchedRules).toContain("deny:credential-path");
+    });
+
+    it("denies fs.write to an ssh private key", () => {
+      const result = evaluatePolicy({
+        ...base,
+        action: { kind: "fs.write", description: "overwrite key", params: {} },
+        write: true,
+        paths: ["home/.ssh/id_rsa"]
+      });
+      expect(result.matchedRules).toContain("deny:credential-path");
+    });
+
+    it("denies nested credential paths such as config/.aws/credentials", () => {
+      const result = evaluatePolicy({
+        ...base,
+        action: { kind: "fs.read", description: "read aws creds", params: {} },
+        paths: ["config/.aws/credentials"]
+      });
+      expect(result.matchedRules).toContain("deny:credential-path");
+    });
+
+    it("still allows fs.write to a non-credential path", () => {
+      const result = evaluatePolicy({
+        ...base,
+        action: { kind: "fs.write", description: "write source", params: {} },
+        write: true,
+        paths: ["src/index.ts"]
+      });
+      expect(result.matchedRules).toContain("approval:write");
+      expect(result.matchedRules).not.toContain("deny:credential-path");
+    });
+
+    it("still allows fs.read of a non-credential path", () => {
+      const result = evaluatePolicy({
+        ...base,
+        action: { kind: "fs.read", description: "read source", params: {} },
+        paths: ["src/index.ts"]
+      });
+      expect(result.decision).toBe("allow");
+    });
+
+    it("denies a symlinked read that canonically resolves onto a credential file", () => {
+      const dir = mkdtempSync(join(tmpdir(), "acs-policy-cred-symlink-"));
+      const root = join(dir, "root");
+      const secrets = join(dir, "secrets");
+      mkdirSync(root);
+      mkdirSync(secrets);
+      writeFileSync(join(secrets, "id_rsa"), "not-a-real-key");
+      symlinkSync(join(secrets, "id_rsa"), join(root, "innocuous-name.txt"));
+
+      try {
+        const result = evaluatePolicy({
+          ...base,
+          action: { kind: "fs.read", description: "read via symlink", params: {} },
+          cwd: root,
+          paths: ["innocuous-name.txt"]
+        });
+        expect(result.matchedRules).toContain("deny:credential-path");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("denies a symlinked write that canonically resolves onto a credential file", () => {
+      const dir = mkdtempSync(join(tmpdir(), "acs-policy-cred-symlink-write-"));
+      const root = join(dir, "root");
+      const secrets = join(dir, "secrets");
+      mkdirSync(root);
+      mkdirSync(secrets);
+      writeFileSync(join(secrets, ".env"), "SECRET=1");
+      symlinkSync(join(secrets, ".env"), join(root, "config.txt"));
+
+      try {
+        const result = evaluatePolicy({
+          ...base,
+          action: { kind: "fs.write", description: "write via symlink", params: {} },
+          write: true,
+          cwd: root,
+          paths: ["config.txt"]
+        });
+        expect(result.matchedRules).toContain("deny:credential-path");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("denies a write to a not-yet-existing credential path inside an existing directory", () => {
+      const dir = mkdtempSync(join(tmpdir(), "acs-policy-cred-new-"));
+      const root = join(dir, "root");
+      mkdirSync(root);
+
+      try {
+        const result = evaluatePolicy({
+          ...base,
+          action: { kind: "fs.write", description: "create env file", params: {} },
+          write: true,
+          cwd: root,
+          paths: [".env"]
+        });
+        expect(result.matchedRules).toContain("deny:credential-path");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("unions a move-shaped action's sourcePath into the checked paths and denies a credential source", () => {
+      const workItem = createWorkItem({
+        title: "Move file",
+        requester: "user",
+        intent: "relocate a file",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          {
+            kind: "fs.move",
+            description: "move credential file",
+            params: { sourcePath: ".env", destinationPath: "backup/env.bak" }
+          }
+        ],
+        risk: "low"
+      });
+      const evaluation = evaluateWorkItemPolicy(workItem, "user", "create")[0];
+      expect(evaluation?.decision.matchedRules).toContain("deny:credential-path");
+    });
+
+    it("unions a move-shaped action's destinationPath into the checked paths and denies a credential destination", () => {
+      const workItem = createWorkItem({
+        title: "Move file",
+        requester: "user",
+        intent: "relocate a file",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          {
+            kind: "fs.move",
+            description: "move file over ssh key",
+            params: { sourcePath: "src/index.ts", destinationPath: "home/.ssh/id_ed25519" }
+          }
+        ],
+        risk: "low"
+      });
+      const evaluation = evaluateWorkItemPolicy(workItem, "user", "create")[0];
+      expect(evaluation?.decision.matchedRules).toContain("deny:credential-path");
+    });
+
+    it("merges an explicit paths array with named resource paths rather than dropping either", () => {
+      const workItem = createWorkItem({
+        title: "Multi-path action",
+        requester: "user",
+        intent: "touch two resources",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          {
+            kind: "fs.write",
+            description: "write two files",
+            params: { write: true, paths: ["src/a.ts"], outputPath: "../outside.txt" }
+          }
+        ],
+        risk: "low"
+      });
+      const evaluation = evaluateWorkItemPolicy(workItem, "user", "create")[0];
+      // The outside path escape must still be caught even though it arrived via a
+      // named key rather than the `paths` array, proving both were unioned in.
+      expect(evaluation?.decision.matchedRules).toContain("deny:path-escape");
+    });
+
+    it("denies a symlink escape reached through a named resource path key", () => {
+      const dir = mkdtempSync(join(tmpdir(), "acs-policy-named-symlink-"));
+      const root = join(dir, "root");
+      const outside = join(dir, "outside");
+      mkdirSync(root);
+      mkdirSync(outside);
+      writeFileSync(join(outside, "secret.txt"), "secret");
+      symlinkSync(outside, join(root, "link"), "dir");
+
+      try {
+        const workItem = createWorkItem({
+          title: "Named path escape",
+          requester: "user",
+          intent: "touch a resource via a named key",
+          target: { cwd: root },
+          requestedActions: [
+            {
+              kind: "fs.write",
+              description: "write via named destination",
+              params: { write: true, destinationPath: "link/secret.txt" }
+            }
+          ],
+          risk: "low"
+        });
+        const evaluation = evaluateWorkItemPolicy(workItem, "user", "create")[0];
+        expect(evaluation?.decision.matchedRules).toContain("deny:path-escape");
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   it("keeps action hashes stable across lifecycle actors", () => {
     const workItem = createWorkItem({
       title: "Write source",

@@ -48,8 +48,8 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
   if (hasShellMetacharacter(command)) {
     return risk("forbidden", "shell metacharacters are denied", ["deny:shell-metacharacter"]);
   }
-  if (readsCredentialPath(context)) {
-    return risk("forbidden", "credential file reads are denied", ["deny:credential-path"]);
+  if (touchesCredentialPath(context)) {
+    return risk("forbidden", "credential path access is denied", ["deny:credential-path"]);
   }
   if (hasPathEscape(context)) {
     return risk("forbidden", "paths outside project root are denied", ["deny:path-escape"]);
@@ -165,8 +165,19 @@ function isRmRfRoot(command: string[]): boolean {
   return hasRecursiveForce && command.includes("/");
 }
 
-function readsCredentialPath(context: PolicyContext): boolean {
-  return context.write !== true && (context.paths ?? []).some((path) => credentialPathPattern.test(path));
+function touchesCredentialPath(context: PolicyContext): boolean {
+  const paths = context.paths ?? [];
+  if (paths.length === 0) {
+    return false;
+  }
+  const base = context.cwd ? resolve(context.cwd) : resolve(".");
+  return paths.some((path) => {
+    if (credentialPathPattern.test(path)) {
+      return true;
+    }
+    const canonical = realpathForPolicy(resolve(base, path));
+    return credentialPathPattern.test(canonical);
+  });
 }
 
 function explicitlyAllowsNetwork(context: PolicyContext): boolean {
