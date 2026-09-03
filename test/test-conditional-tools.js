@@ -24,7 +24,7 @@ async function testConditionalTools() {
 
     const regularTransport = new StdioClientTransport({
         command: "node",
-        args: ["../dist/index.js"]
+        args: ["../dist/index.js", "--standalone"]
     });
 
     await regularClient.connect(regularTransport);
@@ -60,7 +60,7 @@ async function testConditionalTools() {
 
     const dcTransport = new StdioClientTransport({
         command: "node",
-        args: ["../dist/index.js"]
+        args: ["../dist/index.js", "--standalone"]
     });
 
     await dcClient.connect(dcTransport);

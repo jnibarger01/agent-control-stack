@@ -67,6 +67,14 @@ import {
 } from './utils/unsupportedParams.js';
 import { getConfig, setConfigValue } from './tools/config.js';
 import { getRuntimeIdentityState } from './runtime-identity.js';
+import {
+    authorizeManagedToolCall,
+    desktopCommanderExecutionMode,
+    initializeManagedAcsRuntime,
+    managedAuthorizationErrorResult,
+    managedAuthorizationSuccessMeta,
+} from './managed-acs-runtime.js';
+import { isManagedAcsToolName, ManagedAcsAuthorizationError } from './managed-acs.js';
 import { getUsageStats } from './tools/usage.js';
 import { giveFeedbackToDesktopCommander } from './tools/feedback.js';
 import { getPrompts } from './tools/prompts.js';
@@ -263,7 +271,10 @@ server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequ
             ? requestedVersion
             : LATEST_PROTOCOL_VERSION;
 
-        // Return standard initialization response
+        const runtimeIdentity = await initializeManagedAcsRuntime(request.params?._meta);
+
+        // Return standard initialization response plus the managed runtime
+        // handshake. Standalone mode deliberately omits ACS identity metadata.
         return {
             protocolVersion,
             capabilities: {
@@ -275,6 +286,10 @@ server.setRequestHandler(InitializeRequestSchema, async (request: InitializeRequ
             serverInfo: {
                 name: "desktop-commander",
                 version: VERSION,
+            },
+            _meta: {
+                desktopCommanderMode: desktopCommanderExecutionMode(),
+                ...(runtimeIdentity ? { acsRuntimeIdentity: runtimeIdentity } : {}),
             },
         };
     } catch (error) {
@@ -1379,7 +1394,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
         ];
 
         // Filter tools based on current client
-        const filteredTools = allTools.filter(tool => shouldIncludeTool(tool.name));
+        const filteredTools = allTools.filter(tool =>
+            shouldIncludeTool(tool.name)
+            && (desktopCommanderExecutionMode() === 'standalone'
+                || tool.name === 'get_runtime_identity'
+                || isManagedAcsToolName(tool.name))
+        );
 
         // logToStderr('debug', `Returning ${filteredTools.length} tools (filtered from ${allTools.length} total) for client: ${currentClient?.name || 'unknown'}`);
 
@@ -1412,6 +1432,20 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
 
 async function handleCallToolRequest(request: CallToolRequest): Promise<ServerResult> {
     const { name, arguments: args } = request.params;
+    const toolArguments = args && typeof args === 'object' && !Array.isArray(args)
+        ? args as Record<string, unknown>
+        : {};
+    let authorization;
+    if (name !== 'get_runtime_identity') {
+        try {
+            authorization = await authorizeManagedToolCall(name, toolArguments, request.params._meta);
+        } catch (error) {
+            if (error instanceof ManagedAcsAuthorizationError) {
+                return managedAuthorizationErrorResult(error);
+            }
+            throw error;
+        }
+    }
     const startTime = Date.now();
     // Hoisted above the try so the finally block can read them when emitting the
     // server_call_tool completion event (duration + status), even on the crash path.
@@ -1475,8 +1509,13 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
             // Config tools
             case "get_runtime_identity":
                 try {
+                    const identity = await getRuntimeIdentityState();
                     result = {
-                        content: [{ type: "text", text: JSON.stringify(await getRuntimeIdentityState(), null, 2) }],
+                        content: [{ type: "text", text: JSON.stringify({
+                            ...identity,
+                            execution_mode: desktopCommanderExecutionMode(),
+                        }, null, 2) }],
+                        _meta: { desktopCommanderMode: desktopCommanderExecutionMode() },
                     };
                 } catch (error) {
                     capture('server_request_error', { message: `Error in get_runtime_identity handler: ${error}` });
@@ -1717,6 +1756,13 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 };
         }
 
+        if (name !== 'get_runtime_identity') {
+            result._meta = {
+                ...(result._meta ?? {}),
+                ...managedAuthorizationSuccessMeta(authorization),
+            };
+        }
+
         // Add tool call to history (exclude only get_recent_tool_calls to prevent recursion)
         const duration = Date.now() - startTime;
         isError = !!result.isError;
@@ -1857,6 +1903,9 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         return {
             content: [{ type: "text", text: `Error: ${errorMessage}` }],
             isError: true,
+            ...(name !== 'get_runtime_identity'
+                ? { _meta: managedAuthorizationSuccessMeta(authorization) }
+                : {}),
         };
     } finally {
         // Single tool-call telemetry event, fired AFTER execution so it can carry

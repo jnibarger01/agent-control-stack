@@ -30,6 +30,7 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, operatio
 
 export interface MCPDeviceOptions {
     persistSession?: boolean;
+    standalone?: boolean;
 }
 
 /**
@@ -90,7 +91,7 @@ export class MCPDevice {
         this.persistSession = options.persistSession ?? true;
 
         // Initialize desktop integration
-        this.desktop = new DesktopCommanderIntegration();
+        this.desktop = new DesktopCommanderIntegration(options.standalone === true);
 
         // Graceful shutdown handlers (only set once)
         this.setupShutdownHandlers();
@@ -542,12 +543,17 @@ if (isMainModule) {
         console.log('🔓 Session persistence disabled — re-authorization required on every start');
     }
 
-    const device = new MCPDevice(options);
-    device.start().catch((error) => {
-        console.error(JSON.stringify({
-            event: 'remote_device_fatal',
-            error: error instanceof Error ? error.message : String(error),
-        }));
+    if (!args.includes('--standalone')) {
+        console.error('Remote Desktop Commander requires explicit --standalone opt-in');
         process.exitCode = 1;
-    });
+    } else {
+        const device = new MCPDevice({ ...options, standalone: true });
+        device.start().catch((error) => {
+            console.error(JSON.stringify({
+                event: 'remote_device_fatal',
+                error: error instanceof Error ? error.message : String(error),
+            }));
+            process.exitCode = 1;
+        });
+    }
 }

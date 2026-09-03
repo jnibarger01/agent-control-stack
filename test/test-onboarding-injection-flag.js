@@ -76,7 +76,7 @@ function startFlagServer(flags, delayMs = 0) {
  */
 function callToolOnFreshServer({ home, flagUrl, followUpDelayMs = null }) {
   return new Promise((resolve) => {
-    const child = spawn('node', [DIST_INDEX], {
+    const child = spawn('node', [DIST_INDEX, '--standalone'], {
       env: {
         ...process.env,
         HOME: home,

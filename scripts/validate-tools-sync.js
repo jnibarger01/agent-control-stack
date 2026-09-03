@@ -47,7 +47,9 @@ async function extractToolsFromServer() {
   return new Promise((resolve, reject) => {
     // Start the MCP server
     const serverPath = join(rootDir, 'dist', 'index.js');
-    const server = spawn('node', [serverPath], {
+    // Manifest parity describes the standalone/upstream surface. Managed mode
+    // intentionally advertises only the narrower ACS v1 allowlist.
+    const server = spawn('node', [serverPath, '--standalone'], {
       stdio: ['pipe', 'pipe', 'pipe']
     });
 

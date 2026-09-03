@@ -1,18 +1,29 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getRuntimeIdentityState, type RuntimeIdentityState } from './runtime-identity.js';
+import { FIXED_ACS_SCOPES, type DesktopCommanderExecutionMode } from './managed-acs.js';
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 5_000;
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 5_000;
 const DEFAULT_CALL_TIMEOUT_MS = 120_000;
+const FORWARDED_ENVIRONMENT = new Set([
+  'DESKTOP_COMMANDER_ACS_KEY_ID',
+  'DESKTOP_COMMANDER_ACS_PUBLIC_KEY',
+  'DESKTOP_COMMANDER_ACS_SCOPES',
+  'DESKTOP_COMMANDER_DEVICE_CONFIG_PATH',
+  'DESKTOP_COMMANDER_DISABLE_TELEMETRY',
+  'DESKTOP_COMMANDER_STATE_DIR',
+]);
 
 type RuntimeState = 'idle' | 'starting' | 'ready' | 'stopping' | 'stopped' | 'failed';
 
 export interface LocalMcpRuntimeOptions {
+  mode?: DesktopCommanderExecutionMode;
   command?: string;
   args?: string[];
   cwd?: string;
@@ -64,7 +75,8 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, code: st
 
 /**
  * One deterministic local MCP child per instance. It never starts the hosted
- * remote bridge and carries no authorization policy.
+ * remote bridge. Managed ACS authorization is the default; callers must select
+ * mode:'standalone' deliberately to retain upstream-compatible direct execution.
  */
 export class LocalMcpRuntime {
   private state: RuntimeState = 'idle';
@@ -80,8 +92,18 @@ export class LocalMcpRuntime {
     & Omit<LocalMcpRuntimeOptions, 'startupTimeoutMs' | 'healthTimeoutMs' | 'shutdownTimeoutMs' | 'callTimeoutMs' | 'clientName' | 'clientVersion'>;
 
   constructor(options: LocalMcpRuntimeOptions = {}) {
+    const mode = options.mode ?? 'managed';
+    if (mode === 'managed' && options.args?.includes('--standalone')) {
+      throw new LocalMcpRuntimeError('INVALID_OPTIONS', 'managed local runtime args must not contain --standalone');
+    }
+    for (const key of Object.keys(options.env ?? {})) {
+      if (!FORWARDED_ENVIRONMENT.has(key)) {
+        throw new LocalMcpRuntimeError('INVALID_OPTIONS', `env.${key} is not on the local runtime forwarding allowlist`);
+      }
+    }
     this.options = {
       ...options,
+      mode,
       startupTimeoutMs: positiveTimeout(options.startupTimeoutMs, DEFAULT_STARTUP_TIMEOUT_MS, 'startupTimeoutMs'),
       healthTimeoutMs: positiveTimeout(options.healthTimeoutMs, DEFAULT_HEALTH_TIMEOUT_MS, 'healthTimeoutMs'),
       shutdownTimeoutMs: positiveTimeout(options.shutdownTimeoutMs, DEFAULT_SHUTDOWN_TIMEOUT_MS, 'shutdownTimeoutMs'),
@@ -106,7 +128,10 @@ export class LocalMcpRuntime {
   private async startInternal(): Promise<void> {
     const serverPath = fileURLToPath(new URL('./index.js', import.meta.url));
     const command = this.options.command ?? process.execPath;
-    const args = this.options.args ?? [serverPath, '--no-onboarding'];
+    const baseArgs = this.options.args ?? [serverPath, '--no-onboarding'];
+    const args = this.options.mode === 'standalone' && !baseArgs.includes('--standalone')
+      ? [...baseArgs, '--standalone']
+      : [...baseArgs];
 
     try {
       // getDefaultEnvironment intentionally forwards only a small allowlist.
@@ -119,6 +144,15 @@ export class LocalMcpRuntime {
           : {}),
         ...(process.env.DESKTOP_COMMANDER_DEVICE_CONFIG_PATH
           ? { DESKTOP_COMMANDER_DEVICE_CONFIG_PATH: process.env.DESKTOP_COMMANDER_DEVICE_CONFIG_PATH }
+          : {}),
+        ...(process.env.DESKTOP_COMMANDER_ACS_PUBLIC_KEY
+          ? { DESKTOP_COMMANDER_ACS_PUBLIC_KEY: process.env.DESKTOP_COMMANDER_ACS_PUBLIC_KEY }
+          : {}),
+        ...(process.env.DESKTOP_COMMANDER_ACS_KEY_ID
+          ? { DESKTOP_COMMANDER_ACS_KEY_ID: process.env.DESKTOP_COMMANDER_ACS_KEY_ID }
+          : {}),
+        ...(process.env.DESKTOP_COMMANDER_ACS_SCOPES
+          ? { DESKTOP_COMMANDER_ACS_SCOPES: process.env.DESKTOP_COMMANDER_ACS_SCOPES }
           : {}),
         ...this.options.env,
       };
@@ -146,6 +180,32 @@ export class LocalMcpRuntime {
         env: { ...getDefaultEnvironment(), ...identityEnv, DC_LOCAL_RUNTIME: 'true' },
         stderr: 'inherit',
       });
+      if (this.options.mode === 'managed') {
+        const originalSend = this.transport.send.bind(this.transport);
+        const bootstrapScopes = (identityEnv.DESKTOP_COMMANDER_ACS_SCOPES
+          ? identityEnv.DESKTOP_COMMANDER_ACS_SCOPES.split(',')
+          : [...FIXED_ACS_SCOPES]);
+        (this.transport as any).send = (message: any) => {
+          if (message?.method === 'initialize' && message.params) {
+            message = {
+              ...message,
+              params: {
+                ...message.params,
+                _meta: {
+                  ...(message.params._meta ?? {}),
+                  acsRuntimeBootstrap: {
+                    schemaVersion: 1,
+                    runtimeId: this.identity!.runtime_id,
+                    challenge: crypto.randomBytes(32).toString('base64url'),
+                    scopes: bootstrapScopes,
+                  },
+                },
+              },
+            };
+          }
+          return originalSend(message);
+        };
+      }
       this.client = new Client(
         { name: this.options.clientName, version: this.options.clientVersion },
         { capabilities: {} },
@@ -204,7 +264,12 @@ export class LocalMcpRuntime {
     }
   }
 
-  async callTool(name: string, args: Record<string, unknown> = {}, timeoutMs?: number) {
+  async callTool(
+    name: string,
+    args: Record<string, unknown> = {},
+    timeoutMs?: number,
+    meta?: Record<string, unknown>,
+  ) {
     if (this.state !== 'ready' || !this.client) {
       throw new LocalMcpRuntimeError('RUNTIME_NOT_READY', `Cannot call ${name}: local MCP runtime state is ${this.state}`);
     }
@@ -215,7 +280,7 @@ export class LocalMcpRuntime {
     const callTimeoutMs = positiveTimeout(timeoutMs, this.options.callTimeoutMs, 'timeoutMs');
     try {
       return await this.client.callTool(
-        { name, arguments: args },
+        { name, arguments: args, ...(meta ? { _meta: meta } : {}) },
         undefined,
         { timeout: callTimeoutMs, maxTotalTimeout: callTimeoutMs },
       );

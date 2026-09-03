@@ -3,7 +3,8 @@
  */
 import assert from 'assert';
 
-import { server } from '../dist/server.js';
+process.argv.push('--standalone');
+const { server } = await import('../dist/server.js');
 import { buildTrackUiEventCapturePayload } from '../dist/handlers/history-handlers.js';
 
 function getRequestHandler(method) {

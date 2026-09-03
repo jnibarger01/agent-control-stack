@@ -7,6 +7,10 @@ import { createLocalMcpRuntime } from '../dist/local-runtime.js';
 process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-local-runtime-'));
 const stateDir = path.join(root, 'child-state');
+const testPublicKey = Buffer.concat([
+  Buffer.from('302a300506032b6570032100', 'hex'),
+  Buffer.from('11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo', 'base64url'),
+]).toString('base64url');
 process.env.DESKTOP_COMMANDER_STATE_DIR = path.join(root, 'parent-state');
 
 function childPids() {
@@ -30,6 +34,7 @@ async function waitForChildCount(expected, timeoutMs = 2_000) {
 }
 
 const runtime = createLocalMcpRuntime({
+  mode: 'standalone',
   startupTimeoutMs: 15_000,
   healthTimeoutMs: 5_000,
   shutdownTimeoutMs: 5_000,
@@ -115,6 +120,7 @@ try {
   }
 
   const interrupted = createLocalMcpRuntime({
+    mode: 'standalone',
     startupTimeoutMs: 15_000,
     shutdownTimeoutMs: 2_000,
     env: { DESKTOP_COMMANDER_STATE_DIR: path.join(root, 'interrupted-state') },
@@ -131,7 +137,14 @@ try {
     assert.equal(afterInterrupted.length, before.length, `shutdown/start race must not leave a child, before=${before} after=${afterInterrupted}`);
   }
 
-  const inheritedIdentity = createLocalMcpRuntime({ startupTimeoutMs: 15_000, shutdownTimeoutMs: 5_000 });
+  const inheritedIdentity = createLocalMcpRuntime({
+    startupTimeoutMs: 15_000,
+    shutdownTimeoutMs: 5_000,
+    env: {
+      DESKTOP_COMMANDER_ACS_PUBLIC_KEY: testPublicKey,
+      DESKTOP_COMMANDER_ACS_KEY_ID: 'test-key-1',
+    },
+  });
   await inheritedIdentity.start();
   const inheritedHealth = await inheritedIdentity.health();
   const inheritedToolResult = await inheritedIdentity.callTool('get_runtime_identity');
@@ -147,13 +160,48 @@ try {
     assert.equal(afterInherited.length, before.length, `inherited-identity runtime must reap its child, before=${before} after=${afterInherited}`);
   }
 
+  const managedDefault = createLocalMcpRuntime({
+    startupTimeoutMs: 15_000,
+    shutdownTimeoutMs: 5_000,
+    env: {
+      DESKTOP_COMMANDER_STATE_DIR: path.join(root, 'managed-default-state'),
+      DESKTOP_COMMANDER_ACS_PUBLIC_KEY: testPublicKey,
+      DESKTOP_COMMANDER_ACS_KEY_ID: 'test-key-1',
+    },
+  });
+  await managedDefault.start();
+  const deniedPath = path.join(root, 'managed-default-denied.txt');
+  const deniedResult = await managedDefault.callTool('write_file', {
+    path: deniedPath,
+    content: 'must not be written',
+  });
+  assert.equal(deniedResult.isError, true);
+  assert.equal(deniedResult._meta.acsAuthorization.code, 'ACS_CAPABILITY_MISSING');
+  await assert.rejects(() => fs.stat(deniedPath), (error) => error.code === 'ENOENT');
+  await managedDefault.shutdown();
+
+  assert.throws(
+    () => createLocalMcpRuntime({ env: { AWS_SECRET_ACCESS_KEY: 'must-not-forward' } }),
+    (error) => error?.code === 'INVALID_OPTIONS',
+    'caller-controlled environment must reject entries outside the non-secret allowlist',
+  );
+  assert.throws(
+    () => createLocalMcpRuntime({ mode: 'managed', args: ['custom-server.js', '--standalone'] }),
+    (error) => error?.code === 'INVALID_OPTIONS',
+    'managed wrappers must not permit a standalone child argument',
+  );
+
   const originalCwd = process.cwd();
   process.chdir(root);
   try {
     const relativeIdentity = createLocalMcpRuntime({
       startupTimeoutMs: 15_000,
       shutdownTimeoutMs: 5_000,
-      env: { DESKTOP_COMMANDER_STATE_DIR: 'relative-child-state' },
+      env: {
+        DESKTOP_COMMANDER_STATE_DIR: 'relative-child-state',
+        DESKTOP_COMMANDER_ACS_PUBLIC_KEY: testPublicKey,
+        DESKTOP_COMMANDER_ACS_KEY_ID: 'test-key-1',
+      },
     });
     await relativeIdentity.start();
     const relativeHealth = await relativeIdentity.health();

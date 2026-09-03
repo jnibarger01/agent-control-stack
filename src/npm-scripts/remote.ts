@@ -32,6 +32,6 @@ export async function runRemote() {
         }
     }
 
-    const device = new MCPDevice({ persistSession });
+    const device = new MCPDevice({ persistSession, standalone: true });
     await device.start();
 }

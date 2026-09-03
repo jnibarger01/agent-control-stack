@@ -37,7 +37,7 @@ class ExistingConfigClaudeCodeMigrationTest {
 
   async initializeAsClaudeCode() {
     await new Promise((resolve, reject) => {
-      const child = spawn('node', [DIST_INDEX], {
+      const child = spawn('node', [DIST_INDEX, '--standalone'], {
         env: {
           ...process.env,
           HOME: this.home,

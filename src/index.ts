@@ -14,6 +14,7 @@ import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
 import { runRemote } from './npm-scripts/remote.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
+import { desktopCommanderExecutionMode, revokeManagedAcsRuntime } from './managed-acs-runtime.js';
 
 // Store messages to defer until after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -37,6 +38,9 @@ async function runServer() {
 
     // Check if first argument is "remote"
     if (process.argv[2] === 'remote') {
+      if (!process.argv.includes('--standalone')) {
+        throw new Error('Remote Desktop Commander requires explicit --standalone opt-in');
+      }
       await runRemote();
       return;
     }
@@ -50,12 +54,23 @@ async function runServer() {
     // Set global flag for onboarding control
     (global as any).disableOnboarding = DISABLE_ONBOARDING;
 
+    const executionMode = desktopCommanderExecutionMode();
+    logToStderr('info', `Desktop Commander execution mode: ${executionMode}`);
+
     // Create transport FIRST so all logging gets properly buffered
     // This must happen before any code that might use logger.*
     const transport = new FilteredStdioServerTransport();
 
     // Export transport for use throughout the application
     global.mcpTransport = transport;
+
+    if (executionMode === 'managed' && process.platform !== 'win32') {
+      process.once('SIGUSR2', async () => {
+        await revokeManagedAcsRuntime().catch(() => undefined);
+        logToStderr('warning', 'Desktop Commander managed runtime revoked; closing session');
+        await server.close().catch(() => undefined);
+      });
+    }
 
     try {
       deferLog('info', 'Loading configuration...');

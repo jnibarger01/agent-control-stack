@@ -24,6 +24,8 @@ export class DesktopCommanderIntegration {
     private initializePromise: Promise<void> | null = null;
     private shutdownRequested: boolean = false;
 
+    constructor(private readonly standalone: boolean = false) {}
+
     initialize(): Promise<void> {
         if (this.isReady) return Promise.resolve();
         if (this.initializePromise) return this.initializePromise;
@@ -94,6 +96,9 @@ export class DesktopCommanderIntegration {
     }
 
     async resolveMcpConfig(): Promise<McpConfig | null> {
+        if (!this.standalone) {
+            throw new Error('Remote Desktop Commander integration requires explicit standalone opt-in');
+        }
         console.debug('[DEBUG] Resolving MCP config...');
         // Option 1: Development/Local Build
         // Adjusting path resolution since we are now in src/remote-device and dist is in root/dist
@@ -105,7 +110,7 @@ export class DesktopCommanderIntegration {
             console.debug(' - 🔍 Found local MCP server at:', devPath);
             return {
                 command: process.execPath, // Use the current node executable
-                args: [devPath],
+                args: [devPath, '--standalone'],
                 cwd: path.dirname(devPath)
             };
         } catch {
@@ -135,7 +140,7 @@ export class DesktopCommanderIntegration {
             console.debug(' - Found global desktop-commander CLI');
             return {
                 command: commandName,
-                args: []
+                args: ['--standalone']
             };
         } catch (err) {
             console.debug('[DEBUG] Global command not found:', err);

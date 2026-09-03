@@ -98,24 +98,41 @@ Execute long-running terminal commands on your computer and manage processes thr
 
 The package exports a deterministic local MCP lifecycle wrapper for controllers
 that need explicit startup, health, tool calls, and shutdown without enabling the
-hosted Remote MCP bridge:
+hosted Remote MCP bridge. It starts in managed ACS mode by default: initialization
+performs the runtime identity challenge, discovery remains available, and every
+machine-affecting tool call requires a valid single-use `acs.dc.v1` capability.
 
 ```js
 import { createLocalMcpRuntime } from '@wonderwhy-er/desktop-commander';
 
-const runtime = createLocalMcpRuntime({ startupTimeoutMs: 15_000 });
+const runtime = createLocalMcpRuntime({ startupTimeoutMs: 15_000 }); // managed
 await runtime.start();
 const health = await runtime.health();
-const result = await runtime.callTool('read_file', { path: '/absolute/path' });
+// A governing ACS caller supplies _meta.acsCapability as the fourth argument.
+const result = await runtime.callTool('read_file', { path: '/absolute/path' }, undefined, {
+  acsCapability,
+});
 await runtime.shutdown();
 ```
 
 Each wrapper instance owns at most one stdio child and applies bounded startup,
-health, tool-call, and shutdown timeouts. `get_runtime_identity` exposes a stable
-local runtime ID and redacted remote-auth presence for a governing controller to
-bind. It does not authorize actions: policy, approvals, leases, and audit remain
-the controller's responsibility. Local launch does not require Supabase, device
-authorization, or any hosted channel.
+health, tool-call, and shutdown timeouts. Caller-provided child environment entries
+are restricted to the documented Desktop Commander state, telemetry-disable, ACS
+public-key/key-id, and ACS scope fields; arbitrary secret forwarding is rejected.
+`get_runtime_identity` exposes only a stable local runtime ID, execution mode, and
+redacted remote-auth presence.
+
+Direct upstream-compatible execution is available only through the explicit
+standalone opt-in:
+
+```js
+const runtime = createLocalMcpRuntime({ mode: 'standalone' });
+```
+
+The executable equivalent is `desktop-commander --standalone`. Never use that flag
+for an ACS-managed service. Managed mode receives only the ACS Ed25519 public key;
+policy, approvals, leases, capability signing, and audit authority remain in ACS.
+Local launch does not require Supabase, device authorization, or a hosted channel.
 
 ## How to install
 

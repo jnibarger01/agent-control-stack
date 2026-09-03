@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import { MCPDevice } from '../dist/remote-device/device.js';
+import { DesktopCommanderIntegration } from '../dist/remote-device/desktop-commander-integration.js';
 
 process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
+
+await assert.rejects(
+  () => new DesktopCommanderIntegration().resolveMcpConfig(),
+  /standalone opt-in/,
+  'internal remote integrations must not silently select direct execution',
+);
+const nestedConfig = await new DesktopCommanderIntegration(true).resolveMcpConfig();
+assert.ok(nestedConfig?.args.includes('--standalone'), 'explicit remote standalone mode must propagate to its nested MCP child');
 
 let releaseInitialize;
 const initializeGate = new Promise((resolve) => { releaseInitialize = resolve; });

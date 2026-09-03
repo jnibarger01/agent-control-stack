@@ -1,5 +1,95 @@
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { JSONRPCMessageSchema } from "@modelcontextprotocol/sdk/types.js";
 import process from "node:process";
+import { StringDecoder } from "node:string_decoder";
+
+/** Detect duplicate object member names before JSON.parse discards them. */
+export function hasDuplicateJsonObjectKeys(source: string): boolean {
+  let index = 0;
+  let duplicate = false;
+  const skipWhitespace = () => {
+    while (/\s/.test(source[index] ?? '')) index += 1;
+  };
+  const parseString = (): string => {
+    const start = index;
+    if (source[index] !== '"') throw new SyntaxError('expected JSON string');
+    index += 1;
+    while (index < source.length) {
+      if (source[index] === '\\') {
+        index += 2;
+        continue;
+      }
+      if (source[index] === '"') {
+        index += 1;
+        return JSON.parse(source.slice(start, index));
+      }
+      index += 1;
+    }
+    throw new SyntaxError('unterminated JSON string');
+  };
+  const parseValue = (): void => {
+    skipWhitespace();
+    if (source[index] === '{') {
+      index += 1;
+      const keys = new Set<string>();
+      skipWhitespace();
+      if (source[index] === '}') {
+        index += 1;
+        return;
+      }
+      while (index < source.length) {
+        skipWhitespace();
+        const key = parseString();
+        if (keys.has(key)) duplicate = true;
+        keys.add(key);
+        skipWhitespace();
+        if (source[index] !== ':') throw new SyntaxError('expected JSON colon');
+        index += 1;
+        parseValue();
+        skipWhitespace();
+        if (source[index] === '}') {
+          index += 1;
+          return;
+        }
+        if (source[index] !== ',') throw new SyntaxError('expected JSON object separator');
+        index += 1;
+      }
+      throw new SyntaxError('unterminated JSON object');
+    }
+    if (source[index] === '[') {
+      index += 1;
+      skipWhitespace();
+      if (source[index] === ']') {
+        index += 1;
+        return;
+      }
+      while (index < source.length) {
+        parseValue();
+        skipWhitespace();
+        if (source[index] === ']') {
+          index += 1;
+          return;
+        }
+        if (source[index] !== ',') throw new SyntaxError('expected JSON array separator');
+        index += 1;
+      }
+      throw new SyntaxError('unterminated JSON array');
+    }
+    if (source[index] === '"') {
+      parseString();
+      return;
+    }
+    const start = index;
+    while (index < source.length && !/[\s,}\]]/.test(source[index])) index += 1;
+    if (start === index) throw new SyntaxError('expected JSON value');
+    JSON.parse(source.slice(start, index));
+  };
+
+  parseValue();
+  skipWhitespace();
+  if (index !== source.length) throw new SyntaxError('trailing JSON data');
+  return duplicate;
+}
 
 interface LogNotification {
   jsonrpc: "2.0";
@@ -16,6 +106,40 @@ interface LogNotification {
  * instead of filtering them out. This prevents crashes while maintaining debug visibility.
  */
 export class FilteredStdioServerTransport extends StdioServerTransport {
+  private readonly acsDecoder = new StringDecoder('utf8');
+  private acsReadBuffer: string = '';
+  private acsStarted: boolean = false;
+  private readonly acsOnError = (error: Error) => this.onerror?.(error);
+  private readonly acsOnData = (chunk: string | Buffer) => {
+    this.acsReadBuffer += typeof chunk === 'string' ? chunk : this.acsDecoder.write(chunk);
+    if (Buffer.byteLength(this.acsReadBuffer, 'utf8') > 8 * 1024 * 1024) {
+      this.acsReadBuffer = '';
+      this.onerror?.(new Error('Desktop Commander MCP input frame exceeds 8 MiB'));
+      return;
+    }
+    let newline = this.acsReadBuffer.indexOf('\n');
+    while (newline !== -1) {
+      const line = this.acsReadBuffer.slice(0, newline).replace(/\r$/, '');
+      this.acsReadBuffer = this.acsReadBuffer.slice(newline + 1);
+      if (line.trim()) {
+        try {
+          const duplicateKeys = hasDuplicateJsonObjectKeys(line);
+          const parsed = JSON.parse(line);
+          if (duplicateKeys && parsed && typeof parsed === 'object') {
+            parsed.params = parsed.params && typeof parsed.params === 'object' ? parsed.params : {};
+            parsed.params._meta = parsed.params._meta && typeof parsed.params._meta === 'object'
+              ? parsed.params._meta
+              : {};
+            parsed.params._meta.__acsDuplicateJsonKeys = true;
+          }
+          this.onmessage?.(JSONRPCMessageSchema.parse(parsed));
+        } catch (error) {
+          this.onerror?.(error instanceof Error ? error : new Error(String(error)));
+        }
+      }
+      newline = this.acsReadBuffer.indexOf('\n');
+    }
+  };
   private originalConsole: {
     log: typeof console.log;
     warn: typeof console.warn;
@@ -55,6 +179,21 @@ export class FilteredStdioServerTransport extends StdioServerTransport {
     
     // Note: We defer the initialization notification until enableNotifications() is called
     // to ensure MCP protocol compliance - notifications must not be sent before initialization
+  }
+
+  override async start() {
+    if (this.acsStarted) throw new Error('FilteredStdioServerTransport already started');
+    this.acsStarted = true;
+    process.stdin.on('data', this.acsOnData);
+    process.stdin.on('error', this.acsOnError);
+  }
+
+  override async close() {
+    process.stdin.off('data', this.acsOnData);
+    process.stdin.off('error', this.acsOnError);
+    if (process.stdin.listenerCount('data') === 0) process.stdin.pause();
+    this.acsReadBuffer = '';
+    this.onclose?.();
   }
 
   /**
