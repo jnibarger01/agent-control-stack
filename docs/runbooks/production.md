@@ -92,6 +92,52 @@ npm run db:ops -- verify /path/control.db
 
 Restore requires both literal `--replace` and `--writers-stopped` flags. The latter is an operator attestation: stop every gateway and worker first. The command also fails closed if an active writer lock or a lingering `-journal`/`-wal`/`-shm` sidecar makes that state ambiguous. It verifies a unique sibling temporary copy, flushes it, atomically replaces the destination, and creates a timestamped `control.db.pre-restore-*` safety backup. Keep both until post-rollback checks pass.
 
+## Scheduled encrypted backups and restore drills
+
+Production deployments should use the checked-in systemd units in `deploy/systemd` (or equivalent orchestrator
+jobs) to create hourly encrypted backups and run a daily isolated restore drill. Create a dedicated 32-byte key
+file owned by the service account with mode `0600`; keep that key in the deployment secret store and separately
+from the backups. Loss of the key makes every managed backup unrecoverable.
+
+Configure `/etc/agent-control-stack/database-backup.env` without putting secrets in it:
+
+```ini
+ACS_DB_PATH=/var/lib/agent-control-stack/control.db
+ACS_BACKUP_DIRECTORY=/var/backups/agent-control-stack
+ACS_BACKUP_KEY_FILE=/run/secrets/acs-database-backup-key
+ACS_BACKUP_RETENTION_COUNT=48
+ACS_BACKUP_MAX_AGE_HOURS=2
+ACS_BACKUP_MAX_RTO_SECONDS=300
+```
+
+Then install and enable `acs-database-backup.{service,timer}` and
+`acs-database-restore-drill.{service,timer}`. The backup job writes an AES-256-GCM encrypted artifact and a
+checksum-bound JSON manifest through sibling temporary files, verifies the database before encryption, publishes
+the manifest last, and only then removes backups outside the configured count. The restore drill selects the
+newest manifest, authenticates and decrypts it into a private temporary directory, exercises the atomic restore
+primitive against a separate database, runs the full readiness contract, and reports measured backup age (RPO)
+and restore time (RTO). It never replaces the production database.
+
+The checked-in units grant filesystem access specifically to `/var/backups/agent-control-stack`, matching the
+example above. If the deployment uses another backup directory, update both the environment file and the units'
+`ReadWritePaths`/`ReadOnlyPaths` sandbox directives together.
+
+Operators can run the same checks directly:
+
+```sh
+npm run db:backup-policy -- backup /path/control.db \
+  --destination /secure-backups --key-file /run/secrets/acs-database-backup-key --retain 48
+npm run db:backup-policy -- verify-latest /secure-backups \
+  --key-file /run/secrets/acs-database-backup-key
+npm run db:backup-policy -- drill-latest /secure-backups \
+  --key-file /run/secrets/acs-database-backup-key --max-age-hours 2 --max-rto-seconds 300
+```
+
+Each command emits one JSON record without key material. Alert on a nonzero unit exit or an output record with
+`ok:false`. A valid restore whose age or duration breaches its configured objective also exits nonzero. Test key
+recovery from the production secret store during disaster-recovery exercises; do not copy the key into the backup
+directory.
+
 ## Incident recovery
 
 - **Readiness 503:** inspect the public check code. Do not route traffic or attempt writes until the DB write, migration checksum, and audit-chain checks pass.
@@ -103,6 +149,6 @@ Restore requires both literal `--replace` and `--writers-stopped` flags. The lat
 
 ## Observability and retention
 
-Gateway request logs are structured JSON on stdout and include Fastify request IDs. MCP authenticated requests also persist `connector.requested` audit events with actor, auth method, request ID, and tool. Work-item lifecycle events live in SQLite. Configure container log rotation and database backup retention in the deployment platform; this repository does not silently delete audit history.
+Gateway request logs are structured JSON on stdout and include Fastify request IDs. MCP authenticated requests also persist `connector.requested` audit events with actor, auth method, request ID, and tool. Work-item lifecycle events live in SQLite. Configure container log rotation in the deployment platform. Managed backup retention applies only to encrypted backup artifacts and their manifests; this repository does not silently delete audit history from the live database.
 
 The gateway exposes a Prometheus-compatible `/metrics` endpoint, but it is intentionally local to this service. Alert on container health/readiness, restart count, nonzero exits, disk usage, rate-limit responses, lease/worker lifecycle counters, and error-level structured logs. A hosted metrics/alerting backend remains a deployment responsibility.

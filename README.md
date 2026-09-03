@@ -22,6 +22,7 @@ This repository is currently a **v0.1.0-alpha dry-run control-plane release**. I
 - [Deploy](#deploy)
 - [Operations](#operations)
 - [Validation](#validation)
+- [Autonomous development-agent supervisor](#autonomous-development-agent-supervisor)
 - [Known limitations](#known-limitations)
 - [Related docs](#related-docs)
 
@@ -776,6 +777,13 @@ If `npm test` fails, do not restart the service and call it a deployment. That i
 
 ## Validation
 
+Public HTTP and gateway MCP contracts are generated from the runtime Zod
+boundaries. Verify committed OpenAPI, MCP, example, and client artifacts with:
+
+```sh
+npm run contracts:check
+```
+
 Local validation gate:
 
 ```sh
@@ -813,13 +821,26 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 ```
 
+## Autonomous development-agent supervisor
+
+The repository-local development loop can repeatedly invoke a configured
+coding agent against this worktree and independently verify its completion:
+
+```sh
+python scripts/autonomous_agent.py prompts/acs-implementation.md
+```
+
+See [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
+for executor selection, verification overrides, exit codes, and log behavior.
+
 ## Known limitations
 
 - Worker execution is dry-run only.
 - No real OS sandbox is wired in yet.
 - Public worker result submission is not implemented.
 - Production remote connector mode requires OAuth or signed tunnel-session deployment and TLS termination.
-- Docker and Compose artifacts are provided; Kubernetes and a checked-in systemd unit are not.
+- Docker and Compose artifacts are provided. Checked-in systemd units cover managed database backups and restore
+  drills; gateway and worker units and Kubernetes deployment artifacts are not provided.
 - Dashboard approval rendering is intentionally minimal.
 - Error envelopes are not uniform across every route.
 - Release hardening is still in progress.
@@ -831,6 +852,7 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
 - [`docs/runbooks/production.md`](docs/runbooks/production.md)
+- [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)
 
 ## License

@@ -85,6 +85,7 @@ export interface SchedulerOptions {
   /** Path to a JSON file holding a ScheduleConfig, validated with scheduleConfigSchema. */
   scheduleConfigPath?: string;
   now?: Date;
+  onWorkItemCreated?: (workItemId: string) => Promise<void>;
 }
 
 export interface SchedulerFiring {
@@ -170,7 +171,7 @@ export async function runSchedulerOnce(options: SchedulerOptions = {}): Promise<
       // check-then-act sequence, which exists only to decide what *this*
       // call should do once the store has already settled who owns the firing.
       const claim = store.claimSchedulerFiring(
-        { scheduleId: schedule.scheduleId, scheduledFiringTime, idempotencyKey },
+        { scheduleId: schedule.scheduleId, scheduledFiringTime, idempotencyKey, now },
         { via: "domain_service" }
       );
 
@@ -185,23 +186,41 @@ export async function runSchedulerOnce(options: SchedulerOptions = {}): Promise<
         continue;
       }
 
-      const template = schedule.workItemTemplate;
-      const workItem = tools.create_work_item({
-        title: template.title,
-        requester: template.requester,
-        intent: template.intent,
-        target: template.target,
-        requestedActions: template.requestedActions,
-        risk: template.risk
-      });
-      store.completeSchedulerFiring(claim.firing.firingId, workItem.id, { via: "domain_service" });
+      // A reclaim of a stale firing may already carry the work item created
+      // by a prior attempt that crashed (or whose callback rejected) before
+      // completion - reuse it instead of creating a duplicate. Only a fresh
+      // claim, or a reclaim that never got as far as recording a work item,
+      // creates one now.
+      let workItemId = claim.firing.workItemId;
+      if (!workItemId) {
+        const template = schedule.workItemTemplate;
+        const workItem = tools.create_work_item({
+          title: template.title,
+          requester: template.requester,
+          intent: template.intent,
+          target: template.target,
+          requestedActions: template.requestedActions,
+          risk: template.risk
+        });
+        workItemId = workItem.id;
+        store.recordSchedulerFiringWorkItem(claim.firing.firingId, workItemId, { via: "domain_service" });
+      }
+
+      // The firing is only marked 'completed' once the controller callback
+      // has actually succeeded. If this throws (rejection or process
+      // crash), the firing stays in 'claimed' with work_item_id already
+      // recorded, so a later invocation reclaims it and retries the
+      // callback alone rather than losing the handoff or duplicating the
+      // work item.
+      if (options.onWorkItemCreated) await options.onWorkItemCreated(workItemId);
+      store.completeSchedulerFiring(claim.firing.firingId, workItemId, { via: "domain_service" });
 
       firings.push({
         scheduleId: schedule.scheduleId,
         scheduledFiringTime: scheduledFiringTime.toISOString(),
         idempotencyKey,
         created: true,
-        workItemId: workItem.id
+        workItemId
       });
     }
 

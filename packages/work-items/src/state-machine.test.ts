@@ -61,6 +61,40 @@ describe("work item state machine", () => {
     }
   });
 
+  it("records local-agent lifecycle events with a bounded fingerprint and redacted failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-local-agent-audit-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      store.recordLocalAgentEvent({
+        eventType: "failed",
+        actor: "oauth-user",
+        agentId: "codex",
+        requestId: "req_local_agent",
+        requestHash: "a".repeat(64),
+        scope: "acs:work:approve",
+        outcome: "failed",
+        reason: "Bearer secret-value",
+        outputBytes: 12,
+        exitCode: null
+      });
+      const event = store.readEvents()[0];
+      expect(event).toMatchObject({
+        name: "local_agent.failed",
+        attributes: {
+          "agent.id": "codex",
+          "local_agent.request_hash": "a".repeat(64),
+          "local_agent.scope": "acs:work:approve"
+        }
+      });
+      expect(JSON.stringify(event)).not.toContain("secret-value");
+      expect(store.verifyAuditChain().ok).toBe(true);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("applies a default audit event limit", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-event-default-limit-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
@@ -182,8 +216,39 @@ describe("work item state machine", () => {
       store.approveWorkItem(workItem.id, domainTransition);
 
       expectControlError(() => store.transition(workItem.id, "running"), "worker_claim_required");
-      expect(store.claimNextApprovedWorkItem("worker-a")?.status).toBe("running");
+      expect(store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true })?.status).toBe("running");
     } finally {
+      store.close();
+    }
+  });
+
+  it("disables the legacy claim and direct-start test escape hatches outright in production, even with the opt-in flag set", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-test-only-api-production-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const originalNodeEnv = process.env.NODE_ENV;
+    try {
+      const workItem = store.create({
+        title: "Production-blocked legacy claim",
+        requester: "agent",
+        intent: "verify test-only escape hatches are unreachable in production",
+        requestedActions: [{ kind: "manual", description: "claim" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id, domainTransition);
+
+      process.env.NODE_ENV = "production";
+      expectControlError(
+        () => store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true }),
+        "test_only_api_disabled_in_production"
+      );
+      expectControlError(
+        () => store.startWorkItem(workItem.id, "worker-a", { allowDirectStartForTests: true }),
+        "test_only_api_disabled_in_production"
+      );
+      // Neither call left the work item claimed/running.
+      expect(store.get(workItem.id)?.status).toBe("approved");
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
       store.close();
     }
   });
@@ -329,7 +394,7 @@ describe("work item state machine", () => {
       });
       first.approveWorkItem(workItem.id, domainTransition);
 
-      const claimed = first.claimNextApprovedWorkItem("worker-a");
+      const claimed = first.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       expect(claimed?.id).toBe(workItem.id);
       expect(claimed?.workerId).toBe("worker-a");
       expect(claimed?.leaseToken).toEqual(expect.any(String));
@@ -357,7 +422,7 @@ describe("work item state machine", () => {
       });
       store.approveWorkItem(workItem.id, domainTransition);
 
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       expect(claimed?.leaseToken).toEqual(expect.any(String));
 
       const row = readLeaseRow(dbPath, workItem.id);
@@ -392,7 +457,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
+      store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1, allowLegacyClaimForTests: true });
 
       const failed = store.failExpiredLeases(new Date(Date.now() + 1000));
 
@@ -417,7 +482,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
 
       expectControlError(
         () =>
@@ -441,6 +506,40 @@ describe("work item state machine", () => {
     }
   });
 
+  it("rejects a privileged transition asserted by a non-owner while a worker lease is active", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-privileged-lease-owner-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Lease-owned cancellation",
+        requester: "agent",
+        intent: "prevent a stale actor from cancelling running work",
+        requestedActions: [{ kind: "manual", description: "cancel" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id, domainTransition);
+      store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
+
+      expectControlError(
+        () => store.cancelWorkItem(workItem.id, { actor: "worker-b" }, { via: "domain_service", actorId: "worker-b" }),
+        "worker_lease_actor_mismatch"
+      );
+      expect(store.get(workItem.id)?.status).toBe("running");
+
+      const cancelled = store.cancelWorkItem(
+        workItem.id,
+        { actor: "worker-a" },
+        { via: "domain_service", actorId: "worker-a" }
+      );
+      expect(cancelled.status).toBe("cancelled");
+      expect(store.readEvents().at(-1)?.attributes["actor.id"]).toBe("worker-a");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects result submission when request omits worker lease fields", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-result-lease-fields-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
@@ -454,7 +553,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
 
       expect(() =>
         store.submitWorkResult({
@@ -486,7 +585,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
 
       updateWorkItemColumn(dbPath, workItem.id, "lease_token_hash", null);
       expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_missing");
@@ -512,7 +611,7 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a");
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
       updateLeaseColumn(dbPath, claimed!.leaseId, "expires_at", "not-an-iso-date");
 
       expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "lease_state_inconsistent");
@@ -560,7 +659,10 @@ describe("work item state machine", () => {
         risk: "low"
       });
       store.approveWorkItem(workItem.id, domainTransition);
-      const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs: 1 });
+      const claimed = store.claimNextApprovedWorkItem("worker-a", {
+        leaseMs: 1,
+        allowLegacyClaimForTests: true
+      });
       await new Promise((resolve) => setTimeout(resolve, 10));
 
       expectControlError(() => store.submitWorkResult(resultInput(claimed!)), "worker_lease_expired");
@@ -756,7 +858,9 @@ describe("work item state machine", () => {
         ["gemini-cli", "Gemini CLI", "RESEARCH_BROAD_SCAN_AGENT"],
         ["opencode-local", "OpenCode", "LOCAL_CODING_AGENT"],
         ["hermes-local", "Hermes Agent", "ORCHESTRATION_LAYER"],
-        ["openclaw-bridge", "OpenClaw", "DESKTOP_LOCAL_AGENT_BRIDGE"]
+        ["openclaw-bridge", "OpenClaw", "DESKTOP_LOCAL_AGENT_BRIDGE"],
+        ["grok-cli", "Grok CLI", "RESEARCH_BROAD_SCAN_AGENT"],
+        ["pi-cli", "Pi CLI", "REVIEW_PLANNING_AGENT"]
       ] as const;
 
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["actors", "agents", "capabilities", "heartbeats"]));
@@ -769,7 +873,22 @@ describe("work item state machine", () => {
         { version: 6, name: "execution_plans_and_attempts", filename: "006_execution_plans_and_attempts.sql" },
         { version: 7, name: "workspace_allocations", filename: "007_workspace_allocations.sql" },
         { version: 8, name: "scheduler_firings", filename: "008_scheduler_firings.sql" },
-        { version: 9, name: "device_auth", filename: "009_device_auth.sql" }
+        { version: 9, name: "temporal_memory", filename: "009_temporal_memory.sql" },
+        { version: 10, name: "grok_pi_registry", filename: "010_grok_pi_registry.sql" },
+        { version: 11, name: "scheduler_firing_legacy_markers", filename: "011_scheduler_firing_legacy_markers.sql" },
+        { version: 12, name: "attempt_workspace_ownership", filename: "012_attempt_workspace_ownership.sql" },
+        { version: 13, name: "actor_routing", filename: "013_actor_routing.sql" },
+        { version: 14, name: "validation_runs", filename: "014_validation_runs.sql" },
+        { version: 15, name: "recovery_records", filename: "015_recovery_records.sql" },
+        { version: 16, name: "publication_records", filename: "016_publication_records.sql" },
+        {
+          version: 17,
+          name: "scheduler_firing_callback_pending",
+          filename: "017_scheduler_firing_callback_pending.sql"
+        },
+        { version: 18, name: "attempt_lease_approvals", filename: "018_attempt_lease_approvals.sql" },
+        { version: 19, name: "work_item_metadata", filename: "019_work_item_metadata.sql" },
+        { version: 20, name: "device_auth", filename: "020_device_auth.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -868,7 +987,17 @@ describe("work item state machine", () => {
         { version: 6 },
         { version: 7 },
         { version: 8 },
-        { version: 9 }
+        { version: 9 },
+        { version: 10 },
+        { version: 11 },
+        { version: 12 },
+        { version: 13 },
+        { version: 14 },
+        { version: 15 },
+        { version: 16 },
+        { version: 17 },
+        { version: 18 },
+        { version: 19 }
       ]);
     } finally {
       db.close();
@@ -976,7 +1105,9 @@ describe("work item state machine", () => {
 
     const store = new SqliteWorkItemStore(copiedPath);
     try {
-      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20
+      ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
       store.close();
@@ -1049,9 +1180,15 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
-      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+      expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19
+      ]);
       expect(store.listRegistryAgents()).toEqual(
-        expect.arrayContaining([expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" })])
+        expect.arrayContaining([
+          expect.objectContaining({ id: "codex-cli", acpRole: "IMPLEMENTATION_AGENT" }),
+          expect.objectContaining({ id: "grok-cli", acpRole: "RESEARCH_BROAD_SCAN_AGENT" }),
+          expect.objectContaining({ id: "pi-cli", acpRole: "REVIEW_PLANNING_AGENT" })
+        ])
       );
     } finally {
       store.close();

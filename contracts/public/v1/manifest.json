@@ -1,0 +1,21 @@
+{
+  "schemaVersion": "acs.public-contract-manifest.v1",
+  "contractVersion": "1.0.0",
+  "generatedFiles": [
+    "openapi.json",
+    "mcp-tools.json",
+    "examples.json",
+    "client.mjs"
+  ],
+  "sourceFiles": [
+    "apps/gateway/src/public-contracts.ts",
+    "apps/gateway/src/mcp.ts",
+    "apps/gateway/src/server.ts"
+  ],
+  "hashes": {
+    "openapi.json": "sha256:2b0d585fb33d103249d9e83a5f24db8f6800f7c9a293c7da29d000457bfc4272",
+    "mcp-tools.json": "sha256:8816196bfa46d8567fe0ae508db588360eab351dda10277f24b08da2049f735e",
+    "examples.json": "sha256:cf25f904859bbdfc4ff57f017a87abefb3f7216aad5278f27f58ef1a7f9ceea3",
+    "client.mjs": "sha256:52f6a9b2ddfe0a9072e8bf94f1e18ec6e3ef570a91a58c6ac2fe92860fbcd0c6"
+  }
+}

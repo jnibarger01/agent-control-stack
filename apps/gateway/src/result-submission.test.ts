@@ -42,7 +42,7 @@ function seedClaim(dbPath: string, leaseMs?: number): ClaimedWorkItem {
       risk: "low"
     });
     store.approveWorkItem(item.id, transition);
-    const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs });
+    const claimed = store.claimNextApprovedWorkItem("worker-a", { leaseMs, allowLegacyClaimForTests: true });
     if (!claimed) throw new Error("expected a lease");
     return claimed;
   } finally {

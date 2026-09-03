@@ -52,6 +52,18 @@ export const createAttemptInputSchema = z
 
 export const attemptLeaseStatusSchema = z.enum(["active", "consumed", "expired", "revoked"]);
 
+export const transitionAttemptInputSchema = z
+  .object({
+    attemptId: identifierSchema,
+    workItemId: identifierSchema,
+    workerId: identifierSchema,
+    fencingEpoch: z.number().int().positive(),
+    status: z.enum(["running", "cancellation_requested", "interrupted", "succeeded", "failed", "cancelled", "unknown", "quarantined"]),
+    outcomeCode: z.string().min(1).max(256).optional(),
+    now: z.date().optional()
+  })
+  .strict();
+
 export const attemptLeaseSchema = z
   .object({
     leaseId: identifierSchema,
@@ -59,6 +71,8 @@ export const attemptLeaseSchema = z
     workItemId: identifierSchema,
     admissionId: identifierSchema,
     approvalId: identifierSchema.optional(),
+    /** Every additional required-plan-action approval consumed by this lease, beyond `approvalId`. */
+    additionalApprovalIds: z.array(identifierSchema).optional(),
     workerId: identifierSchema,
     tokenHash: hashSchema,
     planHash: hashSchema,
@@ -76,12 +90,27 @@ export const attemptLeaseSchema = z
   })
   .strict();
 
+export const leaseApprovalBindingSchema = z
+  .object({
+    approvalId: identifierSchema,
+    actionHash: hashSchema
+  })
+  .strict();
+
 export const issueLeaseInputSchema = z
   .object({
     attemptId: identifierSchema,
     workItemId: identifierSchema,
     admissionId: identifierSchema,
     approvalId: identifierSchema.optional(),
+    /**
+     * Every additional required-plan-action approval beyond `approvalId`
+     * (which alone can only ever cover a single action), so a multi-action
+     * approval-required plan binds and atomically consumes its complete
+     * approval set through the lease's authority rather than just the
+     * first one.
+     */
+    additionalApprovals: z.array(leaseApprovalBindingSchema).max(64).optional(),
     workerId: identifierSchema,
     leaseToken: z.string().min(16).max(512),
     policyVersion: z.string().min(1).max(128),
@@ -101,18 +130,25 @@ export const issueLeaseInputSchema = z
   })
   .strict();
 
-export const workspaceAllocationStatusSchema = z.enum(["active", "torn_down"]);
+export const workspaceAllocationStatusSchema = z.enum(["active", "cleanup_requested", "cleanup_failed", "torn_down"]);
 
 export const workspaceAllocationSchema = z
   .object({
     allocationId: identifierSchema,
     workItemId: identifierSchema,
+    attemptId: identifierSchema.optional(),
+    leaseId: identifierSchema.optional(),
+    workerId: identifierSchema.optional(),
+    fencingEpoch: z.number().int().nonnegative().optional(),
     hostPath: z.string().min(1).max(4_096),
     branch: z.string().min(1).max(256),
     baseRef: z.string().min(1).max(256),
     status: workspaceAllocationStatusSchema,
     createdAt: timestampSchema,
-    tornDownAt: timestampSchema.optional()
+    tornDownAt: timestampSchema.optional(),
+    cleanupAttempts: z.number().int().nonnegative().optional(),
+    cleanupRequestedAt: timestampSchema.optional(),
+    cleanupLastError: z.string().optional()
   })
   .strict();
 
@@ -120,6 +156,10 @@ export const recordWorkspaceAllocationInputSchema = z
   .object({
     allocationId: identifierSchema,
     workItemId: identifierSchema,
+    attemptId: identifierSchema.optional(),
+    leaseId: identifierSchema.optional(),
+    workerId: identifierSchema.optional(),
+    fencingEpoch: z.number().int().nonnegative().optional(),
     hostPath: z.string().min(1).max(4_096),
     branch: z.string().min(1).max(256),
     baseRef: z.string().min(1).max(256),
@@ -151,7 +191,9 @@ export type ExecutionAttempt = z.infer<typeof executionAttemptSchema>;
 export type CreateAttemptInput = z.infer<typeof createAttemptInputSchema>;
 export type AttemptLeaseStatus = z.infer<typeof attemptLeaseStatusSchema>;
 export type AttemptLease = z.infer<typeof attemptLeaseSchema>;
+export type LeaseApprovalBinding = z.infer<typeof leaseApprovalBindingSchema>;
 export type IssueLeaseInput = z.infer<typeof issueLeaseInputSchema>;
+export type TransitionAttemptInput = z.infer<typeof transitionAttemptInputSchema>;
 export type WorkspaceAllocationStatus = z.infer<typeof workspaceAllocationStatusSchema>;
 export type WorkspaceAllocation = z.infer<typeof workspaceAllocationSchema>;
 export type RecordWorkspaceAllocationInput = z.infer<typeof recordWorkspaceAllocationInputSchema>;
