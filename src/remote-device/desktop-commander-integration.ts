@@ -8,6 +8,7 @@ import { captureRemote } from '../utils/capture.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const MCP_CONNECT_TIMEOUT_MS = 15_000;
 
 interface McpConfig {
     command: string;
@@ -20,8 +21,22 @@ export class DesktopCommanderIntegration {
     private mcpClient: Client | null = null;
     private mcpTransport: StdioClientTransport | null = null;
     private isReady: boolean = false;
+    private initializePromise: Promise<void> | null = null;
+    private shutdownRequested: boolean = false;
 
-    async initialize() {
+    initialize(): Promise<void> {
+        if (this.isReady) return Promise.resolve();
+        if (this.initializePromise) return this.initializePromise;
+        if (this.shutdownRequested) {
+            return Promise.reject(new Error('Desktop Commander integration cannot initialize after shutdown'));
+        }
+        this.initializePromise = this.initializeInternal().finally(() => {
+            this.initializePromise = null;
+        });
+        return this.initializePromise;
+    }
+
+    private async initializeInternal() {
         console.debug('[DEBUG] DesktopCommanderIntegration.initialize() called');
         const config = await this.resolveMcpConfig();
 
@@ -57,7 +72,14 @@ export class DesktopCommanderIntegration {
 
             // Connect to Desktop Commander
             console.debug('[DEBUG] Connecting MCP client to transport');
-            await this.mcpClient.connect(this.mcpTransport);
+            await this.mcpClient.connect(this.mcpTransport, {
+                timeout: MCP_CONNECT_TIMEOUT_MS,
+                maxTotalTimeout: MCP_CONNECT_TIMEOUT_MS,
+            });
+            if (this.shutdownRequested) {
+                await this.mcpClient.close().catch(() => undefined);
+                throw new Error('Desktop Commander integration startup was cancelled by shutdown');
+            }
             this.isReady = true;
 
             console.log(' - 🔌 Connected to Desktop Commander MCP');
@@ -171,6 +193,7 @@ export class DesktopCommanderIntegration {
 
     async shutdown() {
         console.debug('[DEBUG] DesktopCommanderIntegration.shutdown() called');
+        this.shutdownRequested = true;
         const closeWithTimeout = async (operation: () => Promise<void>, name: string, timeoutMs: number = 3000) => {
             return Promise.race([
                 operation(),
@@ -179,6 +202,25 @@ export class DesktopCommanderIntegration {
                 )
             ]);
         };
+
+        // The transport owns the child. Close it first so an MCP initialize
+        // request that never completed cannot keep its SDK timeout alive.
+        if (this.mcpTransport) {
+            try {
+                console.log('  → Closing MCP transport...');
+                console.debug('[DEBUG] Calling mcpTransport.close() with timeout');
+                await closeWithTimeout(
+                    () => this.mcpTransport!.close(),
+                    'MCP transport close'
+                );
+                console.log('  ✓ MCP transport closed');
+            } catch (e: any) {
+                console.warn('  ⚠️  MCP transport close timeout or error:', e.message);
+                console.debug('[DEBUG] MCP transport close error:', e);
+                await captureRemote('desktop_integration_shutdown_error', { error: e, component: 'transport' });
+            }
+            this.mcpTransport = null;
+        }
 
         if (this.mcpClient) {
             try {
@@ -195,23 +237,6 @@ export class DesktopCommanderIntegration {
                 await captureRemote('desktop_integration_shutdown_error', { error: e, component: 'client' });
             }
             this.mcpClient = null;
-        }
-
-        if (this.mcpTransport) {
-            try {
-                console.log('  → Closing MCP transport...');
-                console.debug('[DEBUG] Calling mcpTransport.close() with timeout');
-                await closeWithTimeout(
-                    () => this.mcpTransport!.close(),
-                    'MCP transport close'
-                );
-                console.log('  ✓ MCP transport closed');
-            } catch (e: any) {
-                console.warn('  ⚠️  MCP transport close timeout or error:', e.message);
-                console.debug('[DEBUG] MCP transport close error:', e);
-                await captureRemote('desktop_integration_shutdown_error', { error: e, component: 'transport' });
-            }
-            this.mcpTransport = null;
         }
 
         this.isReady = false;

@@ -26,8 +26,18 @@ const colors = {
 };
 
 async function extractToolsFromManifest() {
-  const manifestPath = join(rootDir, 'mcpb-bundle', 'manifest.json');
-  const content = await readFile(manifestPath, 'utf-8');
+  const generatedPath = join(rootDir, 'mcpb-bundle', 'manifest.json');
+  const templatePath = join(rootDir, 'manifest.template.json');
+  let content;
+  try {
+    content = await readFile(generatedPath, 'utf-8');
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error;
+    // A clean checkout intentionally has no generated mcpb-bundle. Validate
+    // the canonical template instead so `npm run validate:tools` is usable in CI.
+    const packageJson = JSON.parse(await readFile(join(rootDir, 'package.json'), 'utf-8'));
+    content = (await readFile(templatePath, 'utf-8')).replace('{{VERSION}}', packageJson.version);
+  }
   const manifest = JSON.parse(content);
   
   return manifest.tools.map(tool => tool.name).sort();

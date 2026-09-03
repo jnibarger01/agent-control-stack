@@ -7,6 +7,8 @@ export const GetConfigArgsSchema = z.object({
   origin: z.enum(['ui', 'llm']).optional(),
 });
 
+export const GetRuntimeIdentityArgsSchema = z.object({});
+
 export const SetConfigValueArgsSchema = z.object({
   key: z.string(),
   value: z.union([
@@ -285,6 +287,7 @@ export const AcpxCancelArgsSchema = z.object({
  */
 export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   get_config: GetConfigArgsSchema,
+  get_runtime_identity: GetRuntimeIdentityArgsSchema,
   set_config_value: SetConfigValueArgsSchema,
   read_file: ReadFileArgsSchema,
   read_multiple_files: ReadMultipleFilesArgsSchema,

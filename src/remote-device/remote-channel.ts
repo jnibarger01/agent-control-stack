@@ -68,17 +68,35 @@ const CLOCK_SKEW_CORRECTION_THRESHOLD_MS = 5 * 60 * 1000;
 // unable to join makes the device undispatchable. Not lower than 3: ordinary
 // half-open recovery legitimately costs 2.
 const TRANSPORT_WITHDRAW_AFTER_ATTEMPTS = 3;
+// A remote bridge is optional; it must never reconnect forever. After this
+// many consecutive recreates the channel stops all timers and asks its owner
+// to shut down the local MCP child. A service manager may then apply its own
+// bounded restart policy.
+const DEFAULT_MAX_RECONNECT_ATTEMPTS = 8;
+const EXHAUSTED_TEARDOWN_TIMEOUT_MS = 3000;
+const EXHAUSTED_OWNER_CALLBACK_TIMEOUT_MS = 6000;
 // Cap on the withdrawal write; it runs in a catch block RECREATE_TIMEOUT_MS
 // does not cover.
 const CAPABILITY_WRITE_TIMEOUT_MS = 5000;
 // Cap on the shutdown session fetch, which races device.ts's 5s force-exit.
 const OFFLINE_SESSION_TIMEOUT_MS = 500;
+
 // realtime-js parks in 'disconnecting' for ~100ms after a disconnect and
 // connect() early-returns for that whole window (see waitForSocketSettled).
 // Bound generously — this only ever delays a recreate, which RECREATE_TIMEOUT_MS
 // already covers.
 const SOCKET_SETTLE_MAX_MS = 300;
 const SOCKET_SETTLE_POLL_MS = 20;
+
+export interface RemoteChannelFailure {
+    attempts: number;
+    message: string;
+}
+
+export interface RemoteChannelOptions {
+    maxReconnectAttempts?: number;
+    onReconnectExhausted?: (failure: RemoteChannelFailure) => void | Promise<void>;
+}
 
 // auth-js compares token expiry against this device's own Date.now(), with no
 // clock-skew tolerance — a fast clock treats every fresh token as expired and
@@ -142,6 +160,19 @@ export class RemoteChannel {
     /** Auth session gone for good: stops rejoins and caps the notice at one line. */
     private sessionLost = false;
     private handlingSignedOut = false;
+    private lastStatusTimestampMs = 0;
+    private reconnectExhausted = false;
+    private readonly maxReconnectAttempts: number;
+    private readonly onReconnectExhausted?: (failure: RemoteChannelFailure) => void | Promise<void>;
+
+    constructor(options: RemoteChannelOptions = {}) {
+        const configuredMax = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
+        if (!Number.isInteger(configuredMax) || configuredMax < 1) {
+            throw new Error('maxReconnectAttempts must be a positive integer');
+        }
+        this.maxReconnectAttempts = configuredMax;
+        this.onReconnectExhausted = options.onReconnectExhausted;
+    }
 
 
     // Store subscription parameters for channel recreation
@@ -439,15 +470,15 @@ export class RemoteChannel {
         }
 
         if (existingDevice) {
-            console.debug('[DEBUG] Updating device status to online');
+            if (this.shuttingDown) throw new Error('Remote channel registration cancelled by shutdown');
+            console.debug('[DEBUG] Updating device metadata before channel join');
             // transport_broadcast_v1 is NOT set here: the server treats it as
             // binding, so it is written only once presence is proven.
             await this.updateDevice(existingDevice.id, {
-                status: 'online',
-                last_seen: new Date().toISOString(),
                 capabilities: this.capabilitiesPayload(false),
                 device_name: deviceName
             });
+            if (this.shuttingDown) throw new Error('Remote channel registration cancelled by shutdown');
 
             // Store parameters for channel recreation
             this.deviceId = existingDevice.id;
@@ -603,6 +634,16 @@ export class RemoteChannel {
                     }
                 )
                 .subscribe((status: string, err: any) => {
+                    if (this.shuttingDown || this.reconnectExhausted) {
+                        // A timed-out startup/recreate may complete after its owner
+                        // has already begun teardown. Never let that late callback
+                        // re-advertise presence or revive retry timers.
+                        const lateChannel = this.channel;
+                        this.channel = null;
+                        if (lateChannel) this.client?.removeChannel(lateChannel).catch(() => { });
+                        reject(new Error('Tool call channel subscribed after shutdown'));
+                        return;
+                    }
                     // Debug: Log all subscription status events
                     console.debug(`[DEBUG] Channel subscription status: ${status}${err ? ' (error: ' + (err?.message || err) + ')' : ''} — ${this.connState()}`);
 
@@ -765,7 +806,7 @@ export class RemoteChannel {
      * Check if channel is connected, recreate if not.
      */
     private checkConnectionHealth(): void {
-        if (this.sessionLost) return;
+        if (this.sessionLost || this.reconnectExhausted || this.shuttingDown) return;
         if (!this.channel || !this.client || !this.user?.id || !this.onToolCall) {
             return;
         }
@@ -875,6 +916,7 @@ export class RemoteChannel {
      * Recreate the channel by destroying old one and creating fresh instance.
      */
     private async recreateChannel(): Promise<void> {
+        if (this.reconnectExhausted || this.shuttingDown) return;
         if (!this.client || !this.user?.id || !this.onToolCall) {
             console.warn('Cannot recreate channel - missing parameters');
             console.debug('[DEBUG] recreateChannel() aborted - missing prerequisites');
@@ -967,8 +1009,54 @@ export class RemoteChannel {
                     console.debug(`[DEBUG] Capability withdrawal did not complete: ${withdrawErr?.message}`);
                 }
             }
+            if (this.reconnectAttempt >= this.maxReconnectAttempts) {
+                await this.exhaustReconnects(err);
+            }
         } finally {
             this.isRecreatingChannel = false;
+        }
+    }
+
+    /** Stop every retry source and notify the owner exactly once. */
+    private async exhaustReconnects(error: unknown): Promise<void> {
+        if (this.reconnectExhausted) return;
+        this.reconnectExhausted = true;
+        this.presenceTracked = false;
+        this.stopHeartbeat();
+
+        const failure: RemoteChannelFailure = {
+            attempts: this.reconnectAttempt,
+            message: error instanceof Error ? error.message : String(error),
+        };
+        console.error(JSON.stringify({
+            event: 'remote_reconnect_exhausted',
+            attempts: failure.attempts,
+            error: failure.message,
+        }));
+        captureRemote('remote_channel_reconnect_exhausted', failure).catch(() => { });
+
+        try {
+            await this.withTimeout(async () => {
+                if (this.channel) {
+                    await this.client?.removeChannel(this.channel);
+                    this.channel = null;
+                }
+                await (this.client as any)?.realtime?.disconnect?.();
+            }, EXHAUSTED_TEARDOWN_TIMEOUT_MS, 'exhaustedReconnectTeardown');
+        } catch (teardownError: any) {
+            console.debug(`[DEBUG] Exhausted reconnect teardown failed: ${teardownError?.message}`);
+        }
+
+        try {
+            if (this.onReconnectExhausted) {
+                await this.withTimeout(
+                    () => Promise.resolve(this.onReconnectExhausted!(failure)),
+                    EXHAUSTED_OWNER_CALLBACK_TIMEOUT_MS,
+                    'reconnectExhaustedOwnerCallback'
+                );
+            }
+        } catch (callbackError: any) {
+            console.error(`[DEBUG] Reconnect exhaustion callback failed: ${callbackError?.message}`);
         }
     }
 
@@ -1090,10 +1178,31 @@ export class RemoteChannel {
             return;
         }
         this.statusWriteChain = this.statusWriteChain
-            .then(() => (this.deviceId ? this.setOnlineStatus(this.deviceId, status) : undefined))
+            .then(() => {
+                // Teardown may begin while this operation was queued. Skip it
+                // before issuing a request so setOffline remains the final write.
+                if (this.shuttingDown || !this.deviceId) return;
+                return this.runStatusWrite(() => this.setOnlineStatus(this.deviceId!, status));
+            })
             .catch((e: any) => {
                 console.error('[DEBUG] Status write failed:', e?.message);
             });
+    }
+
+    private async runStatusWrite(operation: () => Promise<void>): Promise<void> {
+        // PostgREST responds only after its transaction settles. Await that
+        // acknowledgement rather than timing out locally: a detached request
+        // could otherwise commit online after the final offline write. The
+        // owning MCPDevice bounds the whole shutdown and closes its local child
+        // before waiting on this remote-only barrier.
+        await operation();
+    }
+
+    /** Monotonic per-process timestamp used as a database write fence. */
+    private nextStatusTimestamp(): string {
+        const now = Date.now();
+        this.lastStatusTimestampMs = Math.max(now, this.lastStatusTimestampMs + 1);
+        return new Date(this.lastStatusTimestampMs).toISOString();
     }
 
     /**
@@ -1118,7 +1227,9 @@ export class RemoteChannel {
             console.debug('[DEBUG] Skipping heartbeat write — shutting down');
             return;
         }
-        try {
+        this.statusWriteChain = this.statusWriteChain.then(async () => {
+          if (this.shuttingDown || !this.isReachable()) return;
+          await this.runStatusWrite(async () => {
             // Skip the write entirely when no transport is up. Bumping last_seen
             // on a deaf device would keep its row perpetually young, so the
             // server's staleness sweep could never age it out and correct a
@@ -1130,10 +1241,12 @@ export class RemoteChannel {
                 return;
             }
 
-            const { error } = await this.client
+            const timestamp = this.nextStatusTimestamp();
+            const { error } = await this.client!
                 .from('mcp_devices')
-                .update({ last_seen: new Date().toISOString(), status: 'online' })
-                .eq('id', deviceId);
+                .update({ last_seen: timestamp, status: 'online' })
+                .eq('id', deviceId)
+                .lte('last_seen', timestamp);
 
             if (error) {
                 console.error('[DEBUG] Heartbeat update failed:', error.message);
@@ -1141,10 +1254,12 @@ export class RemoteChannel {
             } else {
                 console.debug('[DEBUG] last_seen bookkeeping write ok:', deviceId);
             }
-        } catch (error: any) {
+          });
+        }).catch((error: any) => {
             console.error('Heartbeat failed:', error.message);
-            await captureRemote('remote_channel_heartbeat_error', { error });
-        }
+            captureRemote('remote_channel_heartbeat_error', { error }).catch(() => { });
+        });
+        return this.statusWriteChain;
     }
 
     startHeartbeat(deviceId: string) {
@@ -1230,10 +1345,12 @@ export class RemoteChannel {
             this.lastDeviceStatus = status;
         }
 
+        const timestamp = this.nextStatusTimestamp();
         const { error } = await this.client
             .from('mcp_devices')
-            .update({ status: status, last_seen: new Date().toISOString() })
-            .eq('id', deviceId);
+            .update({ status: status, last_seen: timestamp })
+            .eq('id', deviceId)
+            .lte('last_seen', timestamp);
 
         if (error) {
             console.error(`[DEBUG] Failed to set status ${status}:`, error.message);
@@ -1309,7 +1426,8 @@ export class RemoteChannel {
                 supabaseUrl,
                 supabaseKey,
                 session.access_token,
-                session.refresh_token || ''
+                session.refresh_token || '',
+                this.nextStatusTimestamp()
             ], {
                 timeout: 3000,
                 stdio: 'pipe', // Capture output to prevent blocking
@@ -1359,10 +1477,11 @@ export class RemoteChannel {
         // In practice only the untrack bound binds — removeChannel/unsubscribe
         // set state='leaving' first, so their leave push resolves inline.
         const LEAVE_BOUND_MS = 300;
-        // Drain queued channel-callback writes. Can't drain an in-flight
-        // heartbeat PATCH (it doesn't use the chain), but the gate above stops
-        // any new one and an in-flight one started earlier.
-        await Promise.race([this.statusWriteChain, this.sleep(250)]);
+        // Drain queued and in-flight status/heartbeat writes. The gate above
+        // stops new ones. Await the acknowledged serialization barrier so the
+        // subprocess offline write below cannot be overtaken by
+        // an older online/heartbeat request completing late.
+        await this.statusWriteChain;
         if (this.channel) {
             // Leave presence on the graceful path (socket close covers the abrupt
             // one). Bounded: a half-open socket still reports 'joined', so the

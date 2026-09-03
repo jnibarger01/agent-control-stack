@@ -74,14 +74,14 @@ async function testStderrTruncation() {
 }
 
 async function testTimeoutTerminatesWrapperAndGrandchild() {
-  // Spawn a node child that itself spawns a long-lived detached grandchild
-  // (sleep 60) and prints its pid, then hangs forever. If the wrapper only
-  // killed the immediate child (not the process group), the grandchild would
-  // be orphaned and keep running after the timeout fires.
+  // The root exits on SIGTERM while its grandchild deliberately ignores it.
+  // The SIGKILL escalation must therefore survive the root's close event and
+  // terminate the remaining process group rather than being cleared early.
   const script = `
     const { spawn } = require('child_process');
-    const gc = spawn('sleep', ['60'], { stdio: 'ignore' });
+    const gc = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'ignore' });
     process.stdout.write(String(gc.pid));
+    process.on('SIGTERM', () => process.exit(2));
     setInterval(() => {}, 1000);
   `;
 

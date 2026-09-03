@@ -9,6 +9,25 @@ import fs from 'fs/promises';
 import path from 'path';
 import { captureRemote } from '../utils/capture.js';
 
+const LOCAL_MCP_STARTUP_TIMEOUT_MS = 15_000;
+const REMOTE_CONFIG_TIMEOUT_MS = 10_000;
+const REMOTE_REGISTER_TIMEOUT_MS = 30_000;
+const DEVICE_SHUTDOWN_TIMEOUT_MS = 7_000;
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, operationName: string): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    try {
+        return await Promise.race([
+            operation,
+            new Promise<T>((_, reject) => {
+                timer = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
+            }),
+        ]);
+    } finally {
+        if (timer) clearTimeout(timer);
+    }
+}
+
 export interface MCPDeviceOptions {
     persistSession?: boolean;
 }
@@ -30,12 +49,37 @@ export class MCPDevice {
     private configPath: string;
     private persistSession: boolean;
     private desktop: DesktopCommanderIntegration;
+    private startPromise: Promise<void> | null = null;
+    private shutdownPromise: Promise<void> | null = null;
     /** Call ids already handled by THIS process (insertion-ordered, bounded). */
     private seenCallIds: Set<string> = new Set();
 
+    private assertRunning(): void {
+        if (this.isShuttingDown) throw new Error('MCP device startup cancelled by shutdown');
+    }
+
     constructor(options: MCPDeviceOptions = {}) {
         this.baseServerUrl = process.env.MCP_SERVER_URL || 'https://mcp.desktopcommander.app';
-        this.remoteChannel = new RemoteChannel();
+        this.remoteChannel = new RemoteChannel({
+            onReconnectExhausted: async ({ attempts, message }) => {
+                if (this.isShuttingDown) return;
+                console.error(JSON.stringify({
+                    event: 'remote_device_stopping_after_reconnect_exhaustion',
+                    attempts,
+                    error: message,
+                }));
+                const forceExit = setTimeout(() => {
+                    console.error(JSON.stringify({ event: 'remote_device_forced_exit_after_reconnect_exhaustion' }));
+                    process.exit(1);
+                }, DEVICE_SHUTDOWN_TIMEOUT_MS + 1000);
+                try {
+                    await this.shutdown();
+                    process.exitCode = 1;
+                } finally {
+                    clearTimeout(forceExit);
+                }
+            },
+        });
         this.deviceId = undefined;
         this.isShuttingDown = false;
         this.configPath = path.join(os.homedir(), '.desktop-commander-device', 'device.json');
@@ -63,11 +107,11 @@ export class MCPDevice {
 
             console.log(`\n${signal} received, initiating graceful shutdown...`);
 
-            // Force exit after 5 seconds if graceful shutdown hangs
+            // Force exit after the bounded graceful-shutdown budget.
             const forceExit = setTimeout(() => {
                 console.error('\n⚠️ Graceful shutdown timed out, forcing exit...');
                 process.exit(1);
-            }, 5000);
+            }, DEVICE_SHUTDOWN_TIMEOUT_MS + 1000);
 
             try {
                 await this.shutdown();
@@ -102,7 +146,16 @@ export class MCPDevice {
         });
     }
 
-    async start() {
+    start(): Promise<void> {
+        if (this.isShuttingDown) {
+            return Promise.reject(new Error('MCP device cannot start after shutdown'));
+        }
+        if (this.startPromise) return this.startPromise;
+        this.startPromise = this.startInternal();
+        return this.startPromise;
+    }
+
+    private async startInternal() {
         try {
             console.log('🚀 Starting MCP Device...');
             if (process.env.DEBUG_MODE === 'true') {
@@ -111,10 +164,20 @@ export class MCPDevice {
 
 
             // Initialize desktop integration
-            await this.desktop.initialize();
+            await withTimeout(
+                this.desktop.initialize(),
+                LOCAL_MCP_STARTUP_TIMEOUT_MS,
+                'Local Desktop Commander MCP startup',
+            );
+            this.assertRunning();
 
             console.log(`⏳ Connecting to Remote MCP ${this.baseServerUrl}`);
-            const { supabaseUrl, anonKey } = await this.fetchSupabaseConfig();
+            const { supabaseUrl, anonKey } = await withTimeout(
+                this.fetchSupabaseConfig(),
+                REMOTE_CONFIG_TIMEOUT_MS,
+                'Remote MCP configuration fetch',
+            );
+            this.assertRunning();
             console.log(`   - 🔌 Connected to Remote MCP`);
 
             // Initialize Remote Channel
@@ -122,10 +185,12 @@ export class MCPDevice {
 
             // Load persisted configuration (deviceId, session)
             let session = await this.loadPersistedConfig();
+            this.assertRunning();
 
             // 2. Set Session or Authenticate
             if (session) {
                 const { error } = await this.remoteChannel.setSession(session);
+                this.assertRunning();
 
                 if (error) {
                     console.log('   - ⚠️ Persisted session invalid:', error.message);
@@ -139,6 +204,7 @@ export class MCPDevice {
                 console.log('\n🔐 Authenticating with Remote MCP server...');
                 const authenticator = new DeviceAuthenticator(this.baseServerUrl);
                 session = await authenticator.authenticate(this.deviceId);
+                this.assertRunning();
                 if (session.device_id) {
                     if (!this.deviceId) {
                         await captureRemote('remote_device_auth_success', {
@@ -160,22 +226,29 @@ export class MCPDevice {
                 }
                 // Set session in Remote Channel
                 const { error } = await this.remoteChannel.setSession(session);
+                this.assertRunning();
                 if (error) throw error;
             }
 
 
             // Force save the current session immediately to ensure it's persisted
             await this.savePersistedConfig();
+            this.assertRunning();
 
             const deviceName = os.hostname();
 
             // Register as device
-            await this.remoteChannel.registerDevice(
-                await this.desktop.listClientTools(),
-                this.deviceId,
-                deviceName,
-                (payload: any) => this.handleNewToolCall(payload)
+            await withTimeout(
+                this.remoteChannel.registerDevice(
+                    await this.desktop.listClientTools(),
+                    this.deviceId,
+                    deviceName,
+                    (payload: any) => this.handleNewToolCall(payload)
+                ),
+                REMOTE_REGISTER_TIMEOUT_MS,
+                'Remote MCP device registration',
             );
+            this.assertRunning();
 
             console.log('✅ Device ready:');
             console.log(`   - User:         ${this.remoteChannel.user!.email}`);
@@ -192,7 +265,7 @@ export class MCPDevice {
             }
             await captureRemote('remote_device_startup_failed', { error });
             await this.shutdown();
-            process.exit(1);
+            throw error;
         }
     }
 
@@ -265,7 +338,9 @@ export class MCPDevice {
     async fetchSupabaseConfig() {
         // No auth header needed for this public endpoint
         console.debug('[DEBUG] Fetching Supabase config from:', `${this.baseServerUrl}/api/mcp-info`);
-        const response = await fetch(`${this.baseServerUrl}/api/mcp-info`);
+        const response = await fetch(`${this.baseServerUrl}/api/mcp-info`, {
+            signal: AbortSignal.timeout(REMOTE_CONFIG_TIMEOUT_MS),
+        });
 
         if (!response.ok) {
             console.debug('[DEBUG] Supabase config fetch failed, status:', response.status, response.statusText);
@@ -381,46 +456,65 @@ export class MCPDevice {
         }
     }
 
-    async shutdown() {
-        if (this.isShuttingDown) {
-            console.debug('[DEBUG] Shutdown already in progress, returning');
-            return;
-        }
-
+    shutdown(): Promise<void> {
+        if (this.shutdownPromise) return this.shutdownPromise;
         this.isShuttingDown = true;
+        this.shutdownPromise = withTimeout(
+            this.shutdownInternal(),
+            DEVICE_SHUTDOWN_TIMEOUT_MS,
+            'Remote device shutdown'
+        );
+        return this.shutdownPromise;
+    }
+
+    private async shutdownInternal(): Promise<void> {
         console.log('\n🛑 Shutting down device...');
         console.debug('[DEBUG] Shutdown initiated for device:', this.deviceId);
 
+        // Every cleanup stage is independent: a remote teardown error must
+        // never skip closing the owned local MCP child.
         try {
-            // Stop heartbeat first to prevent new operations
             console.log('  → Stopping heartbeat...');
             console.debug('[DEBUG] Calling stopHeartbeat()');
             this.remoteChannel.stopHeartbeat();
             console.log('  ✓ Heartbeat stopped');
+        } catch (error: any) {
+            console.error('Heartbeat shutdown error:', error.message);
+        }
 
-            // Unsubscribe from channel
-            console.log('  → Unsubscribing from channel...');
-            console.debug('[DEBUG] Calling channel.unsubscribe()');
-            await this.remoteChannel.unsubscribe();
-
-            // Mark device offline
-            console.log('  → Marking device offline...');
-            console.debug('[DEBUG] Calling setOffline() with deviceId:', this.deviceId);
-            await this.remoteChannel.setOffline(this.deviceId);
-
-            // Shutdown desktop integration
+        // Close the owned local MCP child before any remote bookkeeping wait.
+        // Even if a remote status request is wedged, local execution cannot be
+        // orphaned and the outer shutdown deadline remains meaningful.
+        try {
             console.log('  → Shutting down desktop integration...');
             console.debug('[DEBUG] Calling desktop.shutdown()');
             await this.desktop.shutdown();
             console.log('  ✓ Desktop integration shut down');
-
-            console.log('✓ Device shutdown complete');
-            console.debug('[DEBUG] Shutdown sequence completed successfully');
         } catch (error: any) {
-            console.error('Shutdown error:', error.message);
-            console.debug('[DEBUG] Shutdown error stack:', error.stack);
-            await captureRemote('remote_device_shutdown_error', { error });
+            console.error('Desktop integration shutdown error:', error.message);
+            captureRemote('remote_device_shutdown_error', { error, component: 'desktop' }).catch(() => { });
         }
+
+        try {
+            console.log('  → Unsubscribing from channel...');
+            console.debug('[DEBUG] Calling channel.unsubscribe()');
+            await this.remoteChannel.unsubscribe();
+        } catch (error: any) {
+            console.error('Channel unsubscribe error:', error.message);
+            captureRemote('remote_device_shutdown_error', { error, component: 'channel' }).catch(() => { });
+        }
+
+        try {
+            console.log('  → Marking device offline...');
+            console.debug('[DEBUG] Calling setOffline() with deviceId:', this.deviceId);
+            await this.remoteChannel.setOffline(this.deviceId);
+        } catch (error: any) {
+            console.error('Offline status error:', error.message);
+            captureRemote('remote_device_shutdown_error', { error, component: 'status' }).catch(() => { });
+        }
+
+        console.log('✓ Device shutdown complete');
+        console.debug('[DEBUG] Shutdown sequence completed');
     }
 }
 
@@ -449,5 +543,11 @@ if (isMainModule) {
     }
 
     const device = new MCPDevice(options);
-    device.start();
+    device.start().catch((error) => {
+        console.error(JSON.stringify({
+            event: 'remote_device_fatal',
+            error: error instanceof Error ? error.message : String(error),
+        }));
+        process.exitCode = 1;
+    });
 }

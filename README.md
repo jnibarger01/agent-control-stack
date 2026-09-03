@@ -32,6 +32,7 @@ Work with code and text, run processes, and automate tasks, going far beyond oth
 
 ## Table of Contents
 - [Features](#features)
+- [Programmatic local runtime](#programmatic-local-runtime)
 - [How to install](#how-to-install)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
@@ -92,6 +93,29 @@ Execute long-running terminal commands on your computer and manage processes thr
   - Symlink traversal prevention on file operations
   - Command blocklist for accidental execution
   - [Docker isolation](#option-6-docker-installation--auto-updates-no-nodejs-required) for complete isolation
+
+## Programmatic local runtime
+
+The package exports a deterministic local MCP lifecycle wrapper for controllers
+that need explicit startup, health, tool calls, and shutdown without enabling the
+hosted Remote MCP bridge:
+
+```js
+import { createLocalMcpRuntime } from '@wonderwhy-er/desktop-commander';
+
+const runtime = createLocalMcpRuntime({ startupTimeoutMs: 15_000 });
+await runtime.start();
+const health = await runtime.health();
+const result = await runtime.callTool('read_file', { path: '/absolute/path' });
+await runtime.shutdown();
+```
+
+Each wrapper instance owns at most one stdio child and applies bounded startup,
+health, tool-call, and shutdown timeouts. `get_runtime_identity` exposes a stable
+local runtime ID and redacted remote-auth presence for a governing controller to
+bind. It does not authorize actions: policy, approvals, leases, and audit remain
+the controller's responsibility. Local launch does not require Supabase, device
+authorization, or any hosted channel.
 
 ## How to install
 

@@ -119,21 +119,34 @@ function makeFakeClient({ row = null, failFetches = 0, writeLatencies = [] } = {
       if (!pendingWrite) return result();
       const { payload, delay } = pendingWrite;
       pendingWrite = null;
-      const p = new Promise((resolve) => {
+      let settleTimer;
+      let rejectWrite;
+      const p = new Promise((resolve, reject) => {
+        rejectWrite = reject;
         const settle = () => {
           completions.push(payload);
           resolve({ data: null, error: null });
         };
         // Only defer when a test actually asked for latency, so every other
         // test keeps the original resolve-immediately semantics.
-        if (delay > 0) realSetTimeout(settle, delay);
+        if (delay > 0) settleTimer = realSetTimeout(settle, delay);
         else settle();
       });
       // markCallExecuting chains .eq().eq().select() off a single update(), so
       // this must stay chainable exactly like result() does — returning a bare
       // promise leaves that chain hanging forever.
       p.eq = () => p;
+      p.lte = () => p;
       p.select = () => p;
+      p.abortSignal = (signal) => {
+        const abort = () => {
+          if (settleTimer) clearTimeout(settleTimer);
+          rejectWrite(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+        };
+        if (signal.aborted) abort();
+        else signal.addEventListener('abort', abort, { once: true });
+        return p;
+      };
       p.maybeSingle = async () => ({ data: null, error: null });
       return p;
     },
@@ -417,6 +430,78 @@ await test('concurrent status writes stay ordered', async () => {
       .map((w) => w.status)
       .join(',')}`
   );
+});
+
+await test('registration does not advertise online before a channel joins', async () => {
+  const { rc, client } = makeRemoteChannel({ row: { id: DEVICE_ID, device_name: 'test-device' } });
+  rc.createChannel = async () => {};
+  await rc.registerDevice({ tools: [] }, DEVICE_ID, 'test-device', () => {});
+  const metadataWrite = client.writes.find((write) => write.capabilities);
+  assert(metadataWrite, 'registration must update device metadata');
+  assert(metadataWrite.status === undefined, 'pre-join registration must not write status=online');
+  assert(metadataWrite.last_seen === undefined, 'pre-join registration must not refresh last_seen');
+});
+
+await test('shutdown barrier awaits an over-time online commit before final offline', async () => {
+  const { rc, client } = makeRemoteChannel({ writeLatencies: [1500, 0] });
+  rc.channel = null;
+  rc.queueStatusWrite('online');
+  await new Promise((resolve) => realSetTimeout(resolve, 0));
+  await rc.unsubscribe();
+  await rc.setOnlineStatus(DEVICE_ID, 'offline');
+  await new Promise((resolve) => realSetTimeout(resolve, 600));
+  assert(
+    client.completions.map((write) => write.status).join(',') === 'online,offline',
+    `final offline must follow the acknowledged online commit, got ${client.completions.map((write) => write.status).join(',')}`
+  );
+});
+
+await test('timestamp fence rejects an online commit accepted before final offline', async () => {
+  const db = { status: 'offline', last_seen: '1970-01-01T00:00:00.000Z' };
+  const commits = [];
+  let requestNumber = 0;
+  const client = {
+    from: () => ({
+      update(payload) {
+        let fence;
+        return {
+          eq() { return this; },
+          lte(_column, value) { fence = value; return this; },
+          then(resolve, reject) {
+            requestNumber++;
+            const number = requestNumber;
+            const commit = () => {
+              const applied = db.last_seen <= fence;
+              if (applied) Object.assign(db, payload);
+              commits.push({ number, status: payload.status, applied });
+            };
+            if (number === 1) {
+              // Server accepted the old online request, but the client loses
+              // the response before its delayed transaction commits.
+              realSetTimeout(() => reject(new Error('connection lost after acceptance')), 10);
+              realSetTimeout(commit, 100);
+            } else {
+              commit();
+              resolve({ error: null });
+            }
+          },
+        };
+      },
+    }),
+  };
+  const rc = new RemoteChannel();
+  rc.client = client;
+  rc._user = { id: 'user-1', email: 'tester@example.com' };
+  rc.deviceId = DEVICE_ID;
+  rc.queueStatusWrite('online');
+  await new Promise((resolve) => realSetTimeout(resolve, 0));
+  await rc.unsubscribe();
+  await rc.setOnlineStatus(DEVICE_ID, 'offline');
+  await new Promise((resolve) => realSetTimeout(resolve, 150));
+
+  assert(db.status === 'offline', `late accepted online request overwrote final offline: ${JSON.stringify(db)}`);
+  const lateOnline = commits.find((commit) => commit.number === 1);
+  assert(lateOnline && lateOnline.applied === false, `expected fenced late online commit, got ${JSON.stringify(commits)}`);
 });
 
 // --- 6. Capability withdrawal -----------------------------------------------

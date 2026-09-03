@@ -20,6 +20,8 @@
     "setup": "dist/setup-claude-server.js",
     "remove": "dist/uninstall-claude-server.js"
   },
+  "main": "dist/local-runtime.js",
+  "types": "dist/local-runtime.d.ts",
   "files": [
     "dist",
     "logo.png",

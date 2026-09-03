@@ -4,17 +4,17 @@
  * Blocking script to update device status to offline
  * Runs synchronously during shutdown to ensure DB update completes
  * 
- * Usage: node blocking-offline-update.js <deviceId> <supabaseUrl> <supabaseKey> <accessToken> <refreshToken>
+ * Usage: node blocking-offline-update.js <deviceId> <supabaseUrl> <supabaseKey> <accessToken> <refreshToken> <statusTimestamp>
  */
 
 import { createClient } from '@supabase/supabase-js';
 
 // Parse command line arguments
-const [deviceId, supabaseUrl, supabaseKey, accessToken, refreshToken] = process.argv.slice(2);
+const [deviceId, supabaseUrl, supabaseKey, accessToken, refreshToken, statusTimestamp] = process.argv.slice(2);
 
-if (!deviceId || !supabaseUrl || !supabaseKey || !accessToken || !refreshToken) {
+if (!deviceId || !supabaseUrl || !supabaseKey || !accessToken || !refreshToken || !statusTimestamp || Number.isNaN(Date.parse(statusTimestamp))) {
     console.error('❌ Missing required arguments');
-    console.error('Usage: node blocking-offline-update.js <deviceId> <supabaseUrl> <supabaseKey> <accessToken> <refreshToken>');
+    console.error('Usage: node blocking-offline-update.js <deviceId> <supabaseUrl> <supabaseKey> <accessToken> <refreshToken> <statusTimestamp>');
     process.exit(1);
 }
 
@@ -46,8 +46,9 @@ try {
     // bookkeeping write only runs on the slow capable cadence).
     const { error } = await client
         .from('mcp_devices')
-        .update({ status: 'offline', last_seen: new Date().toISOString() })
-        .eq('id', deviceId);
+        .update({ status: 'offline', last_seen: statusTimestamp })
+        .eq('id', deviceId)
+        .lte('last_seen', statusTimestamp);
 
     clearTimeout(timeoutHandle);
 

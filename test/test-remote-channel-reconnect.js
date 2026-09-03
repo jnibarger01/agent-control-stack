@@ -717,6 +717,64 @@ async function main() {
     );
   });
 
+  await test('persistent reconnect failure stops at the configured attempt limit', async () => {
+    const exhausted = [];
+    const rc = new RemoteChannel({
+      maxReconnectAttempts: 3,
+      onReconnectExhausted: (failure) => exhausted.push(failure),
+    });
+    const client = new FakeClient();
+    rc.client = client;
+    rc._user = { id: 'user-1', email: 'tester@example.com' };
+    rc.deviceId = 'device-1';
+    rc.deviceName = 'test-device';
+    rc.onToolCall = () => {};
+    rc.sleep = () => Promise.resolve();
+    rc.createChannel = () => Promise.reject(new Error('persistent outage'));
+
+    await withQuietLogs(async () => {
+      for (let i = 0; i < 6; i++) await rc.recreateChannel();
+    });
+
+    assert.strictEqual(rc.reconnectAttempt, 3, 'attempt counter must stop at the configured limit');
+    assert.strictEqual(rc.reconnectExhausted, true, 'channel must enter an exhausted terminal state');
+    assert.strictEqual(exhausted.length, 1, 'owner callback must run exactly once');
+    assert.strictEqual(exhausted[0].attempts, 3);
+    assert.strictEqual(exhausted[0].message, 'persistent outage');
+    assert.strictEqual(rc.connectionCheckInterval, null, 'health retry timer must be stopped');
+    assert.strictEqual(rc.heartbeatInterval, null, 'heartbeat timer must be stopped');
+    assert.strictEqual(rc.tokenRefreshInterval, null, 'token refresh timer must be stopped');
+  });
+
+  await test('hung exhaustion teardown and owner callback are bounded', async () => {
+    let callbackStarted = false;
+    const rc = new RemoteChannel({
+      maxReconnectAttempts: 1,
+      onReconnectExhausted: () => {
+        callbackStarted = true;
+        return new Promise(() => {});
+      },
+    });
+    const client = new FakeClient();
+    client.removeChannel = () => new Promise(() => {});
+    rc.client = client;
+    rc._user = { id: 'user-1', email: 'tester@example.com' };
+    rc.deviceId = 'device-1';
+    rc.deviceName = 'test-device';
+    rc.onToolCall = () => {};
+    rc.channel = new FakeChannel('user:user-1', client);
+    rc.channel.state = 'errored';
+    rc.sleep = () => Promise.resolve();
+    rc.createChannel = () => Promise.reject(new Error('persistent outage'));
+    const realWithTimeout = rc.withTimeout.bind(rc);
+    rc.withTimeout = (operation, _timeoutMs, name) => realWithTimeout(operation, 20, name);
+
+    await withQuietLogs(() => rc.recreateChannel());
+
+    assert.strictEqual(callbackStarted, true, 'owner callback must still run after teardown timeout');
+    assert.strictEqual(rc.isRecreatingChannel, false, 'bounded cleanup must release the recreate guard');
+  });
+
   console.log(
     `\n${failures ? '🔴' : '✅'} remote-channel reconnect: ${failures} failing test(s).`
   );

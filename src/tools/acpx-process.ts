@@ -101,9 +101,9 @@ export function runTypedProcess(options: TypedProcessOptions): Promise<TypedProc
       return;
     }
 
-    const clearTimers = () => {
+    const clearTimers = (keepKillEscalation = false) => {
       clearTimeout(deadlineTimer);
-      if (killEscalationTimer) clearTimeout(killEscalationTimer);
+      if (killEscalationTimer && !keepKillEscalation) clearTimeout(killEscalationTimer);
     };
 
     const terminate = (signalToSend: NodeJS.Signals) => {
@@ -113,7 +113,15 @@ export function runTypedProcess(options: TypedProcessOptions): Promise<TypedProc
           // Negative pid targets the whole process group we created via detached:true.
           process.kill(-child.pid, signalToSend);
         } else {
-          child.kill(signalToSend);
+          // Node cannot signal a Windows process group. taskkill /T terminates
+          // the complete descendant tree; /F is required for deterministic
+          // timeout/cancellation cleanup.
+          const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
+            shell: false,
+            windowsHide: true,
+            stdio: 'ignore',
+          });
+          killer.on('error', () => child.kill(signalToSend));
         }
       } catch {
         // Process may have already exited between the check and the kill.
@@ -157,7 +165,9 @@ export function runTypedProcess(options: TypedProcessOptions): Promise<TypedProc
     child.on('close', (code, closeSignal) => {
       if (settled) return;
       settled = true;
-      clearTimers();
+      // If timeout/cancellation sent SIGTERM, keep the SIGKILL group timer even
+      // after the root exits: a descendant may ignore SIGTERM and outlive it.
+      clearTimers(timedOut || aborted);
       if (signal) signal.removeEventListener('abort', onAbort);
       resolve({
         exitCode: code,

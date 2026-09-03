@@ -39,6 +39,7 @@ import {
     MoveFileArgsSchema,
     GetFileInfoArgsSchema,
     GetConfigArgsSchema,
+    GetRuntimeIdentityArgsSchema,
     SetConfigValueArgsSchema,
     ListProcessesArgsSchema,
     EditBlockArgsSchema,
@@ -65,6 +66,7 @@ import {
     buildUnsupportedParamsWarning,
 } from './utils/unsupportedParams.js';
 import { getConfig, setConfigValue } from './tools/config.js';
+import { getRuntimeIdentityState } from './runtime-identity.js';
 import { getUsageStats } from './tools/usage.js';
 import { giveFeedbackToDesktopCommander } from './tools/feedback.js';
 import { getPrompts } from './tools/prompts.js';
@@ -1241,6 +1243,25 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                 },
             },
 
+            {
+                name: "get_runtime_identity",
+                description: `
+                        Return the stable local Desktop Commander runtime identity and redacted
+                        remote device-auth state. No token, credential, user identity, or policy
+                        decision is returned. The authorization field is always "external": callers
+                        such as ACS must bind this identity and make their own authorization decision.
+
+                        Local-only and independent of the hosted realtime/Supabase remote channel.
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(GetRuntimeIdentityArgsSchema),
+                annotations: {
+                    title: "Get Runtime Identity",
+                    readOnlyHint: true,
+                    openWorldHint: false,
+                },
+            },
+
             // ACPX tools
             {
                 name: "acpx_list_sessions",
@@ -1452,6 +1473,19 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
 
         switch (name) {
             // Config tools
+            case "get_runtime_identity":
+                try {
+                    result = {
+                        content: [{ type: "text", text: JSON.stringify(await getRuntimeIdentityState(), null, 2) }],
+                    };
+                } catch (error) {
+                    capture('server_request_error', { message: `Error in get_runtime_identity handler: ${error}` });
+                    result = {
+                        content: [{ type: "text", text: `Error: Failed to load runtime identity` }],
+                        isError: true,
+                    };
+                }
+                break;
             case "get_config":
                 try {
                     result = await getConfig();

@@ -40,6 +40,10 @@
       "description": "Get the complete server configuration including blocked commands, allowed directories, file limits, telemetry settings, client info, and system information."
     },
     {
+      "name": "get_runtime_identity",
+      "description": "Get the stable local runtime identity and redacted remote-auth presence for external authorization binding."
+    },
+    {
       "name": "set_config_value",
       "description": "Set a specific configuration value by key. WARNING: Should be used in a separate chat from file operations to prevent security issues."
     },
