@@ -41,11 +41,11 @@ export class MachineController {
     this.audit = new JsonlAuditLogger(config.audit.logPath);
   }
 
-  async callTool(name: string, args: unknown = {}): Promise<unknown> {
+  async callTool(name: string, args: unknown = {}, context?: { requestHash?: string }): Promise<unknown> {
     const started = Date.now();
     const auditArgs = name === "test.agent.run" ? sanitizeDirectAgentAuditArgs(args) : args;
     try {
-      const dispatched = await this.dispatch(name, args);
+      const dispatched = await this.dispatch(name, args, context);
       const result = this.config.security.redactSecrets ? redactValue(dispatched.result) : dispatched.result;
       this.audit.log({
         timestamp: new Date().toISOString(),
@@ -75,7 +75,7 @@ export class MachineController {
     }
   }
 
-  private async dispatch(name: string, args: unknown): Promise<DispatchResult> {
+  private async dispatch(name: string, args: unknown, context?: { requestHash?: string }): Promise<DispatchResult> {
     switch (name) {
       case "system.status":
         return { result: systemStatus(this.config), risk: "read_only" };
@@ -99,7 +99,7 @@ export class MachineController {
         if (this.options.enableTestAgentRunForLocalDevelopment !== true) {
           throw new ControlStackError("direct_agent_disabled", "test.agent.run is disabled by default");
         }
-        const result = await runDirectAgent(this.config, args, this.options.directAgentRunner);
+        const result = await runDirectAgent(this.config, args, this.options.directAgentRunner, context?.requestHash);
         return { result, risk: "requires_approval", exitCode: result.exitCode };
       }
       default:

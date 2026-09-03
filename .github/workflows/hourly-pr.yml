@@ -20,13 +20,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 50
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Restore task ledger
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v6
         with:
           path: .automation/state/tasks.db
           key: hourly-pr-ledger-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -76,7 +76,7 @@ jobs:
           FREEMODEL_API_KEY: ${{ secrets.FREEMODEL_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          model: freemodel/gpt-5.5
+          model: gpt-5.5
           use_github_token: true
           share: false
           prompt: ${{ steps.prompt.outputs.prompt }}
@@ -110,7 +110,7 @@ jobs:
 
       - name: Persist task ledger
         if: always() && steps.preflight.outputs.idempotency_key != ''
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v6
         with:
           path: .automation/state/tasks.db
           key: hourly-pr-ledger-${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}

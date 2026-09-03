@@ -67,6 +67,41 @@ describe("webhook ingest receiver", () => {
     await app.close();
   });
 
+  it("persists the caller-supplied correlationId and webhook source on the created work item", async () => {
+    const app = testGateway();
+    const res = await app.inject({
+      method: "POST",
+      url: "/webhooks/hermes",
+      headers: { "idempotency-key": "evt-correlation" },
+      payload: { ...validBody, correlationId: "hermes-evt-abc123" }
+    });
+    expect(res.statusCode).toBe(201);
+    const body = res.json() as { workItemId: string };
+
+    const created = await app.inject({ method: "GET", url: `/work-items/${body.workItemId}` });
+    const item = created.json() as {
+      workItem: { metadata?: { webhookSource?: string; correlationId?: string } };
+    };
+    expect(item.workItem.metadata).toEqual({ webhookSource: "hermes", correlationId: "hermes-evt-abc123" });
+    await app.close();
+  });
+
+  it("omits metadata entirely when the caller supplies no correlationId", async () => {
+    const app = testGateway();
+    const res = await app.inject({
+      method: "POST",
+      url: "/webhooks/hermes",
+      headers: { "idempotency-key": "evt-no-correlation" },
+      payload: validBody
+    });
+    const body = res.json() as { workItemId: string };
+
+    const created = await app.inject({ method: "GET", url: `/work-items/${body.workItemId}` });
+    const item = created.json() as { workItem: { metadata?: unknown } };
+    expect(item.workItem.metadata).toBeUndefined();
+    await app.close();
+  });
+
   it("replays an idempotent webhook without creating a duplicate (200)", async () => {
     const app = testGateway();
     const first = await app.inject({
@@ -137,7 +172,6 @@ describe("webhook ingest receiver", () => {
       })
     ]);
 
-    const statuses = [res1.statusCode, res2.statusCode].sort();
     // One must succeed with 201 Created (or 200 replayed if polled) and the other returns 200 replayed or 409 conflict
     expect([200, 201]).toContain(res1.statusCode);
     expect([200, 201, 409]).toContain(res2.statusCode);

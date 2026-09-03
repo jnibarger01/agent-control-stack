@@ -31,10 +31,15 @@ Claim response:
 ```json
 {
   "work_item_id": "wrk_...",
+  "attempt_id": "attempt_...",
   "lease_id": "lease_...",
   "lease_token": "lease_once_...",
   "worker_id": "worker_local_1",
   "action_hash": "<64 lowercase hex characters>",
+  "plan_hash": "<64 lowercase hex characters>",
+  "input_hash": "<64 lowercase hex characters>",
+  "fencing_epoch": 1,
+  "workspace_hash": "<64 lowercase hex characters>",
   "lease_expires_at": "2026-07-05T18:00:00Z"
 }
 ```
@@ -58,7 +63,7 @@ Raw lease tokens are never stored.
 
 The canonical result contract and HTTP response matrix are documented in [`worker-results.md`](worker-results.md). The worker sends the opaque `lease_id`, not the persisted token hash, to `POST /work-items/:id/results` along with its authenticated worker identity and `action_hash`. The gateway never accepts an unauthenticated result route.
 
-The store validates the work item, active lease, worker binding, action hash, expiry, result state, timestamp order, output bounds, dry-run metadata, and idempotency key in one transaction. It inserts one immutable result, transitions the work item, closes the lease, and appends audit events atomically.
+The store validates the work item, attempt, current plan, active lease, worker binding, action and input hashes, fencing epoch, expiry, result state, timestamp order, output bounds, dry-run metadata, and attempt-derived idempotency key in one transaction. It inserts one immutable attempt result, transitions the attempt and work item, closes the lease, and appends audit events atomically. An attempt-backed lease cannot use the legacy result envelope.
 
 ## Failure behavior
 

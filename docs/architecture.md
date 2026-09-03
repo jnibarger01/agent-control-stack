@@ -7,6 +7,14 @@ untrusted capability adapters; they do not own policy, approval, lifecycle,
 leases, result acceptance, or audit. See
 [ADR 0009](adr/0009-engine-harness-authority-and-dependencies.md).
 
+External agent runtimes and launch protocols—including OpenClaw, Hermes,
+Codex, Claude, Gemini, OpenCode, Pi, ACP, and ACPX—remain below this authority
+boundary. They may execute or transport an ACS-approved attempt, but they must
+not introduce a parallel registry, policy engine, approval store, queue/lease
+lifecycle, result authority, or canonical audit sink. Migration notes from the
+retired OpenClaw Agent Orchestrator are captured in
+[`openclaw-agent-orchestrator-migration.md`](openclaw-agent-orchestrator-migration.md).
+
 ## Layers
 
 - `packages/shared`: IDs, redaction, errors, hash helpers, migrations, and OpenTelemetry-shaped event schemas.
@@ -37,4 +45,4 @@ Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval
 
 Policy decisions are recorded as `policy.decided` audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated and records who approved it and why.
 
-Workers claim approved rows through the work-item store with a status compare-and-swap and a short opaque lease. Worker startup marks expired running leases as failed before claiming new work, then the local worker path re-checks policy and action-hash approvals before applying the read-only worker scope and entering dry-run sandbox simulation. A result submission validates authentication at the gateway and lease ownership, worker identity, action hash, expiry, state, payload bounds, and idempotency inside one SQLite transaction. The transaction appends the immutable result, transitions the work item, closes the lease, and records audit evidence. Retry and clone are append-only lineage operations that create new work-item IDs and fresh execution action hashes; policy and approval are evaluated again.
+Workers claim approved rows through the work-item store with a status compare-and-swap and a short opaque lease. The governed worker claim creates one immutable execution attempt against the current admitted plan, starts it at fencing epoch one, and returns its attempt, plan, input, workspace, and lease bindings. Worker startup marks expired running leases as failed before claiming new work, then the local worker path re-checks policy and action-hash approvals before applying the read-only worker scope and entering dry-run sandbox simulation. A result submission for an attempt lease must carry those persisted bindings; the store rejects stale epochs, superseded plans, tampered inputs, and legacy envelopes that omit attempt authority. Privileged transitions that assert an actor identity reject an actor other than the current active lease owner, and the asserted identity is included in the audit event. One SQLite transaction appends the immutable attempt result and compatibility result projection, transitions the attempt and work item, closes both lease projections, and records audit evidence. Retry and clone are append-only lineage operations that create new work-item IDs, plans, attempts, and execution action hashes; policy and approval are evaluated again.

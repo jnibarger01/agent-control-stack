@@ -22,6 +22,7 @@ This repository is currently a **v0.1.0-alpha dry-run control-plane release**. I
 - [Deploy](#deploy)
 - [Operations](#operations)
 - [Validation](#validation)
+- [Autonomous development-agent supervisor](#autonomous-development-agent-supervisor)
 - [Known limitations](#known-limitations)
 - [Related docs](#related-docs)
 
@@ -133,6 +134,7 @@ docs/
   threat-model.md
   runbooks/local-dev.md
 config.example.yml  Example machine-controller policy config
+acs.config.example.yaml  Example `acs serve` runtime topology
 .env.example        Environment variable template
 ```
 
@@ -280,36 +282,41 @@ Do not commit `.env` or real secrets.
 
 ### Core environment variables
 
-| Variable                        | Purpose                                                                            | Local example                     |
-| ------------------------------- | ---------------------------------------------------------------------------------- | --------------------------------- |
-| `NODE_ENV`                      | Runtime mode. Production disables local bearer MCP fallback.                       | `development`                     |
-| `HOST`                          | Gateway bind host if supported by runtime wrapper. Prefer loopback locally.        | `127.0.0.1`                       |
-| `PORT`                          | Gateway port.                                                                      | `3000`                            |
-| `ACS_DB_PATH`                   | SQLite database path.                                                              | `storage/local.db`                |
-| `ACS_GATEWAY_TOKEN`             | Dashboard/API bearer token. Required for HTTP mutations.                           | generate a secret                 |
-| `ACS_GATEWAY_ACTOR`             | Requester/actor label for gateway-authenticated mutations.                         | `user`                            |
-| `ACS_GATEWAY_ACTOR_ID`          | Registry actor id bound to gateway mutations that require actor registry identity. | optional locally                  |
-| `ACS_MCP_BEARER_TOKEN`          | Local development bearer token for `/mcp`. Ignored in production.                  | generate a local token            |
-| `ACS_MCP_RESOURCE_METADATA_URL` | Override OAuth protected-resource metadata URL.                                    | optional                          |
-| `ACS_OAUTH_ISSUER`              | OAuth issuer for production MCP auth.                                              | provider URL                      |
-| `ACS_OAUTH_AUDIENCE`            | OAuth audience/resource, usually public `/mcp` URL.                                | `https://gateway.example.com/mcp` |
-| `ACS_OAUTH_JWKS_URI`            | JWKS URI for JWT verification.                                                     | provider JWKS URL                 |
-| `ACS_AUTH_MODE`                 | Set to `tunnel_id` for trusted signed tunnel-session mode.                         | optional                          |
-| `ACS_TRUSTED_TUNNEL_PROXY`      | Local proxy IP allowed to assert tunnel sessions.                                  | `127.0.0.1`                       |
-| `ACS_ALLOWED_TUNNEL_IDS`        | Legacy dev tunnel allowlist. Prefer persistent connector records.                  | optional                          |
-| `ACS_TUNNEL_SCOPES`             | Comma-separated MCP scopes for tunnel mode.                                        | `acs:work:create,acs:work:read`   |
-| `ACS_MCP_CONFIG`                | Config path for stdio MCP machine controller.                                      | `config.example.yml`              |
-| `ACS_MACHINE_CONTROLLER_CONFIG` | Config path used by the gateway direct-agent controller.                           | optional                          |
-| `ACS_ACP_AGENT_COMMAND`         | Read-only ACP agent command to spawn.                                              | optional                          |
-| `ACS_ACP_AGENT_ARGS_JSON`       | JSON array of ACP command args.                                                    | `[]`                              |
-| `ACS_ACP_AGENT_CWD`             | ACP process working directory.                                                     | optional                          |
-| `ACS_ACP_AGENT_ID`              | Registry id for ACP agent.                                                         | required with command             |
-| `ACS_ACP_ACTOR_ID`              | Actor id for ACP adapter registration.                                             | required with command             |
-| `ACS_MOA_CONFIG`                | MoA/model routing config path.                                                     | optional                          |
-| `ACS_MOA_AUDIT_LOG`             | MoA audit log path.                                                                | `storage/moa-audit.jsonl`         |
-| `ACS_OPENROUTER_API_KEY`        | Optional model provider key for MoA routes.                                        | secret                            |
-| `ACS_OPENAI_API_KEY`            | Optional OpenAI/Codex provider key for MoA routes.                                 | secret                            |
-| `ACS_OLLAMA_BASE_URL`           | Local Ollama endpoint.                                                             | `http://127.0.0.1:11434`          |
+| Variable                        | Purpose                                                                                          | Local example                     |
+| ------------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------- |
+| `NODE_ENV`                      | Runtime mode. Production disables local bearer MCP fallback.                                     | `development`                     |
+| `HOST`                          | Gateway bind host if supported by runtime wrapper. Prefer loopback locally.                      | `127.0.0.1`                       |
+| `PORT`                          | Gateway port.                                                                                    | `3000`                            |
+| `ACS_DB_PATH`                   | SQLite database path.                                                                            | `storage/local.db`                |
+| `ACS_GATEWAY_TOKEN`             | Legacy local-development dashboard/API bearer token. Not accepted for remote production binding. | generate a local secret           |
+| `ACS_GATEWAY_CREDENTIALS_JSON`  | Production credential set with credential-bound actor IDs, roles, and scopes.                    | secret-managed JSON               |
+| `ACS_GATEWAY_ACTOR`             | Requester/actor label for gateway-authenticated mutations.                                       | `user`                            |
+| `ACS_GATEWAY_ACTOR_ID`          | Registry actor id bound to gateway mutations that require actor registry identity.               | optional locally                  |
+| `ACS_MCP_BEARER_TOKEN`          | Local development bearer token for `/mcp`. Ignored in production.                                | generate a local token            |
+| `ACS_MCP_RESOURCE_METADATA_URL` | Override OAuth protected-resource metadata URL.                                                  | optional                          |
+| `ACS_MCP_ALLOWED_ORIGINS`       | Explicit browser origins allowed to call remote MCP.                                             | `https://acs.example`             |
+| `ACS_OAUTH_ISSUER`              | OAuth issuer for production MCP auth.                                                            | provider URL                      |
+| `ACS_OAUTH_AUDIENCE`            | OAuth audience/resource, usually public `/mcp` URL.                                              | `https://gateway.example.com/mcp` |
+| `ACS_OAUTH_JWKS_URI`            | JWKS URI for JWT verification.                                                                   | provider JWKS URL                 |
+| `ACS_AUTH_MODE`                 | Set to `tunnel_id` for trusted signed tunnel-session mode.                                       | optional                          |
+| `ACS_TRUSTED_TUNNEL_PROXY`      | Local proxy IP allowed to assert tunnel sessions.                                                | `127.0.0.1`                       |
+| `ACS_ALLOWED_TUNNEL_IDS`        | Legacy dev tunnel allowlist. Prefer persistent connector records.                                | optional                          |
+| `ACS_TUNNEL_SCOPES`             | Comma-separated MCP scopes for tunnel mode.                                                      | `acs:work:create,acs:work:read`   |
+| `ACS_MCP_CONFIG`                | Config path for stdio MCP machine controller.                                                    | `config.example.yml`              |
+| `ACS_MACHINE_CONTROLLER_CONFIG` | Config path used by the gateway direct-agent controller.                                         | optional                          |
+| `ACS_ACP_AGENT_COMMAND`         | Read-only ACP agent command to spawn.                                                            | optional                          |
+| `ACS_ACP_AGENT_ARGS_JSON`       | JSON array of ACP command args.                                                                  | `[]`                              |
+| `ACS_ACP_AGENT_CWD`             | ACP process working directory.                                                                   | optional                          |
+| `ACS_ACP_AGENT_ID`              | Registry id for ACP agent.                                                                       | required with command             |
+| `ACS_ACP_ACTOR_ID`              | Actor id for ACP adapter registration.                                                           | required with command             |
+| `ACS_MOA_CONFIG`                | MoA/model routing config path.                                                                   | optional                          |
+| `ACS_MOA_AUDIT_LOG`             | MoA audit log path.                                                                              | `storage/moa-audit.jsonl`         |
+| `ACS_OPENROUTER_API_KEY`        | Optional model provider key for MoA routes.                                                      | secret                            |
+| `ACS_OPENAI_API_KEY`            | Optional OpenAI/Codex provider key for MoA routes.                                               | secret                            |
+| `ACS_OLLAMA_BASE_URL`           | Local Ollama endpoint.                                                                           | `http://127.0.0.1:11434`          |
+| `ACS_RATE_LIMIT_WINDOW_MS`      | Mutation/MCP/webhook rate-limit window.                                                          | `60000`                           |
+| `ACS_RATE_LIMIT_MAX_REQUESTS`   | Maximum requests per credential fingerprint/IP and route within the window.                      | `120`                             |
+| `ACS_MAX_PENDING_WORK_ITEMS`    | Maximum draft/pending/approved/running work items before new intake is rejected.                 | `1000`                            |
 
 ### Machine-controller config
 
@@ -385,6 +392,26 @@ The gateway also serves an SSE audit stream at:
 ```text
 /events
 ```
+
+## Run the local ACS runtime
+
+`acs serve` is the all-in-one local entrypoint. It starts the gateway, invokes
+the existing scheduler and bounded worker on their configured intervals, and
+reconciles expired leases plus stale actor/tunnel liveness. It does not own
+policy or approvals: those remain in the existing ACS core packages.
+
+```sh
+cp acs.config.example.yaml acs.config.yaml
+npm run build
+npm run acs -- serve
+```
+
+The runtime keeps gateway transport on `http://127.0.0.1:3000` by default and
+exposes loopback-only component and actor-discovery status on
+`http://127.0.0.1:3001/status`; `/livez` and `/readyz` are also available on
+that status listener. `acs.config.yaml` contains topology only—no credentials,
+policy rules, or approval settings—and its values can be overridden with the
+documented `ACS_*` runtime environment variables.
 
 ## Use the HTTP gateway
 
@@ -750,6 +777,13 @@ If `npm test` fails, do not restart the service and call it a deployment. That i
 
 ## Validation
 
+Public HTTP and gateway MCP contracts are generated from the runtime Zod
+boundaries. Verify committed OpenAPI, MCP, example, and client artifacts with:
+
+```sh
+npm run contracts:check
+```
+
 Local validation gate:
 
 ```sh
@@ -787,13 +821,26 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
   --data '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 ```
 
+## Autonomous development-agent supervisor
+
+The repository-local development loop can repeatedly invoke a configured
+coding agent against this worktree and independently verify its completion:
+
+```sh
+python scripts/autonomous_agent.py prompts/acs-implementation.md
+```
+
+See [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
+for executor selection, verification overrides, exit codes, and log behavior.
+
 ## Known limitations
 
 - Worker execution is dry-run only.
 - No real OS sandbox is wired in yet.
 - Public worker result submission is not implemented.
 - Production remote connector mode requires OAuth or signed tunnel-session deployment and TLS termination.
-- Docker and Compose artifacts are provided; Kubernetes and a checked-in systemd unit are not.
+- Docker and Compose artifacts are provided. Checked-in systemd units cover managed database backups and restore
+  drills; gateway and worker units and Kubernetes deployment artifacts are not provided.
 - Dashboard approval rendering is intentionally minimal.
 - Error envelopes are not uniform across every route.
 - Release hardening is still in progress.
@@ -805,6 +852,7 @@ curl -fsS -X POST http://127.0.0.1:3000/mcp \
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
 - [`docs/runbooks/production.md`](docs/runbooks/production.md)
+- [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)
 
 ## License
