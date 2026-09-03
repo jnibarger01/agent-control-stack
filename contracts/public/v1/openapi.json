@@ -158,7 +158,8 @@
                       "enum": [
                         "acs:work:create",
                         "acs:work:read",
-                        "acs:work:approve"
+                        "acs:work:approve",
+                        "acs:device"
                       ]
                     }
                   }
