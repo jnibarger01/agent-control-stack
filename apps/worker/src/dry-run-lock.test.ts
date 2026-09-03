@@ -5,7 +5,7 @@ import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/po
 import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertWorkerExecutionMode, runWorkerOnce } from "./index.js";
+import { assertDryRunExecutionMode, runWorkerOnce } from "./index.js";
 
 vi.mock("@agent-control-stack/sandbox", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@agent-control-stack/sandbox")>();
@@ -35,7 +35,7 @@ describe("worker dry-run lock", () => {
       });
 
       await expect(runWorkerOnce({ dbPath, workerId: "production-worker" })).rejects.toThrow(
-        "production worker rejected unsupported execution mode: live"
+        "production worker requires dry_run execution mode"
       );
 
       const check = new SqliteWorkItemStore(dbPath);
@@ -50,8 +50,8 @@ describe("worker dry-run lock", () => {
   });
 
   it("fails closed on an unknown execution mode", () => {
-    expect(() => assertWorkerExecutionMode("future_mode", { NODE_ENV: "test" })).toThrow(
-      "worker rejected unsupported execution mode: future_mode"
+    expect(() => assertDryRunExecutionMode("future_mode", "test")).toThrow(
+      "worker requires dry_run execution mode"
     );
   });
 

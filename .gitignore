@@ -38,4 +38,5 @@ agentos/
 reviews/
 IDEA.md
 logs/
+.agent-runs/
 tunnel_*

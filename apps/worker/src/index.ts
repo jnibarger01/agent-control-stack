@@ -1,11 +1,38 @@
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
-import { executeSandboxed } from "@agent-control-stack/sandbox";
+import {
+  ExecutionLearningBridge,
+  ProceduralLearning,
+  type InjectedSkill
+} from "@agent-control-stack/procedural-learning";
+import { executeSandboxed, type SandboxResult } from "@agent-control-stack/sandbox";
 import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
+import { WorkspaceManager } from "@agent-control-stack/workspace-manager";
+
+export interface WorkerExecuteResult extends SandboxResult {
+  usedSkillNames?: string[];
+}
+
+export type WorkerExecute = (
+  workItem: WorkItem & { retrievedSkills: InjectedSkill[]; workspace?: unknown }
+) => Promise<WorkerExecuteResult>;
+
+export interface WorkerValidator {
+  validate(input: {
+    workItemId: string;
+    attemptId: string;
+    outcome: WorkerExecuteResult;
+    retrievedSkills: InjectedSkill[];
+  }): Promise<{ passed: boolean; checks: Array<{ name: string; passed: boolean; detail: string }> }>;
+}
 
 export interface WorkerOptions {
   dbPath?: string;
   workerId?: string;
+  execute?: WorkerExecute;
+  workspaceManager?: WorkspaceManager;
+  learning?: ProceduralLearning;
+  validator?: WorkerValidator;
 }
 
 export interface WorkerResult {
@@ -13,20 +40,24 @@ export interface WorkerResult {
   executionMode?: "dry_run";
   workItemId?: string;
   reason?: string;
+  retrievedSkills?: InjectedSkill[];
+  usedSkills?: string[];
+  validationPassed?: boolean;
 }
 
-const DRY_RUN_EXECUTION_MODE = "dry_run" as const;
+export const DRY_RUN_EXECUTION_MODE = "dry_run" as const;
 
-export function assertWorkerExecutionMode(
-  executionMode: unknown,
-  env: { NODE_ENV?: string } = process.env
-): asserts executionMode is typeof DRY_RUN_EXECUTION_MODE {
-  if (executionMode === DRY_RUN_EXECUTION_MODE) {
+export function assertDryRunExecutionMode(
+  mode: unknown,
+  nodeEnv = process.env.NODE_ENV
+): asserts mode is typeof DRY_RUN_EXECUTION_MODE {
+  if (mode === DRY_RUN_EXECUTION_MODE) {
     return;
   }
-
-  const scope = env.NODE_ENV === "production" ? "production worker" : "worker";
-  throw new Error(`${scope} rejected unsupported execution mode: ${String(executionMode)}`);
+  if (nodeEnv === "production") {
+    throw new Error("production worker requires dry_run execution mode");
+  }
+  throw new Error("worker requires dry_run execution mode");
 }
 
 /**
@@ -54,8 +85,13 @@ export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActi
 export async function runWorkerOnce(options: WorkerOptions = {}): Promise<WorkerResult> {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const workItems = new SqliteWorkItemStore(dbPath);
+  const learning = options.learning ?? new ProceduralLearning(dbPath);
+  const ownsLearning = options.learning === undefined;
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const workerId = options.workerId ?? "local-worker";
+  const execute: WorkerExecute = options.execute ?? (async (item) => executeSandboxed(item));
+  let cleanupWorkspace:
+    { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch: number } | undefined;
 
   try {
     workItems.failExpiredLeases();
@@ -66,7 +102,27 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     if (running.status === "blocked") {
       return { executed: false, workItemId: running.id, reason: "blocked by policy" };
     }
+    if (!running.attemptId || !running.planHash || !running.inputHash || running.fencingEpoch === undefined) {
+      throw new Error("worker claim did not include persisted attempt authority");
+    }
 
+    const workspace = running.attemptId
+      ? await options.workspaceManager?.provision(running.id, {
+          attemptId: running.attemptId,
+          leaseId: running.leaseId,
+          workerId,
+          fencingEpoch: running.fencingEpoch
+        })
+      : undefined;
+    if (workspace && running.attemptId) {
+      cleanupWorkspace = {
+        workItemId: running.id,
+        attemptId: running.attemptId,
+        leaseId: running.leaseId,
+        workerId,
+        fencingEpoch: running.fencingEpoch
+      };
+    }
     const startedAt = new Date().toISOString();
     if (!isReadOnlyWorkerWorkItem(running)) {
       const completedAt = new Date().toISOString();
@@ -75,7 +131,11 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        attemptId: running.attemptId,
+        planHash: running.planHash,
+        inputHash: running.inputHash,
+        fencingEpoch: running.fencingEpoch,
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "blocked",
         startedAt,
         finishedAt: completedAt,
@@ -97,54 +157,126 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       };
     }
 
-    const result = await executeSandboxed(running);
-    assertWorkerExecutionMode(result.executionMode);
+    const bridge = new ExecutionLearningBridge(learning);
+    const prepared = bridge.beforeExecution(running, running.attemptId);
+    const result = await execute({
+      ...running,
+      retrievedSkills: prepared.retrievedSkills,
+      ...(workspace ? { workspace } : {})
+    });
+    assertDryRunExecutionMode(result.executionMode);
     const completedAt = new Date().toISOString();
+    const usedSkills = result.usedSkillNames ?? [];
+    const validation = options.validator
+      ? await options.validator.validate({
+          workItemId: running.id,
+          attemptId: running.attemptId,
+          outcome: result,
+          retrievedSkills: prepared.retrievedSkills
+        })
+      : undefined;
+    const learningRecord = bridge.afterExecution({
+      workItemId: running.id,
+      attemptId: running.attemptId,
+      repository: running.target?.repo ?? running.target?.cwd,
+      retrievedSkills: prepared.retrievedSkills,
+      usedSkillIds: usedSkills,
+      engineSucceeded: result.ok,
+      validationPassed: validation?.passed
+    });
+    const learningOutput = {
+      simulated: true,
+      retrievedSkills: prepared.retrievedSkills.map((skill) => ({
+        skillId: skill.skillId,
+        version: skill.version,
+        confidence: skill.confidence
+      })),
+      usedSkills,
+      validationPassed: validation?.passed ?? null
+    };
 
-    if (result.ok) {
+    const validationFailed = validation !== undefined && validation.passed === false;
+    if (result.ok && !validationFailed) {
       tools.submit_work_result({
         workItemId: running.id,
+        attemptId: running.attemptId,
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        planHash: running.planHash,
+        inputHash: running.inputHash,
+        fencingEpoch: running.fencingEpoch,
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "succeeded",
         startedAt,
         finishedAt: completedAt,
         exitCode: 0,
         summary: "dry-run simulation completed; no real command ran",
         stdout: result.output,
-        structuredOutput: { simulated: true },
+        structuredOutput: learningOutput,
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
     } else {
       tools.submit_work_result({
         workItemId: running.id,
+        attemptId: running.attemptId,
         leaseId: running.leaseId,
         workerId,
         actionHash: running.actionHash,
-        idempotencyKey: workerResultIdempotencyKey(running.id, running.leaseId, workerId),
+        planHash: running.planHash,
+        inputHash: running.inputHash,
+        fencingEpoch: running.fencingEpoch,
+        idempotencyKey: workerResultIdempotencyKey(running.attemptId),
         outcome: "failed",
         startedAt,
         finishedAt: completedAt,
         exitCode: null,
-        summary: "dry-run simulation failed; no real command ran",
-        error: result.error ?? "dry-run sandbox simulation failed",
+        summary: validationFailed
+          ? "dry-run simulation completed but result validation failed"
+          : "dry-run simulation failed; no real command ran",
+        error: validationFailed
+          ? `result validation failed: ${
+              validation?.checks
+                .filter((check) => !check.passed)
+                .map((check) => check.name)
+                .join(", ") || "unspecified check"
+            }`
+          : (result.error ?? "dry-run sandbox simulation failed"),
         stdout: result.output,
         stderr: result.error,
-        structuredOutput: { simulated: true },
+        structuredOutput: learningOutput,
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
     }
 
-    return { executed: true, executionMode: result.executionMode, workItemId: running.id, reason: workerId };
+    return {
+      executed: true,
+      executionMode: result.executionMode,
+      workItemId: running.id,
+      reason: workerId,
+      retrievedSkills: prepared.retrievedSkills,
+      usedSkills: learningRecord.usedSkills,
+      validationPassed: validation?.passed
+    };
   } finally {
-    workItems.close();
+    try {
+      if (cleanupWorkspace) {
+        await options.workspaceManager?.teardown(cleanupWorkspace.workItemId, {
+          attemptId: cleanupWorkspace.attemptId,
+          leaseId: cleanupWorkspace.leaseId,
+          workerId: cleanupWorkspace.workerId,
+          fencingEpoch: cleanupWorkspace.fencingEpoch
+        });
+      }
+    } finally {
+      if (ownsLearning) learning.close();
+      workItems.close();
+    }
   }
 }
 
-export function workerResultIdempotencyKey(workItemId: string, leaseId: string, workerId: string): string {
-  return stableHash({ domain: "acs.worker-result", workItemId, leaseId, workerId, attempt: 1 });
+export function workerResultIdempotencyKey(attemptId: string): string {
+  return stableHash({ domain: "acs.attempt-result.v1", attemptId });
 }

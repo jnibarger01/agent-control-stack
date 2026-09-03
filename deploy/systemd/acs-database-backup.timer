@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Agent Control Stack encrypted database backups
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+RandomizedDelaySec=5m
+Unit=acs-database-backup.service
+
+[Install]
+WantedBy=timers.target

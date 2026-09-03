@@ -17,12 +17,18 @@ const expectedEventNames = [
   WorkItemEvent.NeedsApproval,
   "policy.decided",
   "approval.granted",
+  "execution_plan.created",
+  "execution_plan_approval.granted",
   WorkItemEvent.Approved,
-  WorkItemEvent.Running,
   "policy.decided",
+  "execution_plan.admitted",
+  "execution_attempt.created",
+  "attempt_lease.issued",
+  WorkItemEvent.Running,
   "approval.consumed",
   "execution_result.accepted",
-  WorkItemEvent.Succeeded
+  WorkItemEvent.Succeeded,
+  "execution_attempt.result_accepted"
 ];
 
 export interface SqliteEvaluationRun {
@@ -124,20 +130,27 @@ function runGoldenPath(databasePath: string): SqliteEvaluationRun {
     }
 
     const claimed = tools.claim_next_approved_work_item({ workerId: "eval-worker" });
-    if (!claimed || claimed.id !== created.id) {
+    if (
+      !claimed ||
+      claimed.id !== created.id ||
+      !claimed.attemptId ||
+      !claimed.planHash ||
+      !claimed.inputHash ||
+      claimed.fencingEpoch === undefined
+    ) {
       throw new Error("SQLite evaluation failed to claim the approved work item");
     }
 
     tools.submit_work_result({
       workItemId: claimed.id,
+      attemptId: claimed.attemptId,
       leaseId: claimed.leaseId,
       workerId: claimed.workerId,
       actionHash: claimed.actionHash,
-      idempotencyKey: stableHash({
-        workItemId: claimed.id,
-        leaseId: claimed.leaseId,
-        evaluation: "control-plane-only"
-      }),
+      planHash: claimed.planHash,
+      inputHash: claimed.inputHash,
+      fencingEpoch: claimed.fencingEpoch,
+      idempotencyKey: stableHash({ domain: "acs.attempt-result.v1", attemptId: claimed.attemptId }),
       outcome: "succeeded",
       startedAt: claimed.startedAt,
       finishedAt: new Date(Date.parse(claimed.startedAt) + 10).toISOString(),
@@ -210,6 +223,12 @@ function normalizeValue(value: unknown, workItemId: string, key?: string): unkno
     key === "leaseExpiresAt" ||
     key === "expiresAt" ||
     key === "consumedAt" ||
+    key === "admittedAt" ||
+    key === "issuedAt" ||
+    key === "maxExpiresAt" ||
+    key === "lastRenewedAt" ||
+    key === "startedAt" ||
+    key === "finishedAt" ||
     key === "recordedAt"
   ) {
     return "<time>";
@@ -220,6 +239,18 @@ function normalizeValue(value: unknown, workItemId: string, key?: string): unkno
   if (key === "leaseId" || key === "lease.id") {
     return "<lease-id>";
   }
+  if (key === "attemptId" || key === "attempt.id") {
+    return "<attempt-id>";
+  }
+  if (key === "planId" || key === "plan.id") {
+    return "<plan-id>";
+  }
+  if (key === "admissionId") {
+    return "<admission-id>";
+  }
+  if (key === "approvalId") {
+    return "<approval-id>";
+  }
   if (key === "resultId") {
     return "<result-id>";
   }
@@ -229,7 +260,17 @@ function normalizeValue(value: unknown, workItemId: string, key?: string): unkno
   if (key === "idempotencyKey") {
     return "<idempotency-key>";
   }
-  if (key === "payloadHash") {
+  if (
+    key === "payloadHash" ||
+    key === "planHash" ||
+    key === "plan.hash" ||
+    key === "inputHash" ||
+    key === "subjectInputHash" ||
+    key === "workspaceHash" ||
+    key === "policyDecisionHash" ||
+    key === "policy.decision_hash" ||
+    key === "tokenHash"
+  ) {
     return "<payload-hash>";
   }
   if (value === workItemId) {

@@ -4,6 +4,7 @@ import {
   approvalRequestHash,
   approvalRequestSchema,
   cancelRequestSchema,
+  defaultExecutionPlanForWorkItem,
   rejectRequestSchema,
   type ClaimedWorkItem,
   type PrivilegedTransitionOptions,
@@ -153,6 +154,17 @@ function gateApprovalInTransaction(
         reason: parsed.reason
       })
     );
+    const plan = ensureExecutionPlan(store, workItem, parsed.approvedBy);
+    store.grantExecutionPlanApproval(
+      {
+        workItemId: workItem.id,
+        planHash: plan.planHash,
+        actionHash,
+        approvedByActorId: parsed.approvedBy,
+        reason: parsed.reason
+      },
+      policyTransition
+    );
   }
 
   const missingApproval = required.find((evaluation) => !store.hasApproval(workItem.id, evaluation.actionHash));
@@ -229,41 +241,93 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
-  const running = store.claimNextApprovedWorkItem(parsed.workerId, { leaseMs: parsed.leaseMs });
-  if (!running) {
+  const candidate = store
+    .list({ status: "approved" })
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+  if (!candidate) {
     return undefined;
   }
 
-  const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, running, parsed.workerId, "claim");
+  const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
+  const plan = ensureExecutionPlan(store, candidate, parsed.workerId);
+  const policyDecisionHash = stableHash({
+    schemaVersion: "acs.execution-plan-policy-decision.v1",
+    planHash: plan.planHash,
+    steps: evaluations.map((evaluation) => ({
+      actionHash: evaluation.actionHash,
+      decision: evaluation.decision.decision
+    }))
+  });
+  const admission =
+    decision.decision === "deny"
+      ? undefined
+      : store.admitExecutionPlan(
+          {
+            workItemId: candidate.id,
+            planHash: plan.planHash,
+            policyVersion: "acs.policy.v1",
+            policyDecisionHash,
+            requiresApproval: decision.decision === "require_approval",
+            admittedByActorId: parsed.workerId
+          },
+          policyTransition
+        );
   const required = approvalRequired(evaluations);
-  const missing = required.find((evaluation) => !store.hasApproval(running.id, evaluation.actionHash));
-  let approvalFailure: unknown;
-  if (decision.decision !== "deny" && !missing) {
-    for (const evaluation of required) {
-      try {
-        store.consumeApproval(running.id, evaluation.actionHash, {
-          requestHash: approvalRequestHash(running.id, evaluation.actionHash)
-        });
-      } catch (error) {
-        approvalFailure = error;
-        break;
-      }
-    }
-  }
-  if (decision.decision === "deny" || missing || approvalFailure) {
-    const blocked = store.blockWorkItem(running.id);
+  const missing = required.find((evaluation) => !store.hasApproval(candidate.id, evaluation.actionHash));
+  const planApprovals = required.map((evaluation) =>
+    store.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)
+  );
+  if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
+    const blocked = store.blockWorkItem(candidate.id);
     return {
       ...blocked,
-      workerId: running.workerId,
-      leaseToken: running.leaseToken,
-      leaseId: running.leaseId,
-      actionHash: running.actionHash,
-      startedAt: running.startedAt,
-      leaseExpiresAt: running.leaseExpiresAt
+      workerId: parsed.workerId,
+      leaseToken: "",
+      leaseId: "",
+      actionHash: "",
+      startedAt: blocked.updatedAt,
+      leaseExpiresAt: blocked.updatedAt
     };
   }
 
+  // Every required plan approval - not just the first - must be represented
+  // in and atomically consumed by the lease's authority, so a multi-action
+  // approval-required plan can't dispatch with only one of its approvals
+  // actually bound. planApprovals[0] (if any) rides the lease's single
+  // `approvalId` column; the rest go through additionalApprovals, consumed
+  // transactionally with lease issuance the same way.
+  const [firstApproval, ...restApprovals] = planApprovals;
+  const running = store.claimNextApprovedWorkItem(parsed.workerId, {
+    leaseMs: parsed.leaseMs,
+    attemptAuthority: {
+      planHash: plan.planHash,
+      admissionId: admission.admissionId,
+      ...(firstApproval ? { approvalId: firstApproval.approvalId } : {}),
+      additionalApprovals: restApprovals
+        .filter((approval): approval is NonNullable<typeof approval> => approval !== undefined)
+        .map((approval) => ({ approvalId: approval.approvalId, actionHash: approval.actionHash })),
+      policyVersion: admission.policyVersion,
+      policyDecisionHash: admission.policyDecisionHash
+    }
+  });
+  if (!running) return undefined;
+  for (const evaluation of required) {
+    store.consumeApproval(running.id, evaluation.actionHash, {
+      requestHash: approvalRequestHash(running.id, evaluation.actionHash)
+    });
+  }
   return running;
+}
+
+function ensureExecutionPlan(store: WorkItemStore, workItem: WorkItem, actor: string) {
+  return (
+    store.getCurrentExecutionPlan(workItem.id) ??
+    store.createExecutionPlan({
+      workItemId: workItem.id,
+      definition: defaultExecutionPlanForWorkItem(workItem),
+      createdByActorId: actor
+    })
+  );
 }
 
 export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) {

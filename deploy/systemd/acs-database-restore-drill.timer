@@ -1,0 +1,11 @@
+[Unit]
+Description=Verify Agent Control Stack backups with isolated restore drills
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+Unit=acs-database-restore-drill.service
+
+[Install]
+WantedBy=timers.target

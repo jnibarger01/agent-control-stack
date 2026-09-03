@@ -21,7 +21,7 @@ describe("sandbox execution boundary", () => {
         risk: "low"
       });
       store.approveWorkItem(item.id, transition);
-      const running = store.claimNextApprovedWorkItem("sandbox-worker");
+      const running = store.claimNextApprovedWorkItem("sandbox-worker", { allowLegacyClaimForTests: true });
       if (!running) throw new Error("expected running item");
 
       await expect(executeSandboxed(running)).resolves.toEqual({

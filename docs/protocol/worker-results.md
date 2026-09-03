@@ -13,10 +13,14 @@ Authentication is required. The configured credential must resolve to the `agent
 ```json
 {
   "workItemId": "wrk_...",
+  "attemptId": "attempt_...",
   "leaseId": "lease_...",
   "workerId": "worker_local_1",
   "actionHash": "<64 lowercase hex characters>",
-  "idempotencyKey": "attempt-1",
+  "planHash": "<64 lowercase hex characters>",
+  "inputHash": "<64 lowercase hex characters>",
+  "fencingEpoch": 1,
+  "idempotencyKey": "<hash derived from the persisted attempt id>",
   "outcome": "succeeded",
   "startedAt": "2026-07-20T18:00:00.000Z",
   "finishedAt": "2026-07-20T18:00:00.010Z",
@@ -38,13 +42,13 @@ Worker-submittable outcomes are `succeeded`, `failed`, `cancelled`, and `worker_
 
 One `BEGIN IMMEDIATE` transaction:
 
-1. Loads the running work item and active lease.
-2. Verifies lease/item/worker/action-hash binding and expiry.
-3. Resolves the durable `(workerId, idempotencyKey)` record.
+1. Loads the running work item, immutable attempt, current plan, and active attempt lease.
+2. Recomputes the attempt input binding and verifies the item, worker, action hash, plan hash, input hash, fencing epoch, and expiry.
+3. Verifies that idempotency is derived from the persisted attempt and resolves the durable attempt result.
 4. Returns the original result for an exact replay or rejects a conflict.
 5. Inserts the immutable execution result.
-6. Transitions the work item to the outcome-derived terminal state.
-7. Consumes the lease and clears its legacy token material from the work item.
+6. Transitions the attempt and work item to the outcome-derived terminal state.
+7. Consumes the authoritative and compatibility lease projections and clears legacy token material from the work item.
 8. Appends `execution_result.accepted` and the terminal work-item event.
 
 Any failure rolls back result, state, lease, and audit writes together.
