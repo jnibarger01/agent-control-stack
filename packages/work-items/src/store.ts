@@ -4394,7 +4394,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
       });
 
       return {
-        value: { ...updated, workerId, leaseToken, leaseId, actionHash: actualActionHash, startedAt, leaseExpiresAt: leaseExpiry },
+        value: {
+          ...updated,
+          workerId,
+          leaseToken,
+          leaseId,
+          actionHash: actualActionHash,
+          startedAt,
+          leaseExpiresAt: leaseExpiry
+        },
         events: [
           this.appendAuditEvent(
             workItemStatusEvent(
