@@ -2,11 +2,84 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { buildGateway } from "./server.js";
 
 const auth = { token: "t", actor: "user" };
 
 describe("gateway MCP edge hardening", () => {
+  it("rejects unknown top-level tool arguments before dispatch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, auth, mcpAuth: { localBearerToken: "t" } });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer t" },
+        payload: {
+          jsonrpc: "2.0",
+          id: "strict-args",
+          method: "tools/call",
+          params: { name: "get_work_item", arguments: { id: "work-1", actor: "spoofed" } }
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toMatchObject({
+        jsonrpc: "2.0",
+        id: "strict-args",
+        error: { code: -32602, message: "invalid tool arguments" }
+      });
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.readEvents()).toEqual([]);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed direct-agent arguments before controller dispatch", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
+    const calls: unknown[] = [];
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth,
+      mcpAuth: { localBearerToken: "t" },
+      directAgentRunner: async (request) => {
+        calls.push(request);
+        return { stdout: "", stderr: "", exitCode: 0, durationMs: 1 };
+      }
+    });
+
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer t" },
+        payload: {
+          jsonrpc: "2.0",
+          id: "agent-args",
+          method: "tools/call",
+          params: { name: "test.agent.run", arguments: { agent: "opencode", prompt: "inspect", extra: true } }
+        }
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json().error).toMatchObject({ code: -32602, message: "invalid tool arguments" });
+      expect(calls).toHaveLength(0);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("returns 405 with Allow POST for GET /mcp", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mcp-"));
     const app = buildGateway({

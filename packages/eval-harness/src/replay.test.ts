@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AuditEvent } from "@agent-control-stack/shared";
+import { createPolicyEngine, evaluateWorkItemPolicy } from "@agent-control-stack/policy-gate";
 import {
   SqliteWorkItemStore,
   WorkItemEvent,
@@ -9,7 +10,7 @@ import {
   type WorkItemStatus
 } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
-import { findUnapprovedExecution, replay } from "./index.js";
+import { findUnapprovedExecution, replay, simulatePolicy } from "./index.js";
 
 const domainTransition = { via: "domain_service" } as const;
 
@@ -42,6 +43,32 @@ function lifecycleEvent(name: string, status: WorkItemStatus): AuditEvent {
 }
 
 describe("deterministic replay", () => {
+  it("simulates policy decisions without mutating or trusting the recorded decision", () => {
+    const actionHash = evaluateWorkItemPolicy(baseWorkItem, "user", "create")[0]!.actionHash;
+    const events = [
+      lifecycleEvent(WorkItemEvent.Created, "pending_policy"),
+      {
+        id: "evt-policy",
+        name: "policy.decided",
+        timeUnixNano: "2",
+        attributes: {},
+        body: {
+          workItemId: baseWorkItem.id,
+          actionHash,
+          decision: "allow",
+          reason: "recorded decision",
+          matchedRules: [],
+          context: { actor: "user", operation: "create" }
+        }
+      } satisfies AuditEvent
+    ];
+
+    const result = simulatePolicy(events, createPolicyEngine());
+
+    expect(result).toMatchObject({ evaluated: 1, unchanged: 0, changed: 1 });
+    expect(result.differences[0]?.simulatedDecision).toBe("deny");
+    expect(events[1]?.body).toMatchObject({ decision: "allow" });
+  });
   it("fails closed for unknown work item lifecycle events", () => {
     const event = {
       id: "evt-unknown",

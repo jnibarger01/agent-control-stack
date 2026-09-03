@@ -20,6 +20,7 @@ import { chatgptDashboardWidgetHtml } from "./chatgpt-dashboard-widget.generated
 import {
   directAgentToolName,
   gatewayMcpInputSchemas,
+  gatewayMcpDispatchInputSchemas,
   jsonRpcRequestSchema,
   MCP_PROTOCOL_VERSION,
   mcpRequiredScopes,
@@ -240,6 +241,17 @@ async function handleToolsCall(input: {
     }
     return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, mcpRequiredScopes(parsed.data.name));
   }
+
+  // Authenticate before interpreting tool arguments, then validate the exact
+  // per-tool shape before any actor binding, policy call, or side effect.
+  // Unknown top-level fields are rejected by the strict gateway schemas;
+  // nested action params remain intentionally open for policy evaluation.
+  const argumentSchema = gatewayMcpDispatchInputSchemas[parsed.data.name];
+  const validatedArguments = argumentSchema.safeParse(parsed.data.arguments ?? {});
+  if (!validatedArguments.success) {
+    return jsonRpcError(input.id, -32602, "invalid tool arguments", 400);
+  }
+  parsed.data.arguments = validatedArguments.data;
 
   if (parsed.data.name === "approve_work_item") {
     const actor = resolvedMcpActor(authorization.auth);

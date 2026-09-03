@@ -1,4 +1,5 @@
 import { strictCanonicalSha256V1, type AuditEvent } from "@agent-control-stack/shared";
+import { type PolicyEngine, type PolicyOperation } from "@agent-control-stack/policy-gate";
 import { projectMemories } from "@agent-control-stack/temporal-memory";
 import {
   WorkItemEvent,
@@ -79,6 +80,84 @@ export function replay(events: AuditEvent[]) {
   return {
     workItems: [...knownWorkItems.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
     memories: projectMemories(events)
+  };
+}
+
+export interface PolicyReplayDifference {
+  workItemId: string;
+  actionHash: string;
+  recordedDecision: string;
+  simulatedDecision: string;
+  reason: string;
+}
+
+export interface PolicyReplaySummary {
+  evaluated: number;
+  unchanged: number;
+  changed: number;
+  differences: PolicyReplayDifference[];
+}
+
+/** Re-evaluate policy events without writing to the source store or audit log. */
+export function simulatePolicy(events: AuditEvent[], policy: PolicyEngine): PolicyReplaySummary {
+  const projection = replay(events);
+  const workItems = new Map(projection.workItems.map((workItem) => [workItem.id, workItem]));
+  const differences: PolicyReplayDifference[] = [];
+  let evaluated = 0;
+
+  for (const event of events.filter((candidate) => candidate.name === "policy.decided")) {
+    const body = policyReplayBody(event.body);
+    const workItem = workItems.get(body.workItemId);
+    if (!workItem) {
+      throw new Error(`policy replay: decision references unknown work item ${body.workItemId}`);
+    }
+    const evaluation = policy.evaluateWorkItem(workItem, body.context.actor, body.context.operation).find(
+      (candidate) => candidate.actionHash === body.actionHash
+    );
+    if (!evaluation) {
+      throw new Error(`policy replay: action hash is not present in work item ${body.workItemId}`);
+    }
+
+    evaluated += 1;
+    if (evaluation.decision.decision !== body.decision) {
+      differences.push({
+        workItemId: body.workItemId,
+        actionHash: body.actionHash,
+        recordedDecision: body.decision,
+        simulatedDecision: evaluation.decision.decision,
+        reason: evaluation.decision.reason
+      });
+    }
+  }
+
+  return { evaluated, unchanged: evaluated - differences.length, changed: differences.length, differences };
+}
+
+function policyReplayBody(value: Record<string, unknown>): {
+  workItemId: string;
+  actionHash: string;
+  decision: "allow" | "deny" | "require_approval";
+  context: { actor: string; operation: PolicyOperation };
+} {
+  const context = value.context;
+  if (!context || typeof context !== "object") {
+    throw new Error("policy replay: malformed policy decision context");
+  }
+  const candidate = context as Record<string, unknown>;
+  if (
+    typeof value.workItemId !== "string" ||
+    typeof value.actionHash !== "string" ||
+    !["allow", "deny", "require_approval"].includes(String(value.decision)) ||
+    typeof candidate.actor !== "string" ||
+    !["create", "approve", "unblock", "claim"].includes(String(candidate.operation))
+  ) {
+    throw new Error("policy replay: malformed policy decision event");
+  }
+  return {
+    workItemId: value.workItemId,
+    actionHash: value.actionHash,
+    decision: value.decision as "allow" | "deny" | "require_approval",
+    context: { actor: candidate.actor, operation: candidate.operation as PolicyOperation }
   };
 }
 

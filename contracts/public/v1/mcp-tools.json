@@ -127,7 +127,8 @@
           "title",
           "requester",
           "intent"
-        ]
+        ],
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:create"
@@ -153,7 +154,8 @@
         },
         "required": [
           "id"
-        ]
+        ],
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:read"
@@ -190,7 +192,8 @@
               "quarantined"
             ]
           }
-        }
+        },
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:read"
@@ -220,13 +223,18 @@
           "actionHash": {
             "type": "string",
             "minLength": 1
+          },
+          "approvedBy": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
           "id",
           "reason",
           "actionHash"
-        ]
+        ],
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:approve"
@@ -248,11 +256,16 @@
           "id": {
             "type": "string",
             "minLength": 1
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
           "id"
-        ]
+        ],
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:approve"
@@ -278,11 +291,16 @@
           "reason": {
             "type": "string",
             "minLength": 1
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
           "id"
-        ]
+        ],
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:approve"
@@ -308,11 +326,16 @@
           "reason": {
             "type": "string",
             "minLength": 1
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "required": [
           "id"
-        ]
+        ],
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:approve"
@@ -356,7 +379,8 @@
         },
         "required": [
           "id"
-        ]
+        ],
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:read"
@@ -413,7 +437,8 @@
         "required": [
           "agent",
           "prompt"
-        ]
+        ],
+        "additionalProperties": false
       },
       "requiredScopes": [
         "acs:work:approve"

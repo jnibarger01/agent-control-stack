@@ -1,5 +1,5 @@
-import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { workItemToolNames } from "@agent-control-stack/policy-gate";
+import { directAgentNames } from "@agent-control-stack/machine-controller";
 import {
   acpRoles,
   actionRequestSchema,
@@ -24,7 +24,7 @@ export const approvalBodySchema = z.object({
   actionHash: z.string().min(1)
 });
 export const cancelBodySchema = z.object({ reason: z.string().min(1).optional() });
-export const unblockBodySchema = z.object({}).passthrough();
+export const unblockBodySchema = z.object({ actor: z.string().min(1).optional() }).strict();
 export const mcpScopeSchema = z.enum(MCP_SCOPES);
 export const connectorBodySchema = z.object({
   id: z.string().min(1),
@@ -138,27 +138,41 @@ export const toolsCallParamsSchema = z.object({
   arguments: z.unknown().optional()
 });
 
-const idSchema = z.object({ id: z.string().min(1) });
-const reasonSchema = idSchema.extend({ reason: z.string().min(1).optional() });
-const directAgentInputSchema = z.object({
-  agent: z.enum(directAgentNames),
-  prompt: z.string().min(1).max(32_000),
-  cwd: z.string().min(1).optional(),
-  timeoutSeconds: z.number().int().positive().max(3_600).optional(),
-  permissionMode: z.enum(["read-only", "readonly", "read_only"]).default("read-only")
-});
+const idSchema = z.object({ id: z.string().min(1) }).strict();
+const reasonSchema = idSchema
+  .extend({ reason: z.string().min(1).optional(), actor: z.string().min(1).optional() })
+  .strict();
+const directAgentInputSchema = z
+  .object({
+    agent: z.enum(directAgentNames),
+    prompt: z.string().min(1).max(32_000),
+    cwd: z.string().min(1).optional(),
+    timeoutSeconds: z.number().int().positive().max(3_600).optional(),
+    permissionMode: z.enum(["read-only", "readonly", "read_only"]).default("read-only")
+  })
+  .strict();
+
+const directAgentDispatchInputSchema = directAgentInputSchema.extend({ agent: z.string().min(1) });
 
 export const gatewayMcpInputSchemas = {
-  create_work_item: createWorkItemSchema,
+  create_work_item: createWorkItemSchema.strict(),
   get_work_item: idSchema,
-  list_work_items: listWorkItemsSchema,
-  approve_work_item: idSchema.merge(approvalBodySchema),
-  unblock_work_item: idSchema,
+  list_work_items: listWorkItemsSchema.strict(),
+  approve_work_item: idSchema
+    .merge(approvalBodySchema)
+    .extend({ approvedBy: z.string().min(1).optional() })
+    .strict(),
+  unblock_work_item: idSchema.merge(unblockBodySchema).strict(),
   reject_work_item: reasonSchema,
   cancel_work_item: reasonSchema,
   open_acs_dashboard: z.object({}),
   get_execution_detail: idSchema,
   [directAgentToolName]: directAgentInputSchema
+} satisfies Record<McpToolName, z.ZodType>;
+
+export const gatewayMcpDispatchInputSchemas = {
+  ...gatewayMcpInputSchemas,
+  [directAgentToolName]: directAgentDispatchInputSchema
 } satisfies Record<McpToolName, z.ZodType>;
 
 export function mcpRequiredScopes(name: McpToolName): McpScope[] {

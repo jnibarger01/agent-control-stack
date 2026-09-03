@@ -274,7 +274,10 @@ describe("installed OpenClaw interoperability", () => {
         );
         openclawGatewayProcess.stdout?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
         openclawGatewayProcess.stderr?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
-        await waitForPort(openclawGatewayPort);
+        await waitForPort(openclawGatewayPort, {
+          child: openclawGatewayProcess,
+          describe: () => gatewayOutput
+        });
         expect(openclawGatewayProcess.exitCode, gatewayOutput).toBeNull();
         openclawProcess = spawn(
           "openclaw",
@@ -378,9 +381,36 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function waitForPort(port: number): Promise<void> {
-  const deadline = Date.now() + 10_000;
+interface WaitForPortDiagnostics {
+  /** The spawned process being waited on. If it exits before the port opens, fail fast with its reason. */
+  child?: { exitCode: number | null; signalCode: NodeJS.Signals | null };
+  /** Accumulated stdout+stderr of the spawned process, surfaced verbatim on failure. */
+  describe?: () => string;
+}
+
+async function waitForPort(port: number, diagnostics: WaitForPortDiagnostics = {}): Promise<void> {
+  const timeoutMs = 10_000;
+  const deadline = Date.now() + timeoutMs;
+  const childReason = (): string | undefined => {
+    const child = diagnostics.child;
+    if (!child) return undefined;
+    if (child.exitCode !== null) return `child exited with code ${child.exitCode}`;
+    if (child.signalCode !== null) return `child killed by signal ${child.signalCode}`;
+    return undefined;
+  };
+  const fail = (why: string): never => {
+    const output = diagnostics.describe?.() ?? "";
+    throw new Error(
+      `OpenClaw gateway did not listen on 127.0.0.1:${port} (${why}).\n` +
+        `--- child stdout+stderr ---\n${output.trim() || "<no output captured>"}\n--- end ---`
+    );
+  };
+
   while (Date.now() < deadline) {
+    // If the process is already gone, waiting the full timeout only hides the real
+    // reason. Report the exit/signal and its output immediately.
+    const reason = childReason();
+    if (reason) fail(reason);
     try {
       await new Promise<void>((resolve, reject) => {
         const socket = createConnection({ host: "127.0.0.1", port });
@@ -395,7 +425,7 @@ async function waitForPort(port: number): Promise<void> {
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
   }
-  throw new Error(`OpenClaw gateway did not listen on 127.0.0.1:${port}`);
+  fail(childReason() ?? `still running but not accepting connections after ${timeoutMs}ms`);
 }
 
 function seedActor(dbPath: string, id: string, externalRef: string): void {
