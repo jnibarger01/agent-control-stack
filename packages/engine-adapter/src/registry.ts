@@ -21,9 +21,20 @@ export interface CliEngineAdapterOptions {
   credentialSource?: (envName: string) => string | undefined;
   buildArgs?: (prompt: string) => string[];
   isolationFactory?: (options: { authorityVerifier: EngineIsolationAuthorityVerifier; runtimeMounts?: EngineRuntimeMount[] }) => EngineIsolation;
+  /**
+   * Egress allowlist used when a task leaves `egressAllowlist` empty.
+   * Every adapter must default to its own provider's API endpoint - a
+   * shared OpenAI default would leave a default-configured non-OpenAI
+   * adapter (Claude, Gemini, Grok) unable to reach its own provider at
+   * all, despite valid credentials.
+   */
+  defaultEgress: readonly { host: string; port: number }[];
 }
 
-const DEFAULT_EGRESS = [{ host: "api.openai.com", port: 443 }] as const;
+const OPENAI_DEFAULT_EGRESS = [{ host: "api.openai.com", port: 443 }] as const;
+const ANTHROPIC_DEFAULT_EGRESS = [{ host: "api.anthropic.com", port: 443 }] as const;
+const GEMINI_DEFAULT_EGRESS = [{ host: "generativelanguage.googleapis.com", port: 443 }] as const;
+const XAI_DEFAULT_EGRESS = [{ host: "api.x.ai", port: 443 }] as const;
 
 /** Common provider adapter. The only process boundary is EngineIsolation. */
 export class CliEngineAdapter implements EngineAdapter {
@@ -67,36 +78,39 @@ export class CliEngineAdapter implements EngineAdapter {
       cwd: ".",
       credential: { envName: this.options.credentialEnvName, envValue: credential },
       network: "scoped-egress",
-      egressAllowlist: parsed.egressAllowlist.length ? parsed.egressAllowlist : [...DEFAULT_EGRESS],
+      egressAllowlist: parsed.egressAllowlist.length ? parsed.egressAllowlist : [...this.options.defaultEgress],
       limits: parsed.limits
     };
     return outcomeFromObservation(await this.isolation.execute(request, { signal }));
   }
 }
 
+type ProviderAdapterOptions = Omit<CliEngineAdapterOptions, "id" | "binaryName" | "credentialEnvName" | "defaultEgress"> &
+  Partial<Pick<CliEngineAdapterOptions, "binaryPath" | "credentialSource" | "defaultEgress">>;
+
 export class ClaudeEngineAdapter extends CliEngineAdapter {
-  constructor(options: Omit<CliEngineAdapterOptions, "id" | "binaryName" | "credentialEnvName"> & Partial<Pick<CliEngineAdapterOptions, "binaryPath" | "credentialSource">>) {
-    super({ ...options, id: "claude", binaryName: "claude", credentialEnvName: "ANTHROPIC_API_KEY" });
+  constructor(options: ProviderAdapterOptions) {
+    super({ defaultEgress: ANTHROPIC_DEFAULT_EGRESS, ...options, id: "claude", binaryName: "claude", credentialEnvName: "ANTHROPIC_API_KEY" });
   }
 }
 export class GeminiEngineAdapter extends CliEngineAdapter {
-  constructor(options: Omit<CliEngineAdapterOptions, "id" | "binaryName" | "credentialEnvName"> & Partial<Pick<CliEngineAdapterOptions, "binaryPath" | "credentialSource">>) {
-    super({ ...options, id: "gemini", binaryName: "gemini", credentialEnvName: "GEMINI_API_KEY" });
+  constructor(options: ProviderAdapterOptions) {
+    super({ defaultEgress: GEMINI_DEFAULT_EGRESS, ...options, id: "gemini", binaryName: "gemini", credentialEnvName: "GEMINI_API_KEY" });
   }
 }
 export class GrokEngineAdapter extends CliEngineAdapter {
-  constructor(options: Omit<CliEngineAdapterOptions, "id" | "binaryName" | "credentialEnvName"> & Partial<Pick<CliEngineAdapterOptions, "binaryPath" | "credentialSource">>) {
-    super({ ...options, id: "grok", binaryName: "grok", credentialEnvName: "XAI_API_KEY" });
+  constructor(options: ProviderAdapterOptions) {
+    super({ defaultEgress: XAI_DEFAULT_EGRESS, ...options, id: "grok", binaryName: "grok", credentialEnvName: "XAI_API_KEY" });
   }
 }
 export class OpenCodeEngineAdapter extends CliEngineAdapter {
-  constructor(options: Omit<CliEngineAdapterOptions, "id" | "binaryName" | "credentialEnvName"> & Partial<Pick<CliEngineAdapterOptions, "binaryPath" | "credentialSource">>) {
-    super({ ...options, id: "opencode", binaryName: "opencode", credentialEnvName: "OPENAI_API_KEY" });
+  constructor(options: ProviderAdapterOptions) {
+    super({ defaultEgress: OPENAI_DEFAULT_EGRESS, ...options, id: "opencode", binaryName: "opencode", credentialEnvName: "OPENAI_API_KEY" });
   }
 }
 export class PiEngineAdapter extends CliEngineAdapter {
-  constructor(options: Omit<CliEngineAdapterOptions, "id" | "binaryName" | "credentialEnvName"> & Partial<Pick<CliEngineAdapterOptions, "binaryPath" | "credentialSource">>) {
-    super({ ...options, id: "pi", binaryName: "pi", credentialEnvName: "OPENAI_API_KEY" });
+  constructor(options: ProviderAdapterOptions) {
+    super({ defaultEgress: OPENAI_DEFAULT_EGRESS, ...options, id: "pi", binaryName: "pi", credentialEnvName: "OPENAI_API_KEY" });
   }
 }
 

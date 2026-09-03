@@ -22,12 +22,12 @@ jobs:
       issues: read
     steps:
       - name: Checkout repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
       - name: Run opencode
-        uses: anomalyco/opencode/github@5e75e5e9901f0d178f425bfb47f1bd46cbe78a59 # pinned review commit
+        uses: anomalyco/opencode/github@2c14fc5586fe0b88e5c04732d2e846769cc35671 # pinned review commit
         env:
           FREEMODEL_API_KEY: ${{ secrets.FREEMODEL_API_KEY }}
         with:

@@ -9,6 +9,18 @@ const identifierSchema = z
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/u);
 
 /**
+ * The task-level egress declaration, deliberately more permissive than
+ * `engineEgressAllowlistSchema` (which requires >=1 entries): that schema
+ * also shapes the final EngineIsolationRequest sent to the sandbox, where
+ * an empty allowlist would be meaningless. At the task level, an empty
+ * array is the caller's explicit "use this adapter's own provider
+ * default" - CliEngineAdapter fills in the provider-correct endpoint
+ * before ever constructing the isolation request, so the isolation-facing
+ * schema's non-empty invariant still holds by the time it matters.
+ */
+const engineTaskEgressAllowlistSchema = z.array(engineEgressAllowlistSchema.element).max(4);
+
+/**
  * Everything EngineIsolationBackend needs to bind this invocation to a
  * persisted authority record (ADR 0014) - the same field set as
  * packages/sandbox's SandboxExecutionRequest/EngineIsolationRequest, not a
@@ -38,7 +50,7 @@ export const engineTaskSchema = z
       })
       .strict(),
     prompt: z.string().min(1).max(64_000),
-    egressAllowlist: engineEgressAllowlistSchema,
+    egressAllowlist: engineTaskEgressAllowlistSchema,
     credential: engineCredentialSchema.optional(),
     limits: sandboxLimitsSchema
   })

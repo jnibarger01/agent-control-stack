@@ -55,9 +55,25 @@ const workspace: Workspace = {
 
 function makeStore(): ExecutionControllerStore {
   return {
-    getCurrentExecutionPlan: vi.fn(() => ({ planId: "plan-1", planHash: attempt.planHash })),
+    getCurrentExecutionPlan: vi.fn(() => ({
+      planId: "plan-1",
+      workItemId: "work-1",
+      planHash: attempt.planHash,
+      definition: {
+        steps: [
+          {
+            stepId: "step-001",
+            sequence: 1,
+            action: { kind: "fs.write", description: "test step", params: { paths: ["README.md"], write: true } }
+          }
+        ]
+      }
+    })),
     getExecutionPlanAdmission: vi.fn(() => ({
       admissionId: "admission-1",
+      workItemId: "work-1",
+      planId: "plan-1",
+      planHash: attempt.planHash,
       policyVersion: "policy-1",
       policyDecisionHash: lease.policyDecisionHash,
       requiresApproval: false
@@ -254,6 +270,10 @@ describe("ExecutionController", () => {
       // "running" - independent validation is mandatory, so a passing
       // validation must reach the terminal "succeeded" status here.
       expect(result.validation?.passed).toBe(true);
+      // The returned attempt itself must already reflect the terminal
+      // status the switch persisted, not the pre-transition "running"
+      // snapshot captured before validation ran.
+      expect(result.attempt.status).toBe("succeeded");
       expect(store.getAttempt(result.attempt.attemptId)?.status).toBe("succeeded");
       expect(store.getActiveWorkspaceAllocationForAttempt(result.attempt.attemptId)?.status).toBe("active");
       expect(store.readEvents().map((event) => event.name)).toEqual(expect.arrayContaining([
@@ -261,6 +281,75 @@ describe("ExecutionController", () => {
         "attempt_lease.issued",
         "execution_attempt.transitioned"
       ]));
+    } finally {
+      store.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to execute when the supplied admission is for a stale (superseded) plan, even though it was validly admitted before the replan", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-controller-stale-admission-"));
+    const store = new SqliteWorkItemStore(join(directory, "control.db"));
+    try {
+      const workItem = store.create({
+        title: "replanned work",
+        requester: "user",
+        requesterSubject: "actor-user",
+        intent: "execute an approved repository task",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["README.md"], write: false } }],
+        risk: "low"
+      });
+      const originalPlan = store.createExecutionPlan({
+        workItemId: workItem.id,
+        definition: defaultExecutionPlanForWorkItem(workItem),
+        createdByActorId: "actor-user"
+      });
+      // Admitted with requiresApproval: false under the *original* plan.
+      const staleAdmission = store.admitExecutionPlan(
+        {
+          workItemId: workItem.id,
+          planHash: originalPlan.planHash,
+          policyVersion: "acs.policy.v1",
+          policyDecisionHash: "e".repeat(64),
+          requiresApproval: false,
+          admittedByActorId: "policy-gate"
+        },
+        { via: "policy_gate" }
+      );
+
+      // The work item is replanned (e.g. a new step added) - a real
+      // approval/admission decision would need to be re-evaluated against
+      // this new plan, which never happened here.
+      const replannedWorkItem = store.get(workItem.id)!;
+      const replan = store.createExecutionPlan({
+        workItemId: workItem.id,
+        definition: {
+          ...defaultExecutionPlanForWorkItem(replannedWorkItem),
+          objective: "a materially different, replanned objective"
+        },
+        createdByActorId: "actor-user",
+        expectedCurrentPlanHash: originalPlan.planHash
+      });
+      expect(replan.planHash).not.toBe(originalPlan.planHash);
+
+      const controller = new ExecutionController({
+        store,
+        workspaceManager: { provision: vi.fn(async () => { throw new Error("must not provision a workspace"); }) },
+        engine: { id: "codex", invoke: vi.fn(async () => { throw new Error("must not invoke the engine"); }) },
+        validator: { validate: vi.fn(async () => { throw new Error("must not validate"); }) } as unknown as ResultValidator,
+        buildValidationInput: () => { throw new Error("must not build a validation input"); },
+        input: {
+          workerId: "worker-1",
+          leaseToken: "stale-admission-lease-token-long",
+          admissionId: staleAdmission.admissionId,
+          inputHash: "f".repeat(64),
+          buildTask: () => { throw new Error("must not build a task"); }
+        }
+      });
+
+      await expect(controller.execute(workItem.id)).rejects.toThrow(/does not match the current plan/);
+      expect(store.list().find((item) => item.id === workItem.id)?.status).not.toBe("running");
     } finally {
       store.close();
       rmSync(directory, { recursive: true, force: true });

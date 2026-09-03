@@ -200,10 +200,24 @@ interface SkillRow {
   confidence: number;
 }
 
+/**
+ * Authoritative evidence for a claimed task experience, looked up from the
+ * control plane's own persisted records - never accepted as the caller's
+ * self-report. When configured, recordTaskExperience uses this to override
+ * TaskExperienceInput.completed/validation.passed before scoring: a
+ * fabricated experience claiming a passing validation that never actually
+ * ran, or for a work item/attempt that doesn't exist, cannot promote a
+ * skill just because the input payload says so.
+ */
+export type TaskExperienceEvidenceVerifier = (input: { taskId: string; attemptId: string }) =>
+  | { completed: boolean; validationPassed: boolean }
+  | undefined;
+
 export class ProceduralLearning {
   private readonly db: DatabaseSync;
+  private readonly verifyEvidence: TaskExperienceEvidenceVerifier | undefined;
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: { verifyEvidence?: TaskExperienceEvidenceVerifier } = {}) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA journal_mode = WAL;");
@@ -211,6 +225,7 @@ export class ProceduralLearning {
     this.db.exec("PRAGMA foreign_keys = ON;");
     this.db.exec(SCHEMA_SQL);
     this.seedTargets();
+    this.verifyEvidence = options.verifyEvidence;
   }
 
   close(): void {
@@ -221,6 +236,17 @@ export class ProceduralLearning {
     const parsed = taskExperienceInputSchema.parse(input);
     const secrets = [...parsed.explicitSecrets];
     const sanitized = sanitizeExperience(parsed, secrets);
+    if (this.verifyEvidence) {
+      // Authoritative evidence overrides the self-reported claim in both
+      // directions: a caller cannot promote by claiming success the store
+      // never recorded, and cannot be short-changed by a caller under-
+      // reporting a real success either - but when no evidence exists at
+      // all for this taskId/attemptId, fail closed rather than trust the
+      // input.
+      const evidence = this.verifyEvidence({ taskId: sanitized.taskId, attemptId: sanitized.attemptId });
+      sanitized.completed = evidence?.completed ?? false;
+      sanitized.validation = { ...sanitized.validation, passed: evidence?.validationPassed ?? false };
+    }
     const payloadHash = experienceHash(sanitized);
     const experienceId = stableLearningId("exp", { taskId: sanitized.taskId, payloadHash });
     this.withImmediateTransaction(() => {

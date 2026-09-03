@@ -166,6 +166,52 @@ describe("worker policy gate", () => {
     }
   });
 
+  it("fails the work item when the engine succeeds but independent validation reports failure", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-validation-failure-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    try {
+      const workItem = tools.create_work_item(readOnlyInput("Engine succeeds, validation fails"));
+      store.close();
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        execute: async () => ({ ok: true, executionMode: "dry_run", output: "looks fine" }),
+        validator: {
+          validate: async () => ({
+            passed: false,
+            checks: [{ name: "forbidden_paths", passed: false, detail: "forbidden paths changed: .env" }]
+          })
+        }
+      });
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(result.executed).toBe(true);
+        expect(result.validationPassed).toBe(false);
+        expect(check.get(workItem.id)?.status).toBe("failed");
+        const db = new DatabaseSync(dbPath, { readOnly: true });
+        try {
+          expect(db.prepare(`SELECT status, outcome_code FROM execution_attempts`).get()).toEqual({
+            status: "failed",
+            outcome_code: "failed"
+          });
+        } finally {
+          db.close();
+        }
+      } finally {
+        check.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The worker setup already closed this handle.
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("blocks approved write work without matching action approval", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-"));
     const dbPath = join(dir, "control.db");

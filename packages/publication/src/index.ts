@@ -1,11 +1,20 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
+import { runBoundedCommand, subprocessEnv } from "@agent-control-stack/machine-controller";
 
-const execFileAsync = promisify(execFile);
+const GIT_COMMAND_TIMEOUT_MS = 120_000;
+const GIT_COMMAND_TERMINATION_GRACE_MS = 5_000;
+const GIT_COMMAND_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 const DEFAULT_COMMIT_AUTHOR_NAME = "ACS Autonomous Publisher";
 const DEFAULT_COMMIT_AUTHOR_EMAIL = "acs-bot@users.noreply.github.com";
 const DEFAULT_REMOTE = "origin";
+const CONFIGURED_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
+
+function validateGitRemote(remote: string): string {
+  if (!CONFIGURED_REMOTE_NAME.test(remote)) {
+    throw new Error("publication refused: git remote must be a configured remote name");
+  }
+  return remote;
+}
 
 export interface PublicationRecord {
   publicationId: string;
@@ -19,6 +28,14 @@ export interface PublicationRecord {
 export interface PublicationStore {
   getByIdempotency(key: string): PublicationRecord | undefined;
   record(record: PublicationRecord): PublicationRecord;
+  /**
+   * The attempt's own persisted, independently-run validation outcome -
+   * never the caller's self-reported claim. Publication trusts only what
+   * the store itself recorded.
+   */
+  getValidationRunForAttempt(attemptId: string): { passed: boolean } | undefined;
+  /** Whether the work item's *current* execution plan actually authorizes a real push. */
+  planAllowsPush(workItemId: string): boolean;
 }
 export interface PullRequestClient {
   createOrUpdate(input: { branch: string; commitSha: string; title: string; body: string; idempotencyKey: string }): Promise<{ url: string }>;
@@ -30,7 +47,6 @@ export interface PublicationInput {
   branch: string;
   title: string;
   body: string;
-  validationPassed: boolean;
   leaseIsCurrent: () => Promise<boolean>;
   /** Remote to push to; defaults to "origin". */
   remote?: string;
@@ -73,8 +89,14 @@ export async function publishValidatedAttempt(input: PublicationInput, store: Pu
 }
 
 async function publishValidatedAttemptUnlocked(input: PublicationInput, store: PublicationStore, github: PullRequestClient): Promise<PublicationRecord> {
-  if (!input.validationPassed) throw new Error("publication requires independent validation success");
+  const validation = store.getValidationRunForAttempt(input.attemptId);
+  if (!validation || !validation.passed) {
+    throw new Error("publication requires a persisted, independently-run passing validation for this attempt");
+  }
   if (!(await input.leaseIsCurrent())) throw new Error("publication requires a current lease");
+  if (!store.planAllowsPush(input.workItemId)) {
+    throw new Error("publication refused: the work item's current execution plan does not authorize a push");
+  }
 
   const expectedBranch = attemptBranch(input.attemptId);
   if (input.branch !== expectedBranch) {
@@ -86,6 +108,21 @@ async function publishValidatedAttemptUnlocked(input: PublicationInput, store: P
   if (existing) return existing;
 
   const run = input.gitRunner ?? ((args: string[]) => runGit(input.git ?? "git", args, input.workspacePath));
+
+  // Don't trust the caller-supplied input.branch alone - ask the actual
+  // workspace what branch (if any) it is really on. A detached HEAD or a
+  // checkout of the wrong branch means the engine's worktree diverged from
+  // what the attempt claims to own, and publishing it would push history
+  // from an unintended base while the check above still reports "passed".
+  const actualBranch = await run(["symbolic-ref", "--quiet", "--short", "HEAD"]);
+  if (actualBranch.exitCode !== 0 || !actualBranch.stdout.trim()) {
+    throw new Error("publication refused: workspace HEAD is detached, expected a checkout of the attempt's own branch");
+  }
+  if (actualBranch.stdout.trim() !== expectedBranch) {
+    throw new Error(
+      `publication refused: workspace is actually on branch "${actualBranch.stdout.trim()}", not the attempt's own branch "${expectedBranch}"`
+    );
+  }
 
   const statusBefore = await run(["status", "--porcelain"]);
   if (statusBefore.exitCode !== 0) throw new Error(`git status failed: ${statusBefore.stderr}`);
@@ -100,8 +137,8 @@ async function publishValidatedAttemptUnlocked(input: PublicationInput, store: P
   if (!staged.stdout.trim()) {
     const current = await run(["rev-parse", "HEAD"]);
     if (current.exitCode !== 0 || !current.stdout.trim()) throw new Error("publication refused: no staged changes to publish after git add -A");
-    const remote = input.remote ?? DEFAULT_REMOTE;
-    const remoteHead = await run(["ls-remote", "--heads", remote, input.branch]);
+    const remote = validateGitRemote(input.remote ?? DEFAULT_REMOTE);
+    const remoteHead = await run(["ls-remote", "--heads", "--", remote, input.branch]);
     const remoteSha = remoteHead.stdout.trim().split(/\s+/u)[0];
     if (remoteHead.exitCode !== 0 || remoteSha !== current.stdout.trim()) {
       throw new Error("publication refused: no staged changes to publish after git add -A");
@@ -124,18 +161,38 @@ async function publishValidatedAttemptUnlocked(input: PublicationInput, store: P
   if (!(await input.leaseIsCurrent())) throw new Error("lease became stale before publication push");
 
   if (!alreadyPushed) {
-    const remote = input.remote ?? DEFAULT_REMOTE;
-    const push = await run(["push", "--set-upstream", remote, `HEAD:refs/heads/${input.branch}`]);
+    const remote = validateGitRemote(input.remote ?? DEFAULT_REMOTE);
+    const push = await run(["push", "--set-upstream", "--", remote, `HEAD:refs/heads/${input.branch}`]);
     if (push.exitCode !== 0) throw new Error(`git push failed: ${push.stderr || push.stdout}`);
   }
 
+  // The push already landed and cannot be un-pushed, but every mutation
+  // still ahead of us - opening/updating the PR, persisting the durable
+  // publication record - must not proceed under authority that died in the
+  // gap since the last check. Fencing at each externally visible boundary
+  // (not only once before the first one) bounds how much a lease loss
+  // mid-flight can still cause, instead of trusting one stale boolean for
+  // the whole remaining sequence.
+  if (!(await input.leaseIsCurrent())) throw new Error("lease became stale after publication push, before PR creation");
+
   const pullRequest = await github.createOrUpdate({ branch: input.branch, commitSha, title: input.title, body: input.body, idempotencyKey });
+
+  if (!(await input.leaseIsCurrent())) throw new Error("lease became stale after PR creation, before persisting the publication record");
+
   return store.record({ publicationId: `publication-${input.workItemId}`, workItemId: input.workItemId, attemptId: input.attemptId, branch: input.branch, commitSha, pullRequestUrl: pullRequest.url, idempotencyKey });
 }
 
 async function runGit(git: string, args: string[], cwd: string) {
-  try { const result = await execFileAsync(git, args, { cwd }); return { stdout: result.stdout, stderr: result.stderr, exitCode: 0 }; }
-  catch (error) { const failure = error as { stdout?: string; stderr?: string; code?: number }; return { stdout: failure.stdout ?? "", stderr: failure.stderr ?? "", exitCode: typeof failure.code === "number" ? failure.code : 1 }; }
+  const result = await runBoundedCommand({
+    cwd,
+    command: git,
+    args,
+    env: subprocessEnv(),
+    timeoutMs: GIT_COMMAND_TIMEOUT_MS,
+    terminationGraceMs: GIT_COMMAND_TERMINATION_GRACE_MS,
+    maxOutputBytes: GIT_COMMAND_MAX_OUTPUT_BYTES
+  });
+  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode ?? 1 };
 }
 
 export * from "./github.js";

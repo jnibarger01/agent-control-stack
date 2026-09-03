@@ -301,12 +301,22 @@ function gateWorkerClaimInTransaction(
     };
   }
 
+  // Every required plan approval - not just the first - must be represented
+  // in and atomically consumed by the lease's authority, so a multi-action
+  // approval-required plan can't dispatch with only one of its approvals
+  // actually bound. planApprovals[0] (if any) rides the lease's single
+  // `approvalId` column; the rest go through additionalApprovals, consumed
+  // transactionally with lease issuance the same way.
+  const [firstApproval, ...restApprovals] = planApprovals;
   const running = store.claimNextApprovedWorkItem(parsed.workerId, {
     leaseMs: parsed.leaseMs,
     attemptAuthority: {
       planHash: plan.planHash,
       admissionId: admission.admissionId,
-      ...(planApprovals[0] ? { approvalId: planApprovals[0].approvalId } : {}),
+      ...(firstApproval ? { approvalId: firstApproval.approvalId } : {}),
+      additionalApprovals: restApprovals
+        .filter((approval): approval is NonNullable<typeof approval> => approval !== undefined)
+        .map((approval) => ({ approvalId: approval.approvalId, actionHash: approval.actionHash })),
       policyVersion: admission.policyVersion,
       policyDecisionHash: admission.policyDecisionHash
     }

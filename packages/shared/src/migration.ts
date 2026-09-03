@@ -39,13 +39,20 @@ const migrationFiles = [
   { version: 16, name: "publication_records", filename: "016_publication_records.sql" },
   {
     version: 17,
+    name: "scheduler_firing_callback_pending",
+    filename: "017_scheduler_firing_callback_pending.sql"
+  },
+  { version: 18, name: "attempt_lease_approvals", filename: "018_attempt_lease_approvals.sql" },
+  { version: 19, name: "work_item_metadata", filename: "019_work_item_metadata.sql" },
+  {
+    version: 20,
     name: "desktop_commander_execution_mode",
-    filename: "017_desktop_commander_execution_mode.sql"
+    filename: "020_desktop_commander_execution_mode.sql"
   },
   {
-    version: 18,
+    version: 21,
     name: "advisory_evidence_and_verification",
-    filename: "018_advisory_evidence_and_verification.sql"
+    filename: "021_advisory_evidence_and_verification.sql"
   }
 ] as const;
 

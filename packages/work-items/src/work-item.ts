@@ -139,6 +139,26 @@ const structuredOutputSchema = z.record(z.string(), z.unknown()).superRefine((va
   }
 });
 
+/**
+ * Caller-supplied provenance that isn't part of the work item's own
+ * governed fields (title/intent/target/actions) but still needs to survive
+ * to the persisted record - e.g. an external webhook's correlationId, so a
+ * caller can trace the work item it produced back to the event that
+ * created it. Strict: this is not a general escape hatch for smuggling
+ * unvalidated data into a governed work item.
+ */
+export const workItemMetadataSchema = z
+  .object({
+    webhookSource: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[a-z0-9_-]{1,64}$/iu)
+      .optional(),
+    correlationId: z.string().min(1).max(512).optional()
+  })
+  .strict();
+
 export const createWorkItemSchema = z.object({
   title: z.string().min(1),
   requester: requesterSchema,
@@ -147,7 +167,8 @@ export const createWorkItemSchema = z.object({
   intent: z.string().min(1),
   target: targetSchema,
   requestedActions: z.array(actionRequestSchema).default([]),
-  risk: workItemRiskSchema.default("medium")
+  risk: workItemRiskSchema.default("medium"),
+  metadata: workItemMetadataSchema.optional()
 });
 
 export const workItemSchema = createWorkItemSchema.extend({

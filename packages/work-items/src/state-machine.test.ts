@@ -61,6 +61,40 @@ describe("work item state machine", () => {
     }
   });
 
+  it("records local-agent lifecycle events with a bounded fingerprint and redacted failure", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-local-agent-audit-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      store.recordLocalAgentEvent({
+        eventType: "failed",
+        actor: "oauth-user",
+        agentId: "codex",
+        requestId: "req_local_agent",
+        requestHash: "a".repeat(64),
+        scope: "acs:work:approve",
+        outcome: "failed",
+        reason: "Bearer secret-value",
+        outputBytes: 12,
+        exitCode: null
+      });
+      const event = store.readEvents()[0];
+      expect(event).toMatchObject({
+        name: "local_agent.failed",
+        attributes: {
+          "agent.id": "codex",
+          "local_agent.request_hash": "a".repeat(64),
+          "local_agent.scope": "acs:work:approve"
+        }
+      });
+      expect(JSON.stringify(event)).not.toContain("secret-value");
+      expect(store.verifyAuditChain().ok).toBe(true);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("applies a default audit event limit", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-event-default-limit-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
@@ -184,6 +218,37 @@ describe("work item state machine", () => {
       expectControlError(() => store.transition(workItem.id, "running"), "worker_claim_required");
       expect(store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true })?.status).toBe("running");
     } finally {
+      store.close();
+    }
+  });
+
+  it("disables the legacy claim and direct-start test escape hatches outright in production, even with the opt-in flag set", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-test-only-api-production-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const originalNodeEnv = process.env.NODE_ENV;
+    try {
+      const workItem = store.create({
+        title: "Production-blocked legacy claim",
+        requester: "agent",
+        intent: "verify test-only escape hatches are unreachable in production",
+        requestedActions: [{ kind: "manual", description: "claim" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id, domainTransition);
+
+      process.env.NODE_ENV = "production";
+      expectControlError(
+        () => store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true }),
+        "test_only_api_disabled_in_production"
+      );
+      expectControlError(
+        () => store.startWorkItem(workItem.id, "worker-a", { allowDirectStartForTests: true }),
+        "test_only_api_disabled_in_production"
+      );
+      // Neither call left the work item claimed/running.
+      expect(store.get(workItem.id)?.status).toBe("approved");
+    } finally {
+      process.env.NODE_ENV = originalNodeEnv;
       store.close();
     }
   });
@@ -818,13 +883,20 @@ describe("work item state machine", () => {
         { version: 16, name: "publication_records", filename: "016_publication_records.sql" },
         {
           version: 17,
+          name: "scheduler_firing_callback_pending",
+          filename: "017_scheduler_firing_callback_pending.sql"
+        },
+        { version: 18, name: "attempt_lease_approvals", filename: "018_attempt_lease_approvals.sql" },
+        { version: 19, name: "work_item_metadata", filename: "019_work_item_metadata.sql" },
+        {
+          version: 20,
           name: "desktop_commander_execution_mode",
-          filename: "017_desktop_commander_execution_mode.sql"
+          filename: "020_desktop_commander_execution_mode.sql"
         },
         {
-          version: 18,
+          version: 21,
           name: "advisory_evidence_and_verification",
-          filename: "018_advisory_evidence_and_verification.sql"
+          filename: "021_advisory_evidence_and_verification.sql"
         }
       ]);
       expect(store.listActors()).toEqual(
@@ -933,7 +1005,10 @@ describe("work item state machine", () => {
         { version: 15 },
         { version: 16 },
         { version: 17 },
-        { version: 18 }
+        { version: 18 },
+        { version: 19 },
+        { version: 20 },
+        { version: 21 }
       ]);
     } finally {
       db.close();
@@ -1042,7 +1117,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(copiedPath);
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1117,7 +1192,7 @@ describe("work item state machine", () => {
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([

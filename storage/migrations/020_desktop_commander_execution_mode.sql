@@ -1,4 +1,4 @@
--- 017_desktop_commander_execution_mode
+-- 020_desktop_commander_execution_mode
 --
 -- Relax the immutable-result dry-run lock so an ACS-authorized real execution
 -- through the local Desktop Commander MCP can persist an honest, non-simulated
@@ -16,7 +16,7 @@ DROP TRIGGER IF EXISTS execution_results_binding_guard;
 DROP TRIGGER IF EXISTS execution_results_immutable_guard;
 DROP TRIGGER IF EXISTS execution_results_no_delete;
 
-ALTER TABLE execution_results RENAME TO execution_results__pre017;
+ALTER TABLE execution_results RENAME TO execution_results__pre020;
 
 CREATE TABLE execution_results (
   result_id TEXT PRIMARY KEY,
@@ -70,9 +70,9 @@ INSERT INTO execution_results
     result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome,
     started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json,
     artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at
-  FROM execution_results__pre017;
+  FROM execution_results__pre020;
 
-DROP TABLE execution_results__pre017;
+DROP TABLE execution_results__pre020;
 
 CREATE INDEX IF NOT EXISTS idx_execution_results_lease ON execution_results(lease_id);
 CREATE INDEX IF NOT EXISTS idx_execution_results_worker_key ON execution_results(worker_id, idempotency_key);
@@ -111,7 +111,7 @@ DROP TRIGGER IF EXISTS attempt_results_cancel_race_guard;
 DROP TRIGGER IF EXISTS attempt_results_immutable_guard;
 DROP TRIGGER IF EXISTS attempt_results_no_delete;
 
-ALTER TABLE attempt_results RENAME TO attempt_results__pre017;
+ALTER TABLE attempt_results RENAME TO attempt_results__pre020;
 
 CREATE TABLE attempt_results (
   result_id TEXT PRIMARY KEY,
@@ -168,9 +168,9 @@ INSERT INTO attempt_results
     idempotency_key, plan_hash, input_hash, outcome, outcome_certainty, started_at, finished_at,
     exit_code, summary, stdout, stderr, structured_output_json, error, resource_usage_json,
     simulation_metadata_json, payload_hash, created_at
-  FROM attempt_results__pre017;
+  FROM attempt_results__pre020;
 
-DROP TABLE attempt_results__pre017;
+DROP TABLE attempt_results__pre020;
 
 CREATE INDEX IF NOT EXISTS idx_attempt_results_work_item
   ON attempt_results(work_item_id, created_at);

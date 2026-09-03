@@ -35,6 +35,30 @@ export const workspaceSchema = z
 export type Workspace = z.infer<typeof workspaceSchema>;
 
 /**
+ * A worktree observed on disk (or in the store) with no confirmed attempt
+ * ownership - discovered after a crash window (e.g. `git worktree add`
+ * succeeded but the process died before the allocation was persisted), or
+ * any other case where reconciliation cannot establish a lease/worker/
+ * fencing-epoch authority tuple for it. Deliberately a distinct shape from
+ * `Workspace` rather than an all-optional variant of it: an owned
+ * workspace's ownership fields must stay required everywhere that isn't
+ * reconciliation, so orphan status can never be represented by "just don't
+ * check the fields."
+ */
+export const orphanedWorkspaceSchema = z
+  .object({
+    allocationId: identifierSchema,
+    workItemId: identifierSchema,
+    hostPath: z.string().min(1),
+    branch: z.string().min(1),
+    baseRef: z.string().min(1),
+    createdAt: z.string()
+  })
+  .strict();
+
+export type OrphanedWorkspace = z.infer<typeof orphanedWorkspaceSchema>;
+
+/**
  * The persisted ownership record WorkspaceManager is built around (ADR-
  * adjacent finding from the R2/R4 remediation pass: an in-memory Map is not
  * durable ownership - it is amnesia across a process restart, and it is
@@ -66,6 +90,27 @@ export interface WorkspaceAllocationStore {
     input: { allocationId: string; leaseId: string; workerId: string; fencingEpoch: number },
     options: PrivilegedTransitionOptions
   ): WorkspaceAllocation;
+  /**
+   * The authoritative check required before any destructive filesystem
+   * cleanup that a caller claims authority for. Unlike comparing against
+   * the worker/lease/epoch tuple *copied onto the allocation at provision
+   * time*, this re-verifies against the attempt's live current fencing
+   * epoch/worker (and, while the attempt is still live, its active lease):
+   * expired, revoked, or superseded (re-leased to a new worker/epoch)
+   * authority is rejected even when the stale copy on the allocation still
+   * matches. A terminal attempt's own worker/epoch remains authorized to
+   * clean up after itself - cleanup is the normal, expected next step
+   * after a successful (or failed) attempt, not just a live-execution
+   * privilege.
+   */
+  getWorkspaceCleanupAuthority?(input: {
+    workItemId: string;
+    attemptId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    workspaceAllocationId: string;
+  }): boolean;
 }
 
 export interface WorkspaceManagerOptions {
@@ -238,13 +283,35 @@ export class WorkspaceManager {
     }
 
     const targetPath = persisted.hostPath;
-    if (
-      options.workerId !== undefined &&
-      (persisted.workerId !== options.workerId ||
+    if (options.workerId !== undefined) {
+      if (this.store.getWorkspaceCleanupAuthority) {
+        // Re-verify against the attempt's live current fencing epoch (and,
+        // while still live, its active lease) - not the worker/lease/epoch
+        // tuple frozen onto the allocation at provision time: an expired,
+        // revoked, or superseded (re-leased) authority must be rejected
+        // even though that stale copy still matches what the caller
+        // presents.
+        const authorized = this.store.getWorkspaceCleanupAuthority({
+          workItemId: parsedId,
+          attemptId,
+          leaseId: persisted.leaseId ?? options.leaseId ?? "",
+          workerId: options.workerId,
+          fencingEpoch: options.fencingEpoch ?? -1,
+          workspaceAllocationId: persisted.allocationId
+        });
+        if (!authorized) {
+          throw new ControlStackError(
+            "workspace_cleanup_fence_stale",
+            "workspace cleanup fence is stale, expired, or superseded by a newer lease"
+          );
+        }
+      } else if (
+        persisted.workerId !== options.workerId ||
         persisted.leaseId !== options.leaseId ||
-        persisted.fencingEpoch !== options.fencingEpoch)
-    ) {
-      throw new ControlStackError("workspace_cleanup_fence_stale", "workspace cleanup fence is stale");
+        persisted.fencingEpoch !== options.fencingEpoch
+      ) {
+        throw new ControlStackError("workspace_cleanup_fence_stale", "workspace cleanup fence is stale");
+      }
     }
     let onDisk: boolean;
     try {
@@ -316,10 +383,10 @@ export class WorkspaceManager {
     return persisted ? workspaceFromAllocation(persisted) : undefined;
   }
 
-  async reconcile(activeWorkItemIds: ReadonlySet<string>): Promise<{ orphaned: Workspace[] }> {
+  async reconcile(activeWorkItemIds: ReadonlySet<string>): Promise<{ orphaned: Array<Workspace | OrphanedWorkspace> }> {
     const { stdout } = await this.git(["worktree", "list", "--porcelain"]);
     const rootReal = realpathSync(this.rootDir);
-    const orphaned: Workspace[] = [];
+    const orphaned: Array<Workspace | OrphanedWorkspace> = [];
 
     for (const entry of parseWorktreeList(stdout)) {
       if (!isContained(rootReal, entry.path)) continue; // not ours
@@ -333,7 +400,15 @@ export class WorkspaceManager {
       orphaned.push(
         persisted
           ? workspaceFromAllocation(persisted)
-          : workspaceSchema.parse({
+          // A worktree with no persisted allocation at all - most likely
+          // the P1-L crash window (`git worktree add` succeeded, the
+          // process died before recordWorkspaceAllocation committed). No
+          // attemptId/leaseId/workerId/fencingEpoch authority tuple exists
+          // to report, so this is reported through the distinct orphan
+          // shape rather than forced through workspaceSchema's ownership
+          // requirement (which would throw and abort startup
+          // reconciliation entirely).
+          : orphanedWorkspaceSchema.parse({
               allocationId: createId("workspace"),
               workItemId,
               hostPath: entry.path,

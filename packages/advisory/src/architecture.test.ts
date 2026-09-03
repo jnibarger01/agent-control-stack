@@ -76,9 +76,9 @@ describe("ADR 0015 architecture boundaries (proof 15 + dependency direction)", (
     }
   });
 
-  it("migration 018 is append-only and does not touch the terminal result tables", () => {
+  it("migration 021 is append-only and does not touch the terminal result tables", () => {
     const sql = readFileSync(
-      join(repoRoot, "storage/migrations/018_advisory_evidence_and_verification.sql"),
+      join(repoRoot, "storage/migrations/021_advisory_evidence_and_verification.sql"),
       "utf8"
     );
     // Every new table has a no-delete guard (append-only).
@@ -103,9 +103,9 @@ describe("ADR 0015 architecture boundaries (proof 15 + dependency direction)", (
     expect(sql).not.toMatch(/ALTER TABLE execution_attempts/i);
   });
 
-  it("the migration registry includes exactly one new version (18) for this change", () => {
+  it("the migration registry includes exactly one ADR 0015 entry after earlier production migrations", () => {
     const reg = readFileSync(join(repoRoot, "packages/shared/src/migration.ts"), "utf8");
-    expect(reg).toMatch(/version:\s*18,\s*\n\s*name:\s*"advisory_evidence_and_verification"/);
-    expect(reg).not.toMatch(/version:\s*19/);
+    expect(reg).toMatch(/version:\s*21,\s*\n\s*name:\s*"advisory_evidence_and_verification"/);
+    expect(reg.match(/name:\s*"advisory_evidence_and_verification"/g)).toHaveLength(1);
   });
 });
