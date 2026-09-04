@@ -1,4 +1,9 @@
-import { collectSensitiveValues, ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
+import {
+  collectSensitiveValues,
+  ControlStackError,
+  redactSensitiveText,
+  stableHash
+} from "@agent-control-stack/shared";
 import {
   type ApprovalGrant,
   approvalRequestHash,
@@ -458,24 +463,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
         evaluateContractAdmission(input);
         const workItem = store.create(input);
         if (workItem.requestedActions.length > 0) {
-          const intake = nativeMissionIntakeForWorkItem(workItem);
-          const classifier = classifyMissionIntake(intake, {
-            evidenceId: `classifier-${workItem.id}`,
-            generatedAt: workItem.createdAt
-          });
-          const route = routeMission({
-            intake,
-            classifierEvidence: classifier,
-            routeId: `route-${workItem.id}`,
-            decidedAt: workItem.createdAt
-          });
-          store.recordMissionRouting({
-            workItemId: workItem.id,
-            intake,
-            classifier,
-            route,
-            createdAt: workItem.createdAt
-          });
+          recordNativeMissionRouting(store, workItem);
         }
         const { decision } = evaluateAndRecordPolicy(store, policy, workItem, workItem.requester, "create");
         return applyPolicyStatus(store, workItem, decision);
@@ -506,6 +494,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       const parsed = retryInputSchema.parse(input);
       return store.withTransaction(() => {
         const workItem = store.retryWorkItem(parsed.id, { actor: parsed.actor, reason: parsed.reason });
+        recordNativeMissionRouting(store, workItem);
         evaluateContractAdmission({
           title: workItem.title,
           requester: workItem.requester,
@@ -524,6 +513,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       const parsed = cloneInputSchema.parse(input);
       return store.withTransaction(() => {
         const workItem = store.cloneWorkItem(parsed.id, parsed);
+        recordNativeMissionRouting(store, workItem);
         evaluateContractAdmission({
           title: workItem.title,
           requester: workItem.requester,
@@ -615,8 +605,23 @@ function nativeMissionIntakeForWorkItem(workItem: WorkItem) {
   };
 }
 
+function recordNativeMissionRouting(store: WorkItemStore, workItem: WorkItem): void {
+  const intake = nativeMissionIntakeForWorkItem(workItem);
+  const classifier = classifyMissionIntake(intake, {
+    evidenceId: `classifier-${workItem.id}`,
+    generatedAt: workItem.createdAt
+  });
+  const route = routeMission({
+    intake,
+    classifierEvidence: classifier,
+    routeId: `route-${workItem.id}`,
+    decidedAt: workItem.createdAt
+  });
+  store.recordMissionRouting({ workItemId: workItem.id, intake, classifier, route, createdAt: workItem.createdAt });
+}
+
 function redactedNativeIntakeText(value: string, explicitSecrets: readonly string[]): string {
-  const redacted = redactValue(value, explicitSecrets);
+  const redacted = redactSensitiveText(value, explicitSecrets);
   if (typeof redacted !== "string" || redacted.length === 0) {
     throw new ControlStackError(
       "mission_intake_projection_invalid",

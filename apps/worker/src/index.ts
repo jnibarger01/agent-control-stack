@@ -476,7 +476,19 @@ function resolveNativeRouteDispatch(
 ): NativeRouteDispatch {
   try {
     const persisted = workItems.getVerifiedMissionRouting(workItemId);
-    if (!persisted) return { denied: false };
+    if (!persisted) {
+      const workItem = workItems.get(workItemId);
+      // Retry/clone lineage is governed by native routing too. Missing
+      // evidence must not reopen the legacy Desktop Commander path.
+      if (workItem?.sourceWorkItemId) {
+        return {
+          denied: true,
+          code: "mission_route_dispatch_denied",
+          reason: "native lineage route evidence is missing"
+        };
+      }
+      return { denied: false };
+    }
     const route = requireRoutedMission(persisted.route);
     try {
       return {

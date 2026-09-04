@@ -41,14 +41,14 @@ describe("policy-gated work item tools", () => {
     const tools = createWorkItemTools(store, createPolicyEngine());
     try {
       const workItem = tools.create_work_item({
-        title: "Inspect a source file",
+        title: "Inspect /private/.ssh/id_rsa source file",
         requester: "user",
-        intent: "inspect the source code",
+        intent: "inspect private/.env and /private/.ssh/id_rsa source code",
         target: { cwd: "/private/.ssh/id_rsa", files: ["private/.env"] },
         requestedActions: [
           {
             kind: "fs.read",
-            description: "inspect",
+            description: "inspect src/index.ts and /private/.ssh/id_rsa",
             params: {
               paths: ["private/.env", "/private/.ssh/id_rsa"],
               password: "native-password-literal",
@@ -454,6 +454,8 @@ describe("policy-gated work item tools", () => {
 
       const retried = tools.retry_work_item({ id: source.id, actor: "operator", reason: "repeat inspection" });
       const cloned = tools.clone_work_item({ id: source.id, actor: "operator", risk: "high" });
+      expect(store.getVerifiedMissionRouting(retried.id)).toBeDefined();
+      expect(store.getVerifiedMissionRouting(cloned.id)).toBeDefined();
       const policyEvents = store
         .readEvents()
         .filter((event) => event.name === "policy.decided")

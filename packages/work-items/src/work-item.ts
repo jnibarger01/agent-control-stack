@@ -2,7 +2,7 @@ import {
   collectSensitiveValues,
   createEvent,
   createId,
-  redactValue,
+  redactSensitiveText,
   stableHash,
   type AuditEvent
 } from "@agent-control-stack/shared";
@@ -412,7 +412,7 @@ export function auditWorkItemProjection(workItem: WorkItem): WorkItem {
 }
 
 function redactedAuditText(value: string, explicitSecrets: readonly string[]): string {
-  const redacted = redactValue(value, explicitSecrets);
+  const redacted = redactSensitiveText(value, explicitSecrets);
   if (typeof redacted !== "string" || redacted.length === 0)
     throw new Error("work item audit projection could not be produced safely");
   return redacted;
