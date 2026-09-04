@@ -95,9 +95,8 @@ const resourceUsageSchema = z
   .strict();
 
 // Discriminated on `executionMode`. The `dry_run` branch is byte-identical to
-// the schema that has always shipped; the `desktop_commander` branch is the
-// only way a non-simulated result can be persisted, and it can only be produced
-// by the ACS worker after the full execution-authorization chain has passed.
+// the schema that has always shipped; non-simulated branches can only be
+// produced by the ACS worker after their full authority chain has passed.
 const simulationMetadataSchema = z.discriminatedUnion("executionMode", [
   z
     .object({
@@ -117,6 +116,18 @@ const simulationMetadataSchema = z.discriminatedUnion("executionMode", [
       invocationFingerprint: hashSchema,
       requestId: identifierSchema,
       approvalId: identifierSchema.optional(),
+      workerVersion: identifierSchema.optional(),
+      reason: z.string().max(512).optional()
+    })
+    .strict(),
+  z
+    .object({
+      executionMode: z.literal("native_engine"),
+      simulated: z.literal(false),
+      backend: z.literal("engine-isolation-v1"),
+      engineId: identifierSchema,
+      routeId: identifierSchema,
+      adapterInvocationHash: hashSchema,
       workerVersion: identifierSchema.optional(),
       reason: z.string().max(512).optional()
     })

@@ -121,6 +121,87 @@ describe("worker policy gate", () => {
     }
   });
 
+  it("invokes exactly the persisted native-route adapter with fenced workspace authority", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-native-route-invoke-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    const previousBackend = process.env.ACS_EXECUTION_BACKEND;
+    const invoke = vi.fn(async () => ({
+      status: "completed" as const,
+      exitCode: 0,
+      stdout: "native result",
+      stderr: "",
+      durationMs: 1,
+      stdoutTruncated: false,
+      stderrTruncated: false
+    }));
+    const workspaceManager = {
+      provision: vi.fn(async (workItemId: string, options: Record<string, unknown>) => ({
+        allocationId: "workspace_native",
+        workItemId,
+        attemptId: String(options.attemptId),
+        leaseId: String(options.leaseId),
+        workerId: String(options.workerId),
+        fencingEpoch: Number(options.fencingEpoch),
+        hostPath: "/tmp/workspace-native",
+        branch: "acs/attempt/native",
+        baseRef: "HEAD",
+        createdAt: new Date().toISOString()
+      })),
+      teardown: vi.fn(async () => undefined)
+    } as unknown as import("@agent-control-stack/workspace-manager").WorkspaceManager;
+    try {
+      process.env.ACS_EXECUTION_BACKEND = "native_engine";
+      const workItem = tools.create_work_item(readOnlyInput("Native adapter invocation"));
+      store.close();
+
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        executionBackend: "native_engine",
+        workspaceManager,
+        engineAdapterRegistry: new EngineAdapterRegistry([{ id: "codex", invoke }]),
+        validator: {
+          validate: async () => ({ passed: true, checks: [{ name: "screen", passed: true, detail: "ok" }] })
+        }
+      });
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(result).toMatchObject({ executed: true, executionMode: "native_engine", workItemId: workItem.id });
+        expect(check.get(workItem.id)?.result).toMatchObject({ executionMode: "native_engine", outcome: "succeeded" });
+        expect(invoke).toHaveBeenCalledTimes(1);
+        expect(invoke).toHaveBeenCalledWith(
+          expect.objectContaining({
+            workItemId: workItem.id,
+            workerId: "test-worker",
+            authorization: { kind: "plan", hash: expect.stringMatching(/^[a-f0-9]{64}$/u) },
+            workspace: { allocationId: "workspace_native", hostPath: "/tmp/workspace-native" }
+          })
+        );
+        expect(check.readEvents().map((event) => event.name)).toEqual(
+          expect.arrayContaining([
+            "execution.authorization_granted",
+            "execution.started",
+            "execution.result_persisted",
+            "execution.completed"
+          ])
+        );
+      } finally {
+        check.close();
+      }
+    } finally {
+      if (previousBackend === undefined) delete process.env.ACS_EXECUTION_BACKEND;
+      else process.env.ACS_EXECUTION_BACKEND = previousBackend;
+      try {
+        store.close();
+      } catch {
+        // The worker setup closes the handle before execution.
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("allocates and fences an attempt workspace around execution", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-workspace-"));
     const dbPath = join(dir, "control.db");

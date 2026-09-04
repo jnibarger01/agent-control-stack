@@ -55,7 +55,8 @@ const migrationFiles = [
     filename: "021_advisory_evidence_and_verification.sql"
   },
   { version: 22, name: "device_auth", filename: "022_device_auth.sql" },
-  { version: 23, name: "native_mission_routing_evidence", filename: "023_native_mission_routing_evidence.sql" }
+  { version: 23, name: "native_mission_routing_evidence", filename: "023_native_mission_routing_evidence.sql" },
+  { version: 24, name: "native_engine_execution_mode", filename: "024_native_engine_execution_mode.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

@@ -21,6 +21,9 @@ if (!/raw === undefined \|\| raw === "" \|\| raw === "dry_run"[\s\S]*return "dry
 if (!/if \(raw === "desktop_commander"\) \{\s*return "desktop_commander";/.test(backendSource)) {
   failures.push("desktop_commander backend is reachable without an explicit ACS_EXECUTION_BACKEND=desktop_commander");
 }
+if (!/if \(raw === "native_engine"\) \{\s*return "native_engine";/.test(backendSource)) {
+  failures.push("native_engine backend is reachable without an explicit ACS_EXECUTION_BACKEND=native_engine");
+}
 if (!backendSource.includes('"execution_backend_invalid"')) {
   failures.push("resolveExecutionBackend no longer fails closed on an unknown backend value");
 }
@@ -36,16 +39,17 @@ if (!workerSource.includes("production worker requires dry_run execution mode"))
   failures.push("worker production dry-run error message is missing");
 }
 
-// --- A non-simulated result is only representable for desktop_commander -------
+// --- Non-simulated results are limited to named governed backends -------------
 if (!workItemSource.includes('z.discriminatedUnion("executionMode"')) {
   failures.push("simulation metadata is no longer a discriminated union keyed on executionMode");
 }
-if (
-  !/executionMode: z\.literal\("desktop_commander"\),\s*simulated: z\.literal\(false\),\s*backend: z\.literal\("desktop-commander-mcp"\)/.test(
-    workItemSource
-  )
-) {
-  failures.push("a non-simulated (simulated:false) result is representable for a mode other than desktop_commander");
+for (const [mode, backend] of [
+  ["desktop_commander", "desktop-commander-mcp"],
+  ["native_engine", "engine-isolation-v1"]
+]) {
+  if (!new RegExp(`executionMode: z\\.literal\\("${mode}"\\),\\s*simulated: z\\.literal\\(false\\),\\s*backend: z\\.literal\\("${backend}"\\)`).test(workItemSource)) {
+    failures.push(`missing governed non-simulated result shape for ${mode}`);
+  }
 }
 if (!sandboxSource.includes('executionMode: "dry_run"')) {
   failures.push("sandbox dry-run implementation no longer declares dry_run mode");
@@ -69,5 +73,5 @@ if (failures.length > 0) {
 }
 
 console.log(
-  "Dry-run release gate passed: the worker defaults to dry_run, only enters real execution on explicit ACS_EXECUTION_BACKEND=desktop_commander, guards every result's execution mode, and never emits a live mode."
+  "Dry-run release gate passed: the worker defaults to dry_run, enters governed real execution only through explicitly configured Desktop Commander or native EngineIsolation backends, guards every result's execution mode, and never emits a live mode."
 );

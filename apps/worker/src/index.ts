@@ -4,7 +4,12 @@ import {
   evaluateVerificationRequirement,
   requireRoutedMission
 } from "@agent-control-stack/policy-gate";
-import { EngineAdapterRegistry, type EngineAdapter } from "@agent-control-stack/engine-adapter";
+import {
+  EngineAdapterRegistry,
+  type EngineAdapter,
+  type EngineOutcome,
+  type EngineTask
+} from "@agent-control-stack/engine-adapter";
 import {
   ExecutionLearningBridge,
   ProceduralLearning,
@@ -81,7 +86,7 @@ export interface WorkerOptions {
 
 export interface WorkerResult {
   executed: boolean;
-  executionMode?: "dry_run" | "desktop_commander";
+  executionMode?: "dry_run" | "desktop_commander" | "native_engine";
   workItemId?: string;
   reason?: string;
   retrievedSkills?: InjectedSkill[];
@@ -91,6 +96,7 @@ export interface WorkerResult {
 
 export const DRY_RUN_EXECUTION_MODE = "dry_run" as const;
 export const DESKTOP_COMMANDER_EXECUTION_MODE = "desktop_commander" as const;
+export const NATIVE_ENGINE_EXECUTION_MODE = "native_engine" as const;
 const WORKER_VERSION = "acs-worker.0.1.0";
 
 export function assertDryRunExecutionMode(
@@ -123,6 +129,12 @@ export function assertExecutionModeForBackend(
   if (backend === "desktop_commander") {
     if (mode !== DESKTOP_COMMANDER_EXECUTION_MODE) {
       throw new Error("desktop_commander backend requires desktop_commander execution mode");
+    }
+    return;
+  }
+  if (backend === "native_engine") {
+    if (mode !== NATIVE_ENGINE_EXECUTION_MODE) {
+      throw new Error("native_engine backend requires native_engine execution mode");
     }
     return;
   }
@@ -259,6 +271,30 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         workerId,
         startedAt,
         machineExecutor: machineExecutor!
+      });
+    }
+
+    if (executionBackend === "native_engine") {
+      if (!nativeRouteDispatch.adapter || !nativeRouteDispatch.route || !workspace) {
+        return blockNativeRouteDispatch({
+          workItems,
+          running,
+          workerId,
+          startedAt,
+          code: "mission_route_dispatch_denied",
+          reason: "native engine execution requires a verified route adapter and owned workspace",
+          engineId: nativeRouteDispatch.route?.engineId
+        });
+      }
+      return await runNativeEngineExecution({
+        workItems,
+        running,
+        workerId,
+        startedAt,
+        workspace,
+        route: nativeRouteDispatch.route,
+        adapter: nativeRouteDispatch.adapter,
+        validator: options.validator
       });
     }
 
@@ -419,7 +455,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
 }
 
 type NativeRouteDispatch =
-  | { denied: false; adapter?: EngineAdapter }
+  | { denied: false; adapter?: EngineAdapter; route?: { engineId: string; routeId: string } }
   | {
       denied: true;
       code: "mission_route_engine_unavailable" | "mission_route_dispatch_denied";
@@ -443,7 +479,11 @@ function resolveNativeRouteDispatch(
     if (!persisted) return { denied: false };
     const route = requireRoutedMission(persisted.route);
     try {
-      return { denied: false, adapter: registry.require(route.engineId) };
+      return {
+        denied: false,
+        adapter: registry.require(route.engineId),
+        route: { engineId: route.engineId, routeId: route.routeId }
+      };
     } catch (error) {
       if (error instanceof ControlStackError && error.code === "engine_adapter_not_found") {
         return {
@@ -504,6 +544,200 @@ function blockNativeRouteDispatch(input: {
     simulationMetadata: { executionMode: "dry_run", simulated: true, reason: code }
   });
   return { executed: false, workItemId: running.id, reason: `native route dispatch denied: ${code}` };
+}
+
+interface NativeEngineExecutionInput {
+  workItems: WorkItemStore;
+  running: ClaimedWorkItem;
+  workerId: string;
+  startedAt: string;
+  workspace: {
+    allocationId: string;
+    hostPath: string;
+    workItemId: string;
+    attemptId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+  };
+  route: { engineId: string; routeId: string };
+  adapter: EngineAdapter;
+  validator?: WorkerValidator;
+}
+
+/**
+ * Native engines are invoked only from persisted claim, lease, plan, route,
+ * and workspace authority. No caller-provided engine, prompt, workspace, or
+ * execution backend can reach this boundary.
+ */
+async function runNativeEngineExecution(input: NativeEngineExecutionInput): Promise<WorkerResult> {
+  const { workItems, running, workerId, startedAt, workspace, route, adapter, validator } = input;
+  const attemptId = running.attemptId!;
+  const plan = workItems.getCurrentExecutionPlan(running.id);
+  const lease = workItems.getActiveLeaseForAttempt(attemptId);
+  const authorityMatches =
+    plan?.planHash === running.planHash &&
+    plan?.definition.constraints.executionMode === "native_engine" &&
+    lease?.leaseId === running.leaseId &&
+    lease.workItemId === running.id &&
+    lease.workerId === workerId &&
+    lease.planHash === running.planHash &&
+    lease.inputHash === running.inputHash &&
+    lease.fencingEpoch === running.fencingEpoch &&
+    workspace.workItemId === running.id &&
+    workspace.attemptId === attemptId &&
+    workspace.leaseId === running.leaseId &&
+    workspace.workerId === workerId &&
+    workspace.fencingEpoch === running.fencingEpoch;
+  if (!authorityMatches || !plan || !lease) {
+    return blockNativeRouteDispatch({
+      workItems,
+      running,
+      workerId,
+      startedAt,
+      code: "mission_route_dispatch_denied",
+      reason: "native engine task authority no longer matches persisted plan, lease, or workspace",
+      engineId: route.engineId
+    });
+  }
+
+  const idempotencyKey = workerResultIdempotencyKey(attemptId);
+  const task: EngineTask = {
+    workItemId: running.id,
+    attemptId,
+    leaseId: running.leaseId,
+    workerId,
+    fencingToken: running.fencingEpoch!,
+    authorization: { kind: "plan", hash: running.planHash! },
+    policyVersion: lease.policyVersion,
+    auditCorrelationId: `native_${running.leaseId}_${running.fencingEpoch}`,
+    idempotencyKey,
+    workspace: { allocationId: workspace.allocationId, hostPath: workspace.hostPath },
+    prompt: nativePromptFromPersistedWorkItem(running),
+    egressAllowlist: [],
+    limits: {
+      wallClockMs: Math.min(plan.definition.constraints.maxRuntimeMs, 15 * 60 * 1_000),
+      terminationGraceMs: 1_000,
+      cpuQuotaPercent: 50,
+      memoryBytes: 512 * 1_024 * 1_024,
+      pids: 64,
+      outputBytes: 64 * 1_024,
+      tmpfsBytes: 256 * 1_024 * 1_024
+    }
+  };
+  const adapterInvocationHash = domainHash("acs:native-engine-invocation:v1", task);
+  workItems.recordExecutionEvent({
+    name: "execution.authorization_granted",
+    workItemId: running.id,
+    body: { engineId: route.engineId, routeId: route.routeId },
+    attributes: { "mission.route_engine": route.engineId, "execution.mode": "native_engine" }
+  });
+  workItems.recordExecutionEvent({
+    name: "execution.started",
+    workItemId: running.id,
+    body: { engineId: route.engineId, routeId: route.routeId },
+    attributes: { "mission.route_engine": route.engineId, "execution.mode": "native_engine" }
+  });
+
+  let outcome: EngineOutcome;
+  try {
+    outcome = await adapter.invoke(task);
+  } catch (error) {
+    outcome = {
+      status: "process_error",
+      message: error instanceof Error ? error.message : "native adapter invocation failed"
+    };
+  }
+  const result = nativeWorkerResult(outcome);
+  const validation = validator
+    ? await validator.validate({ workItemId: running.id, attemptId, outcome: result, retrievedSkills: [] })
+    : undefined;
+  const validationFailed = validation?.passed === false;
+  const ok = result.ok && !validationFailed;
+  const finishedAt = new Date().toISOString();
+  workItems.submitWorkResult({
+    workItemId: running.id,
+    attemptId,
+    leaseId: running.leaseId,
+    workerId,
+    actionHash: running.actionHash,
+    planHash: running.planHash,
+    inputHash: running.inputHash,
+    fencingEpoch: running.fencingEpoch,
+    idempotencyKey,
+    outcome: ok ? "succeeded" : result.error === "native engine cancelled" ? "cancelled" : "failed",
+    startedAt,
+    finishedAt,
+    exitCode: outcome.status === "completed" ? outcome.exitCode : null,
+    summary: ok ? `native engine ${route.engineId} completed` : `native engine ${route.engineId} failed`,
+    stdout: result.output,
+    ...(ok
+      ? {}
+      : {
+          error: validationFailed ? "native engine result validation failed" : (result.error ?? "native engine failed")
+        }),
+    structuredOutput: {
+      simulated: false,
+      engineId: route.engineId,
+      routeId: route.routeId,
+      validationPassed: validation?.passed ?? null
+    },
+    artifacts: [],
+    simulationMetadata: {
+      executionMode: "native_engine",
+      simulated: false,
+      backend: "engine-isolation-v1",
+      engineId: route.engineId,
+      routeId: route.routeId,
+      adapterInvocationHash,
+      workerVersion: WORKER_VERSION
+    }
+  });
+  workItems.recordExecutionEvent({
+    name: "execution.result_persisted",
+    workItemId: running.id,
+    body: { engineId: route.engineId, adapterInvocationHash },
+    attributes: { "mission.route_engine": route.engineId, "execution.mode": "native_engine" }
+  });
+  workItems.recordExecutionEvent({
+    name: "execution.completed",
+    workItemId: running.id,
+    body: { engineId: route.engineId, ok },
+    attributes: { "mission.route_engine": route.engineId, "execution.mode": "native_engine" }
+  });
+  return {
+    executed: true,
+    executionMode: "native_engine",
+    workItemId: running.id,
+    reason: workerId,
+    validationPassed: validation?.passed
+  };
+}
+
+function nativePromptFromPersistedWorkItem(workItem: WorkItem): string {
+  return `${workItem.intent}\n\nAuthorized plan steps:\n${workItem.requestedActions
+    .map((action, index) => `${index + 1}. ${action.kind}: ${action.description}`)
+    .join("\n")}`;
+}
+
+function nativeWorkerResult(outcome: EngineOutcome): WorkerExecuteResult {
+  if (outcome.status === "completed") {
+    return {
+      ok: outcome.exitCode === 0,
+      executionMode: "native_engine" as never,
+      output: outcome.stdout,
+      error: outcome.exitCode === 0 ? undefined : `native engine exited with ${outcome.exitCode}`
+    };
+  }
+  if (outcome.status === "cancelled") {
+    return { ok: false, executionMode: "native_engine" as never, output: "", error: "native engine cancelled" };
+  }
+  return {
+    ok: false,
+    executionMode: "native_engine" as never,
+    output: "",
+    error: outcome.status === "timeout" ? "native engine timed out" : outcome.message
+  };
 }
 
 function configuredEngineAdapterRegistry(executionBackend: ExecutionBackend): EngineAdapterRegistry {
