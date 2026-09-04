@@ -199,4 +199,69 @@ describe("gateWorkerClaimById (claim_approved_work_item_by_id)", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("binds and consumes every required approval for a multi-action exact-id claim", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-claim-by-id-tools-multi-approval-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const policy = createPolicyEngine();
+    const tools = createWorkItemTools(store, policy);
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Exact-id multi-action approval target",
+        requester: "user",
+        intent: "verify every action approval is persisted in exact-id lease authority",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          { kind: "fs.write", description: "write first", params: { paths: ["src/one.ts"] } },
+          { kind: "fs.write", description: "write second", params: { paths: ["src/two.ts"] } }
+        ],
+        risk: "low"
+      });
+      const approvals = policy.evaluateWorkItem(workItem, "approver", "approve");
+      expect(approvals).toHaveLength(2);
+      for (const approval of approvals) {
+        tools.approve_work_item({
+          id: workItem.id,
+          approvedBy: "approver",
+          reason: "approve exact action",
+          actionHash: approval.actionHash
+        });
+      }
+
+      const claimed = tools.claim_approved_work_item_by_id({ id: workItem.id, workerId: "worker-a" });
+      expect(claimed?.status).toBe("running");
+
+      const dbAny = store as unknown as {
+        db: {
+          prepare: (sql: string) => {
+            all: (...args: unknown[]) => Array<{ approval_id: string; action_hash: string; status?: string }>;
+          };
+        };
+      };
+      const planApprovals = dbAny.db
+        .prepare(`SELECT approval_id, action_hash, status FROM execution_plan_approvals WHERE work_item_id = ? ORDER BY action_hash`)
+        .all(workItem.id);
+      const leaseApprovals = dbAny.db
+        .prepare(`SELECT approval_id, action_hash FROM attempt_lease_approvals WHERE work_item_id = ? ORDER BY action_hash`)
+        .all(workItem.id);
+
+      expect(planApprovals).toHaveLength(2);
+      expect(planApprovals.every((approval) => approval.status === "consumed")).toBe(true);
+      // The first approval is on attempt_leases.approval_id; every remaining
+      // required approval must be tamper-evidently persisted in the companion
+      // lease-authority table with its matching action hash.
+      expect(leaseApprovals).toHaveLength(1);
+      expect(leaseApprovals[0]?.action_hash).toBe(approvals[1]?.actionHash);
+      expect(planApprovals).toContainEqual({
+        approval_id: leaseApprovals[0]?.approval_id,
+        action_hash: approvals[1]?.actionHash,
+        status: "consumed"
+      });
+      expect(store.readEvents().filter((event) => event.name === "approval.consumed")).toHaveLength(2);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });

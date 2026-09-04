@@ -408,12 +408,21 @@ function gateWorkerClaimByIdInTransaction(
     };
   }
 
+  // Match the next-item claim path: the lease's primary approval column can
+  // bind one required action, while every remaining required action must be
+  // persisted in attempt_lease_approvals before any approval is consumed.
+  // Omitting these bindings would let an exact-id/resume claim consume an
+  // approval that its attempt authority does not carry.
+  const [firstApproval, ...restApprovals] = planApprovals;
   const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
     attemptAuthority: {
       planHash: plan.planHash,
       admissionId: admission.admissionId,
-      ...(planApprovals[0] ? { approvalId: planApprovals[0].approvalId } : {}),
+      ...(firstApproval ? { approvalId: firstApproval.approvalId } : {}),
+      additionalApprovals: restApprovals
+        .filter((approval): approval is NonNullable<typeof approval> => approval !== undefined)
+        .map((approval) => ({ approvalId: approval.approvalId, actionHash: approval.actionHash })),
       policyVersion: admission.policyVersion,
       policyDecisionHash: admission.policyDecisionHash
     }
