@@ -35,6 +35,63 @@ describe("policy-gated work item tools", () => {
     }
   });
 
+  it("persists only a redacted presence projection of native intake and audit evidence", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-native-route-redaction-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    try {
+      const workItem = tools.create_work_item({
+        title: "Inspect a source file",
+        requester: "user",
+        intent: "inspect the source code",
+        target: { cwd: "/private/.ssh/id_rsa", files: ["private/.env"] },
+        requestedActions: [
+          {
+            kind: "fs.read",
+            description: "inspect",
+            params: {
+              paths: ["private/.env", "/private/.ssh/id_rsa"],
+              password: "native-password-literal",
+              apiKey: "native-api-key-literal",
+              token: "native-token-literal",
+              authorization: "Bearer native-bearer-literal",
+              secret: "native-secret-literal"
+            }
+          }
+        ],
+        risk: "low"
+      });
+      const db = (
+        store as unknown as { db: { prepare(sql: string): { get(...args: unknown[]): { canonical_json: string } } } }
+      ).db;
+      const canonical = db
+        .prepare(
+          `SELECT canonical_json FROM mission_intake_records WHERE intake_hash = (SELECT intake_hash FROM work_item_mission_routing WHERE work_item_id = ?)`
+        )
+        .get(workItem.id).canonical_json;
+      const audit = JSON.stringify(store.readEvents());
+      expect(JSON.parse(canonical)).toMatchObject({
+        target: { files: [] },
+        proposedActions: [{ params: { declared: true } }]
+      });
+      for (const literal of [
+        "native-password-literal",
+        "native-api-key-literal",
+        "native-token-literal",
+        "native-bearer-literal",
+        "native-secret-literal",
+        "/private/.ssh/id_rsa",
+        "private/.env"
+      ]) {
+        expect(canonical).not.toContain(literal);
+        expect(audit).not.toContain(literal);
+      }
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects persisted route-table metadata tampering", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-native-route-tamper-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

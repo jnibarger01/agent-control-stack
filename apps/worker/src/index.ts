@@ -187,7 +187,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const workerId = options.workerId ?? "local-worker";
   const execute: WorkerExecute = options.execute ?? (async (item) => executeSandboxed(item));
-  const engineAdapterRegistry = options.engineAdapterRegistry ?? configuredEngineAdapterRegistry(executionBackend);
+  const engineAdapterRegistry = options.engineAdapterRegistry ?? configuredEngineAdapterRegistry();
 
   let cleanupWorkspace:
     { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch: number } | undefined;
@@ -740,17 +740,10 @@ function nativeWorkerResult(outcome: EngineOutcome): WorkerExecuteResult {
   };
 }
 
-function configuredEngineAdapterRegistry(executionBackend: ExecutionBackend): EngineAdapterRegistry {
-  const adapter: EngineAdapter = {
-    id: executionBackend,
-    async invoke() {
-      throw new ControlStackError(
-        "engine_adapter_backend_dispatch_unavailable",
-        `configured execution backend ${executionBackend} cannot invoke native engine tasks directly`
-      );
-    }
-  };
-  return new EngineAdapterRegistry([adapter]);
+function configuredEngineAdapterRegistry(): EngineAdapterRegistry {
+  // Production composition must provide a concrete adapter for the persisted
+  // route. An empty registry denies before a native execution is reported.
+  return new EngineAdapterRegistry();
 }
 
 interface DesktopCommanderExecutionInput {

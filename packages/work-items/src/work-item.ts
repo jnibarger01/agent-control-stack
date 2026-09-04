@@ -1,4 +1,11 @@
-import { createEvent, createId, stableHash, type AuditEvent } from "@agent-control-stack/shared";
+import {
+  collectSensitiveValues,
+  createEvent,
+  createId,
+  redactValue,
+  stableHash,
+  type AuditEvent
+} from "@agent-control-stack/shared";
 import { z } from "zod";
 
 export const requesterSchema = z.enum(["user", "agent", "system"]);
@@ -361,7 +368,7 @@ export function executionActionHash(
 }
 
 export function workItemCreatedEvent(workItem: WorkItem): AuditEvent {
-  return createEvent(WorkItemEvent.Created, workItem, workItemAttributes(workItem));
+  return createEvent(WorkItemEvent.Created, auditWorkItemProjection(workItem), workItemAttributes(workItem));
 }
 
 export function workItemStatusEvent(
@@ -371,7 +378,7 @@ export function workItemStatusEvent(
 ): AuditEvent {
   return createEvent(
     statusEvents[workItem.status],
-    { ...workItem, ...body },
+    { ...auditWorkItemProjection(workItem), ...body },
     { ...workItemAttributes(workItem), ...attributes }
   );
 }
@@ -387,6 +394,28 @@ export function projectWorkItems(events: AuditEvent[]): WorkItem[] {
   }
 
   return [...workItems.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
+export function auditWorkItemProjection(workItem: WorkItem): WorkItem {
+  const explicitSecrets = collectSensitiveValues({ target: workItem.target, actions: workItem.requestedActions });
+  return {
+    ...workItem,
+    title: redactedAuditText(workItem.title, explicitSecrets),
+    intent: redactedAuditText(workItem.intent, explicitSecrets),
+    target: {},
+    requestedActions: workItem.requestedActions.map((action) => ({
+      kind: action.kind,
+      description: redactedAuditText(action.description, explicitSecrets),
+      params: { declared: Object.keys(action.params).length > 0 }
+    }))
+  };
+}
+
+function redactedAuditText(value: string, explicitSecrets: readonly string[]): string {
+  const redacted = redactValue(value, explicitSecrets);
+  if (typeof redacted !== "string" || redacted.length === 0)
+    throw new Error("work item audit projection could not be produced safely");
+  return redacted;
 }
 
 function workItemAttributes(workItem: WorkItem): Record<string, string> {

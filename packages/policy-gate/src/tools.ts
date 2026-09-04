@@ -1,4 +1,4 @@
-import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import { collectSensitiveValues, ControlStackError, redactValue, stableHash } from "@agent-control-stack/shared";
 import {
   type ApprovalGrant,
   approvalRequestHash,
@@ -564,8 +564,10 @@ export function policyContextAuditReceipt(context: PolicyContext): Record<string
     action: {
       kind: context.action.kind
     },
-    cwd: context.cwd,
-    paths: context.paths,
+    // The action hash binds raw policy inputs. Durable audit evidence records
+    // only their presence so unrestricted paths do not become a retention path.
+    hasCwd: context.cwd !== undefined,
+    pathCount: context.paths?.length ?? 0,
     commandHash: context.command ? stableHash(context.command) : undefined,
     network: context.network,
     write: context.write,
@@ -574,48 +576,54 @@ export function policyContextAuditReceipt(context: PolicyContext): Record<string
 }
 
 function nativeMissionIntakeForWorkItem(workItem: WorkItem) {
+  const explicitSecrets = collectSensitiveValues({ target: workItem.target, actions: workItem.requestedActions });
   const hasFilesystemAction = workItem.requestedActions.some((action) => action.kind.startsWith("fs."));
   const network = workItem.requestedActions.some(
     (action) => action.params.network === true || action.params.allowNetwork === true
   )
     ? "declared"
     : "none";
-  const rollbackPlan = workItem.requestedActions
-    .map((action) => action.params.rollbackCheckpoint)
-    .find((checkpoint) => checkpoint !== undefined);
   return {
     schemaVersion: "acs.mission-intake.v1" as const,
     requestId: `intake-${workItem.id}`,
-    title: workItem.title,
+    title: redactedNativeIntakeText(workItem.title, explicitSecrets),
     // The native classifier consumes the immutable intake goal. Include
     // normalized action intent so a caller cannot hide an otherwise explicit
     // filesystem task behind a generic natural-language goal.
     goal: [
-      workItem.title,
-      workItem.intent,
-      ...workItem.requestedActions.map((action) => `${action.kind}: ${action.description}`),
+      redactedNativeIntakeText(workItem.title, explicitSecrets),
+      redactedNativeIntakeText(workItem.intent, explicitSecrets),
+      ...workItem.requestedActions.map(
+        (action) => `${action.kind}: ${redactedNativeIntakeText(action.description, explicitSecrets)}`
+      ),
       ...(hasFilesystemAction ? ["coding"] : [])
     ].join("\n"),
     origin: workItem.requester === "user" ? "dashboard" : workItem.requester === "agent" ? "hermes" : "api",
-    target: {
-      ...(workItem.target.repo ? { repo: workItem.target.repo } : {}),
-      ...(workItem.target.cwd ? { cwd: workItem.target.cwd } : {}),
-      files: []
-    },
+    target: { files: [] },
     proposedActions: workItem.requestedActions.map((action, index) => ({
       clientActionId: `action-${String(index + 1).padStart(3, "0")}`,
       kind: action.kind,
-      description: action.description,
-      params: action.params
+      description: redactedNativeIntakeText(action.description, explicitSecrets),
+      params: { declared: Object.keys(action.params).length > 0 }
     })),
     constraints: {
       network,
       maxRuntimeMs: maxRuntimeMs(workItem),
-      successCriteria: [workItem.intent],
-      ...(rollbackPlan && typeof rollbackPlan === "object" ? { rollbackPlan } : {})
+      successCriteria: [redactedNativeIntakeText(workItem.intent, explicitSecrets)]
     },
     submittedClaims: { risk: missionRiskForWorkItem(workItem.risk) }
   };
+}
+
+function redactedNativeIntakeText(value: string, explicitSecrets: readonly string[]): string {
+  const redacted = redactValue(value, explicitSecrets);
+  if (typeof redacted !== "string" || redacted.length === 0) {
+    throw new ControlStackError(
+      "mission_intake_projection_invalid",
+      "native mission intake could not be projected safely"
+    );
+  }
+  return redacted;
 }
 
 /** Recompute the complete native evidence chain immediately before a lease is issued. */

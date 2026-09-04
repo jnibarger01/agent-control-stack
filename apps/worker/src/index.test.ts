@@ -82,7 +82,7 @@ describe("worker policy gate", () => {
     }
   });
 
-  it("blocks native routed work when the selected engine is absent from the registry", async () => {
+  it("blocks native routed work when production composition has no concrete route adapter", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-native-route-missing-"));
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath);
@@ -93,8 +93,7 @@ describe("worker policy gate", () => {
 
       const result = await runWorkerOnce({
         dbPath,
-        workerId: "test-worker",
-        engineAdapterRegistry: new EngineAdapterRegistry()
+        workerId: "test-worker"
       });
       const check = new SqliteWorkItemStore(dbPath);
       try {
