@@ -1,10 +1,22 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EngineAdapterRegistry } from "@agent-control-stack/engine-adapter";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { runWorkerOnce } from "./index.js";
+
+function nativeEngineRegistry(): EngineAdapterRegistry {
+  return new EngineAdapterRegistry([
+    {
+      id: "codex",
+      async invoke() {
+        return { status: "process_error", message: "native adapter should not run in cleanup tests" };
+      }
+    }
+  ]);
+}
 
 describe("PR30 worker cleanup regression", () => {
   it("tears down a provisioned workspace when execution throws", async () => {
@@ -44,6 +56,7 @@ describe("PR30 worker cleanup regression", () => {
           dbPath,
           workerId: "worker-throw",
           workspaceManager,
+          engineAdapterRegistry: nativeEngineRegistry(),
           execute: async () => {
             throw new Error("boom");
           }

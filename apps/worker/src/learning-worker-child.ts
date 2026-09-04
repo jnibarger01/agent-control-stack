@@ -1,4 +1,5 @@
 import { writeFileSync } from "node:fs";
+import { EngineAdapterRegistry } from "@agent-control-stack/engine-adapter";
 import { runWorkerOnce, type WorkerExecute } from "./index.js";
 
 const dbPath = process.argv[2];
@@ -25,10 +26,20 @@ const execute: WorkerExecute = async (workItem) => {
   };
 };
 
+const engineAdapterRegistry = new EngineAdapterRegistry([
+  {
+    id: "codex",
+    async invoke() {
+      return { status: "process_error", message: "native adapter should not run in learning child" };
+    }
+  }
+]);
+
 const result = await runWorkerOnce({
   dbPath,
   workerId: "e2e-child-worker",
   execute,
+  engineAdapterRegistry,
   validator: {
     async validate() {
       return {

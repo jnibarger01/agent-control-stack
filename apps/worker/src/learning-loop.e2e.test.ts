@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { DatabaseSync } from "node:sqlite";
+import { EngineAdapterRegistry } from "@agent-control-stack/engine-adapter";
 import { ProceduralLearning, type TaskExperienceInput } from "@agent-control-stack/procedural-learning";
 import { runSchedulerOnce } from "@agent-control-stack/scheduler";
 import { afterEach, describe, expect, it } from "vitest";
@@ -91,6 +92,17 @@ const usingExecute: WorkerExecute = async (workItem) => ({
   usedSkillNames: workItem.retrievedSkills.map((skill) => skill.skillId)
 });
 
+function nativeEngineRegistry(): EngineAdapterRegistry {
+  return new EngineAdapterRegistry([
+    {
+      id: "codex",
+      async invoke() {
+        return { status: "process_error", message: "native adapter should not run in learning tests" };
+      }
+    }
+  ]);
+}
+
 describe("canonical worker learning loop", () => {
   it("retrieves, injects, records used+validated outcome, then survives worker restart for task B", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-learning-e2e-"));
@@ -116,7 +128,8 @@ describe("canonical worker learning loop", () => {
       dbPath,
       workerId: "worker-a",
       execute: usingExecute,
-      validator: passingValidator
+      validator: passingValidator,
+      engineAdapterRegistry: nativeEngineRegistry()
     });
     expect(firstWorker.executed).toBe(true);
     expect(firstWorker.retrievedSkills?.[0]?.skillId).toBe("vite-duplicate-react-debugging");

@@ -22,8 +22,8 @@ function passingEvidence() {
   };
 }
 
-describe("agentos promotion gate", () => {
-  it("promotes only when the shared gate passes", () => {
+describe("native promotion gate", () => {
+  it("promotes only when the native gate passes", () => {
     expect(evaluatePromotionGate(passingEvidence()).promoted).toBe(true);
   });
 
@@ -44,6 +44,6 @@ describe("agentos promotion gate", () => {
     const result = evaluatePromotionGate(evidence);
 
     expect(result.promoted).toBe(false);
-    expect(result.failure_code).toBe("gate_missing_evidence");
+    expect(result.failureCode).toBe("gate_missing_evidence");
   });
 });

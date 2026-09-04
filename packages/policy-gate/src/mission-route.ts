@@ -53,7 +53,9 @@ export function routeMission(input: RouteMissionInput): MissionRouteEvidence {
     subjectIntakeHash: intakeHash,
     classifierEvidenceHash: classifierEvidenceHash(classifier),
     taskType,
-    effectiveRisk: classifier.risk.recommendation,
+    // Classification is advisory. A submitted risk claim is an immutable
+    // control-plane input and therefore establishes a non-downgrade floor.
+    effectiveRisk: maxRisk(intake.submittedClaims?.risk ?? "read_only", classifier.risk.recommendation),
     ...(engineId ? { engineId } : {}),
     decision: engineId ? "routed" : "blocked",
     reasons: engineId ? [] : ["unknown_task_type"],
@@ -72,5 +74,17 @@ export function requireRoutedMission(input: unknown): MissionRouteEvidence & { e
   if (route.decision !== "routed" || !route.engineId) {
     throw new ControlStackError("mission_route_blocked", "mission route is blocked and cannot be dispatched");
   }
+  if (route.taskType === "unknown" || route.engineId !== ROUTE_TABLE[route.taskType]) {
+    throw new ControlStackError(
+      "mission_route_engine_mismatch",
+      "route evidence engine is not the engine selected by the native route table"
+    );
+  }
   return route as MissionRouteEvidence & { engineId: string; decision: "routed" };
+}
+
+const RISK_RANK = { read_only: 0, draft: 1, write: 2, destructive: 3, unknown: 4 } as const;
+
+function maxRisk<T extends keyof typeof RISK_RANK>(left: T, right: T): T {
+  return RISK_RANK[left] >= RISK_RANK[right] ? left : right;
 }

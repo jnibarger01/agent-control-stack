@@ -86,5 +86,24 @@ describe("native mission route table", () => {
     expect(() => requireRoutedMission({ ...route, routeTableHash: "b".repeat(64) })).toThrowError(
       expect.objectContaining({ code: "mission_route_table_mismatch" })
     );
+    expect(() => requireRoutedMission({ ...route, engineId: "claude" })).toThrowError(
+      expect.objectContaining({ code: "mission_route_engine_mismatch" })
+    );
+  });
+
+  it("does not allow advisory evidence to downgrade submitted risk", () => {
+    const destructiveIntake = { ...intake, submittedClaims: { risk: "destructive" } };
+    const route = routeMission({
+      intake: destructiveIntake,
+      classifierEvidence: {
+        ...classifier,
+        subjectIntakeHash: missionIntakeHash(destructiveIntake),
+        risk: { recommendation: "read_only", signals: [] }
+      },
+      routeId: "route-005",
+      decidedAt: "2026-09-04T12:00:01.000Z"
+    });
+
+    expect(route.effectiveRisk).toBe("destructive");
   });
 });

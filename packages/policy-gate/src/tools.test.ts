@@ -10,6 +10,64 @@ import { createWorkItemTools } from "./tools.js";
 const domainTransition = { via: "domain_service" } as const;
 
 describe("policy-gated work item tools", () => {
+  it("persists a native route binding atomically with a created work item", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-native-route-persistence-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Inspect a source file",
+        requester: "user",
+        intent: "inspect the source code",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+
+      expect(store.getVerifiedMissionRouting(workItem.id)).toMatchObject({
+        workItemId: workItem.id,
+        route: { decision: "routed", engineId: "codex" }
+      });
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects persisted route-table metadata tampering", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-native-route-tamper-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Inspect a source file",
+        requester: "user",
+        intent: "inspect the source code",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      const db = (
+        store as unknown as { db: { exec(sql: string): void; prepare(sql: string): { run(...args: unknown[]): void } } }
+      ).db;
+      db.exec(`DROP TRIGGER mission_route_evidence_records_no_update`);
+      db.prepare(
+        `UPDATE mission_route_evidence_records
+         SET route_table_hash = ?
+         WHERE route_evidence_hash = (SELECT route_evidence_hash FROM work_item_mission_routing WHERE work_item_id = ?)`
+      ).run("0".repeat(64), workItem.id);
+
+      expect(() => store.getVerifiedMissionRouting(workItem.id)).toThrowError(
+        expect.objectContaining({ code: "mission_routing_evidence_invalid" })
+      );
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects invalid contract envelopes before creating work items", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-contract-invalid-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

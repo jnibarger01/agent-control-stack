@@ -2,7 +2,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { evaluateContractAdmission } from "./contracts.js";
 
-describe("agentos contract admission", () => {
+describe("native contract admission", () => {
   it("routes unknown tools to human triage with write-risk approval", () => {
     const admission = evaluateContractAdmission({
       title: "Unknown tool",
@@ -13,10 +13,10 @@ describe("agentos contract admission", () => {
       risk: "low"
     });
 
-    expect(admission.envelope.task_type).toBe("unknown");
+    expect(admission.envelope.taskType).toBe("unknown");
     expect(admission.route.target).toBe("human-triage");
-    expect(admission.route.effective_risk).toBe("write");
-    expect(admission.route.queued_for_approval).toBe(true);
+    expect(admission.policy.effectiveRisk).toBe("write");
+    expect(admission.route.queuedForApproval).toBe(true);
   });
 
   it("forces approval for write tasks before dispatch", () => {
@@ -29,9 +29,9 @@ describe("agentos contract admission", () => {
       risk: "low"
     });
 
-    expect(admission.route.effective_risk).toBe("write");
-    expect(admission.route.approval_required).toBe(true);
-    expect(admission.route.queued_for_approval).toBe(true);
+    expect(admission.policy.effectiveRisk).toBe("write");
+    expect(admission.policy.approvalRequired).toBe(true);
+    expect(admission.route.queuedForApproval).toBe(true);
   });
 
   it("rejects undeclared network access", () => {
@@ -78,8 +78,8 @@ describe("agentos contract admission", () => {
       risk: "low"
     });
 
-    expect(admission.route.effective_risk).toBe("destructive");
-    expect(admission.route.rollback_required).toBe(true);
-    expect(admission.route.queued_for_approval).toBe(true);
+    expect(admission.policy.effectiveRisk).toBe("destructive");
+    expect(admission.policy.rollbackRequired).toBe(true);
+    expect(admission.route.queuedForApproval).toBe(true);
   });
 });

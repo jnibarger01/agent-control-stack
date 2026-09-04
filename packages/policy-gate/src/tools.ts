@@ -15,6 +15,8 @@ import {
 } from "@agent-control-stack/work-items";
 import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
+import { classifyMissionIntake } from "./mission-classifier.js";
+import { requireRoutedMission, routeMission } from "./mission-route.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
 
 export const workItemToolNames = [
@@ -258,6 +260,9 @@ function gateWorkerClaimInTransaction(
   if (!candidate) {
     return undefined;
   }
+  if (!hasCurrentNativeRoute(store, candidate)) {
+    return blockedClaim(store, candidate, parsed.workerId);
+  }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
   const plan = ensureExecutionPlan(store, candidate, parsed.workerId);
@@ -357,6 +362,9 @@ function gateWorkerClaimByIdInTransaction(
   if (!candidate || candidate.status !== "approved") {
     return undefined;
   }
+  if (!hasCurrentNativeRoute(store, candidate)) {
+    return blockedClaim(store, candidate, parsed.workerId);
+  }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
   const plan = ensureExecutionPlan(store, candidate, parsed.workerId);
@@ -440,6 +448,26 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.withTransaction(() => {
         evaluateContractAdmission(input);
         const workItem = store.create(input);
+        if (workItem.requestedActions.length > 0) {
+          const intake = nativeMissionIntakeForWorkItem(workItem);
+          const classifier = classifyMissionIntake(intake, {
+            evidenceId: `classifier-${workItem.id}`,
+            generatedAt: workItem.createdAt
+          });
+          const route = routeMission({
+            intake,
+            classifierEvidence: classifier,
+            routeId: `route-${workItem.id}`,
+            decidedAt: workItem.createdAt
+          });
+          store.recordMissionRouting({
+            workItemId: workItem.id,
+            intake,
+            classifier,
+            route,
+            createdAt: workItem.createdAt
+          });
+        }
         const { decision } = evaluateAndRecordPolicy(store, policy, workItem, workItem.requester, "create");
         return applyPolicyStatus(store, workItem, decision);
       });
@@ -534,4 +562,116 @@ export function policyContextAuditReceipt(context: PolicyContext): Record<string
     write: context.write,
     destructive: context.destructive
   };
+}
+
+function nativeMissionIntakeForWorkItem(workItem: WorkItem) {
+  const hasFilesystemAction = workItem.requestedActions.some((action) => action.kind.startsWith("fs."));
+  const network = workItem.requestedActions.some(
+    (action) => action.params.network === true || action.params.allowNetwork === true
+  )
+    ? "declared"
+    : "none";
+  const rollbackPlan = workItem.requestedActions
+    .map((action) => action.params.rollbackCheckpoint)
+    .find((checkpoint) => checkpoint !== undefined);
+  return {
+    schemaVersion: "acs.mission-intake.v1" as const,
+    requestId: `intake-${workItem.id}`,
+    title: workItem.title,
+    // The native classifier consumes the immutable intake goal. Include
+    // normalized action intent so a caller cannot hide an otherwise explicit
+    // filesystem task behind a generic natural-language goal.
+    goal: [
+      workItem.title,
+      workItem.intent,
+      ...workItem.requestedActions.map((action) => `${action.kind}: ${action.description}`),
+      ...(hasFilesystemAction ? ["coding"] : [])
+    ].join("\n"),
+    origin: workItem.requester === "user" ? "dashboard" : workItem.requester === "agent" ? "hermes" : "api",
+    target: {
+      ...(workItem.target.repo ? { repo: workItem.target.repo } : {}),
+      ...(workItem.target.cwd ? { cwd: workItem.target.cwd } : {}),
+      files: []
+    },
+    proposedActions: workItem.requestedActions.map((action, index) => ({
+      clientActionId: `action-${String(index + 1).padStart(3, "0")}`,
+      kind: action.kind,
+      description: action.description,
+      params: action.params
+    })),
+    constraints: {
+      network,
+      maxRuntimeMs: maxRuntimeMs(workItem),
+      successCriteria: [workItem.intent],
+      ...(rollbackPlan && typeof rollbackPlan === "object" ? { rollbackPlan } : {})
+    },
+    submittedClaims: { risk: missionRiskForWorkItem(workItem.risk) }
+  };
+}
+
+/** Recompute the complete native evidence chain immediately before a lease is issued. */
+function hasCurrentNativeRoute(store: WorkItemStore, workItem: WorkItem): boolean {
+  try {
+    const persisted = store.getVerifiedMissionRouting(workItem.id);
+    // Direct store creation is a legacy compatibility path. It never creates
+    // native evidence and remains governed by the existing claim checks. Once
+    // a native binding exists, however, it is mandatory and fail-closed.
+    if (!persisted) return true;
+    const classifier = classifyMissionIntake(persisted.intake, {
+      evidenceId: persisted.classifier.evidenceId,
+      generatedAt: persisted.classifier.generatedAt
+    });
+    if (stableHash(classifier) !== stableHash(persisted.classifier)) return false;
+    const route = routeMission({
+      intake: persisted.intake,
+      classifierEvidence: classifier,
+      routeId: persisted.route.routeId,
+      decidedAt: persisted.route.decidedAt
+    });
+    if (stableHash(route) !== stableHash(persisted.route)) return false;
+    requireRoutedMission(route);
+    return (
+      missionRiskRank(route.effectiveRisk) >= missionRiskRank(persisted.intake.submittedClaims?.risk ?? "unknown") &&
+      missionRiskRank(route.effectiveRisk) >= missionRiskRank(missionRiskForWorkItem(workItem.risk))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function blockedClaim(store: WorkItemStore, workItem: WorkItem, workerId: string): ClaimedWorkItem {
+  const blocked = store.blockWorkItem(workItem.id);
+  return {
+    ...blocked,
+    workerId,
+    leaseToken: "",
+    leaseId: "",
+    actionHash: "",
+    startedAt: blocked.updatedAt,
+    leaseExpiresAt: blocked.updatedAt
+  };
+}
+
+function maxRuntimeMs(workItem: WorkItem): number {
+  const timeouts = workItem.requestedActions
+    .map((action) => action.params.timeoutMs)
+    .filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0);
+  return Math.min(86_400_000, Math.max(1, ...(timeouts.length ? timeouts : [900_000])));
+}
+
+function missionRiskForWorkItem(risk: WorkItem["risk"]): "read_only" | "draft" | "write" | "destructive" {
+  switch (risk) {
+    case "low":
+      return "read_only";
+    case "medium":
+      return "draft";
+    case "high":
+      return "write";
+    case "critical":
+      return "destructive";
+  }
+}
+
+function missionRiskRank(risk: "read_only" | "draft" | "write" | "destructive" | "unknown"): number {
+  return { read_only: 0, draft: 1, write: 2, destructive: 3, unknown: 4 }[risk];
 }

@@ -1,6 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EngineAdapterRegistry } from "@agent-control-stack/engine-adapter";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
 import type {
@@ -47,6 +48,17 @@ function approvalActionHash(workItem: WorkItem, actor: string): string {
   const decision = createPolicyEngine().evaluateWorkItem(workItem, actor, "approve")[0];
   if (!decision?.actionHash) throw new Error("no approval action hash");
   return decision.actionHash;
+}
+
+function nativeEngineRegistry(): EngineAdapterRegistry {
+  return new EngineAdapterRegistry([
+    {
+      id: "codex",
+      async invoke() {
+        return { status: "process_error", message: "native adapter should not run in Desktop Commander tests" };
+      }
+    }
+  ]);
 }
 
 interface SeedAction {
@@ -116,7 +128,12 @@ describe("desktop_commander worker execution - success path", () => {
     const { id } = seed(readAction(join(root, "pkg", "a.txt")));
     const executor = new FakeExecutor();
 
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
 
     expect(result).toMatchObject({ executed: true, executionMode: "desktop_commander", workItemId: id });
     expect(executor.calls).toHaveLength(1);
@@ -171,7 +188,12 @@ describe("desktop_commander worker execution - success path", () => {
     store0.close();
 
     const executor = new FakeExecutor();
-    const notApproved = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const notApproved = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
     expect(notApproved).toEqual({ executed: false, reason: "no approved work item" });
     expect(executor.calls).toHaveLength(0);
 
@@ -186,7 +208,12 @@ describe("desktop_commander worker execution - success path", () => {
     });
     store1.close();
 
-    const approvedRun = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const approvedRun = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
     expect(approvedRun).toMatchObject({ executed: true, executionMode: "desktop_commander" });
     expect(executor.calls).toHaveLength(1);
     expect(executor.calls[0].authorization.toolName).toBe("write_file");
@@ -203,7 +230,12 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
       params: { paths: ["src/index.ts"], tool: "kill_process", arguments: { pid: 1 } }
     });
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
     const store = new SqliteWorkItemStore(dbPath);
@@ -220,7 +252,12 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
   it("denies when a path escapes the containment allow root", async () => {
     seed(readAction("/etc/passwd"));
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
   });
@@ -229,7 +266,12 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
     writeFileSync(join(root, ".env"), "SECRET=x");
     seed(readAction(join(root, ".env")));
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
   });
@@ -246,7 +288,12 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
       }
     });
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
   });
@@ -264,7 +311,8 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
       dbPath,
       workerId: "dc-worker",
       executionBackend: "desktop_commander",
-      machineExecutor: executor
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
     });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
@@ -281,10 +329,20 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
   it("is idempotent on a replayed attempt (no duplicate Desktop Commander call)", async () => {
     seed(readAction(join(root, "pkg", "a.txt")));
     const executor = new FakeExecutor();
-    const first = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const first = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
     expect(first.executed).toBe(true);
     // A second worker pass finds nothing approved - the item is terminal.
-    const second = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const second = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
     expect(second).toEqual({ executed: false, reason: "no approved work item" });
     expect(executor.calls).toHaveLength(1);
   });

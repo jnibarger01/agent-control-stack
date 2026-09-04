@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { workspaceIdentityFromContainment } from "@agent-control-stack/advisory";
+import { EngineAdapterRegistry } from "@agent-control-stack/engine-adapter";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import {
   SqliteWorkItemStore,
@@ -40,6 +41,17 @@ class FakeExecutor implements MachineExecutor {
     };
   }
   async close() {}
+}
+
+function nativeEngineRegistry(): EngineAdapterRegistry {
+  return new EngineAdapterRegistry([
+    {
+      id: "codex",
+      async invoke() {
+        return { status: "process_error", message: "native adapter should not run in verification tests" };
+      }
+    }
+  ]);
 }
 
 function approvalActionHash(workItem: WorkItem, actor: string): string {
@@ -241,7 +253,12 @@ describe("ADR 0015 worker verification enforcement", () => {
     const id = seedRead();
     const executor = new FakeExecutor();
 
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
 
     expect(result).toMatchObject({ executed: true, executionMode: "desktop_commander", workItemId: id });
     expect(result.reason).not.toBe("awaiting_independent_verification");
@@ -265,7 +282,12 @@ describe("ADR 0015 worker verification enforcement", () => {
     const id = seedRead();
     const executor = new FakeExecutor();
 
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
 
     expect(result).toMatchObject({ executed: true, executionMode: "desktop_commander", workItemId: id });
     expect(result.reason).not.toBe("awaiting_independent_verification");
@@ -301,7 +323,12 @@ describe("ADR 0015 worker verification enforcement", () => {
     const id = seedWrite();
     const executor = new FakeExecutor();
 
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
 
     expect(result).toEqual({
       executed: true,
@@ -353,7 +380,12 @@ describe("ADR 0015 worker verification enforcement", () => {
     vi.stubEnv("ACS_VERIFICATION_POLICY", "enforce");
     const id = seedWrite();
     const executor = new FakeExecutor();
-    await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    await runWorkerOnce({
+      dbPath,
+      workerId: "dc-worker",
+      machineExecutor: executor,
+      engineAdapterRegistry: nativeEngineRegistry()
+    });
 
     const store = new SqliteWorkItemStore(dbPath);
     const tools = createWorkItemTools(store, createPolicyEngine());

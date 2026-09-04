@@ -1,8 +1,10 @@
 import {
   createPolicyEngine,
   createWorkItemTools,
-  evaluateVerificationRequirement
+  evaluateVerificationRequirement,
+  requireRoutedMission
 } from "@agent-control-stack/policy-gate";
+import { EngineAdapterRegistry, type EngineAdapter } from "@agent-control-stack/engine-adapter";
 import {
   ExecutionLearningBridge,
   ProceduralLearning,
@@ -73,6 +75,8 @@ export interface WorkerOptions {
   executionBackend?: ExecutionBackend;
   /** Inject a machine executor (tests only). */
   machineExecutor?: MachineExecutor;
+  /** Explicit native-engine composition boundary. */
+  engineAdapterRegistry?: EngineAdapterRegistry;
 }
 
 export interface WorkerResult {
@@ -171,6 +175,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   const tools = createWorkItemTools(workItems, createPolicyEngine());
   const workerId = options.workerId ?? "local-worker";
   const execute: WorkerExecute = options.execute ?? (async (item) => executeSandboxed(item));
+  const engineAdapterRegistry = options.engineAdapterRegistry ?? configuredEngineAdapterRegistry(executionBackend);
 
   let cleanupWorkspace:
     { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch: number } | undefined;
@@ -213,6 +218,18 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
     if (!running.attemptId || !running.planHash || !running.inputHash || running.fencingEpoch === undefined) {
       throw new Error("worker claim did not include persisted attempt authority");
+    }
+    const nativeRouteDispatch = resolveNativeRouteDispatch(workItems, engineAdapterRegistry, running.id);
+    if (nativeRouteDispatch.denied) {
+      return blockNativeRouteDispatch({
+        workItems,
+        running,
+        workerId,
+        startedAt: new Date().toISOString(),
+        code: nativeRouteDispatch.code,
+        reason: nativeRouteDispatch.reason,
+        engineId: nativeRouteDispatch.engineId
+      });
     }
 
     const workspace = running.attemptId
@@ -399,6 +416,107 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       workItems.close();
     }
   }
+}
+
+type NativeRouteDispatch =
+  | { denied: false; adapter?: EngineAdapter }
+  | {
+      denied: true;
+      code: "mission_route_engine_unavailable" | "mission_route_dispatch_denied";
+      reason: string;
+      engineId?: string;
+    };
+
+/**
+ * Native route selection is independent of execution-backend selection. A
+ * persisted route must resolve exactly its closed-table engine through the
+ * registry; it must never inherit dry-run/Desktop Commander as a fallback.
+ * Items without native evidence retain the pre-routing compatibility path.
+ */
+function resolveNativeRouteDispatch(
+  workItems: WorkItemStore,
+  registry: EngineAdapterRegistry,
+  workItemId: string
+): NativeRouteDispatch {
+  try {
+    const persisted = workItems.getVerifiedMissionRouting(workItemId);
+    if (!persisted) return { denied: false };
+    const route = requireRoutedMission(persisted.route);
+    try {
+      return { denied: false, adapter: registry.require(route.engineId) };
+    } catch (error) {
+      if (error instanceof ControlStackError && error.code === "engine_adapter_not_found") {
+        return {
+          denied: true,
+          code: "mission_route_engine_unavailable",
+          reason: `native route engine is not registered: ${route.engineId}`,
+          engineId: route.engineId
+        };
+      }
+      throw error;
+    }
+  } catch (error) {
+    return {
+      denied: true,
+      code: "mission_route_dispatch_denied",
+      reason: error instanceof Error ? error.message : "native route dispatch authority could not be verified"
+    };
+  }
+}
+
+function blockNativeRouteDispatch(input: {
+  workItems: WorkItemStore;
+  running: ClaimedWorkItem;
+  workerId: string;
+  startedAt: string;
+  code: "mission_route_engine_unavailable" | "mission_route_dispatch_denied";
+  reason: string;
+  engineId?: string;
+}): WorkerResult {
+  const { workItems, running, workerId, startedAt, code, engineId } = input;
+  workItems.recordExecutionEvent({
+    name: "execution.authorization_denied",
+    workItemId: running.id,
+    body: { reason: code },
+    attributes: {
+      "authorization.code": code,
+      ...(engineId ? { "mission.route_engine": engineId } : {})
+    }
+  });
+  workItems.recordDerivedWorkResult({
+    workItemId: running.id,
+    leaseId: running.leaseId,
+    workerId,
+    actionHash: running.actionHash,
+    attemptId: running.attemptId!,
+    planHash: running.planHash!,
+    inputHash: running.inputHash!,
+    fencingEpoch: running.fencingEpoch!,
+    idempotencyKey: workerResultIdempotencyKey(running.attemptId!),
+    outcome: "blocked",
+    startedAt,
+    finishedAt: new Date().toISOString(),
+    exitCode: null,
+    summary: `native route dispatch denied: ${code}`,
+    error: code,
+    structuredOutput: { simulated: true, blocked: true, reason: code },
+    artifacts: [],
+    simulationMetadata: { executionMode: "dry_run", simulated: true, reason: code }
+  });
+  return { executed: false, workItemId: running.id, reason: `native route dispatch denied: ${code}` };
+}
+
+function configuredEngineAdapterRegistry(executionBackend: ExecutionBackend): EngineAdapterRegistry {
+  const adapter: EngineAdapter = {
+    id: executionBackend,
+    async invoke() {
+      throw new ControlStackError(
+        "engine_adapter_backend_dispatch_unavailable",
+        `configured execution backend ${executionBackend} cannot invoke native engine tasks directly`
+      );
+    }
+  };
+  return new EngineAdapterRegistry([adapter]);
 }
 
 interface DesktopCommanderExecutionInput {

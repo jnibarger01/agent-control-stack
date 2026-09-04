@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { EngineAdapterRegistry } from "@agent-control-stack/engine-adapter";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
@@ -21,6 +22,17 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
+function nativeEngineRegistry(): EngineAdapterRegistry {
+  return new EngineAdapterRegistry([
+    {
+      id: "codex",
+      async invoke() {
+        return { status: "process_error", message: "native adapter should not run in dry-run lock tests" };
+      }
+    }
+  ]);
+}
+
 describe("worker dry-run lock", () => {
   it("rejects a non-dry-run execution mode in production", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-dry-run-lock-"));
@@ -35,7 +47,9 @@ describe("worker dry-run lock", () => {
         output: "live execution must not be accepted"
       });
 
-      await expect(runWorkerOnce({ dbPath, workerId: "production-worker" })).rejects.toThrow(
+      await expect(
+        runWorkerOnce({ dbPath, workerId: "production-worker", engineAdapterRegistry: nativeEngineRegistry() })
+      ).rejects.toThrow(
         "production worker requires dry_run execution mode"
       );
 
@@ -107,7 +121,9 @@ describe("worker dry-run lock", () => {
         output: "must not be persisted"
       });
 
-      await expect(runWorkerOnce({ dbPath, workerId: "production-worker" })).rejects.toThrow();
+      await expect(
+        runWorkerOnce({ dbPath, workerId: "production-worker", engineAdapterRegistry: nativeEngineRegistry() })
+      ).rejects.toThrow();
 
       const check = new SqliteWorkItemStore(dbPath);
       try {

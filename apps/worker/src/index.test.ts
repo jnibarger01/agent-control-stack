@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exec, fork, spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
+import { EngineAdapterRegistry } from "@agent-control-stack/engine-adapter";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore, type ClaimedWorkItem, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
@@ -26,6 +27,17 @@ function approvalActionHash(workItem: WorkItem, actor: string): string {
     throw new Error(`missing approval action hash for ${workItem.id}`);
   }
   return decision.actionHash;
+}
+
+function nativeEngineRegistry(): EngineAdapterRegistry {
+  return new EngineAdapterRegistry([
+    {
+      id: "codex",
+      async invoke() {
+        return { status: "process_error", message: "native adapter should not run in dry-run worker tests" };
+      }
+    }
+  ]);
 }
 
 describe("worker policy gate", () => {
@@ -53,7 +65,11 @@ describe("worker policy gate", () => {
       });
       store.close();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        engineAdapterRegistry: nativeEngineRegistry()
+      });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result.executed).toBe(true);
@@ -62,6 +78,45 @@ describe("worker policy gate", () => {
         check.close();
       }
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("blocks native routed work when the selected engine is absent from the registry", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-native-route-missing-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    try {
+      const workItem = tools.create_work_item(readOnlyInput("Native route must resolve codex"));
+      store.close();
+
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        engineAdapterRegistry: new EngineAdapterRegistry()
+      });
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(result).toEqual({
+          executed: false,
+          workItemId: workItem.id,
+          reason: "native route dispatch denied: mission_route_engine_unavailable"
+        });
+        expect(check.get(workItem.id)?.status).toBe("blocked");
+        expect(check.readEvents().find((event) => event.name === "execution.authorization_denied")).toMatchObject({
+          body: { reason: "mission_route_engine_unavailable" },
+          attributes: { "authorization.code": "[redacted]", "mission.route_engine": "codex" }
+        });
+      } finally {
+        check.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The worker setup closes the handle before execution.
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });
@@ -98,6 +153,7 @@ describe("worker policy gate", () => {
       await runWorkerOnce({
         dbPath,
         workerId: "test-worker",
+        engineAdapterRegistry: nativeEngineRegistry(),
         workspaceManager,
         execute: async (input) => {
           expect((input as typeof input & { workspace?: unknown }).workspace).toBeDefined();
@@ -130,6 +186,7 @@ describe("worker policy gate", () => {
       const result = await runWorkerOnce({
         dbPath,
         workerId: "test-worker",
+        engineAdapterRegistry: nativeEngineRegistry(),
         execute: async () => ({
           ok: false,
           executionMode: "dry_run",
@@ -177,6 +234,7 @@ describe("worker policy gate", () => {
       const result = await runWorkerOnce({
         dbPath,
         workerId: "test-worker",
+        engineAdapterRegistry: nativeEngineRegistry(),
         execute: async () => ({ ok: true, executionMode: "dry_run", output: "looks fine" }),
         validator: {
           validate: async () => ({
@@ -229,7 +287,11 @@ describe("worker policy gate", () => {
       store.approveWorkItem(workItem.id, domainTransition);
       store.close();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        engineAdapterRegistry: nativeEngineRegistry()
+      });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result.executed).toBe(false);
@@ -260,7 +322,11 @@ describe("worker policy gate", () => {
       store.close();
       vi.clearAllMocks();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        engineAdapterRegistry: nativeEngineRegistry()
+      });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result).toEqual({ executed: false, workItemId: workItem.id, reason: "blocked by policy" });
@@ -304,7 +370,11 @@ describe("worker policy gate", () => {
       store.close();
       vi.clearAllMocks();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        engineAdapterRegistry: nativeEngineRegistry()
+      });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result).toEqual({ executed: false, reason: "no approved work item" });
@@ -346,7 +416,11 @@ describe("worker policy gate", () => {
       expect(approval.workItem.status).toBe("approved");
       store.close();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({
+        dbPath,
+        workerId: "test-worker",
+        engineAdapterRegistry: nativeEngineRegistry()
+      });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         const events = check.readEvents().map((event) => event.name);
