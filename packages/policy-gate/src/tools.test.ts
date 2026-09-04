@@ -39,6 +39,7 @@ describe("policy-gated work item tools", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-native-route-redaction-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
     const tools = createWorkItemTools(store, createPolicyEngine());
+    const apiKeyLiteral = "native-api-key-literal";
     try {
       const workItem = tools.create_work_item({
         title: "Inspect /private/.ssh/id_rsa source file",
@@ -52,7 +53,7 @@ describe("policy-gated work item tools", () => {
             params: {
               paths: ["private/.env", "/private/.ssh/id_rsa"],
               password: "native-password-literal",
-              apiKey: "native-api-key-literal",
+              apiKey: apiKeyLiteral,
               token: "native-token-literal",
               authorization: "Bearer native-bearer-literal",
               secret: "native-secret-literal"
@@ -76,7 +77,7 @@ describe("policy-gated work item tools", () => {
       });
       for (const literal of [
         "native-password-literal",
-        "native-api-key-literal",
+        apiKeyLiteral,
         "native-token-literal",
         "native-bearer-literal",
         "native-secret-literal",
