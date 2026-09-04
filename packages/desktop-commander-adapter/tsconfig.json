@@ -10,6 +10,7 @@
     { "path": "../shared" },
     { "path": "../work-items" },
     { "path": "../policy-gate" },
-    { "path": "../machine-controller" }
+    { "path": "../machine-controller" },
+    { "path": "../mcp-result-screen" }
   ]
 }

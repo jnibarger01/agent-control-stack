@@ -31,6 +31,19 @@ export interface DesktopCommanderToolPolicy {
   readonly commandArgs: readonly string[];
   readonly timeoutMs: number;
   readonly maxResultBytes: number;
+  /**
+   * The upstream `tools/list` `inputSchema` fingerprint ACS has pinned for this
+   * tool (canonical semantic form; see `@agent-control-stack/mcp-result-screen`).
+   * When set, a protected tool whose upstream now advertises a different
+   * fingerprint is quarantined. Never auto-populated — pinning is an explicit
+   * config/code edit, so drift is never "learned" silently.
+   */
+  readonly upstreamInputSchemaFingerprint?: string;
+  /**
+   * Additional upstream fingerprints an operator has EXPLICITLY accepted as
+   * equivalent to the pinned value. Never auto-populated.
+   */
+  readonly acceptedUpstreamSchemaFingerprints?: readonly string[];
 }
 
 const MAX_PATH_LEN = 4096;

@@ -1,4 +1,5 @@
 import { ControlStackError } from "@agent-control-stack/shared";
+import { screenMcpResult, toolSchemaFingerprint } from "@agent-control-stack/mcp-result-screen";
 import { desktopCommanderInvocationFingerprint } from "./arguments.js";
 import type { DesktopCommanderAdapterConfig } from "./config.js";
 import type { ContainmentConfig } from "./containment.js";
@@ -67,6 +68,8 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
   private readonly containment: ContainmentConfig;
   private readonly now: () => Date;
   private connecting: Promise<void> | undefined;
+  /** Last-seen upstream-advertised `inputSchema` per tool, for schema-drift screening. */
+  private readonly upstreamInputSchemas = new Map<string, unknown>();
 
   constructor(
     private readonly config: DesktopCommanderAdapterConfig,
@@ -95,7 +98,19 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
   async preflight(): Promise<{ serverInfo: { name?: string; version?: string }; toolCount: number }> {
     await this.ensureConnected();
     const tools = await this.transport.listTools();
+    this.cacheUpstreamSchemas(tools);
     return { serverInfo: this.transport.getServerInfo(), toolCount: tools.length };
+  }
+
+  private cacheUpstreamSchemas(descriptors: readonly McpToolDescriptor[]): void {
+    for (const descriptor of descriptors) {
+      this.upstreamInputSchemas.set(descriptor.name, descriptor.inputSchema);
+    }
+  }
+
+  private async ensureUpstreamSchemas(): Promise<void> {
+    if (this.upstreamInputSchemas.size > 0) return;
+    this.cacheUpstreamSchemas(await this.transport.listTools());
   }
 
   private async ensureConnected(): Promise<void> {
@@ -117,6 +132,7 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
   async listTools(): Promise<MachineTool[]> {
     await this.ensureConnected();
     const discovered = await this.transport.listTools();
+    this.cacheUpstreamSchemas(discovered);
     return discovered.map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -164,6 +180,7 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
     }
 
     await this.ensureConnected();
+    await this.ensureUpstreamSchemas();
 
     const startedAt = this.now();
     let raw: McpToolCallResult;
@@ -192,14 +209,83 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
       };
     }
     const completedAt = this.now();
+    const maxResultBytes = Math.min(policy.maxResultBytes, this.config.maxResultBytes);
 
-    return normalizeToolResult(raw, {
-      toolName: auth.toolName,
-      invocationFingerprint: auth.invocationFingerprint,
-      startedAt,
-      completedAt,
-      maxResultBytes: Math.min(policy.maxResultBytes, this.config.maxResultBytes)
+    // Post-execution trust boundary (ADR 0017 companion): the raw upstream MCP
+    // result is untrusted. Screen it - structure, secrets, injection framing,
+    // provenance, schema drift - BEFORE it can reach a caller or become trusted
+    // evidence. A quarantined result withholds the payload entirely.
+    const serverInfo = this.transport.getServerInfo();
+    const upstreamId = `${serverInfo.name ?? "desktop-commander"}@${serverInfo.version ?? "unknown"}`;
+
+    // Schema-drift enforcement compares the CURRENTLY advertised upstream
+    // `inputSchema` fingerprint against the value ACS pinned for this tool.
+    // Enforcement is active only for a tool whose pin is set; an unpinned tool
+    // records the observed fingerprint as evidence but is not drift-quarantined
+    // (there is no trusted baseline to drift from, and args are still
+    // re-validated pre-dispatch against `policy.argsSchema`).
+    const advertised = this.upstreamInputSchemas.get(auth.toolName);
+    const observedSchemaFingerprint = toolSchemaFingerprint({ inputSchema: advertised ?? {} });
+    const pinned = policy.upstreamInputSchemaFingerprint;
+    const schemaPinEnforced = pinned !== undefined;
+
+    const screened = screenMcpResult({
+      raw,
+      binding: { invocationId: auth.attemptId, upstreamId, toolName: auth.toolName, actionFingerprint: auth.invocationFingerprint },
+      expected: {
+        invocationId: auth.attemptId,
+        upstreamId,
+        toolName: auth.toolName,
+        actionFingerprint: auth.invocationFingerprint,
+        toolSchemaFingerprint: pinned ?? observedSchemaFingerprint,
+        observedToolSchemaFingerprint: observedSchemaFingerprint,
+        acceptedToolSchemaFingerprints: policy.acceptedUpstreamSchemaFingerprints
+      },
+      // Every allowlisted Desktop Commander tool is protected: it is on the ACS
+      // allowlist and ACS relies on its behaviour.
+      protectedTool: schemaPinEnforced,
+      maxTextBytes: maxResultBytes,
+      now: () => completedAt
     });
+
+    const screen = {
+      verdict: screened.verdict,
+      withheld: screened.evidence.withheld,
+      findingCodes: screened.evidence.findingCodes,
+      provenanceHash: screened.provenance.provenanceHash,
+      evidenceHash: screened.evidence.evidenceHash,
+      schemaDrift: screened.evidence.schemaDrift,
+      schemaPinEnforced,
+      observedSchemaFingerprint
+    } as const;
+
+    if (screened.verdict === "quarantine") {
+      return {
+        toolName: auth.toolName,
+        invocationFingerprint: auth.invocationFingerprint,
+        startedAt: startedAt.toISOString(),
+        completedAt: completedAt.toISOString(),
+        durationMs: Math.max(0, completedAt.getTime() - startedAt.getTime()),
+        isError: true,
+        output: "",
+        error: `result withheld by ACS screening: ${screened.evidence.findingCodes.join(", ")}`,
+        truncated: false,
+        resultHash: screened.evidence.resultHash,
+        omittedBlocks: 0,
+        screen
+      };
+    }
+
+    return {
+      ...normalizeToolResult(raw, {
+        toolName: auth.toolName,
+        invocationFingerprint: auth.invocationFingerprint,
+        startedAt,
+        completedAt,
+        maxResultBytes
+      }),
+      screen
+    };
   }
 
   private async withTimeout<T>(

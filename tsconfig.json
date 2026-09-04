@@ -24,6 +24,7 @@
     { "path": "packages/verification" },
     { "path": "packages/eval-harness" },
     { "path": "packages/moa-orchestrator" },
+    { "path": "packages/mcp-result-screen" },
     { "path": "apps/control-ui" },
     { "path": "apps/mcp" },
     { "path": "apps/evidence-mcp" },

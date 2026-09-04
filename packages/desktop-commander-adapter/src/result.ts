@@ -12,15 +12,36 @@ import type { McpToolCallResult } from "./mcp-stdio-client.js";
  * bounded value; the worker decides lifecycle.
  */
 
+/**
+ * Payload-free summary of the post-execution result screening (see
+ * `@agent-control-stack/mcp-result-screen`). Present on every
+ * `MachineExecutionResult` produced from a real upstream MCP call. A
+ * `quarantine` verdict means the upstream payload was withheld: `output` is
+ * empty and `isError` is true.
+ */
+export interface ResultScreenSummary {
+  verdict: "accept" | "quarantine";
+  withheld: boolean;
+  findingCodes: readonly string[];
+  provenanceHash: string;
+  evidenceHash: string;
+  /** true when the observed upstream schema differs from the pinned/accepted set. */
+  schemaDrift: boolean;
+  /** true only when this tool has a pinned upstream schema fingerprint (drift is then quarantining). */
+  schemaPinEnforced: boolean;
+  /** Canonical fingerprint of the upstream-advertised `inputSchema` this call saw. */
+  observedSchemaFingerprint: string;
+}
+
 export interface MachineExecutionResult {
   toolName: string;
   invocationFingerprint: string;
   startedAt: string;
   completedAt: string;
   durationMs: number;
-  /** Desktop Commander flagged the call as an error. */
+  /** Desktop Commander flagged the call as an error, OR ACS screening withheld the result. */
   isError: boolean;
-  /** Bounded + redacted textual output. */
+  /** Bounded + redacted textual output. Empty when the result was quarantined. */
   output: string;
   /** Bounded + redacted error text when `isError`. */
   error?: string;
@@ -30,6 +51,8 @@ export interface MachineExecutionResult {
   resultHash: string;
   /** Count of non-text content blocks that were summarised out. */
   omittedBlocks: number;
+  /** Post-execution screening outcome. Absent only on transport failure before any result. */
+  screen?: ResultScreenSummary;
 }
 
 function stripBinary(value: string): string {
