@@ -2,6 +2,7 @@ export * from "./contracts.js";
 export * from "./action-envelope.js";
 export * from "./fingerprint.js";
 export * from "./mission-classifier.js";
+export * from "./mission-route.js";
 export * from "./plan-tools.js";
 export * from "./policy.js";
 export * from "./rules.js";

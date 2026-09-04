@@ -2,10 +2,22 @@ import { isAbsolute } from "node:path";
 import { canonicalJson, domainHash } from "@agent-control-stack/shared";
 import { z } from "zod";
 
-const safeIdSchema = z.string().min(6).max(128).regex(/^[A-Za-z0-9._:-]+$/);
-const shortIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:@/-]+$/);
+const safeIdSchema = z
+  .string()
+  .min(6)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/);
+const shortIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:@/-]+$/);
 const sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/);
-const nonceSchema = z.string().min(22).max(256).regex(/^[A-Za-z0-9._~+-]+$/);
+const nonceSchema = z
+  .string()
+  .min(22)
+  .max(256)
+  .regex(/^[A-Za-z0-9._~+-]+$/);
 const isoTimestampSchema = z
   .string()
   .min(20)
@@ -18,13 +30,11 @@ const safePathSchema = z
   .max(512)
   .refine((value) => !value.split(/[\\/]+/).includes(".."), "path must not contain parent traversal");
 const absolutePathSchema = safePathSchema.refine((value) => isAbsolute(value), "path must be absolute");
-const jsonObjectSchema = z
-  .record(z.string(), z.json())
-  .superRefine((value, context) => {
-    if (Buffer.byteLength(canonicalJson(value), "utf8") > 65_536) {
-      context.addIssue({ code: "custom", message: "JSON object exceeds 65536 canonical bytes" });
-    }
-  });
+const jsonObjectSchema = z.record(z.string(), z.json()).superRefine((value, context) => {
+  if (Buffer.byteLength(canonicalJson(value), "utf8") > 65_536) {
+    context.addIssue({ code: "custom", message: "JSON object exceeds 65536 canonical bytes" });
+  }
+});
 
 export const missionRiskClaimSchema = z.enum(["read_only", "draft", "write", "destructive", "unknown"]);
 export const missionTaskTypeSchema = z.enum([
@@ -34,7 +44,7 @@ export const missionTaskTypeSchema = z.enum([
   "browser_scrape",
   "deal_analysis",
   "system_admin",
-  "unknown",
+  "unknown"
 ]);
 
 export const legacyProvenanceClaimSchema = z
@@ -47,7 +57,7 @@ export const legacyProvenanceClaimSchema = z
     sourceEnvelopeHash: sha256HexSchema,
     sourceTraceHeadHash: sha256HexSchema.optional(),
     sourceRunId: safeIdSchema.optional(),
-    verification: z.literal("unverified"),
+    verification: z.literal("unverified")
   })
   .strict();
 
@@ -57,16 +67,20 @@ export const legacyProvenanceRecordSchema = legacyProvenanceClaimSchema
     schemaVersion: z.literal("acs.legacy-provenance.v1"),
     verification: z.enum(["verified", "unverified"]),
     importedAt: isoTimestampSchema,
-    importedByActorId: shortIdSchema,
+    importedByActorId: shortIdSchema
   })
   .strict();
 
 const proposedActionSchema = z
   .object({
     clientActionId: safeIdSchema,
-    kind: z.string().min(1).max(64).regex(/^[A-Za-z0-9._:-]+$/),
+    kind: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9._:-]+$/),
     description: boundedTextSchema,
-    params: jsonObjectSchema,
+    params: jsonObjectSchema
   })
   .strict();
 
@@ -81,7 +95,7 @@ export const missionIntakeSchema = z
       .object({
         repo: z.string().min(1).max(512).optional(),
         cwd: absolutePathSchema.optional(),
-        files: z.array(safePathSchema).max(64),
+        files: z.array(safePathSchema).max(64)
       })
       .strict(),
     proposedActions: z.array(proposedActionSchema).min(1).max(64),
@@ -90,25 +104,29 @@ export const missionIntakeSchema = z
         network: z.enum(["none", "declared"]),
         maxRuntimeMs: z.number().int().min(1).max(86_400_000),
         successCriteria: z.array(z.string().min(1).max(1_000)).max(32),
-        rollbackPlan: jsonObjectSchema.optional(),
+        rollbackPlan: jsonObjectSchema.optional()
       })
       .strict(),
     submittedClaims: z
       .object({
         taskType: missionTaskTypeSchema.optional(),
         risk: missionRiskClaimSchema.optional(),
-        approvalRequested: z.boolean().optional(),
+        approvalRequested: z.boolean().optional()
       })
       .strict()
       .optional(),
-    legacyProvenance: legacyProvenanceClaimSchema.optional(),
+    legacyProvenance: legacyProvenanceClaimSchema.optional()
   })
   .strict()
   .superRefine((value, context) => {
     const ids = new Set<string>();
     value.proposedActions.forEach((action, index) => {
       if (ids.has(action.clientActionId)) {
-        context.addIssue({ code: "custom", path: ["proposedActions", index, "clientActionId"], message: "duplicate clientActionId" });
+        context.addIssue({
+          code: "custom",
+          path: ["proposedActions", index, "clientActionId"],
+          message: "duplicate clientActionId"
+        });
       }
       ids.add(action.clientActionId);
     });
@@ -116,8 +134,12 @@ export const missionIntakeSchema = z
 
 const evidenceSignalSchema = z
   .object({
-    ruleId: z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/),
-    matchedTextHash: sha256HexSchema.optional(),
+    ruleId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9._:-]+$/),
+    matchedTextHash: sha256HexSchema.optional()
   })
   .strict();
 
@@ -128,7 +150,7 @@ export const classifierEvidenceSchema = z
     classifier: z
       .object({
         id: z.string().min(1).max(128),
-        version: z.string().min(1).max(64),
+        version: z.string().min(1).max(64)
       })
       .strict(),
     subjectIntakeHash: sha256HexSchema,
@@ -137,40 +159,73 @@ export const classifierEvidenceSchema = z
       .object({
         recommendation: missionTaskTypeSchema,
         confidence: z.number().min(0).max(1).optional(),
-        signals: z.array(evidenceSignalSchema).max(64),
+        signals: z.array(evidenceSignalSchema).max(64)
       })
       .strict(),
     risk: z
       .object({
         recommendation: missionRiskClaimSchema,
         confidence: z.number().min(0).max(1).optional(),
-        signals: z.array(evidenceSignalSchema).max(64),
+        signals: z.array(evidenceSignalSchema).max(64)
       })
       .strict(),
     sensitivity: z
       .object({
         categories: z.array(z.string().min(1).max(64)).max(32),
-        signals: z.array(evidenceSignalSchema).max(64),
+        signals: z.array(evidenceSignalSchema).max(64)
       })
       .strict(),
-    authoritative: z.literal(false),
+    authoritative: z.literal(false)
   })
   .strict();
+
+/** Control-plane-owned evidence; advisory classification never chooses engines. */
+export const missionRouteEvidenceSchema = z
+  .object({
+    schemaVersion: z.literal("acs.mission-route-evidence.v1"),
+    routeId: safeIdSchema,
+    routeTableVersion: z.literal("acs.native-route-table.v1"),
+    routeTableHash: sha256HexSchema,
+    subjectIntakeHash: sha256HexSchema,
+    classifierEvidenceHash: sha256HexSchema,
+    taskType: missionTaskTypeSchema,
+    effectiveRisk: missionRiskClaimSchema,
+    engineId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[a-z][a-z0-9_-]*$/)
+      .optional(),
+    decision: z.enum(["routed", "blocked"]),
+    reasons: z.array(z.string().min(1).max(256)).max(16),
+    decidedAt: isoTimestampSchema
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.decision === "routed" && !value.engineId) {
+      context.addIssue({ code: "custom", path: ["engineId"], message: "routed evidence requires an engine" });
+    }
+    if (value.decision === "blocked" && value.engineId) {
+      context.addIssue({ code: "custom", path: ["engineId"], message: "blocked evidence cannot select an engine" });
+    }
+  });
 
 const canonicalActionSchema = z
   .object({
     actionId: safeIdSchema,
-    kind: z.string().min(1).max(64).regex(/^[A-Za-z0-9._:-]+$/),
+    kind: z
+      .string()
+      .min(1)
+      .max(64)
+      .regex(/^[A-Za-z0-9._:-]+$/),
     description: boundedTextSchema,
     arguments: jsonObjectSchema,
     cwd: absolutePathSchema.optional(),
     normalizedPaths: z.array(absolutePathSchema).max(64).optional(),
     argv: z.array(z.string().max(8_192)).max(256).optional(),
-    effects: z
-      .object({ network: z.boolean(), write: z.boolean(), destructive: z.boolean() })
-      .strict(),
+    effects: z.object({ network: z.boolean(), write: z.boolean(), destructive: z.boolean() }).strict(),
     timeoutMs: z.number().int().min(1).max(86_400_000),
-    rollback: jsonObjectSchema.optional(),
+    rollback: jsonObjectSchema.optional()
   })
   .strict();
 
@@ -183,7 +238,7 @@ export const actionManifestSchema = z
     policyVersion: z.string().min(1).max(128),
     nonce: nonceSchema,
     createdAt: isoTimestampSchema,
-    actions: z.array(canonicalActionSchema).min(1).max(64),
+    actions: z.array(canonicalActionSchema).min(1).max(64)
   })
   .strict()
   .superRefine((value, context) => {
@@ -209,7 +264,7 @@ export const approvalBindingSchema = z
     requesterActorId: shortIdSchema,
     nonce: nonceSchema,
     createdAt: isoTimestampSchema,
-    expiresAt: isoTimestampSchema,
+    expiresAt: isoTimestampSchema
   })
   .strict()
   .superRefine((value, context) => {
@@ -227,7 +282,7 @@ export const approvalGrantSchema = z
     reason: z.string().min(1).max(1_000).optional(),
     grantedAt: isoTimestampSchema,
     expiresAt: isoTimestampSchema,
-    status: z.enum(["granted", "consumed", "expired"]),
+    status: z.enum(["granted", "consumed", "expired"])
   })
   .strict()
   .superRefine((value, context) => {
@@ -247,7 +302,7 @@ export const idempotencyRecordSchema = z
     workItemId: safeIdSchema.optional(),
     responseHash: sha256HexSchema.optional(),
     createdAt: isoTimestampSchema,
-    completedAt: isoTimestampSchema.optional(),
+    completedAt: isoTimestampSchema.optional()
   })
   .strict();
 
@@ -263,12 +318,14 @@ export const traceCorrelationSchema = z
     parent: z
       .object({ traceId: traceIdSchema, spanId: spanIdSchema, source: z.string().min(1).max(128) })
       .strict()
-      .optional(),
+      .optional()
   })
   .strict();
 
 export type MissionIntake = z.infer<typeof missionIntakeSchema>;
+export type MissionTaskType = z.infer<typeof missionTaskTypeSchema>;
 export type ClassifierEvidence = z.infer<typeof classifierEvidenceSchema>;
+export type MissionRouteEvidence = z.infer<typeof missionRouteEvidenceSchema>;
 export type ActionManifest = z.infer<typeof actionManifestSchema>;
 export type ApprovalBinding = z.infer<typeof approvalBindingSchema>;
 export type CanonicalApprovalGrant = z.infer<typeof approvalGrantSchema>;
@@ -281,6 +338,11 @@ export function missionIntakeHash(input: unknown): string {
 
 export function classifierEvidenceHash(input: unknown): string {
   return domainHash("acs:classifier-evidence:v1", classifierEvidenceSchema.parse(input));
+}
+
+/** This distinct domain prevents classifier evidence from becoming route authority. */
+export function missionRouteEvidenceHash(input: unknown): string {
+  return domainHash("acs:mission-route-evidence:v1", missionRouteEvidenceSchema.parse(input));
 }
 
 export function actionManifestHash(input: unknown): string {
