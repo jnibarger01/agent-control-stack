@@ -77,7 +77,7 @@ jobs:
           FREEMODEL_API_KEY: ${{ secrets.FREEMODEL_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
         with:
-          model: gpt-5.5
+          model: freemodel/claude-sonnet-4-6
           use_github_token: true
           share: false
           prompt: ${{ steps.prompt.outputs.prompt }}
