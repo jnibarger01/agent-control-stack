@@ -1,7 +1,7 @@
 import { terminalManager, MAX_BUFFERED_OUTPUT_CHARS } from '../terminal-manager.js';
 import { commandManager } from '../command-manager.js';
 import { StartProcessArgsSchema, ReadProcessOutputArgsSchema, InteractWithProcessArgsSchema, ForceTerminateArgsSchema, ListSessionsArgsSchema } from './schemas.js';
-import { validatePath } from './filesystem.js';
+import { validateWorkspaceDirectory } from '../security/path-policy.js';
 import { capture } from "../utils/capture.js";
 import { ServerResult } from '../types.js';
 import { analyzeProcessState, cleanProcessOutput, formatProcessStateMessage, ProcessState } from '../utils/process-detection.js';
@@ -157,7 +157,7 @@ export async function startProcess(args: unknown): Promise<ServerResult> {
   let resolvedCwd: string | undefined;
   if (parsed.data.cwd !== undefined && parsed.data.cwd !== '') {
     try {
-      resolvedCwd = await validatePath(parsed.data.cwd);
+      resolvedCwd = await validateWorkspaceDirectory(parsed.data.cwd);
     } catch (error) {
       return {
         content: [{ type: "text", text: `Error: Invalid cwd for start_process: ${error instanceof Error ? error.message : String(error)}` }],

@@ -26,7 +26,7 @@
 
 import crypto from 'crypto';
 import fs from 'fs/promises';
-import { validatePath } from './filesystem.js';
+import { validateWorkspaceDirectory } from '../security/path-policy.js';
 import { runTypedProcess, TypedProcessResult } from './acpx-process.js';
 import { ServerResult } from '../types.js';
 
@@ -76,12 +76,11 @@ function getAcpxExecutable(): string {
 // ---------------------------------------------------------------------------
 
 async function validateAcpxCwd(requestedCwd: string): Promise<string> {
-  const resolved = await validatePath(requestedCwd);
-  const stat = await fs.stat(resolved).catch(() => null);
-  if (!stat || !stat.isDirectory()) {
+  try {
+    return await validateWorkspaceDirectory(requestedCwd);
+  } catch {
     throw new Error(`cwd does not exist or is not a directory: ${requestedCwd}`);
   }
-  return resolved;
 }
 
 function requireAcpxSessionName(record: AcpxSessionRecord): string {

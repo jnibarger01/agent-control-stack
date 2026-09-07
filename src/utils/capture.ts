@@ -39,6 +39,8 @@ let uniqueUserId = 'unknown';
 // otherwise anyone can POST arbitrary events straight into BigQuery ingestion.
 const TELEMETRY_PROXY_URL = 'https://telemetry.desktopcommander.app/mp/collect';
 const TELEMETRY_PROXY_FALLBACK_URL = 'https://dc-telemetry-proxy-83847352264.europe-west1.run.app/mp/collect';
+const TELEMETRY_AUTH_TOKEN_ENV = 'DESKTOP_COMMANDER_TELEMETRY_BEARER_TOKEN';
+const MAX_TELEMETRY_PAYLOAD_BYTES = 64 * 1024;
 
 /**
  * Hard kill-switch for telemetry via environment variable.
@@ -103,11 +105,13 @@ export const captureBase = async (captureURL: string, event: string, properties?
             return;
         }
 
-        // Check if telemetry is enabled in config (defaults to true if not set)
+        // Check if telemetry is enabled in config. Missing configuration is
+        // treated as disabled so telemetry cannot become an implicit egress path.
         const telemetryEnabled = await configManager.getValue('telemetryEnabled');
 
-        // If telemetry is explicitly disabled or GA credentials are missing, don't send
-        if (isTelemetryDisabledValue(telemetryEnabled) || !captureURL) {
+        // If telemetry is explicitly disabled or no authenticated transport is
+        // configured, don't send.
+        if (isTelemetryDisabledValue(telemetryEnabled) || !captureURL || !telemetryBearerToken()) {
             return;
         }
 
@@ -426,7 +430,8 @@ const sendToTelemetryProxy = async (event: string, eventProperties: any) => {
     try {
         if (isTelemetryDisabledByEnv()) return;
         const telemetryEnabled = await configManager.getValue('telemetryEnabled');
-        if (isTelemetryDisabledValue(telemetryEnabled)) return;
+        const bearerToken = telemetryBearerToken();
+        if (isTelemetryDisabledValue(telemetryEnabled) || !bearerToken) return;
 
         const payload = JSON.stringify({
             client_id: uniqueUserId,
@@ -437,16 +442,23 @@ const sendToTelemetryProxy = async (event: string, eventProperties: any) => {
             }]
         });
 
-        const sent = await postTelemetryPayload(TELEMETRY_PROXY_URL, payload);
+        if (Buffer.byteLength(payload, 'utf8') > MAX_TELEMETRY_PAYLOAD_BYTES) return;
+
+        const sent = await postTelemetryPayload(TELEMETRY_PROXY_URL, payload, bearerToken);
         if (!sent) {
-            await postTelemetryPayload(TELEMETRY_PROXY_FALLBACK_URL, payload);
+            await postTelemetryPayload(TELEMETRY_PROXY_FALLBACK_URL, payload, bearerToken);
         }
     } catch {
         // Silent fail — telemetry should never break functionality
     }
 };
 
-const postTelemetryPayload = async (endpoint: string, payload: string): Promise<boolean> => {
+function telemetryBearerToken(): string | undefined {
+    const token = process.env[TELEMETRY_AUTH_TOKEN_ENV]?.trim();
+    return token && token.length <= 4096 ? token : undefined;
+}
+
+const postTelemetryPayload = async (endpoint: string, payload: string, bearerToken: string): Promise<boolean> => {
     return await new Promise((resolve) => {
         const url = new URL(endpoint);
         const options = {
@@ -456,7 +468,8 @@ const postTelemetryPayload = async (endpoint: string, payload: string): Promise<
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(payload)
+                'Content-Length': Buffer.byteLength(payload),
+                'Authorization': `Bearer ${bearerToken}`
             }
         };
 

@@ -180,7 +180,9 @@ class ConfigManager {
         return userShell;
       })(),
       allowedDirectories: [],
-      telemetryEnabled: true, // Default to opt-out approach (telemetry on by default)
+      // Telemetry is fail-closed by default. Users must explicitly enable it;
+      // an unauthenticated proxy must never become an implicit data egress path.
+      telemetryEnabled: false,
       fileWriteLineLimit: 50,  // Default line limit for file write operations (changed from 100)
       fileReadLineLimit: 1000,  // Default line limit for file read operations (changed from character-based)
       pendingWelcomeOnboarding: true, // New install flag - triggers A/B test for welcome page
