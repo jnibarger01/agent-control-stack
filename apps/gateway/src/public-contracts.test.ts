@@ -5,7 +5,15 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
-import { gatewayMcpInputSchemas, publicContractExamples, publicHttpOperations } from "./public-contracts.js";
+import {
+  gatewayMcpInputSchemas,
+  mcpRequiredScopes,
+  mcpToolAnnotations,
+  portfolioToolNames,
+  publicContractExamples,
+  publicHttpOperations,
+  remoteMcpToolNames
+} from "./public-contracts.js";
 import { buildGateway } from "./server.js";
 
 type GeneratedTransportRequest = {
@@ -40,6 +48,20 @@ afterEach(() => {
 });
 
 describe("generated public contract clients", () => {
+  it("advertises seven read-only portfolio tools under acs:work:read", () => {
+    expect(portfolioToolNames).toHaveLength(7);
+    for (const name of portfolioToolNames) {
+      expect(remoteMcpToolNames).toContain(name);
+      expect(mcpRequiredScopes(name)).toEqual(["acs:work:read"]);
+      expect(mcpToolAnnotations(name)).toEqual({
+        readOnlyHint: true,
+        destructiveHint: false,
+        openWorldHint: false
+      });
+      expect(gatewayMcpInputSchemas[name]).toBeDefined();
+    }
+  });
+
   it("exercise successful HTTP and MCP calls through generated operation bindings", async () => {
     const app = testGateway();
     const generated = await generatedClients();

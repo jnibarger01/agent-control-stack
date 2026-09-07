@@ -39,6 +39,24 @@ describe("public contract compatibility classification", () => {
     ).toEqual([]);
   });
 
+  it("allows additive portfolio tools without classifying them as breaking", () => {
+    expect(
+      classifyBreakingChanges(baseline, {
+        operations: baseline.operations,
+        tools: {
+          ...baseline.tools,
+          "portfolio.get_summary": { required: [], properties: [], propertyTypes: {}, propertyEnums: {} },
+          "portfolio.list_repositories": {
+            required: [],
+            properties: ["lifecycle", "limit", "status"],
+            propertyTypes: { lifecycle: "string", limit: "number", status: "string" },
+            propertyEnums: {}
+          }
+        }
+      })
+    ).toEqual([]);
+  });
+
   it("classifies removed surfaces, removed properties, and new requirements", () => {
     expect(
       classifyBreakingChanges(baseline, {
