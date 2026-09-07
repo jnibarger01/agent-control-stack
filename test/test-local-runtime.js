@@ -3,14 +3,15 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { createLocalMcpRuntime } from '../dist/local-runtime.js';
+import {
+  TEST_ACS_KEY_ID,
+  TEST_ACS_PUBLIC_KEY,
+  testAcsEnvironment,
+} from './fixtures/acs-test-fixture.js';
 
 process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-local-runtime-'));
 const stateDir = path.join(root, 'child-state');
-const testPublicKey = Buffer.concat([
-  Buffer.from('302a300506032b6570032100', 'hex'),
-  Buffer.from('11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo', 'base64url'),
-]).toString('base64url');
 process.env.DESKTOP_COMMANDER_STATE_DIR = path.join(root, 'parent-state');
 
 function childPids() {
@@ -124,7 +125,7 @@ try {
     cwd: retryCwd,
     startupTimeoutMs: 2_000,
     shutdownTimeoutMs: 2_000,
-    env: { DESKTOP_COMMANDER_STATE_DIR: path.join(root, 'retry-state') },
+    env: testAcsEnvironment(path.join(root, 'retry-state')),
   });
   await assert.rejects(
     () => retryable.start(),
@@ -159,8 +160,8 @@ try {
     startupTimeoutMs: 15_000,
     shutdownTimeoutMs: 5_000,
     env: {
-      DESKTOP_COMMANDER_ACS_PUBLIC_KEY: testPublicKey,
-      DESKTOP_COMMANDER_ACS_KEY_ID: 'test-key-1',
+      DESKTOP_COMMANDER_ACS_PUBLIC_KEY: TEST_ACS_PUBLIC_KEY,
+      DESKTOP_COMMANDER_ACS_KEY_ID: TEST_ACS_KEY_ID,
     },
   });
   await inheritedIdentity.start();
@@ -183,8 +184,8 @@ try {
     shutdownTimeoutMs: 5_000,
     env: {
       DESKTOP_COMMANDER_STATE_DIR: path.join(root, 'managed-default-state'),
-      DESKTOP_COMMANDER_ACS_PUBLIC_KEY: testPublicKey,
-      DESKTOP_COMMANDER_ACS_KEY_ID: 'test-key-1',
+      DESKTOP_COMMANDER_ACS_PUBLIC_KEY: TEST_ACS_PUBLIC_KEY,
+      DESKTOP_COMMANDER_ACS_KEY_ID: TEST_ACS_KEY_ID,
     },
   });
   await managedDefault.start();
@@ -217,8 +218,8 @@ try {
       shutdownTimeoutMs: 5_000,
       env: {
         DESKTOP_COMMANDER_STATE_DIR: 'relative-child-state',
-        DESKTOP_COMMANDER_ACS_PUBLIC_KEY: testPublicKey,
-        DESKTOP_COMMANDER_ACS_KEY_ID: 'test-key-1',
+        DESKTOP_COMMANDER_ACS_PUBLIC_KEY: TEST_ACS_PUBLIC_KEY,
+        DESKTOP_COMMANDER_ACS_KEY_ID: TEST_ACS_KEY_ID,
       },
     });
     await relativeIdentity.start();
