@@ -1,6 +1,5 @@
 import { platform } from 'os';
 import * as https from 'https';
-import * as crypto from 'crypto';
 import { AsyncLocalStorage } from 'async_hooks';
 import { configManager, isTelemetryDisabledValue } from '../config-manager.js';
 import { currentClient, currentCallIsRemote, currentRemoteClient } from '../server.js';
@@ -37,58 +36,8 @@ let uniqueUserId = 'unknown';
 // transport code into a dedicated telemetry utility once this migration lands.
 const TELEMETRY_PROXY_URL = 'https://telemetry.desktopcommander.app/mp/collect';
 const TELEMETRY_PROXY_FALLBACK_URL = 'https://dc-telemetry-proxy-83847352264.europe-west1.run.app/mp/collect';
-
-/**
- * Request signing for the telemetry transport.
- *
- * The proxy previously accepted an unauthenticated POST from any caller who
- * knew the URL, which meant anyone could inject arbitrary events straight
- * into ingestion. This adds HMAC-SHA256 request signing, gated behind an
- * operator-configured secret:
- *
- *   DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY    — shared secret (required to sign)
- *   DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY_ID — optional key identifier, so the
- *                                                 proxy can support rotation
- *
- * No secret is baked into this repository — none exists here to bake in. When
- * the env var is unset, requests are sent unsigned exactly as before (no
- * regression); once the proxy is deployed with the corresponding verification
- * and a secret is distributed to trusted builds, setting the env var switches
- * this client over to authenticated requests with no code change. The proxy
- * must reject unsigned/invalid-signature requests once it enforces this, so
- * that the header is what actually blocks unauthenticated ingestion — signing
- * on our side only would be decorative.
- */
-const TELEMETRY_SIGNING_KEY_ENV = 'DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY';
-const TELEMETRY_SIGNING_KEY_ID_ENV = 'DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY_ID';
-const DEFAULT_TELEMETRY_KEY_ID = 'default';
-
-/**
- * Computes the HMAC-SHA256 signature for a signed telemetry request.
- * Exported (pure, no I/O) so it can be unit tested and independently
- * re-derived by the proxy for verification.
- */
-export function computeTelemetrySignature(secret: string, timestamp: string, payload: string): string {
-    return crypto.createHmac('sha256', secret).update(`${timestamp}.${payload}`).digest('hex');
-}
-
-/**
- * Builds the auth headers for a telemetry request body, or {} when no signing
- * key is configured (unsigned — current default behavior, unchanged).
- */
-export function buildTelemetryAuthHeaders(payload: string): Record<string, string> {
-    const key = process.env[TELEMETRY_SIGNING_KEY_ENV];
-    if (!key) {
-        return {};
-    }
-    const keyId = process.env[TELEMETRY_SIGNING_KEY_ID_ENV] || DEFAULT_TELEMETRY_KEY_ID;
-    const timestamp = Date.now().toString();
-    return {
-        'X-DC-Telemetry-Timestamp': timestamp,
-        'X-DC-Telemetry-Key-Id': keyId,
-        'X-DC-Telemetry-Signature': `sha256=${computeTelemetrySignature(key, timestamp, payload)}`,
-    };
-}
+const TELEMETRY_AUTH_TOKEN_ENV = 'DESKTOP_COMMANDER_TELEMETRY_BEARER_TOKEN';
+const MAX_TELEMETRY_PAYLOAD_BYTES = 64 * 1024;
 
 /**
  * Hard kill-switch for telemetry via environment variable.
@@ -184,11 +133,13 @@ export const captureBase = async (captureURL: string, event: string, properties?
             return;
         }
 
-        // Check if telemetry is enabled in config (defaults to true if not set)
+        // Check if telemetry is enabled in config. Missing configuration is
+        // treated as disabled so telemetry cannot become an implicit egress path.
         const telemetryEnabled = await configManager.getValue('telemetryEnabled');
 
-        // If telemetry is explicitly disabled or GA credentials are missing, don't send
-        if (isTelemetryDisabledValue(telemetryEnabled) || !captureURL) {
+        // If telemetry is explicitly disabled or no authenticated transport is
+        // configured, don't send.
+        if (isTelemetryDisabledValue(telemetryEnabled) || !captureURL || !telemetryBearerToken()) {
             return;
         }
 
@@ -494,7 +445,8 @@ const sendToTelemetryProxy = async (event: string, eventProperties: any) => {
     try {
         if (isTelemetryDisabledByEnv()) return;
         const telemetryEnabled = await configManager.getValue('telemetryEnabled');
-        if (isTelemetryDisabledValue(telemetryEnabled)) return;
+        const bearerToken = telemetryBearerToken();
+        if (isTelemetryDisabledValue(telemetryEnabled) || !bearerToken) return;
 
         const payload = JSON.stringify({
             client_id: uniqueUserId,
@@ -505,16 +457,24 @@ const sendToTelemetryProxy = async (event: string, eventProperties: any) => {
             }]
         });
 
-        const sent = await postTelemetryPayload(TELEMETRY_PROXY_URL, payload);
+        if (Buffer.byteLength(payload, 'utf8') > MAX_TELEMETRY_PAYLOAD_BYTES) return;
+
+        const sent = await postTelemetryPayload(TELEMETRY_PROXY_URL, payload, bearerToken);
         if (!sent) {
-            await postTelemetryPayload(TELEMETRY_PROXY_FALLBACK_URL, payload);
+            await postTelemetryPayload(TELEMETRY_PROXY_FALLBACK_URL, payload, bearerToken);
         }
     } catch {
         // Silent fail — telemetry should never break functionality
     }
 };
 
-const postTelemetryPayload = async (endpoint: string, payload: string): Promise<boolean> => {
+/** Exported (pure, no I/O) so the auth-gating logic is directly unit testable. */
+export function telemetryBearerToken(): string | undefined {
+    const token = process.env[TELEMETRY_AUTH_TOKEN_ENV]?.trim();
+    return token && token.length <= 4096 ? token : undefined;
+}
+
+const postTelemetryPayload = async (endpoint: string, payload: string, bearerToken: string): Promise<boolean> => {
     return await new Promise((resolve) => {
         const url = new URL(endpoint);
         const options = {
@@ -525,7 +485,7 @@ const postTelemetryPayload = async (endpoint: string, payload: string): Promise<
             headers: {
                 'Content-Type': 'application/json',
                 'Content-Length': Buffer.byteLength(payload),
-                ...buildTelemetryAuthHeaders(payload),
+                'Authorization': `Bearer ${bearerToken}`
             }
         };
 

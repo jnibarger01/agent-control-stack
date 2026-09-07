@@ -1,14 +1,11 @@
 import assert from 'assert';
-import crypto from 'crypto';
 
 import {
-  computeTelemetrySignature,
-  buildTelemetryAuthHeaders,
+  telemetryBearerToken,
   sanitizeTelemetryProperties,
 } from '../dist/utils/capture.js';
 
-const SIGNING_KEY_ENV = 'DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY';
-const SIGNING_KEY_ID_ENV = 'DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY_ID';
+const TOKEN_ENV = 'DESKTOP_COMMANDER_TELEMETRY_BEARER_TOKEN';
 
 function withEnv(overrides, fn) {
   const previous = {};
@@ -33,67 +30,47 @@ function withEnv(overrides, fn) {
   }
 }
 
-function testUnsignedByDefault() {
-  console.log('\n--- Test: telemetry requests are unsigned when no key is configured ---');
+function testNoTokenByDefault() {
+  console.log('\n--- Test: no bearer token configured means telemetry cannot authenticate ---');
 
-  withEnv({ [SIGNING_KEY_ENV]: undefined, [SIGNING_KEY_ID_ENV]: undefined }, () => {
-    const headers = buildTelemetryAuthHeaders(JSON.stringify({ event: 'test' }));
-    assert.deepStrictEqual(headers, {}, 'no signing key configured must mean no auth headers, and no behavior change');
+  withEnv({ [TOKEN_ENV]: undefined }, () => {
+    assert.strictEqual(telemetryBearerToken(), undefined, 'no token configured must mean no authenticated transport');
   });
 
-  console.log('ok: unsigned by default (no regression)');
+  console.log('ok: unauthenticated by default when no token is configured (send is gated on this)');
 }
 
-function testSignedWhenKeyConfigured() {
-  console.log('\n--- Test: telemetry requests are HMAC-signed once a key is configured ---');
+function testTokenReturnedWhenConfigured() {
+  console.log('\n--- Test: a configured token is returned trimmed ---');
 
-  withEnv({ [SIGNING_KEY_ENV]: 'test-secret', [SIGNING_KEY_ID_ENV]: 'key-42' }, () => {
-    const payload = JSON.stringify({ event: 'server_read_file', client_id: 'abc' });
-    const headers = buildTelemetryAuthHeaders(payload);
-
-    assert.ok(headers['X-DC-Telemetry-Timestamp'], 'timestamp header must be present');
-    assert.strictEqual(headers['X-DC-Telemetry-Key-Id'], 'key-42', 'key id header must reflect configured key id');
-    assert.ok(headers['X-DC-Telemetry-Signature']?.startsWith('sha256='), 'signature header must be sha256-prefixed');
-
-    // Independently re-derive the signature the way a verifying server would,
-    // to prove the header is a real function of (secret, timestamp, payload)
-    // and not just an opaque constant.
-    const timestamp = headers['X-DC-Telemetry-Timestamp'];
-    const expected = crypto.createHmac('sha256', 'test-secret').update(`${timestamp}.${payload}`).digest('hex');
-    assert.strictEqual(headers['X-DC-Telemetry-Signature'], `sha256=${expected}`, 'signature must match independent HMAC computation');
+  withEnv({ [TOKEN_ENV]: '  test-bearer-token-123  ' }, () => {
+    assert.strictEqual(telemetryBearerToken(), 'test-bearer-token-123', 'token must be trimmed');
   });
 
-  console.log('ok: signed when key configured');
+  console.log('ok: token trimmed and returned');
 }
 
-function testSignatureChangesWithPayloadOrSecret() {
-  console.log('\n--- Test: signature is bound to both payload and secret ---');
+function testOversizedTokenRejected() {
+  console.log('\n--- Test: an oversized token is rejected rather than sent ---');
 
-  const timestamp = '1700000000000';
-  const sigA = computeTelemetrySignature('secret-a', timestamp, 'payload-1');
-  const sigB = computeTelemetrySignature('secret-b', timestamp, 'payload-1');
-  const sigC = computeTelemetrySignature('secret-a', timestamp, 'payload-2');
-
-  assert.notStrictEqual(sigA, sigB, 'different secrets must produce different signatures for the same payload');
-  assert.notStrictEqual(sigA, sigC, 'different payloads must produce different signatures for the same secret');
-  assert.strictEqual(
-    computeTelemetrySignature('secret-a', timestamp, 'payload-1'),
-    sigA,
-    'signing must be deterministic for identical (secret, timestamp, payload)'
-  );
-
-  console.log('ok: signature bound to payload and secret');
-}
-
-function testDefaultKeyIdWhenUnset() {
-  console.log('\n--- Test: key id defaults when only the signing key is set ---');
-
-  withEnv({ [SIGNING_KEY_ENV]: 'test-secret', [SIGNING_KEY_ID_ENV]: undefined }, () => {
-    const headers = buildTelemetryAuthHeaders('{}');
-    assert.strictEqual(headers['X-DC-Telemetry-Key-Id'], 'default');
+  withEnv({ [TOKEN_ENV]: 'x'.repeat(4097) }, () => {
+    assert.strictEqual(telemetryBearerToken(), undefined, 'a token over the 4096-char bound must be rejected');
+  });
+  withEnv({ [TOKEN_ENV]: 'x'.repeat(4096) }, () => {
+    assert.strictEqual(telemetryBearerToken(), 'x'.repeat(4096), 'a token exactly at the bound must be accepted');
   });
 
-  console.log('ok: default key id applied');
+  console.log('ok: oversized token rejected, boundary value accepted');
+}
+
+function testEmptyTokenTreatedAsAbsent() {
+  console.log('\n--- Test: an empty/whitespace-only token is treated as not configured ---');
+
+  withEnv({ [TOKEN_ENV]: '   ' }, () => {
+    assert.strictEqual(telemetryBearerToken(), undefined, 'whitespace-only token must not authenticate');
+  });
+
+  console.log('ok: whitespace-only token treated as absent');
 }
 
 function testSensitivePropertiesAreStripped() {
@@ -132,10 +109,10 @@ function testSensitivePropertiesAreStripped() {
 
 export default async function runTests() {
   try {
-    testUnsignedByDefault();
-    testSignedWhenKeyConfigured();
-    testSignatureChangesWithPayloadOrSecret();
-    testDefaultKeyIdWhenUnset();
+    testNoTokenByDefault();
+    testTokenReturnedWhenConfigured();
+    testOversizedTokenRejected();
+    testEmptyTokenTreatedAsAbsent();
     testSensitivePropertiesAreStripped();
 
     console.log('\nTelemetry auth/redaction tests passed.');

@@ -52,7 +52,7 @@ export class ManagedAcsAuthorizationError extends Error {
   }
 }
 
-interface ToolPolicy {
+export interface ManagedToolPolicy {
   scopes: readonly AcsScope[];
   requiresApproval: boolean;
 }
@@ -60,7 +60,7 @@ interface ToolPolicy {
 const FS_READ_POLICY = Object.freeze({ scopes: ['fs.read'] as const, requiresApproval: false });
 const FS_WRITE_POLICY = Object.freeze({ scopes: ['fs.write'] as const, requiresApproval: true });
 const PROCESS_READ_POLICY = Object.freeze({ scopes: ['process.exec'] as const, requiresApproval: false });
-const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = Object.freeze({
+const TOOL_POLICIES: Readonly<Record<string, ManagedToolPolicy>> = Object.freeze({
   get_config: FS_READ_POLICY,
   get_file_info: FS_READ_POLICY,
   get_usage_stats: PROCESS_READ_POLICY,
@@ -79,6 +79,14 @@ const TOOL_POLICIES: Readonly<Record<string, ToolPolicy>> = Object.freeze({
 
 export function isManagedAcsToolName(toolName: string): boolean {
   return Object.prototype.hasOwnProperty.call(TOOL_POLICIES, toolName);
+}
+
+export function getManagedAcsToolPolicy(toolName: string): ManagedToolPolicy | undefined {
+  return TOOL_POLICIES[toolName];
+}
+
+export function listManagedAcsToolPolicies(): Readonly<Record<string, ManagedToolPolicy>> {
+  return TOOL_POLICIES;
 }
 
 const ENVELOPE_KEYS = ['keyId', 'payload', 'signature'];
