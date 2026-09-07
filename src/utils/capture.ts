@@ -1,5 +1,6 @@
 import { platform } from 'os';
 import * as https from 'https';
+import * as crypto from 'crypto';
 import { AsyncLocalStorage } from 'async_hooks';
 import { configManager, isTelemetryDisabledValue } from '../config-manager.js';
 import { currentClient, currentCallIsRemote, currentRemoteClient } from '../server.js';
@@ -34,11 +35,60 @@ let uniqueUserId = 'unknown';
 // --- Telemetry Proxy (direct BigQuery ingestion) ---
 // TODO: Move proxy endpoints, auth header setup, request retry/fallback, and
 // transport code into a dedicated telemetry utility once this migration lands.
-// TODO(security): bearer token was removed, so this endpoint is now unauthenticated.
-// Confirm the proxy enforces rate limiting / payload validation server-side,
-// otherwise anyone can POST arbitrary events straight into BigQuery ingestion.
 const TELEMETRY_PROXY_URL = 'https://telemetry.desktopcommander.app/mp/collect';
 const TELEMETRY_PROXY_FALLBACK_URL = 'https://dc-telemetry-proxy-83847352264.europe-west1.run.app/mp/collect';
+
+/**
+ * Request signing for the telemetry transport.
+ *
+ * The proxy previously accepted an unauthenticated POST from any caller who
+ * knew the URL, which meant anyone could inject arbitrary events straight
+ * into ingestion. This adds HMAC-SHA256 request signing, gated behind an
+ * operator-configured secret:
+ *
+ *   DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY    — shared secret (required to sign)
+ *   DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY_ID — optional key identifier, so the
+ *                                                 proxy can support rotation
+ *
+ * No secret is baked into this repository — none exists here to bake in. When
+ * the env var is unset, requests are sent unsigned exactly as before (no
+ * regression); once the proxy is deployed with the corresponding verification
+ * and a secret is distributed to trusted builds, setting the env var switches
+ * this client over to authenticated requests with no code change. The proxy
+ * must reject unsigned/invalid-signature requests once it enforces this, so
+ * that the header is what actually blocks unauthenticated ingestion — signing
+ * on our side only would be decorative.
+ */
+const TELEMETRY_SIGNING_KEY_ENV = 'DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY';
+const TELEMETRY_SIGNING_KEY_ID_ENV = 'DESKTOP_COMMANDER_TELEMETRY_SIGNING_KEY_ID';
+const DEFAULT_TELEMETRY_KEY_ID = 'default';
+
+/**
+ * Computes the HMAC-SHA256 signature for a signed telemetry request.
+ * Exported (pure, no I/O) so it can be unit tested and independently
+ * re-derived by the proxy for verification.
+ */
+export function computeTelemetrySignature(secret: string, timestamp: string, payload: string): string {
+    return crypto.createHmac('sha256', secret).update(`${timestamp}.${payload}`).digest('hex');
+}
+
+/**
+ * Builds the auth headers for a telemetry request body, or {} when no signing
+ * key is configured (unsigned — current default behavior, unchanged).
+ */
+export function buildTelemetryAuthHeaders(payload: string): Record<string, string> {
+    const key = process.env[TELEMETRY_SIGNING_KEY_ENV];
+    if (!key) {
+        return {};
+    }
+    const keyId = process.env[TELEMETRY_SIGNING_KEY_ID_ENV] || DEFAULT_TELEMETRY_KEY_ID;
+    const timestamp = Date.now().toString();
+    return {
+        'X-DC-Telemetry-Timestamp': timestamp,
+        'X-DC-Telemetry-Key-Id': keyId,
+        'X-DC-Telemetry-Signature': `sha256=${computeTelemetrySignature(key, timestamp, payload)}`,
+    };
+}
 
 /**
  * Hard kill-switch for telemetry via environment variable.
@@ -53,6 +103,37 @@ export function isTelemetryDisabledByEnv(): boolean {
     return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+
+/**
+ * Property-name substrings that are never safe to forward as telemetry,
+ * regardless of what a given call site passes in. Path-like keys are
+ * stripped because paths can reveal usernames/project names; the rest are
+ * defense in depth against a property that happens to carry a credential,
+ * token, or auth header (no current call site sends these, but telemetry
+ * must stay safe even if one is added carelessly later).
+ */
+const SENSITIVE_PROPERTY_KEY_SUBSTRINGS = [
+    'path', 'filePath', 'directory', 'file_path', 'sourcePath', 'destinationPath', 'fullPath', 'rootPath',
+    'token', 'secret', 'password', 'passwd', 'authorization', 'apikey', 'api_key', 'credential', 'cookie', 'bearer',
+] as const;
+
+/**
+ * Strips sensitive properties from a telemetry properties object in place,
+ * returning it. Exported (pure) so redaction coverage can be unit tested
+ * without exercising the network path.
+ */
+export function sanitizeTelemetryProperties<T extends Record<string, unknown>>(properties: T): T {
+    for (const key of Object.keys(properties)) {
+        const lowerKey = key.toLowerCase();
+        if (
+            SENSITIVE_PROPERTY_KEY_SUBSTRINGS.some((sensitiveKey) => lowerKey.includes(sensitiveKey.toLowerCase())) &&
+            lowerKey !== 'fileextension' // keep fileExtension as it's safe
+        ) {
+            delete properties[key as keyof T];
+        }
+    }
+    return properties;
+}
 
 /**
  * Sanitizes error objects to remove potentially sensitive information like file paths
@@ -158,15 +239,8 @@ export const captureBase = async (captureURL: string, event: string, properties?
             }
         }
 
-        // Remove any properties that might contain paths
-        const sensitiveKeys = ['path', 'filePath', 'directory', 'file_path', 'sourcePath', 'destinationPath', 'fullPath', 'rootPath'];
-        for (const key of Object.keys(sanitizedProperties)) {
-            const lowerKey = key.toLowerCase();
-            if (sensitiveKeys.some(sensitiveKey => lowerKey.includes(sensitiveKey)) &&
-                lowerKey !== 'fileextension') { // keep fileExtension as it's safe
-                delete sanitizedProperties[key];
-            }
-        }
+        // Remove any properties that might contain paths, tokens, or other secrets
+        sanitizeTelemetryProperties(sanitizedProperties);
 
         // Is MCP installed with DXT
         let isDXT: string = 'false';
@@ -349,13 +423,7 @@ const buildEventProperties = async (properties?: any) => {
         }
     }
 
-    const sensitiveKeys = ['path', 'filePath', 'directory', 'file_path', 'sourcePath', 'destinationPath', 'fullPath', 'rootPath'];
-    for (const key of Object.keys(sanitizedProperties)) {
-        const lowerKey = key.toLowerCase();
-        if (sensitiveKeys.some(sk => lowerKey.includes(sk)) && lowerKey !== 'fileextension') {
-            delete sanitizedProperties[key];
-        }
-    }
+    sanitizeTelemetryProperties(sanitizedProperties);
 
     let isDXT = 'false';
     if (process.env.MCP_DXT) isDXT = 'true';
@@ -456,7 +524,8 @@ const postTelemetryPayload = async (endpoint: string, payload: string): Promise<
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(payload)
+                'Content-Length': Buffer.byteLength(payload),
+                ...buildTelemetryAuthHeaders(payload),
             }
         };
 
