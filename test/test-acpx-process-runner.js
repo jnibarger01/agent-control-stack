@@ -21,6 +21,25 @@ function isAlive(pid) {
   }
 }
 
+/**
+ * Polls until `pid` is gone or `timeoutMs` elapses. SIGKILL delivery is
+ * asynchronous — the kernel/container scheduler decides how long reaping
+ * takes, which varies a lot across hosts (a few ms on bare Linux, up to
+ * ~2s observed under some sandboxed/virtualized environments). A single
+ * fixed sleep-then-check is therefore inherently flaky: too short and it
+ * false-fails on a slow host, too long and it wastes time on a fast one.
+ * Polling asserts the real invariant (the process eventually dies) without
+ * being tuned to any one host's signal latency.
+ */
+async function waitUntilDead(pid, timeoutMs) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (!isAlive(pid)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return !isAlive(pid);
+}
+
 async function testExitCodeAndStreamsPreserved() {
   const result = await runTypedProcess({
     executable: NODE,
@@ -100,9 +119,10 @@ async function testTimeoutTerminatesWrapperAndGrandchild() {
   const grandchildPid = parseInt(result.stdout.trim(), 10);
   assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0, 'expected a grandchild pid in stdout');
 
-  // Give the SIGKILL escalation a moment to land, then confirm no orphan survives.
-  await new Promise((r) => setTimeout(r, 3000));
-  assert.strictEqual(isAlive(grandchildPid), false, 'grandchild must not be orphaned after timeout kill');
+  // Poll for the SIGKILL escalation to land (see waitUntilDead) rather than
+  // asserting after one fixed sleep, then confirm no orphan survives.
+  const died = await waitUntilDead(grandchildPid, 10000);
+  assert.strictEqual(died, true, 'grandchild must not be orphaned after timeout kill');
   console.log('✓ timeout terminates the wrapper process and its process group (no orphans)');
 }
 

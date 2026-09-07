@@ -18,6 +18,7 @@
  */
 
 import { spawn } from 'child_process';
+import { terminateProcessTree, shouldSpawnAsProcessGroupLeader } from '../utils/process-tree.js';
 
 export interface TypedProcessOptions {
   /** Absolute or PATH-resolved executable name. Never a shell string. */
@@ -91,7 +92,7 @@ export function runTypedProcess(options: TypedProcessOptions): Promise<TypedProc
         shell: false,
         // Own process group on POSIX so we can terminate the whole tree
         // (the child plus anything it spawns) instead of leaving orphans.
-        detached: process.platform !== 'win32',
+        detached: shouldSpawnAsProcessGroupLeader(),
         env: env ?? process.env,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -108,24 +109,7 @@ export function runTypedProcess(options: TypedProcessOptions): Promise<TypedProc
 
     const terminate = (signalToSend: NodeJS.Signals) => {
       if (child.pid === undefined) return;
-      try {
-        if (process.platform !== 'win32') {
-          // Negative pid targets the whole process group we created via detached:true.
-          process.kill(-child.pid, signalToSend);
-        } else {
-          // Node cannot signal a Windows process group. taskkill /T terminates
-          // the complete descendant tree; /F is required for deterministic
-          // timeout/cancellation cleanup.
-          const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
-            shell: false,
-            windowsHide: true,
-            stdio: 'ignore',
-          });
-          killer.on('error', () => child.kill(signalToSend));
-        }
-      } catch {
-        // Process may have already exited between the check and the kill.
-      }
+      terminateProcessTree(child.pid, signalToSend);
     };
 
     const killDeadline = (reason: 'timeout' | 'abort') => {

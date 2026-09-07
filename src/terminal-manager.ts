@@ -5,6 +5,7 @@ import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
 import { configManager } from './config-manager.js';
 import {capture} from "./utils/capture.js";
 import { analyzeProcessState } from './utils/process-detection.js';
+import { terminateProcessTree, shouldSpawnAsProcessGroupLeader } from './utils/process-tree.js';
 
 /**
  * Standard Windows PATHEXT value, used to repair a corrupted PATHEXT before
@@ -209,7 +210,11 @@ export class TerminalManager {
           ...process.env,
           TERM: 'xterm-256color'  // Better terminal compatibility
         },
-        windowsHide: true  // Prevent visible console windows on Windows
+        windowsHide: true,  // Prevent visible console windows on Windows
+        // Own process group on POSIX so forceTerminate() can reach the whole
+        // tree (e.g. a pipeline or a REPL's own children), not just this
+        // direct child — otherwise killing the shell orphans its descendants.
+        detached: shouldSpawnAsProcessGroupLeader(),
       };
 
       // Add shell option if needed (for unknown shells)
@@ -229,7 +234,8 @@ export class TerminalManager {
           ...process.env,
           TERM: 'xterm-256color'
         },
-        windowsHide: true  // Prevent visible console windows on Windows
+        windowsHide: true,  // Prevent visible console windows on Windows
+        detached: shouldSpawnAsProcessGroupLeader(),
       };
     }
 
@@ -501,13 +507,33 @@ export class TerminalManager {
     // Enforce the per-session cap by evicting the oldest lines. Keeps the
     // buffer far below V8's max string length so concatenation and join()
     // can never throw "Invalid string length" and kill the server.
-    while (session.bufferedChars > MAX_BUFFERED_OUTPUT_CHARS && session.outputLines.length > 1) {
-      const dropped = session.outputLines.shift()!;
-      const droppedJoinedChars = dropped.length + 1; // +1 for its join separator
-      session.bufferedChars -= droppedJoinedChars;
-      session.evictedChars += droppedJoinedChars;
-      session.evictedLines++;
-      if (session.lastReadIndex > 0) session.lastReadIndex--;
+    //
+    // Evicting one line at a time via Array.prototype.shift() is O(current
+    // array length) per call (V8 arrays are not a deque), which makes
+    // trimming back to the cap O(evicted x length) overall — a process
+    // emitting many small lines fast can make a single burst of output block
+    // this (single-threaded) event loop for many seconds even though memory
+    // stays bounded (measured: ~18s to shift 100k times off a ~500k-element
+    // array). Count how many oldest lines must go first, then remove them
+    // all in one splice() — O(length) total, not O(evicted x length).
+    let evictCount = 0;
+    let projectedBufferedChars = session.bufferedChars;
+    let evictedCharsThisPass = 0;
+    while (
+      projectedBufferedChars > MAX_BUFFERED_OUTPUT_CHARS &&
+      session.outputLines.length - evictCount > 1
+    ) {
+      const droppedJoinedChars = session.outputLines[evictCount].length + 1; // +1 for its join separator
+      projectedBufferedChars -= droppedJoinedChars;
+      evictedCharsThisPass += droppedJoinedChars;
+      evictCount++;
+    }
+    if (evictCount > 0) {
+      session.outputLines.splice(0, evictCount);
+      session.bufferedChars = projectedBufferedChars;
+      session.evictedChars += evictedCharsThisPass;
+      session.evictedLines += evictCount;
+      session.lastReadIndex = Math.max(0, session.lastReadIndex - evictCount);
     }
   }
 
@@ -728,10 +754,10 @@ export class TerminalManager {
     }
 
     try {
-        session.process.kill('SIGINT');
+        terminateProcessTree(pid, 'SIGINT');
         setTimeout(() => {
           if (this.sessions.has(pid)) {
-            session.process.kill('SIGKILL');
+            terminateProcessTree(pid, 'SIGKILL');
           }
         }, 1000);
         return true;

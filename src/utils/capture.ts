@@ -34,9 +34,6 @@ let uniqueUserId = 'unknown';
 // --- Telemetry Proxy (direct BigQuery ingestion) ---
 // TODO: Move proxy endpoints, auth header setup, request retry/fallback, and
 // transport code into a dedicated telemetry utility once this migration lands.
-// TODO(security): bearer token was removed, so this endpoint is now unauthenticated.
-// Confirm the proxy enforces rate limiting / payload validation server-side,
-// otherwise anyone can POST arbitrary events straight into BigQuery ingestion.
 const TELEMETRY_PROXY_URL = 'https://telemetry.desktopcommander.app/mp/collect';
 const TELEMETRY_PROXY_FALLBACK_URL = 'https://dc-telemetry-proxy-83847352264.europe-west1.run.app/mp/collect';
 const TELEMETRY_AUTH_TOKEN_ENV = 'DESKTOP_COMMANDER_TELEMETRY_BEARER_TOKEN';
@@ -55,6 +52,37 @@ export function isTelemetryDisabledByEnv(): boolean {
     return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
+
+/**
+ * Property-name substrings that are never safe to forward as telemetry,
+ * regardless of what a given call site passes in. Path-like keys are
+ * stripped because paths can reveal usernames/project names; the rest are
+ * defense in depth against a property that happens to carry a credential,
+ * token, or auth header (no current call site sends these, but telemetry
+ * must stay safe even if one is added carelessly later).
+ */
+const SENSITIVE_PROPERTY_KEY_SUBSTRINGS = [
+    'path', 'filePath', 'directory', 'file_path', 'sourcePath', 'destinationPath', 'fullPath', 'rootPath',
+    'token', 'secret', 'password', 'passwd', 'authorization', 'apikey', 'api_key', 'credential', 'cookie', 'bearer',
+] as const;
+
+/**
+ * Strips sensitive properties from a telemetry properties object in place,
+ * returning it. Exported (pure) so redaction coverage can be unit tested
+ * without exercising the network path.
+ */
+export function sanitizeTelemetryProperties<T extends Record<string, unknown>>(properties: T): T {
+    for (const key of Object.keys(properties)) {
+        const lowerKey = key.toLowerCase();
+        if (
+            SENSITIVE_PROPERTY_KEY_SUBSTRINGS.some((sensitiveKey) => lowerKey.includes(sensitiveKey.toLowerCase())) &&
+            lowerKey !== 'fileextension' // keep fileExtension as it's safe
+        ) {
+            delete properties[key as keyof T];
+        }
+    }
+    return properties;
+}
 
 /**
  * Sanitizes error objects to remove potentially sensitive information like file paths
@@ -162,15 +190,8 @@ export const captureBase = async (captureURL: string, event: string, properties?
             }
         }
 
-        // Remove any properties that might contain paths
-        const sensitiveKeys = ['path', 'filePath', 'directory', 'file_path', 'sourcePath', 'destinationPath', 'fullPath', 'rootPath'];
-        for (const key of Object.keys(sanitizedProperties)) {
-            const lowerKey = key.toLowerCase();
-            if (sensitiveKeys.some(sensitiveKey => lowerKey.includes(sensitiveKey)) &&
-                lowerKey !== 'fileextension') { // keep fileExtension as it's safe
-                delete sanitizedProperties[key];
-            }
-        }
+        // Remove any properties that might contain paths, tokens, or other secrets
+        sanitizeTelemetryProperties(sanitizedProperties);
 
         // Is MCP installed with DXT
         let isDXT: string = 'false';
@@ -353,13 +374,7 @@ const buildEventProperties = async (properties?: any) => {
         }
     }
 
-    const sensitiveKeys = ['path', 'filePath', 'directory', 'file_path', 'sourcePath', 'destinationPath', 'fullPath', 'rootPath'];
-    for (const key of Object.keys(sanitizedProperties)) {
-        const lowerKey = key.toLowerCase();
-        if (sensitiveKeys.some(sk => lowerKey.includes(sk)) && lowerKey !== 'fileextension') {
-            delete sanitizedProperties[key];
-        }
-    }
+    sanitizeTelemetryProperties(sanitizedProperties);
 
     let isDXT = 'false';
     if (process.env.MCP_DXT) isDXT = 'true';
@@ -453,7 +468,8 @@ const sendToTelemetryProxy = async (event: string, eventProperties: any) => {
     }
 };
 
-function telemetryBearerToken(): string | undefined {
+/** Exported (pure, no I/O) so the auth-gating logic is directly unit testable. */
+export function telemetryBearerToken(): string | undefined {
     const token = process.env[TELEMETRY_AUTH_TOKEN_ENV]?.trim();
     return token && token.length <= 4096 ? token : undefined;
 }

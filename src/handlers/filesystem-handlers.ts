@@ -79,7 +79,7 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
     const HANDLER_TIMEOUT = 3.5 * 60 * 1000; // 3m30s
     // Add input validation
     if (args === null || args === undefined) {
-        return createErrorResponse('No arguments provided for read_file command');
+        return createErrorResponse('No arguments provided for read_file command', { causeCategory: 'validation' });
     }
     const readFileOperation = async () => {
         const parsed = ReadFileArgsSchema.parse(args);
@@ -87,7 +87,7 @@ export async function handleReadFile(args: unknown): Promise<ServerResult> {
         // Get the configuration for file read limits
         const config = await configManager.getConfig();
         if (!config) {
-            return createErrorResponse('Configuration not available');
+            return createErrorResponse('Configuration not available', { causeCategory: 'internal', retryable: true });
         }
 
         const defaultLimit = config.fileReadLineLimit ?? 1000;

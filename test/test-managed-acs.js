@@ -326,6 +326,26 @@ for (const [code, envelope] of rejectionCases) {
   );
 }
 
+// Tool registration/policy drift: a tool name that exists nowhere in
+// TOOL_POLICIES (e.g. newly added to schemas.ts without a matching ACS
+// policy entry yet, or simply invented by a hostile caller) must be denied
+// by default rather than silently authorized — TOOL_POLICIES is an
+// allowlist, not a denylist, so an unrecognized tool name always fails
+// closed regardless of how well-formed and correctly signed the rest of
+// the capability envelope is.
+{
+  const unregisteredToolArgs = { path: '/safe/example.txt' };
+  assert.throws(
+    () => guard.authorize(
+      'totally_unregistered_tool',
+      unregisteredToolArgs,
+      { acsCapability: sign(payload({ toolName: 'totally_unregistered_tool', normalizedArguments: unregisteredToolArgs })) },
+    ),
+    (error) => error instanceof ManagedAcsAuthorizationError && error.code === 'ACS_CAPABILITY_SCOPE_MISMATCH',
+    'a tool with no TOOL_POLICIES entry must fail closed, not authorize by default',
+  );
+}
+
 const writeArgs = { path: '/safe/example.txt', content: 'test' };
 const writeBase = payload({
   toolName: 'write_file',
