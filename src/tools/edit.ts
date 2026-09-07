@@ -415,7 +415,7 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
         handler = await getFileHandler(validatedPath);
     } catch (error) {
         const errorMessage = error instanceof Error ? error.message : String(error);
-        return createErrorResponse(errorMessage);
+        return createErrorResponse(errorMessage, { causeCategory: 'permission' });
     }
 
     const hasEditRange = 'editRange' in handler && typeof handler.editRange === 'function';
@@ -457,12 +457,12 @@ export async function handleEditBlock(args: unknown): Promise<ServerResult> {
             }
         }
 
-        return createErrorResponse(`Range-based editing not supported for ${parsed.file_path}. For text files, use old_string and new_string parameters instead. If your client requires range/content parameters, set them to empty strings ("").`);
+        return createErrorResponse(`Range-based editing not supported for ${parsed.file_path}. For text files, use old_string and new_string parameters instead. If your client requires range/content parameters, set them to empty strings ("").`, { causeCategory: 'validation' });
     }
 
     // Path 2: Text replacement — old_string + new_string
     if (parsed.old_string === undefined || parsed.new_string === undefined) {
-        return createErrorResponse(`Text replacement requires both old_string and new_string parameters`);
+        return createErrorResponse(`Text replacement requires both old_string and new_string parameters`, { causeCategory: 'validation' });
     }
 
     // If the handler implements editRange it owns text-replacement for its file type

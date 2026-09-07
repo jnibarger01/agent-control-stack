@@ -5,6 +5,7 @@ import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
 import { configManager } from './config-manager.js';
 import {capture} from "./utils/capture.js";
 import { analyzeProcessState } from './utils/process-detection.js';
+import { terminateProcessTree, shouldSpawnAsProcessGroupLeader } from './utils/process-tree.js';
 
 /**
  * Standard Windows PATHEXT value, used to repair a corrupted PATHEXT before
@@ -209,7 +210,11 @@ export class TerminalManager {
           ...process.env,
           TERM: 'xterm-256color'  // Better terminal compatibility
         },
-        windowsHide: true  // Prevent visible console windows on Windows
+        windowsHide: true,  // Prevent visible console windows on Windows
+        // Own process group on POSIX so forceTerminate() can reach the whole
+        // tree (e.g. a pipeline or a REPL's own children), not just this
+        // direct child — otherwise killing the shell orphans its descendants.
+        detached: shouldSpawnAsProcessGroupLeader(),
       };
 
       // Add shell option if needed (for unknown shells)
@@ -229,7 +234,8 @@ export class TerminalManager {
           ...process.env,
           TERM: 'xterm-256color'
         },
-        windowsHide: true  // Prevent visible console windows on Windows
+        windowsHide: true,  // Prevent visible console windows on Windows
+        detached: shouldSpawnAsProcessGroupLeader(),
       };
     }
 
@@ -728,10 +734,10 @@ export class TerminalManager {
     }
 
     try {
-        session.process.kill('SIGINT');
+        terminateProcessTree(pid, 'SIGINT');
         setTimeout(() => {
           if (this.sessions.has(pid)) {
-            session.process.kill('SIGKILL');
+            terminateProcessTree(pid, 'SIGKILL');
           }
         }, 1000);
         return true;
