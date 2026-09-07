@@ -95,7 +95,7 @@ export function createPortfolioClient(config: PortfolioClientConfig): PortfolioC
     } finally {
       clearTimeout(timer);
     }
-    let body: unknown = null;
+    let body: unknown;
     try {
       body = await response.json();
     } catch {
