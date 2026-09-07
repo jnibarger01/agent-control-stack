@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getRuntimeIdentityState, type RuntimeIdentityState } from './runtime-identity.js';
 import { FIXED_ACS_SCOPES, type DesktopCommanderExecutionMode } from './managed-acs.js';
+import { RuntimeExecutionError } from './runtime/errors.js';
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 15_000;
 const DEFAULT_HEALTH_TIMEOUT_MS = 5_000;
@@ -44,9 +45,13 @@ export interface LocalMcpRuntimeHealth {
   error?: { code: string; message: string };
 }
 
-export class LocalMcpRuntimeError extends Error {
-  constructor(public readonly code: string, message: string, public readonly cause?: unknown) {
-    super(message);
+export class LocalMcpRuntimeError extends RuntimeExecutionError {
+  constructor(public readonly code: string, message: string, cause?: unknown) {
+    super(code, message, {
+      cause,
+      retryable: code === 'STARTUP_FAILED' || code === 'STARTUP_TIMEOUT' || code === 'HEALTH_TIMEOUT',
+      causeCategory: code.includes('TIMEOUT') ? 'timeout' : code.includes('STARTUP') ? 'transport' : 'unknown',
+    });
     this.name = 'LocalMcpRuntimeError';
   }
 }

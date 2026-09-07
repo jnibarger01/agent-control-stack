@@ -114,6 +114,7 @@ try {
   assert.equal(failedHealth.ok, false);
   assert.equal(failedHealth.state, 'failed');
   assert.equal(failedHealth.error?.code, 'STARTUP_TIMEOUT');
+  assert.equal(failedHealth.error?.message.includes('timed out'), true);
   await hanging.shutdown();
   if (process.platform !== 'win32') {
     const afterTimeout = await waitForChildCount(before.length);
