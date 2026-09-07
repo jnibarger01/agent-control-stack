@@ -121,7 +121,9 @@ export class LocalMcpRuntime {
     if (this.startPromise) return this.startPromise;
 
     this.state = 'starting';
-    this.startPromise = this.startInternal();
+    this.startPromise = this.startInternal().finally(() => {
+      this.startPromise = null;
+    });
     return this.startPromise;
   }
 

@@ -119,6 +119,24 @@ try {
     assert.equal(afterTimeout.length, before.length, `timed-out child must be reaped, before=${before} after=${afterTimeout}`);
   }
 
+  const retryCwd = path.join(root, 'retry-cwd');
+  const retryable = createLocalMcpRuntime({
+    cwd: retryCwd,
+    startupTimeoutMs: 2_000,
+    shutdownTimeoutMs: 2_000,
+    env: { DESKTOP_COMMANDER_STATE_DIR: path.join(root, 'retry-state') },
+  });
+  await assert.rejects(
+    () => retryable.start(),
+    (error) => error?.code === 'STARTUP_FAILED',
+    'a missing child cwd must fail startup without making the runtime permanently unretryable',
+  );
+  await fs.mkdir(retryCwd);
+  await retryable.start();
+  const retryHealth = await retryable.health();
+  assert.equal(retryHealth.ok, true, JSON.stringify(retryHealth));
+  await retryable.shutdown();
+
   const interrupted = createLocalMcpRuntime({
     mode: 'standalone',
     startupTimeoutMs: 15_000,
