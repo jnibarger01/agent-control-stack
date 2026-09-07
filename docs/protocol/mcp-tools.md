@@ -192,6 +192,38 @@ Backed by `createWorkItemTools` (`packages/policy-gate/src/tools.ts`) over a `Wo
 
 Remote (HTTP/OAuth) callers get `remoteMcpToolNames`: everything below except `approve_work_item`. Calling `approve_work_item` over MCP — local or remote — is unconditionally rejected with JSON-RPC error `-32002` ("MCP identities cannot grant approval"); approval must go through an authenticated gateway mutation actor via `/work-items/:id/approve`, per [ADR 0004](../adr/0004-request-bound-approval-tokens.md).
 
+### Visualizer portfolio intelligence (read-only)
+
+The gateway exposes seven `portfolio.*` MCP tools that consume only the Visualizer
+loopback HTTP API. ACS does not hold GitHub credentials, does not call GitHub,
+and does not interpret raw GitHub payloads. V1 GitHub writes are denied; any
+future V2 mutation must be a separate approved work-item path after Visualizer's
+seven-day proving window is eligible.
+
+Configuration:
+
+- `ACS_PORTFOLIO_BASE_URL` must be a loopback `http://127.0.0.1` or
+  `http://localhost` Visualizer origin. If it is absent or not loopback, the
+  tools remain advertised and return `PORTFOLIO_UNAVAILABLE`.
+- These tools use the existing `acs:work:read` scope.
+- Annotations: `readOnlyHint: true`, `destructiveHint: false`,
+  `openWorldHint: false`.
+
+| Tool                                | Input                             | Visualizer route                                    |
+| ----------------------------------- | --------------------------------- | --------------------------------------------------- |
+| `portfolio.get_summary`             | `{}`                              | `GET /api/v1/portfolio`                             |
+| `portfolio.list_repositories`       | `{ status?, lifecycle?, limit? }` | `GET /api/v1/portfolio/repositories`                |
+| `portfolio.list_attention_required` | `{ limit? }`                      | `GET /api/v1/portfolio/attention`                   |
+| `portfolio.get_repository`          | `{ repository }` as `owner/repo`  | `GET /api/v1/portfolio/repositories/{owner}/{repo}` |
+| `portfolio.list_failures`           | `{ limit? }`                      | `GET /api/v1/portfolio/failures`                    |
+| `portfolio.list_pending_work`       | `{ limit? }`                      | `GET /api/v1/portfolio/pending-work`                |
+| `portfolio.list_recent_progress`    | `{ limit? }`                      | `GET /api/v1/portfolio/activity`                    |
+
+V2 placeholder: GitHub issue/PR comments, labels, assignment, and other write
+actions are out of scope until Visualizer reports
+`proving.eligibleForV2 === true`. No ACS tool may call a GitHub mutation
+endpoint.
+
 ### `create_work_item`
 
 ```json

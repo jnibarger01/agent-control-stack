@@ -368,6 +368,198 @@
       }
     },
     {
+      "name": "portfolio.get_summary",
+      "exposure": "remote",
+      "description": "Read the Visualizer GitHub portfolio summary. This never mutates GitHub.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "portfolio.list_repositories",
+      "exposure": "remote",
+      "description": "List persisted GitHub portfolio repositories from Visualizer. This never mutates GitHub.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "HEALTHY",
+              "ATTENTION",
+              "BLOCKED",
+              "UNKNOWN",
+              "ARCHIVED"
+            ]
+          },
+          "lifecycle": {
+            "type": "string",
+            "enum": [
+              "ACTIVE",
+              "MAINTENANCE",
+              "EXPERIMENTAL",
+              "DORMANT",
+              "ARCHIVED",
+              "UNKNOWN"
+            ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "portfolio.list_attention_required",
+      "exposure": "remote",
+      "description": "List ranked GitHub portfolio attention items from Visualizer. This never mutates GitHub.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "portfolio.get_repository",
+      "exposure": "remote",
+      "description": "Read one persisted GitHub portfolio repository from Visualizer. This never mutates GitHub.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "repository": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+\\/[A-Za-z0-9_.-]+$"
+          }
+        },
+        "required": [
+          "repository"
+        ],
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "portfolio.list_failures",
+      "exposure": "remote",
+      "description": "List recent GitHub portfolio CI failures from Visualizer. This never mutates GitHub.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "portfolio.list_pending_work",
+      "exposure": "remote",
+      "description": "List pending GitHub pull requests and issues from Visualizer. This never mutates GitHub.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "portfolio.list_recent_progress",
+      "exposure": "remote",
+      "description": "List recent GitHub portfolio progress events from Visualizer. This never mutates GitHub.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
       "name": "test.agent.run",
       "exposure": "development_only",
       "description": "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.",
