@@ -73,6 +73,7 @@ import { GatewayMetrics } from "./metrics.js";
 import { gatewayListenConfig } from "./runtime-config.js";
 import { DeviceAuthStore } from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
+import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-client.js";
 
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
@@ -118,6 +119,7 @@ export interface GatewayOptions {
   moa?: MoaGatewayOverrides | false;
   rateLimit?: RateLimitOptions;
   maxPendingWorkItems?: number;
+  portfolioClient?: PortfolioClient;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -140,6 +142,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const rateLimiter = new SlidingWindowRateLimiter(options.rateLimit ?? resolveRateLimitFromEnv());
   const maxPendingWorkItems = options.maxPendingWorkItems ?? resolveMaxPendingWorkItemsFromEnv();
   const metrics = new GatewayMetrics();
+  const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const requestStartTimes = new WeakMap<object, number>();
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
   const acpAdapter =
@@ -473,7 +476,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       auditAuthenticatedRequest: recordAuthenticatedMcpRequest,
       auditLocalAgentEvent: recordLocalAgentEvent,
       resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth),
-      maxPendingWorkItems
+      maxPendingWorkItems,
+      portfolioClient
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);

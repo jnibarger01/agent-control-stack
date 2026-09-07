@@ -13,6 +13,11 @@ import {
 } from "@agent-control-stack/work-items";
 import { z } from "zod";
 import { MCP_SCOPES, type McpScope } from "./auth.js";
+import {
+  portfolioGetRepositoryInputSchema,
+  portfolioLimitInputSchema,
+  portfolioListRepositoriesInputSchema
+} from "./portfolio-client.js";
 
 export { createWorkItemSchema, listWorkItemsSchema, submitWorkResultSchema };
 
@@ -126,11 +131,26 @@ export const jsonRpcRequestSchema = z.object({
 
 export const directAgentToolName = "test.agent.run" as const;
 export const dashboardToolNames = ["open_acs_dashboard", "get_execution_detail"] as const;
-export const mcpToolNames = [...workItemToolNames, ...dashboardToolNames, directAgentToolName] as const;
+export const portfolioToolNames = [
+  "portfolio.get_summary",
+  "portfolio.list_repositories",
+  "portfolio.list_attention_required",
+  "portfolio.get_repository",
+  "portfolio.list_failures",
+  "portfolio.list_pending_work",
+  "portfolio.list_recent_progress"
+] as const;
+export const mcpToolNames = [
+  ...workItemToolNames,
+  ...dashboardToolNames,
+  ...portfolioToolNames,
+  directAgentToolName
+] as const;
 export type McpToolName = (typeof mcpToolNames)[number];
 export const remoteMcpToolNames = [
   ...workItemToolNames.filter((name) => name !== "approve_work_item"),
-  ...dashboardToolNames
+  ...dashboardToolNames,
+  ...portfolioToolNames
 ];
 
 export const toolsCallParamsSchema = z.object({
@@ -158,6 +178,13 @@ export const gatewayMcpInputSchemas = {
   cancel_work_item: reasonSchema,
   open_acs_dashboard: z.object({}),
   get_execution_detail: idSchema,
+  "portfolio.get_summary": z.object({}).strict(),
+  "portfolio.list_repositories": portfolioListRepositoriesInputSchema,
+  "portfolio.list_attention_required": portfolioLimitInputSchema,
+  "portfolio.get_repository": portfolioGetRepositoryInputSchema,
+  "portfolio.list_failures": portfolioLimitInputSchema,
+  "portfolio.list_pending_work": portfolioLimitInputSchema,
+  "portfolio.list_recent_progress": portfolioLimitInputSchema,
   [directAgentToolName]: directAgentInputSchema
 } satisfies Record<McpToolName, z.ZodType>;
 
@@ -170,6 +197,13 @@ export function mcpRequiredScopes(name: McpToolName): McpScope[] {
     case "list_work_items":
     case "open_acs_dashboard":
     case "get_execution_detail":
+    case "portfolio.get_summary":
+    case "portfolio.list_repositories":
+    case "portfolio.list_attention_required":
+    case "portfolio.get_repository":
+    case "portfolio.list_failures":
+    case "portfolio.list_pending_work":
+    case "portfolio.list_recent_progress":
       return ["acs:work:read"];
     case "approve_work_item":
     case "unblock_work_item":
@@ -186,6 +220,13 @@ export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
     case "list_work_items":
     case "open_acs_dashboard":
     case "get_execution_detail":
+    case "portfolio.get_summary":
+    case "portfolio.list_repositories":
+    case "portfolio.list_attention_required":
+    case "portfolio.get_repository":
+    case "portfolio.list_failures":
+    case "portfolio.list_pending_work":
+    case "portfolio.list_recent_progress":
       return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
     case "cancel_work_item":
     case "reject_work_item":
@@ -218,6 +259,20 @@ export function mcpToolDescription(name: McpToolName): string {
       return "Reject a work item through a distinct terminal denial state.";
     case "cancel_work_item":
       return "Cancel a work item through the work-item state machine.";
+    case "portfolio.get_summary":
+      return "Read the Visualizer GitHub portfolio summary. This never mutates GitHub.";
+    case "portfolio.list_repositories":
+      return "List persisted GitHub portfolio repositories from Visualizer. This never mutates GitHub.";
+    case "portfolio.list_attention_required":
+      return "List ranked GitHub portfolio attention items from Visualizer. This never mutates GitHub.";
+    case "portfolio.get_repository":
+      return "Read one persisted GitHub portfolio repository from Visualizer. This never mutates GitHub.";
+    case "portfolio.list_failures":
+      return "List recent GitHub portfolio CI failures from Visualizer. This never mutates GitHub.";
+    case "portfolio.list_pending_work":
+      return "List pending GitHub pull requests and issues from Visualizer. This never mutates GitHub.";
+    case "portfolio.list_recent_progress":
+      return "List recent GitHub portfolio progress events from Visualizer. This never mutates GitHub.";
   }
 }
 

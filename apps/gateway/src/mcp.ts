@@ -17,6 +17,7 @@ import {
   executionDetail
 } from "./chatgpt-dashboard.js";
 import { chatgptDashboardWidgetHtml } from "./chatgpt-dashboard-widget.generated.js";
+import { createUnavailablePortfolioClient, type PortfolioClient } from "./portfolio-client.js";
 import {
   directAgentToolName,
   gatewayMcpInputSchemas,
@@ -25,6 +26,7 @@ import {
   mcpRequiredScopes,
   mcpToolAnnotations,
   mcpToolDescription,
+  portfolioToolNames,
   remoteMcpToolNames,
   toolsCallParamsSchema,
   type McpToolName
@@ -36,7 +38,11 @@ type DirectAgentToolName = typeof directAgentToolName;
 type JsonRpcId = string | number | null;
 
 export interface GatewayDirectAgentController {
-  callTool(name: DirectAgentToolName, args: unknown, context?: { requestHash: string; actor: string }): Promise<unknown> | unknown;
+  callTool(
+    name: DirectAgentToolName,
+    args: unknown,
+    context?: { requestHash: string; actor: string }
+  ): Promise<unknown> | unknown;
 }
 
 export interface LocalAgentAuditEvent {
@@ -98,6 +104,7 @@ export async function handleMcpHttpRequest(input: {
   auditLocalAgentEvent?: (event: LocalAgentAuditEvent) => void;
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
   maxPendingWorkItems?: number;
+  portfolioClient?: PortfolioClient;
 }): Promise<McpHttpResult> {
   const request = jsonRpcRequestSchema.safeParse(input.body);
   if (!request.success) {
@@ -156,7 +163,8 @@ export async function handleMcpHttpRequest(input: {
         auditAuthenticatedRequest: input.auditAuthenticatedRequest,
         auditLocalAgentEvent: input.auditLocalAgentEvent,
         resolveActorId: input.resolveActorId,
-        maxPendingWorkItems: input.maxPendingWorkItems
+        maxPendingWorkItems: input.maxPendingWorkItems,
+        portfolioClient: input.portfolioClient
       });
     default:
       return handleProtectedUnsupportedMethod({
@@ -214,6 +222,7 @@ async function handleToolsCall(input: {
   auditLocalAgentEvent?: (event: LocalAgentAuditEvent) => void;
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
   maxPendingWorkItems?: number;
+  portfolioClient?: PortfolioClient;
 }): Promise<McpHttpResult> {
   const parsed = toolsCallParamsSchema.safeParse(input.params);
   if (!parsed.success) {
@@ -260,20 +269,23 @@ async function handleToolsCall(input: {
     return jsonRpcError(input.id, -32001, "MCP actor is not registered", 403);
   }
   if (parsed.data.name === "create_work_item" && input.maxPendingWorkItems !== undefined) {
-    const pending = input.store.list().filter((workItem) =>
-      ["draft", "pending_policy", "needs_approval", "approved", "running"].includes(workItem.status)
-    ).length;
+    const pending = input.store
+      .list()
+      .filter((workItem) =>
+        ["draft", "pending_policy", "needs_approval", "approved", "running"].includes(workItem.status)
+      ).length;
     if (pending >= input.maxPendingWorkItems) {
       return jsonRpcError(input.id, -32029, "pending work-item limit reached", 429);
     }
   }
   try {
-    const localAgent = parsed.data.name === directAgentToolName
-      ? {
-          agentId: directAgentId(parsed.data.arguments),
-          requestHash: directAgentRequestHash(parsed.data.arguments, actor, authorization.auth.scopes)
-        }
-      : undefined;
+    const localAgent =
+      parsed.data.name === directAgentToolName
+        ? {
+            agentId: directAgentId(parsed.data.arguments),
+            requestHash: directAgentRequestHash(parsed.data.arguments, actor, authorization.auth.scopes)
+          }
+        : undefined;
     if (localAgent) {
       input.auditLocalAgentEvent?.({
         eventType: "authorization",
@@ -297,6 +309,7 @@ async function handleToolsCall(input: {
       tools: input.tools,
       store: input.store,
       directAgentController: input.directAgentController,
+      portfolioClient: input.portfolioClient ?? createUnavailablePortfolioClient(),
       name: parsed.data.name,
       args: parsed.data.arguments ?? {},
       auth: authorization.auth,
@@ -409,6 +422,7 @@ async function callMcpTool(input: {
   tools: GatewayWorkItemTools;
   store: WorkItemStore;
   directAgentController?: GatewayDirectAgentController;
+  portfolioClient: PortfolioClient;
   name: McpToolName;
   args: unknown;
   auth: McpAuthenticatedRequest;
@@ -429,6 +443,9 @@ async function callMcpTool(input: {
     const detail = executionDetail(input.store, id);
     if (!detail) throw new ControlStackError("work_item_not_found", "work item not found");
     return detail;
+  }
+  if (isPortfolioTool(input.name)) {
+    return callPortfolioTool(input.portfolioClient, input.name, input.args);
   }
 
   return callGatewayTool(input.tools, input.name, input.args, input.auth, input.actor);
@@ -513,7 +530,36 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
 
 function isMutatingTool(name: McpToolName): boolean {
   if (name === directAgentToolName) return true;
+  if (isPortfolioTool(name)) return false;
   return !["get_work_item", "list_work_items", "open_acs_dashboard", "get_execution_detail"].includes(name);
+}
+
+function isPortfolioTool(name: McpToolName): name is (typeof portfolioToolNames)[number] {
+  return (portfolioToolNames as readonly string[]).includes(name);
+}
+
+async function callPortfolioTool(
+  client: PortfolioClient,
+  name: (typeof portfolioToolNames)[number],
+  args: unknown
+): Promise<unknown> {
+  const parsed = gatewayMcpInputSchemas[name].parse(args ?? {});
+  switch (name) {
+    case "portfolio.get_summary":
+      return client.getSummary();
+    case "portfolio.list_repositories":
+      return client.listRepositories(parsed as Parameters<PortfolioClient["listRepositories"]>[0]);
+    case "portfolio.list_attention_required":
+      return client.listAttentionRequired(parsed as Parameters<PortfolioClient["listAttentionRequired"]>[0]);
+    case "portfolio.get_repository":
+      return client.getRepository(parsed as Parameters<PortfolioClient["getRepository"]>[0]);
+    case "portfolio.list_failures":
+      return client.listFailures(parsed as Parameters<PortfolioClient["listFailures"]>[0]);
+    case "portfolio.list_pending_work":
+      return client.listPendingWork(parsed as Parameters<PortfolioClient["listPendingWork"]>[0]);
+    case "portfolio.list_recent_progress":
+      return client.listRecentProgress(parsed as Parameters<PortfolioClient["listRecentProgress"]>[0]);
+  }
 }
 
 function directAgentId(input: unknown): string {

@@ -12,7 +12,8 @@ paths = [
   '''(^|/)packages/execution-controller/src/index\.test\.ts$''',
   '''(^|/)packages/agentos-contracts/test/trace\.test\.js$''',
   '''(^|/)packages/work-items/src/validation\.test\.ts$''',
-  '''(^|/)scripts/test_autonomous_agent\.py$'''
+  '''(^|/)scripts/test_autonomous_agent\.py$''',
+  '''(^|/)docs/openai-compatible-inference\.md$'''
 ]
 regexes = [
   '''(?i)authorization:\s*bearer\s+(?:change-me-local-dev|local-dev-token)''',
