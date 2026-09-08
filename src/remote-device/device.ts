@@ -68,6 +68,7 @@ export class MCPDevice {
             process.env.MCP_SERVER_URL || 'https://mcp.desktopcommander.app',
         );
         this.remoteChannel = new RemoteChannel({
+            isLocalReady: () => this.desktop?.ready === true,
             onReconnectExhausted: async ({ attempts, message }) => {
                 if (this.isShuttingDown) return;
                 console.error(JSON.stringify({
@@ -183,6 +184,7 @@ export class MCPDevice {
                 LOCAL_MCP_STARTUP_TIMEOUT_MS,
                 'Local Desktop Commander MCP startup',
             );
+            this.desktop.onDisconnect((reason) => void this.handleLocalMcpLoss(reason));
             this.assertRunning();
 
             console.log(`⏳ Connecting to Remote MCP ${this.baseServerUrl}`);
@@ -378,6 +380,22 @@ export class MCPDevice {
     }
 
     // Methods moved to RemoteChannel
+
+    private async handleLocalMcpLoss(reason: string): Promise<void> {
+        if (this.isShuttingDown) return;
+        if (this.deviceId) {
+            await this.remoteChannel.setOnlineStatus(this.deviceId, 'offline').catch((error: any) =>
+                console.error('Failed to mark device offline after local MCP loss:', error.message));
+        }
+        try {
+            await this.desktop.ensureReady();
+            this.remoteChannel.syncReachabilityStatus();
+            console.log(`♻️  Local Desktop Commander MCP restarted (${reason})`);
+        } catch (error: any) {
+            console.error(`❌ Could not restart local Desktop Commander MCP: ${error.message}`);
+            await captureRemote('remote_device_local_mcp_restart_failed', { error, reason });
+        }
+    }
 
     /** Record a handled call id, evicting the oldest once the cap is reached. */
     private rememberCallId(callId: string) {

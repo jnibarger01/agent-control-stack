@@ -20,7 +20,10 @@ let heartbeatStarts = 0;
 
 const device = new MCPDevice();
 device.desktop = {
+  ready: true,
   initialize: () => initializeGate,
+  onDisconnect: () => {},
+  ensureReady: async () => {},
   shutdown: async () => { desktopShutdowns++; },
   listClientTools: async () => ({ tools: [] }),
 };
@@ -49,6 +52,7 @@ resilient.remoteChannel = {
   setOffline: async () => { throw new Error('offline failed'); },
 };
 resilient.desktop = {
+  ready: false,
   shutdown: async () => { resilientDesktopShutdowns++; },
 };
 const firstShutdown = resilient.shutdown();

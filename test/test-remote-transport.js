@@ -173,6 +173,8 @@ function makeRemoteChannel(opts = {}) {
   const client = makeFakeClient(opts);
   rc.client = client; // private in TS, plain property at runtime
   rc._user = { id: 'user-1', email: 'tester@example.com' };
+  rc.lastKnownSession = { access_token: 'test-access', refresh_token: 'test-refresh' };
+  rc.presenceTracked = true;
   rc.deviceId = DEVICE_ID;
   rc.deviceName = 'test-device';
   rc.onToolCall = () => {};
@@ -313,10 +315,9 @@ await test('the result row is written BEFORE the doorbell is rung', async () => 
 });
 
 // --- 4. Heartbeat cadence tiers ---------------------------------------------
-// The server tiers its offline sweep on the capability FLAG, not the app
-// version, and the flag is only set once presence is proven. So an unproven
-// device is judged by the fast 45s rule and must heartbeat fast enough to
-// survive it, or it is swept offline before it ever proves presence.
+// The hosted service currently applies the observed legacy ~45s sweep even
+// when transport_broadcast_v1=true, so capable devices use the bounded
+// compatibility cadence rather than the historical 5-minute client cadence.
 
 await test('unproven tier heartbeats inside the server 45s sweep threshold', async () => {
   const { rc } = makeRemoteChannel();
@@ -330,15 +331,15 @@ await test('unproven tier heartbeats inside the server 45s sweep threshold', asy
   assert(rc.heartbeatIntervalMs() === cadence, 'a withdrawn capability uses the fast cadence');
 });
 
-await test('capable tier heartbeats inside the server capable sweep threshold', async () => {
+await test('capable tier uses compatibility cadence inside the observed legacy sweep', async () => {
   const { rc } = makeRemoteChannel();
   rc.transportCapableWritten = true;
   const cadence = rc.heartbeatIntervalMs();
   assert(
-    cadence * 2 < SERVER_CAPABLE_OFFLINE_TIMEOUT_MS,
-    `capable cadence ${cadence}ms must allow >=2 writes inside ${SERVER_CAPABLE_OFFLINE_TIMEOUT_MS}ms`
+    cadence * 2 < SERVER_LEGACY_OFFLINE_TIMEOUT_MS,
+    `capable compatibility cadence ${cadence}ms must allow >=2 writes inside ${SERVER_LEGACY_OFFLINE_TIMEOUT_MS}ms`
   );
-  assert(cadence > SERVER_LEGACY_OFFLINE_TIMEOUT_MS, 'capable cadence is the slow one');
+  assert(cadence < SERVER_CAPABLE_OFFLINE_TIMEOUT_MS, 'compatibility cadence remains bounded');
 });
 
 await test('withdrawing the capability re-arms the heartbeat at the fast cadence', async () => {
@@ -390,11 +391,29 @@ await test('heartbeat stays silent when no transport is joined', async () => {
   assert(client.writes.length === 0, 'a deaf device must let the sweep age its row out');
 });
 
-await test('heartbeat writes when the private channel is joined', async () => {
+await test('heartbeat writes only when channel, Presence, session, and local MCP are healthy', async () => {
   const { rc, client } = makeRemoteChannel();
   rc.channel = makeChannelState('joined');
   await rc.updateHeartbeat(DEVICE_ID);
-  assert(client.writes.length === 1, 'private channel joined = reachable');
+  assert(client.writes.length === 1, 'all online proofs should permit the compatibility heartbeat');
+});
+
+await test('heartbeat stops when Presence is lost', async () => {
+  const { rc, client } = makeRemoteChannel();
+  rc.channel = makeChannelState('joined');
+  rc.presenceTracked = false;
+  await rc.updateHeartbeat(DEVICE_ID);
+  assert(client.writes.length === 0, 'Presence loss must stop online assertions');
+});
+
+await test('heartbeat stops when the local MCP is not ready', async () => {
+  let ready = true;
+  const { rc, client } = makeRemoteChannel();
+  rc.isLocalReady = () => ready;
+  rc.channel = makeChannelState('joined');
+  ready = false;
+  await rc.updateHeartbeat(DEVICE_ID);
+  assert(client.writes.length === 0, 'local MCP loss must stop online assertions');
 });
 
 await test('status goes offline when the private channel is not joined', async () => {
@@ -403,6 +422,15 @@ await test('status goes offline when the private channel is not joined', async (
   rc.syncReachabilityStatus();
   await rc.statusWriteChain;
   assert(client.writes[0].status === 'offline', 'genuinely deaf device goes offline');
+});
+
+await test('status goes offline when Presence disappears even if channel remains joined', async () => {
+  const { rc, client } = makeRemoteChannel();
+  rc.channel = makeChannelState('joined');
+  rc.presenceTracked = false;
+  rc.syncReachabilityStatus();
+  await rc.statusWriteChain;
+  assert(client.writes[0].status === 'offline', 'joined without Presence is not dispatchable');
 });
 
 await test('concurrent status writes stay ordered', async () => {

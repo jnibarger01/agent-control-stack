@@ -23,6 +23,25 @@ export class DesktopCommanderIntegration {
     private isReady: boolean = false;
     private initializePromise: Promise<void> | null = null;
     private shutdownRequested: boolean = false;
+    private disconnectHandler: ((reason: string) => void) | null = null;
+    private reinitPromise: Promise<void> | null = null;
+
+    get ready(): boolean {
+        return this.isReady && this.mcpClient !== null;
+    }
+
+    onDisconnect(handler: (reason: string) => void): void {
+        this.disconnectHandler = handler;
+    }
+
+    private handleLocalDisconnect(reason: string): void {
+        if (this.shutdownRequested || !this.isReady) return;
+        this.isReady = false;
+        this.mcpClient = null;
+        this.mcpTransport = null;
+        console.error(` - ❌ Local Desktop Commander MCP went away (${reason})`);
+        this.disconnectHandler?.(reason);
+    }
 
     constructor(private readonly standalone: boolean = false) {}
 
@@ -83,6 +102,9 @@ export class DesktopCommanderIntegration {
                 throw new Error('Desktop Commander integration startup was cancelled by shutdown');
             }
             this.isReady = true;
+            this.mcpTransport.onclose = () => this.handleLocalDisconnect('stdio transport closed');
+            this.mcpTransport.onerror = (error: Error) =>
+                this.handleLocalDisconnect(`stdio transport error: ${error?.message ?? String(error)}`);
 
             console.log(' - 🔌 Connected to Desktop Commander MCP');
             console.debug('[DEBUG] Desktop Commander MCP connection successful');
@@ -90,9 +112,24 @@ export class DesktopCommanderIntegration {
         } catch (error) {
             console.error(' - ❌ Failed to connect to Desktop Commander MCP:', error);
             console.debug('[DEBUG] MCP connection error:', error);
+            this.isReady = false;
+            this.mcpClient = null;
+            if (this.mcpTransport) {
+                try { await this.mcpTransport.close(); } catch { /* already dead */ }
+                this.mcpTransport = null;
+            }
             await captureRemote('desktop_integration_init_failed', { error });
             throw error;
         }
+    }
+
+    async ensureReady(): Promise<void> {
+        if (this.ready) return;
+        if (this.shutdownRequested) throw new Error('Desktop Commander integration is shutting down');
+        if (!this.reinitPromise) {
+            this.reinitPromise = this.initialize().finally(() => { this.reinitPromise = null; });
+        }
+        await this.reinitPromise;
     }
 
     async resolveMcpConfig(): Promise<McpConfig | null> {
@@ -152,15 +189,12 @@ export class DesktopCommanderIntegration {
     }
 
     async callClientTool(toolName: string, args: any, metadata?: any) {
-        if (!this.isReady || !this.mcpClient) {
-            console.debug('[DEBUG] callClientTool() failed - not ready or no client');
-            throw new Error('DesktopIntegration not initialized');
-        }
+        await this.ensureReady();
 
         // Proxy other tools to MCP server
         try {
             console.debug('[DEBUG] Calling MCP tool:', toolName, 'args:', JSON.stringify(args).substring(0, 100));
-            const result = await this.mcpClient.callTool({
+            const result = await this.mcpClient!.callTool({
                 name: toolName,
                 arguments: args,
                 _meta: { remote: true, ...metadata || {} }
@@ -198,6 +232,7 @@ export class DesktopCommanderIntegration {
 
     async shutdown() {
         console.debug('[DEBUG] DesktopCommanderIntegration.shutdown() called');
+        this.shutdownRequested = true;
         this.shutdownRequested = true;
         const closeWithTimeout = async (operation: () => Promise<void>, name: string, timeoutMs: number = 3000) => {
             return Promise.race([

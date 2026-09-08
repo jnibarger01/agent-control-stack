@@ -45,10 +45,16 @@ interface DeviceData {
     last_seen: string;
 }
 
-// last_seen cadences. The server tiers its sweep on the transport_broadcast_v1
-// flag, so each must fit its tier's threshold in the server's constants.ts:
-// capable -> 15 min, unflagged -> 45s.
-const CAPABLE_HEARTBEAT_INTERVAL = 5 * 60 * 1000;
+// The hosted control plane currently sweeps capable devices on the legacy
+// ~45s last_seen threshold despite transport_broadcast_v1=true (reproduced
+// 2026-09-08 with Presence still visible). Keep the compatibility write bounded
+// and configurable, with a conservative default that fits that observed tier.
+const CAPABLE_HEARTBEAT_INTERVAL = (() => {
+    const configured = Number.parseInt(process.env.REMOTE_STATUS_HEARTBEAT_INTERVAL_MS ?? '', 10);
+    return Number.isFinite(configured) && configured >= 1_000 && configured <= 600_000
+        ? configured
+        : 5 * 1000;
+})();
 const LEGACY_HEARTBEAT_INTERVAL = 15 * 1000;
 // Cap on a recreate's rebuild step so a hung await can't disable the watchdog.
 // Must exceed createChannel()'s worst case (~31.5s of presence retries).
@@ -96,6 +102,7 @@ export interface RemoteChannelFailure {
 export interface RemoteChannelOptions {
     maxReconnectAttempts?: number;
     onReconnectExhausted?: (failure: RemoteChannelFailure) => void | Promise<void>;
+    isLocalReady?: () => boolean;
 }
 
 // auth-js compares token expiry against this device's own Date.now(), with no
@@ -164,6 +171,7 @@ export class RemoteChannel {
     private reconnectExhausted = false;
     private readonly maxReconnectAttempts: number;
     private readonly onReconnectExhausted?: (failure: RemoteChannelFailure) => void | Promise<void>;
+    private readonly isLocalReady: () => boolean;
 
     constructor(options: RemoteChannelOptions = {}) {
         const configuredMax = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
@@ -172,6 +180,7 @@ export class RemoteChannel {
         }
         this.maxReconnectAttempts = configuredMax;
         this.onReconnectExhausted = options.onReconnectExhausted;
+        this.isLocalReady = options.isLocalReady ?? (() => true);
     }
 
 
@@ -539,6 +548,7 @@ export class RemoteChannel {
                 // Proven end-to-end (joined AND presence published) — only now
                 // may the server treat our presence as authoritative.
                 await this.setTransportCapable(true);
+                this.syncReachabilityStatus();
                 return;
             }
 
@@ -553,6 +563,7 @@ export class RemoteChannel {
         // dispatch at all. The faster heartbeat tier keeps the device's status
         // accurate for the DB-status fallback while it recovers.
         await this.setTransportCapable(false);
+        this.syncReachabilityStatus();
     }
 
     /**
@@ -652,9 +663,6 @@ export class RemoteChannel {
                         this.reconnectAttempt = 0;
                         this.lastHeartbeatOkAt = performance.now(); // a fresh join is proof of life too
                         console.log(`✅ Channel subscribed${recovered > 0 ? ` (recovered after ${recovered} attempt${recovered === 1 ? '' : 's'})` : ''}`);
-                        // Update device status on successful connection (queued, so
-                        // it can't be overtaken by a teardown's status write).
-                        this.queueStatusWrite('online');
                         // Presence is the live signal dispatch reads, so resolve
                         // only once it lands — otherwise registerDevice() reports
                         // "Device ready" while still undispatchable.
@@ -1147,7 +1155,21 @@ export class RemoteChannel {
         }
     }
 
-    /** Reachable means the private channel is joined. Gates the heartbeat and `status`. */
+    /**
+     * Online is a conjunction of the actual local and remote proofs needed for
+     * a forwarded call: authenticated session, joined channel, acknowledged
+     * Presence, and a ready local MCP child.
+     */
+    private isOnlineEligible(): boolean {
+        return !this.shuttingDown
+            && !this.sessionLost
+            && this.lastKnownSession !== null
+            && this.channel?.state === 'joined'
+            && this.presenceTracked
+            && this.isLocalReady();
+    }
+
+    /** Reachable means the private channel is joined. */
     private isReachable(): boolean {
         return this.channel?.state === 'joined';
     }
@@ -1158,8 +1180,8 @@ export class RemoteChannel {
      * private channel's error path re-fires on every rejoin and would oscillate
      * the row against the heartbeat. Same predicate as the heartbeat gate.
      */
-    private syncReachabilityStatus(): void {
-        this.queueStatusWrite(this.isReachable() ? 'online' : 'offline');
+    syncReachabilityStatus(): void {
+        this.queueStatusWrite(this.isOnlineEligible() ? 'online' : 'offline');
     }
 
     /**
@@ -1228,7 +1250,7 @@ export class RemoteChannel {
             return;
         }
         this.statusWriteChain = this.statusWriteChain.then(async () => {
-          if (this.shuttingDown || !this.isReachable()) return;
+          if (this.shuttingDown || !this.isOnlineEligible()) return;
           await this.runStatusWrite(async () => {
             // Skip the write entirely when no transport is up. Bumping last_seen
             // on a deaf device would keep its row perpetually young, so the
@@ -1236,12 +1258,20 @@ export class RemoteChannel {
             // stale 'online' — and whenever presence is unavailable (kill
             // switch, wedged socket) that stale row is exactly what dispatch
             // falls back to. Staying silent lets the sweep do its job.
-            if (!this.isReachable()) {
-                console.debug('[DEBUG] Skipping heartbeat write — no transport joined; letting the row age out');
+            if (!this.isOnlineEligible()) {
+                console.debug('[DEBUG] Skipping heartbeat write — online proofs incomplete; letting the row age out');
                 return;
             }
 
             const timestamp = this.nextStatusTimestamp();
+            console.debug(JSON.stringify({
+                event: 'remote_status_write_requested',
+                status: 'online',
+                timestamp,
+                presenceTracked: this.presenceTracked,
+                localReady: this.isLocalReady(),
+                transportCapable: this.transportCapableWritten === true,
+            }));
             const { error } = await this.client!
                 .from('mcp_devices')
                 .update({ last_seen: timestamp, status: 'online' })
@@ -1252,7 +1282,7 @@ export class RemoteChannel {
                 console.error('[DEBUG] Heartbeat update failed:', error.message);
                 await captureRemote('remote_channel_heartbeat_error', { error });
             } else {
-                console.debug('[DEBUG] last_seen bookkeeping write ok:', deviceId);
+                console.debug(JSON.stringify({ event: 'remote_status_write_acknowledged', status: 'online', timestamp }));
             }
           });
         }).catch((error: any) => {
@@ -1346,6 +1376,14 @@ export class RemoteChannel {
         }
 
         const timestamp = this.nextStatusTimestamp();
+        console.debug(JSON.stringify({
+            event: 'remote_status_write_requested',
+            status,
+            timestamp,
+            presenceTracked: this.presenceTracked,
+            localReady: this.isLocalReady(),
+            transportCapable: this.transportCapableWritten === true,
+        }));
         const { error } = await this.client
             .from('mcp_devices')
             .update({ status: status, last_seen: timestamp })
@@ -1360,7 +1398,7 @@ export class RemoteChannel {
             await captureRemote('remote_channel_status_update_error', { error, status });
             return;
         } else {
-            console.debug(`[DEBUG] Device status set to ${status}`);
+            console.debug(JSON.stringify({ event: 'remote_status_write_acknowledged', status, timestamp }));
         }
 
         // console.log(status === 'online' ? `🔌 Device marked as ${status}` : `❌ Device marked as ${status}`);
