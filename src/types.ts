@@ -24,6 +24,10 @@ export interface TerminalSession {
   bufferedChars: number;      // Joined length of outputLines (content + separators)
   evictedLines: number;       // Lines dropped from the front to enforce the buffer cap
   evictedChars: number;       // Joined length of evicted lines (keeps snapshot offsets absolute)
+  // Durable session-store identity (P2.1) — the key for the on-disk record
+  // this session's lifecycle updates get written to. Independent of pid,
+  // which the OS can and does reuse.
+  sessionId: string;
 }
 
 export interface CommandExecutionResult {
@@ -57,6 +61,10 @@ export interface ActiveSession {
   pid: number;
   isBlocked: boolean;
   runtime: number;
+  // true for a session recovered from a durable record after a server
+  // restart — it has no live stdin/stdout attached (see terminal-manager.ts
+  // RecoveredSession), only PID-based liveness and termination.
+  recovered?: boolean;
 }
 
 export interface CompletedSession {

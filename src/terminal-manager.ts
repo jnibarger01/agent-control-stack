@@ -6,6 +6,11 @@ import { configManager } from './config-manager.js';
 import {capture} from "./utils/capture.js";
 import { analyzeProcessState } from './utils/process-detection.js';
 import { terminateProcessTree, shouldSpawnAsProcessGroupLeader } from './utils/process-tree.js';
+import { newSessionId, writeSessionRecord, readSessionRecord, sessionSchemaVersion, PersistedSessionRecord } from './session-store.js';
+import { getProcessStartFingerprint, verifyProcessIdentity } from './utils/process-identity.js';
+import { getRuntimeIdentityState } from './runtime-identity.js';
+import type { RecoveredSessionHandle } from './session-reconciliation.js';
+import { logger } from './utils/logger.js';
 
 /**
  * Standard Windows PATHEXT value, used to repair a corrupted PATHEXT before
@@ -148,7 +153,145 @@ function getShellSpawnArgs(shellPath: string, command: string): ShellSpawnConfig
 export class TerminalManager {
   private sessions: Map<number, TerminalSession> = new Map();
   private completedSessions: Map<number, CompletedSession> = new Map();
-  
+  // Sessions recovered from a durable record after a server restart (P2.1).
+  // Keyed by pid, disjoint from `sessions`: a recovered entry has no
+  // ChildProcess handle (the original spawning process is gone), only
+  // enough to check liveness and terminate via the shared process-tree
+  // utility — see registerRecoveredSession, forceTerminate, listActiveSessions.
+  private recoveredSessions: Map<number, RecoveredSessionHandle> = new Map();
+
+  /**
+   * Registers a session recovered by startup reconciliation
+   * (session-reconciliation.ts) as live-but-not-attached. Idempotent: a
+   * pid already present is left as-is rather than overwritten, so running
+   * reconciliation more than once never duplicates or resets tracking.
+   */
+  registerRecoveredSession(handle: RecoveredSessionHandle): void {
+    if (this.recoveredSessions.has(handle.pid)) return;
+    if (this.sessions.has(handle.pid)) return; // a live, attached session already owns this pid
+    this.recoveredSessions.set(handle.pid, handle);
+  }
+
+  isRecoveredSession(pid: number): boolean {
+    return this.recoveredSessions.has(pid);
+  }
+
+  getRecoveredSession(pid: number): RecoveredSessionHandle | undefined {
+    return this.recoveredSessions.get(pid);
+  }
+
+  /**
+   * A recovered session has no ChildProcess handle, so there is no 'exit'
+   * event to tell us when it dies — unlike a live session, which the OS
+   * proactively notifies this server about. Callers that act on a recovered
+   * session re-verify liveness on demand instead; this both answers the
+   * question and — if the process is gone — cleans it up (removes it from
+   * the tracked map, marks its durable record 'stale') so a single stale
+   * entry doesn't linger as "recovered" forever.
+   */
+  async refreshRecoveredSessionLiveness(pid: number): Promise<boolean> {
+    const handle = this.recoveredSessions.get(pid);
+    if (!handle) return false;
+
+    const record = await readSessionRecord(handle.sessionId);
+    const identity = await verifyProcessIdentity(pid, record?.processStartFingerprint);
+
+    if (identity === 'alive') return true;
+
+    this.recoveredSessions.delete(pid);
+    if (record) {
+      try {
+        await writeSessionRecord({
+          ...record,
+          status: 'stale',
+          staleReason: identity === 'reused' ? 'pid reused by a different process since recovery' : 'process no longer exists',
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        logger.warning(`Desktop Commander: failed to persist stale transition for recovered pid ${pid}`, {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    return false;
+  }
+
+  private async persistNewSession(
+    session: TerminalSession,
+    command: string,
+    cwd: string | undefined,
+    shell: string,
+  ): Promise<void> {
+    try {
+      const identity = await getRuntimeIdentityState();
+      const fingerprint = await getProcessStartFingerprint(session.pid);
+      const now = new Date().toISOString();
+      const record: PersistedSessionRecord = {
+        schemaVersion: sessionSchemaVersion() as 1,
+        sessionId: session.sessionId,
+        pid: session.pid,
+        processStartFingerprint: fingerprint,
+        command,
+        cwd,
+        shell,
+        ownerRuntimeId: identity.runtime_id,
+        createdAt: now,
+        updatedAt: now,
+        status: 'running',
+      };
+      await writeSessionRecord(record);
+    } catch (error) {
+      // Durability is best-effort: a failure here degrades recovery for
+      // this one session after a future restart, but must never prevent
+      // the process itself from running.
+      logger.warning(`Desktop Commander: failed to persist session record for pid ${session.pid}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async persistSessionExit(
+    sessionId: string,
+    exitCode: number | null,
+    exitSignal: string | null,
+  ): Promise<void> {
+    try {
+      const existing = await readSessionRecord(sessionId);
+      if (!existing) return; // never persisted (e.g. persistNewSession itself failed) — nothing to update
+      const updated: PersistedSessionRecord = {
+        ...existing,
+        status: exitSignal ? 'terminated' : 'completed',
+        exitCode,
+        exitSignal,
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      await writeSessionRecord(updated);
+    } catch (error) {
+      logger.warning(`Desktop Commander: failed to persist session exit for session ${sessionId}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  /** Marks a recovered session's durable record terminated, after forceTerminate. */
+  private async persistRecoveredSessionTerminated(handle: RecoveredSessionHandle): Promise<void> {
+    try {
+      const existing = await readSessionRecord(handle.sessionId);
+      if (!existing) return;
+      await writeSessionRecord({
+        ...existing,
+        status: 'terminated',
+        completedAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      logger.warning(`Desktop Commander: failed to persist recovered-session termination for pid ${handle.pid}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
   /**
    * Send input to a running process
    * @param pid Process ID
@@ -277,6 +420,7 @@ export class TerminalManager {
       };
     }
 
+    const sessionId = newSessionId();
     const session: TerminalSession = {
       pid: childProcess.pid,
       process: childProcess,
@@ -286,10 +430,22 @@ export class TerminalManager {
       startTime: new Date(),
       bufferedChars: 0,
       evictedLines: 0,
-      evictedChars: 0
+      evictedChars: 0,
+      sessionId,
     };
 
     this.sessions.set(childProcess.pid, session);
+    // Fire-and-forget, deliberately not awaited: this does real filesystem
+    // I/O, which yields the event loop. Awaiting it here — before the
+    // stdout/exit listeners below are attached — lets a fast-exiting child
+    // (spawn, run, exit in well under a millisecond, e.g. `echo $0`) emit
+    // its 'exit' event while we're still off doing I/O; EventEmitter never
+    // replays a past event to a listener attached afterward, so the
+    // process's completion would be missed entirely and this call would
+    // hang until timeoutMs. Durability is best-effort (see persistNewSession's
+    // own error handling) specifically so it can never gate the listeners
+    // that make output/exit observation work at all.
+    void this.persistNewSession(session, command, cwd, String(shellToUse));
 
     // Timing telemetry
     const startTime = Date.now();
@@ -431,7 +587,7 @@ export class TerminalManager {
         });
       }, timeoutMs);
 
-      childProcess.on('exit', (code: any) => {
+      childProcess.on('exit', (code: any, signal: any) => {
         if (childProcess.pid) {
           // Store completed session before removing active session
           this.completedSessions.set(childProcess.pid, {
@@ -451,6 +607,7 @@ export class TerminalManager {
           }
 
           this.sessions.delete(childProcess.pid);
+          void this.persistSessionExit(session.sessionId, code ?? null, signal ?? null);
         }
         exitReason = 'process_exit';
         resolveOnce({
@@ -749,11 +906,8 @@ export class TerminalManager {
 
   forceTerminate(pid: number): boolean {
     const session = this.sessions.get(pid);
-    if (!session) {
-      return false;
-    }
-
-    try {
+    if (session) {
+      try {
         terminateProcessTree(pid, 'SIGINT');
         setTimeout(() => {
           if (this.sessions.has(pid)) {
@@ -767,15 +921,51 @@ export class TerminalManager {
         capture('server_request_error', {error: errorMessage, message: `Failed to terminate process ${pid}:`});
         return false;
       }
+    }
+
+    // Recovered session (P2.1): no ChildProcess handle, but terminateProcessTree
+    // operates on a bare pid — the same process-tree/process-group semantics
+    // apply whether or not this server spawned (vs. recovered) the session,
+    // so termination behavior does not regress after a restart.
+    const recovered = this.recoveredSessions.get(pid);
+    if (recovered) {
+      try {
+        terminateProcessTree(pid, 'SIGINT');
+        setTimeout(() => {
+          // Escalate first (mirrors the live-session path above) — deleting
+          // the entry before this check would skip the SIGKILL escalation
+          // for a process that ignores SIGINT.
+          if (this.recoveredSessions.has(pid)) {
+            terminateProcessTree(pid, 'SIGKILL');
+          }
+          this.recoveredSessions.delete(pid);
+          void this.persistRecoveredSessionTerminated(recovered);
+        }, 1000);
+        return true;
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        capture('server_request_error', {error: errorMessage, message: `Failed to terminate recovered process ${pid}:`});
+        return false;
+      }
+    }
+
+    return false;
   }
 
   listActiveSessions(): ActiveSession[] {
     const now = new Date();
-    return Array.from(this.sessions.values()).map(session => ({
+    const live = Array.from(this.sessions.values()).map(session => ({
       pid: session.pid,
       isBlocked: session.isBlocked,
       runtime: now.getTime() - session.startTime.getTime()
     }));
+    const recovered = Array.from(this.recoveredSessions.values()).map(handle => ({
+      pid: handle.pid,
+      isBlocked: false,
+      runtime: now.getTime() - Date.parse(handle.createdAt),
+      recovered: true as const,
+    }));
+    return [...live, ...recovered];
   }
 
   listCompletedSessions(): CompletedSession[] {
