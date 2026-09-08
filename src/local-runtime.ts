@@ -1,6 +1,6 @@
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { getDefaultEnvironment, StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
+import { ErrorCode, McpError, type Tool } from '@modelcontextprotocol/sdk/types.js';
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -271,7 +271,7 @@ export class LocalMcpRuntime {
     }
   }
 
-  async listTools(timeoutMs?: number) {
+  async listTools(timeoutMs?: number): Promise<{ tools: Tool[] }> {
     if (this.state !== 'ready' || !this.client) {
       throw new LocalMcpRuntimeError('RUNTIME_NOT_READY', `Cannot list tools: local MCP runtime state is ${this.state}`);
     }
@@ -283,6 +283,7 @@ export class LocalMcpRuntime {
         maxTotalTimeout: listTimeoutMs,
       });
     } catch (error) {
+      if (error instanceof LocalMcpRuntimeError) throw error;
       if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
         throw new LocalMcpRuntimeError('TOOL_LIST_TIMEOUT', `Desktop Commander tool listing timed out after ${listTimeoutMs}ms`, error);
       }
