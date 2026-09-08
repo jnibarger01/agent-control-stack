@@ -117,4 +117,47 @@ describe("portfolio client", () => {
     const client = createPortfolioClientFromEnv({ ACS_PORTFOLIO_BASE_URL: "https://example.test" });
     return expect(client.getSummary()).rejects.toMatchObject({ code: PORTFOLIO_UNAVAILABLE_CODE });
   });
+
+  it("requests attention path and limits items client-side", async () => {
+    const seen: string[] = [];
+    const baseUrl = await listen((request, response) => {
+      seen.push(`${request.method} ${request.url}`);
+      response.setHeader("content-type", "application/json");
+      response.end(
+        JSON.stringify({
+          ...envelope,
+          items: [
+            { fullName: "jnibarger01/visualizer", status: "ATTENTION" },
+            { fullName: "jnibarger01/agent-control-stack", status: "ATTENTION" }
+          ]
+        })
+      );
+    });
+    const client = createPortfolioClient({ baseUrl, timeoutMs: 1_000 });
+    const body = (await client.listAttentionRequired({ limit: 1 })) as { items: unknown[] };
+    expect(seen).toEqual(["GET /api/v1/portfolio/attention"]);
+    expect(body.items).toEqual([{ fullName: "jnibarger01/visualizer", status: "ATTENTION" }]);
+  });
+
+  it("createPortfolioClientFromEnv happy-path hits get_summary and attention", async () => {
+    const seen: string[] = [];
+    const baseUrl = await listen((request, response) => {
+      seen.push(`${request.method} ${request.url}`);
+      response.setHeader("content-type", "application/json");
+      if (request.url === "/api/v1/portfolio") {
+        response.end(JSON.stringify({ ...envelope, summary: { repositoryCount: 2 } }));
+        return;
+      }
+      response.end(JSON.stringify({ ...envelope, items: [{ fullName: "jnibarger01/visualizer" }] }));
+    });
+    const client = createPortfolioClientFromEnv({
+      ACS_PORTFOLIO_BASE_URL: baseUrl,
+      ACS_PORTFOLIO_TIMEOUT_MS: "1000"
+    });
+    await expect(client.getSummary()).resolves.toMatchObject({ summary: { repositoryCount: 2 } });
+    await expect(client.listAttentionRequired()).resolves.toMatchObject({
+      items: [{ fullName: "jnibarger01/visualizer" }]
+    });
+    expect(seen).toEqual(["GET /api/v1/portfolio", "GET /api/v1/portfolio/attention"]);
+  });
 });
