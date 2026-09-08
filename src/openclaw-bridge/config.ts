@@ -13,6 +13,8 @@ export interface OpenClawBridgeConfig {
   issuerUrl: URL;
   issuerTimeoutMs: number;
   issuerToken?: string;
+  workItemId: string;
+  attemptId: string;
   childPublicKey: string;
   childKeyId: string;
   childScopes?: readonly AcsScope[];
@@ -101,6 +103,8 @@ export function loadOpenClawBridgeConfig(env: NodeJS.ProcessEnv = process.env): 
   const issuerUrl = parseIssuerUrl(requireNonEmpty(env, 'OPENCLAW_ACS_ISSUER_URL'));
   const issuerTimeoutMs = parseIssuerTimeout(env.OPENCLAW_ACS_ISSUER_TIMEOUT_MS);
   const issuerToken = env.OPENCLAW_ACS_ISSUER_TOKEN?.trim() || undefined;
+  const workItemId = requireNonEmpty(env, 'OPENCLAW_ACS_WORK_ITEM_ID');
+  const attemptId = requireNonEmpty(env, 'OPENCLAW_ACS_ATTEMPT_ID');
   const childPublicKey = parseChildPublicKey(requireNonEmpty(env, 'DESKTOP_COMMANDER_ACS_PUBLIC_KEY'));
   const childKeyId = parseChildKeyId(requireNonEmpty(env, 'DESKTOP_COMMANDER_ACS_KEY_ID'));
   const childScopes = parseChildScopes(env.DESKTOP_COMMANDER_ACS_SCOPES);
@@ -109,6 +113,8 @@ export function loadOpenClawBridgeConfig(env: NodeJS.ProcessEnv = process.env): 
     issuerUrl,
     issuerTimeoutMs,
     ...(issuerToken ? { issuerToken } : {}),
+    workItemId,
+    attemptId,
     childPublicKey,
     childKeyId,
     ...(childScopes ? { childScopes } : {}),

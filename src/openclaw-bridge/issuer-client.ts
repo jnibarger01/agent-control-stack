@@ -1,15 +1,15 @@
-import crypto from 'node:crypto';
 import { z } from 'zod';
 import { computeDesktopCommanderInvocationHash, strictCanonicalJsonV1 } from '../managed-acs.js';
 import type { OpenClawBridgeConfig } from './config.js';
 
 /**
  * Client for the narrow, documented issuer contract described in the README.
- * The bridge sends only what the issuer needs to make and sign an approval
- * decision (runtime identity, tool name, normalized arguments, a bridge
- * request id, and the invocation hash the child will independently
- * recompute). The issuer alone decides approval and holds the ACS signing
- * key; this client never signs anything and never fabricates a capability.
+ * The bridge sends only the attempt identifier required by the ACS issuer.
+ * Work-item identity comes from the configured issuer route binding, while
+ * tool, arguments, hashes, lease, approval, and runtime identity are derived
+ * by ACS from authoritative state. The issuer alone decides approval and
+ * holds the ACS signing key; this client never signs anything and never
+ * fabricates a capability.
  */
 
 export type IssuerClientErrorCode =
@@ -83,21 +83,15 @@ export async function requestManagedCapability(
   input: CapabilityRequestInput,
 ): Promise<IssuedCapabilityEnvelope> {
   const invocationHash = computeDesktopCommanderInvocationHash(input.toolName, input.normalizedArguments);
-  const requestBody = {
-    version: 'acs.dc.v1' as const,
-    requestId: crypto.randomUUID(),
-    requestedAt: new Date().toISOString(),
-    runtimeId: input.runtimeId,
-    toolName: input.toolName,
-    normalizedArguments: input.normalizedArguments,
-    invocationHash,
-  };
+  const issuerUrl = new URL(config.issuerUrl);
+  issuerUrl.pathname = `${issuerUrl.pathname.replace(/\/$/u, '')}/work-items/${encodeURIComponent(config.workItemId)}/desktop-commander/capability`;
+  const requestBody = { attemptId: config.attemptId };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), config.issuerTimeoutMs);
   let response: Response;
   try {
-    response = await fetch(config.issuerUrl, {
+    response = await fetch(issuerUrl, {
       method: 'POST',
       headers: {
         'content-type': 'application/json',

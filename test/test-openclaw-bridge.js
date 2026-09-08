@@ -31,21 +31,23 @@ function signEnvelope(payload) {
   };
 }
 
-function issuedPayloadFor(request) {
+function issuedPayloadFor(request, expectedInvocation) {
+  const invocation = expectedInvocation ?? request;
+  const runtimeId = request.runtimeId ?? expectedInvocation?.runtimeId ?? 'runtime_01';
   const issuedAt = new Date();
   const expiresAt = new Date(issuedAt.getTime() + 20_000);
   return {
     version: 'acs.dc.v1',
     issuer: 'acs',
     audience: 'desktop-commander',
-    runtimeId: request.runtimeId,
+    runtimeId,
     workItemId: 'work_01',
     attemptId: 'attempt_01',
     leaseId: 'lease_01',
     leaseEpoch: 1,
-    toolName: request.toolName,
-    normalizedArguments: request.normalizedArguments,
-    invocationHash: request.invocationHash,
+    toolName: invocation.toolName,
+    normalizedArguments: invocation.normalizedArguments,
+    invocationHash: invocation.invocationHash ?? computeDesktopCommanderInvocationHash(invocation.toolName, invocation.normalizedArguments),
     actionHash: 'a'.repeat(64),
     requestHash: 'b'.repeat(64),
     planHash: 'c'.repeat(64),
@@ -61,6 +63,8 @@ class MockIssuer {
   constructor() {
     this.requests = [];
     this.fixedEnvelope = undefined;
+    this.expectedInvocation = undefined;
+    this.expectedRuntimeId = undefined;
     this.server = http.createServer((req, res) => this.handle(req, res));
   }
 
@@ -89,38 +93,38 @@ class MockIssuer {
       }
       this.requests.push(request);
 
-      if (req.url === '/deny') {
+      if (req.url?.includes('/deny')) {
         res.writeHead(403, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ error: { code: 'policy_denied', message: 'no' } }));
         return;
       }
-      if (req.url === '/malformed') {
+      if (req.url?.includes('/malformed')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ ok: true }));
         return;
       }
-      if (req.url === '/non-json') {
+      if (req.url?.includes('/non-json')) {
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end('not-json');
         return;
       }
-      if (req.url === '/mismatched') {
+      if (req.url?.includes('/mismatched')) {
         // Signed and structurally valid, but for a different tool than asked.
-        const envelope = signEnvelope(issuedPayloadFor({ ...request, toolName: 'get_usage_stats', normalizedArguments: {} }));
+        const envelope = signEnvelope(issuedPayloadFor({ ...request, runtimeId: this.expectedRuntimeId, toolName: 'get_usage_stats', normalizedArguments: {} }, this.expectedInvocation));
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ capability: envelope }));
         return;
       }
-      if (req.url === '/fixed') {
+      if (req.url?.includes('/fixed')) {
         // Returns the exact same signed capability every time it is called,
         // simulating a compromised/buggy issuer that replays its own output.
-        this.fixedEnvelope ??= signEnvelope(issuedPayloadFor(request));
+        this.fixedEnvelope ??= signEnvelope(issuedPayloadFor({ ...request, runtimeId: this.expectedRuntimeId }, this.expectedInvocation));
         res.writeHead(200, { 'content-type': 'application/json' });
         res.end(JSON.stringify({ capability: this.fixedEnvelope }));
         return;
       }
 
-      const envelope = signEnvelope(issuedPayloadFor(request));
+      const envelope = signEnvelope(issuedPayloadFor({ ...request, runtimeId: this.expectedRuntimeId }, this.expectedInvocation));
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ capability: envelope }));
     });
@@ -137,6 +141,8 @@ class StdioProbe {
       DESKTOP_COMMANDER_ACS_PUBLIC_KEY: TEST_ACS_PUBLIC_KEY,
       DESKTOP_COMMANDER_ACS_KEY_ID: TEST_ACS_KEY_ID,
       OPENCLAW_ACS_ISSUER_TIMEOUT_MS: '3000',
+      OPENCLAW_ACS_WORK_ITEM_ID: 'work_01',
+      OPENCLAW_ACS_ATTEMPT_ID: 'attempt_01',
       ...(issuerUrl ? { OPENCLAW_ACS_ISSUER_URL: issuerUrl } : {}),
       ...extraEnv,
     };
@@ -240,6 +246,8 @@ try {
   assert.throws(
     () => loadOpenClawBridgeConfig({
       OPENCLAW_ACS_ISSUER_URL: `${issuer.baseUrl}/issue`,
+      OPENCLAW_ACS_WORK_ITEM_ID: 'work_01',
+      OPENCLAW_ACS_ATTEMPT_ID: 'attempt_01',
       DESKTOP_COMMANDER_ACS_KEY_ID: TEST_ACS_KEY_ID,
     }),
     (error) => error instanceof OpenClawBridgeConfigError && /DESKTOP_COMMANDER_ACS_PUBLIC_KEY/.test(error.message),
@@ -284,13 +292,14 @@ try {
 
     const fixture = path.join(root, 'readable.txt');
     await fs.writeFile(fixture, 'bridge-authorized-read');
+    issuer.expectedRuntimeId = identityPayload.runtime_id;
+    issuer.expectedInvocation = { toolName: 'read_file', normalizedArguments: { path: fixture }, invocationHash: computeDesktopCommanderInvocationHash('read_file', { path: fixture }) };
     const allowed = await probe.request('tools/call', { name: 'read_file', arguments: { path: fixture } });
     assert.equal(allowed.result.isError, undefined, JSON.stringify(allowed));
     assert.match(allowed.result.content[0].text, /bridge-authorized-read/);
     assert.equal(allowed.result._meta.acsAuthorization.decision, 'granted');
     assert.equal(allowed.result._meta.acsAuthorization.mode, 'managed');
-    assert.equal(issuer.requests.at(-1).toolName, 'read_file');
-    assert.equal(issuer.requests.at(-1).runtimeId, identityPayload.runtime_id);
+    assert.equal(issuer.requests.at(-1).attemptId, 'attempt_01');
 
     // --- A client-supplied forged capability has zero effect -----------------
     // Point this probe's calls at a denying issuer route is not possible
@@ -388,8 +397,11 @@ try {
   const replayProbe = new StdioProbe(path.join(root, 'replay-state'), `${issuer.baseUrl}/fixed`);
   try {
     await replayProbe.initialize();
+    const replayIdentity = await replayProbe.request('tools/call', { name: 'get_runtime_identity', arguments: {} });
+    issuer.expectedRuntimeId = JSON.parse(replayIdentity.result.content[0].text).runtime_id;
     const fixture = path.join(root, 'replay-target.txt');
     await fs.writeFile(fixture, 'replay-guard-content');
+    issuer.expectedInvocation = { toolName: 'read_file', normalizedArguments: { path: fixture }, invocationHash: computeDesktopCommanderInvocationHash('read_file', { path: fixture }) };
     const first = await replayProbe.request('tools/call', { name: 'read_file', arguments: { path: fixture } });
     assert.equal(first.result.isError, undefined, JSON.stringify(first));
     assert.equal(first.result._meta.acsAuthorization.decision, 'granted');
