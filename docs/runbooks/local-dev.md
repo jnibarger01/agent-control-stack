@@ -103,6 +103,9 @@ stay listed and return `PORTFOLIO_UNAVAILABLE`; CI does not require Visualizer.
 See [portfolio-mcp.md](portfolio-mcp.md) for env, Visualizer branch/contract,
 Vitest contract suites, and `scripts/portfolio-mcp-smoke.mjs`.
 
+SQLite backup / restore for the work-items store (snapshot, dry-run, /health + audit-chain):
+[sqlite-backup-restore.md](./sqlite-backup-restore.md).
+
 ## ChatGPT App UI
 
 Build the self-contained React widget with `npm run build:chatgpt-widget`.

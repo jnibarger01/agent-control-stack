@@ -861,6 +861,7 @@ for executor selection, verification overrides, exit codes, and log behavior.
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
 - [`docs/runbooks/production.md`](docs/runbooks/production.md)
+- [`docs/runbooks/sqlite-backup-restore.md`](docs/runbooks/sqlite-backup-restore.md)
 - [`docs/runbooks/github-agent-workflows.md`](docs/runbooks/github-agent-workflows.md)
 - [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)
