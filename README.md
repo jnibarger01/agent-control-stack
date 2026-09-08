@@ -699,6 +699,15 @@ Register connectors and sessions through the authenticated gateway routes before
 
 ## Operations
 
+### GitHub Actions agent workflows
+
+Hourly Pull Request Cycle is `disabled_manually` and OpenCode comment automation
+(`/oc`, `/opencode`) is gated off after FreeModel was retired (ACS #84). Do not
+reintroduce paid FreeModel without an explicit decision. See
+[`docs/runbooks/github-agent-workflows.md`](docs/runbooks/github-agent-workflows.md)
+for active vs disabled agent workflows and how to re-enable with
+`ANTHROPIC_API_KEY` (or another supported provider).
+
 ### Health checks
 
 ```sh
@@ -852,6 +861,7 @@ for executor selection, verification overrides, exit codes, and log behavior.
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
 - [`docs/runbooks/production.md`](docs/runbooks/production.md)
+- [`docs/runbooks/github-agent-workflows.md`](docs/runbooks/github-agent-workflows.md)
 - [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)
 

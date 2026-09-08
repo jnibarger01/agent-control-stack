@@ -1,5 +1,21 @@
 name: opencode
 
+# ACS #84: FreeModel retired from OpenCode comment automation.
+# This workflow is intentionally gated so /oc and /opencode comments cannot
+# fail solely due to FreeModel balance or FREEMODEL_API_KEY.
+#
+# Related: Hourly Pull Request Cycle (.github/workflows/hourly-pr.yml) is
+# disabled_manually in GitHub Actions for the same FreeModel funding decision.
+# Do not re-enable Hourly or restore freemodel/* without an explicit decision.
+#
+# Re-enable OpenCode later (supported provider only — not FreeModel by default):
+# 1. Store ANTHROPIC_API_KEY (or another anomalyco/opencode-supported provider
+#    secret) in repository Actions secrets.
+# 2. Restore a real job that runs anomalyco/opencode/github with that secret and
+#    a non-freemodel model id (see git history before this gate for the prior
+#    association + /oc|/opencode comment guards).
+# 3. Remove `if: false` below (and `gh workflow enable opencode` if disabled).
+# See docs/runbooks/github-agent-workflows.md.
 on:
   issue_comment:
     types: [created]
@@ -8,27 +24,16 @@ on:
 
 jobs:
   opencode:
-    if: |
-      contains(fromJson('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association) &&
-      (github.event_name == 'pull_request_review_comment' || github.event.issue.pull_request) &&
-      (
-        startsWith(format('{0} ', github.event.comment.body), '/oc ') ||
-        startsWith(format('{0} ', github.event.comment.body), '/opencode ')
-      )
+    # Durable gate: job never runs; FreeModel env/model intentionally removed.
+    if: false
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: read
       issues: read
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Run opencode
-        uses: anomalyco/opencode/github@2c14fc5586fe0b88e5c04732d2e846769cc35671 # pinned review commit
-        env:
-          FREEMODEL_API_KEY: ${{ secrets.FREEMODEL_API_KEY }}
-        with:
-          model: freemodel/gpt-5.5
+      - name: OpenCode gated off (ACS #84)
+        run: |
+          echo "OpenCode comment automation is intentionally disabled (ACS #84)."
+          echo "FreeModel was removed; re-enable only with a funded supported provider."
+          echo "See docs/runbooks/github-agent-workflows.md"
