@@ -119,6 +119,41 @@ what's missing. If the failure needed a workflow fix, land the fix on `main`
 first and use `--tag=vX.Y.Z` / the UI `tag` field instead — dispatch runs
 `main`'s copy of the workflow.
 
+## Rolling back a bad release
+
+There is no single "undo" — each of the four publish targets has its own
+rollback mechanism, and none of them delete history. The fix for a bad
+release is almost always **ship a new, corrected version**, not erase the
+old one:
+
+- **npm** — packages can't be unpublished after the npm registry's 24-hour
+  window (and shouldn't be even within it, if anyone may have already
+  installed it — unpublishing breaks their builds). Mark the bad version
+  deprecated instead, with a message pointing at the fix:
+  ```bash
+  npm deprecate @wonderwhy-er/desktop-commander@0.2.48 "Broken — use 0.2.49 or later"
+  ```
+  This keeps the tarball resolvable (existing lockfiles keep working) but
+  warns on every fresh install/CI run of that exact version.
+- **GitHub release** — edit the release to add a warning banner at the top
+  of the notes, or mark it "Pre-release" (Edit release → Set as a
+  pre-release) so it stops looking like the latest recommended download.
+  Deleting the release/tag is possible but not usually worth it: the
+  Claude directory scanner already ingested the `.mcpb` from it, and
+  deleting doesn't retract that ingestion — publishing a corrected version
+  is what actually fixes what users get.
+- **MCP Registry** — versions are immutable (see the release workflow's own
+  comment on this); there is no delete or edit. The only path is to publish
+  a new, higher version once the fix lands.
+- **Claude directory (MCPB)** — not directly reachable — it re-scans off
+  whatever the current GitHub release for the latest tag exposes. Publish
+  a corrected release; there is nothing to roll back independently here.
+
+In short: **treat a bad release as a forward-only problem.** Fix the bug,
+cut the next version through the normal release flow above, and use the
+per-target steps above only to stop steering people at the bad one in the
+meantime.
+
 ## Alpha releases
 
 ```bash
