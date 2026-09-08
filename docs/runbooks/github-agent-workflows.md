@@ -12,9 +12,23 @@ retirement decision (ACS #84).
 | Vitest Tests | `.github/workflows/testdriver.yml` | active | Vitest suite. |
 | codeql | `.github/workflows/codeql.yml` | active | CodeQL analysis. |
 | Dependabot Updates | (GitHub Dependabot) | active | Dependency update PRs. |
+| Dependabot auto-merge | `.github/workflows/dependabot-auto-merge.yml` | active | Patch/minor auto-merge; majors labeled (ACS #86). |
 
 Other workflows such as `pr30-remediation` may exist for one-off remediation;
 they are not autonomous coding agents.
+
+## Dependabot triage (ACS #86)
+
+Policy for dependency update PRs:
+
+| Kind | Behavior |
+| --- | --- |
+| Patch / minor | Workflow `.github/workflows/dependabot-auto-merge.yml` runs `gh pr merge --auto --squash` for Dependabot. Merges after required CI (`check`, Vitest `test`, CodeQL `analyze`) is green. |
+| Major | Labeled deps-major; human review only. |
+
+Park red majors with deps-parked. Keep Allow auto-merge on.
+
+Do not re-enable Hourly or FreeModel.
 
 ## Intentionally disabled / gated (agent automation)
 
