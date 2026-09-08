@@ -92,6 +92,24 @@ export const eventQuerySchema = z
   .passthrough();
 export const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
 export const retryBodySchema = z.object({ reason: z.string().min(1).max(2_000) });
+
+/**
+ * Strict: the only caller-supplied identifier is which of the authenticated
+ * worker's own attempts to issue a capability for. `toolName`, `arguments`,
+ * `runtimeId`, `capability`, and any `_meta`-shaped field are rejected
+ * outright, not silently ignored - everything else the signed `acs.dc.v1`
+ * payload needs is re-derived server-side from trusted work-item/attempt/
+ * lease state.
+ */
+export const desktopCommanderCapabilityRequestSchema = z
+  .object({
+    attemptId: z
+      .string()
+      .min(1)
+      .max(128)
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u)
+  })
+  .strict();
 export const cloneBodySchema = z.object({
   title: z.string().min(1).max(512).optional(),
   intent: z.string().min(1).max(4_000).optional(),
@@ -355,6 +373,20 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     summary: "Submit an authenticated lease-bound worker result.",
     requestSchema: submitWorkResultSchema,
     successStatus: 201
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/desktop-commander/capability",
+    operationId: "issueDesktopCommanderCapability",
+    summary: "Issue one short-lived signed acs.dc.v1 capability for an already-claimed, leased attempt.",
+    requestSchema: desktopCommanderCapabilityRequestSchema,
+    successStatus: 201
+  },
+  {
+    method: "get",
+    path: "/desktop-commander/capability-key",
+    operationId: "getDesktopCommanderCapabilityKey",
+    summary: "Read the current Desktop Commander capability signing key id and public key."
   },
   {
     method: "post",

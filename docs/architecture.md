@@ -52,6 +52,17 @@ all succeed. Failure of any check fails closed and Desktop Commander is never
 invoked. The adapter never depends on any hosted Desktop Commander service. ACS
 decides; Desktop Commander executes.
 
+For deployments where the actual Desktop Commander tool call runs in a
+separate, untrusted process (for example an OpenClaw Desktop Commander
+bridge) rather than the same worker process that claims the attempt, the
+gateway additionally exposes an ACS-owned HTTP capability issuer
+(`POST /work-items/{id}/desktop-commander/capability`, see
+[docs/protocol/acs-dc-v1-capability-contract.md](protocol/acs-dc-v1-capability-contract.md#10-acs-owned-http-capability-issuer)).
+It performs the identical policy/lease/approval re-verification and signs
+with the same private key material, held only in the gateway process's
+memory; it is an alternative issuance transport, not a separate policy model.
+The OpenClaw bridge integration required to call it is not yet implemented.
+
 Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. `blocked` remains a recoverable policy state; an accepted execution result is immutable and terminal. In this alpha, worker simulation only starts by transitioning an approved work item to `running`; no real command execution is claimed. The worker then applies a second, execution-side read-only scope check: filesystem inspection items may be simulated, while approved writes, shell commands, and other non-read-only actions are recorded as blocked rather than falsely reported as successful.
 
 Policy decisions are recorded as `policy.decided` audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated and records who approved it and why.

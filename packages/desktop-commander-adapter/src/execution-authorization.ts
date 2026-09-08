@@ -1,6 +1,7 @@
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
   executionActionHash,
+  executionPlanApprovalRequestHash,
   type AttemptLease,
   type ClaimedWorkItem,
   type WorkItem
@@ -32,6 +33,8 @@ export interface ExecutionAuthorization {
   readonly fencingEpoch: number;
   /** executionActionHash(workItem) - re-derived from trusted state and matched. */
   readonly actionHash: string;
+  /** Re-derived from immutable work-item, plan, and action authority. */
+  readonly requestHash: string;
   /** domainHash of the exact normalised Desktop Commander tool call. */
   readonly invocationFingerprint: string;
   readonly toolName: string;
@@ -146,6 +149,11 @@ export function authorizeDesktopCommanderExecution(input: AuthorizeExecutionInpu
     inputHash: claimed.inputHash,
     fencingEpoch: claimed.fencingEpoch,
     actionHash: recomputedActionHash,
+    requestHash: executionPlanApprovalRequestHash({
+      workItemId: trustedWorkItem.id,
+      planHash: claimed.planHash,
+      actionHash: recomputedActionHash
+    }),
     invocationFingerprint,
     toolName: invocation.toolName,
     normalizedArguments: Object.freeze({ ...invocation.validatedArguments }),

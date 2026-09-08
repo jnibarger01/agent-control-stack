@@ -12,8 +12,12 @@
  * not exported.
  */
 
-export { desktopCommanderAdapterConfigFromEnv } from "./config.js";
-export type { DesktopCommanderAdapterConfig } from "./config.js";
+export {
+  desktopCommanderAdapterConfigFromEnv,
+  desktopCommanderContainmentFromEnv,
+  desktopCommanderCapabilityIssuerConfigFromEnv
+} from "./config.js";
+export type { DesktopCommanderAdapterConfig, DesktopCommanderCapabilityIssuerConfig } from "./config.js";
 
 export {
   desktopCommanderToolPolicy,
@@ -36,8 +40,23 @@ export {
 } from "./arguments.js";
 export type { NormalizedInvocation } from "./arguments.js";
 
+export {
+  DESKTOP_COMMANDER_CAPABILITY_VERSION,
+  desktopCommanderCapabilityNonceHash
+} from "./capability.js";
+export type { CapabilitySigningConfig, DesktopCommanderCapability, DesktopCommanderCapabilityPayload } from "./capability.js";
+
+export { issueAndSignDesktopCommanderCapability } from "./capability-issuance.js";
+export type { CapabilityIssuanceDeps, ManagedCapabilityConfig } from "./capability-issuance.js";
+
+export { SqliteDesktopCommanderRuntimeRegistry } from "./runtime-registry.js";
+export type { RuntimeAttestation, RuntimeBootstrapChallenge, CapabilityIssuanceBinding } from "./runtime-registry.js";
+
 export { authorizeDesktopCommanderExecution, isExecutionAuthorization } from "./execution-authorization.js";
 export type { ExecutionAuthorization, AuthorizeExecutionInput } from "./execution-authorization.js";
+
+export { issueDesktopCommanderCapabilityForRequest } from "./http-issuer.js";
+export type { IssueDesktopCommanderCapabilityForRequestInput } from "./http-issuer.js";
 
 export { normalizeToolResult } from "./result.js";
 export type { MachineExecutionResult, NormalizeResultOptions } from "./result.js";
@@ -48,6 +67,8 @@ export {
   authorizationRequestedEvent,
   authorizationGrantedEvent,
   authorizationDeniedEvent,
+  capabilityIssuedEvent,
+  capabilityDeniedEvent,
   executionStartedEvent,
   toolCalledEvent,
   toolOutcomeEvent,

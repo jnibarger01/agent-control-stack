@@ -88,6 +88,14 @@ const operations = {
     "method": "POST",
     "path": "/work-items/{id}/results"
   },
+  "issueDesktopCommanderCapability": {
+    "method": "POST",
+    "path": "/work-items/{id}/desktop-commander/capability"
+  },
+  "getDesktopCommanderCapabilityKey": {
+    "method": "GET",
+    "path": "/desktop-commander/capability-key"
+  },
   "retryWorkItem": {
     "method": "POST",
     "path": "/work-items/{id}/retry"

@@ -586,7 +586,9 @@ const executionAuditEventNames = new Set([
   "execution.completed",
   "desktop_commander.tool_called",
   "desktop_commander.tool_succeeded",
-  "desktop_commander.tool_failed"
+  "desktop_commander.tool_failed",
+  "desktop_commander.capability_issued",
+  "desktop_commander.capability_denied"
 ]);
 
 export const localAgentEventTypes = [

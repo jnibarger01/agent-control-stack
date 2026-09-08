@@ -11,12 +11,18 @@ import {
 } from "./execution-authorization.js";
 import {
   McpStdioClient,
+  type McpRuntimeBootstrap,
   type McpStdioClientOptions,
   type McpToolCallResult,
   type McpToolDescriptor
 } from "./mcp-stdio-client.js";
 import { normalizeToolResult, type MachineExecutionResult } from "./result.js";
 import { desktopCommanderToolPolicy, isAllowlistedDesktopCommanderTool } from "./tool-policy.js";
+import { issueAndSignDesktopCommanderCapability } from "./capability-issuance.js";
+import type { AuditEventDraft } from "./audit.js";
+import type { CapabilityIssuanceBinding, RuntimeBootstrapRegistry } from "./runtime-registry.js";
+import { SqliteDesktopCommanderRuntimeRegistry } from "./runtime-registry.js";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 
 /**
  * Phase 1 + Phase 10 - the machine execution boundary.
@@ -48,9 +54,9 @@ export interface MachineExecutor {
 
 /** Test seam: a minimal transport the executor can drive. */
 export interface DesktopCommanderTransport {
-  connect(): Promise<unknown>;
+  connect(runtimeBootstrap?: McpRuntimeBootstrap): Promise<unknown>;
   listTools(): Promise<McpToolDescriptor[]>;
-  callTool(name: string, args: unknown): Promise<McpToolCallResult>;
+  callTool(name: string, args: unknown, meta?: Record<string, unknown>): Promise<McpToolCallResult>;
   close(): Promise<void>;
   isConnected(): boolean;
   getServerInfo(): { name?: string; version?: string; protocolVersion?: string };
@@ -60,12 +66,23 @@ export interface DesktopCommanderMachineExecutorDeps {
   /** Inject a fake transport for unit tests. */
   transport?: DesktopCommanderTransport;
   now?: () => Date;
+  /** Authoritative transaction gate; a capability is never signed before it commits. */
+  capabilityRegistry?: { recordIssuance(input: CapabilityIssuanceBinding): { requestHash: string; approvalId?: string } };
+  /** Durable bootstrap challenge/attestation gate for managed startup. */
+  runtimeRegistry?: RuntimeBootstrapRegistry;
+  /** Canonical audit persistence; failure prevents signing and transmission. */
+  persistAuditEvent?: (event: AuditEventDraft) => void | Promise<void>;
 }
 
 export class DesktopCommanderMachineExecutor implements MachineExecutor {
   private readonly transport: DesktopCommanderTransport;
   private readonly containment: ContainmentConfig;
   private readonly now: () => Date;
+  private readonly capabilityRegistry: DesktopCommanderMachineExecutorDeps["capabilityRegistry"];
+  private readonly runtimeRegistry: RuntimeBootstrapRegistry | undefined;
+  private readonly persistAuditEvent: DesktopCommanderMachineExecutorDeps["persistAuditEvent"];
+  private readonly ownedRegistry: SqliteDesktopCommanderRuntimeRegistry | undefined;
+  private readonly ownedAuditStore: SqliteWorkItemStore | undefined;
   private connecting: Promise<void> | undefined;
 
   constructor(
@@ -74,6 +91,19 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
   ) {
     this.containment = { allowedRoots: config.allowedRoots, deniedRoots: config.deniedRoots };
     this.now = deps.now ?? (() => new Date());
+    const databasePath = config.capability?.databasePath;
+    this.ownedRegistry = !deps.capabilityRegistry && !config.capability?.issuanceRegistry && databasePath
+      ? new SqliteDesktopCommanderRuntimeRegistry(databasePath)
+      : undefined;
+    this.ownedAuditStore = !deps.persistAuditEvent && !config.capability?.persistAuditEvent && databasePath
+      ? new SqliteWorkItemStore(databasePath)
+      : undefined;
+    this.capabilityRegistry = deps.capabilityRegistry ?? config.capability?.issuanceRegistry ?? this.ownedRegistry;
+    this.runtimeRegistry = deps.runtimeRegistry ?? config.capability?.runtimeRegistry ?? this.ownedRegistry;
+    const ownedAuditStore = this.ownedAuditStore;
+    this.persistAuditEvent = deps.persistAuditEvent ?? config.capability?.persistAuditEvent ?? (ownedAuditStore
+      ? (event) => { ownedAuditStore.recordExecutionEvent({ name: event.name, workItemId: String(event.body.workItemId), body: event.body, attributes: event.attributes }); }
+      : undefined);
     this.transport = deps.transport ?? new McpStdioClient(this.stdioOptions());
   }
 
@@ -101,8 +131,31 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
   private async ensureConnected(): Promise<void> {
     if (this.transport.isConnected()) return;
     if (!this.connecting) {
+      const capability = this.config.capability;
+      if (!capability || !this.runtimeRegistry) {
+        throw new ControlStackError("desktop_commander_runtime_identity_rejected", "managed Desktop Commander requires a runtime registry");
+      }
+      const bootstrap = this.runtimeRegistry.issueBootstrap({
+        runtimeId: capability.runtimeId,
+        identityConfigFingerprint: capability.runtimeIdentityConfigFingerprint,
+        scopes: capability.runtimeScopes
+      }, this.now());
+      const request: McpRuntimeBootstrap = {
+        schemaVersion: 1,
+        runtimeId: bootstrap.runtimeId,
+        challenge: bootstrap.challenge,
+        scopes: bootstrap.scopes
+      };
       this.connecting = this.transport
-        .connect()
+        .connect(request)
+        .then(() => {
+          this.runtimeRegistry?.completeBootstrap({
+            runtimeId: bootstrap.runtimeId,
+            identityConfigFingerprint: bootstrap.identityConfigFingerprint,
+            scopes: bootstrap.scopes,
+            challenge: bootstrap.challenge
+          }, this.now());
+        })
         .then(() => undefined)
         .catch((error) => {
           this.connecting = undefined;
@@ -163,13 +216,17 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
       containPath(this.containment, canonical);
     }
 
+    if (!this.config.capability) {
+      throw new ControlStackError("desktop_commander_capability_missing", "managed capability signing is not configured");
+    }
+    const capability = await this.issueCapability(auth);
     await this.ensureConnected();
 
     const startedAt = this.now();
     let raw: McpToolCallResult;
     try {
       raw = await this.withTimeout(
-        this.transport.callTool(auth.toolName, auth.normalizedArguments),
+        this.transport.callTool(auth.toolName, auth.normalizedArguments, { acsCapability: capability }),
         policy.timeoutMs,
         auth.toolName,
         request.signal
@@ -200,6 +257,21 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
       completedAt,
       maxResultBytes: Math.min(policy.maxResultBytes, this.config.maxResultBytes)
     });
+  }
+
+  private async issueCapability(auth: ExecutionAuthorization) {
+    if (!this.config.capability || !this.capabilityRegistry || !this.persistAuditEvent) {
+      throw new ControlStackError(
+        "desktop_commander_capability_missing",
+        "managed capability requires an authoritative issuance registry and audit sink"
+      );
+    }
+    return issueAndSignDesktopCommanderCapability(
+      auth,
+      this.config.capability,
+      { capabilityRegistry: this.capabilityRegistry, persistAuditEvent: this.persistAuditEvent },
+      this.now()
+    );
   }
 
   private async withTimeout<T>(
@@ -245,6 +317,8 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
 
   async close(): Promise<void> {
     await this.transport.close();
+    this.ownedRegistry?.close();
+    this.ownedAuditStore?.close();
   }
 }
 

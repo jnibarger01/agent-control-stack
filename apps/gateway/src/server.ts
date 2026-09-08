@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHmac, createPrivateKey, createPublicKey, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -11,6 +11,12 @@ import {
   loadMachineControllerConfig,
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
+import {
+  desktopCommanderCapabilityIssuerConfigFromEnv,
+  issueDesktopCommanderCapabilityForRequest,
+  SqliteDesktopCommanderRuntimeRegistry,
+  type DesktopCommanderCapabilityIssuerConfig
+} from "@agent-control-stack/desktop-commander-adapter";
 import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
@@ -60,6 +66,7 @@ import {
   connectorKeyRotationBodySchema,
   cloneBodySchema,
   createWorkItemSchema,
+  desktopCommanderCapabilityRequestSchema,
   eventQuerySchema,
   heartbeatBodySchema,
   retryBodySchema,
@@ -118,6 +125,13 @@ export interface GatewayOptions {
   moa?: MoaGatewayOverrides | false;
   rateLimit?: RateLimitOptions;
   maxPendingWorkItems?: number;
+  /**
+   * ACS-owned Desktop Commander capability issuer. `false` explicitly disables
+   * the issuance/discovery routes (they answer 503) even if the environment
+   * happens to carry signing material; `undefined` (the default) resolves
+   * from environment via `desktopCommanderCapabilityIssuerConfigFromEnv`.
+   */
+  desktopCommanderCapabilityIssuer?: DesktopCommanderCapabilityIssuerConfig | false;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -146,6 +160,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     acpAdapterConfig === false || !acpAdapterConfig
       ? undefined
       : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
+  const desktopCommanderIssuerConfig =
+    options.desktopCommanderCapabilityIssuer === undefined
+      ? desktopCommanderCapabilityIssuerConfigFromEnv()
+      : options.desktopCommanderCapabilityIssuer || undefined;
+  // Private signing material lives only in this registry's process memory for
+  // the life of the gateway process; it is never re-derived from a request.
+  const desktopCommanderRuntimeRegistry = desktopCommanderIssuerConfig
+    ? new SqliteDesktopCommanderRuntimeRegistry(desktopCommanderIssuerConfig.capability.databasePath ?? dbPath)
+    : undefined;
   app.addHook("preHandler", async (request, reply) => {
     requestStartTimes.set(request, performance.now());
     if (request.method === "GET" || !isRateLimitedRoute(request.url)) return;
@@ -912,6 +935,94 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
 
+  app.post<{ Params: { id: string } }>(
+    "/work-items/:id/desktop-commander/capability",
+    { bodyLimit: MAX_RESULT_BODY_BYTES },
+    async (request, reply) => {
+      reply.header("x-request-id", request.id);
+      try {
+        const workerId = requireDesktopCommanderIssuerIdentity(request, reply, auth);
+        if (!workerId) {
+          return;
+        }
+        if (!desktopCommanderIssuerConfig || !desktopCommanderRuntimeRegistry) {
+          return reply.code(503).send({
+            error: "desktop commander capability issuance is not configured",
+            code: "desktop_commander_issuer_unconfigured"
+          });
+        }
+        // .strict() in the schema: any extra field (a client-supplied
+        // toolName, arguments, runtimeId, capability, or _meta) is a 400, not
+        // a silently-ignored field. Only `attemptId` is ever accepted from
+        // the caller; workItemId comes from the route, workerId from the
+        // authenticated credential, and everything else (tool, arguments,
+        // hashes, fencing epoch, runtime) is re-derived from trusted store
+        // state inside `issueDesktopCommanderCapabilityForRequest`.
+        const body = desktopCommanderCapabilityRequestSchema.parse(request.body);
+        const capability = await issueDesktopCommanderCapabilityForRequest({
+          store: workItems,
+          config: desktopCommanderIssuerConfig.capability,
+          containment: {
+            allowedRoots: desktopCommanderIssuerConfig.allowedRoots,
+            deniedRoots: desktopCommanderIssuerConfig.deniedRoots
+          },
+          capabilityRegistry: desktopCommanderRuntimeRegistry,
+          persistAuditEvent: (event) => {
+            workItems.recordExecutionEvent({
+              name: event.name,
+              workItemId: request.params.id,
+              body: event.body,
+              attributes: event.attributes
+            });
+          },
+          workItemId: request.params.id,
+          attemptId: body.attemptId,
+          workerId,
+          requestId: request.id
+        });
+        request.log.info(
+          { requestId: request.id, workItemId: request.params.id, attemptId: body.attemptId, workerId },
+          "desktop commander capability issued"
+        );
+        return reply.code(201).send({ capability });
+      } catch (error) {
+        request.log.warn(
+          {
+            requestId: request.id,
+            workItemId: request.params.id,
+            code:
+              error instanceof ControlStackError
+                ? error.code
+                : error instanceof ZodError
+                  ? "invalid_request"
+                  : "internal_error"
+          },
+          "desktop commander capability issuance rejected"
+        );
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get("/desktop-commander/capability-key", { preHandler: requireRead }, (_request, reply) => {
+    if (!desktopCommanderIssuerConfig) {
+      return reply.code(503).send({
+        error: "desktop commander capability issuance is not configured",
+        code: "desktop_commander_issuer_unconfigured"
+      });
+    }
+    const privateKey = createPrivateKey({
+      key: Buffer.from(desktopCommanderIssuerConfig.capability.privateKey, "base64url"),
+      format: "der",
+      type: "pkcs8"
+    });
+    const publicKeyDer = createPublicKey(privateKey).export({ format: "der", type: "spki" });
+    return reply.code(200).send({
+      keyId: desktopCommanderIssuerConfig.capability.keyId,
+      publicKey: Buffer.from(publicKeyDer).toString("base64url")
+    });
+  });
+
   app.post<{ Params: { id: string } }>("/work-items/:id/retry", async (request, reply) => {
     try {
       const actor = requireMutationActor(request, reply, auth);
@@ -976,6 +1087,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     await acpAdapter?.stop();
     executionReads.close();
     deviceAuthStore.close();
+    desktopCommanderRuntimeRegistry?.close();
     workItems.close();
   });
 
@@ -1020,11 +1132,56 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   return app;
 }
 
+/**
+ * Every rejection the Desktop Commander capability issuer can produce - the
+ * store lookups in `issueDesktopCommanderCapabilityForRequest`,
+ * `authorizeDesktopCommanderExecution`'s re-verification, capability
+ * preparation, and `recordIssuance`'s transactional gate - mapped to a
+ * stable, distinct HTTP status. None of these messages ever contain a
+ * capability payload, nonce, signature, or private key; ControlStackError
+ * messages here are authored fixed strings, not echoed request data.
+ */
+const desktopCommanderIssuerStatusByCode: Record<string, number> = {
+  desktop_commander_work_item_not_found: 404,
+  desktop_commander_attempt_not_found: 404,
+  desktop_commander_lease_worker_mismatch: 403,
+  desktop_commander_lease_work_item_mismatch: 403,
+  desktop_commander_lease_attempt_mismatch: 403,
+  desktop_commander_approval_missing: 403,
+  desktop_commander_approval_rejected: 403,
+  desktop_commander_runtime_not_active: 403,
+  desktop_commander_runtime_scope_rejected: 403,
+  desktop_commander_tool_not_allowlisted: 403,
+  desktop_commander_lease_expired: 410,
+  desktop_commander_lease_missing: 409,
+  desktop_commander_lease_inactive: 409,
+  desktop_commander_lease_fencing_mismatch: 409,
+  desktop_commander_work_item_not_executable: 409,
+  desktop_commander_work_item_mismatch: 409,
+  desktop_commander_plan_execution_mode_mismatch: 409,
+  desktop_commander_action_hash_changed: 409,
+  desktop_commander_attempt_authority_missing: 409,
+  desktop_commander_plan_hash_mismatch: 409,
+  desktop_commander_capability_lease_rejected: 409,
+  desktop_commander_capability_already_issued: 409,
+  desktop_commander_capability_nonce_collision: 409,
+  desktop_commander_capability_issuance_rejected: 409,
+  desktop_commander_capability_invalid: 400,
+  desktop_commander_authorization_failed: 400,
+  desktop_commander_config_invalid: 503,
+  desktop_commander_capability_missing: 503
+};
+
 function sendError(reply: FastifyReply, error: unknown) {
   if (error instanceof ZodError) {
     return reply.code(400).send({ error: "invalid request" });
   }
   if (error instanceof ControlStackError) {
+    if (error.code in desktopCommanderIssuerStatusByCode) {
+      return reply
+        .code(desktopCommanderIssuerStatusByCode[error.code]!)
+        .send({ error: error.message, code: error.code });
+    }
     const status =
       error.code === "work_item_not_found" || error.code === "agent_not_found"
         ? 404
@@ -1373,6 +1530,46 @@ function requireWorkerIdentity(
   }
   if (!credential.roles.includes("worker") || !credential.scopes.includes("acs:worker") || !credential.actorId) {
     reply.code(403).send({ error: "worker role is required", code: "insufficient_worker_authority" });
+    return undefined;
+  }
+  return credential.actorId;
+}
+
+/**
+ * A distinct, narrower scope than `acs:worker`: a worker credential that can
+ * submit results does not automatically gain authority to mint signed
+ * Desktop Commander capabilities. Both `acs:worker` (so the resolved identity
+ * matches the attempt's `claimedByWorkerId`) and `acs:desktop-commander:issue`
+ * are required. Caller/bridge identity is always the credential-bound
+ * `actorId` - never a request body or header field.
+ */
+function requireDesktopCommanderIssuerIdentity(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  if (!auth) {
+    reply.code(503).send({
+      error: "desktop commander issuer auth is not configured",
+      code: "desktop_commander_issuer_auth_unconfigured"
+    });
+    return undefined;
+  }
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (!credential) {
+    reply.code(401).send({ error: "unauthorized" });
+    return undefined;
+  }
+  if (
+    !credential.roles.includes("worker") ||
+    !credential.scopes.includes("acs:worker") ||
+    !credential.scopes.includes("acs:desktop-commander:issue") ||
+    !credential.actorId
+  ) {
+    reply.code(403).send({
+      error: "desktop commander capability issuance authority is required",
+      code: "insufficient_desktop_commander_issuer_authority"
+    });
     return undefined;
   }
   return credential.actorId;

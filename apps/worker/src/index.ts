@@ -33,6 +33,7 @@ import {
   authorizationRequestedEvent,
   authorizeDesktopCommanderExecution,
   desktopCommanderAdapterConfigFromEnv,
+  desktopCommanderContainmentFromEnv,
   DesktopCommanderMachineExecutor,
   executionCompletedEvent,
   executionStartedEvent,
@@ -778,11 +779,7 @@ async function recordGovernedExecutionEvidence(input: GovernedEvidenceInput): Pr
 }
 
 function machineExecutorContainmentFromEnv(): { allowedRoots: string[]; deniedRoots: string[] } {
-  const config = desktopCommanderAdapterConfigFromEnv();
-  if (!config) {
-    throw new Error("Desktop Commander adapter configuration is unavailable");
-  }
-  return { allowedRoots: config.allowedRoots, deniedRoots: config.deniedRoots };
+  return desktopCommanderContainmentFromEnv();
 }
 
 export function workerResultIdempotencyKey(attemptId: string): string {
