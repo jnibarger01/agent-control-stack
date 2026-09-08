@@ -15,6 +15,8 @@ import { logToStderr, logger } from './utils/logger.js';
 import { runRemote } from './npm-scripts/remote.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
 import { desktopCommanderExecutionMode, revokeManagedAcsRuntime } from './managed-acs-runtime.js';
+import { reconcileSessionsOnStartup } from './session-reconciliation.js';
+import { terminalManager } from './terminal-manager.js';
 
 // Store messages to defer until after initialization
 const deferredMessages: Array<{ level: string, message: string }> = [];
@@ -80,6 +82,32 @@ async function runServer() {
       // Initialize feature flags (non-blocking)
       deferLog('info', 'Initializing feature flags...');
       await featureFlagManager.initialize();
+
+      // Reconcile durable process-session records (P2.1) against current OS
+      // state before accepting any tool calls, so a session left over from
+      // a prior run of this server is classified (recovered / stale /
+      // quarantined-corrupt) rather than silently forgotten or, worse,
+      // treated as live without verification.
+      deferLog('info', 'Reconciling durable process sessions...');
+      try {
+        const summary = await reconcileSessionsOnStartup();
+        for (const handle of summary.recovered) {
+          terminalManager.registerRecoveredSession(handle);
+        }
+        deferLog(
+          'info',
+          `Session reconciliation: ${summary.recovered.length} recovered, ${summary.markedStale} stale, ` +
+          `${summary.alreadyTerminal} already terminal, ${summary.corrupt} corrupt (quarantined), ${summary.pruned} pruned`
+        );
+      } catch (reconciliationError) {
+        // Reconciliation failing must never block server startup — fail
+        // closed on session recovery (no sessions get adopted this run),
+        // not on the server itself starting.
+        deferLog(
+          'warning',
+          `Session reconciliation failed, continuing with no recovered sessions: ${reconciliationError instanceof Error ? reconciliationError.message : String(reconciliationError)}`
+        );
+      }
     } catch (configError) {
       deferLog('error', `Failed to load configuration: ${configError instanceof Error ? configError.message : String(configError)}`);
       if (configError instanceof Error && configError.stack) {

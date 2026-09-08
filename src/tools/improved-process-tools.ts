@@ -294,6 +294,25 @@ export async function readProcessOutput(args: unknown): Promise<ServerResult> {
   // Timing telemetry
   const startTime = Date.now();
 
+  // A session recovered from a durable record after a server restart (P2.1)
+  // has no live stdout/stderr attached — the original spawning process is
+  // gone, so there is no pipe left to read from. Say so explicitly rather
+  // than reporting "no session found" (which would be misleading: the
+  // process itself may well still be running) or fabricating output that
+  // was never durably captured.
+  const recovered = terminalManager.getRecoveredSession(pid);
+  if (recovered) {
+    const stillAlive = await terminalManager.refreshRecoveredSessionLiveness(pid);
+    return {
+      content: [{
+        type: "text",
+        text: stillAlive
+          ? `Process ${pid} was recovered after a Desktop Commander restart. It is confirmed still running, but live output from before the restart was not durably retained and cannot be read — this server was not attached to it when it produced that output. Use force_terminate to end it, or wait for it to exit on its own.`
+          : `Process ${pid} is no longer running.`
+      }],
+    };
+  }
+
   // For active sessions with no new output yet, optionally wait for output
   const session = terminalManager.getSession(pid);
   if (session && offset === 0) {
@@ -462,6 +481,23 @@ export async function interactWithProcess(args: unknown): Promise<ServerResult> 
   let exitReason: 'early_exit_quick_pattern' | 'early_exit_periodic_check' | 'process_finished' | 'timeout' | 'no_wait' = 'timeout';
 
   try {
+    // A session recovered after a restart (P2.1) has no live stdin attached
+    // — say so plainly rather than letting this fall through to the generic
+    // "may have exited or doesn't accept input" message below, which would
+    // wrongly suggest the process itself is the problem.
+    if (terminalManager.getRecoveredSession(pid)) {
+      const stillAlive = await terminalManager.refreshRecoveredSessionLiveness(pid);
+      return {
+        content: [{
+          type: "text",
+          text: stillAlive
+            ? `Process ${pid} was recovered after a Desktop Commander restart and has no live stdin attached — it cannot receive further input from this server. Use force_terminate to end it, or wait for it to exit on its own.`
+            : `Process ${pid} is no longer running.`
+        }],
+        isError: true,
+      };
+    }
+
     capture('server_interact_with_process', {
       pid: pid,
       inputLength: input.length
@@ -737,6 +773,7 @@ export async function listSessions(): Promise<ServerResult> {
 
   const realSessionsText = sessions.map(s =>
     `PID: ${s.pid}, Blocked: ${s.isBlocked}, Runtime: ${Math.round(s.runtime / 1000)}s`
+    + (s.recovered ? ' (recovered after restart — no live output attached, see read_process_output)' : '')
   );
 
   const virtualSessionsText = virtualSessions.map(s =>
