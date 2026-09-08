@@ -205,6 +205,8 @@ Configuration:
 - `ACS_PORTFOLIO_BASE_URL` must be a loopback `http://127.0.0.1` or
   `http://localhost` Visualizer origin. If it is absent or not loopback, the
   tools remain advertised and return `PORTFOLIO_UNAVAILABLE`.
+- Visualizer contract branch: `jnibarger01/visualizer` → `feat/github-portfolio-intelligence`.
+- Contributor wiring runbook: [portfolio-mcp.md](../runbooks/portfolio-mcp.md) (local smoke + env).
 - These tools use the existing `acs:work:read` scope.
 - Annotations: `readOnlyHint: true`, `destructiveHint: false`,
   `openWorldHint: false`.

@@ -94,6 +94,15 @@ curl -fsS http://127.0.0.1:3001/readyz
 curl -fsS http://127.0.0.1:3001/status
 ```
 
+## Portfolio MCP (Visualizer loopback)
+
+Read-only `portfolio.*` tools need `ACS_PORTFOLIO_BASE_URL` pointing at a
+loopback Visualizer (`127.0.0.1` or `localhost` only). Without it the tools
+stay listed and return `PORTFOLIO_UNAVAILABLE`; CI does not require Visualizer.
+
+See [portfolio-mcp.md](portfolio-mcp.md) for env, Visualizer branch/contract,
+Vitest contract suites, and `scripts/portfolio-mcp-smoke.mjs`.
+
 ## ChatGPT App UI
 
 Build the self-contained React widget with `npm run build:chatgpt-widget`.
