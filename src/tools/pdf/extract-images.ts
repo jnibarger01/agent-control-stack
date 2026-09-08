@@ -132,9 +132,12 @@ export async function extractImagesFromPdf(
 }
 
 /**
- * Convert raw image data to compressed base64 using sharp
+ * Convert raw image data to compressed base64 using sharp.
+ * Exported (in addition to being used internally) so this exact sharp API
+ * surface — raw-pixel-buffer input, resize, jpeg/webp encode — has direct
+ * regression coverage independent of the full PDF extraction pipeline.
  */
-async function convertRawImageToBase64(
+export async function convertRawImageToBase64(
     data: Uint8ClampedArray,
     width: number,
     height: number,
