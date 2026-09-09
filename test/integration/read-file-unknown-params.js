@@ -39,7 +39,11 @@ function textOf(result) {
 async function createMcpClient() {
   const transport = new StdioClientTransport({
     command: process.execPath,
-    args: [path.join(PROJECT_ROOT, 'dist/index.js'), '--no-onboarding'],
+    // Without --standalone the server starts in managed ACS mode and rejects
+    // every tool call with ACS_RUNTIME_IDENTITY_MISSING, because this client
+    // performs no runtime identity handshake. Same opt-in the local runtime and
+    // the remote device use when they exec dist/index.js directly.
+    args: [path.join(PROJECT_ROOT, 'dist/index.js'), '--no-onboarding', '--standalone'],
     cwd: PROJECT_ROOT,
     stderr: 'pipe',
     env: { ...process.env, DESKTOP_COMMANDER_DISABLE_TELEMETRY: 'true' },
