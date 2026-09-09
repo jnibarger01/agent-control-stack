@@ -40,7 +40,16 @@ const identifierSchema = z
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
 const hashSchema = z.string().regex(/^[a-f0-9]{64}$/iu);
-const timestampSchema = z.string().datetime({ offset: true }).max(64);
+const publicResultTimestampDateSource = String.raw`(?:(?:\d\d[2468][048]|\d\d[13579][26]|\d\d0[48]|[02468][048]00|[13579][26]00)-02-29|\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\d|30)|(?:02)-(?:0[1-9]|1\d|2[0-8])))`;
+const publicResultTimestampTimeSource = String.raw`(?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?`;
+const publicResultTimestampOffsetSource = String.raw`(?:Z|([+-](?:[01]\d|2[0-3]):[0-5]\d))`;
+const publicResultTimestampPattern = new RegExp(
+  `^${publicResultTimestampDateSource}T(?:${publicResultTimestampTimeSource}${publicResultTimestampOffsetSource})$`,
+  "u"
+);
+// Public contract v1 intentionally accepts both minute- and second-precision zoned timestamps.
+// Keep this grammar dependency-independent; changing it requires the public breaking-change process.
+const timestampSchema = z.string().regex(publicResultTimestampPattern).max(64).meta({ format: "date-time" });
 const boundedSummarySchema = z.string().min(1).max(2_000);
 const boundedOutputSchema = z
   .string()
