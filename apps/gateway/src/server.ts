@@ -148,7 +148,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const rateLimiter = new SlidingWindowRateLimiter(options.rateLimit ?? resolveRateLimitFromEnv());
   const maxPendingWorkItems = options.maxPendingWorkItems ?? resolveMaxPendingWorkItemsFromEnv();
   const maxSseClients = options.maxSseClients ?? resolveMaxSseClientsFromEnv();
-  const maxSseClientsPerPrincipal = options.maxSseClientsPerPrincipal ?? resolveMaxSseClientsPerPrincipalFromEnv();
+  const configuredMaxSseClientsPerPrincipal =
+    options.maxSseClientsPerPrincipal ?? resolveMaxSseClientsPerPrincipalFromEnv();
+  const maxSseClientsPerPrincipal = effectiveMaxSseClientsPerPrincipal(
+    configuredMaxSseClientsPerPrincipal,
+    maxSseClients
+  );
+  if (maxSseClientsPerPrincipal < configuredMaxSseClientsPerPrincipal) {
+    app.log.warn(
+      { configured: configuredMaxSseClientsPerPrincipal, effective: maxSseClientsPerPrincipal, maxSseClients },
+      "per-principal SSE cap lowered to stay below the global cap"
+    );
+  }
   const metrics = new GatewayMetrics();
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const requestStartTimes = new WeakMap<object, number>();
@@ -1263,6 +1274,23 @@ function resolveMaxSseClientsPerPrincipalFromEnv(env: NodeJS.ProcessEnv = proces
     .min(1)
     .max(100_000)
     .parse(env.ACS_MAX_SSE_CLIENTS_PER_PRINCIPAL ?? 10);
+}
+
+/**
+ * The fairness guarantee is that no single principal can occupy every stream
+ * slot. The two caps are configured independently, so an operator who lowers
+ * ACS_MAX_SSE_CLIENTS below the per-principal default would otherwise void that
+ * guarantee silently — with a global cap of 5 and the default 10, the
+ * per-principal branch can never fire. Derive the effective limit from both
+ * rather than trusting them to be coherent.
+ *
+ * One slot below the global ceiling is the minimum that actually enforces the
+ * promise, and it leaves an explicit per-principal setting alone whenever that
+ * setting is already consistent. A global cap of 1 has no fairness to give;
+ * the floor of 1 keeps that degenerate case working rather than unservable.
+ */
+export function effectiveMaxSseClientsPerPrincipal(configured: number, globalMax: number): number {
+  return Math.max(1, Math.min(configured, globalMax - 1));
 }
 
 /**
