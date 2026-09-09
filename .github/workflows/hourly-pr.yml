@@ -72,7 +72,7 @@ jobs:
       - name: Run engineering worker
         if: steps.preflight.outputs.mode != 'skip'
         id: opencode
-        uses: anomalyco/opencode/github@2c14fc5586fe0b88e5c04732d2e846769cc35671
+        uses: anomalyco/opencode/github@77fc88c8ade8e5a620ebbe1197f3a572d29ae91a
         env:
           FREEMODEL_API_KEY: ${{ secrets.FREEMODEL_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
