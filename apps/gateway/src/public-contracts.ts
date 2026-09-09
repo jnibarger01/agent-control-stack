@@ -289,6 +289,13 @@ export type PublicHttpOperation = {
    * generated OpenAPI document keeps matching the real response.
    */
   successStatus?: number;
+  /**
+   * Statuses this operation can return beyond the 400/401/403 set every route
+   * shares. Set this whenever server.ts introduces a status a client is
+   * expected to branch on, so the generated OpenAPI document keeps describing
+   * every response a caller can actually observe.
+   */
+  additionalResponses?: Readonly<Record<string, { description: string }>>;
 };
 
 export const publicHttpOperations: readonly PublicHttpOperation[] = [
@@ -490,7 +497,18 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     operationId: "getAcpAgent",
     summary: "Read an agent through the ACP view."
   },
-  { method: "get", path: "/events", operationId: "streamEvents", summary: "Stream audit events over SSE." }
+  {
+    method: "get",
+    path: "/events",
+    operationId: "streamEvents",
+    summary: "Stream audit events over SSE.",
+    additionalResponses: {
+      "503": {
+        description:
+          "Event stream capacity reached, globally or for this principal. Body carries code sse_capacity_reached; retry-after indicates when to retry."
+      }
+    }
+  }
 ] as const;
 
 export const publicContractExamples = {
