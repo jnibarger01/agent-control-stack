@@ -117,6 +117,7 @@ export interface GatewayOptions {
   moa?: MoaGatewayOverrides | false;
   rateLimit?: RateLimitOptions;
   maxPendingWorkItems?: number;
+  maxSseClients?: number;
   portfolioClient?: PortfolioClient;
 }
 
@@ -138,6 +139,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
   const rateLimiter = new SlidingWindowRateLimiter(options.rateLimit ?? resolveRateLimitFromEnv());
   const maxPendingWorkItems = options.maxPendingWorkItems ?? resolveMaxPendingWorkItemsFromEnv();
+  const maxSseClients = options.maxSseClients ?? resolveMaxSseClientsFromEnv();
   const metrics = new GatewayMetrics();
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const requestStartTimes = new WeakMap<object, number>();
@@ -938,6 +940,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.get("/events", { preHandler: requireRead }, (request, reply) => {
+    // Each stream pins a socket and its buffered writes for as long as the
+    // client holds it. Unbounded, an authenticated client can open sockets
+    // until the process runs out of memory, so refuse past the cap rather than
+    // degrade every existing subscriber.
+    if (sseClients.size >= maxSseClients) {
+      metrics.increment("acs_sse_connections_rejected_total");
+      return reply
+        .header("retry-after", "5")
+        .code(503)
+        .send({ error: "event stream capacity reached", code: "sse_capacity_reached" });
+    }
     reply.hijack();
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream",
@@ -1191,6 +1204,15 @@ function resolveRateLimitFromEnv(env: NodeJS.ProcessEnv = process.env): RateLimi
       .max(100_000)
       .parse(env.ACS_RATE_LIMIT_MAX_REQUESTS ?? 120)
   };
+}
+
+function resolveMaxSseClientsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100_000)
+    .parse(env.ACS_MAX_SSE_CLIENTS ?? 100);
 }
 
 function resolveMaxPendingWorkItemsFromEnv(env: NodeJS.ProcessEnv = process.env): number {

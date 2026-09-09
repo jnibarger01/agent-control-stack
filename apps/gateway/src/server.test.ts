@@ -3492,6 +3492,41 @@ describe("gateway dashboard sessions", () => {
     }
   });
 
+  it("refuses new SSE subscribers past the configured client cap", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-sse-cap-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: dashboardAuth,
+      maxSseClients: 1
+    });
+
+    try {
+      const { cookie } = await loginSession(app);
+
+      const first = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie },
+        payloadAsStream: true
+      });
+      expect(first.statusCode).toBe(200);
+
+      const rejected = await app.inject({ method: "GET", url: "/events", headers: { cookie } });
+      expect(rejected.statusCode).toBe(503);
+      expect(rejected.json()).toMatchObject({ code: "sse_capacity_reached" });
+      expect(rejected.headers["retry-after"]).toBe("5");
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics", headers: { cookie } });
+      expect(metrics.body).toContain("acs_sse_connections_rejected_total 1");
+
+      first.stream().destroy();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("returns a login page instead of the dashboard when unauthenticated", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-session-loginpage-"));
     const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });

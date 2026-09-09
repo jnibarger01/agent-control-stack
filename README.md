@@ -317,6 +317,7 @@ Do not commit `.env` or real secrets.
 | `ACS_RATE_LIMIT_WINDOW_MS`      | Mutation/MCP/webhook rate-limit window.                                                          | `60000`                           |
 | `ACS_RATE_LIMIT_MAX_REQUESTS`   | Maximum requests per credential fingerprint/IP and route within the window.                      | `120`                             |
 | `ACS_MAX_PENDING_WORK_ITEMS`    | Maximum draft/pending/approved/running work items before new intake is rejected.                 | `1000`                            |
+| `ACS_MAX_SSE_CLIENTS`           | Maximum concurrent `/events` subscribers before new streams are refused with 503.                | `100`                             |
 
 ### Machine-controller config
 
