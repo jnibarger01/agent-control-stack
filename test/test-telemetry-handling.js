@@ -3,9 +3,10 @@ import assert from 'assert';
 import {
   configManager,
   isTelemetryDisabledValue,
+  isTelemetryEnabledValue,
   normalizeTelemetryEnabledValue,
 } from '../dist/config-manager.js';
-import { isInsideUiOriginCall, runInUiOriginCallContext } from '../dist/utils/capture.js';
+import { capture, isInsideUiOriginCall, runInUiOriginCallContext, sanitizeTelemetryProperties } from '../dist/utils/capture.js';
 import { setConfigValue } from '../dist/tools/config.js';
 
 function testTelemetryHelpers() {
@@ -20,6 +21,10 @@ function testTelemetryHelpers() {
   assert.strictEqual(isTelemetryDisabledValue('FALSE'), true);
   assert.strictEqual(isTelemetryDisabledValue(true), false);
   assert.strictEqual(isTelemetryDisabledValue('true'), false);
+  assert.strictEqual(isTelemetryEnabledValue(true), true);
+  assert.strictEqual(isTelemetryEnabledValue('true'), true);
+  assert.strictEqual(isTelemetryEnabledValue(undefined), false);
+  assert.strictEqual(isTelemetryEnabledValue('enabled'), false);
 
   console.log('ok: telemetry helpers');
 }
@@ -131,6 +136,25 @@ async function testCapturePathAllowsTrueValues() {
  * the AsyncLocalStorage mechanics that invariant depends on: the flag holds
  * across awaits, does not leak out, and does not bleed into interleaved calls.
  */
+async function testDefaultOffAndNoEgress() {
+  console.log('\\n--- Test: telemetry default-off and no client/network work ---');
+  await configManager.updateConfig({ telemetryEnabled: undefined, clientId: undefined });
+  await capture('test_default_off', { token: 'should-not-be-forwarded' });
+  assert.strictEqual(await configManager.getValue('clientId'), undefined, 'disabled telemetry must not create a client ID');
+  assert.deepStrictEqual(sanitizeTelemetryProperties({ token: 'secret', nested: { authorization: 'Bearer secret', ok: 'value' } }), { nested: { ok: 'value' } });
+  console.log('ok: default-off/no-egress and secret redaction');
+}
+
+async function testExplicitOptInValidation() {
+  console.log('\\n--- Test: telemetry requires explicit validated opt-in ---');
+  await configManager.setValue('telemetryEnabled', 'true');
+  assert.strictEqual(await configManager.getValue('telemetryEnabled'), true);
+  assert.strictEqual(isTelemetryEnabledValue(await configManager.getValue('telemetryEnabled')), true);
+  await assert.rejects(() => configManager.setValue('telemetryEnabled', 'yes'), /must be a boolean/);
+  await configManager.setValue('telemetryEnabled', false);
+  console.log('ok: explicit opt-in validation');
+}
+
 async function testUiOriginCallContext() {
   console.log('\n--- Test: UI-origin call context (zero telemetry for widget calls) ---');
 
@@ -172,6 +196,8 @@ export default async function runTests() {
     await testCapturePathRespectsStringFALSE();
     await testCapturePathRespectsBooleanFalse();
     await testCapturePathAllowsTrueValues();
+    await testDefaultOffAndNoEgress();
+    await testExplicitOptInValidation();
     await testUiOriginCallContext();
 
     console.log('\nTelemetry handling tests passed.');

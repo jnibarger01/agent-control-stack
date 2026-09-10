@@ -1,7 +1,7 @@
 import { platform } from 'os';
 import * as https from 'https';
 import { AsyncLocalStorage } from 'async_hooks';
-import { configManager, isTelemetryDisabledValue } from '../config-manager.js';
+import { configManager, isTelemetryEnabledValue } from '../config-manager.js';
 import { currentClient, currentCallIsRemote, currentRemoteClient } from '../server.js';
 
 // Execution context for tool calls fired programmatically by the widget UIs
@@ -38,6 +38,46 @@ const TELEMETRY_PROXY_URL = 'https://telemetry.desktopcommander.app/mp/collect';
 const TELEMETRY_PROXY_FALLBACK_URL = 'https://dc-telemetry-proxy-83847352264.europe-west1.run.app/mp/collect';
 const TELEMETRY_AUTH_TOKEN_ENV = 'DESKTOP_COMMANDER_TELEMETRY_BEARER_TOKEN';
 const MAX_TELEMETRY_PAYLOAD_BYTES = 64 * 1024;
+const SENSITIVE_PROPERTY_KEY_SUBSTRINGS = [
+    'path', 'directory', 'token', 'secret', 'password', 'passwd', 'authorization',
+    'apikey', 'api_key', 'credential', 'cookie', 'bearer', 'privatekey', 'clientsecret',
+] as const;
+
+function redactSensitiveString(value: string): string {
+    return value
+        .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [REDACTED]')
+        .replace(/([?&](?:token|secret|password|api[_-]?key|authorization)=)[^&#\s]+/gi, '$1[REDACTED]')
+        .replace(/\b(?:sk|pk)_[A-Za-z0-9_-]{8,}\b/g, '[REDACTED]')
+        .replace(/(?:\/|\\)[\w\d_.-\/\\]+/g, '[PATH]')
+        .replace(/[A-Za-z]:\\[\w\d_.-\/\\]+/g, '[PATH]')
+        .slice(0, 512);
+}
+
+/** Remove secret-bearing fields recursively before transport. */
+export function sanitizeTelemetryProperties(properties: unknown): Record<string, unknown> {
+    if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return {};
+    const output: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+        const lowerKey = key.toLowerCase();
+        if (SENSITIVE_PROPERTY_KEY_SUBSTRINGS.some((part) => lowerKey.includes(part)) && lowerKey !== 'fileextension') {
+            continue;
+        }
+        if (typeof value === 'string') {
+            output[key] = redactSensitiveString(value);
+        } else if (Array.isArray(value)) {
+            output[key] = value.slice(0, 50).map((item) => {
+                if (typeof item === 'string') return redactSensitiveString(item);
+                if (item && typeof item === 'object' && !Array.isArray(item)) return sanitizeTelemetryProperties(item);
+                return item;
+            });
+        } else if (value && typeof value === 'object') {
+            output[key] = sanitizeTelemetryProperties(value);
+        } else {
+            output[key] = value;
+        }
+    }
+    return output;
+}
 
 /**
  * Hard kill-switch for telemetry via environment variable.
@@ -52,37 +92,6 @@ export function isTelemetryDisabledByEnv(): boolean {
     return ['1', 'true', 'yes', 'on'].includes(raw.trim().toLowerCase());
 }
 
-
-/**
- * Property-name substrings that are never safe to forward as telemetry,
- * regardless of what a given call site passes in. Path-like keys are
- * stripped because paths can reveal usernames/project names; the rest are
- * defense in depth against a property that happens to carry a credential,
- * token, or auth header (no current call site sends these, but telemetry
- * must stay safe even if one is added carelessly later).
- */
-const SENSITIVE_PROPERTY_KEY_SUBSTRINGS = [
-    'path', 'filePath', 'directory', 'file_path', 'sourcePath', 'destinationPath', 'fullPath', 'rootPath',
-    'token', 'secret', 'password', 'passwd', 'authorization', 'apikey', 'api_key', 'credential', 'cookie', 'bearer',
-] as const;
-
-/**
- * Strips sensitive properties from a telemetry properties object in place,
- * returning it. Exported (pure) so redaction coverage can be unit tested
- * without exercising the network path.
- */
-export function sanitizeTelemetryProperties<T extends Record<string, unknown>>(properties: T): T {
-    for (const key of Object.keys(properties)) {
-        const lowerKey = key.toLowerCase();
-        if (
-            SENSITIVE_PROPERTY_KEY_SUBSTRINGS.some((sensitiveKey) => lowerKey.includes(sensitiveKey.toLowerCase())) &&
-            lowerKey !== 'fileextension' // keep fileExtension as it's safe
-        ) {
-            delete properties[key as keyof T];
-        }
-    }
-    return properties;
-}
 
 /**
  * Sanitizes error objects to remove potentially sensitive information like file paths
@@ -107,10 +116,7 @@ export function sanitizeError(error: any): { message: string, code?: string } {
         errorMessage = 'Unknown error';
     }
 
-    // Remove any file paths using regex
-    // This pattern matches common path formats including Windows and Unix-style paths
-    errorMessage = errorMessage.replace(/(?:\/|\\)[\w\d_.-\/\\]+/g, '[PATH]');
-    errorMessage = errorMessage.replace(/[A-Za-z]:\\[\w\d_.-\/\\]+/g, '[PATH]');
+    errorMessage = redactSensitiveString(errorMessage);
 
     return {
         message: errorMessage,
@@ -139,7 +145,7 @@ export const captureBase = async (captureURL: string, event: string, properties?
 
         // If telemetry is explicitly disabled or no authenticated transport is
         // configured, don't send.
-        if (isTelemetryDisabledValue(telemetryEnabled) || !captureURL || !telemetryBearerToken()) {
+        if (!isTelemetryEnabledValue(telemetryEnabled) || !captureURL || !telemetryBearerToken()) {
             return;
         }
 
@@ -169,12 +175,7 @@ export const captureBase = async (captureURL: string, event: string, properties?
 
         // Create a deep copy of properties to avoid modifying the original objects
         // This ensures we don't alter error objects that are also returned to the AI
-        let sanitizedProperties;
-        try {
-            sanitizedProperties = properties ? JSON.parse(JSON.stringify(properties)) : {};
-        } catch (e) {
-            sanitizedProperties = {}
-        }
+        const sanitizedProperties = sanitizeTelemetryProperties(properties);
 
         // Sanitize error objects if present
         if (sanitizedProperties.error) {
@@ -189,9 +190,6 @@ export const captureBase = async (captureURL: string, event: string, properties?
                 sanitizedProperties.error = sanitizeError(sanitizedProperties.error).message;
             }
         }
-
-        // Remove any properties that might contain paths, tokens, or other secrets
-        sanitizeTelemetryProperties(sanitizedProperties);
 
         // Is MCP installed with DXT
         let isDXT: string = 'false';
@@ -357,12 +355,7 @@ const buildEventProperties = async (properties?: any) => {
         clientContext.saw_onboarding_page = sawOnboardingPage;
     }
 
-    let sanitizedProperties: any;
-    try {
-        sanitizedProperties = properties ? JSON.parse(JSON.stringify(properties)) : {};
-    } catch {
-        sanitizedProperties = {};
-    }
+    const sanitizedProperties = sanitizeTelemetryProperties(properties);
 
     if (sanitizedProperties.error) {
         if (typeof sanitizedProperties.error === 'object' && sanitizedProperties.error !== null) {
@@ -373,8 +366,6 @@ const buildEventProperties = async (properties?: any) => {
             sanitizedProperties.error = sanitizeError(sanitizedProperties.error).message;
         }
     }
-
-    sanitizeTelemetryProperties(sanitizedProperties);
 
     let isDXT = 'false';
     if (process.env.MCP_DXT) isDXT = 'true';
@@ -446,7 +437,7 @@ const sendToTelemetryProxy = async (event: string, eventProperties: any) => {
         if (isTelemetryDisabledByEnv()) return;
         const telemetryEnabled = await configManager.getValue('telemetryEnabled');
         const bearerToken = telemetryBearerToken();
-        if (isTelemetryDisabledValue(telemetryEnabled) || !bearerToken) return;
+        if (!isTelemetryEnabledValue(telemetryEnabled) || !bearerToken) return;
 
         const payload = JSON.stringify({
             client_id: uniqueUserId,
@@ -514,6 +505,11 @@ export const capture = async (event: string, properties?: any) => {
     if (isInsideUiOriginCall()) {
         return;
     }
+    if (isTelemetryDisabledByEnv()) return;
+    // Gate before building event properties: disabled telemetry must not create
+    // a client ID, write config, or perform any network work.
+    const telemetryEnabled = await configManager.getValue('telemetryEnabled');
+    if (!isTelemetryEnabledValue(telemetryEnabled)) return;
     void (async () => {
         try {
             const eventProperties = await buildEventProperties(properties);

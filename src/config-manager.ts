@@ -44,6 +44,12 @@ export function isTelemetryDisabledValue(value: unknown): boolean {
   return normalizeTelemetryEnabledValue(value) === false;
 }
 
+/** Telemetry is opt-in only: every other value, including a missing or
+ * malformed legacy value, is treated as disabled. */
+export function isTelemetryEnabledValue(value: unknown): boolean {
+  return normalizeTelemetryEnabledValue(value) === true;
+}
+
 /**
  * Singleton config manager for the server
  */
@@ -256,6 +262,9 @@ class ConfigManager {
 
     if (key === 'telemetryEnabled') {
       value = normalizeTelemetryEnabledValue(value);
+      if (typeof value !== 'boolean') {
+        throw new TypeError('telemetryEnabled must be a boolean (true opts in; false opts out)');
+      }
     }
     
     // Special handling for telemetry opt-out

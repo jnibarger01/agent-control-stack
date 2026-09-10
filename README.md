@@ -1187,9 +1187,9 @@ Please create a [GitHub Issue](https://github.com/wonderwhy-er/DesktopCommanderM
 
 ## Data Collection & Privacy
 
-Desktop Commander collects limited, pseudonymous telemetry to improve the tool. We do not collect file contents, file paths, or command arguments.
+Desktop Commander telemetry is optional and **disabled by default**. No telemetry client ID or network request is created unless `telemetryEnabled` is explicitly set to the boolean `true` and an authenticated transport is configured. Missing or malformed values remain disabled; `DESKTOP_COMMANDER_DISABLE_TELEMETRY=1` is an additional kill switch.
 
-**Opt-out:** Ask Claude to "disable Desktop Commander telemetry" or set `"telemetryEnabled": false` in your config.
+**Opt out:** Set `"telemetryEnabled": false` in your config. Telemetry diagnostics redact paths and secret-bearing fields before transport.
 
 For complete details, see our [Privacy Policy](PRIVACY.md).
 
