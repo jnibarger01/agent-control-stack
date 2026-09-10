@@ -70,7 +70,10 @@ const openapi = {
           [String(operation.successStatus ?? 200)]: { description: "Successful response." },
           "400": { description: "Boundary validation failed." },
           "401": { description: "Authentication is required." },
-          "403": { description: "The authenticated principal is not authorized." }
+          "403": { description: "The authenticated principal is not authorized." },
+          // Operation-specific statuses a client can actually observe, beyond
+          // the four every route shares.
+          ...(operation.additionalResponses ?? {})
         }
       }
     };

@@ -15,7 +15,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
-import { buildGateway } from "./server.js";
+import { buildGateway, type GatewayAuthOptions } from "./server.js";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
@@ -3424,7 +3424,7 @@ describe("gateway MCP transport", () => {
 describe("gateway dashboard sessions", () => {
   const dashboardAuth = { token: "super-secret-dashboard-token", actor: "user", actorId: "user" } as const;
 
-  async function loginSession(app: ReturnType<typeof buildGateway>, token = dashboardAuth.token) {
+  async function loginSession(app: ReturnType<typeof buildGateway>, token: string = dashboardAuth.token) {
     const login = await app.inject({ method: "POST", url: "/session/login", payload: { token } });
     const setCookie = String(login.headers["set-cookie"] ?? "");
     return { login, cookie: setCookie.split(";")[0] };
@@ -3486,6 +3486,160 @@ describe("gateway dashboard sessions", () => {
 
       const denied = await app.inject({ method: "GET", url: "/events" });
       expect(denied.statusCode).toBe(401);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses new SSE subscribers past the global client cap", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-sse-cap-"));
+    // Two distinct credentials: now that the per-principal cap is always at
+    // least one below the global one, a single principal can never reach the
+    // global ceiling, so exercising it honestly takes more than one.
+    const operatorCredentials: NonNullable<GatewayAuthOptions["credentials"]> = [
+      {
+        id: "op-a",
+        token: "operator-a-token-that-is-long-enough",
+        actor: "user",
+        actorId: "op-a",
+        roles: ["operator"],
+        scopes: ["acs:read"]
+      },
+      {
+        id: "op-b",
+        token: "operator-b-token-that-is-long-enough",
+        actor: "user",
+        actorId: "op-b",
+        roles: ["operator"],
+        scopes: ["acs:read"]
+      },
+      {
+        id: "op-c",
+        token: "operator-c-token-that-is-long-enough",
+        actor: "user",
+        actorId: "op-c",
+        roles: ["operator"],
+        scopes: ["acs:read"]
+      }
+    ];
+    const operators: GatewayAuthOptions = { ...dashboardAuth, credentials: operatorCredentials };
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: operators,
+      maxSseClients: 2,
+      maxSseClientsPerPrincipal: 1
+    });
+
+    try {
+      const a = await loginSession(app, operatorCredentials[0].token);
+      const b = await loginSession(app, operatorCredentials[1].token);
+
+      const first = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie: a.cookie },
+        payloadAsStream: true
+      });
+      const second = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie: b.cookie },
+        payloadAsStream: true
+      });
+      expect(first.statusCode).toBe(200);
+      expect(second.statusCode).toBe(200);
+
+      // A third principal holds no streams of its own, so the only thing that
+      // can turn it away is the global ceiling.
+      const c = await loginSession(app, operatorCredentials[2].token);
+      const rejected = await app.inject({ method: "GET", url: "/events", headers: { cookie: c.cookie } });
+      expect(rejected.statusCode).toBe(503);
+      expect(rejected.json()).toMatchObject({ code: "sse_capacity_reached" });
+      expect(rejected.headers["retry-after"]).toBe("5");
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics", headers: { cookie: c.cookie } });
+      expect(metrics.body).toContain('acs_sse_connections_rejected_total{reason="global"} 1');
+
+      first.stream().destroy();
+      second.stream().destroy();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps one principal from monopolizing the event stream", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-sse-principal-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: dashboardAuth,
+      // Global headroom is deliberately ample: only the per-principal limit
+      // should be able to reject here.
+      maxSseClients: 50,
+      maxSseClientsPerPrincipal: 1
+    });
+
+    try {
+      const { cookie } = await loginSession(app);
+
+      const first = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie },
+        payloadAsStream: true
+      });
+      expect(first.statusCode).toBe(200);
+
+      const rejected = await app.inject({ method: "GET", url: "/events", headers: { cookie } });
+      expect(rejected.statusCode).toBe(503);
+      expect(rejected.json()).toMatchObject({ code: "sse_capacity_reached" });
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics", headers: { cookie } });
+      expect(metrics.body).toContain('acs_sse_connections_rejected_total{reason="per_principal"} 1');
+
+      first.stream().destroy();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("holds the fairness guarantee when the global cap is set below the per-principal default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-sse-clamp-"));
+    // The reported case: an operator lowers the global cap and leaves the
+    // per-principal cap at its default, so the per-principal branch could never
+    // fire and one credential could take every slot.
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: dashboardAuth,
+      maxSseClients: 2,
+      maxSseClientsPerPrincipal: 10
+    });
+
+    try {
+      const { cookie } = await loginSession(app);
+
+      const first = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie },
+        payloadAsStream: true
+      });
+      expect(first.statusCode).toBe(200);
+
+      // One slot remains globally, but this principal is already at its
+      // effective limit of 1, so the rejection must be the per-principal one.
+      const rejected = await app.inject({ method: "GET", url: "/events", headers: { cookie } });
+      expect(rejected.statusCode).toBe(503);
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics", headers: { cookie } });
+      expect(metrics.body).toContain('acs_sse_connections_rejected_total{reason="per_principal"} 1');
+
+      first.stream().destroy();
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

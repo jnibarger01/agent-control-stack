@@ -13,7 +13,7 @@
     "apps/gateway/src/server.ts"
   ],
   "hashes": {
-    "openapi.json": "sha256:2b0d585fb33d103249d9e83a5f24db8f6800f7c9a293c7da29d000457bfc4272",
+    "openapi.json": "sha256:d84ddff098cda645f73428e3b44735293297c3eea845659f9991b58357da2243",
     "mcp-tools.json": "sha256:f57e1ff139413fc09494f3d52018520118754fd9aff4742d8e8578a80fc482dc",
     "examples.json": "sha256:cf25f904859bbdfc4ff57f017a87abefb3f7216aad5278f27f58ef1a7f9ceea3",
     "client.mjs": "sha256:52f6a9b2ddfe0a9072e8bf94f1e18ec6e3ef570a91a58c6ac2fe92860fbcd0c6"

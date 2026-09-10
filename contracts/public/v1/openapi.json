@@ -2099,6 +2099,9 @@
           },
           "403": {
             "description": "The authenticated principal is not authorized."
+          },
+          "503": {
+            "description": "Event stream capacity reached, globally or for this principal. Body carries code sse_capacity_reached; retry-after indicates when to retry."
           }
         }
       }

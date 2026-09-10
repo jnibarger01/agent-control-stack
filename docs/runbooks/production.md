@@ -17,6 +17,8 @@ pass.
 - `ACS_GATEWAY_CREDENTIALS_JSON` containing credential-bound operator/service/worker identities and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
 - `ACS_MCP_ALLOWED_ORIGINS` containing the explicit browser origins permitted to call MCP; non-browser clients without an `Origin` header remain supported.
 - `ACS_MAX_PENDING_WORK_ITEMS` set to an operationally safe queue ceiling.
+- `ACS_MAX_SSE_CLIENTS` set to the number of dashboard/event subscribers the host can hold concurrently; each stream pins a socket for its lifetime.
+- `ACS_MAX_SSE_CLIENTS_PER_PRINCIPAL` set below `ACS_MAX_SSE_CLIENTS`, so one credential cannot consume every slot and lock other operators out of the live audit channel during an incident. The gateway clamps it to one below the global cap if the two are set inconsistently, and logs a warning when it does.
 - A versioned image tag and a recorded previous image tag.
 
 ## Build and verify
