@@ -284,21 +284,38 @@ export async function parsePdfToMarkdown(source: string, pageNumbers: number[] |
     }
 }
 
+/**
+ * Chrome's setuid sandbox refuses to start when the process is already root,
+ * which is the default in the published Docker image and in most CI containers.
+ * Without this, every PDF render in a container dies with
+ * "Running as root without --no-sandbox is not supported".
+ *
+ * Only relaxed when we are actually root: an unprivileged desktop install keeps
+ * the sandbox, which is where it does real work.
+ */
+function requiresNoSandbox(): boolean {
+    return process.platform !== 'win32' && process.getuid?.() === 0;
+}
+
 export async function parseMarkdownToPdf(markdown: string, options: any = {}): Promise<Buffer> {
     try {
         // Find Chrome: puppeteer cache -> system Chrome -> install
         const chromePath = await getChromePath();
-        
+
+        const launchOptions = { ...options.launch_options };
         if (chromePath) {
-            options = {
-                ...options,
-                launch_options: {
-                    ...options.launch_options,
-                    executablePath: chromePath,
-                }
-            };
+            launchOptions.executablePath = chromePath;
         }
-        
+        if (requiresNoSandbox()) {
+            const args = launchOptions.args ?? [];
+            launchOptions.args = args.includes('--no-sandbox')
+                ? args
+                : [...args, '--no-sandbox', '--disable-setuid-sandbox'];
+        }
+        if (Object.keys(launchOptions).length > 0) {
+            options = { ...options, launch_options: launchOptions };
+        }
+
         const pdf = await mdToPdf({ content: markdown }, options);
 
         return pdf.content;
