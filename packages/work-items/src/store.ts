@@ -1528,8 +1528,64 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError("attempt_not_leasable", `attempt status ${attemptRow.status} cannot be leased`);
       }
 
-      const nextEpoch = attemptRow.current_fencing_epoch + 1;
       const now = (parsed.now ?? new Date()).toISOString();
+      const admissionRow = this.db
+        .prepare(`SELECT * FROM execution_plan_admissions WHERE admission_id = ?`)
+        .get(parsed.admissionId) as unknown as ExecutionPlanAdmissionRow | undefined;
+      if (
+        !admissionRow ||
+        admissionRow.work_item_id !== parsed.workItemId ||
+        admissionRow.plan_hash !== attemptRow.plan_hash ||
+        admissionRow.policy_version !== parsed.policyVersion ||
+        admissionRow.policy_decision_hash !== parsed.policyDecisionHash
+      ) {
+        throw new ControlStackError(
+          "execution_plan_admission_mismatch",
+          "lease admission does not match the attempt authority"
+        );
+      }
+
+      const approvalBindings = [
+        ...(parsed.approvalId ? [{ approvalId: parsed.approvalId, actionHash: undefined }] : []),
+        ...(parsed.additionalApprovals ?? [])
+      ];
+      if (admissionRow.requires_approval === 1 && approvalBindings.length === 0) {
+        throw new ControlStackError("execution_plan_approval_required", "lease requires a plan-bound approval");
+      }
+      if (admissionRow.requires_approval === 0 && approvalBindings.length > 0) {
+        throw new ControlStackError(
+          "execution_plan_approval_unexpected",
+          "lease cannot attach approvals when admission did not require them"
+        );
+      }
+      for (const binding of approvalBindings) {
+        const approval = this.db
+          .prepare(`SELECT * FROM execution_plan_approvals WHERE approval_id = ?`)
+          .get(binding.approvalId) as unknown as ExecutionPlanApprovalRow | undefined;
+        if (
+          !approval ||
+          approval.work_item_id !== parsed.workItemId ||
+          approval.plan_id !== admissionRow.plan_id ||
+          approval.plan_hash !== attemptRow.plan_hash ||
+          (binding.actionHash !== undefined && approval.action_hash !== binding.actionHash)
+        ) {
+          throw new ControlStackError(
+            "execution_plan_approval_mismatch",
+            "lease approval does not match the admitted plan authority"
+          );
+        }
+        if (approval.status !== "granted") {
+          throw new ControlStackError(
+            "execution_plan_approval_not_granted",
+            "lease approval is not currently granted"
+          );
+        }
+        if (Date.parse(approval.expires_at) <= Date.parse(now)) {
+          throw new ControlStackError("execution_plan_approval_expired", "lease approval expired before claim");
+        }
+      }
+
+      const nextEpoch = attemptRow.current_fencing_epoch + 1;
       const expiresAt = new Date(Date.parse(now) + parsed.ttlMs).toISOString();
       const maxExpiresAt = new Date(
         Date.parse(now) + Math.max(parsed.ttlMs, parsed.maxTtlMs ?? parsed.ttlMs)

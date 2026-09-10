@@ -661,6 +661,36 @@ describe("leaseAttempt consumes an execution-plan approval atomically (R3)", () 
     ).toThrow();
   });
 
+  it("revalidates approval expiry against the authoritative claim time before mutating the attempt", () => {
+    const fixture = createApprovalRequiredFixture();
+    directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    const claimTime = new Date(Date.parse(fixture.approval.expiresAt) + 1);
+
+    expect(() =>
+      fixture.store.leaseAttempt(
+        {
+          attemptId: attempt.attemptId,
+          workItemId: fixture.workItem.id,
+          admissionId: fixture.admission.admissionId,
+          approvalId: fixture.approval.approvalId,
+          workerId: "worker-1",
+          leaseToken: "a".repeat(32),
+          policyVersion: "acs.policy.v2",
+          policyDecisionHash: hex("2"),
+          ttlMs: 60_000,
+          now: claimTime
+        },
+        { via: "domain_service" }
+      )
+    ).toThrowError(expect.objectContaining({ code: "execution_plan_approval_expired" }));
+
+    expect(fixture.store.getAttempt(attempt.attemptId)?.status).toBe("pending");
+  });
+
   it("refuses to reuse an already-consumed approval for a second attempt (replay rejection)", () => {
     const fixture = createApprovalRequiredFixture();
     directory = fixture.directory;
