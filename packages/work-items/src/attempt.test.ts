@@ -1253,3 +1253,83 @@ describe("transitionAttempt", () => {
     expect(fixture.store.getAttempt(attempt.attemptId)?.status).toBe("leased");
   });
 });
+
+describe("listAttemptsNeedingReconciliation", () => {
+  let directory: string | undefined;
+
+  afterEach(() => {
+    if (directory) rmSync(directory, { recursive: true, force: true });
+    directory = undefined;
+  });
+
+  it("returns unresolved active attempts for deterministic startup recovery", () => {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        admissionId: fixture.admission.admissionId,
+        workerId: "worker-1",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("1"),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+
+    expect(fixture.store.listAttemptsNeedingReconciliation()).toEqual([
+      expect.objectContaining({ attemptId: attempt.attemptId, status: "leased" })
+    ]);
+  });
+
+  it("excludes terminal attempts", () => {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    const attempt = fixture.store.createAttempt(
+      { workItemId: fixture.workItem.id, planHash: fixture.plan.planHash, inputHash: hex("a") },
+      { via: "domain_service" }
+    );
+    const lease = fixture.store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        admissionId: fixture.admission.admissionId,
+        workerId: "worker-1",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("1"),
+        ttlMs: 60_000
+      },
+      { via: "domain_service" }
+    );
+    fixture.store.transitionAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        workerId: "worker-1",
+        fencingEpoch: lease.fencingEpoch,
+        status: "running"
+      },
+      { via: "domain_service" }
+    );
+    fixture.store.transitionAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: fixture.workItem.id,
+        workerId: "worker-1",
+        fencingEpoch: lease.fencingEpoch,
+        status: "succeeded",
+        outcomeCode: "completed"
+      },
+      { via: "domain_service" }
+    );
+
+    expect(fixture.store.listAttemptsNeedingReconciliation()).toEqual([]);
+  });
+});

@@ -873,6 +873,8 @@ export interface WorkItemStore {
   hasExecutionPlanApproval(workItemId: string, planHash: string, actionHash: string): boolean;
   createAttempt(input: CreateAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
   getAttempt(attemptId: string): ExecutionAttempt | undefined;
+  /** Attempts requiring startup reconciliation, ordered oldest-first for deterministic recovery. */
+  listAttemptsNeedingReconciliation(): ExecutionAttempt[];
   leaseAttempt(input: IssueLeaseInput, options: PrivilegedTransitionOptions): AttemptLease;
   transitionAttempt(input: TransitionAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
   recordActorRoutingDecision(
@@ -1560,6 +1562,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
     const row = this.db.prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ?`).get(attemptId) as unknown as
       ExecutionAttemptRow | undefined;
     return row ? rowToExecutionAttempt(row) : undefined;
+  }
+
+  listAttemptsNeedingReconciliation(): ExecutionAttempt[] {
+    const rows = this.db
+      .prepare(
+        `SELECT ea.*
+         FROM execution_attempts ea
+         LEFT JOIN attempt_results ar ON ar.attempt_id = ea.attempt_id
+         WHERE ea.status IN ('leased', 'running', 'cancellation_requested', 'interrupted', 'unknown')
+           AND ar.attempt_id IS NULL
+         ORDER BY ea.created_at ASC, ea.attempt_number ASC, ea.attempt_id ASC`
+      )
+      .all() as unknown as ExecutionAttemptRow[];
+    return rows.map(rowToExecutionAttempt);
   }
 
   leaseAttempt(input: IssueLeaseInput, options: PrivilegedTransitionOptions): AttemptLease {
