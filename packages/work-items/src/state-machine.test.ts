@@ -38,6 +38,49 @@ function resultInput(
 }
 
 describe("work item state machine", () => {
+  it("propagates caller correlation IDs to every work-item audit event", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-trace-correlation-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const item = store.create({
+        title: "Trace correlated item",
+        requester: "user",
+        intent: "preserve end-to-end provenance",
+        target: { type: "repository", repository: "agent-control-stack" },
+        requestedActions: [],
+        metadata: { webhookSource: "hermes", correlationId: "trace-request-123" }
+      });
+      store.transition(item.id, "blocked", { via: "domain_service", actorId: "user" });
+
+      const events = store.readEvents({ workItemId: item.id });
+      expect(events.length).toBeGreaterThanOrEqual(2);
+      expect(events.every((event) => event.attributes["trace.correlation_id"] === "trace-request-123")).toBe(true);
+      expect(store.verifyAuditChain().ok).toBe(true);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("does not invent trace correlation for uncorrelated work items", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-no-trace-correlation-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const item = store.create({
+        title: "Uncorrelated item",
+        requester: "user",
+        intent: "remain uncorrelated",
+        target: { type: "repository", repository: "agent-control-stack" },
+        requestedActions: []
+      });
+      expect(store.readEvents({ workItemId: item.id })[0]?.attributes["trace.correlation_id"]).toBeUndefined();
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
   it("reads audit events with bounded pagination filters", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-event-pagination-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

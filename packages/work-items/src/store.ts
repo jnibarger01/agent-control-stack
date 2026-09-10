@@ -4550,6 +4550,22 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   private appendAuditEvent(event: AuditEvent): StoredAuditEvent {
+    const workItemId = event.attributes["work_item.id"];
+    let enrichedEvent = event;
+    if (typeof workItemId === "string" && event.attributes["trace.correlation_id"] === undefined) {
+      const row = this.db
+        .prepare(`SELECT metadata_json FROM work_items WHERE id = ?`)
+        .get(workItemId) as { metadata_json: string | null } | undefined;
+      if (row?.metadata_json) {
+        const metadata = JSON.parse(row.metadata_json) as { correlationId?: unknown };
+        if (typeof metadata.correlationId === "string") {
+          enrichedEvent = {
+            ...event,
+            attributes: { ...event.attributes, "trace.correlation_id": metadata.correlationId }
+          };
+        }
+      }
+    }
     const previousHash = this.latestAuditHash();
     this.db
       .prepare(
@@ -4557,11 +4573,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
          VALUES (?, ?, ?, ?, ?, ?, '')`
       )
       .run(
-        event.id,
-        event.name,
-        event.timeUnixNano,
-        JSON.stringify(event.attributes),
-        JSON.stringify(event.body),
+        enrichedEvent.id,
+        enrichedEvent.name,
+        enrichedEvent.timeUnixNano,
+        JSON.stringify(enrichedEvent.attributes),
+        JSON.stringify(enrichedEvent.body),
         previousHash
       );
     const inserted = this.findEventById(event.id);
