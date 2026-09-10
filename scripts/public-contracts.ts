@@ -177,13 +177,7 @@ if (checkOnly) {
     const expected = render(filename, value);
     const path = resolve(generatedRoot, filename);
     const actual = await readOptional(path);
-    if (actual !== expected) {
-      drift.push(filename);
-      if (filename === "openapi.json" && actual) {
-        const details = describeJsonDrift(actual, expected);
-        if (details.length > 0) process.stderr.write(`openapi drift details:\n${details.join("\n")}\n`);
-      }
-    }
+    if (actual !== expected) drift.push(filename);
   }
   if (drift.length > 0) {
     throw new Error(`generated public contracts drifted: ${drift.join(", ")}; run npm run contracts:generate`);
@@ -230,54 +224,20 @@ function normalizeJsonSchema(value: unknown): unknown {
     normalized.anyOf = type.map((item) => ({ type: item }));
   }
 
+  // Metadata is applied after generated string constraints, but the committed
+  // v1 artifact historically emits date-time keys in this order. Canonicalize
+  // the representation without changing the schema's accepted values.
+  if (
+    normalized.type === "string" &&
+    normalized.format === "date-time" &&
+    typeof normalized.pattern === "string" &&
+    normalized.maxLength !== undefined
+  ) {
+    const { type: schemaType, format, pattern, maxLength, ...rest } = normalized;
+    return { type: schemaType, format, pattern, maxLength, ...rest };
+  }
+
   return normalized;
-}
-
-function describeJsonDrift(actualText: string, expectedText: string): string[] {
-  try {
-    const semantic = jsonDifferences(JSON.parse(actualText), JSON.parse(expectedText));
-    if (semantic.length > 0) return semantic.slice(0, 40);
-  } catch {
-    // Fall through to a text-level diagnostic if either side is not valid JSON.
-  }
-
-  const actualLines = actualText.split("\n");
-  const expectedLines = expectedText.split("\n");
-  const lineCount = Math.max(actualLines.length, expectedLines.length);
-  for (let index = 0; index < lineCount; index += 1) {
-    if (actualLines[index] !== expectedLines[index]) {
-      return [
-        `first text mismatch at line ${index + 1}`,
-        `actual: ${JSON.stringify(actualLines[index] ?? "<missing>")}`,
-        `expected: ${JSON.stringify(expectedLines[index] ?? "<missing>")}`
-      ];
-    }
-  }
-  return [];
-}
-
-function jsonDifferences(actual: unknown, expected: unknown, path = "$ "): string[] {
-  if (Object.is(actual, expected)) return [];
-  if (Array.isArray(actual) && Array.isArray(expected)) {
-    const differences: string[] = [];
-    if (actual.length !== expected.length) {
-      differences.push(`${path}length: ${actual.length} -> ${expected.length}`);
-    }
-    const length = Math.max(actual.length, expected.length);
-    for (let index = 0; index < length; index += 1) {
-      differences.push(...jsonDifferences(actual[index], expected[index], `${path}[${index}]`));
-    }
-    return differences;
-  }
-  if (isJsonObject(actual) && isJsonObject(expected)) {
-    const keys = [...new Set([...Object.keys(actual), ...Object.keys(expected)])].sort();
-    return keys.flatMap((key) => jsonDifferences(actual[key], expected[key], `${path}.${key}`));
-  }
-  return [`${path}: ${JSON.stringify(actual)} -> ${JSON.stringify(expected)}`];
-}
-
-function isJsonObject(value: unknown): value is JsonObject {
-  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 async function validateExamples(): Promise<void> {
