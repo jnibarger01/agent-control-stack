@@ -998,6 +998,31 @@ describe("authoritative worker attempt lifecycle", () => {
     expect(fixture.store.readEvents().map((event) => event.name)).toContain("execution_attempt.result_accepted");
   });
 
+  it("persists a crash-recoverable immutable attempt result receipt", () => {
+    const fixture = claim();
+    const input = resultInput(fixture.claimed);
+    fixture.store.submitWorkResult(input);
+
+    const byAttempt = fixture.store.getAttemptResult(input.attemptId);
+    expect(byAttempt).toMatchObject({
+      attemptId: input.attemptId,
+      workItemId: input.workItemId,
+      leaseId: input.leaseId,
+      workerId: input.workerId,
+      fencingEpoch: input.fencingEpoch,
+      idempotencyKey: input.idempotencyKey,
+      planHash: input.planHash,
+      inputHash: input.inputHash,
+      outcome: "succeeded",
+      outcomeCertainty: "observed",
+      summary: input.summary,
+      simulationMetadata: input.simulationMetadata
+    });
+    expect(fixture.store.getAttemptResultForIdempotency(input.workerId, input.idempotencyKey)).toEqual(byAttempt);
+    expect(fixture.store.getAttemptResult("missing-attempt")).toBeUndefined();
+    expect(fixture.store.getAttemptResultForIdempotency(input.workerId, hex("f"))).toBeUndefined();
+  });
+
   it("rolls back every attempt and compatibility mutation when terminal fencing fails", () => {
     const fixture = claim();
     const dbAny = fixture.store as unknown as {

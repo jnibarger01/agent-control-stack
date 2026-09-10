@@ -178,11 +178,30 @@ interface ExecutionResultRow {
 }
 
 interface AttemptResultRow {
+  result_id: string;
   attempt_id: string;
   work_item_id: string;
+  lease_id: string;
   worker_id: string;
+  fencing_epoch: number;
+  protocol_version: string;
   idempotency_key: string;
+  plan_hash: string;
+  input_hash: string;
+  outcome: ResultOutcome;
+  outcome_certainty: "observed";
+  started_at: string;
+  finished_at: string;
+  exit_code: number | null;
+  summary: string;
+  stdout: string | null;
+  stderr: string | null;
+  structured_output_json: string;
+  error: string | null;
+  resource_usage_json: string | null;
+  simulation_metadata_json: string;
   payload_hash: string;
+  created_at: string;
 }
 
 interface ExecutionPlanRow {
@@ -769,6 +788,33 @@ export interface ClaimOptions {
   };
 }
 
+export interface StoredAttemptResult {
+  resultId: string;
+  attemptId: string;
+  workItemId: string;
+  leaseId: string;
+  workerId: string;
+  fencingEpoch: number;
+  protocolVersion: string;
+  idempotencyKey: string;
+  planHash: string;
+  inputHash: string;
+  outcome: ResultOutcome;
+  outcomeCertainty: "observed";
+  startedAt: string;
+  finishedAt: string;
+  exitCode?: number | null;
+  summary: string;
+  stdout?: string;
+  stderr?: string;
+  structuredOutput: Record<string, unknown>;
+  error?: string;
+  resourceUsage?: Record<string, unknown>;
+  simulationMetadata: Record<string, unknown>;
+  payloadHash: string;
+  createdAt: string;
+}
+
 export interface StoredExecutionResult {
   resultId: string;
   workItemId: string;
@@ -934,6 +980,8 @@ export interface WorkItemStore {
   failExpiredLeases(now?: Date): WorkItem[];
   submitWorkResult(input: unknown): WorkItem;
   recordDerivedWorkResult(input: unknown): WorkItem;
+  getAttemptResult(attemptId: string): StoredAttemptResult | undefined;
+  getAttemptResultForIdempotency(workerId: string, idempotencyKey: string): StoredAttemptResult | undefined;
   getExecutionResult(resultId: string): StoredExecutionResult | undefined;
   getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined;
   retryWorkItem(id: string, input: RetryWorkItemInput): WorkItem;
@@ -3785,6 +3833,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  getAttemptResult(attemptId: string): StoredAttemptResult | undefined {
+    if (!attemptId) return undefined;
+    const row = this.db.prepare(`SELECT * FROM attempt_results WHERE attempt_id = ?`).get(attemptId) as unknown as
+      AttemptResultRow | undefined;
+    return row ? rowToAttemptResult(row) : undefined;
+  }
+
+  getAttemptResultForIdempotency(workerId: string, idempotencyKey: string): StoredAttemptResult | undefined {
+    if (!workerId || !idempotencyKey) return undefined;
+    const row = this.db
+      .prepare(`SELECT * FROM attempt_results WHERE worker_id = ? AND idempotency_key = ?`)
+      .get(workerId, idempotencyKey) as unknown as AttemptResultRow | undefined;
+    return row ? rowToAttemptResult(row) : undefined;
+  }
+
   getExecutionResult(resultId: string): StoredExecutionResult | undefined {
     if (!resultId) return undefined;
     const row = this.db.prepare(`SELECT * FROM execution_results WHERE result_id = ?`).get(resultId) as unknown as
@@ -4682,6 +4745,37 @@ function rowToEvent(row: EventRow): StoredAuditEvent {
     body: JSON.parse(row.body) as StoredAuditEvent["body"],
     previousHash: row.previous_hash,
     eventHash: row.event_hash
+  };
+}
+
+function rowToAttemptResult(row: AttemptResultRow): StoredAttemptResult {
+  return {
+    resultId: row.result_id,
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    workerId: row.worker_id,
+    fencingEpoch: row.fencing_epoch,
+    protocolVersion: row.protocol_version,
+    idempotencyKey: row.idempotency_key,
+    planHash: row.plan_hash,
+    inputHash: row.input_hash,
+    outcome: row.outcome,
+    outcomeCertainty: "observed",
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    exitCode: row.exit_code,
+    summary: row.summary,
+    ...(row.stdout === null ? {} : { stdout: row.stdout }),
+    ...(row.stderr === null ? {} : { stderr: row.stderr }),
+    structuredOutput: JSON.parse(row.structured_output_json) as Record<string, unknown>,
+    ...(row.error === null ? {} : { error: row.error }),
+    ...(row.resource_usage_json === null
+      ? {}
+      : { resourceUsage: JSON.parse(row.resource_usage_json) as Record<string, unknown> }),
+    simulationMetadata: JSON.parse(row.simulation_metadata_json) as Record<string, unknown>,
+    payloadHash: row.payload_hash,
+    createdAt: row.created_at
   };
 }
 
