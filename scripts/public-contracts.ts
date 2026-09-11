@@ -201,11 +201,46 @@ if (checkOnly) {
 }
 
 function jsonSchema(schema: z.ZodType): JsonObject {
-  return z.toJSONSchema(schema, {
-    target: "draft-2020-12",
-    unrepresentable: "any",
-    io: "input"
-  }) as JsonObject;
+  return normalizeJsonSchema(
+    z.toJSONSchema(schema, {
+      target: "draft-2020-12",
+      unrepresentable: "any",
+      io: "input"
+    }) as JsonObject
+  ) as JsonObject;
+}
+
+function normalizeJsonSchema(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map((item) => normalizeJsonSchema(item));
+  if (value === null || typeof value !== "object") return value;
+
+  const normalized = Object.fromEntries(
+    Object.entries(value as JsonObject).map(([key, child]) => [key, normalizeJsonSchema(child)])
+  ) as JsonObject;
+  const type = normalized.type;
+
+  // Zod 4.5 compacts simple anyOf unions into `type: [...]`. Expand that
+  // representation so generated public-contract artifacts remain stable when
+  // the accepted runtime values have not changed.
+  if (Array.isArray(type) && type.length > 1 && type.every((item) => typeof item === "string")) {
+    delete normalized.type;
+    normalized.anyOf = type.map((item) => ({ type: item }));
+  }
+
+  // Metadata is applied after generated string constraints, but the committed
+  // v1 artifact historically emits date-time keys in this order. Canonicalize
+  // the representation without changing the schema's accepted values.
+  if (
+    normalized.type === "string" &&
+    normalized.format === "date-time" &&
+    typeof normalized.pattern === "string" &&
+    normalized.maxLength !== undefined
+  ) {
+    const { type: schemaType, format, pattern, maxLength, ...rest } = normalized;
+    return { type: schemaType, format, pattern, maxLength, ...rest };
+  }
+
+  return normalized;
 }
 
 async function validateExamples(): Promise<void> {
