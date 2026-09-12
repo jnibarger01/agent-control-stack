@@ -2,6 +2,27 @@
 FROM node:lts-alpine
 
 ENV MCP_CLIENT_DOCKER=true
+
+# Chromium for PDF generation. Without it this image has no usable browser at
+# all: the `npm install --ignore-scripts` below skips Puppeteer's own download,
+# and the runtime fallback fetches Chrome for Testing, whose glibc-linked Linux
+# build cannot execute on this musl-based image. PDF creation therefore failed
+# here even after Chrome stopped refusing to launch as root.
+#
+# No code change is needed to select it: findSystemChrome() in
+# src/tools/pdf/markdown.ts already probes /usr/bin/chromium, which is where the
+# Alpine package installs, and that lookup runs before the download fallback.
+#
+# This adds roughly 150 MB to the image. That is the cost of shipping an image
+# where a documented feature works rather than one where it fails at runtime.
+RUN apk add --no-cache \
+    chromium \
+    nss \
+    freetype \
+    harfbuzz \
+    ca-certificates \
+    ttf-freefont
+
 # Create app directory
 WORKDIR /usr/src/app
 
