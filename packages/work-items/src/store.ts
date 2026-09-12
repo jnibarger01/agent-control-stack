@@ -81,6 +81,15 @@ import {
   type WorkspaceAllocation
 } from "./attempt.js";
 import {
+  createProcessSessionInputSchema,
+  rowToProcessSession,
+  verifyProcessSessionOwnershipInputSchema,
+  type CreateProcessSessionInput,
+  type ProcessSession,
+  type ProcessSessionRow,
+  type VerifyProcessSessionOwnershipInput
+} from "./process-session.js";
+import {
   actorReliabilitySchema,
   actorRoutingDecisionSchema,
   recordActorReliabilityInputSchema,
@@ -980,6 +989,27 @@ export interface WorkItemStore {
     workerId: string,
     options?: ClaimOptions
   ): ClaimedWorkItem | undefined;
+
+  // --- ADR 0016 Slice 4: Desktop Commander process-session ownership ---
+  createProcessSession(input: CreateProcessSessionInput, options: PrivilegedTransitionOptions): ProcessSession;
+  getActiveProcessSession(pid: number, bootId: string): ProcessSession | undefined;
+  /**
+   * Fail-closed ownership check: true only if there is an `active` session
+   * for the exact (pid, bootId, procStartTicks) triple AND it was created for
+   * this workItemId. Any mismatch, or no session at all, returns false - this
+   * never throws so callers can use it as a plain authorization gate.
+   */
+  verifyProcessSessionOwnership(input: VerifyProcessSessionOwnershipInput): boolean;
+  closeProcessSession(id: string, options: PrivilegedTransitionOptions): ProcessSession;
+  /**
+   * Startup/restart reconciliation: every `active` session whose bootId does
+   * not match the current host boot is marked `lost` - a reboot means the
+   * old pids are gone (or worse, reused by unrelated processes), so an
+   * active session surviving across a boot boundary must never be treated
+   * as still owning anything.
+   */
+  reconcileProcessSessionsForBoot(currentBootId: string, options: PrivilegedTransitionOptions): ProcessSession[];
+
   failExpiredLeases(now?: Date): WorkItem[];
   submitWorkResult(input: unknown): WorkItem;
   recordDerivedWorkResult(input: unknown): WorkItem;
@@ -4209,6 +4239,156 @@ export class SqliteWorkItemStore implements WorkItemStore {
           )
         ]
       };
+    });
+  }
+
+  // --- ADR 0016 Slice 4: Desktop Commander process-session ownership ---
+
+  createProcessSession(input: CreateProcessSessionInput, options: PrivilegedTransitionOptions): ProcessSession {
+    requirePrivilegedTransition(options, "create_process_session");
+    const parsed = createProcessSessionInputSchema.parse(input);
+    return this.write(() => {
+      const id = createId("dcps");
+      const now = (parsed.now ?? new Date()).toISOString();
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO dc_process_sessions
+             (id, work_item_id, action_hash, worker_id, pid, boot_id, proc_start_ticks, dc_session_id,
+              status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`
+          )
+          .run(
+            id,
+            parsed.workItemId,
+            parsed.actionHash,
+            parsed.workerId,
+            parsed.pid,
+            parsed.bootId,
+            parsed.procStartTicks,
+            parsed.dcSessionId ?? null,
+            now,
+            now
+          );
+      } catch (error) {
+        // The partial unique index on (pid, boot_id, proc_start_ticks) WHERE
+        // status='active' is the actual safety property here: it is what
+        // stops two active sessions from ever claiming the same live
+        // process identity, whatever caller races produced the insert.
+        throw new ControlStackError(
+          "process_session_identity_conflict",
+          `an active process session already exists for pid=${parsed.pid} bootId=${parsed.bootId}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+      const row = this.db.prepare(`SELECT * FROM dc_process_sessions WHERE id = ?`).get(id) as unknown as
+        ProcessSessionRow;
+      const session = rowToProcessSession(row);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "dc_process_session.created",
+          session,
+          {
+            "work_item.id": parsed.workItemId,
+            "action.hash": parsed.actionHash,
+            "worker.id": parsed.workerId,
+            "dc_process_session.id": id
+          }
+        )
+      );
+      return { value: session, events: [event] };
+    });
+  }
+
+  getActiveProcessSession(pid: number, bootId: string): ProcessSession | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM dc_process_sessions WHERE pid = ? AND boot_id = ? AND status = 'active'`)
+      .get(pid, bootId) as unknown as ProcessSessionRow | undefined;
+    return row ? rowToProcessSession(row) : undefined;
+  }
+
+  verifyProcessSessionOwnership(input: VerifyProcessSessionOwnershipInput): boolean {
+    const parsed = verifyProcessSessionOwnershipInputSchema.parse(input);
+    const row = this.db
+      .prepare(
+        `SELECT * FROM dc_process_sessions
+         WHERE pid = ? AND boot_id = ? AND proc_start_ticks = ? AND status = 'active'`
+      )
+      .get(parsed.pid, parsed.bootId, parsed.procStartTicks) as unknown as ProcessSessionRow | undefined;
+    // Fail closed: no row, a different work item's session, or a
+    // proc_start_ticks mismatch (the pid was reused by an unrelated
+    // process since the session was created) all deny ownership.
+    if (!row) return false;
+    return row.work_item_id === parsed.workItemId;
+  }
+
+  closeProcessSession(id: string, options: PrivilegedTransitionOptions): ProcessSession {
+    requirePrivilegedTransition(options, "close_process_session");
+    return this.write(() => {
+      const existing = this.db
+        .prepare(`SELECT * FROM dc_process_sessions WHERE id = ?`)
+        .get(id) as unknown as ProcessSessionRow | undefined;
+      if (!existing) {
+        throw new ControlStackError("process_session_not_found", `no such process session: ${id}`);
+      }
+      const now = new Date().toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE dc_process_sessions SET status = 'closed', updated_at = ?, closed_at = ?
+           WHERE id = ? AND status = 'active'`
+        )
+        .run(now, now, id);
+      if (updated.changes !== 1) {
+        throw new ControlStackError("process_session_not_active", `process session is not active: ${id}`);
+      }
+      const row = this.db.prepare(`SELECT * FROM dc_process_sessions WHERE id = ?`).get(id) as unknown as
+        ProcessSessionRow;
+      const session = rowToProcessSession(row);
+      const event = this.appendAuditEvent(
+        createEvent("dc_process_session.closed", session, {
+          "work_item.id": session.workItemId,
+          "dc_process_session.id": id
+        })
+      );
+      return { value: session, events: [event] };
+    });
+  }
+
+  reconcileProcessSessionsForBoot(currentBootId: string, options: PrivilegedTransitionOptions): ProcessSession[] {
+    requirePrivilegedTransition(options, "reconcile_process_sessions_for_boot");
+    return this.write(() => {
+      const stale = this.db
+        .prepare(`SELECT * FROM dc_process_sessions WHERE status = 'active' AND boot_id != ?`)
+        .all(currentBootId) as unknown as ProcessSessionRow[];
+      if (stale.length === 0) {
+        return { value: [], events: [] };
+      }
+      const now = new Date().toISOString();
+      const events: StoredAuditEvent[] = [];
+      const sessions: ProcessSession[] = [];
+      for (const row of stale) {
+        this.db
+          .prepare(
+            `UPDATE dc_process_sessions SET status = 'lost', updated_at = ?, closed_at = ?
+             WHERE id = ? AND status = 'active'`
+          )
+          .run(now, now, row.id);
+        const refreshed = this.db.prepare(`SELECT * FROM dc_process_sessions WHERE id = ?`).get(row.id) as unknown as
+          ProcessSessionRow;
+        const session = rowToProcessSession(refreshed);
+        sessions.push(session);
+        events.push(
+          this.appendAuditEvent(
+            createEvent("dc_process_session.lost", session, {
+              "work_item.id": session.workItemId,
+              "dc_process_session.id": row.id,
+              "boot.id": currentBootId
+            })
+          )
+        );
+      }
+      return { value: sessions, events };
     });
   }
 

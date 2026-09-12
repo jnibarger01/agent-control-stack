@@ -46,6 +46,11 @@ const migrationFiles = [
     version: 18,
     name: "advisory_evidence_and_verification",
     filename: "018_advisory_evidence_and_verification.sql"
+  },
+  {
+    version: 19,
+    name: "dc_process_sessions",
+    filename: "019_dc_process_sessions.sql"
   }
 ] as const;
 
