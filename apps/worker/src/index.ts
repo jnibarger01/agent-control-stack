@@ -36,6 +36,8 @@ import {
   DesktopCommanderMachineExecutor,
   executionCompletedEvent,
   executionStartedEvent,
+  parseStartedProcessPid,
+  resolveCurrentProcessIdentity,
   resultPersistedEvent,
   toolCalledEvent,
   toolOutcomeEvent,
@@ -474,6 +476,27 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
     return submitDesktopCommanderFailure(input, requestId, code);
   }
 
+  // --- ADR 0016 Slice 5: process-session ownership gate ----------------------
+  // read_process_output is read_only / no-approval by tool-policy classification,
+  // but that classification is about DATA sensitivity, not about WHO may read a
+  // given live pid's output. Ownership is a separate, mandatory check: this
+  // work item may read pid X's output only if it holds an active
+  // dc_process_sessions row for the EXACT (pid, bootId, procStartTicks) triple
+  // Slice 4 persisted when that process was started - never for a bare pid
+  // match, since the OS reuses pids. Any failure to prove ownership - a
+  // missing session, a mismatched boot/start-tick (pid reuse), an unresolvable
+  // process identity, or a store error - denies the call. No raw
+  // process-inspection or persistence error is ever let through into
+  // execute(); it is translated into the same authorization-denied result the
+  // rest of this function already uses.
+  if (authorization.toolName === "read_process_output") {
+    const denial = verifyReadProcessOutputOwnership(workItems, trustedWorkItem.id, authorization.normalizedArguments);
+    if (denial) {
+      emit(authorizationDeniedEvent({ workItemId: running.id, workerId, requestId, code: denial.code, reason: denial.reason }));
+      return submitDesktopCommanderFailure(input, requestId, denial.code);
+    }
+  }
+
   emit(authorizationGrantedEvent(authorization));
   emit(executionStartedEvent(authorization));
   emit(toolCalledEvent(authorization));
@@ -491,9 +514,45 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
   );
 
   const finishedAt = executionResult.completedAt;
-  const ok = !executionResult.isError;
+  const dcOk = !executionResult.isError;
   const submittedExecutionMode: typeof DESKTOP_COMMANDER_EXECUTION_MODE = DESKTOP_COMMANDER_EXECUTION_MODE;
   assertExecutionModeForBackend(submittedExecutionMode, "desktop_commander");
+
+  // --- ADR 0016 Slice 5: register the process-session on a successful start_process ---
+  // A start_process call Desktop Commander reports as successful is NOT yet
+  // safely usable: nothing owns the resulting pid until a dc_process_sessions
+  // row is created for it. Only after that row is committed does any future
+  // read_process_output call on this pid have anything to verify ownership
+  // against - so if identity resolution or persistence fails here, the work
+  // item result must say so plainly (outcome "failed") rather than reporting
+  // the tool call as a success that produced an unowned, unauditable process.
+  // A retry of a failed registration can never silently hand ownership of an
+  // already-active process identity to a different work item: createProcessSession
+  // is bound to the partial unique index on (pid, boot_id, proc_start_ticks)
+  // WHERE status='active', so a second attempt against the same live process
+  // conflicts rather than reassigning ownership.
+  let sessionRegistrationFailure: { code: string; reason: string } | undefined;
+  if (dcOk && authorization.toolName === "start_process") {
+    sessionRegistrationFailure = registerStartedProcessSession(
+      workItems,
+      running.id,
+      authorization.actionHash,
+      workerId,
+      executionResult.output
+    );
+    if (sessionRegistrationFailure) {
+      emit(
+        authorizationDeniedEvent({
+          workItemId: running.id,
+          workerId,
+          requestId,
+          code: sessionRegistrationFailure.code,
+          reason: sessionRegistrationFailure.reason
+        })
+      );
+    }
+  }
+  const ok = dcOk && sessionRegistrationFailure === undefined;
 
   // --- ADR 0015: machine evidence + verification requirement (gated) ---------
   if (ok && resolveVerificationPolicyMode() === "enforce") {
@@ -536,9 +595,16 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
       exitCode: ok ? 0 : null,
       summary: ok
         ? `desktop_commander ${authorization.toolName} completed`
-        : `desktop_commander ${authorization.toolName} failed`,
+        : sessionRegistrationFailure
+          ? `desktop_commander ${authorization.toolName} succeeded but process-session registration failed`
+          : `desktop_commander ${authorization.toolName} failed`,
       stdout: executionResult.output,
-      ...(ok ? {} : { error: executionResult.error ?? "desktop_commander tool failed" }),
+      ...(ok
+        ? {}
+        : {
+            error:
+              sessionRegistrationFailure?.reason ?? executionResult.error ?? "desktop_commander tool failed"
+          }),
       structuredOutput: {
         simulated: false,
         tool: authorization.toolName,
@@ -587,6 +653,119 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
     reason: workerId,
     validationPassed: ok
   };
+}
+
+/**
+ * ADR 0016 Slice 5. Deny closed on: no numeric pid in the call, a process
+ * identity that cannot be resolved from /proc (already exited, or /proc is
+ * unreadable), a store lookup that throws instead of answering, or the
+ * primitive itself reporting no active session for this exact
+ * (pid, bootId, procStartTicks) triple owned by this work item. Never
+ * authorizes on a bare pid match.
+ */
+function verifyReadProcessOutputOwnership(
+  workItems: WorkItemStore,
+  workItemId: string,
+  normalizedArguments: Readonly<Record<string, unknown>>
+): { code: string; reason: string } | undefined {
+  const pidValue = normalizedArguments.pid;
+  const pid = typeof pidValue === "number" ? pidValue : undefined;
+  if (pid === undefined) {
+    return { code: "process_ownership_pid_missing", reason: "read_process_output call carried no numeric pid" };
+  }
+
+  let identity: ReturnType<typeof resolveCurrentProcessIdentity>;
+  try {
+    identity = resolveCurrentProcessIdentity(pid);
+  } catch (error) {
+    return {
+      code: "process_ownership_identity_unresolvable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  let owned: boolean;
+  try {
+    owned = workItems.verifyProcessSessionOwnership({
+      workItemId,
+      pid: identity.pid,
+      bootId: identity.bootId,
+      procStartTicks: identity.procStartTicks
+    });
+  } catch (error) {
+    // verifyProcessSessionOwnership is designed to return false rather than
+    // throw for an ordinary mismatch; a thrown error here means the store
+    // could not even answer the question. That ambiguity denies, it never
+    // defaults to owned.
+    return {
+      code: "process_ownership_lookup_failed",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+  if (!owned) {
+    return {
+      code: "process_ownership_denied",
+      reason: `work item ${workItemId} does not hold an active process session for pid ${pid}`
+    };
+  }
+  return undefined;
+}
+
+/**
+ * ADR 0016 Slice 5. Called only after Desktop Commander itself reported
+ * start_process as successful. Parses the pid Desktop Commander returned,
+ * resolves its live identity, and persists the owning session - or reports a
+ * failure reason without ever guessing a pid or silently treating the
+ * process as unowned-but-fine. createProcessSession's underlying partial
+ * unique index on (pid, boot_id, proc_start_ticks) WHERE status='active'
+ * means a retried registration attempt against an already-registered live
+ * process identity conflicts rather than reassigning ownership to a
+ * different work item.
+ */
+function registerStartedProcessSession(
+  workItems: WorkItemStore,
+  workItemId: string,
+  actionHash: string,
+  workerId: string,
+  dcOutput: string
+): { code: string; reason: string } | undefined {
+  const pid = parseStartedProcessPid(dcOutput);
+  if (pid === undefined) {
+    return {
+      code: "process_session_pid_unresolvable",
+      reason: "could not parse a pid from the Desktop Commander start_process response"
+    };
+  }
+
+  let identity: ReturnType<typeof resolveCurrentProcessIdentity>;
+  try {
+    identity = resolveCurrentProcessIdentity(pid);
+  } catch (error) {
+    return {
+      code: "process_session_identity_unresolvable",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+
+  try {
+    workItems.createProcessSession(
+      {
+        workItemId,
+        actionHash,
+        workerId,
+        pid: identity.pid,
+        bootId: identity.bootId,
+        procStartTicks: identity.procStartTicks
+      },
+      { via: "domain_service", actorId: workerId }
+    );
+  } catch (error) {
+    return {
+      code: "process_session_registration_failed",
+      reason: error instanceof Error ? error.message : String(error)
+    };
+  }
+  return undefined;
 }
 
 function submitDesktopCommanderFailure(

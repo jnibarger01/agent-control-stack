@@ -67,3 +67,11 @@ export type {
 
 export { disabledDeviceAuthorizationProvider } from "./device-authorization.js";
 export type { DeviceAuthorizationProvider, DeviceAuthorizationGrant } from "./device-authorization.js";
+
+export {
+  getHostBootId,
+  getProcessStartTicks,
+  resolveCurrentProcessIdentity,
+  parseStartedProcessPid
+} from "./process-identity.js";
+export type { ProcessIdentity } from "./process-identity.js";

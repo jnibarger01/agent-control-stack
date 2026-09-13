@@ -1,5 +1,6 @@
 export * from "./audit.js";
 export * from "./command.js";
+export * from "./desktop-commander-guard.js";
 export * from "./config.js";
 export * from "./controller.js";
 export * from "./direct-agent.js";

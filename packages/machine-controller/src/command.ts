@@ -3,6 +3,7 @@ import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import { z } from "zod";
 import type { MachineControllerConfig } from "./config.js";
 import { resolveSafePath } from "./path.js";
+import { isDesktopCommanderBypassAttempt } from "./desktop-commander-guard.js";
 
 export const riskLevelSchema = z.enum(["read_only", "safe_mutation", "requires_approval", "destructive", "forbidden"]);
 export type RiskLevel = z.infer<typeof riskLevelSchema>;
@@ -40,6 +41,24 @@ export function previewCommand(config: MachineControllerConfig, input: unknown):
   const command = parsed.command;
   const args = parsed.args;
   const deny = new Set([...defaultDeniedCommands, ...config.commands.deny]);
+
+  // ADR 0016 Slice 5: explicit, always-on guard against invoking Desktop
+  // Commander directly through the generic cmd.run path. Everything else in
+  // this function classifies by allowlist (default-deny), which already
+  // blocks most forms of this by omission - but that protection depends on
+  // nobody ever adding a permissive rule for node/npx/npm without noticing
+  // the Desktop Commander bypass it would reopen. This check runs first and
+  // unconditionally, so it cannot be defeated by a future change to the
+  // allow/deny classification below.
+  if (isDesktopCommanderBypassAttempt(command, args)) {
+    return {
+      cwd,
+      command,
+      args,
+      risk: "forbidden",
+      reason: "direct invocation of Desktop Commander bypasses the governed ACS adapter and is forbidden"
+    };
+  }
 
   if (command.includes("/") || shellMetaPattern.test(command) || args.some((arg) => shellMetaPattern.test(arg))) {
     return { cwd, command, args, risk: "forbidden", reason: "shell paths and metacharacters are forbidden" };
