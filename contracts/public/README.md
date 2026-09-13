@@ -8,6 +8,12 @@ Run `npm run contracts:generate` after changing a public boundary. CI and
 validates the examples, compares committed artifacts byte-for-byte, and checks
 the compatibility baseline.
 
+Frozen MCP coverage includes every work-item tool and every portfolio tool.
+`contracts:check` fails if those names are absent from the generated
+`mcp-tools.json` catalog or from `compatibility-baseline.json`, and it still
+fails when committed OpenAPI / MCP artifacts silently drift from the Zod source
+schemas.
+
 The compatibility checker classifies operation or tool removal, property
 removal, and newly required properties as breaking. A deliberate breaking
 change requires:

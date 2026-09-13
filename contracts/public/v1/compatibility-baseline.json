@@ -148,6 +148,7 @@
       ],
       "properties": [
         "intent",
+        "metadata",
         "requestedActions",
         "requester",
         "requesterSubject",
@@ -164,7 +165,8 @@
         "intent": "\"string\"",
         "target": "\"object\"",
         "requestedActions": "\"array\"",
-        "risk": "\"string\""
+        "risk": "\"string\"",
+        "metadata": "\"object\""
       },
       "propertyEnums": {
         "requester": [
@@ -176,6 +178,36 @@
           "draft",
           "pending_policy"
         ],
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
+    },
+    "POST /webhooks/{source}": {
+      "required": [
+        "intent",
+        "title"
+      ],
+      "properties": [
+        "correlationId",
+        "intent",
+        "requestedActions",
+        "risk",
+        "target",
+        "title"
+      ],
+      "propertyTypes": {
+        "title": "\"string\"",
+        "intent": "\"string\"",
+        "target": "\"object\"",
+        "requestedActions": "\"array\"",
+        "risk": "\"string\"",
+        "correlationId": "\"string\""
+      },
+      "propertyEnums": {
         "risk": [
           "critical",
           "high",
@@ -247,12 +279,16 @@
       "properties": [
         "actionHash",
         "artifacts",
+        "attemptId",
         "error",
         "exitCode",
+        "fencingEpoch",
         "finishedAt",
         "idempotencyKey",
+        "inputHash",
         "leaseId",
         "outcome",
+        "planHash",
         "resourceUsage",
         "simulationMetadata",
         "startedAt",
@@ -265,9 +301,13 @@
       ],
       "propertyTypes": {
         "workItemId": "\"string\"",
+        "attemptId": "\"string\"",
         "leaseId": "\"string\"",
         "workerId": "\"string\"",
         "actionHash": "\"string\"",
+        "planHash": "\"string\"",
+        "inputHash": "\"string\"",
+        "fencingEpoch": "\"integer\"",
         "idempotencyKey": "\"string\"",
         "outcome": "\"string\"",
         "startedAt": "\"string\"",
@@ -568,6 +608,7 @@
       ],
       "properties": [
         "intent",
+        "metadata",
         "requestedActions",
         "requester",
         "requesterSubject",
@@ -584,7 +625,8 @@
         "intent": "\"string\"",
         "target": "\"object\"",
         "requestedActions": "\"array\"",
-        "risk": "\"string\""
+        "risk": "\"string\"",
+        "metadata": "\"object\""
       },
       "propertyEnums": {
         "requester": [
@@ -697,6 +739,112 @@
       "propertyTypes": {
         "id": "\"string\"",
         "reason": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "open_acs_dashboard": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "get_execution_detail": {
+      "required": [
+        "id"
+      ],
+      "properties": [
+        "id"
+      ],
+      "propertyTypes": {
+        "id": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.get_summary": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "portfolio.list_repositories": {
+      "required": [],
+      "properties": [
+        "lifecycle",
+        "limit",
+        "status"
+      ],
+      "propertyTypes": {
+        "status": "\"string\"",
+        "lifecycle": "\"string\"",
+        "limit": "\"integer\""
+      },
+      "propertyEnums": {
+        "status": [
+          "ARCHIVED",
+          "ATTENTION",
+          "BLOCKED",
+          "HEALTHY",
+          "UNKNOWN"
+        ],
+        "lifecycle": [
+          "ACTIVE",
+          "ARCHIVED",
+          "DORMANT",
+          "EXPERIMENTAL",
+          "MAINTENANCE",
+          "UNKNOWN"
+        ]
+      }
+    },
+    "portfolio.list_attention_required": {
+      "required": [],
+      "properties": [
+        "limit"
+      ],
+      "propertyTypes": {
+        "limit": "\"integer\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.get_repository": {
+      "required": [
+        "repository"
+      ],
+      "properties": [
+        "repository"
+      ],
+      "propertyTypes": {
+        "repository": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.list_failures": {
+      "required": [],
+      "properties": [
+        "limit"
+      ],
+      "propertyTypes": {
+        "limit": "\"integer\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.list_pending_work": {
+      "required": [],
+      "properties": [
+        "limit"
+      ],
+      "propertyTypes": {
+        "limit": "\"integer\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.list_recent_progress": {
+      "required": [],
+      "properties": [
+        "limit"
+      ],
+      "propertyTypes": {
+        "limit": "\"integer\""
       },
       "propertyEnums": {}
     },
