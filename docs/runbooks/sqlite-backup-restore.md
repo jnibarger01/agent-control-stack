@@ -94,6 +94,74 @@ Real replace uses the existing db-ops restore entrypoint with both --replace and
 db-ops restore creates a sibling pre-restore safety copy of the previous
 destination when one existed. Keep both until post-restore checks pass.
 
+## WAL checkpoint + VACUUM
+
+Gateway and worker open the control-plane DB with `PRAGMA journal_mode = WAL`.
+The `-wal` sidecar can grow under sustained writes even when the main `.db` file
+looks small. Checkpoint merges WAL frames back into the main file; VACUUM
+rebuilds the main file to reclaim free pages after large deletes.
+
+### Cadence
+
+| Operation      | When                                                                                                                                          | Writers                                                                               |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| WAL checkpoint | When `-wal` is large relative to the main DB, before a quiet-window backup of raw files, or during scheduled maintenance                      | PASSIVE may run while live (best-effort). FULL/TRUNCATE: quiet window or stop writers |
+| VACUUM         | After large deletions, schema-heavy migrations, or when the main file stays bloated after checkpoint — typically monthly/quarterly, not daily | **Stop every gateway, worker, and scheduler first**                                   |
+
+Snapshot with the backup helper before VACUUM on any non-fixture database. Do
+not rewrite audit hashes in place; if verify fails after maintenance, restore
+the last verified backup.
+
+### Warning: live gateway / worker
+
+- **Do not run VACUUM while the gateway, worker, or scheduler are live.** VACUUM
+  needs an exclusive lock; concurrent writers can fail the maintenance step or
+  leave the process stuck. The script refuses VACUUM without `--writers-stopped`
+  and fails closed if an exclusive lock cannot be taken.
+- Prefer stopping writers before `wal-checkpoint --mode TRUNCATE` (or FULL /
+  RESTART) when you need the `-wal` file to shrink to zero. `PASSIVE` is safer
+  on a live DB but may report uncheckpointed frames (`busy != 0` or
+  `checkpointed < log`).
+- Never delete `-wal` / `-shm` sidecars by hand while processes hold the DB open.
+
+### Practice on the sample fixture
+
+These steps succeed without a live gateway and must leave the audit chain intact
+(`health.ok` / `auditChain` pass).
+
+1. Recreate the fixture (or reuse an existing sample DB):
+
+       mkdir -p storage/fixtures
+       node scripts/sqlite-backup-restore.mjs create-fixture storage/fixtures/sample-work-items.db
+
+2. Optional: put the fixture in WAL mode and force a small WAL (offline only):
+
+       node -e "const {DatabaseSync}=require('node:sqlite'); const p='storage/fixtures/sample-work-items.db'; const db=new DatabaseSync(p); db.exec('PRAGMA journal_mode=WAL'); db.exec(\"UPDATE actors SET display_name='fixture-operator-wal' WHERE id='fixture-operator'\"); db.close();"
+
+3. Checkpoint (TRUNCATE shrinks `-wal` when no other connection is open):
+
+       node scripts/sqlite-backup-restore.mjs wal-checkpoint storage/fixtures/sample-work-items.db --mode TRUNCATE
+
+4. VACUUM with writers attested stopped (required flag):
+
+       node scripts/sqlite-backup-restore.mjs vacuum storage/fixtures/sample-work-items.db --writers-stopped
+
+5. Re-verify integrity + audit chain:
+
+       node scripts/sqlite-backup-restore.mjs verify storage/fixtures/sample-work-items.db
+
+Expect `ok:true` and `health.ok:true` from each JSON report. A failed verify
+after maintenance means stop and restore from the last good snapshot — do not
+hand-edit the chain.
+
+### Live / alpha maintenance outline
+
+1. Take a verified snapshot (see Backup above).
+2. Stop gateway, worker, and scheduler processes that open ACS_DB_PATH.
+3. `wal-checkpoint` with `--mode TRUNCATE`, then `vacuum ... --writers-stopped`.
+4. `verify` the live path; only then restart writers.
+5. Confirm `/readyz` (or offline verify) once the gateway is back.
+
 ## Integrity: /health + audit-chain verify
 
 ### Offline (no gateway)
@@ -125,4 +193,4 @@ investigate. Do not rewrite hashes in place.
 - [audit-chain-export.md](./audit-chain-export.md) — JSONL export + offline verify
 - scripts/db-ops.mjs — verify / backup / restore primitives
 - scripts/db-backup-policy.mjs — encrypted retention + drill (production)
-- scripts/sqlite-backup-restore.mjs — timestamped snapshot + restore dry-run + fixture
+- scripts/sqlite-backup-restore.mjs — timestamped snapshot + restore dry-run + fixture + wal-checkpoint + vacuum
