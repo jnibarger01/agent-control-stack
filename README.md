@@ -743,6 +743,17 @@ Use `/livez` for process liveness and `/readyz` for traffic readiness. `/health`
 
 `GET /mcp/tools` is an authenticated capability-inventory route and requires the MCP `acs:work:read` scope. Anonymous, invalid, and insufficient-scope requests do not receive the tool inventory.
 
+### Metrics
+
+Authenticated operators can scrape Prometheus text from `GET /metrics` (same read auth as the dashboard):
+
+```sh
+curl -fsS -H "Authorization: Bearer $ACS_GATEWAY_TOKEN" \
+  http://127.0.0.1:3000/metrics
+```
+
+Key series: `acs_rate_limit_rejected_total` (429s), `acs_http_requests_total` (includes `status="429"`), `acs_http_request_duration_seconds_{count,sum}`, `acs_audit_events_total` (lease/approval lifecycle via `event_name`), `acs_sse_*`, and `acs_sqlite_ready`. Mission Control’s **Operator metrics** panel shows derived lease age and approval wait from live store state. Full names and scrape notes: [`docs/runbooks/operator-metrics.md`](docs/runbooks/operator-metrics.md).
+
 ### Logs
 
 - Gateway logs go to stdout/stderr by default.
@@ -889,6 +900,7 @@ for executor selection, verification overrides, exit codes, and log behavior.
 - [`apps/gateway/VERCEL_DISABLED.md`](apps/gateway/VERCEL_DISABLED.md) (gateway is not on Vercel)
 - [`docs/runbooks/sqlite-backup-restore.md`](docs/runbooks/sqlite-backup-restore.md)
 - [`docs/runbooks/gateway-abuse-controls.md`](docs/runbooks/gateway-abuse-controls.md)
+- [`docs/runbooks/operator-metrics.md`](docs/runbooks/operator-metrics.md)
 - [`docs/runbooks/github-agent-workflows.md`](docs/runbooks/github-agent-workflows.md)
 - [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)

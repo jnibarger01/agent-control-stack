@@ -40,6 +40,8 @@ For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send i
 
 Default per-principal rate limits and the pending work-item ceiling apply on local MCP/HTTP writes; see [gateway-abuse-controls.md](./gateway-abuse-controls.md) for knobs and recommended local vs deployed values.
 
+Authenticated local scrape of gateway metrics (`GET /metrics`) and the Mission Control operator metrics panel are documented in [operator-metrics.md](./operator-metrics.md).
+
 The real loopback MCP interoperability smoke path uses a temporary SQLite
 database, deterministic OAuth test keys, and an explicitly registered harmless
 fixture agent. It starts the gateway on `127.0.0.1` and sends the actual

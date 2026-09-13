@@ -55,6 +55,42 @@ describe("renderDashboard", () => {
     expect(html).not.toContain("data-approve-all");
   });
 
+  it("renders an operator metrics panel with lease age, approval wait, and /metrics scrape notes", () => {
+    const lease = {
+      leaseId: "lease_ops",
+      attemptId: "attempt_ops",
+      workItemId: "wrk_test",
+      admissionId: "admission_ops",
+      workerId: "worker-ops",
+      planHash: "a".repeat(64),
+      inputHash: "b".repeat(64),
+      fencingEpoch: 1,
+      protocolVersion: "acs.worker.v2" as const,
+      policyVersion: "policy-v1",
+      policyDecisionHash: "c".repeat(64),
+      issuedAt: "2026-07-05T00:00:00.000Z",
+      expiresAt: "2026-07-05T00:10:00.000Z",
+      maxExpiresAt: "2026-07-05T00:30:00.000Z",
+      lastRenewedAt: "2026-07-05T00:00:00.000Z",
+      status: "active" as const
+    };
+    const html = renderDashboard({
+      workItems: [workItem],
+      events: [],
+      attemptLeasesByWorkItem: { wrk_test: [lease] },
+      now: new Date("2026-07-05T00:01:30.000Z")
+    });
+
+    expect(html).toContain('id="operator-metrics"');
+    expect(html).toContain("Operator metrics");
+    expect(html).toContain("Oldest lease age");
+    expect(html).toContain("1m 30s");
+    expect(html).toContain("Oldest approval wait");
+    expect(html).toContain('href="/metrics"');
+    expect(html).toContain("acs_rate_limit_rejected_total");
+    expect(html).toContain("docs/runbooks/operator-metrics.md");
+  });
+
   it("does not hard-reload the dashboard for SSE audit events", () => {
     const html = renderDashboard({ workItems: [workItem], events: [], now: new Date("2026-07-05T00:01:00.000Z") });
 
@@ -98,7 +134,12 @@ describe("renderDashboard", () => {
   it("visually distinguishes work items that need operator attention from normally running ones", () => {
     const runningItem = { ...workItem, id: "wrk_running", status: "running" as const, title: "Running task" };
     const succeededItem = { ...workItem, id: "wrk_succeeded", status: "succeeded" as const, title: "Succeeded task" };
-    const quarantinedItem = { ...workItem, id: "wrk_quarantined", status: "quarantined" as const, title: "Quarantined task" };
+    const quarantinedItem = {
+      ...workItem,
+      id: "wrk_quarantined",
+      status: "quarantined" as const,
+      title: "Quarantined task"
+    };
 
     const html = renderDashboard({
       workItems: [workItem, blockedItem, runningItem, succeededItem, quarantinedItem],

@@ -75,7 +75,7 @@ Keep real secrets in the deployment secret store or process environment. Do not 
 
    Gateway host map (what is supported vs Vercel-disabled): [README Deploy](../../README.md#deploy).
 
-`/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain. Route traffic only when readiness is HTTP 200. Authenticated operators can scrape `/metrics` for request latency/status, rate-limit outcomes, audit lifecycle events, and SQLite readiness.
+`/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain. Route traffic only when readiness is HTTP 200. Authenticated operators can scrape `/metrics` for request latency/status, rate-limit outcomes (`acs_rate_limit_rejected_total`), audit lifecycle events, and SQLite readiness. Metric names, local scrape examples, and the Mission Control operator metrics panel: [operator-metrics.md](./operator-metrics.md).
 
 ## Shutdown
 
