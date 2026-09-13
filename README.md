@@ -56,7 +56,7 @@ Do **not** claim this alpha provides:
 - kernel-level containment
 - a multi-user enterprise authorization model
 
-The current `packages/sandbox` implementation is intentionally dry-run only. Real execution should be added behind that package after isolation, environment allowlisting, path containment, output caps, and network controls pass their own release gate.
+The current `packages/sandbox` implementation is intentionally dry-run only. Real execution should be added behind that package only after the [sandbox real-execution release gate](docs/releases/sandbox-real-execution-gate.md) passes (path containment, env allowlist, output caps, network controls, approval binding, audit evidence).
 
 Wave 2 models completion without claiming execution: result submission accepts only authenticated worker principals with an active matching lease, action hash, and dry-run metadata. Accepted results are immutable. Retry and clone create new work items; they never reopen or edit historical items. External connector proof remains separate from this local lifecycle proof.
 
@@ -847,7 +847,7 @@ for executor selection, verification overrides, exit codes, and log behavior.
 ## Known limitations
 
 - Worker execution is dry-run only.
-- No real OS sandbox is wired in yet.
+- No real OS sandbox is wired in yet. Enabling live execution requires completing the [sandbox real-execution release gate](docs/releases/sandbox-real-execution-gate.md) (also linked from [`packages/sandbox`](packages/sandbox/README.md)).
 - Public worker result submission is not implemented.
 - Production remote connector mode requires OAuth or signed tunnel-session deployment and TLS termination.
 - Docker and Compose artifacts are provided. Checked-in systemd units cover managed database backups and restore
@@ -868,6 +868,7 @@ for executor selection, verification overrides, exit codes, and log behavior.
 - [`docs/runbooks/github-agent-workflows.md`](docs/runbooks/github-agent-workflows.md)
 - [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)
+- [`docs/releases/sandbox-real-execution-gate.md`](docs/releases/sandbox-real-execution-gate.md)
 
 ## License
 
