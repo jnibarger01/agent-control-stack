@@ -10,7 +10,7 @@ import {
   type WorkspaceAllocation,
   type WorkItemStore
 } from "@agent-control-stack/work-items";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WorkspaceManager, type WorkspaceAllocationStore } from "./index.js";
 
 const execFileAsync = promisify(execFile);
@@ -56,6 +56,7 @@ describe("WorkspaceManager", () => {
   let cleanup: (() => void) | undefined;
 
   afterEach(() => {
+    vi.useRealTimers();
     cleanup?.();
     cleanup = undefined;
   });
@@ -198,7 +199,11 @@ describe("WorkspaceManager", () => {
     });
     expect(existsSync(orphanPath)).toBe(true);
 
-    const manager = new WorkspaceManager({ repoPath: fixture.repoPath, rootDir: fixture.rootDir, store: fixture.store });
+    const manager = new WorkspaceManager({
+      repoPath: fixture.repoPath,
+      rootDir: fixture.rootDir,
+      store: fixture.store
+    });
 
     // Must not throw a Zod validation error and abort reconciliation.
     const { orphaned } = await manager.reconcile(new Set());
@@ -444,6 +449,10 @@ describe("WorkspaceManager", () => {
       { workItemId, planHash: plan.planHash, inputHash: "a".repeat(64) },
       { via: "domain_service" }
     );
+    // Use a long TTL so provision (git worktree add + record) cannot lose the
+    // race against wall-clock expiry under loaded CI - the prior ttlMs:50 +
+    // setTimeout(75) flake failed at WorkspaceManager.provision with
+    // workspace_allocation_conflict once worktree creation exceeded 50ms.
     const lease = fixture.store.leaseAttempt(
       {
         attemptId: attempt.attemptId,
@@ -453,7 +462,7 @@ describe("WorkspaceManager", () => {
         leaseToken: "a".repeat(32),
         policyVersion: "acs.policy.v1",
         policyDecisionHash: "1".repeat(64),
-        ttlMs: 50
+        ttlMs: 60_000
       },
       { via: "domain_service" }
     );
@@ -467,12 +476,13 @@ describe("WorkspaceManager", () => {
     const workspace = manager.get(workItemId, attempt.attemptId)!;
     expect(existsSync(workspace.hostPath)).toBe(true);
 
-    // Let the lease's TTL genuinely elapse without anything reaping it -
-    // its row stays status='active' the whole time (failExpiredLeases was
-    // never called), and the allocation's own copied worker/lease/epoch
-    // tuple is untouched and still matches exactly what the now-stale
-    // worker presents. Only the lease's own expires_at has actually passed.
-    await new Promise((resolve) => setTimeout(resolve, 75));
+    // Advance past expires_at without calling failExpiredLeases - the lease
+    // row stays status='active', and the allocation's copied worker/lease/
+    // epoch tuple still matches exactly what the now-stale worker presents.
+    // Only the lease's own expires_at has actually passed (same pattern as
+    // work-items getWorkspaceCleanupAuthority expired-lease coverage).
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.parse(lease.expiresAt) + 1));
 
     await expect(
       manager.teardown(workItemId, {
@@ -484,6 +494,7 @@ describe("WorkspaceManager", () => {
     ).rejects.toThrowError(
       expect.objectContaining<Partial<ControlStackError>>({ code: "workspace_cleanup_fence_stale" })
     );
+    vi.useRealTimers();
     // Refused before ever touching the filesystem.
     expect(existsSync(workspace.hostPath)).toBe(true);
   });
