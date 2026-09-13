@@ -1,0 +1,4 @@
+# Sandbox real-execution changes need owner review against
+# docs/releases/sandbox-real-execution-gate.md before live exec is enabled.
+/packages/sandbox/ @jnibarger01
+/docs/releases/sandbox-real-execution-gate.md @jnibarger01
