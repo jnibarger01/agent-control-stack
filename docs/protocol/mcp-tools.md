@@ -226,6 +226,19 @@ actions are out of scope until Visualizer reports
 `proving.eligibleForV2 === true`. No ACS tool may call a GitHub mutation
 endpoint.
 
+**Visualizer proving handshake (ACS side):** ACS reads
+`GET /api/v1/portfolio/sync-status` and requires
+`proving.eligibleForV2 === true` before any portfolio GitHub write tool is
+reachable. When the flag is false or absent, the portfolio client and gateway
+refuse reserved write tool names (`portfolio.create_issue_comment`,
+`portfolio.create_pull_request_comment`, `portfolio.add_labels`,
+`portfolio.remove_labels`, `portfolio.assign`, `portfolio.unassign`, and any
+other non-read `portfolio.*` name) with `PORTFOLIO_V2_WRITES_DENIED`. Eligibility
+alone does not enable writes in V1 — ACS still has no GitHub mutation
+implementation (`PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED`). Contract coverage:
+`apps/gateway/src/portfolio-client.test.ts` and
+`apps/gateway/src/portfolio-mcp.test.ts`.
+
 ### `create_work_item`
 
 ```json

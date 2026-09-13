@@ -18,7 +18,12 @@ import {
   executionDetail
 } from "./chatgpt-dashboard.js";
 import { chatgptDashboardWidgetHtml } from "./chatgpt-dashboard-widget.generated.js";
-import { createUnavailablePortfolioClient, type PortfolioClient } from "./portfolio-client.js";
+import {
+  PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_MESSAGE,
+  createUnavailablePortfolioClient,
+  isPortfolioGithubWriteTool,
+  type PortfolioClient
+} from "./portfolio-client.js";
 import {
   directAgentToolName,
   gatewayMcpInputSchemas,
@@ -199,6 +204,12 @@ async function authorizeDiscoveryMethod(input: {
   return authorization.ok ? undefined : mcpAuthError(input.id, authorization, input.resourceMetadataUrl, []);
 }
 
+function toolNameFromParams(params: unknown): string | undefined {
+  if (params === null || typeof params !== "object" || Array.isArray(params)) return undefined;
+  const name = (params as { name?: unknown }).name;
+  return typeof name === "string" ? name : undefined;
+}
+
 function isDiscoveryMethod(method: string): boolean {
   return (
     method === "initialize" ||
@@ -228,6 +239,38 @@ async function handleToolsCall(input: {
   portfolioClient?: PortfolioClient;
   toolAllowlist?: McpToolAllowlistConfig;
 }): Promise<McpHttpResult> {
+  const portfolioClient = input.portfolioClient ?? createUnavailablePortfolioClient();
+  const candidateName = toolNameFromParams(input.params);
+  // Reserved / non-read portfolio.* names are GitHub write tools. Refuse them
+  // before schema parse so they stay unreachable while proving.eligibleForV2
+  // is false or absent (and remain unimplemented even when eligible).
+  if (candidateName !== undefined && isPortfolioGithubWriteTool(candidateName)) {
+    const authorization = await authorizeMcpRequest({
+      headers: input.headers,
+      auth: input.auth,
+      requiredScopes: ["acs:work:read"],
+      remoteAddress: input.remoteAddress
+    });
+    if (!authorization.ok) {
+      return mcpAuthError(input.id, authorization, input.resourceMetadataUrl, ["acs:work:read"]);
+    }
+    const actor = resolvedMcpActor(authorization.auth);
+    input.auditAuthenticatedRequest?.({
+      requestId: input.requestId ?? String(input.id ?? ""),
+      method: "tools/call",
+      toolName: candidateName,
+      resolvedActor: actor,
+      auth: authorization.auth
+    });
+    try {
+      await portfolioClient.refuseGithubWriteTool(candidateName);
+      // refuseGithubWriteTool is Promise<never>; keep a hard stop if a stub resolves.
+      return jsonRpcError(input.id, -32000, PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_MESSAGE, 409);
+    } catch (error) {
+      return jsonRpcError(input.id, errorCode(error), errorMessage(error), errorStatus(error));
+    }
+  }
+
   const parsed = toolsCallParamsSchema.safeParse(input.params);
   if (!parsed.success) {
     return jsonRpcError(input.id, -32602, "invalid tools/call params", 400);
@@ -327,7 +370,7 @@ async function handleToolsCall(input: {
       tools: input.tools,
       store: input.store,
       directAgentController: input.directAgentController,
-      portfolioClient: input.portfolioClient ?? createUnavailablePortfolioClient(),
+      portfolioClient,
       name: parsed.data.name,
       args: parsed.data.arguments ?? {},
       auth: authorization.auth,
