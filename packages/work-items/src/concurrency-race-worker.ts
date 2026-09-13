@@ -8,7 +8,9 @@ type Race =
   | { kind: "retry"; dbPath: string; workItemId: string; actor: string }
   | { kind: "cancel"; dbPath: string; workItemId: string; actor: string }
   | { kind: "mixed"; dbPath: string; workItemId: string; actor: string; op: "retry" | "cancel" }
-  | { kind: "lease"; dbPath: string; input: any; workerId: string };
+  | { kind: "lease"; dbPath: string; input: any; workerId: string }
+  | { kind: "renew"; dbPath: string; input: any }
+  | { kind: "authoritative_result"; dbPath: string; input: unknown };
 
 const input = workerData as Race & { barrier: SharedArrayBuffer };
 const barrier = new Int32Array(input.barrier);
@@ -23,8 +25,10 @@ try {
     value = store.claimNextApprovedWorkItem(input.workerId, { allowLegacyClaimForTests: true });
   else if (input.kind === "lease")
     value = store.leaseAttempt({ ...input.input, workerId: input.workerId }, { via: "domain_service" });
+  else if (input.kind === "renew") value = store.renewAttemptLease(input.input);
   else if (input.kind === "consume") value = store.consumeApproval(input.workItemId, input.actionHash);
-  else if (input.kind === "result") value = store.submitWorkResult(input.input);
+  else if (input.kind === "result" || input.kind === "authoritative_result")
+    value = store.submitWorkResult(input.input);
   else if (input.kind === "retry" || (input.kind === "mixed" && input.op === "retry"))
     value = store.retryWorkItem(input.workItemId, { actor: input.actor, reason: "concurrent retry" });
   else
