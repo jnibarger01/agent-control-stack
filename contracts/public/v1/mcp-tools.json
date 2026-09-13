@@ -324,6 +324,115 @@
       }
     },
     {
+      "name": "explain_policy",
+      "exposure": "remote",
+      "description": "Read-only policy explain for a candidate action: decision, matched rule ids, and action hash. Does not execute or record.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "workItemId": {
+            "type": "string",
+            "minLength": 1
+          },
+          "actor": {
+            "type": "string",
+            "minLength": 1
+          },
+          "operation": {
+            "type": "string",
+            "enum": [
+              "create",
+              "approve",
+              "unblock",
+              "claim"
+            ]
+          },
+          "requester": {
+            "type": "string",
+            "minLength": 1
+          },
+          "risk": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "action": {
+            "type": "object",
+            "properties": {
+              "kind": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": {
+                "type": "string",
+                "minLength": 1
+              },
+              "params": {
+                "default": {},
+                "type": "object",
+                "propertyNames": {
+                  "type": "string"
+                },
+                "additionalProperties": {}
+              }
+            },
+            "required": [
+              "kind",
+              "description"
+            ]
+          },
+          "cwd": {
+            "type": "string",
+            "minLength": 1
+          },
+          "command": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "network": {
+            "type": "boolean"
+          },
+          "write": {
+            "type": "boolean"
+          },
+          "destructive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "workItemId",
+          "actor",
+          "operation",
+          "requester",
+          "risk",
+          "action"
+        ]
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
       "name": "open_acs_dashboard",
       "exposure": "remote",
       "description": "Open the read-only ACS Control Center with current health, executions, approvals, and operational findings.",

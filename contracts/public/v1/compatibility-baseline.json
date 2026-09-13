@@ -186,6 +186,58 @@
         ]
       }
     },
+    "POST /policy/explain": {
+      "required": [
+        "action",
+        "actor",
+        "operation",
+        "requester",
+        "risk",
+        "workItemId"
+      ],
+      "properties": [
+        "action",
+        "actor",
+        "command",
+        "cwd",
+        "destructive",
+        "network",
+        "operation",
+        "paths",
+        "requester",
+        "risk",
+        "workItemId",
+        "write"
+      ],
+      "propertyTypes": {
+        "workItemId": "\"string\"",
+        "actor": "\"string\"",
+        "operation": "\"string\"",
+        "requester": "\"string\"",
+        "risk": "\"string\"",
+        "action": "\"object\"",
+        "cwd": "\"string\"",
+        "command": "\"array\"",
+        "paths": "\"array\"",
+        "network": "\"boolean\"",
+        "write": "\"boolean\"",
+        "destructive": "\"boolean\""
+      },
+      "propertyEnums": {
+        "operation": [
+          "approve",
+          "claim",
+          "create",
+          "unblock"
+        ],
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
+    },
     "POST /webhooks/{source}": {
       "required": [
         "intent",
@@ -741,6 +793,58 @@
         "reason": "\"string\""
       },
       "propertyEnums": {}
+    },
+    "explain_policy": {
+      "required": [
+        "action",
+        "actor",
+        "operation",
+        "requester",
+        "risk",
+        "workItemId"
+      ],
+      "properties": [
+        "action",
+        "actor",
+        "command",
+        "cwd",
+        "destructive",
+        "network",
+        "operation",
+        "paths",
+        "requester",
+        "risk",
+        "workItemId",
+        "write"
+      ],
+      "propertyTypes": {
+        "workItemId": "\"string\"",
+        "actor": "\"string\"",
+        "operation": "\"string\"",
+        "requester": "\"string\"",
+        "risk": "\"string\"",
+        "action": "\"object\"",
+        "cwd": "\"string\"",
+        "command": "\"array\"",
+        "paths": "\"array\"",
+        "network": "\"boolean\"",
+        "write": "\"boolean\"",
+        "destructive": "\"boolean\""
+      },
+      "propertyEnums": {
+        "operation": [
+          "approve",
+          "claim",
+          "create",
+          "unblock"
+        ],
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
     },
     "open_acs_dashboard": {
       "required": [],

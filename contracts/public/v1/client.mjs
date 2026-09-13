@@ -56,6 +56,10 @@ const operations = {
     "method": "GET",
     "path": "/work-items"
   },
+  "explainPolicy": {
+    "method": "POST",
+    "path": "/policy/explain"
+  },
   "createWorkItem": {
     "method": "POST",
     "path": "/work-items"

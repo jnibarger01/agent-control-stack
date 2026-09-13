@@ -1,4 +1,5 @@
 export * from "./contracts.js";
+export * from "./explain.js";
 export * from "./fingerprint.js";
 export * from "./mission-classifier.js";
 export * from "./plan-tools.js";

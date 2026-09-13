@@ -531,7 +531,9 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
 function isMutatingTool(name: McpToolName): boolean {
   if (name === directAgentToolName) return true;
   if (isPortfolioTool(name)) return false;
-  return !["get_work_item", "list_work_items", "open_acs_dashboard", "get_execution_detail"].includes(name);
+  return !["get_work_item", "list_work_items", "explain_policy", "open_acs_dashboard", "get_execution_detail"].includes(
+    name
+  );
 }
 
 function isPortfolioTool(name: McpToolName): name is (typeof portfolioToolNames)[number] {

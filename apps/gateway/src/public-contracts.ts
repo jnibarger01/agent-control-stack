@@ -1,5 +1,5 @@
 import { directAgentNames } from "@agent-control-stack/machine-controller";
-import { workItemToolNames } from "@agent-control-stack/policy-gate";
+import { explainPolicyInputSchema, workItemToolNames } from "@agent-control-stack/policy-gate";
 import {
   acpRoles,
   actionRequestSchema,
@@ -176,6 +176,7 @@ export const gatewayMcpInputSchemas = {
   unblock_work_item: idSchema,
   reject_work_item: reasonSchema,
   cancel_work_item: reasonSchema,
+  explain_policy: explainPolicyInputSchema,
   open_acs_dashboard: z.object({}),
   get_execution_detail: idSchema,
   "portfolio.get_summary": z.object({}).strict(),
@@ -195,6 +196,7 @@ export function mcpRequiredScopes(name: McpToolName): McpScope[] {
       return ["acs:work:create"];
     case "get_work_item":
     case "list_work_items":
+    case "explain_policy":
     case "open_acs_dashboard":
     case "get_execution_detail":
     case "portfolio.get_summary":
@@ -218,6 +220,7 @@ export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
   switch (name) {
     case "get_work_item":
     case "list_work_items":
+    case "explain_policy":
     case "open_acs_dashboard":
     case "get_execution_detail":
     case "portfolio.get_summary":
@@ -259,6 +262,8 @@ export function mcpToolDescription(name: McpToolName): string {
       return "Reject a work item through a distinct terminal denial state.";
     case "cancel_work_item":
       return "Cancel a work item through the work-item state machine.";
+    case "explain_policy":
+      return "Read-only policy explain for a candidate action: decision, matched rule ids, and action hash. Does not execute or record.";
     case "portfolio.get_summary":
       return "Read the Visualizer GitHub portfolio summary. This never mutates GitHub.";
     case "portfolio.list_repositories":
@@ -365,6 +370,13 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     summary: "Read MCP OAuth protected-resource metadata."
   },
   { method: "get", path: "/work-items", operationId: "listWorkItems", summary: "List governed work items." },
+  {
+    method: "post",
+    path: "/policy/explain",
+    operationId: "explainPolicy",
+    summary: "Explain a candidate policy decision without executing it.",
+    requestSchema: explainPolicyInputSchema
+  },
   {
     method: "post",
     path: "/work-items",

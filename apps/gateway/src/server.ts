@@ -11,7 +11,12 @@ import {
   loadMachineControllerConfig,
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
-import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
+import {
+  createPolicyEngine,
+  createWorkItemTools,
+  explainPolicy,
+  workItemToolNames
+} from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
   listWorkItemsSchema,
@@ -564,6 +569,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/work-items", { preHandler: requireRead }, async (request, reply) => {
     try {
       return { workItems: tools.list_work_items(listWorkItemsSchema.parse(request.query)) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/policy/explain", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      return explainPolicy(request.body);
     } catch (error) {
       return sendError(reply, error);
     }
@@ -1350,6 +1363,7 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/mcp" ||
     path === "/session/login" ||
     path === "/work-items" ||
+    path === "/policy/explain" ||
     path.startsWith("/work-items/") ||
     path.startsWith("/webhooks/")
   );
