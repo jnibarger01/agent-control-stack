@@ -59,11 +59,21 @@ Keep real secrets in the deployment secret store or process environment. Do not 
 4. Verify:
 
    ```sh
-   curl -fsS http://127.0.0.1:3000/livez
-   curl -fsS http://127.0.0.1:3000/readyz
+   ./scripts/gateway-post-deploy-healthcheck.sh http://127.0.0.1:3000
    docker compose -f compose.production.yml ps
    docker compose -f compose.production.yml logs --tail=100 gateway
    ```
+
+   The healthcheck script probes `/livez` then `/readyz` (same contract as the
+   curls below). Prefer it so operators share one post-deploy check. Manual
+   equivalent:
+
+   ```sh
+   curl -fsS http://127.0.0.1:3000/livez
+   curl -fsS http://127.0.0.1:3000/readyz
+   ```
+
+   Gateway host map (what is supported vs Vercel-disabled): [README Deploy](../../README.md#deploy).
 
 `/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain. Route traffic only when readiness is HTTP 200. Authenticated operators can scrape `/metrics` for request latency/status, rate-limit outcomes, audit lifecycle events, and SQLite readiness.
 
