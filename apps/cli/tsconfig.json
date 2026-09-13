@@ -7,12 +7,29 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../../apps/gateway" },
-    { "path": "../../apps/mcp" },
-    { "path": "../../apps/scheduler" },
-    { "path": "../../apps/worker" },
-    { "path": "../../packages/machine-controller" },
-    { "path": "../../packages/work-items" },
-    { "path": "../../packages/procedural-learning" }
+    {
+      "path": "../../apps/gateway"
+    },
+    {
+      "path": "../../apps/mcp"
+    },
+    {
+      "path": "../../apps/scheduler"
+    },
+    {
+      "path": "../../apps/worker"
+    },
+    {
+      "path": "../../packages/machine-controller"
+    },
+    {
+      "path": "../../packages/procedural-learning"
+    },
+    {
+      "path": "../../packages/shared"
+    },
+    {
+      "path": "../../packages/work-items"
+    }
   ]
 }

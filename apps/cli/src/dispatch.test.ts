@@ -38,6 +38,10 @@ function adapters(overrides: Partial<AcsAdapters> = {}): AcsAdapters {
     startGateway: vi.fn(async () => undefined),
     readStatus: vi.fn(() => ({ health: { ok: true }, audit: { ok: true } })),
     listPublications: vi.fn(() => []),
+    exportAuditJsonl: vi.fn(() => '{"sequence":1}\n'),
+    writeAuditExport: vi.fn(),
+    verifyAuditJsonlFile: vi.fn(() => ({ ok: true, eventCount: 1, headHash: "abc" })),
+    verifyAuditDatabase: vi.fn(() => ({ ok: true, eventCount: 1, headHash: "abc" })),
     ...overrides
   };
 }
@@ -177,5 +181,36 @@ describe("runAcsCli", () => {
       expect(await runAcsCli(["doctor", "--json"], collectedJson.io, injected)).toBe(1);
       expect(JSON.parse(collectedJson.stdout)).toEqual({ health: { ok: true }, audit: { ok: false } });
     });
+  });
+
+  it("exports audit JSONL through the adapter", async () => {
+    const collected = collectIo();
+    const exportAuditJsonl = vi.fn(() => '{"sequence":1,"id":"evt_1"}\n');
+    const code = await runAcsCli(
+      ["audit", "export", "--db", "fixture.db"],
+      collected.io,
+      adapters({ exportAuditJsonl })
+    );
+    expect(code).toBe(0);
+    expect(exportAuditJsonl).toHaveBeenCalledWith("fixture.db");
+    expect(collected.stdout).toBe('{"sequence":1,"id":"evt_1"}\n');
+  });
+
+  it("verifies audit JSONL files and returns non-zero on failure", async () => {
+    const collected = collectIo();
+    const verifyAuditJsonlFile = vi.fn(() => ({
+      ok: false,
+      eventCount: 1,
+      headHash: "",
+      failure: { sequence: 1 }
+    }));
+    const code = await runAcsCli(
+      ["audit", "verify", "--file", "export.jsonl"],
+      collected.io,
+      adapters({ verifyAuditJsonlFile })
+    );
+    expect(code).toBe(1);
+    expect(verifyAuditJsonlFile).toHaveBeenCalledWith("export.jsonl");
+    expect(JSON.parse(collected.stdout)).toMatchObject({ ok: false, eventCount: 1 });
   });
 });

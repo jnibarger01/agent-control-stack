@@ -7,10 +7,10 @@ as durable. Production encrypted backups and systemd restore drills remain in
 
 ## Where the database lives
 
-| Setting | Default | Notes |
-| --- | --- | --- |
-| ACS_DB_PATH | storage/local.db | Shared by gateway, worker, scheduler, CLI. |
-| Production example | /var/lib/agent-control-stack/control.db | See production runbook. |
+| Setting            | Default                                 | Notes                                      |
+| ------------------ | --------------------------------------- | ------------------------------------------ |
+| ACS_DB_PATH        | storage/local.db                        | Shared by gateway, worker, scheduler, CLI. |
+| Production example | /var/lib/agent-control-stack/control.db | See production runbook.                    |
 
 The file is ordinary SQLite. Live processes typically open it in WAL mode, so a
 naive file copy of a running database can miss uncheckpointed commits. Prefer
@@ -122,7 +122,7 @@ investigate. Do not rewrite hashes in place.
 
 - [production.md](./production.md) — deploy backup, encrypted managed backups, restore drills
 - [local-dev.md](./local-dev.md) — local gateway / worker with ACS_DB_PATH
+- [audit-chain-export.md](./audit-chain-export.md) — JSONL export + offline verify
 - scripts/db-ops.mjs — verify / backup / restore primitives
 - scripts/db-backup-policy.mjs — encrypted retention + drill (production)
 - scripts/sqlite-backup-restore.mjs — timestamped snapshot + restore dry-run + fixture
-
