@@ -165,3 +165,9 @@ directory.
 Gateway request logs are structured JSON on stdout and include Fastify request IDs. MCP authenticated requests also persist `connector.requested` audit events with actor, auth method, request ID, and tool. Work-item lifecycle events live in SQLite. Configure container log rotation in the deployment platform. Managed backup retention applies only to encrypted backup artifacts and their manifests; this repository does not silently delete audit history from the live database.
 
 The gateway exposes a Prometheus-compatible `/metrics` endpoint, but it is intentionally local to this service. Alert on container health/readiness, restart count, nonzero exits, disk usage, rate-limit responses, lease/worker lifecycle counters, and error-level structured logs. A hosted metrics/alerting backend remains a deployment responsibility.
+
+## Pending-approval digest (optional)
+
+Operators who do not keep Mission Control open can enable an optional oneshot
+digest of stale `needs_approval` work (item id + action hash only). Default off.
+See [pending-approval-digest.md](./pending-approval-digest.md).

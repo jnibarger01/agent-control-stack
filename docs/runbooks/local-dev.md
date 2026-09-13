@@ -108,6 +108,9 @@ Vitest contract suites, and `scripts/portfolio-mcp-smoke.mjs`.
 SQLite backup / restore for the work-items store (snapshot, dry-run, /health + audit-chain):
 [sqlite-backup-restore.md](./sqlite-backup-restore.md).
 
+Pending-approval digest (optional stdout / local webhook for stale `needs_approval` items; default off):
+[pending-approval-digest.md](./pending-approval-digest.md).
+
 Gateway rate limits, pending-queue ceiling, structured 429s, and local vs deployed auth knobs:
 [gateway-abuse-controls.md](./gateway-abuse-controls.md).
 
