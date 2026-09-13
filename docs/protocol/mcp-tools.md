@@ -29,14 +29,14 @@ Schema cannot express.
 
 There is no single tool catalog. Two independent MCP servers exist, with different transports, different tool names, and different backing state:
 
-|              | Local stdio MCP                                                                             | Gateway MCP                                                                                |
-| ------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
-| Entry point  | `apps/mcp/src/server.ts` (`McpStdioServer`)                                                 | `apps/gateway/src/mcp.ts` (`handleMcpHttpRequest`)                                         |
-| Backed by    | `MachineController` (`packages/machine-controller`)                                         | work-item tools (`packages/policy-gate/src/tools.ts`, `packages/work-items`)               |
-| Transport    | stdio, `Content-Length`-framed JSON-RPC                                                     | HTTP JSON-RPC (`apps/gateway`), per [ADR 0007](../adr/0007-chatgpt-https-mcp-transport.md) |
-| Tool naming  | dotted (`system.status`, `fs.read`, ...)                                                    | snake_case (`create_work_item`, `approve_work_item`, ...)                                  |
-| What it does | Reads the local machine directly (files, command previews, one read-only command execution) | Creates and manages governed work items that a separate worker later claims and executes   |
-| Auth         | none (local process, trusted caller)                                                        | `authorizeMcpRequest` — bearer/OAuth scopes, per `apps/gateway/src/auth.ts`                |
+|              | Local stdio MCP                                                                             | Gateway MCP                                                                                                                                                                                                  |
+| ------------ | ------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Entry point  | `apps/mcp/src/server.ts` (`McpStdioServer`)                                                 | `apps/gateway/src/mcp.ts` (`handleMcpHttpRequest`)                                                                                                                                                           |
+| Backed by    | `MachineController` (`packages/machine-controller`)                                         | work-item tools (`packages/policy-gate/src/tools.ts`, `packages/work-items`)                                                                                                                                 |
+| Transport    | stdio, `Content-Length`-framed JSON-RPC                                                     | HTTP JSON-RPC (`apps/gateway`), per [ADR 0007](../adr/0007-chatgpt-https-mcp-transport.md)                                                                                                                   |
+| Tool naming  | dotted (`system.status`, `fs.read`, ...)                                                    | snake_case (`create_work_item`, `approve_work_item`, ...)                                                                                                                                                    |
+| What it does | Reads the local machine directly (files, command previews, one read-only command execution) | Creates and manages governed work items that a separate worker later claims and executes                                                                                                                     |
+| Auth         | none (local process, trusted caller)                                                        | `authorizeMcpRequest` — bearer/OAuth scopes, per `apps/gateway/src/auth.ts`; optional per-identity tool allowlist (`ACS_MCP_TOOL_ALLOWLIST_JSON`, see [oauth-authentication.md](../oauth-authentication.md)) |
 
 There is no naming convention that unifies the two — the local server's tool names are the literal `MachineController.callTool` dispatch keys (dots), and the gateway's are the literal `createWorkItemTools` keys (underscores). Do not assume one implies the other.
 
@@ -72,7 +72,7 @@ Failure is a JSON-RPC error, not a result with `ok: false`:
 }
 ```
 
-`code` is `-32602` for a Zod schema validation failure, `-32000` for a thrown `ControlStackError`, `-32601` for an unsupported JSON-RPC method, `-32603` for anything else. The gateway additionally uses `-32001` (actor not registered), `-32002` (MCP identity attempted `approve_work_item`), and returns a matching HTTP status per error alongside the JSON-RPC body. `message` is the `ControlStackError`'s own message text — by convention some throw sites lead with the machine-readable code (`"approval_action_hash_required: actionHash is required"`), others just describe the failure (`"path is outside allowed roots: ..."`); the machine-readable `code` itself is a property on the server-side exception object, not a separate field in the JSON-RPC response.
+`code` is `-32602` for a Zod schema validation failure, `-32000` for a thrown `ControlStackError`, `-32601` for an unsupported JSON-RPC method, `-32603` for anything else. The gateway additionally uses `-32001` (actor not registered), `-32002` (MCP identity attempted `approve_work_item`), `-32003` (per-identity tool allowlist denial), and returns a matching HTTP status per error alongside the JSON-RPC body. `message` is the `ControlStackError`'s own message text — by convention some throw sites lead with the machine-readable code (`"approval_action_hash_required: actionHash is required"`), others just describe the failure (`"path is outside allowed roots: ..."`); the machine-readable `code` itself is a property on the server-side exception object, not a separate field in the JSON-RPC response.
 
 ## Error codes
 

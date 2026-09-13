@@ -53,6 +53,7 @@ import {
   type GatewayDirectAgentController,
   type LocalAgentAuditEvent
 } from "./mcp.js";
+import { resolveMcpToolAllowlist, type McpToolAllowlistMode } from "./mcp-tool-allowlist.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
 import { SqliteMoaIdempotencyStore } from "./moa/idempotency.js";
 import {
@@ -129,6 +130,10 @@ export interface GatewayOptions {
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
   mcpAllowedOrigins?: string[];
+  /** Per-identity MCP tool allowlist (identity → tool names). */
+  mcpToolAllowlist?: Record<string, readonly string[]>;
+  /** Override allowlist mode; defaults from NODE_ENV. */
+  mcpToolAllowlistMode?: McpToolAllowlistMode;
   machineControllerConfigPath?: string;
   directAgentRunner?: DirectAgentRunner;
   directAgentController?: GatewayDirectAgentController;
@@ -162,6 +167,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
+  const mcpToolAllowlist = resolveMcpToolAllowlist({
+    allowlist: options.mcpToolAllowlist,
+    mode: options.mcpToolAllowlistMode
+  });
   const rateLimiter = new SlidingWindowRateLimiter(options.rateLimit ?? resolveRateLimitFromEnv());
   const maxPendingWorkItems = options.maxPendingWorkItems ?? resolveMaxPendingWorkItemsFromEnv();
   const maxSseClients = options.maxSseClients ?? resolveMaxSseClientsFromEnv();
@@ -539,7 +548,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       auditLocalAgentEvent: recordLocalAgentEvent,
       resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth),
       maxPendingWorkItems,
-      portfolioClient
+      portfolioClient,
+      toolAllowlist: mcpToolAllowlist
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);

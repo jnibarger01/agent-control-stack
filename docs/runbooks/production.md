@@ -16,6 +16,7 @@ pass.
 - A persistent volume with enough free space for SQLite WAL growth and backups.
 - `ACS_GATEWAY_CREDENTIALS_JSON` containing credential-bound operator/service/worker identities and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
 - `ACS_MCP_ALLOWED_ORIGINS` containing the explicit browser origins permitted to call MCP; non-browser clients without an `Origin` header remain supported.
+- Optional `ACS_MCP_TOOL_ALLOWLIST_JSON` mapping each MCP identity to allowed tool names. When set, unknown identities are default-denied in production.
 - `ACS_MAX_PENDING_WORK_ITEMS` set to an operationally safe queue ceiling.
 - Rate-limit / auth defaults and local-vs-deployed knobs: [gateway-abuse-controls.md](./gateway-abuse-controls.md).
 - `ACS_MAX_SSE_CLIENTS` set to the number of dashboard/event subscribers the host can hold concurrently; each stream pins a socket for its lifetime.
