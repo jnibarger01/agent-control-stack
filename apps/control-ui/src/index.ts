@@ -67,6 +67,45 @@ export interface MissionControlViewModel {
   now?: Date;
 }
 
+export type SseConnectionRoot = {
+  querySelector(selectors: string): SseConnectionElement | null;
+  querySelectorAll(selectors: string): ArrayLike<SseConnectionButton>;
+};
+
+export type SseConnectionElement = {
+  hidden: boolean;
+  classList: { toggle(token: string, force?: boolean): unknown };
+  innerHTML: string;
+};
+
+export type SseConnectionButton = {
+  disabled: boolean;
+  getAttribute(name: string): string | null;
+};
+
+/** Exponential backoff for EventSource reconnect: 1s, 2s, 4s, 8s, 16s, then 30s cap. */
+export function nextSseReconnectDelayMs(attempt: number): number {
+  const n = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return Math.min(30_000, 1_000 * 2 ** Math.min(n, 5));
+}
+
+/** Show/hide the stale-stream banner and disable approve/deny/unblock while disconnected. */
+export function applySseConnectionState(root: SseConnectionRoot, connected: boolean): void {
+  const banner = root.querySelector("#sse-stale-banner");
+  if (banner) banner.hidden = connected;
+  const live = root.querySelector(".live");
+  if (live) {
+    live.classList.toggle("disconnected", !connected);
+    live.innerHTML = connected
+      ? `<span aria-hidden="true"></span> Live`
+      : `<span aria-hidden="true"></span> Disconnected`;
+  }
+  for (const button of Array.from(root.querySelectorAll("[data-approve],[data-reject],[data-unblock]"))) {
+    const approveWithoutHash = button.getAttribute("data-approve") !== null && !button.getAttribute("data-action-hash");
+    button.disabled = !connected || approveWithoutHash;
+  }
+}
+
 const OPERATOR_ATTENTION_STATUSES: ReadonlySet<WorkItem["status"]> = new Set([
   "blocked",
   "needs_approval",
@@ -158,6 +197,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
         <div class="live" aria-live="polite"><span aria-hidden="true"></span> SSE ready</div>
       </header>
+      <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve and deny are disabled until the live stream reconnects.</div>
       <section id="overview" class="cards">${overviewCards(stats)}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
@@ -511,8 +551,12 @@ function composer(): string {
 
 function clientScript(): string {
   return `
-const source = new EventSource('/events');
-[
+let sseSource = null;
+let sseReconnectAttempt = 0;
+let sseReconnectTimer = null;
+let sseEverOpened = false;
+let sseConnected = false;
+const sseEventNames = [
   'work_item.created',
   'work_item.needs_approval',
   'work_item.approved',
@@ -530,7 +574,65 @@ const source = new EventSource('/events');
   'acp.disconnected',
   'acp.error',
   'tunnel_session.heartbeat'
-].forEach((name) => source.addEventListener(name, appendAuditEvent));
+];
+
+function nextSseReconnectDelayMs(attempt) {
+  const n = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return Math.min(30000, 1000 * Math.pow(2, Math.min(n, 5)));
+}
+
+function applySseConnectionState(root, connected) {
+  sseConnected = connected;
+  const banner = root.querySelector('#sse-stale-banner');
+  if (banner) banner.hidden = connected;
+  const live = root.querySelector('.live');
+  if (live) {
+    live.classList.toggle('disconnected', !connected);
+    live.innerHTML = connected
+      ? '<span aria-hidden="true"></span> Live'
+      : '<span aria-hidden="true"></span> Disconnected';
+  }
+  root.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach(function (button) {
+    const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
+    button.disabled = !connected || approveWithoutHash;
+  });
+}
+
+function connectSse() {
+  if (sseReconnectTimer) {
+    clearTimeout(sseReconnectTimer);
+    sseReconnectTimer = null;
+  }
+  if (sseSource) {
+    sseSource.close();
+    sseSource = null;
+  }
+  sseSource = new EventSource('/events');
+  sseSource.addEventListener('open', function () {
+    const shouldRefresh = sseEverOpened && !sseConnected;
+    sseReconnectAttempt = 0;
+    applySseConnectionState(document, true);
+    sseEverOpened = true;
+    if (shouldRefresh) location.assign(location.href);
+  });
+  sseSource.addEventListener('error', function () {
+    applySseConnectionState(document, false);
+    if (sseSource) {
+      sseSource.close();
+      sseSource = null;
+    }
+    if (sseReconnectTimer) return;
+    const delay = nextSseReconnectDelayMs(sseReconnectAttempt);
+    sseReconnectAttempt += 1;
+    sseReconnectTimer = setTimeout(function () {
+      sseReconnectTimer = null;
+      connectSse();
+    }, delay);
+  });
+  sseEventNames.forEach(function (name) {
+    sseSource.addEventListener(name, appendAuditEvent);
+  });
+}
 
 function appendAuditEvent(event) {
   let data;
@@ -825,11 +927,17 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
 bindWorkItems();
 bindAgentRows();
 refreshAgentRoster();
+connectSse();
 
 document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
   button.addEventListener('click', async () => {
     const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
     const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'reject' : 'unblock';
+    if (!sseConnected) {
+      const output = document.querySelector('#approval-result-' + id);
+      if (output) output.textContent = 'Disconnected: actions disabled until reconnect';
+      return;
+    }
     const reasonInput = document.querySelector('[data-reason="' + id + '"]');
     const reason = reasonInput ? reasonInput.value.trim() : '';
     const output = document.querySelector('#approval-result-' + id);
@@ -948,6 +1056,9 @@ h1 { margin: 0; font-size: 26px; color: var(--ink); }
 p { color: var(--muted); margin: 6px 0 0; }
 .live { border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: var(--surface); white-space: nowrap; }
 .live span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
+.live.disconnected span { background: var(--red); }
+.stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid #f1d18a; background: #fff8e6; color: var(--amber); border-radius: 8px; font-weight: 600; }
+.stale-banner[hidden] { display: none; }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px rgba(23, 32, 42, .06); }
 .card { padding: 15px; min-height: 108px; }
