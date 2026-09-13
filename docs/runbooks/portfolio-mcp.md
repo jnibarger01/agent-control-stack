@@ -80,5 +80,20 @@ Protocol detail: docs/protocol/mcp-tools.md.
 ## V2 writes stay denied
 
 GitHub mutations stay out of scope until Visualizer reports
-proving.eligibleForV2 === true. Do not point ACS_PORTFOLIO_BASE_URL at a
+`proving.eligibleForV2 === true`. Do not point ACS_PORTFOLIO_BASE_URL at a
 non-loopback host to enable writes — the client refuses non-loopback URLs.
+
+### Visualizer handshake
+
+1. Visualizer owns the seven-day proving window and exposes it on
+   `GET /api/v1/portfolio/sync-status` as `proving.eligibleForV2`.
+2. ACS portfolio client calls that route (loopback only) before any GitHub
+   write tool path and fails closed unless the flag is strictly `true`.
+3. Gateway MCP `tools/call` refuses reserved portfolio write tool names through
+   the same client gate when the flag is false or absent; write tools are never
+   advertised on `tools/list` in V1.
+4. This issue does not add GitHub mutations. Eligibility is necessary later, not
+   sufficient now.
+
+Contract tests fail if a write tool becomes reachable without the flag:
+`portfolio-client.test.ts` + `portfolio-mcp.test.ts`.

@@ -5,6 +5,36 @@ export const PORTFOLIO_UNAVAILABLE_CODE = "PORTFOLIO_UNAVAILABLE";
 export const PORTFOLIO_UNAVAILABLE_MESSAGE =
   "PORTFOLIO_UNAVAILABLE: Portfolio intelligence is not available from this gateway.";
 
+export const PORTFOLIO_V2_WRITES_DENIED_CODE = "PORTFOLIO_V2_WRITES_DENIED";
+export const PORTFOLIO_V2_WRITES_DENIED_MESSAGE =
+  "PORTFOLIO_V2_WRITES_DENIED: GitHub write tools stay denied until Visualizer reports proving.eligibleForV2 === true.";
+
+export const PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_CODE = "PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED";
+export const PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_MESSAGE =
+  "PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED: ACS has no GitHub mutation tools yet; eligibility alone does not enable writes.";
+
+/** Reserved future MCP names for GitHub mutations. None are advertised or callable in V1. */
+export const portfolioGithubWriteToolNames = [
+  "portfolio.create_issue_comment",
+  "portfolio.create_pull_request_comment",
+  "portfolio.add_labels",
+  "portfolio.remove_labels",
+  "portfolio.assign",
+  "portfolio.unassign"
+] as const;
+
+export type PortfolioGithubWriteToolName = (typeof portfolioGithubWriteToolNames)[number];
+
+const PORTFOLIO_READ_TOOL_NAMES = new Set([
+  "portfolio.get_summary",
+  "portfolio.list_repositories",
+  "portfolio.list_attention_required",
+  "portfolio.get_repository",
+  "portfolio.list_failures",
+  "portfolio.list_pending_work",
+  "portfolio.list_recent_progress"
+]);
+
 const FULL_NAME = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const STATUS = z.enum(["HEALTHY", "ATTENTION", "BLOCKED", "UNKNOWN", "ARCHIVED"]);
 const LIFECYCLE = z.enum(["ACTIVE", "MAINTENANCE", "EXPERIMENTAL", "DORMANT", "ARCHIVED", "UNKNOWN"]);
@@ -52,7 +82,35 @@ export type PortfolioClient = {
   listFailures(input?: z.infer<typeof portfolioLimitInputSchema>): Promise<unknown>;
   listPendingWork(input?: z.infer<typeof portfolioLimitInputSchema>): Promise<unknown>;
   listRecentProgress(input?: z.infer<typeof portfolioLimitInputSchema>): Promise<unknown>;
+  /** Visualizer proving/sync handshake (`GET /api/v1/portfolio/sync-status`). */
+  getSyncStatus(): Promise<unknown>;
+  /**
+   * Fail closed unless Visualizer reports `proving.eligibleForV2 === true`.
+   * Does not perform GitHub writes.
+   */
+  assertGithubWritesAllowed(): Promise<void>;
+  /**
+   * Refuse a portfolio GitHub write tool. Always checks proving eligibility first;
+   * never calls GitHub. Even when eligible, ACS V1 has no mutation implementation.
+   */
+  refuseGithubWriteTool(toolName: string): Promise<never>;
 };
+
+export function isPortfolioGithubWriteTool(name: string): boolean {
+  if ((portfolioGithubWriteToolNames as readonly string[]).includes(name)) return true;
+  return name.startsWith("portfolio.") && !PORTFOLIO_READ_TOOL_NAMES.has(name);
+}
+
+export function isProvingEligibleForV2(proving: unknown): boolean {
+  if (proving === null || typeof proving !== "object" || Array.isArray(proving)) return false;
+  return (proving as Record<string, unknown>).eligibleForV2 === true;
+}
+
+export function assertPortfolioGithubWritesAllowed(proving: unknown): void {
+  if (!isProvingEligibleForV2(proving)) {
+    throw new ControlStackError(PORTFOLIO_V2_WRITES_DENIED_CODE, PORTFOLIO_V2_WRITES_DENIED_MESSAGE);
+  }
+}
 
 export function createUnavailablePortfolioClient(): PortfolioClient {
   const unavailable = async (): Promise<never> => {
@@ -65,7 +123,18 @@ export function createUnavailablePortfolioClient(): PortfolioClient {
     getRepository: unavailable,
     listFailures: unavailable,
     listPendingWork: unavailable,
-    listRecentProgress: unavailable
+    listRecentProgress: unavailable,
+    getSyncStatus: unavailable,
+    assertGithubWritesAllowed: async () => {
+      assertPortfolioGithubWritesAllowed(undefined);
+    },
+    refuseGithubWriteTool: async (_toolName: string): Promise<never> => {
+      assertPortfolioGithubWritesAllowed(undefined);
+      throw new ControlStackError(
+        PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_CODE,
+        PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_MESSAGE
+      );
+    }
   };
 }
 
@@ -122,6 +191,11 @@ export function createPortfolioClient(config: PortfolioClientConfig): PortfolioC
     return body;
   };
 
+  const assertGithubWritesAllowed = async (): Promise<void> => {
+    const body = await getJson("/api/v1/portfolio/sync-status");
+    assertPortfolioGithubWritesAllowed(asRecord(body).proving);
+  };
+
   return {
     async getSummary() {
       return getJson("/api/v1/portfolio");
@@ -158,6 +232,23 @@ export function createPortfolioClient(config: PortfolioClientConfig): PortfolioC
     },
     async listRecentProgress(input = {}) {
       return limitPayload(await getJson("/api/v1/portfolio/activity"), "activity", input.limit);
+    },
+    async getSyncStatus() {
+      return getJson("/api/v1/portfolio/sync-status");
+    },
+    assertGithubWritesAllowed,
+    async refuseGithubWriteTool(toolName: string): Promise<never> {
+      if (!isPortfolioGithubWriteTool(toolName)) {
+        throw new ControlStackError(
+          PORTFOLIO_V2_WRITES_DENIED_CODE,
+          `${PORTFOLIO_V2_WRITES_DENIED_MESSAGE} Unknown portfolio tool: ${toolName}`
+        );
+      }
+      await assertGithubWritesAllowed();
+      throw new ControlStackError(
+        PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_CODE,
+        PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED_MESSAGE
+      );
     }
   };
 }
