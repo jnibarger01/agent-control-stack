@@ -550,6 +550,27 @@ When it claims work, the result includes the work item id and `executionMode: "d
 
 ACS can be deployed as a local loopback service or behind an authenticated HTTPS reverse proxy. The current alpha should remain local-first unless you have reviewed the threat model and configured production MCP auth.
 
+### Where the gateway runs
+
+Use this map first. Team Vercel showing zero gateway projects is expected: the gateway is not a Vercel app.
+
+| Target                                                    | Status                      | Notes                                                                                                                              |
+| --------------------------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Local loopback (`npm run start:gateway` / `acs serve`)    | **Supported**               | Default for development and personal operation. Dashboard at `http://127.0.0.1:3000/`.                                             |
+| Docker / Compose (`Dockerfile`, `compose.production.yml`) | **Supported**               | Repeatable production artifact. Follow [`docs/runbooks/production.md`](docs/runbooks/production.md).                               |
+| systemd on a persistent host                              | **Supported**               | Example unit in Option C below. Checked-in units under `deploy/systemd` cover DB backup/restore drills.                            |
+| Authenticated HTTPS reverse proxy / signed tunnel         | **Supported**               | Remote MCP connectors only after OAuth or tunnel-session auth (Options D–E).                                                       |
+| Vercel for `apps/gateway`                                 | **Not supported**           | Needs a long-running Node process and persistent SQLite. See [`apps/gateway/VERCEL_DISABLED.md`](apps/gateway/VERCEL_DISABLED.md). |
+| Vercel for `apps/public-site`                             | **Supported (static only)** | Marketing/demo static site. Not the control-plane gateway or operator dashboard.                                                   |
+
+The mission-control dashboard is served by the gateway itself (`apps/control-ui` hosted by `apps/gateway`), not by Vercel. Do not deploy the gateway to serverless platforms that lack a durable local filesystem and a long-lived process.
+
+Post-deploy smoke (liveness + readiness):
+
+```sh
+./scripts/gateway-post-deploy-healthcheck.sh http://127.0.0.1:3000
+```
+
 ### Option A: local loopback service
 
 Use this for personal/local operation.
@@ -713,6 +734,8 @@ for active vs disabled agent workflows and how to re-enable with
 ### Health checks
 
 ```sh
+./scripts/gateway-post-deploy-healthcheck.sh http://127.0.0.1:3000
+# or:
 curl -fsS http://127.0.0.1:3000/health
 ```
 
@@ -863,6 +886,7 @@ for executor selection, verification overrides, exit codes, and log behavior.
 - [`docs/oauth-authentication.md`](docs/oauth-authentication.md)
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
 - [`docs/runbooks/production.md`](docs/runbooks/production.md)
+- [`apps/gateway/VERCEL_DISABLED.md`](apps/gateway/VERCEL_DISABLED.md) (gateway is not on Vercel)
 - [`docs/runbooks/sqlite-backup-restore.md`](docs/runbooks/sqlite-backup-restore.md)
 - [`docs/runbooks/gateway-abuse-controls.md`](docs/runbooks/gateway-abuse-controls.md)
 - [`docs/runbooks/github-agent-workflows.md`](docs/runbooks/github-agent-workflows.md)
