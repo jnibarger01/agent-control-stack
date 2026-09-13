@@ -18,6 +18,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import assert from 'assert';
 import fs from 'fs/promises';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -27,6 +29,29 @@ const PROJECT_ROOT = path.resolve(__dirname, '..', '..');
 const TEST_DIR = path.join(__dirname, 'test_read_file_unknown_params');
 const TEST_FILE = path.join(TEST_DIR, 'numbered.txt');
 const LINE_COUNT = 50;
+
+// The server resolves its config path from os.homedir(), which honours $HOME on
+// POSIX. Point the child at a throwaway home so the suite exercises a fresh
+// default config instead of rewriting the developer's real
+// ~/.claude-server-commander/config.json.
+//
+// This matters because the test lowers allowedDirectories to TEST_DIR. Undoing
+// that depends on teardown running, which an interrupt or a timeout can skip --
+// leaving a real installation locked to a temp path. An isolated home removes
+// that failure mode rather than narrowing it.
+const TEST_HOME = mkdtempSync(path.join(tmpdir(), 'desktop-commander-test-home-'));
+
+// Best-effort cleanup of the throwaway home. Unlike the config restore this
+// replaces, leaking a temp directory is cosmetic, not destructive.
+process.on('exit', () => {
+  try {
+    rmSync(TEST_HOME, { recursive: true, force: true });
+  } catch {
+    // Nothing useful to do while the process is already exiting.
+  }
+});
+
+
 
 async function callTool(client, name, args) {
   return client.callTool({ name, arguments: args }, undefined, { timeout: 30000 });
@@ -46,7 +71,12 @@ async function createMcpClient() {
     args: [path.join(PROJECT_ROOT, 'dist/index.js'), '--no-onboarding', '--standalone'],
     cwd: PROJECT_ROOT,
     stderr: 'pipe',
-    env: { ...process.env, DESKTOP_COMMANDER_DISABLE_TELEMETRY: 'true' },
+    env: {
+      ...process.env,
+      DESKTOP_COMMANDER_DISABLE_TELEMETRY: 'true',
+      HOME: TEST_HOME,
+      USERPROFILE: TEST_HOME,
+    },
   });
 
   const client = new Client(

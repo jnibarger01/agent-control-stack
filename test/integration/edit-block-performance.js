@@ -9,6 +9,8 @@
 
 import assert from 'assert';
 import fs from 'fs/promises';
+import { mkdtempSync, rmSync } from 'fs';
+import { tmpdir } from 'os';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { performance } from 'perf_hooks';
@@ -40,6 +42,29 @@ const PERFORMANCE_LIMITS_MS = {
 };
 const RESPONSIVENESS_INTERVAL_MS = 1000;
 const RESPONSIVENESS_MAX_LATENCY_MS = 5000;
+
+// The server resolves its config path from os.homedir(), which honours $HOME on
+// POSIX. Point the child at a throwaway home so the suite exercises a fresh
+// default config instead of rewriting the developer's real
+// ~/.claude-server-commander/config.json.
+//
+// This matters because the test lowers allowedDirectories to TEST_DIR. Undoing
+// that depends on teardown running, which an interrupt or a timeout can skip --
+// leaving a real installation locked to a temp path. An isolated home removes
+// that failure mode rather than narrowing it.
+const TEST_HOME = mkdtempSync(path.join(tmpdir(), 'desktop-commander-test-home-'));
+
+// Best-effort cleanup of the throwaway home. Unlike the config restore this
+// replaces, leaking a temp directory is cosmetic, not destructive.
+process.on('exit', () => {
+  try {
+    rmSync(TEST_HOME, { recursive: true, force: true });
+  } catch {
+    // Nothing useful to do while the process is already exiting.
+  }
+});
+
+
 
 // Fuzzy-scan event-loop regression: a deliberately slow fuzzy fallback (large
 // file, large absent old_string) must not block concurrent pings. The general
@@ -769,6 +794,8 @@ async function createMcpClient() {
     env: {
       ...process.env,
       DESKTOP_COMMANDER_DISABLE_TELEMETRY: 'true',
+      HOME: TEST_HOME,
+      USERPROFILE: TEST_HOME,
     },
   });
 
