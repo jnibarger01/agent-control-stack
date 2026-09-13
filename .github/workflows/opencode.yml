@@ -4,9 +4,8 @@ name: opencode
 # This workflow is intentionally gated so /oc and /opencode comments cannot
 # fail solely due to FreeModel balance or FREEMODEL_API_KEY.
 #
-# Related: Hourly Pull Request Cycle (.github/workflows/hourly-pr.yml) is
-# disabled_manually in GitHub Actions for the same FreeModel funding decision.
-# Do not re-enable Hourly or restore freemodel/* without an explicit decision.
+# Related: Hourly Pull Request Cycle was archived/removed (ACS #113 / ADR 0015).
+# Do not restore Hourly or freemodel/* without an explicit funded-provider decision.
 #
 # Re-enable OpenCode later (supported provider only — not FreeModel by default):
 # 1. Store ANTHROPIC_API_KEY (or another anomalyco/opencode-supported provider
