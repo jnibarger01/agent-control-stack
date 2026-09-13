@@ -9,11 +9,13 @@ import {
   mcpToolAnnotations,
   mcpToolDescription,
   mcpToolNames,
+  portfolioToolNames,
   PUBLIC_CONTRACT_VERSION,
   publicContractExamples,
   publicHttpOperations,
   remoteMcpToolNames
 } from "../apps/gateway/src/public-contracts.js";
+import { workItemToolNames } from "../packages/policy-gate/src/tools.js";
 import {
   classifyBreakingChanges,
   type CompatibilitySurface
@@ -98,6 +100,14 @@ const mcp = {
     annotations: mcpToolAnnotations(name)
   }))
 };
+
+/** Tools that must stay frozen in both mcp-tools.json and the compatibility baseline. */
+const frozenRequiredToolNames = [...workItemToolNames, ...portfolioToolNames] as const;
+
+assertFrozenToolCoverage(
+  "generated mcp-tools catalog",
+  (mcp.tools as Array<{ name: string }>).map((tool) => tool.name)
+);
 
 const examples = {
   schemaVersion: `acs.public-contract-examples.${PUBLIC_CONTRACT_VERSION}`,
@@ -200,6 +210,14 @@ if (checkOnly) {
   process.stdout.write(`generated ${outputs.size} public contract files\n`);
 }
 
+function assertFrozenToolCoverage(surface: string, toolNames: Iterable<string>): void {
+  const present = new Set(toolNames);
+  const missing = frozenRequiredToolNames.filter((name) => !present.has(name));
+  if (missing.length > 0) {
+    throw new Error(`frozen MCP tool coverage incomplete in ${surface}: missing ${missing.join(", ")}`);
+  }
+}
+
 function jsonSchema(schema: z.ZodType): JsonObject {
   return z.toJSONSchema(schema, {
     target: "draft-2020-12",
@@ -229,6 +247,7 @@ async function validateCompatibility(nextOpenapi: JsonObject, nextMcp: JsonObjec
     throw new Error("compatibility baseline is missing; initialize it with --update-baseline");
   }
   const baseline = JSON.parse(baselineText) as CompatibilitySurface;
+  assertFrozenToolCoverage("compatibility baseline", Object.keys(baseline.tools));
   const next = compatibilitySurface(nextOpenapi, nextMcp);
   const breaks = classifyBreakingChanges(baseline, next);
   if (breaks.length === 0) return;
