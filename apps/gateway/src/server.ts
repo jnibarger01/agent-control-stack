@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -174,11 +174,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const decision = rateLimiter.check(rateLimitKey(request, auth));
     reply.header("x-ratelimit-remaining", String(decision.remaining));
     if (!decision.allowed) {
+      const route = request.routeOptions.url ?? "<unmatched>";
+      metrics.increment("acs_rate_limit_rejected_total", { method: request.method, route });
       const limitedReply = reply.header("retry-after", String(decision.retryAfterSeconds)).code(429);
-      if (request.routeOptions.url === "/mcp") {
-        return limitedReply.send(jsonRpcError(jsonRpcRequestId(request.body), -32029, "rate limit exceeded"));
+      if (route === "/mcp") {
+        return limitedReply.send(
+          jsonRpcError(jsonRpcRequestId(request.body), -32029, "rate limit exceeded", {
+            code: "rate_limited",
+            retry_after_seconds: decision.retryAfterSeconds
+          })
+        );
       }
-      return limitedReply.send({ error: "rate limit exceeded", code: "rate_limited" });
+      return limitedReply.send({
+        error: "rate limit exceeded",
+        code: "rate_limited",
+        retry_after_seconds: decision.retryAfterSeconds
+      });
     }
   });
   app.addHook("onResponse", async (request, reply) => {
@@ -1334,8 +1345,18 @@ function isRateLimitedRoute(url: string): boolean {
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
   const credential = gatewayCredentialForRequest(request, auth);
-  const principal = credential ? `credential:${credential.id}` : `ip:${request.ip}`;
+  const principal = credential
+    ? `credential:${credential.id}`
+    : bearerPrincipal(request.headers.authorization) ?? `ip:${request.ip}`;
   return `${request.method}:${request.routeOptions.url ?? "<unmatched>"}:${principal}`;
+}
+
+function bearerPrincipal(authorization: string | string[] | undefined): string | undefined {
+  if (Array.isArray(authorization)) return undefined;
+  const match = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
+  if (!match) return undefined;
+  const digest = createHash("sha256").update(match[1]).digest("hex").slice(0, 16);
+  return `bearer:${digest}`;
 }
 
 function jsonRpcRequestId(body: unknown): string | number | null {
@@ -1355,11 +1376,15 @@ function isJsonParseError(error: unknown): boolean {
   return (error as { code?: string }).code === "FST_ERR_CTP_INVALID_JSON_BODY";
 }
 
-function jsonRpcError(id: string | number | null, code: number, message: string) {
+function jsonRpcError(id: string | number | null, code: number, message: string, data?: unknown) {
   return {
     jsonrpc: "2.0" as const,
     id,
-    error: { code, message }
+    error: {
+      code,
+      message,
+      ...(data === undefined ? {} : { data })
+    }
   };
 }
 
