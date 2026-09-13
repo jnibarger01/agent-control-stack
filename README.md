@@ -315,7 +315,7 @@ Do not commit `.env` or real secrets.
 | `ACS_OPENAI_API_KEY`                | Optional OpenAI/Codex provider key for MoA routes.                                                            | secret                            |
 | `ACS_OLLAMA_BASE_URL`               | Local Ollama endpoint.                                                                                        | `http://127.0.0.1:11434`          |
 | `ACS_RATE_LIMIT_WINDOW_MS`          | Mutation/MCP/webhook rate-limit window.                                                                       | `60000`                           |
-| `ACS_RATE_LIMIT_MAX_REQUESTS`       | Maximum requests per credential fingerprint/IP and route within the window.                                   | `120`                             |
+| `ACS_RATE_LIMIT_MAX_REQUESTS`       | Maximum requests per principal (credential id, bearer-token hash, or IP) and route within the window.         | `120`                             |
 | `ACS_MAX_PENDING_WORK_ITEMS`        | Maximum draft/pending/approved/running work items before new intake is rejected.                              | `1000`                            |
 | `ACS_MAX_SSE_CLIENTS`               | Maximum concurrent `/events` subscribers before new streams are refused with 503.                             | `100`                             |
 | `ACS_MAX_SSE_CLIENTS_PER_PRINCIPAL` | Maximum concurrent `/events` subscribers for one credential/IP, so a single principal cannot take every slot. | `10`                              |
@@ -864,6 +864,7 @@ for executor selection, verification overrides, exit codes, and log behavior.
 - [`docs/runbooks/local-dev.md`](docs/runbooks/local-dev.md)
 - [`docs/runbooks/production.md`](docs/runbooks/production.md)
 - [`docs/runbooks/sqlite-backup-restore.md`](docs/runbooks/sqlite-backup-restore.md)
+- [`docs/runbooks/gateway-abuse-controls.md`](docs/runbooks/gateway-abuse-controls.md)
 - [`docs/runbooks/github-agent-workflows.md`](docs/runbooks/github-agent-workflows.md)
 - [`docs/runbooks/autonomous-agent-supervisor.md`](docs/runbooks/autonomous-agent-supervisor.md)
 - [`docs/releases/v0.1.0-alpha.md`](docs/releases/v0.1.0-alpha.md)

@@ -38,6 +38,8 @@ Open `http://127.0.0.1:3000`.
 
 For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send it as `Authorization: Bearer <token>` on `/mcp` requests. OAuth and tunnel ID setup are documented in `docs/oauth-authentication.md`.
 
+Default per-principal rate limits and the pending work-item ceiling apply on local MCP/HTTP writes; see [gateway-abuse-controls.md](./gateway-abuse-controls.md) for knobs and recommended local vs deployed values.
+
 The real loopback MCP interoperability smoke path uses a temporary SQLite
 database, deterministic OAuth test keys, and an explicitly registered harmless
 fixture agent. It starts the gateway on `127.0.0.1` and sends the actual
@@ -105,6 +107,9 @@ Vitest contract suites, and `scripts/portfolio-mcp-smoke.mjs`.
 
 SQLite backup / restore for the work-items store (snapshot, dry-run, /health + audit-chain):
 [sqlite-backup-restore.md](./sqlite-backup-restore.md).
+
+Gateway rate limits, pending-queue ceiling, structured 429s, and local vs deployed auth knobs:
+[gateway-abuse-controls.md](./gateway-abuse-controls.md).
 
 ## ChatGPT App UI
 

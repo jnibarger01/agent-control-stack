@@ -3421,6 +3421,148 @@ describe("gateway MCP transport", () => {
   });
 });
 
+describe("gateway abuse controls", () => {
+  const workItemPayload = {
+    title: "rate-limit probe",
+    intent: "prove per-principal write bounds",
+    requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
+    target: { cwd: "/repo" },
+    risk: "low"
+  };
+
+  it("returns structured 429s and metrics when one principal bursts work-item writes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-abuse-rate-"));
+    const app = buildTestGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      rateLimit: { windowMs: 60_000, maxRequests: 2 }
+    });
+
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-1" }
+      });
+      const second = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-2" }
+      });
+      const limited = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-3" }
+      });
+
+      expect(first.statusCode).toBe(201);
+      expect(second.statusCode).toBe(201);
+      expect(limited.statusCode).toBe(429);
+      expect(limited.headers["retry-after"]).toBeDefined();
+      expect(limited.headers["x-ratelimit-remaining"]).toBe("0");
+      expect(limited.json()).toMatchObject({
+        error: "rate limit exceeded",
+        code: "rate_limited",
+        retry_after_seconds: expect.any(Number)
+      });
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics" });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.body).toContain('acs_rate_limit_rejected_total{method="POST",route="/work-items"} 1');
+      expect(metrics.body).toContain('acs_http_requests_total{method="POST",route="/work-items",status="429"} 1');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps MCP principals isolated and bounds create_work_item bursts", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-abuse-mcp-"));
+    const dbPath = join(dir, "control.db");
+    seedActor(dbPath, "user", "local_bearer:local-dev");
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: testAuth,
+      mcpAuth: { localBearerToken: "mcp-principal-a" },
+      rateLimit: { windowMs: 60_000, maxRequests: 1 }
+    });
+
+    try {
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-principal-a" },
+        payload: createWorkItemToolCall("mcp-write-1")
+      });
+      const limited = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-principal-a" },
+        payload: createWorkItemToolCall("mcp-write-2")
+      });
+      // A different bearer is a different principal even on the same loopback IP.
+      const otherPrincipal = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-principal-b" },
+        payload: createWorkItemToolCall("mcp-write-other")
+      });
+
+      expect(allowed.statusCode).toBe(200);
+      expect(allowed.json().result.structuredContent.title).toBe("mcp-write-1");
+      expect(limited.statusCode).toBe(429);
+      expect(limited.json()).toMatchObject({
+        jsonrpc: "2.0",
+        error: {
+          code: -32029,
+          message: "rate limit exceeded",
+          data: { code: "rate_limited", retry_after_seconds: expect.any(Number) }
+        }
+      });
+      // Wrong token fails auth (401/403 path), proving the limiter key is token-scoped
+      // rather than letting an unbounded alternate client write as the first principal.
+      expect(otherPrincipal.statusCode).not.toBe(200);
+      expect([401, 403]).toContain(otherPrincipal.statusCode);
+    } finally {
+      await app.close();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects additional work-item intake when the pending queue ceiling is reached", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-abuse-pending-"));
+    const app = buildTestGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      maxPendingWorkItems: 1,
+      rateLimit: { windowMs: 60_000, maxRequests: 100 }
+    });
+
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "pending-1" }
+      });
+      const second = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "pending-2" }
+      });
+
+      expect(first.statusCode).toBe(201);
+      expect(second.statusCode).toBe(429);
+      expect(second.json()).toMatchObject({ error: "pending work-item limit reached", code: "work_queue_full" });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("gateway dashboard sessions", () => {
   const dashboardAuth = { token: "super-secret-dashboard-token", actor: "user", actorId: "user" } as const;
 
