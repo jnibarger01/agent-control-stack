@@ -98,3 +98,5 @@ Re-leasing an interrupted attempt revokes any prior active lease first and emits
 ## Security rule
 
 Worker identity without an active matching lease is not authority. A lease without the authenticated worker binding and action hash is not authority. Both are required, and results remain dry-run records until a separately gated sandbox wave exists.
+
+Worker bearer credentials additionally support TTL, rotation, and revoke — see [`worker-identity.md`](worker-identity.md).

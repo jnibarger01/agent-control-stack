@@ -24,6 +24,7 @@ import {
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
   validateHeartbeatTtl,
+  WorkerIdentityRegistry,
   type ReadEventsOptions,
   type RegistryAgentDetail,
   type RegistryStatus,
@@ -93,7 +94,10 @@ const gatewayCredentialSchema = z.object({
   actor: z.string().min(1),
   actorId: z.string().min(1),
   roles: z.array(z.enum(["operator", "service", "worker"])).min(1),
-  scopes: z.array(z.string().min(1)).min(1)
+  scopes: z.array(z.string().min(1)).min(1),
+  /** Optional wall-clock expiry for worker (and other) credentials. */
+  expiresAt: z.string().datetime({ offset: true }).optional(),
+  status: z.enum(["active", "revoked"]).optional()
 });
 type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
 export interface GatewayAuthOptions {
@@ -102,7 +106,15 @@ export interface GatewayAuthOptions {
   /** Registry actor ID this credential is bound to; registry mutations fail closed without it. */
   actorId?: string;
   credentials?: readonly GatewayCredential[];
+  /**
+   * Mutable worker identity registry with TTL, rotation, and revoke.
+   * When present, bearer tokens known to the registry authenticate workers
+   * for result submission and reject expired/revoked identities.
+   */
+  workerIdentities?: WorkerIdentityRegistry;
 }
+
+export { WorkerIdentityRegistry };
 
 export interface GatewayOptions {
   dbPath?: string;
@@ -1476,16 +1488,46 @@ function requireWorkerIdentity(
     reply.code(503).send({ error: "worker auth is not configured", code: "worker_auth_unconfigured" });
     return undefined;
   }
-  const credential = gatewayCredentialForRequest(request, auth);
-  if (!credential) {
+  const token = bearerToken(request.headers.authorization);
+  const now = new Date();
+
+  if (auth.workerIdentities && token) {
+    const resolved = auth.workerIdentities.resolve(token, now);
+    if (resolved.ok) {
+      return resolved.identity.workerId;
+    }
+    if (resolved.code === "worker_identity_expired") {
+      reply.code(410).send({ error: "worker identity has expired", code: resolved.code });
+      return undefined;
+    }
+    if (resolved.code === "worker_identity_revoked") {
+      reply.code(401).send({ error: "worker identity has been revoked", code: resolved.code });
+      return undefined;
+    }
+    // Unknown to the registry: fall through to static gateway credentials.
+  }
+
+  // Match before the live-credential filter so expiry can return 410 instead of a
+  // generic 401, matching lease-expiry semantics for worker authority. Cookie
+  // sessions fall through gatewayCredentialForRequest when no bearer is present.
+  const matched = token ? matchGatewayCredential(token, auth) : gatewayCredentialForRequest(request, auth);
+  if (!matched) {
     reply.code(401).send({ error: "unauthorized" });
     return undefined;
   }
-  if (!credential.roles.includes("worker") || !credential.scopes.includes("acs:worker") || !credential.actorId) {
+  if (matched.status === "revoked") {
+    reply.code(401).send({ error: "worker identity has been revoked", code: "worker_identity_revoked" });
+    return undefined;
+  }
+  if (matched.expiresAt && Date.parse(matched.expiresAt) <= now.getTime()) {
+    reply.code(410).send({ error: "worker identity has expired", code: "worker_identity_expired" });
+    return undefined;
+  }
+  if (!matched.roles.includes("worker") || !matched.scopes.includes("acs:worker") || !matched.actorId) {
     reply.code(403).send({ error: "worker role is required", code: "insufficient_worker_authority" });
     return undefined;
   }
-  return credential.actorId;
+  return matched.actorId;
 }
 
 function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {
@@ -1533,7 +1575,7 @@ function gatewayCredentialForRequest(
   return cookie ? gatewayCredentialForSessionCookie(cookie, auth) : undefined;
 }
 
-function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
+function matchGatewayCredential(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
   if (!token) return undefined;
   const credential = auth.credentials?.find((candidate) => constantTimeEqual(token, candidate.token));
   if (credential) return credential;
@@ -1548,6 +1590,14 @@ function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthO
     };
   }
   return undefined;
+}
+
+function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
+  const credential = matchGatewayCredential(token, auth);
+  if (!credential) return undefined;
+  if (credential.status === "revoked") return undefined;
+  if (credential.expiresAt && Date.parse(credential.expiresAt) <= Date.now()) return undefined;
+  return credential;
 }
 
 function bearerToken(authorization: string | string[] | undefined): string | undefined {
