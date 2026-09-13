@@ -147,6 +147,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <a href="#agents">Agents</a>
         <a href="#queue">Work Queue</a>
         <a href="#approvals">Approvals</a>
+        <a href="#operator-metrics">Metrics</a>
         <a href="#dispatch">New Task</a>
         <a href="#events">Events</a>
       </nav>
@@ -166,6 +167,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
       </section>
       <section class="grid lower">
+        <article id="operator-metrics" class="panel"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div>${operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, model.now ?? new Date())}</article>
         <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(recentEvents)}</article>
         <article id="system" class="panel"><div class="panel-head"><h2>System Health</h2><span>derived</span></div>${systemPanel(stats, agents)}</article>
       </section>
@@ -426,6 +428,54 @@ function workItemError(item: WorkItem): string {
 function workItemResultError(item: WorkItem): string | undefined {
   const result = item.result;
   return result && typeof result.error === "string" ? result.error : undefined;
+}
+
+function operatorMetricsPanel(
+  workItems: WorkItem[],
+  attemptLeasesByWorkItem: Record<string, MissionControlAttemptLease[]>,
+  now: Date
+): string {
+  const activeLeases = Object.values(attemptLeasesByWorkItem)
+    .flat()
+    .filter((lease) => lease.status === "active");
+  const pendingApprovals = workItems.filter((item) => item.status === "needs_approval");
+  const oldestLeaseAge = maxAgeMs(
+    activeLeases.map((lease) => lease.issuedAt),
+    now
+  );
+  const oldestApprovalWait = maxAgeMs(
+    pendingApprovals.map((item) => item.createdAt),
+    now
+  );
+  return `<div class="operator-metrics"><dl>
+    <div><dt>Active leases</dt><dd>${activeLeases.length}</dd></div>
+    <div><dt>Oldest lease age</dt><dd>${formatDuration(oldestLeaseAge)}</dd></div>
+    <div><dt>Pending approvals</dt><dd>${pendingApprovals.length}</dd></div>
+    <div><dt>Oldest approval wait</dt><dd>${formatDuration(oldestApprovalWait)}</dd></div>
+  </dl>
+  <p class="metrics-scrape">429s / rate limits: scrape authenticated <a href="/metrics"><code>GET /metrics</code></a> for <code>acs_rate_limit_rejected_total</code> and <code>acs_http_requests_total{status="429"}</code>. Full names: <code>docs/runbooks/operator-metrics.md</code>.</p>
+  </div>`;
+}
+
+function maxAgeMs(timestamps: string[], now: Date): number | undefined {
+  let oldest: number | undefined;
+  for (const value of timestamps) {
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) continue;
+    const age = Math.max(0, now.getTime() - parsed);
+    if (oldest === undefined || age > oldest) oldest = age;
+  }
+  return oldest;
+}
+
+function formatDuration(ageMs: number | undefined): string {
+  if (ageMs === undefined) return "—";
+  const totalSeconds = Math.floor(ageMs / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 function systemPanel(stats: ReturnType<typeof summarize>, agents: MissionControlAgent[]): string {
@@ -905,7 +955,7 @@ p { color: var(--muted); margin: 6px 0 0; }
 .card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
 .card p { font-size: 12px; line-height: 1.35; }
 .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
-.lower { grid-template-columns: minmax(380px, .9fr) minmax(0, 1.1fr); }
+.lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .panel { min-width: 0; overflow: hidden; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: #fbfcfd; }
 .panel-head p { font-size: 12px; margin-top: 3px; }
@@ -944,6 +994,13 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
 .system-panel dt { color: var(--muted); }
 .system-panel dd { margin: 0; color: var(--ink); }
+.operator-metrics { padding: 18px; display: grid; gap: 14px; }
+.operator-metrics dl { margin: 0; display: grid; gap: 8px; }
+.operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
+.operator-metrics dt { color: var(--muted); }
+.operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+.metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.metrics-scrape code { font-size: 12px; }
 .queue-item strong, .queue-item small { display: block; margin-top: 6px; }
 .queue-item small { color: var(--muted); }
 .error-line { color: var(--red) !important; }
