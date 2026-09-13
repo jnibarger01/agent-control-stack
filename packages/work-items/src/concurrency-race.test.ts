@@ -204,4 +204,157 @@ describe("deterministic multi-connection concurrency invariants", () => {
     check.close();
     rmSync(dir, { recursive: true, force: true });
   });
+
+  it("renews an attempt lease once under competing renewals", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-race-renew-"));
+    const path = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(path);
+    const workItem = item(store);
+    const plan = store.createExecutionPlan({
+      workItemId: workItem.id,
+      definition: defaultExecutionPlanForWorkItem(workItem),
+      createdByActorId: "seed"
+    });
+    const admission = store.admitExecutionPlan(
+      {
+        workItemId: workItem.id,
+        planHash: plan.planHash,
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("a"),
+        requiresApproval: false,
+        admittedByActorId: "policy"
+      },
+      { via: "policy_gate" }
+    );
+    const attempt = store.createAttempt(
+      { workItemId: workItem.id, planHash: plan.planHash, inputHash: hex("b") },
+      transition
+    );
+    const issuedAt = new Date("2026-03-01T00:00:00.000Z");
+    const lease = store.leaseAttempt(
+      {
+        attemptId: attempt.attemptId,
+        workItemId: workItem.id,
+        admissionId: admission.admissionId,
+        workerId: "owner",
+        leaseToken: "a".repeat(32),
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("a"),
+        ttlMs: 60_000,
+        maxTtlMs: 10 * 60_000,
+        now: issuedAt
+      },
+      transition
+    );
+    store.close();
+    const results = await race({
+      kind: "renew",
+      dbPath: path,
+      input: {
+        leaseId: lease.leaseId,
+        attemptId: attempt.attemptId,
+        workItemId: workItem.id,
+        workerId: "owner",
+        leaseToken: "a".repeat(32),
+        fencingEpoch: lease.fencingEpoch,
+        ttlMs: 60_000,
+        now: new Date(issuedAt.getTime() + 30_000)
+      }
+    });
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(
+      results.filter((r) => !r.ok && ["attempt_lease_conflict", "lease_renewal_exhausted"].includes(r.error.code))
+    ).toHaveLength(1);
+    const check = new SqliteWorkItemStore(path);
+    expect(check.readEvents().filter((e) => e.name === "attempt_lease.renewed")).toHaveLength(1);
+    check.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("accepts one authoritative complete under a dual-worker race", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-race-auth-complete-"));
+    const path = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(path);
+    const workItem = item(store);
+    const plan = store.createExecutionPlan({
+      workItemId: workItem.id,
+      definition: defaultExecutionPlanForWorkItem(workItem),
+      createdByActorId: "seed"
+    });
+    const admission = store.admitExecutionPlan(
+      {
+        workItemId: workItem.id,
+        planHash: plan.planHash,
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash: hex("a"),
+        requiresApproval: false,
+        admittedByActorId: "policy"
+      },
+      { via: "policy_gate" }
+    );
+    store.approveWorkItem(workItem.id, transition);
+    const claimed = store.claimNextApprovedWorkItem("worker-a", {
+      attemptAuthority: {
+        planHash: plan.planHash,
+        admissionId: admission.admissionId,
+        policyVersion: admission.policyVersion,
+        policyDecisionHash: admission.policyDecisionHash
+      }
+    });
+    if (!claimed?.attemptId || !claimed.planHash || !claimed.inputHash || claimed.fencingEpoch === undefined) {
+      throw new Error("expected authoritative claim");
+    }
+    const winner = {
+      workItemId: claimed.id,
+      attemptId: claimed.attemptId,
+      leaseId: claimed.leaseId,
+      workerId: claimed.workerId,
+      actionHash: claimed.actionHash,
+      planHash: claimed.planHash,
+      inputHash: claimed.inputHash,
+      fencingEpoch: claimed.fencingEpoch,
+      idempotencyKey: stableHash({ domain: "acs.attempt-result.v1", attemptId: claimed.attemptId }),
+      outcome: "succeeded",
+      startedAt: claimed.startedAt,
+      finishedAt: claimed.startedAt,
+      exitCode: 0,
+      summary: "race",
+      structuredOutput: {},
+      artifacts: [],
+      simulationMetadata: { executionMode: "dry_run", simulated: true }
+    };
+    const loser = { ...winner, workerId: "worker-b", fencingEpoch: claimed.fencingEpoch + 1 };
+    store.close();
+
+    const barrier = new SharedArrayBuffer(4);
+    const payloads = [winner, loser];
+    const workers = payloads.map(
+      (input) =>
+        new Worker(workerUrl, {
+          execArgv: ["--import", "tsx"],
+          workerData: { kind: "authoritative_result", dbPath: path, input, barrier }
+        })
+    );
+    const results = await Promise.all(
+      workers.map(
+        (worker) =>
+          new Promise<any>((resolve, reject) => {
+            worker.once("message", resolve);
+            worker.once("error", reject);
+          })
+      )
+    );
+    await Promise.all(workers.map((worker) => worker.terminate()));
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(
+      results.filter(
+        (r) => !r.ok && ["attempt_fence_mismatch", "result_conflict", "attempt_conflict"].includes(r.error.code)
+      )
+    ).toHaveLength(1);
+    const check = new SqliteWorkItemStore(path);
+    expect(check.get(claimed.id)?.status).toBe("succeeded");
+    expect(check.readEvents().filter((e) => e.name === "execution_attempt.result_accepted")).toHaveLength(1);
+    check.close();
+    rmSync(dir, { recursive: true, force: true });
+  });
 });

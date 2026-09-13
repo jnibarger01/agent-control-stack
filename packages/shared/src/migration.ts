@@ -43,7 +43,8 @@ const migrationFiles = [
     filename: "017_scheduler_firing_callback_pending.sql"
   },
   { version: 18, name: "attempt_lease_approvals", filename: "018_attempt_lease_approvals.sql" },
-  { version: 19, name: "work_item_metadata", filename: "019_work_item_metadata.sql" }
+  { version: 19, name: "work_item_metadata", filename: "019_work_item_metadata.sql" },
+  { version: 20, name: "lease_renewal", filename: "020_lease_renewal.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
