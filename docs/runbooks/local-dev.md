@@ -38,6 +38,8 @@ Open `http://127.0.0.1:3000`.
 
 For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send it as `Authorization: Bearer <token>` on `/mcp` requests. OAuth and tunnel ID setup are documented in `docs/oauth-authentication.md`.
 
+Optional per-identity tool allowlists use `ACS_MCP_TOOL_ALLOWLIST_JSON`. Local mode keeps a permissive default for identities not listed in the map; see `docs/oauth-authentication.md`.
+
 Default per-principal rate limits and the pending work-item ceiling apply on local MCP/HTTP writes; see [gateway-abuse-controls.md](./gateway-abuse-controls.md) for knobs and recommended local vs deployed values.
 
 Authenticated local scrape of gateway metrics (`GET /metrics`) and the Mission Control operator metrics panel are documented in [operator-metrics.md](./operator-metrics.md).

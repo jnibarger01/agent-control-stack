@@ -33,14 +33,14 @@ The `resource` metadata value is `ACS_OAUTH_AUDIENCE`. `authorization_servers` c
 
 ## Scopes
 
-| Tool | Required scope |
-| --- | --- |
-| `create_work_item` | `acs:work:create` |
-| `get_work_item` | `acs:work:read` |
-| `list_work_items` | `acs:work:read` |
+| Tool                | Required scope     |
+| ------------------- | ------------------ |
+| `create_work_item`  | `acs:work:create`  |
+| `get_work_item`     | `acs:work:read`    |
+| `list_work_items`   | `acs:work:read`    |
 | `approve_work_item` | `acs:work:approve` |
 | `unblock_work_item` | `acs:work:approve` |
-| `cancel_work_item` | `acs:work:approve` |
+| `cancel_work_item`  | `acs:work:approve` |
 
 Worker claim and result submission tools are not exposed on the public MCP gateway in `v0.1.0-alpha`. They remain local worker/store paths only.
 
@@ -161,3 +161,30 @@ https://<your-public-tunnel-domain>/mcp
 Use the same OAuth resource-server setup as Claude. Register the MCP endpoint as `https://gateway.example.com/mcp` and let the client discover `/.well-known/oauth-protected-resource/mcp`.
 
 Authenticated MCP requests are written to the audit chain as `connector.requested` events with auth method, subject, issuer, connector id, tunnel id, session id, scopes, request id, and work item id when a tool call creates or returns one. The gateway never stores bearer tokens or JWTs.
+
+## Per-agent MCP tool allowlist
+
+Multi-agent deployments can restrict which MCP tools each authenticated identity
+may call with `ACS_MCP_TOOL_ALLOWLIST_JSON` (or `GatewayOptions.mcpToolAllowlist`):
+
+```json
+{
+  "agent-a": ["list_work_items"],
+  "agent-b": ["get_work_item", "list_work_items", "create_work_item"]
+}
+```
+
+Identity keys match the gateway MCP actor string: tunnel `connectorId` when
+present, otherwise the OAuth/local bearer `subject` (local bearer uses
+`local-dev`).
+
+Behavior:
+
+- **Unset / empty** — feature off; scopes alone gate tools (current default).
+- **Listed identity** — may call only tools on its list (both local and production).
+- **Unknown identity + production** (`NODE_ENV=production`) — **default-deny**.
+- **Unknown identity + local** — **permissive default** (allowed); listed peers
+  remain restricted. This keeps single-agent local development ergonomic.
+
+Enforcement is on `tools/call` after authentication and scope checks. Denied
+calls return JSON-RPC error `-32003` with HTTP 403.

@@ -10,6 +10,7 @@ import {
   type McpAuthOptions,
   type McpScope
 } from "./auth.js";
+import { evaluateMcpToolAllowlist, type McpToolAllowlistConfig } from "./mcp-tool-allowlist.js";
 import {
   ACS_DASHBOARD_CSP,
   ACS_DASHBOARD_RESOURCE_URI,
@@ -105,6 +106,7 @@ export async function handleMcpHttpRequest(input: {
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
   maxPendingWorkItems?: number;
   portfolioClient?: PortfolioClient;
+  toolAllowlist?: McpToolAllowlistConfig;
 }): Promise<McpHttpResult> {
   const request = jsonRpcRequestSchema.safeParse(input.body);
   if (!request.success) {
@@ -164,7 +166,8 @@ export async function handleMcpHttpRequest(input: {
         auditLocalAgentEvent: input.auditLocalAgentEvent,
         resolveActorId: input.resolveActorId,
         maxPendingWorkItems: input.maxPendingWorkItems,
-        portfolioClient: input.portfolioClient
+        portfolioClient: input.portfolioClient,
+        toolAllowlist: input.toolAllowlist
       });
     default:
       return handleProtectedUnsupportedMethod({
@@ -223,6 +226,7 @@ async function handleToolsCall(input: {
   resolveActorId?: (auth: McpAuthenticatedRequest) => string | undefined;
   maxPendingWorkItems?: number;
   portfolioClient?: PortfolioClient;
+  toolAllowlist?: McpToolAllowlistConfig;
 }): Promise<McpHttpResult> {
   const parsed = toolsCallParamsSchema.safeParse(input.params);
   if (!parsed.success) {
@@ -267,6 +271,20 @@ async function handleToolsCall(input: {
     : resolvedMcpActor(authorization.auth);
   if (!actor) {
     return jsonRpcError(input.id, -32001, "MCP actor is not registered", 403);
+  }
+  const allowlistIdentity = resolvedMcpActor(authorization.auth);
+  if (input.toolAllowlist) {
+    const allowlistDecision = evaluateMcpToolAllowlist(input.toolAllowlist, allowlistIdentity, parsed.data.name);
+    if (!allowlistDecision.allowed) {
+      input.auditAuthenticatedRequest?.({
+        requestId: input.requestId ?? String(input.id ?? ""),
+        method: "tools/call",
+        toolName: parsed.data.name,
+        resolvedActor: actor,
+        auth: authorization.auth
+      });
+      return jsonRpcError(input.id, -32003, allowlistDecision.reason, 403);
+    }
   }
   if (parsed.data.name === "create_work_item" && input.maxPendingWorkItems !== undefined) {
     const pending = input.store
