@@ -6,11 +6,11 @@ loopback setup and [production.md](./production.md) for remote binding.
 
 ## What is bounded by default
 
-| Control | Default | Effect |
-| --- | --- | --- |
-| Per-principal request rate | 120 requests / 60s | Sliding window on mutation, MCP, session login, and webhook routes. |
-| Pending work-item ceiling | 1000 | Rejects new intake when draft/pending_policy/needs_approval/approved/running count is at the ceiling. |
-| Auth | Local bearer / credentials (see below) | Mutations and protected MCP tools require a configured principal. |
+| Control                    | Default                                | Effect                                                                                                |
+| -------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| Per-principal request rate | 120 requests / 60s                     | Sliding window on mutation, MCP, session login, and webhook routes.                                   |
+| Pending work-item ceiling  | 1000                                   | Rejects new intake when draft/pending_policy/needs_approval/approved/running count is at the ceiling. |
+| Auth                       | Local bearer / credentials (see below) | Mutations and protected MCP tools require a configured principal.                                     |
 
 A burst from one principal therefore hits either `429 rate_limited` or
 `429 work_queue_full` instead of growing the queue without bound.
@@ -28,10 +28,10 @@ never stored in the key—only a truncated hash.
 
 ## Structured 429 responses
 
-| Path | Body shape |
-| --- | --- |
-| HTTP mutations | `{ "error": "...", "code": "rate_limited" \| "work_queue_full", "retry_after_seconds"?: number }` |
-| MCP `/mcp` rate limit | JSON-RPC error `-32029` with `data: { code: "rate_limited", retry_after_seconds }` |
+| Path                  | Body shape                                                                                        |
+| --------------------- | ------------------------------------------------------------------------------------------------- |
+| HTTP mutations        | `{ "error": "...", "code": "rate_limited" \| "work_queue_full", "retry_after_seconds"?: number }` |
+| MCP `/mcp` rate limit | JSON-RPC error `-32029` with `data: { code: "rate_limited", retry_after_seconds }`                |
 
 HTTP and MCP rate-limit replies also set `Retry-After` and
 `x-ratelimit-remaining`. Rejected rate limits increment
@@ -40,16 +40,16 @@ usual `acs_http_requests_total` status series).
 
 ## Environment knobs
 
-| Variable | Purpose | Local default / recommendation | Deployed recommendation |
-| --- | --- | --- | --- |
-| `ACS_RATE_LIMIT_WINDOW_MS` | Sliding-window length (ms). | `60000` | Keep `60000` unless you have a front-door limiter; raise only with evidence. |
-| `ACS_RATE_LIMIT_MAX_REQUESTS` | Max requests per principal+route in the window. | `120` (comfortable for local dashboards and MCP tools). | Tighten toward `30`–`60` for internet-facing gateways; keep ≥ worker/operator burst needs. |
-| `ACS_MAX_PENDING_WORK_ITEMS` | Cap on non-terminal work items before intake returns `work_queue_full`. | `1000` (or lower, e.g. `50`, for tiny local DBs). | Size to disk/ops capacity (often `100`–`500` for alpha hosts). |
-| `ACS_GATEWAY_TOKEN` / `ACS_GATEWAY_ACTOR` | Legacy local HTTP/dashboard bearer. | Generate a local secret; bind loopback only. | Do **not** use for remote production binding. |
-| `ACS_GATEWAY_CREDENTIALS_JSON` | Credential-bound actors, roles, scopes. | Optional locally. | **Required** for non-loopback production. |
-| `ACS_MCP_BEARER_TOKEN` | Local MCP bearer (ignored when `NODE_ENV=production`). | Local-only secret for `/mcp` tools. | Prefer OAuth/JWKS or trusted tunnel; never rely on this in production. |
-| `ACS_OAUTH_*` / `ACS_AUTH_MODE` / tunnel vars | Production MCP auth. | See [oauth-authentication.md](../oauth-authentication.md). | Required for remote production binding (OAuth **or** trusted tunnel). |
-| `ACS_MCP_ALLOWED_ORIGINS` | Browser origins allowed to call remote MCP. | Optional on loopback. | **Required** for remote production binding. |
+| Variable                                      | Purpose                                                                 | Local default / recommendation                             | Deployed recommendation                                                                    |
+| --------------------------------------------- | ----------------------------------------------------------------------- | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------ |
+| `ACS_RATE_LIMIT_WINDOW_MS`                    | Sliding-window length (ms).                                             | `60000`                                                    | Keep `60000` unless you have a front-door limiter; raise only with evidence.               |
+| `ACS_RATE_LIMIT_MAX_REQUESTS`                 | Max requests per principal+route in the window.                         | `120` (comfortable for local dashboards and MCP tools).    | Tighten toward `30`–`60` for internet-facing gateways; keep ≥ worker/operator burst needs. |
+| `ACS_MAX_PENDING_WORK_ITEMS`                  | Cap on non-terminal work items before intake returns `work_queue_full`. | `1000` (or lower, e.g. `50`, for tiny local DBs).          | Size to disk/ops capacity (often `100`–`500` for alpha hosts).                             |
+| `ACS_GATEWAY_TOKEN` / `ACS_GATEWAY_ACTOR`     | Legacy local HTTP/dashboard bearer.                                     | Generate a local secret; bind loopback only.               | Do **not** use for remote production binding.                                              |
+| `ACS_GATEWAY_CREDENTIALS_JSON`                | Credential-bound actors, roles, scopes.                                 | Optional locally.                                          | **Required** for non-loopback production.                                                  |
+| `ACS_MCP_BEARER_TOKEN`                        | Local MCP bearer (ignored when `NODE_ENV=production`).                  | Local-only secret for `/mcp` tools.                        | Prefer OAuth/JWKS or trusted tunnel; never rely on this in production.                     |
+| `ACS_OAUTH_*` / `ACS_AUTH_MODE` / tunnel vars | Production MCP auth.                                                    | See [oauth-authentication.md](../oauth-authentication.md). | Required for remote production binding (OAuth **or** trusted tunnel).                      |
+| `ACS_MCP_ALLOWED_ORIGINS`                     | Browser origins allowed to call remote MCP.                             | Optional on loopback.                                      | **Required** for remote production binding.                                                |
 
 Related SSE caps (`ACS_MAX_SSE_CLIENTS`, `ACS_MAX_SSE_CLIENTS_PER_PRINCIPAL`) are
 documented in the production runbook; they bound event subscribers, not work-item

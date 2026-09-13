@@ -3439,9 +3439,21 @@ describe("gateway abuse controls", () => {
     });
 
     try {
-      const first = await app.inject({ method: "POST", url: "/work-items", payload: { ...workItemPayload, title: "write-1" } });
-      const second = await app.inject({ method: "POST", url: "/work-items", payload: { ...workItemPayload, title: "write-2" } });
-      const limited = await app.inject({ method: "POST", url: "/work-items", payload: { ...workItemPayload, title: "write-3" } });
+      const first = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-1" }
+      });
+      const second = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-2" }
+      });
+      const limited = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-3" }
+      });
 
       expect(first.statusCode).toBe(201);
       expect(second.statusCode).toBe(201);
@@ -3456,12 +3468,8 @@ describe("gateway abuse controls", () => {
 
       const metrics = await app.inject({ method: "GET", url: "/metrics" });
       expect(metrics.statusCode).toBe(200);
-      expect(metrics.body).toContain(
-        'acs_rate_limit_rejected_total{method="POST",route="/work-items"} 1'
-      );
-      expect(metrics.body).toContain(
-        'acs_http_requests_total{method="POST",route="/work-items",status="429"} 1'
-      );
+      expect(metrics.body).toContain('acs_rate_limit_rejected_total{method="POST",route="/work-items"} 1');
+      expect(metrics.body).toContain('acs_http_requests_total{method="POST",route="/work-items",status="429"} 1');
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -3534,8 +3542,16 @@ describe("gateway abuse controls", () => {
     });
 
     try {
-      const first = await app.inject({ method: "POST", url: "/work-items", payload: { ...workItemPayload, title: "pending-1" } });
-      const second = await app.inject({ method: "POST", url: "/work-items", payload: { ...workItemPayload, title: "pending-2" } });
+      const first = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "pending-1" }
+      });
+      const second = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "pending-2" }
+      });
 
       expect(first.statusCode).toBe(201);
       expect(second.statusCode).toBe(429);

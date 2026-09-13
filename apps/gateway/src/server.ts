@@ -1347,7 +1347,7 @@ function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefi
   const credential = gatewayCredentialForRequest(request, auth);
   const principal = credential
     ? `credential:${credential.id}`
-    : bearerPrincipal(request.headers.authorization) ?? `ip:${request.ip}`;
+    : (bearerPrincipal(request.headers.authorization) ?? `ip:${request.ip}`);
   return `${request.method}:${request.routeOptions.url ?? "<unmatched>"}:${principal}`;
 }
 
