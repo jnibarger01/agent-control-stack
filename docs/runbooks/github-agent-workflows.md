@@ -2,7 +2,7 @@
 
 Ops note for autonomous / comment-driven agent workflows in this repository.
 Tracks which workflows are intentionally on or off after the FreeModel
-retirement decision (ACS #84).
+retirement decision (ACS #84) and the Hourly archive (ACS #113 / ADR 0015).
 
 ## Active (CI / analysis)
 
@@ -28,19 +28,24 @@ Policy for dependency update PRs:
 
 Park red majors with deps-parked. Keep Allow auto-merge on.
 
-Do not re-enable Hourly or FreeModel.
+Do not reintroduce FreeModel or a scheduled Hourly agent workflow.
 
-## Intentionally disabled / gated (agent automation)
+## Intentionally gated (agent automation)
 
 | Workflow | Path | State | Why |
 | --- | --- | --- | --- |
-| Hourly Pull Request Cycle | `.github/workflows/hourly-pr.yml` | `disabled_manually` in GitHub Actions | FreeModel insufficient balance; decision not to fund FreeModel. Do **not** re-enable without an explicit funded-provider decision. |
 | opencode | `.github/workflows/opencode.yml` | gated in-repo (`if: false`); FreeModel env/model removed | `/oc` and `/opencode` comments previously called `freemodel/*` via `FREEMODEL_API_KEY` and could fail on balance/key alone. |
+
+## Archived (not on tree)
+
+| Former workflow | Decision | Why |
+| --- | --- | --- |
+| Hourly Pull Request Cycle (`.github/workflows/hourly-pr.yml`, `.automation/hourly-pr*`, `scripts/hourly_pr.py`) | Removed per ADR 0015 / ACS #113 | Was `disabled_manually` after FreeModel retirement; leftover confused ops and attracted Dependabot pin bumps. Not coming back without a funded supported provider and a new ADR. |
 
 ## FreeModel policy
 
 - Do **not** reintroduce paid FreeModel (`FREEMODEL_API_KEY`, `freemodel/*` models) without an explicit funding decision.
-- Do **not** re-enable Hourly while it still depends on FreeModel.
+- Do **not** restore a scheduled Hourly agent path without ADR + funded provider (see ADR 0015).
 
 ## How to re-enable OpenCode (supported provider)
 
@@ -51,16 +56,6 @@ Do not re-enable Hourly or FreeModel.
    - Run `anomalyco/opencode/github` with the supported provider secret and a **non-freemodel** model id.
 3. If the workflow was also disabled in the Actions UI: `gh workflow enable opencode`.
 4. Verify with a controlled `/oc` comment on a PR from an allowed author association.
-
-## How to re-enable Hourly (explicit decision required)
-
-Hourly remains `disabled_manually`. Re-enable only after replacing FreeModel with a funded supported provider in `.github/workflows/hourly-pr.yml`, then:
-
-```sh
-gh workflow enable "Hourly Pull Request Cycle"
-```
-
-Do not enable Hourly solely to restore FreeModel.
 
 ## Quick status check
 
