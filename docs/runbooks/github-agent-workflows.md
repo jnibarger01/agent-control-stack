@@ -12,7 +12,7 @@ retirement decision (ACS #84) and the Hourly archive (ACS #113 / ADR 0015).
 | Vitest Tests | `.github/workflows/testdriver.yml` | active | Vitest suite. |
 | codeql | `.github/workflows/codeql.yml` | active | CodeQL analysis. |
 | Dependabot Updates | (GitHub Dependabot) | active | Dependency update PRs. |
-| Dependabot auto-merge | `.github/workflows/dependabot-auto-merge.yml` | active | Patch/minor auto-merge; majors labeled (ACS #86). |
+| Dependabot auto-merge | `.github/workflows/dependabot-auto-merge.yml` | active | Patch/minor only; `deps-major` / `deps-parked` hard-blocked (ACS #86; after #102). |
 
 Other workflows such as `pr30-remediation` may exist for one-off remediation;
 they are not autonomous coding agents.
@@ -23,10 +23,11 @@ Policy for dependency update PRs:
 
 | Kind | Behavior |
 | --- | --- |
-| Patch / minor | Workflow `.github/workflows/dependabot-auto-merge.yml` runs `gh pr merge --auto --squash` for Dependabot. Merges after required CI (`check`, Vitest `test`, CodeQL `analyze`) is green. |
-| Major | Labeled deps-major; human review only. |
+| Patch / minor | Workflow `.github/workflows/dependabot-auto-merge.yml` runs `gh pr merge --auto --squash` for Dependabot **only when the PR is not labeled `deps-major` or `deps-parked`**. Merges after required CI (`check`, Vitest `test`, CodeQL `analyze`) is green. |
+| Major | Labeled `deps-major`; auto-merge is **disabled**; human review only. |
+| Parked | Label `deps-parked` **hard-blocks** auto-merge even if Dependabot metadata misclassifies the bump (see #102 codeql-action group slip). |
 
-Park red majors with deps-parked. Keep Allow auto-merge on.
+Park red majors with `deps-parked`. Repo may keep Allow auto-merge on, but the workflow must never enable or leave auto-merge on for `deps-major` / `deps-parked`.
 
 Do not reintroduce FreeModel or a scheduled Hourly agent workflow.
 
