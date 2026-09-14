@@ -1,8 +1,10 @@
 name: Dependabot auto-merge
 
-# Auto-merge patch/minor when required CI is green; label majors for humans.
+# Patch/minor only. Majors and anything labeled deps-major or deps-parked are
+# hard-blocked from auto-merge (CoS policy after ACS #102 slip).
 on:
   pull_request:
+    types: [opened, reopened, synchronize, labeled, unlabeled]
 
 permissions:
   contents: write
@@ -19,21 +21,55 @@ jobs:
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Hard-block majors and parked deps from auto-merge
+        id: gate
+        env:
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPDATE_TYPE: ${{ steps.meta.outputs.update-type }}
+          PR_LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        run: |
+          set -euo pipefail
+          blocked=0
+          reason=""
+
+          case "$UPDATE_TYPE" in
+            version-update:semver-major)
+              blocked=1
+              reason="semver-major"
+              gh pr edit "$PR_URL" --add-label "deps-major" || true
+              ;;
+          esac
+
+          IFS=',' read -r -a labels <<< "$PR_LABELS"
+          for label in "${labels[@]}"; do
+            case "$label" in
+              deps-major|deps-parked)
+                blocked=1
+                reason="${reason:+$reason; }label:$label"
+                ;;
+            esac
+          done
+
+          if [ "$blocked" = "1" ]; then
+            echo "blocked=true" >> "$GITHUB_OUTPUT"
+            echo "Auto-merge hard-blocked ($reason)."
+            # Cancel any previously enabled auto-merge (e.g. misclassified group bump).
+            gh pr merge --disable-auto "$PR_URL" || true
+            if [ "$UPDATE_TYPE" = "version-update:semver-major" ] || [[ ",$PR_LABELS," == *",deps-major,"* ]]; then
+              gh pr comment "$PR_URL" --body "Major / parked dependency bump — human review only (ACS #86; CoS policy after #102). Auto-merge disabled." || true
+            fi
+            exit 0
+          fi
+
+          echo "blocked=false" >> "$GITHUB_OUTPUT"
+
       - name: Enable auto-merge for patch and minor
         if: >
-          steps.meta.outputs.update-type == 'version-update:semver-patch' ||
-          steps.meta.outputs.update-type == 'version-update:semver-minor'
+          steps.gate.outputs.blocked != 'true' &&
+          (steps.meta.outputs.update-type == 'version-update:semver-patch' ||
+           steps.meta.outputs.update-type == 'version-update:semver-minor')
         env:
           PR_URL: ${{ github.event.pull_request.html_url }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh pr merge --auto --squash "$PR_URL"
-
-      - name: Label major bumps for human review
-        if: steps.meta.outputs.update-type == 'version-update:semver-major'
-        env:
-          PR_URL: ${{ github.event.pull_request.html_url }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh pr edit "$PR_URL" --add-label "deps-major"
-          gh pr comment "$PR_URL" --body "Major dependency bump — human review (ACS #86). Not auto-merged."
-
