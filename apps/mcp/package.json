@@ -17,6 +17,6 @@
   "dependencies": {
     "@agent-control-stack/machine-controller": "0.1.0",
     "@agent-control-stack/shared": "0.1.0",
-    "zod": "^4.0.0"
+    "zod": "^4.5.4"
   }
 }
