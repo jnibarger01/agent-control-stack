@@ -72,6 +72,23 @@ describe("strict canonicalization v1", () => {
     expect(() => strictCanonicalJsonV1(arrayCycle)).toThrow(/cyclic/i);
   });
 
+  it("rejects array subclasses, non-enumerable indexes, and accessors without invoking them", () => {
+    class ArraySubclass extends Array<unknown> {}
+    const nonEnumerable = ["visible"];
+    Object.defineProperty(nonEnumerable, "0", { enumerable: false, value: "hidden" });
+    const accessor = ["visible"];
+    Object.defineProperty(accessor, "0", {
+      enumerable: true,
+      get: () => {
+        throw new Error("array accessor must not be invoked");
+      }
+    });
+
+    expect(() => strictCanonicalJsonV1(new ArraySubclass("value"))).toThrow(/non-plain/i);
+    expect(() => strictCanonicalJsonV1(nonEnumerable)).toThrow(/non-enumerable/i);
+    expect(() => strictCanonicalJsonV1(accessor)).toThrow(/accessor/i);
+  });
+
   it("rejects non-plain objects", () => {
     class Example {
       value = 1;

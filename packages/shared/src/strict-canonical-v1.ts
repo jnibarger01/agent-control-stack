@@ -61,6 +61,13 @@ function serializeArrayV1(value: unknown[], ancestors: WeakSet<object>): string 
     if (typeof key !== "string" || !isArrayIndexV1(key, value.length)) {
       throw new TypeError("strict-canonical-v1: unsupported array property");
     }
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (descriptor === undefined || !descriptor.enumerable) {
+      throw new TypeError("strict-canonical-v1: unsupported non-enumerable property");
+    }
+    if (!("value" in descriptor)) {
+      throw new TypeError("strict-canonical-v1: unsupported accessor property");
+    }
   }
 
   ancestors.add(value);
@@ -70,9 +77,6 @@ function serializeArrayV1(value: unknown[], ancestors: WeakSet<object>): string 
       const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
       if (descriptor === undefined) {
         throw new TypeError("strict-canonical-v1: undefined array entry is unsupported");
-      }
-      if (!("value" in descriptor)) {
-        throw new TypeError("strict-canonical-v1: unsupported accessor property");
       }
       serialized[index] = serializeV1(descriptor.value, ancestors);
     }
