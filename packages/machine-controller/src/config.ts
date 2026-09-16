@@ -134,7 +134,7 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
     },
     paths: {
       allow: raw.paths.allow.map((entry) => realExistingPath(entry, baseDir)),
-      deny: raw.paths.deny.map((entry) => absolutePath(entry, baseDir))
+      deny: raw.paths.deny.map((entry) => realExistingPath(entry, baseDir))
     },
     commands: {
       allowReadonly: commands.allow_readonly,

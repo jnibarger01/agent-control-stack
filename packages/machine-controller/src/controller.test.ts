@@ -37,6 +37,39 @@ describe("machine controller", () => {
     }
   });
 
+  it("canonicalizes deny roots to block symlink aliases into allowed paths", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-machine-deny-alias-"));
+    const allowed = join(dir, "allowed");
+    const secret = join(allowed, "secret");
+    const deniedAlias = join(dir, "deny-alias");
+    const payload = join(secret, "payload.txt");
+    const publicPayload = join(allowed, "public.txt");
+    const brokenAlias = join(dir, "broken-deny-alias");
+    mkdirSync(secret, { recursive: true });
+    writeFileSync(payload, "secret");
+    writeFileSync(publicPayload, "allowed");
+    symlinkSync(secret, deniedAlias);
+    symlinkSync(join(dir, "missing-deny-target"), brokenAlias);
+    const config = writeConfig(dir, allowed, [deniedAlias]);
+    const controller = new MachineController(config);
+
+    try {
+      expect(config.paths.deny).toEqual([secret]);
+      expect(() => writeConfig(dir, allowed, [join(dir, "missing-deny-root")])).toThrow(ControlStackError);
+      expect(() => writeConfig(dir, allowed, [brokenAlias])).toThrow(ControlStackError);
+      expect(() => resolveSafePath(config, join(allowed, "secret", ".", "payload.txt"))).toThrow(ControlStackError);
+      expect(() => resolveSafePath(config, join(allowed, "secret", "..", "secret", "payload.txt"))).toThrow(
+        ControlStackError
+      );
+      await expect(controller.callTool("fs.read", { path: payload })).rejects.toThrow(ControlStackError);
+      expect(readFileSync(payload, "utf8")).toBe("secret");
+      expect(resolveSafePath(config, publicPayload)).toMatchObject({ realPath: publicPayload });
+      await expect(controller.callTool("fs.read", { path: publicPayload })).resolves.toMatchObject({ text: "1: allowed" });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("reads files with line numbers and redacts secrets before returning or logging", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-machine-"));
     const allowed = join(dir, "allowed");
@@ -188,7 +221,7 @@ describe("machine controller", () => {
   });
 });
 
-function writeConfig(dir: string, allowed: string, deny = [join(dir, "outside")]) {
+function writeConfig(dir: string, allowed: string, deny: string[] = []) {
   const configPath = join(dir, "config.json");
   writeFileSync(
     configPath,
