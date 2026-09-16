@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildExecutionEnvelope, verifyExecutionEnvelope, type SwarmExecutionEvidence } from "./codex-swarm-envelope.js";
-import { assertCodexSwarmTestBackendEnabled, CodexSwarmCoordinator, type AttemptAuthority, type DispatchReservation } from "./codex-swarm.js";
+import { assertCodexSwarmTestBackendEnabled, createCodexSwarmTestCoordinator, type AttemptAuthority, type DispatchReservation } from "./codex-swarm.js";
 
 const secret = "s".repeat(48);
 const now = new Date("2026-09-03T00:00:20.000Z");
@@ -28,24 +28,27 @@ function evidence(e = envelope()): SwarmExecutionEvidence {
   };
 }
 
-function harness(mode: "reserved" | "replay" | "conflict" = "reserved") {
+function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = vi.fn(async () => undefined), cancel = vi.fn(async () => undefined)) {
   const authority: AttemptAuthority = {
     workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, active: true, revoked: false,
     workspace: { allocationId: "alloc_1", hostPath: "/isolated/attempt_1", expectedBaseSha: "0".repeat(40) }, admittedPlanHash: "a".repeat(64)
   };
-  const starts = vi.fn(async () => undefined);
-  const cancels = vi.fn(async () => undefined);
+  const starts = start;
+  const cancels = cancel;
   const audit = vi.fn();
-  const coordinator = new CodexSwarmCoordinator(
-    { read: vi.fn(() => authority), cancel: vi.fn() },
-    { reserve: vi.fn((_tuple: DispatchReservation) => ({ kind: mode })) },
-    { start: starts, cancel: cancels },
-    { append: audit },
-    { verify: vi.fn(async () => ({ ok: true })) },
-    { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
-    () => now
+  const atomicCancel = vi.fn((): { kind: "cancelled" | "replay" | "stale" } => ({ kind: "cancelled" }));
+  const completeStart = vi.fn();
+  const coordinator = createCodexSwarmTestCoordinator(
+    {
+      authority: { read: vi.fn(() => authority), cancel: atomicCancel },
+      reservations: { reserve: vi.fn((_tuple: DispatchReservation) => ({ kind: mode })), completeStart },
+      child: { start: starts, cancel: cancels }, audit: { append: audit },
+      verifier: { verify: vi.fn(async () => ({ ok: true })) },
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) }, now: () => now
+    },
+    { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" }
   );
-  return { coordinator, authority, starts, cancels, audit };
+  return { coordinator, authority, starts, cancels, audit, atomicCancel, completeStart };
 }
 
 describe("CodexSwarmCoordinator", () => {
@@ -55,10 +58,20 @@ describe("CodexSwarmCoordinator", () => {
     expect(() => assertCodexSwarmTestBackendEnabled({ ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" })).not.toThrow();
   });
 
+  it("permits construction only through the guarded test-only factory", () => {
+    const h = harness();
+    expect(() => createCodexSwarmTestCoordinator({
+      authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) }, reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
+      child: { start: async () => undefined, cancel: async () => undefined }, audit: { append: () => undefined }, verifier: { verify: async () => ({ ok: true }) },
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) }
+    }, { NODE_ENV: "production", ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" })).toThrow(/disabled in production/);
+  });
+
   it("starts only an atomically reserved, current attempt and exact replay does not start again", async () => {
     const first = harness();
     await expect(first.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "started" });
     expect(first.starts).toHaveBeenCalledTimes(1);
+    expect(first.completeStart).toHaveBeenCalledWith(expect.anything(), { kind: "started" });
     const replay = harness("replay");
     await expect(replay.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "replay" });
     expect(replay.starts).not.toHaveBeenCalled();
@@ -94,12 +107,38 @@ describe("CodexSwarmCoordinator", () => {
     const h = harness();
     const nested = { ...evidence(), evidenceBundle: { ...evidence().evidenceBundle, nested: { accepted: true } } };
     await expect(h.coordinator.ingestEvidence(nested, envelope())).resolves.toEqual({ status: "quarantined", reason: "evidence_forbidden_lifecycle_claim" });
-    const verifierFail = new CodexSwarmCoordinator(
-      { read: () => h.authority, cancel: vi.fn() }, { reserve: () => ({ kind: "reserved" }) }, { start: vi.fn(), cancel: vi.fn() }, { append: vi.fn() },
-      { verify: async () => ({ ok: false, reason: "verifier_missing" }) },
-      { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
-      () => now
-    );
+    const verifierFail = createCodexSwarmTestCoordinator({
+      authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) },
+      reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
+      child: { start: vi.fn(), cancel: vi.fn() }, audit: { append: vi.fn() },
+      verifier: { verify: async () => ({ ok: false, reason: "verifier_missing" }) },
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) }, now: () => now
+    }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
     await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "verifier_missing" });
+  });
+
+  it("persists failed starts and makes cancellation atomic, replay-safe, and auditable", async () => {
+    const startFailure = harness("reserved", vi.fn(async () => { throw new Error("start failed"); }));
+    await expect(startFailure.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "failed_start" });
+    expect(startFailure.completeStart).toHaveBeenCalledWith(expect.anything(), { kind: "failed_start", reason: "codex_swarm_child_start_failed" });
+    expect(startFailure.audit).toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.start_failed" }));
+
+    const h = harness();
+    const request = { workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1", authenticated: true };
+    await expect(h.coordinator.cancel(request)).resolves.toEqual({ kind: "cancelled" });
+    expect(h.atomicCancel).toHaveBeenCalledTimes(1);
+    h.atomicCancel.mockReturnValue({ kind: "replay" });
+    await expect(h.coordinator.cancel(request)).resolves.toEqual({ kind: "replay" });
+    expect(h.cancels).toHaveBeenCalledTimes(1);
+
+    const cancelFailure = harness("reserved", vi.fn(async () => undefined), vi.fn(async () => { throw new Error("cancel failed"); }));
+    await expect(cancelFailure.coordinator.cancel({ ...request, requestId: "r_2" })).resolves.toEqual({ kind: "cancelled", reason: "codex_swarm_child_cancel_failed" });
+    expect(cancelFailure.audit).toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.cancelled", reason: "codex_swarm_child_cancel_failed" }));
+  });
+
+  it("quarantines future evidence and forged evidence envelopes before verification", async () => {
+    const h = harness();
+    await expect(h.coordinator.ingestEvidence({ ...evidence(), startedAt: "2026-09-03T00:00:26.000Z", endedAt: "2026-09-03T00:00:27.000Z" }, envelope())).resolves.toEqual({ status: "quarantined", reason: "evidence_stale_or_chronology_invalid" });
+    await expect(h.coordinator.ingestEvidence(evidence(), { ...envelope(), mac: "0".repeat(64) })).resolves.toEqual({ status: "quarantined", reason: "evidence_envelope_verification_failed" });
   });
 });

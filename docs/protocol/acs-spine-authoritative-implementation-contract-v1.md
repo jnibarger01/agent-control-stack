@@ -6,4 +6,4 @@ This disabled-by-default implementation is governed by the exact external artifa
 - SHA-256: `c63d37c58880c41e7b341b884f2dd268ee906893369f8c6cd0a118d33f60c190`
 - Board attachment: `/home/jacen/.hermes/kanban/attachments/t_ab454a48/acs-spine-authoritative-implementation-contract-v1.md`
 
-The external artifact is normative. This repository reference does not restate or amend it. Production use remains blocked; Slice 1 only exposes injectable test-only ACS coordination seams.
+The external artifact is normative. This repository reference does not restate or amend it. Production use remains blocked; Slice 1 only exposes injectable test-only ACS coordination seams. The Codex Swarm coordinator factory requires the injected `in_memory` provider and refuses production. Its authority, reservation, audit, child-controller, and independent-verifier ports document required durable integration behavior but are not a SQLite reservation store, child socket transport, or authoritative evidence/workspace verifier; in-memory implementations are test scaffolding, never durable authority.

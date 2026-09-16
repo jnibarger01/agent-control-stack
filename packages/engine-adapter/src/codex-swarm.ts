@@ -10,6 +10,7 @@ import {
 /** Test-only coordinator boundary. It deliberately has no shell, filesystem, network, or MCP dependency. */
 export const CODEX_SWARM_TEST_PROVIDER = "in_memory" as const;
 const evidenceFreshnessMs = 30_000;
+const evidenceMaxClockSkewMs = 5_000;
 const forbiddenLifecycleKeys = new Set(["succeeded", "approved", "promoted", "granted", "authorized", "accepted"]);
 
 export interface DispatchReservation {
@@ -30,12 +31,20 @@ export interface AttemptAuthority extends Pick<DispatchReservation, "workItemId"
 
 export interface CodexSwarmAuthorityPort {
   read(binding: Pick<DispatchReservation, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch">): AttemptAuthority | undefined;
-  cancel(binding: Pick<DispatchReservation, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch">, requestId: string): void;
+  /** Atomically authenticate, fence, revoke, and persist this request-id result. */
+  cancel(input: CancellationRequest): { kind: "cancelled" | "replay" | "stale" };
+}
+
+export interface CancellationRequest extends Pick<DispatchReservation, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch"> {
+  requestId: string;
+  authenticated: boolean;
 }
 
 export interface DispatchReservationPort {
   /** Must execute atomically in durable ACS storage, never in the child process. */
   reserve(tuple: DispatchReservation): { kind: "reserved" } | { kind: "replay" } | { kind: "conflict" };
+  /** Persist the immutable child-start result before the coordinator returns it. */
+  completeStart(tuple: DispatchReservation, result: { kind: "started" } | { kind: "failed_start"; reason: string }): void;
 }
 
 export interface CodexSwarmChildController {
@@ -44,7 +53,7 @@ export interface CodexSwarmChildController {
 }
 
 export interface CanonicalAuditPort {
-  append(event: { name: "execution.codex_swarm.dispatched" | "execution.codex_swarm.dispatch_denied" | "execution.codex_swarm.cancelled" | "execution.codex_swarm.evidence_quarantined" | "execution.codex_swarm.evidence_verified"; workItemId: string; attemptId: string; reason?: string }): void;
+  append(event: { name: "execution.codex_swarm.dispatched" | "execution.codex_swarm.dispatch_denied" | "execution.codex_swarm.start_failed" | "execution.codex_swarm.cancelled" | "execution.codex_swarm.evidence_quarantined" | "execution.codex_swarm.evidence_verified"; workItemId: string; attemptId: string; reason?: string }): void;
 }
 
 export interface IndependentEvidenceVerifier {
@@ -63,7 +72,41 @@ export function assertCodexSwarmTestBackendEnabled(env: NodeJS.ProcessEnv = proc
   }
 }
 
-export class CodexSwarmCoordinator {
+export interface CodexSwarmCoordinator {
+  readonly id: typeof CODEX_SWARM_ENGINE_ID;
+  dispatch(value: unknown): Promise<{ kind: "started" | "replay" | "failed_start" } | { kind: "denied"; reason: string }>;
+  cancel(input: CancellationRequest): Promise<{ kind: "cancelled" | "replay" | "denied"; reason?: string }>;
+  ingestEvidence(value: unknown, envelope: unknown): Promise<{ status: "verified" | "quarantined"; reason?: string }>;
+}
+
+export interface CodexSwarmTestCoordinatorDependencies {
+  authority: CodexSwarmAuthorityPort;
+  reservations: DispatchReservationPort;
+  child: CodexSwarmChildController;
+  audit: CanonicalAuditPort;
+  verifier: IndependentEvidenceVerifier;
+  envelopeVerifier: ExecutionEnvelopeVerifier;
+  now?: () => Date;
+}
+
+/** The sole exported construction seam; this test-only boundary is guarded. */
+export function createCodexSwarmTestCoordinator(
+  dependencies: CodexSwarmTestCoordinatorDependencies,
+  env: NodeJS.ProcessEnv = process.env
+): CodexSwarmCoordinator {
+  assertCodexSwarmTestBackendEnabled(env);
+  return new TestOnlyCodexSwarmCoordinator(
+    dependencies.authority,
+    dependencies.reservations,
+    dependencies.child,
+    dependencies.audit,
+    dependencies.verifier,
+    dependencies.envelopeVerifier,
+    dependencies.now
+  );
+}
+
+class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
   readonly id = CODEX_SWARM_ENGINE_ID;
 
   constructor(
@@ -76,7 +119,7 @@ export class CodexSwarmCoordinator {
     private readonly now: () => Date = () => new Date()
   ) {}
 
-  async dispatch(value: unknown): Promise<{ kind: "started" | "replay" } | { kind: "denied"; reason: string }> {
+  async dispatch(value: unknown): Promise<{ kind: "started" | "replay" | "failed_start" } | { kind: "denied"; reason: string }> {
     const verified = this.envelopeVerifier.verify(value);
     if (!verified.ok) return this.denyDispatch(verified.reason);
     const envelope = verified.envelope;
@@ -86,24 +129,41 @@ export class CodexSwarmCoordinator {
     } catch (error) {
       return this.denyDispatch((error as Error).message, envelope);
     }
-    const reservation = this.reservations.reserve({ ...binding, envelopeHash: envelope.envelopeHash, idempotencyKey: envelope.idempotencyKey });
+    const tuple = { ...binding, envelopeHash: envelope.envelopeHash, idempotencyKey: envelope.idempotencyKey };
+    const reservation = this.reservations.reserve(tuple);
     if (reservation.kind === "conflict") return this.denyDispatch("codex_swarm_dispatch_idempotency_conflict", envelope);
     if (reservation.kind === "replay") return { kind: "replay" };
-    await this.child.start({ envelope });
+    try {
+      await this.child.start({ envelope });
+    } catch {
+      this.reservations.completeStart(tuple, { kind: "failed_start", reason: "codex_swarm_child_start_failed" });
+      this.audit.append({ name: "execution.codex_swarm.start_failed", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason: "codex_swarm_child_start_failed" });
+      return { kind: "failed_start" };
+    }
+    this.reservations.completeStart(tuple, { kind: "started" });
     this.audit.append({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId });
     return { kind: "started" };
   }
 
-  async cancel(input: { workItemId: string; attemptId: string; leaseId: string; fencingEpoch: number; requestId: string; authenticated: boolean }): Promise<void> {
+  async cancel(input: CancellationRequest): Promise<{ kind: "cancelled" | "replay" | "denied"; reason?: string }> {
     if (!input.authenticated || !input.requestId) throw new Error("codex_swarm_cancel_unauthenticated");
-    const authority = this.authority.read(input);
-    if (!authority || !authority.active || authority.revoked) throw new Error("codex_swarm_cancel_stale_authority");
-    this.authority.cancel(input, input.requestId);
-    await this.child.cancel(input);
+    const cancellation = this.authority.cancel(input);
+    if (cancellation.kind === "stale") return { kind: "denied", reason: "codex_swarm_cancel_stale_authority" };
+    if (cancellation.kind === "replay") return { kind: "replay" };
+    try {
+      await this.child.cancel(input);
+    } catch {
+      this.audit.append({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId, reason: "codex_swarm_child_cancel_failed" });
+      return { kind: "cancelled", reason: "codex_swarm_child_cancel_failed" };
+    }
     this.audit.append({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId });
+    return { kind: "cancelled" };
   }
 
-  async ingestEvidence(value: unknown, envelope: ExecutionEnvelope): Promise<{ status: "verified" | "quarantined"; reason?: string }> {
+  async ingestEvidence(value: unknown, envelopeValue: unknown): Promise<{ status: "verified" | "quarantined"; reason?: string }> {
+    const verifiedEnvelope = this.envelopeVerifier.verify(envelopeValue);
+    if (!verifiedEnvelope.ok) return this.quarantineUnknown("evidence_envelope_verification_failed");
+    const envelope = verifiedEnvelope.envelope;
     if (containsForbiddenLifecycleKey(value)) return this.quarantine(envelope, "evidence_forbidden_lifecycle_claim");
     const parsed = swarmExecutionEvidenceSchema.safeParse(value);
     if (!parsed.success) return this.quarantine(envelope, "evidence_schema_invalid");
@@ -117,7 +177,14 @@ export class CodexSwarmCoordinator {
     const now = this.now().getTime();
     const endedAt = Date.parse(parsed.data.endedAt);
     const startedAt = Date.parse(parsed.data.startedAt);
-    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt || now - endedAt > evidenceFreshnessMs) {
+    if (
+      !Number.isFinite(startedAt) ||
+      !Number.isFinite(endedAt) ||
+      endedAt < startedAt ||
+      startedAt - now > evidenceMaxClockSkewMs ||
+      endedAt - now > evidenceMaxClockSkewMs ||
+      now - endedAt > evidenceFreshnessMs
+    ) {
       return this.quarantine(envelope, "evidence_stale_or_chronology_invalid");
     }
     const result = await this.verifier.verify({ envelope, evidence: parsed.data });
@@ -141,6 +208,11 @@ export class CodexSwarmCoordinator {
 
   private quarantine(envelope: ExecutionEnvelope, reason: string): { status: "quarantined"; reason: string } {
     this.audit.append({ name: "execution.codex_swarm.evidence_quarantined", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason });
+    return { status: "quarantined", reason };
+  }
+
+  private quarantineUnknown(reason: string): { status: "quarantined"; reason: string } {
+    this.audit.append({ name: "execution.codex_swarm.evidence_quarantined", workItemId: "unknown", attemptId: "unknown", reason });
     return { status: "quarantined", reason };
   }
 
