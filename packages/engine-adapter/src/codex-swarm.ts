@@ -1,6 +1,7 @@
 import {
   CODEX_SWARM_ENGINE_ID,
   evidenceMatchesEnvelope,
+  executionEnvelopeSchema,
   swarmExecutionEvidenceSchema,
   type ExecutionEnvelope,
   type VerifyExecutionEnvelopeResult,
@@ -205,13 +206,8 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
   ) {}
 
   async dispatch(value: unknown): Promise<{ kind: "started" | "replay" | "failed_start" } | { kind: "denied"; reason: string }> {
-    let verified: VerifyExecutionEnvelopeResult;
-    try {
-      verified = this.envelopeVerifier.verify(value);
-    } catch {
-      return this.denyDispatch("envelope_verification_failed");
-    }
-    if (!verified.ok) return this.denyDispatch(stableEnvelopeDenialReason(verified.reason));
+    const verified = this.verifyEnvelope(value);
+    if (!verified.ok) return this.denyDispatch(verified.reason);
     const envelope = verified.envelope;
     const binding = bindingFromEnvelope(envelope);
     const authorityDenial = this.currentAuthorityDenial(envelope);
@@ -223,8 +219,10 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     } catch {
       return this.denyDispatch("codex_swarm_dispatch_reservation_failed", envelope);
     }
-    if (reservation.kind === "conflict") return this.denyDispatch("codex_swarm_dispatch_idempotency_conflict", envelope);
-    if (reservation.kind === "replay") return { kind: "replay" };
+    const reservationKind = safeReservationKind(reservation);
+    if (reservationKind === undefined) return this.denyDispatch("codex_swarm_dispatch_reservation_failed", envelope);
+    if (reservationKind === "conflict") return this.denyDispatch("codex_swarm_dispatch_idempotency_conflict", envelope);
+    if (reservationKind === "replay") return { kind: "replay" };
     if (!this.appendAudit({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
     try {
       await this.child.start({ envelope });
@@ -253,8 +251,11 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     } catch {
       return { kind: "denied", reason: "codex_swarm_cancellation_authentication_failed" };
     }
-    if (!authenticated || !sameCancellationBinding(input, authenticated)) {
-      throw new Error("codex_swarm_cancel_unauthenticated");
+    if (!authenticated) return { kind: "denied", reason: "codex_swarm_cancel_unauthenticated" };
+    try {
+      if (!sameCancellationBinding(input, authenticated)) return { kind: "denied", reason: "codex_swarm_cancel_unauthenticated" };
+    } catch {
+      return { kind: "denied", reason: "codex_swarm_cancellation_authentication_failed" };
     }
     let cancellation: ReturnType<CodexSwarmAuthorityPort["cancel"]>;
     try {
@@ -262,8 +263,10 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     } catch {
       return { kind: "denied", reason: "codex_swarm_cancel_authority_unavailable" };
     }
-    if (cancellation.kind === "stale") return { kind: "denied", reason: "codex_swarm_cancel_stale_authority" };
-    if (cancellation.kind === "replay") return { kind: "replay" };
+    const cancellationKind = safeCancellationKind(cancellation);
+    if (cancellationKind === undefined) return { kind: "denied", reason: "codex_swarm_cancel_authority_unavailable" };
+    if (cancellationKind === "stale") return { kind: "denied", reason: "codex_swarm_cancel_stale_authority" };
+    if (cancellationKind === "replay") return { kind: "replay" };
     if (!this.appendAudit({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
     try {
       await this.child.cancel(input);
@@ -275,12 +278,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
   }
 
   async ingestEvidence(value: unknown, envelopeValue: unknown): Promise<{ status: "verified" | "quarantined"; reason?: string }> {
-    let verifiedEnvelope: VerifyExecutionEnvelopeResult;
-    try {
-      verifiedEnvelope = this.envelopeVerifier.verify(envelopeValue);
-    } catch {
-      return this.quarantineUnknown("evidence_envelope_verification_failed");
-    }
+    const verifiedEnvelope = this.verifyEnvelope(envelopeValue);
     if (!verifiedEnvelope.ok) return this.quarantineUnknown("evidence_envelope_verification_failed");
     const envelope = verifiedEnvelope.envelope;
     if (containsForbiddenLifecycleKey(value)) return this.quarantine(envelope, "evidence_forbidden_lifecycle_claim");
@@ -308,7 +306,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     } catch {
       return this.quarantine(envelope, "independent_verification_failed");
     }
-    if (!result.ok) return this.quarantine(envelope, "independent_verification_failed");
+    if (!independentVerificationSucceeded(result)) return this.quarantine(envelope, "independent_verification_failed");
     if (!this.appendAudit({ name: "execution.codex_swarm.evidence_verified", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId })) return { status: "quarantined", reason: "codex_swarm_audit_unavailable" };
     return { status: "verified" };
   }
@@ -316,7 +314,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
   private currentAuthorityDenial(envelope: ExecutionEnvelope): string | undefined {
     let authority: AttemptAuthority | undefined;
     try {
-      authority = this.authority.read(bindingFromEnvelope(envelope));
+      authority = safeAuthority(this.authority.read(bindingFromEnvelope(envelope)));
     } catch {
       return "codex_swarm_authority_unavailable";
     }
@@ -337,7 +335,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     result: { kind: "started" } | { kind: "failed_start"; reason: string }
   ): "completed" | "replay" | "conflict" | undefined {
     try {
-      return this.reservations.completeStart(tuple, result).kind;
+      return safeCompletionKind(this.reservations.completeStart(tuple, result));
     } catch {
       return undefined;
     }
@@ -372,6 +370,19 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
       return false;
     }
   }
+
+  private verifyEnvelope(value: unknown): { ok: true; envelope: ExecutionEnvelope } | { ok: false; reason: string } {
+    try {
+      const result: unknown = this.envelopeVerifier.verify(value);
+      if (!result || typeof result !== "object") return { ok: false, reason: "envelope_verification_failed" };
+      const record = result as Record<string, unknown>;
+      if (record.ok !== true) return { ok: false, reason: stableEnvelopeDenialReason(typeof record.reason === "string" ? record.reason : "") };
+      const parsed = executionEnvelopeSchema.safeParse(record.envelope);
+      return parsed.success ? { ok: true, envelope: parsed.data } : { ok: false, reason: "envelope_verification_failed" };
+    } catch {
+      return { ok: false, reason: "envelope_verification_failed" };
+    }
+  }
 }
 
 function sameCancellationBinding(request: CancellationRequest, authenticated: AuthenticatedCancellationRequest): boolean {
@@ -384,6 +395,29 @@ function sameCancellationBinding(request: CancellationRequest, authenticated: Au
     typeof authenticated.principalId === "string" &&
     authenticated.principalId.length > 0
   );
+}
+
+function safeAuthority(value: unknown): AttemptAuthority | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const authority = value as AttemptAuthority;
+  if (typeof authority.workItemId !== "string" || typeof authority.attemptId !== "string" || typeof authority.leaseId !== "string" || typeof authority.fencingEpoch !== "number" || typeof authority.active !== "boolean" || typeof authority.revoked !== "boolean" || !authority.workspace || typeof authority.workspace !== "object" || typeof authority.workspace.allocationId !== "string" || typeof authority.workspace.hostPath !== "string" || typeof authority.workspace.expectedBaseSha !== "string" || typeof authority.admittedPlanHash !== "string") return undefined;
+  return { workItemId: authority.workItemId, attemptId: authority.attemptId, leaseId: authority.leaseId, fencingEpoch: authority.fencingEpoch, active: authority.active, revoked: authority.revoked, workspace: { allocationId: authority.workspace.allocationId, hostPath: authority.workspace.hostPath, expectedBaseSha: authority.workspace.expectedBaseSha }, admittedPlanHash: authority.admittedPlanHash };
+}
+
+function safeReservationKind(value: unknown): "reserved" | "replay" | "conflict" | undefined {
+  try { const kind = value && typeof value === "object" ? (value as { kind?: unknown }).kind : undefined; return kind === "reserved" || kind === "replay" || kind === "conflict" ? kind : undefined; } catch { return undefined; }
+}
+
+function safeCompletionKind(value: unknown): "completed" | "replay" | "conflict" | undefined {
+  try { const kind = value && typeof value === "object" ? (value as { kind?: unknown }).kind : undefined; return kind === "completed" || kind === "replay" || kind === "conflict" ? kind : undefined; } catch { return undefined; }
+}
+
+function safeCancellationKind(value: unknown): "cancelled" | "replay" | "stale" | undefined {
+  try { const kind = value && typeof value === "object" ? (value as { kind?: unknown }).kind : undefined; return kind === "cancelled" || kind === "replay" || kind === "stale" ? kind : undefined; } catch { return undefined; }
+}
+
+function independentVerificationSucceeded(value: unknown): boolean {
+  try { return !!value && typeof value === "object" && (value as { ok?: unknown }).ok === true; } catch { return false; }
 }
 
 function bindingFromEnvelope(envelope: ExecutionEnvelope): Pick<DispatchReservation, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch"> {

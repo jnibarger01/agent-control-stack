@@ -161,7 +161,7 @@ describe("CodexSwarmCoordinator", () => {
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
       cancellationAuthentication: { verify: () => undefined }
     }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
-    await expect(denied.cancel({ workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1" })).rejects.toThrow("unauthenticated");
+    await expect(denied.cancel({ workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1" })).resolves.toEqual({ kind: "denied", reason: "codex_swarm_cancel_unauthenticated" });
     expect(h.atomicCancel).not.toHaveBeenCalled();
     expect(h.cancels).not.toHaveBeenCalled();
   });
@@ -294,6 +294,32 @@ describe("CodexSwarmCoordinator", () => {
     expect(persisted).not.toContain("SECRET_DEPENDENCY");
     expect(persisted).not.toContain("雪");
     expect(persisted).not.toContain("😈");
+  });
+
+  it("fails closed on throwing getters and null dependency results without leaking them", async () => {
+    const hostile = "SECRET_GETTER=top-secret\r\n\u0000雪😈".repeat(20_000);
+    const throwing = (property: string) => Object.defineProperty({}, property, { get: () => { throw new Error(hostile); } });
+    const request = { workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_getter" };
+    const h = harness();
+    const make = (overrides: Partial<Parameters<typeof createCodexSwarmTestCoordinator>[0]>) => createCodexSwarmTestCoordinator({ authority: { read: () => h.authority, cancel: h.atomicCancel }, reservations: { reserve: h.reserve, completeStart: h.completeStart }, child: { start: h.starts, cancel: h.cancels }, audit: { append: h.audit }, verifier: { verify: async () => ({ ok: true }) }, envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) }, cancellationAuthentication: { verify: authenticatedCancellation }, now: () => now, ...overrides }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
+
+    await expect(make({ envelopeVerifier: { verify: () => throwing("ok") as never } }).dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "envelope_verification_failed" });
+    await expect(make({ authority: { read: () => Object.defineProperty({ ...h.authority }, "active", { get: () => { throw new Error(hostile); } }), cancel: h.atomicCancel } }).dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_authority_unavailable" });
+    await expect(make({ reservations: { reserve: () => throwing("kind") as never, completeStart: h.completeStart } }).dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_dispatch_reservation_failed" });
+    await expect(make({ cancellationAuthentication: { verify: () => throwing("workItemId") as never } }).cancel(request)).resolves.toEqual({ kind: "denied", reason: "codex_swarm_cancellation_authentication_failed" });
+    await expect(make({ verifier: { verify: async () => throwing("ok") as never } }).ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "independent_verification_failed" });
+    await expect(make({ envelopeVerifier: { verify: () => null as never } }).dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "envelope_verification_failed" });
+    await expect(make({ authority: { read: () => null as never, cancel: h.atomicCancel } }).dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_authority_inactive" });
+    await expect(make({ reservations: { reserve: () => null as never, completeStart: h.completeStart } }).dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_dispatch_reservation_failed" });
+    await expect(make({ cancellationAuthentication: { verify: () => null as never } }).cancel(request)).resolves.toEqual({ kind: "denied", reason: "codex_swarm_cancel_unauthenticated" });
+    await expect(make({ verifier: { verify: async () => null as never } }).ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "independent_verification_failed" });
+    expect(h.reserve).not.toHaveBeenCalled();
+    expect(h.starts).not.toHaveBeenCalled();
+    expect(h.atomicCancel).not.toHaveBeenCalled();
+    expect(h.cancels).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("SECRET_GETTER");
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("雪");
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("😈");
   });
 
   it("fails closed when canonical audit append throws after the durable transition", async () => {
