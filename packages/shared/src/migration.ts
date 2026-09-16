@@ -54,7 +54,12 @@ const migrationFiles = [
     name: "advisory_evidence_and_verification",
     filename: "021_advisory_evidence_and_verification.sql"
   },
-  { version: 22, name: "device_auth", filename: "022_device_auth.sql" }
+  { version: 22, name: "device_auth", filename: "022_device_auth.sql" },
+  {
+    version: 23,
+    name: "desktop_commander_runtime_capabilities",
+    filename: "023_desktop_commander_runtime_capabilities.sql"
+  }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -83,6 +88,7 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   if (!hasColumn(db, "schema_migrations", "checksum")) {
     db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
   }
+  repairExactLegacySeventeenEighteenLineage(db);
   for (const migration of controlPlaneMigrations()) {
     // The "already applied?" question is answered fresh inside this
     // migration's own transaction, after BEGIN IMMEDIATE's write lock is
@@ -134,6 +140,186 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       throw error;
     }
   }
+}
+
+type MigrationHistoryRow = {
+  version: number;
+  name: string;
+  filename: string;
+  checksum: string;
+};
+
+const legacySeventeenEighteenRows = [
+  {
+    version: 17,
+    name: "desktop_commander_execution_mode",
+    filename: "017_desktop_commander_execution_mode.sql",
+    checksum: "aedd1140975cd1a9197df06f1dbd9906b8b3ab143b4025bcc2e4ba0e758f5d43"
+  },
+  {
+    version: 18,
+    name: "advisory_evidence_and_verification",
+    filename: "018_advisory_evidence_and_verification.sql",
+    checksum: "456755abba99bae8a282b1f0544b4f0e798f57a27d4e717ec4b28ba79d4a9f7d"
+  }
+] as const;
+
+function repairExactLegacySeventeenEighteenLineage(db: SqliteLike): void {
+  const migrations = controlPlaneMigrations();
+  const rows = migrationHistoryRows(db);
+  if (!hasLegacySeventeenEighteenMarker(rows)) return;
+  assertExactLegacySeventeenEighteenHistory(rows, migrations);
+  validateLegacySeventeenEighteenSchema(db);
+
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const lockedRows = migrationHistoryRows(db);
+    assertExactLegacySeventeenEighteenHistory(lockedRows, migrations);
+    validateLegacySeventeenEighteenSchema(db);
+
+    db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version IN (17, 18)").run();
+
+    for (const migration of migrations.filter(({ version }) => version >= 17 && version <= 19)) {
+      db.exec(migrationSqlForCurrentSchema(db, migration));
+      db.prepare(
+        `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
+    }
+
+    for (const migration of migrations.filter(({ version }) => version >= 20 && version <= 21)) {
+      const legacyVersion = migration.version - 3 + 100;
+      db.prepare(
+        `UPDATE schema_migrations
+         SET version = ?, name = ?, filename = ?, checksum = ?
+         WHERE version = ?`
+      ).run(migration.version, migration.name, migration.filename, migration.checksum, legacyVersion);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // best effort; SQLite may have already closed the transaction.
+    }
+    throw error;
+  }
+}
+
+function migrationHistoryRows(db: SqliteLike): MigrationHistoryRow[] {
+  return db
+    .prepare("SELECT version, name, filename, checksum FROM schema_migrations ORDER BY version")
+    .all() as MigrationHistoryRow[];
+}
+
+function hasLegacySeventeenEighteenMarker(rows: MigrationHistoryRow[]): boolean {
+  return rows.some((row) =>
+    legacySeventeenEighteenRows.some(
+      (legacy) => row.version === legacy.version && (row.name === legacy.name || row.filename === legacy.filename)
+    )
+  );
+}
+
+function assertExactLegacySeventeenEighteenHistory(
+  rows: MigrationHistoryRow[],
+  migrations: ControlPlaneMigration[]
+): void {
+  const canonicalPrefix = migrations.filter(({ version }) => version <= 16);
+  if (rows.length !== 18) throw new Error("legacy migration lineage mismatch");
+
+  for (const migration of canonicalPrefix) {
+    const row = rows[migration.version - 1];
+    if (
+      !row ||
+      row.version !== migration.version ||
+      row.name !== migration.name ||
+      row.filename !== migration.filename ||
+      row.checksum !== migration.checksum
+    ) {
+      throw new Error("legacy migration lineage mismatch");
+    }
+  }
+
+  for (const legacy of legacySeventeenEighteenRows) {
+    const row = rows[legacy.version - 1];
+    if (
+      !row ||
+      row.version !== legacy.version ||
+      row.name !== legacy.name ||
+      row.filename !== legacy.filename ||
+      row.checksum !== legacy.checksum
+    ) {
+      throw new Error("legacy migration lineage mismatch");
+    }
+  }
+}
+
+function validateLegacySeventeenEighteenSchema(db: SqliteLike): void {
+  const requiredTables = [
+    "execution_results",
+    "attempt_results",
+    "plan_proposals",
+    "evidence_manifests",
+    "review_findings",
+    "reviewer_grants",
+    "attempt_phases",
+    "verification_requirements",
+    "verification_decisions"
+  ];
+  const requiredTriggers = [
+    "execution_results_binding_guard",
+    "execution_results_immutable_guard",
+    "execution_results_no_delete",
+    "attempt_results_binding_guard",
+    "attempt_results_cancel_race_guard",
+    "attempt_results_immutable_guard",
+    "attempt_results_no_delete",
+    "plan_proposals_no_delete",
+    "plan_proposals_immutable_guard",
+    "evidence_manifests_no_update",
+    "evidence_manifests_no_delete",
+    "review_findings_no_update",
+    "review_findings_no_delete",
+    "reviewer_grants_no_delete",
+    "reviewer_grants_transition_guard",
+    "attempt_phases_no_update",
+    "attempt_phases_no_delete",
+    "verification_requirements_no_update",
+    "verification_requirements_no_delete",
+    "verification_decisions_no_update",
+    "verification_decisions_no_delete"
+  ];
+
+  for (const table of requiredTables) {
+    if (!schemaObjectSql(db, "table", table)) throw new Error("legacy migration lineage schema validation failed");
+  }
+  for (const trigger of requiredTriggers) {
+    if (!schemaObjectSql(db, "trigger", trigger)) throw new Error("legacy migration lineage schema validation failed");
+  }
+
+  for (const table of ["execution_results", "attempt_results"]) {
+    const sql = schemaObjectSql(db, "table", table) ?? "";
+    if (!sql.includes("desktop_commander") || !sql.includes("desktop-commander-mcp")) {
+      throw new Error("legacy migration lineage schema validation failed");
+    }
+  }
+
+  if (schemaObjectSql(db, "table", "attempt_lease_approvals") || hasColumn(db, "work_items", "metadata_json")) {
+    throw new Error("legacy migration lineage schema validation failed");
+  }
+
+  const schedulerGuard = schemaObjectSql(db, "trigger", "scheduler_firings_transition_guard") ?? "";
+  if (
+    !schedulerGuard.includes("NEW.work_item_id IS NOT NULL OR julianday(NEW.claimed_at) <= julianday(OLD.claimed_at)")
+  ) {
+    throw new Error("legacy migration lineage schema validation failed");
+  }
+}
+
+function schemaObjectSql(db: SqliteLike, type: "table" | "trigger", name: string): string | null {
+  const row = db.prepare("SELECT sql FROM sqlite_master WHERE type = ? AND name = ?").get(type, name) as
+    { sql?: string | null } | undefined;
+  return typeof row?.sql === "string" ? row.sql : null;
 }
 
 function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMigration): string {
