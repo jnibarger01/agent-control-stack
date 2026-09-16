@@ -359,6 +359,21 @@ interface WorkspaceAllocationRow {
   torn_down_at: string | null;
 }
 
+interface CodexSwarmCancellationReceiptRow {
+  cancellation_id: string;
+  work_item_id: string;
+  attempt_id: string;
+  lease_id: string;
+  fencing_epoch: number;
+  canonical_intent_hash: string;
+  context_hash: string;
+  proof_binding_hash: string;
+  provider_generation: number;
+  session_epoch_binding_hash: string;
+  serialized_outcome: string;
+  outcome_hash: string;
+}
+
 interface SchedulerFiringRow {
   firing_id: string;
   schedule_id: string;
@@ -856,7 +871,61 @@ export interface SqliteWorkItemStoreOptions {
   leaseMs?: number;
   heartbeatTtlMs?: number;
   onEvent?: (event: StoredAuditEvent) => void;
+  /** Private process-local view supplied by the protected provider boundary. */
+  currentProviderBindingValidator?: CurrentProviderBindingValidator;
 }
+
+/** Internal, already-envelope-verified dispatch tuple. It is not a route input. */
+export interface CodexSwarmDispatchReservationInput {
+  workItemId: string;
+  attemptId: string;
+  leaseId: string;
+  fencingEpoch: number;
+  envelopeHash: string;
+  idempotencyKey: string;
+}
+
+export type CodexSwarmDispatchReservationResult = { kind: "reserved" } | { kind: "replay" } | { kind: "conflict" };
+
+export interface CodexSwarmProviderBinding {
+  contextHash: string;
+  proofBindingHash: string;
+  providerGeneration: number;
+  sessionEpochBindingHash: string;
+}
+
+export interface AuthenticatedCodexSwarmCancellation {
+  requestId: string;
+  workItemId: string;
+  attemptId: string;
+  leaseId: string;
+  fencingEpoch: number;
+  authenticatedPrincipalId: string;
+  canonicalIntentHash: string;
+  providerBinding: CodexSwarmProviderBinding;
+}
+
+export type CurrentProviderBindingValidation =
+  { kind: "current" } | { kind: "revoked" | "generation_invalid" | "session_stale" | "proof_invalid" | "unavailable" };
+
+export interface CurrentProviderBindingValidator {
+  validateCurrent(binding: CodexSwarmProviderBinding, now: string): CurrentProviderBindingValidation;
+}
+
+export type CancelCodexSwarmAttemptResult =
+  | { kind: "committed"; cancellationId: string; serializedOutcome: string; outcomeHash: string; replay: false }
+  | { kind: "replay"; cancellationId: string; serializedOutcome: string; outcomeHash: string; replay: true }
+  | { kind: "conflict"; reason: "cancellation_request_key_conflict" }
+  | {
+      kind: "denied";
+      reason:
+        | "codex_swarm_cancel_principal_unknown"
+        | "codex_swarm_cancel_binding_invalid"
+        | "codex_swarm_cancel_provider_revoked"
+        | "codex_swarm_cancel_session_stale"
+        | "codex_swarm_cancel_not_cancellable"
+        | "codex_swarm_audit_chain_invalid";
+    };
 
 export interface WorkItemStore {
   withTransaction<T>(operation: () => T): T;
@@ -931,6 +1000,8 @@ export interface WorkItemStore {
   isVerificationSatisfiedForAttempt(attemptId: string): { satisfied: boolean; reason: string };
   /** Most recent lease for the attempt, active or not - startup reconciliation needs the real status, not an assumption. */
   getActiveLeaseForAttempt(attemptId: string): AttemptLease | undefined;
+  reserveCodexSwarmDispatch(input: CodexSwarmDispatchReservationInput): CodexSwarmDispatchReservationResult;
+  cancelCodexSwarmAttempt(input: AuthenticatedCodexSwarmCancellation): CancelCodexSwarmAttemptResult;
   recordWorkspaceAllocation(
     input: RecordWorkspaceAllocationInput,
     options: PrivilegedTransitionOptions
@@ -1050,6 +1121,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private readonly leaseMs: number;
   private readonly heartbeatTtlMs: number;
   private readonly onEvent: (event: StoredAuditEvent) => void;
+  private readonly currentProviderBindingValidator: CurrentProviderBindingValidator | undefined;
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
   private auditChainValid = true;
@@ -1060,6 +1132,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     this.onEvent = options.onEvent ?? (() => undefined);
+    this.currentProviderBindingValidator = options.currentProviderBindingValidator;
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
@@ -2650,6 +2723,233 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(`SELECT * FROM attempt_leases WHERE attempt_id = ? ORDER BY issued_at DESC LIMIT 1`)
       .get(attemptId) as unknown as AttemptLeaseRow | undefined;
     return row ? rowToAttemptLease(row) : undefined;
+  }
+
+  /**
+   * The dispatch reservation is intentionally made from the same writer
+   * transaction that re-reads the attempt lease and current fence.  A prior
+   * read by an adapter is advisory only; it can never grant child-start
+   * authority after the lease changes.
+   */
+  reserveCodexSwarmDispatch(input: CodexSwarmDispatchReservationInput): CodexSwarmDispatchReservationResult {
+    if (
+      !isNonEmptyIdentifier(input.idempotencyKey) ||
+      !isLowercaseSha256(input.envelopeHash) ||
+      !Number.isInteger(input.fencingEpoch) ||
+      input.fencingEpoch <= 0
+    ) {
+      return { kind: "conflict" };
+    }
+    return this.write<CodexSwarmDispatchReservationResult>(() => {
+      const existing = this.db
+        .prepare(`SELECT * FROM codex_swarm_dispatch_reservations WHERE idempotency_key = ?`)
+        .get(input.idempotencyKey) as
+        | { work_item_id: string; attempt_id: string; lease_id: string; fencing_epoch: number; envelope_hash: string }
+        | undefined;
+      if (existing) {
+        const exact =
+          existing.work_item_id === input.workItemId &&
+          existing.attempt_id === input.attemptId &&
+          existing.lease_id === input.leaseId &&
+          existing.fencing_epoch === input.fencingEpoch &&
+          existing.envelope_hash === input.envelopeHash;
+        return { value: exact ? { kind: "replay" as const } : { kind: "conflict" as const }, events: [] };
+      }
+
+      const now = new Date().toISOString();
+      const current = this.db
+        .prepare(
+          `SELECT 1
+           FROM execution_attempts AS attempts
+           JOIN attempt_leases AS leases
+             ON leases.attempt_id = attempts.attempt_id
+            AND leases.work_item_id = attempts.work_item_id
+           JOIN execution_plan_admissions AS admissions
+             ON admissions.admission_id = leases.admission_id
+            AND admissions.work_item_id = attempts.work_item_id
+           JOIN workspace_allocations AS workspaces
+             ON workspaces.attempt_id = attempts.attempt_id
+            AND workspaces.lease_id = leases.lease_id
+            AND workspaces.fencing_epoch = leases.fencing_epoch
+            AND workspaces.status = 'active'
+           WHERE attempts.attempt_id = ? AND attempts.work_item_id = ?
+             AND attempts.current_fencing_epoch = ? AND attempts.status IN ('leased', 'running')
+             AND leases.lease_id = ? AND leases.fencing_epoch = ? AND leases.status = 'active'
+             AND julianday(leases.expires_at) > julianday(?)
+             AND admissions.plan_hash = attempts.plan_hash`
+        )
+        .get(input.attemptId, input.workItemId, input.fencingEpoch, input.leaseId, input.fencingEpoch, now);
+      if (!current) return { value: { kind: "conflict" as const }, events: [] };
+
+      const tupleConflict = this.db
+        .prepare(
+          `SELECT 1 FROM codex_swarm_dispatch_reservations WHERE attempt_id = ? AND lease_id = ? AND fencing_epoch = ?`
+        )
+        .get(input.attemptId, input.leaseId, input.fencingEpoch);
+      if (tupleConflict) return { value: { kind: "conflict" as const }, events: [] };
+      this.db
+        .prepare(
+          `INSERT INTO codex_swarm_dispatch_reservations
+           (idempotency_key, work_item_id, attempt_id, lease_id, fencing_epoch, envelope_hash, start_status, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?)`
+        )
+        .run(
+          input.idempotencyKey,
+          input.workItemId,
+          input.attemptId,
+          input.leaseId,
+          input.fencingEpoch,
+          input.envelopeHash,
+          now
+        );
+      return { value: { kind: "reserved" as const }, events: [] };
+    });
+  }
+
+  cancelCodexSwarmAttempt(input: AuthenticatedCodexSwarmCancellation): CancelCodexSwarmAttemptResult {
+    if (!isAuthenticatedCancellation(input)) return { kind: "denied", reason: "codex_swarm_cancel_binding_invalid" };
+    return this.write<CancelCodexSwarmAttemptResult>(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM codex_swarm_cancellation_receipts WHERE authenticated_principal_id = ? AND request_id = ?`
+        )
+        .get(input.authenticatedPrincipalId, input.requestId) as CodexSwarmCancellationReceiptRow | undefined;
+      if (existing) {
+        if (!sameCancellationReceiptBinding(existing, input)) {
+          return { value: { kind: "conflict", reason: "cancellation_request_key_conflict" }, events: [] };
+        }
+        return {
+          value: {
+            kind: "replay",
+            cancellationId: existing.cancellation_id,
+            serializedOutcome: existing.serialized_outcome,
+            outcomeHash: existing.outcome_hash,
+            replay: true
+          },
+          events: []
+        };
+      }
+
+      const now = new Date().toISOString();
+      let provider: CurrentProviderBindingValidation;
+      try {
+        provider = this.currentProviderBindingValidator?.validateCurrent(input.providerBinding, now) ?? {
+          kind: "unavailable"
+        };
+      } catch {
+        provider = { kind: "unavailable" };
+      }
+      if (provider.kind !== "current") {
+        return {
+          value: {
+            kind: "denied",
+            reason:
+              provider.kind === "session_stale"
+                ? "codex_swarm_cancel_session_stale"
+                : "codex_swarm_cancel_provider_revoked"
+          },
+          events: []
+        };
+      }
+      const actor = this.db.prepare(`SELECT 1 FROM actors WHERE id = ?`).get(input.authenticatedPrincipalId);
+      if (!actor) return { value: { kind: "denied", reason: "codex_swarm_cancel_principal_unknown" }, events: [] };
+      const current = this.db
+        .prepare(
+          `SELECT attempts.status AS attempt_status, work_items.status AS work_item_status
+           FROM execution_attempts AS attempts
+           JOIN attempt_leases AS leases ON leases.attempt_id = attempts.attempt_id AND leases.work_item_id = attempts.work_item_id
+           JOIN workspace_allocations AS workspaces ON workspaces.attempt_id = attempts.attempt_id AND workspaces.lease_id = leases.lease_id AND workspaces.fencing_epoch = leases.fencing_epoch AND workspaces.status = 'active'
+           WHERE attempts.attempt_id = ? AND attempts.work_item_id = ? AND attempts.current_fencing_epoch = ?
+             AND leases.lease_id = ? AND leases.fencing_epoch = ? AND leases.status = 'active' AND julianday(leases.expires_at) > julianday(?)`
+        )
+        .get(input.attemptId, input.workItemId, input.fencingEpoch, input.leaseId, input.fencingEpoch, now) as
+        { attempt_status: string; work_item_status: WorkItemStatus } | undefined;
+      if (!current) return { value: { kind: "denied", reason: "codex_swarm_cancel_binding_invalid" }, events: [] };
+
+      const outcomeStatus =
+        current.attempt_status === "cancelled"
+          ? "already_cancelled"
+          : current.attempt_status === "leased" || current.attempt_status === "running"
+            ? "accepted"
+            : "denied";
+      const outcome =
+        outcomeStatus === "denied"
+          ? {
+              schemaVersion: "acs.cancellation-outcome.v1",
+              status: "denied",
+              code: "cancellation_not_cancellable",
+              requestId: input.requestId
+            }
+          : {
+              schemaVersion: "acs.cancellation-outcome.v1",
+              status: outcomeStatus,
+              workItemId: input.workItemId,
+              attemptId: input.attemptId,
+              requestId: input.requestId
+            };
+      const serializedOutcome = JSON.stringify(outcome);
+      const outcomeHash = createHash("sha256").update(serializedOutcome, "utf8").digest("hex");
+      const cancellationId = createId("cancellation");
+      const receiptStatus = outcomeStatus === "denied" ? "not_cancellable" : outcomeStatus;
+      this.db
+        .prepare(
+          `INSERT INTO codex_swarm_cancellation_receipts
+           (cancellation_id, authenticated_principal_id, request_id, work_item_id, attempt_id, lease_id, fencing_epoch, canonical_intent_hash, context_hash, proof_binding_hash, provider_generation, session_epoch_binding_hash, receipt_status, external_status, external_code, serialized_outcome, outcome_hash, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          cancellationId,
+          input.authenticatedPrincipalId,
+          input.requestId,
+          input.workItemId,
+          input.attemptId,
+          input.leaseId,
+          input.fencingEpoch,
+          input.canonicalIntentHash,
+          input.providerBinding.contextHash,
+          input.providerBinding.proofBindingHash,
+          input.providerBinding.providerGeneration,
+          input.providerBinding.sessionEpochBindingHash,
+          receiptStatus,
+          outcomeStatus === "denied" ? "denied" : outcomeStatus,
+          outcomeStatus === "denied" ? "cancellation_not_cancellable" : null,
+          serializedOutcome,
+          outcomeHash,
+          now
+        );
+      if (outcomeStatus === "accepted") {
+        const attemptUpdated = this.db
+          .prepare(
+            `UPDATE execution_attempts SET status = 'cancellation_requested', cancellation_requested_at = ?, updated_at = ? WHERE attempt_id = ? AND status IN ('leased', 'running') AND current_fencing_epoch = ?`
+          )
+          .run(now, now, input.attemptId, input.fencingEpoch);
+        const leaseUpdated = this.db
+          .prepare(
+            `UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND attempt_id = ? AND fencing_epoch = ? AND status = 'active'`
+          )
+          .run(now, input.leaseId, input.attemptId, input.fencingEpoch);
+        if (attemptUpdated.changes !== 1 || leaseUpdated.changes !== 1)
+          throw new ControlStackError("attempt_conflict", "attempt changed during cancellation");
+        if (current.work_item_status === "running")
+          this.db
+            .prepare(`UPDATE work_items SET status = 'cancelling', updated_at = ? WHERE id = ? AND status = 'running'`)
+            .run(now, input.workItemId);
+        this.db
+          .prepare(
+            `UPDATE codex_swarm_dispatch_reservations SET start_status = 'cancelled', completed_at = ? WHERE attempt_id = ? AND lease_id = ? AND fencing_epoch = ? AND start_status = 'reserved'`
+          )
+          .run(now, input.attemptId, input.leaseId, input.fencingEpoch);
+        this.db
+          .prepare(
+            `INSERT INTO codex_swarm_cancellation_supervision (cancellation_id, attempt_id, lease_id, fencing_epoch, supervisor_state) VALUES (?, ?, ?, ?, 'pending')`
+          )
+          .run(cancellationId, input.attemptId, input.leaseId, input.fencingEpoch);
+      }
+      return {
+        value: { kind: "committed", cancellationId, serializedOutcome, outcomeHash, replay: false },
+        events: []
+      };
+    });
   }
 
   recordWorkspaceAllocation(
@@ -5434,6 +5734,49 @@ function rowToWorkItem(row: WorkItemRow): WorkItem {
     createdAt: row.created_at,
     updatedAt: row.updated_at
   });
+}
+
+function isNonEmptyIdentifier(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value) && value.length <= 128;
+}
+
+function isLowercaseSha256(value: string): boolean {
+  return /^[a-f0-9]{64}$/u.test(value);
+}
+
+function isAuthenticatedCancellation(value: AuthenticatedCodexSwarmCancellation): boolean {
+  return (
+    isNonEmptyIdentifier(value.requestId) &&
+    isNonEmptyIdentifier(value.workItemId) &&
+    isNonEmptyIdentifier(value.attemptId) &&
+    isNonEmptyIdentifier(value.leaseId) &&
+    isNonEmptyIdentifier(value.authenticatedPrincipalId) &&
+    Number.isInteger(value.fencingEpoch) &&
+    value.fencingEpoch > 0 &&
+    isLowercaseSha256(value.canonicalIntentHash) &&
+    isLowercaseSha256(value.providerBinding.contextHash) &&
+    isLowercaseSha256(value.providerBinding.proofBindingHash) &&
+    isLowercaseSha256(value.providerBinding.sessionEpochBindingHash) &&
+    Number.isInteger(value.providerBinding.providerGeneration) &&
+    value.providerBinding.providerGeneration > 0
+  );
+}
+
+function sameCancellationReceiptBinding(
+  row: CodexSwarmCancellationReceiptRow,
+  input: AuthenticatedCodexSwarmCancellation
+): boolean {
+  return (
+    row.work_item_id === input.workItemId &&
+    row.attempt_id === input.attemptId &&
+    row.lease_id === input.leaseId &&
+    row.fencing_epoch === input.fencingEpoch &&
+    row.canonical_intent_hash === input.canonicalIntentHash &&
+    row.context_hash === input.providerBinding.contextHash &&
+    row.proof_binding_hash === input.providerBinding.proofBindingHash &&
+    row.provider_generation === input.providerBinding.providerGeneration &&
+    row.session_epoch_binding_hash === input.providerBinding.sessionEpochBindingHash
+  );
 }
 
 function rowToEvent(row: EventRow): StoredAuditEvent {
