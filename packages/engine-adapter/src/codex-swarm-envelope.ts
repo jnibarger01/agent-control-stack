@@ -33,6 +33,8 @@ const hash64 = z.string().regex(/^[a-f0-9]{64}$/u);
 const timestampSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u).max(64);
 const gitRevisionSchema = z.string().min(7).max(256);
 export const CODEX_SWARM_ENVELOPE_MAX_TTL_MS = 30_000;
+/** Maximum acceptable issuer/verifier clock divergence for v1 envelopes. */
+export const CODEX_SWARM_ENVELOPE_MAX_CLOCK_SKEW_MS = 5_000;
 
 /** `none`, or `scoped-egress:<sha256 of the sorted "host:port" allowlist>`. */
 export const codexSwarmNetworkPolicySchema = z
@@ -333,6 +335,9 @@ export function verifyExecutionEnvelope(
   }
   if (expiresAt <= now) {
     return { ok: false, reason: "envelope_expired" };
+  }
+  if (issuedAt - now > CODEX_SWARM_ENVELOPE_MAX_CLOCK_SKEW_MS) {
+    return { ok: false, reason: "envelope_issued_at_in_future" };
   }
 
   if (options.expectedAttemptId !== undefined && envelope.acsAttemptId !== options.expectedAttemptId) {

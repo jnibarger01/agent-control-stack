@@ -126,6 +126,16 @@ describe("buildExecutionEnvelope / verifyExecutionEnvelope", () => {
     ).toEqual({ ok: false, reason: "envelope_expired" });
   });
 
+  it("rejects an envelope issued beyond the bounded verifier clock skew", () => {
+    const envelope = buildExecutionEnvelope(
+      bodyInput({ issuedAt: "2026-09-03T00:00:06.000Z", expiresAt: "2026-09-03T00:00:30.000Z" }),
+      SECRET
+    );
+    expect(
+      verifyExecutionEnvelope(envelope, SECRET, { now: () => new Date("2026-09-03T00:00:00.000Z") })
+    ).toEqual({ ok: false, reason: "envelope_issued_at_in_future" });
+  });
+
   it("rejects an attempt-id mismatch when an expectation is supplied", () => {
     const envelope = buildExecutionEnvelope(bodyInput(), SECRET);
     expect(

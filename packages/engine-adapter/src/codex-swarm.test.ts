@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { buildExecutionEnvelope, type SwarmExecutionEvidence } from "./codex-swarm-envelope.js";
+import { buildExecutionEnvelope, verifyExecutionEnvelope, type SwarmExecutionEvidence } from "./codex-swarm-envelope.js";
 import { assertCodexSwarmTestBackendEnabled, CodexSwarmCoordinator, type AttemptAuthority, type DispatchReservation } from "./codex-swarm.js";
 
 const secret = "s".repeat(48);
@@ -42,6 +42,7 @@ function harness(mode: "reserved" | "replay" | "conflict" = "reserved") {
     { start: starts, cancel: cancels },
     { append: audit },
     { verify: vi.fn(async () => ({ ok: true })) },
+    { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
     () => now
   );
   return { coordinator, authority, starts, cancels, audit };
@@ -62,14 +63,29 @@ describe("CodexSwarmCoordinator", () => {
     await expect(replay.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "replay" });
     expect(replay.starts).not.toHaveBeenCalled();
     const conflict = harness("conflict");
-    await expect(conflict.coordinator.dispatch(envelope())).rejects.toThrow("idempotency_conflict");
+    await expect(conflict.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_dispatch_idempotency_conflict" });
     expect(conflict.starts).not.toHaveBeenCalled();
+  });
+
+  it("denies a malformed runtime envelope before reservation or child start and audits only a stable redacted reason", async () => {
+    const h = harness();
+    await expect(h.coordinator.dispatch({ acsWorkItemId: "wrk_1", acsAttemptId: "attempt_1" } as never)).resolves.toEqual({
+      kind: "denied",
+      reason: "envelope_schema_invalid"
+    });
+    expect(h.starts).not.toHaveBeenCalled();
+    expect(h.audit).toHaveBeenCalledWith({
+      name: "execution.codex_swarm.dispatch_denied",
+      workItemId: "unknown",
+      attemptId: "unknown",
+      reason: "envelope_schema_invalid"
+    });
   });
 
   it("rejects stale authority and unauthenticated cancellation before touching the child", async () => {
     const h = harness();
     h.authority.revoked = true;
-    await expect(h.coordinator.dispatch(envelope())).rejects.toThrow("authority_inactive");
+    await expect(h.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_authority_inactive" });
     await expect(h.coordinator.cancel({ workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1", authenticated: false })).rejects.toThrow("unauthenticated");
     expect(h.cancels).not.toHaveBeenCalled();
   });
@@ -80,7 +96,9 @@ describe("CodexSwarmCoordinator", () => {
     await expect(h.coordinator.ingestEvidence(nested, envelope())).resolves.toEqual({ status: "quarantined", reason: "evidence_forbidden_lifecycle_claim" });
     const verifierFail = new CodexSwarmCoordinator(
       { read: () => h.authority, cancel: vi.fn() }, { reserve: () => ({ kind: "reserved" }) }, { start: vi.fn(), cancel: vi.fn() }, { append: vi.fn() },
-      { verify: async () => ({ ok: false, reason: "verifier_missing" }) }, () => now
+      { verify: async () => ({ ok: false, reason: "verifier_missing" }) },
+      { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
+      () => now
     );
     await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "verifier_missing" });
   });

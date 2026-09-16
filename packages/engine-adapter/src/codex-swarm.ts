@@ -3,6 +3,7 @@ import {
   evidenceMatchesEnvelope,
   swarmExecutionEvidenceSchema,
   type ExecutionEnvelope,
+  type VerifyExecutionEnvelopeResult,
   type SwarmExecutionEvidence
 } from "./codex-swarm-envelope.js";
 
@@ -43,11 +44,16 @@ export interface CodexSwarmChildController {
 }
 
 export interface CanonicalAuditPort {
-  append(event: { name: "execution.codex_swarm.dispatched" | "execution.codex_swarm.cancelled" | "execution.codex_swarm.evidence_quarantined" | "execution.codex_swarm.evidence_verified"; workItemId: string; attemptId: string; reason?: string }): void;
+  append(event: { name: "execution.codex_swarm.dispatched" | "execution.codex_swarm.dispatch_denied" | "execution.codex_swarm.cancelled" | "execution.codex_swarm.evidence_quarantined" | "execution.codex_swarm.evidence_verified"; workItemId: string; attemptId: string; reason?: string }): void;
 }
 
 export interface IndependentEvidenceVerifier {
   verify(input: { envelope: ExecutionEnvelope; evidence: SwarmExecutionEvidence }): Promise<{ ok: boolean; reason?: string }>;
+}
+
+/** Injected by the ACS attempt-secret provider; no unsigned default exists. */
+export interface ExecutionEnvelopeVerifier {
+  verify(value: unknown): VerifyExecutionEnvelopeResult;
 }
 
 export function assertCodexSwarmTestBackendEnabled(env: NodeJS.ProcessEnv = process.env): void {
@@ -66,14 +72,22 @@ export class CodexSwarmCoordinator {
     private readonly child: CodexSwarmChildController,
     private readonly audit: CanonicalAuditPort,
     private readonly verifier: IndependentEvidenceVerifier,
+    private readonly envelopeVerifier: ExecutionEnvelopeVerifier,
     private readonly now: () => Date = () => new Date()
   ) {}
 
-  async dispatch(envelope: ExecutionEnvelope): Promise<{ kind: "started" | "replay" }> {
+  async dispatch(value: unknown): Promise<{ kind: "started" | "replay" } | { kind: "denied"; reason: string }> {
+    const verified = this.envelopeVerifier.verify(value);
+    if (!verified.ok) return this.denyDispatch(verified.reason);
+    const envelope = verified.envelope;
     const binding = bindingFromEnvelope(envelope);
-    this.assertCurrent(envelope);
+    try {
+      this.assertCurrent(envelope);
+    } catch (error) {
+      return this.denyDispatch((error as Error).message, envelope);
+    }
     const reservation = this.reservations.reserve({ ...binding, envelopeHash: envelope.envelopeHash, idempotencyKey: envelope.idempotencyKey });
-    if (reservation.kind === "conflict") throw new Error("codex_swarm_dispatch_idempotency_conflict");
+    if (reservation.kind === "conflict") return this.denyDispatch("codex_swarm_dispatch_idempotency_conflict", envelope);
     if (reservation.kind === "replay") return { kind: "replay" };
     await this.child.start({ envelope });
     this.audit.append({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId });
@@ -128,6 +142,17 @@ export class CodexSwarmCoordinator {
   private quarantine(envelope: ExecutionEnvelope, reason: string): { status: "quarantined"; reason: string } {
     this.audit.append({ name: "execution.codex_swarm.evidence_quarantined", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason });
     return { status: "quarantined", reason };
+  }
+
+  private denyDispatch(reason: string, envelope?: ExecutionEnvelope): { kind: "denied"; reason: string } {
+    const stableReason = reason.split(":", 1)[0] || "envelope_verification_failed";
+    this.audit.append({
+      name: "execution.codex_swarm.dispatch_denied",
+      workItemId: envelope?.acsWorkItemId ?? "unknown",
+      attemptId: envelope?.acsAttemptId ?? "unknown",
+      reason: stableReason
+    });
+    return { kind: "denied", reason: stableReason };
   }
 }
 
