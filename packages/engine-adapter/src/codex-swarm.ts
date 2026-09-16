@@ -32,12 +32,20 @@ export interface AttemptAuthority extends Pick<DispatchReservation, "workItemId"
 export interface CodexSwarmAuthorityPort {
   read(binding: Pick<DispatchReservation, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch">): AttemptAuthority | undefined;
   /** Atomically authenticate, fence, revoke, and persist this request-id result. */
-  cancel(input: CancellationRequest): { kind: "cancelled" | "replay" | "stale" };
+  cancel(input: AuthenticatedCancellationRequest): { kind: "cancelled" | "replay" | "stale" };
 }
 
 export interface CancellationRequest extends Pick<DispatchReservation, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch"> {
   requestId: string;
-  authenticated: boolean;
+}
+
+/** Produced by the ACS authentication boundary, never supplied by the caller. */
+export interface AuthenticatedCancellationRequest extends CancellationRequest {
+  principalId: string;
+}
+
+export interface CancellationAuthenticationVerifier {
+  verify(input: CancellationRequest): AuthenticatedCancellationRequest | undefined;
 }
 
 export interface DispatchReservationPort {
@@ -86,6 +94,7 @@ export interface CodexSwarmTestCoordinatorDependencies {
   audit: CanonicalAuditPort;
   verifier: IndependentEvidenceVerifier;
   envelopeVerifier: ExecutionEnvelopeVerifier;
+  cancellationAuthentication: CancellationAuthenticationVerifier;
   now?: () => Date;
 }
 
@@ -102,6 +111,7 @@ export function createCodexSwarmTestCoordinator(
     dependencies.audit,
     dependencies.verifier,
     dependencies.envelopeVerifier,
+    dependencies.cancellationAuthentication,
     dependencies.now
   );
 }
@@ -116,6 +126,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     private readonly audit: CanonicalAuditPort,
     private readonly verifier: IndependentEvidenceVerifier,
     private readonly envelopeVerifier: ExecutionEnvelopeVerifier,
+    private readonly cancellationAuthentication: CancellationAuthenticationVerifier,
     private readonly now: () => Date = () => new Date()
   ) {}
 
@@ -146,8 +157,12 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
   }
 
   async cancel(input: CancellationRequest): Promise<{ kind: "cancelled" | "replay" | "denied"; reason?: string }> {
-    if (!input.authenticated || !input.requestId) throw new Error("codex_swarm_cancel_unauthenticated");
-    const cancellation = this.authority.cancel(input);
+    if (!input.requestId) throw new Error("codex_swarm_cancel_unauthenticated");
+    const authenticated = this.cancellationAuthentication.verify(input);
+    if (!authenticated || !sameCancellationBinding(input, authenticated)) {
+      throw new Error("codex_swarm_cancel_unauthenticated");
+    }
+    const cancellation = this.authority.cancel(authenticated);
     if (cancellation.kind === "stale") return { kind: "denied", reason: "codex_swarm_cancel_stale_authority" };
     if (cancellation.kind === "replay") return { kind: "replay" };
     try {
@@ -188,7 +203,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
       return this.quarantine(envelope, "evidence_stale_or_chronology_invalid");
     }
     const result = await this.verifier.verify({ envelope, evidence: parsed.data });
-    if (!result.ok) return this.quarantine(envelope, result.reason ?? "independent_verification_failed");
+    if (!result.ok) return this.quarantine(envelope, "independent_verification_failed");
     this.audit.append({ name: "execution.codex_swarm.evidence_verified", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId });
     return { status: "verified" };
   }
@@ -226,6 +241,18 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     });
     return { kind: "denied", reason: stableReason };
   }
+}
+
+function sameCancellationBinding(request: CancellationRequest, authenticated: AuthenticatedCancellationRequest): boolean {
+  return (
+    request.workItemId === authenticated.workItemId &&
+    request.attemptId === authenticated.attemptId &&
+    request.leaseId === authenticated.leaseId &&
+    request.fencingEpoch === authenticated.fencingEpoch &&
+    request.requestId === authenticated.requestId &&
+    typeof authenticated.principalId === "string" &&
+    authenticated.principalId.length > 0
+  );
 }
 
 function bindingFromEnvelope(envelope: ExecutionEnvelope): Pick<DispatchReservation, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch"> {

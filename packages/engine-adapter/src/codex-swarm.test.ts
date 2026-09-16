@@ -44,7 +44,8 @@ function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = 
       reservations: { reserve: vi.fn((_tuple: DispatchReservation) => ({ kind: mode })), completeStart },
       child: { start: starts, cancel: cancels }, audit: { append: audit },
       verifier: { verify: vi.fn(async () => ({ ok: true })) },
-      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) }, now: () => now
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
+      cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }, now: () => now
     },
     { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" }
   );
@@ -63,7 +64,8 @@ describe("CodexSwarmCoordinator", () => {
     expect(() => createCodexSwarmTestCoordinator({
       authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) }, reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
       child: { start: async () => undefined, cancel: async () => undefined }, audit: { append: () => undefined }, verifier: { verify: async () => ({ ok: true }) },
-      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) }
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
+      cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }
     }, { NODE_ENV: "production", ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" })).toThrow(/disabled in production/);
   });
 
@@ -95,11 +97,18 @@ describe("CodexSwarmCoordinator", () => {
     });
   });
 
-  it("rejects stale authority and unauthenticated cancellation before touching the child", async () => {
+  it("rejects stale authority and an unauthenticated cancellation before touching the child", async () => {
     const h = harness();
     h.authority.revoked = true;
     await expect(h.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_authority_inactive" });
-    await expect(h.coordinator.cancel({ workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1", authenticated: false })).rejects.toThrow("unauthenticated");
+    const denied = createCodexSwarmTestCoordinator({
+      authority: { read: () => h.authority, cancel: h.atomicCancel }, reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
+      child: { start: h.starts, cancel: h.cancels }, audit: { append: h.audit }, verifier: { verify: async () => ({ ok: true }) },
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
+      cancellationAuthentication: { verify: () => undefined }
+    }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
+    await expect(denied.cancel({ workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1" })).rejects.toThrow("unauthenticated");
+    expect(h.atomicCancel).not.toHaveBeenCalled();
     expect(h.cancels).not.toHaveBeenCalled();
   });
 
@@ -112,9 +121,35 @@ describe("CodexSwarmCoordinator", () => {
       reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
       child: { start: vi.fn(), cancel: vi.fn() }, audit: { append: vi.fn() },
       verifier: { verify: async () => ({ ok: false, reason: "verifier_missing" }) },
-      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) }, now: () => now
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
+      cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }, now: () => now
     }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
-    await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "verifier_missing" });
+    await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "independent_verification_failed" });
+  });
+
+  it("never forwards hostile verifier output into canonical audit", async () => {
+    const h = harness();
+    const hostile = "SECRET_TOKEN=top-secret\n\u0000".repeat(20_000);
+    const verifierFail = createCodexSwarmTestCoordinator({
+      authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) },
+      reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
+      child: { start: vi.fn(), cancel: vi.fn() }, audit: { append: h.audit },
+      verifier: { verify: async () => ({ ok: false, reason: hostile }) },
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
+      cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }, now: () => now
+    }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
+
+    await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({
+      status: "quarantined",
+      reason: "independent_verification_failed"
+    });
+    expect(h.audit).toHaveBeenCalledWith({
+      name: "execution.codex_swarm.evidence_quarantined",
+      workItemId: "wrk_1",
+      attemptId: "attempt_1",
+      reason: "independent_verification_failed"
+    });
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("SECRET_TOKEN");
   });
 
   it("persists failed starts and makes cancellation atomic, replay-safe, and auditable", async () => {
@@ -124,7 +159,7 @@ describe("CodexSwarmCoordinator", () => {
     expect(startFailure.audit).toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.start_failed" }));
 
     const h = harness();
-    const request = { workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1", authenticated: true };
+    const request = { workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1" };
     await expect(h.coordinator.cancel(request)).resolves.toEqual({ kind: "cancelled" });
     expect(h.atomicCancel).toHaveBeenCalledTimes(1);
     h.atomicCancel.mockReturnValue({ kind: "replay" });
