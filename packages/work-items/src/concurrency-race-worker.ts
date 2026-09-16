@@ -1,5 +1,5 @@
 import { workerData, parentPort } from "node:worker_threads";
-import { SqliteWorkItemStore } from "./store.js";
+import { type AuthenticatedCodexSwarmCancellation, SqliteWorkItemStore } from "./store.js";
 
 type Race =
   | { kind: "claim"; dbPath: string; workerId: string }
@@ -7,6 +7,7 @@ type Race =
   | { kind: "result"; dbPath: string; input: unknown }
   | { kind: "retry"; dbPath: string; workItemId: string; actor: string }
   | { kind: "cancel"; dbPath: string; workItemId: string; actor: string }
+  | { kind: "codex_cancel"; dbPath: string; cancellation: AuthenticatedCodexSwarmCancellation }
   | { kind: "mixed"; dbPath: string; workItemId: string; actor: string; op: "retry" | "cancel" }
   | { kind: "lease"; dbPath: string; input: any; workerId: string };
 
@@ -17,7 +18,11 @@ Atomics.notify(barrier, 0);
 while (Atomics.load(barrier, 0) < 2) Atomics.wait(barrier, 0, 1);
 
 try {
-  const store = new SqliteWorkItemStore(input.dbPath);
+  const store = new SqliteWorkItemStore(input.dbPath, {
+    ...(input.kind === "codex_cancel"
+      ? { currentProviderBindingValidator: { validateCurrent: () => ({ kind: "current" as const }) } }
+      : {})
+  });
   let value: unknown;
   if (input.kind === "claim")
     value = store.claimNextApprovedWorkItem(input.workerId, { allowLegacyClaimForTests: true });
@@ -27,6 +32,7 @@ try {
   else if (input.kind === "result") value = store.submitWorkResult(input.input);
   else if (input.kind === "retry" || (input.kind === "mixed" && input.op === "retry"))
     value = store.retryWorkItem(input.workItemId, { actor: input.actor, reason: "concurrent retry" });
+  else if (input.kind === "codex_cancel") value = store.cancelCodexSwarmAttempt(input.cancellation);
   else
     value = store.cancelWorkItem(
       input.workItemId,

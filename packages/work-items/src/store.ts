@@ -2858,6 +2858,36 @@ export class SqliteWorkItemStore implements WorkItemStore {
           events: []
         };
       }
+      // A reservation authorizes at most one in-flight child-start attempt;
+      // it does not preserve authority after the lease is expired, replaced,
+      // fenced, or cancelled. Re-read every mutable authority component while
+      // holding the writer transaction before completing the durable outcome.
+      const now = new Date().toISOString();
+      const current = this.db
+        .prepare(
+          `SELECT 1
+           FROM execution_attempts AS attempts
+           JOIN attempt_leases AS leases
+             ON leases.attempt_id = attempts.attempt_id
+            AND leases.work_item_id = attempts.work_item_id
+           JOIN workspace_allocations AS workspaces
+             ON workspaces.attempt_id = attempts.attempt_id
+            AND workspaces.lease_id = leases.lease_id
+            AND workspaces.fencing_epoch = leases.fencing_epoch
+            AND workspaces.status = 'active'
+           WHERE attempts.attempt_id = ? AND attempts.work_item_id = ?
+             AND attempts.current_fencing_epoch = ? AND attempts.status IN ('leased', 'running')
+             AND leases.lease_id = ? AND leases.fencing_epoch = ? AND leases.status = 'active'
+             AND julianday(leases.expires_at) > julianday(?)
+             AND NOT EXISTS (
+               SELECT 1 FROM codex_swarm_cancellation_receipts AS cancellations
+               WHERE cancellations.attempt_id = attempts.attempt_id
+                 AND cancellations.lease_id = leases.lease_id
+                 AND cancellations.fencing_epoch = leases.fencing_epoch
+             )`
+        )
+        .get(input.attemptId, input.workItemId, input.fencingEpoch, input.leaseId, input.fencingEpoch, now);
+      if (!current) return { value: { kind: "conflict" }, events: [] };
       const startCode = result.kind === "failed_start" ? "codex_swarm_child_start_failed" : null;
       const updated = this.db
         .prepare(
@@ -2917,6 +2947,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
       const actor = this.db.prepare(`SELECT 1 FROM actors WHERE id = ?`).get(input.authenticatedPrincipalId);
       if (!actor) return { value: { kind: "denied", reason: "codex_swarm_cancel_principal_unknown" }, events: [] };
+      // The authenticated principal is authorized only as the immutable
+      // requester subject for this work item. Keep this predicate in the
+      // tuple read that is immediately followed by the receipt and lifecycle
+      // writes, so a current provider binding cannot authorize cancellation
+      // of another principal's attempt.
       const current = this.db
         .prepare(
           `SELECT attempts.status AS attempt_status, work_items.status AS work_item_status
@@ -2924,11 +2959,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
            JOIN work_items ON work_items.id = attempts.work_item_id
            JOIN attempt_leases AS leases ON leases.attempt_id = attempts.attempt_id AND leases.work_item_id = attempts.work_item_id
            JOIN workspace_allocations AS workspaces ON workspaces.attempt_id = attempts.attempt_id AND workspaces.lease_id = leases.lease_id AND workspaces.fencing_epoch = leases.fencing_epoch AND workspaces.status = 'active'
-           WHERE attempts.attempt_id = ? AND attempts.work_item_id = ? AND attempts.current_fencing_epoch = ?
+           WHERE attempts.attempt_id = ? AND attempts.work_item_id = ? AND work_items.requester_subject = ? AND attempts.current_fencing_epoch = ?
              AND leases.lease_id = ? AND leases.fencing_epoch = ? AND leases.status = 'active' AND julianday(leases.expires_at) > julianday(?)`
         )
-        .get(input.attemptId, input.workItemId, input.fencingEpoch, input.leaseId, input.fencingEpoch, now) as
-        { attempt_status: string; work_item_status: WorkItemStatus } | undefined;
+        .get(
+          input.attemptId,
+          input.workItemId,
+          input.authenticatedPrincipalId,
+          input.fencingEpoch,
+          input.leaseId,
+          input.fencingEpoch,
+          now
+        ) as { attempt_status: string; work_item_status: WorkItemStatus } | undefined;
       if (!current) return { value: { kind: "denied", reason: "codex_swarm_cancel_binding_invalid" }, events: [] };
 
       const outcomeStatus =
