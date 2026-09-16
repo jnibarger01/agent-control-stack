@@ -29,8 +29,10 @@ const identifierSchema = z
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
 const hash64 = z.string().regex(/^[a-f0-9]{64}$/u);
-const timestampSchema = z.string().datetime({ offset: true }).max(64);
+/** Frozen v1 wire format: UTC, millisecond precision, no offset aliases. */
+const timestampSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u).max(64);
 const gitRevisionSchema = z.string().min(7).max(256);
+export const CODEX_SWARM_ENVELOPE_MAX_TTL_MS = 30_000;
 
 /** `none`, or `scoped-egress:<sha256 of the sorted "host:port" allowlist>`. */
 export const codexSwarmNetworkPolicySchema = z
@@ -49,11 +51,20 @@ export const codexSwarmNetworkPolicySchema = z
 const commandSchema = z.array(z.string().min(1).max(8_192)).min(1).max(64);
 
 function expiresAfterIssued(value: { issuedAt: string; expiresAt: string }, context: z.RefinementCtx): void {
-  if (Date.parse(value.expiresAt) <= Date.parse(value.issuedAt)) {
+  const issuedAt = Date.parse(value.issuedAt);
+  const expiresAt = Date.parse(value.expiresAt);
+  if (!Number.isFinite(issuedAt) || !Number.isFinite(expiresAt) || expiresAt <= issuedAt) {
     context.addIssue({
       code: "custom",
       path: ["expiresAt"],
       message: "expiresAt must be after issuedAt"
+    });
+  }
+  if (Number.isFinite(issuedAt) && Number.isFinite(expiresAt) && expiresAt - issuedAt > CODEX_SWARM_ENVELOPE_MAX_TTL_MS) {
+    context.addIssue({
+      code: "custom",
+      path: ["expiresAt"],
+      message: `envelope lifetime must not exceed ${CODEX_SWARM_ENVELOPE_MAX_TTL_MS}ms`
     });
   }
 }
@@ -185,10 +196,12 @@ export const swarmExecutionEvidenceSchema = z
 
     // Echoed authority context - ACS rejects the result if any of these do not
     // match the envelope it issued.
+    acsWorkItemId: identifierSchema,
     acsAttemptId: identifierSchema,
     envelopeHash: hash64,
     leaseId: identifierSchema,
     fencingEpoch: z.number().int().positive(),
+    auditCorrelationId: identifierSchema,
 
     exitStatus: z.enum(["completed", "timeout", "cancelled", "spawn_error"]),
     startedAt: timestampSchema,
@@ -313,7 +326,12 @@ export function verifyExecutionEnvelope(
   }
 
   const now = (options.now ?? (() => new Date()))().getTime();
-  if (Date.parse(envelope.expiresAt) <= now) {
+  const issuedAt = Date.parse(envelope.issuedAt);
+  const expiresAt = Date.parse(envelope.expiresAt);
+  if (expiresAt - issuedAt > CODEX_SWARM_ENVELOPE_MAX_TTL_MS) {
+    return { ok: false, reason: "envelope_ttl_exceeded" };
+  }
+  if (expiresAt <= now) {
     return { ok: false, reason: "envelope_expired" };
   }
 
@@ -332,9 +350,11 @@ export function evidenceMatchesEnvelope(
   evidence: SwarmExecutionEvidence,
   envelope: ExecutionEnvelope
 ): { ok: true } | { ok: false; reason: string } {
+  if (evidence.acsWorkItemId !== envelope.acsWorkItemId) return { ok: false, reason: "evidence_work_item_mismatch" };
   if (evidence.acsAttemptId !== envelope.acsAttemptId) return { ok: false, reason: "evidence_attempt_mismatch" };
   if (evidence.envelopeHash !== envelope.envelopeHash) return { ok: false, reason: "evidence_envelope_hash_mismatch" };
   if (evidence.leaseId !== envelope.leaseId) return { ok: false, reason: "evidence_lease_mismatch" };
   if (evidence.fencingEpoch !== envelope.fencingEpoch) return { ok: false, reason: "evidence_fencing_mismatch" };
+  if (evidence.auditCorrelationId !== envelope.auditCorrelationId) return { ok: false, reason: "evidence_audit_correlation_mismatch" };
   return { ok: true };
 }

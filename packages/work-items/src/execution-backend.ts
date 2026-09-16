@@ -22,6 +22,21 @@ export function resolveExecutionBackend(env: NodeJS.ProcessEnv = process.env): E
   if (raw === "desktop_commander") {
     return "desktop_commander";
   }
+  if (raw === "codex_swarm") {
+    if (env.NODE_ENV === "production") {
+      throw new ControlStackError("execution_backend_disabled", "codex_swarm backend is disabled in production");
+    }
+    if (env.ACS_CODEX_SWARM_TEST_PROVIDER !== "in_memory") {
+      throw new ControlStackError(
+        "execution_backend_provider_missing",
+        "codex_swarm backend requires an injected in_memory test provider"
+      );
+    }
+    throw new ControlStackError(
+      "execution_backend_disabled",
+      "codex_swarm backend is test-only and must be invoked through the ACS coordinator"
+    );
+  }
   throw new ControlStackError(
     "execution_backend_invalid",
     `unknown ACS_EXECUTION_BACKEND: ${raw} (expected one of ${EXECUTION_BACKENDS.join(", ")})`
