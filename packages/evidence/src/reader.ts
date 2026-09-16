@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { lstatSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { redactValue } from "@agent-control-stack/shared";
@@ -40,12 +40,11 @@ export interface EvidenceReaderContext {
   store: EvidenceStoreReader;
 }
 
-function containWithin(root: string, requested: string): string {
+function containWithin(canonicalRoot: string, requested: string): string {
   if (typeof requested !== "string" || requested.length === 0 || requested.includes("\0")) {
     throw new Error("evidence_read_path_invalid");
   }
   if (requested.split(/[/\\]/).includes("..")) throw new Error("evidence_read_path_escape");
-  const canonicalRoot = realpathSync(root);
   const absolute = isAbsolute(requested) ? resolve(requested) : resolve(canonicalRoot, requested);
   let canonical: string;
   try {
@@ -62,15 +61,33 @@ function containWithin(root: string, requested: string): string {
   return canonical;
 }
 
+function containedChild(canonicalRoot: string, candidate: string): string | undefined {
+  try {
+    // Do not follow a symlink while walking. A nested symlink could otherwise
+    // turn a contained directory traversal into an external enumeration.
+    if (lstatSync(candidate).isSymbolicLink()) return undefined;
+    const canonical = realpathSync(candidate);
+    if (canonical !== canonicalRoot && !canonical.startsWith(`${canonicalRoot}${sep}`)) return undefined;
+    return canonical;
+  } catch {
+    // A broken, removed, or otherwise unreadable child is not evidence.
+    return undefined;
+  }
+}
+
 /**
  * Attempt-scoped, read-only evidence reader. Implements exactly
  * `EvidenceReadSurface` — every method observes, none acts.
  */
 export class EvidenceReader implements EvidenceReadSurface {
   private readonly gitPath: string;
+  private readonly workspaceRoot: string;
 
   constructor(private readonly ctx: EvidenceReaderContext) {
     this.gitPath = ctx.gitPath ?? "git";
+    // Capture the canonical allocation once so a workspace-path alias cannot
+    // be swapped to a different root after this reader is constructed.
+    this.workspaceRoot = realpathSync(ctx.workspaceHostPath);
   }
 
   work_item_info = async (): Promise<unknown> =>
@@ -83,7 +100,7 @@ export class EvidenceReader implements EvidenceReadSurface {
     redactValue(this.ctx.store.getWorkspaceAllocationSummary(this.ctx.attemptId));
 
   read_file = async (input: ReadFileInput): Promise<unknown> => {
-    const path = containWithin(this.ctx.workspaceHostPath, input.path);
+    const path = containWithin(this.workspaceRoot, input.path);
     const stat = statSync(path);
     if (!stat.isFile()) throw new Error("evidence_read_not_a_file");
     const buffer = readFileSync(path);
@@ -103,13 +120,14 @@ export class EvidenceReader implements EvidenceReadSurface {
   };
 
   list_directory = async (input: ListDirectoryInput): Promise<unknown> => {
-    const root = containWithin(this.ctx.workspaceHostPath, input.path);
+    const root = containWithin(this.workspaceRoot, input.path);
     const depth = Math.min(Math.max(1, input.depth ?? 1), 4);
     const entries: Array<{ path: string; kind: string; sizeBytes: number }> = [];
     const walk = (dir: string, level: number): void => {
       for (const name of readdirSync(dir).sort()) {
         if (name === ".git") continue;
-        const full = join(dir, name);
+        const full = containedChild(this.workspaceRoot, join(dir, name));
+        if (!full) continue;
         let s;
         try {
           s = statSync(full);
@@ -117,7 +135,7 @@ export class EvidenceReader implements EvidenceReadSurface {
           continue;
         }
         entries.push({
-          path: full.slice(realpathSync(this.ctx.workspaceHostPath).length + 1),
+          path: full.slice(this.workspaceRoot.length + 1),
           kind: s.isDirectory() ? "directory" : s.isFile() ? "file" : "other",
           sizeBytes: s.size
         });
@@ -130,15 +148,16 @@ export class EvidenceReader implements EvidenceReadSurface {
   };
 
   search_workspace = async (input: SearchWorkspaceInput): Promise<unknown> => {
-    const base = input.path ? containWithin(this.ctx.workspaceHostPath, input.path) : this.ctx.workspaceHostPath;
+    const base = input.path ? containWithin(this.workspaceRoot, input.path) : this.workspaceRoot;
     const max = Math.min(Math.max(1, input.maxResults ?? 100), 500);
     const needle = input.query.toLowerCase();
     const matches: Array<{ path: string; line: number; text: string }> = [];
-    const root = realpathSync(this.ctx.workspaceHostPath);
+    const root = this.workspaceRoot;
     const walk = (dir: string): void => {
       for (const name of readdirSync(dir).sort()) {
         if (name === ".git" || name === "node_modules" || name === "dist") continue;
-        const full = join(dir, name);
+        const full = containedChild(root, join(dir, name));
+        if (!full) continue;
         let s;
         try {
           s = statSync(full);
@@ -218,7 +237,7 @@ export class EvidenceReader implements EvidenceReadSurface {
   private async git(args: string[]): Promise<string> {
     try {
       const { stdout } = await execFileAsync(this.gitPath, args, {
-        cwd: this.ctx.workspaceHostPath,
+        cwd: this.workspaceRoot,
         maxBuffer: 16 * 1024 * 1024
       });
       return stdout;

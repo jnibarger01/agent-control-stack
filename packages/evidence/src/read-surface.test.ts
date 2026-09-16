@@ -1,4 +1,12 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -104,5 +112,56 @@ describe("EvidenceReader — instance exposes exactly the read capabilities", ()
     expect(search.matches.some((m) => m.text.includes("TODO"))).toBe(true);
     const list = (await reader.list_directory({ path: "src" })) as { entries: Array<{ path: string }> };
     expect(list.entries.some((e) => e.path.endsWith("a.ts"))).toBe(true);
+  });
+
+  it("does not follow nested links or a swapped workspace-root alias", async () => {
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "acs-ereader-outside-")));
+    const aliasParent = realpathSync(mkdtempSync(join(tmpdir(), "acs-ereader-alias-")));
+    const nested = join(dir, "nested");
+    const outsideName = "outside-secret.txt";
+    const outsideFile = join(outside, outsideName);
+    writeFileSync(outsideFile, "OUTSIDE TODO secret\n");
+    mkdirSync(nested);
+    symlinkSync(outside, join(nested, "directory-link"), "dir");
+    symlinkSync(outsideFile, join(nested, "file-link"), "file");
+    symlinkSync(join(nested, "missing-target"), join(nested, "broken-link"), "file");
+    symlinkSync("directory-link", join(nested, "link-chain"), "dir");
+
+    try {
+      const listed = (await reader.list_directory({ path: "nested", depth: 4 })) as {
+        entries: Array<{ path: string }>;
+      };
+      expect(listed.entries).toEqual([]);
+
+      const searched = (await reader.search_workspace({ query: "TODO" })) as {
+        matches: Array<{ path: string; text: string }>;
+      };
+      expect(searched.matches.some((match) => match.path.includes(outsideName))).toBe(false);
+      expect(searched.matches.some((match) => match.text.includes("OUTSIDE"))).toBe(false);
+      expect(searched.matches.some((match) => match.path.endsWith("src/a.ts"))).toBe(true);
+      await expect(reader.read_file({ path: "nested/file-link" })).rejects.toThrow(/outside/);
+      await expect(reader.list_directory({ path: "../nested" })).rejects.toThrow(/escape/);
+      await expect(reader.search_workspace({ query: "TODO", path: "../nested" })).rejects.toThrow(/escape/);
+
+      const alias = join(aliasParent, "workspace");
+      symlinkSync(dir, alias, "dir");
+      const aliasReader = new EvidenceReader({
+        workItemId: "wrk_1",
+        attemptId: "attempt_1",
+        workspaceHostPath: alias,
+        store: fakeStore
+      });
+      unlinkSync(alias);
+      symlinkSync(outside, alias, "dir");
+      const afterSwap = (await aliasReader.search_workspace({ query: "TODO" })) as {
+        matches: Array<{ path: string; text: string }>;
+      };
+      expect(afterSwap.matches.some((match) => match.path.includes(outsideName))).toBe(false);
+      expect(afterSwap.matches.some((match) => match.text.includes("OUTSIDE"))).toBe(false);
+      expect(afterSwap.matches.some((match) => match.path.endsWith("src/a.ts"))).toBe(true);
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+      rmSync(aliasParent, { recursive: true, force: true });
+    }
   });
 });
