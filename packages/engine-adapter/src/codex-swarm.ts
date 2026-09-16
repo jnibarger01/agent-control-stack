@@ -216,6 +216,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     const binding = bindingFromEnvelope(envelope);
     const authorityDenial = this.currentAuthorityDenial(envelope);
     if (authorityDenial) return this.denyDispatch(authorityDenial, envelope);
+    if (!this.appendAudit({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
     const tuple = { ...binding, envelopeHash: envelope.envelopeHash, idempotencyKey: envelope.idempotencyKey };
     let reservation: ReturnType<DispatchReservationPort["reserve"]>;
     try {
@@ -233,7 +234,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
       if (completion === "conflict") {
         return this.denyDispatch("codex_swarm_start_outcome_conflict", envelope);
       }
-      this.audit.append({ name: "execution.codex_swarm.start_failed", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason: "codex_swarm_child_start_failed" });
+      this.appendAudit({ name: "execution.codex_swarm.start_failed", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason: "codex_swarm_child_start_failed" });
       return { kind: "failed_start" };
     }
     const completion = this.completeStart(tuple, { kind: "started" });
@@ -241,31 +242,45 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     if (completion === "conflict") {
       return this.denyDispatch("codex_swarm_start_outcome_conflict", envelope);
     }
-    this.audit.append({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId });
     return { kind: "started" };
   }
 
   async cancel(input: CancellationRequest): Promise<{ kind: "cancelled" | "replay" | "denied"; reason?: string }> {
     if (!input.requestId) throw new Error("codex_swarm_cancel_unauthenticated");
-    const authenticated = this.cancellationAuthentication.verify(input);
+    let authenticated: AuthenticatedCancellationRequest | undefined;
+    try {
+      authenticated = this.cancellationAuthentication.verify(input);
+    } catch {
+      return { kind: "denied", reason: "codex_swarm_cancellation_authentication_failed" };
+    }
     if (!authenticated || !sameCancellationBinding(input, authenticated)) {
       throw new Error("codex_swarm_cancel_unauthenticated");
     }
-    const cancellation = this.authority.cancel(authenticated);
+    if (!this.appendAudit({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
+    let cancellation: ReturnType<CodexSwarmAuthorityPort["cancel"]>;
+    try {
+      cancellation = this.authority.cancel(authenticated);
+    } catch {
+      return { kind: "denied", reason: "codex_swarm_cancel_authority_unavailable" };
+    }
     if (cancellation.kind === "stale") return { kind: "denied", reason: "codex_swarm_cancel_stale_authority" };
     if (cancellation.kind === "replay") return { kind: "replay" };
     try {
       await this.child.cancel(input);
     } catch {
-      this.audit.append({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId, reason: "codex_swarm_child_cancel_failed" });
+      this.appendAudit({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId, reason: "codex_swarm_child_cancel_failed" });
       return { kind: "cancelled", reason: "codex_swarm_child_cancel_failed" };
     }
-    this.audit.append({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId });
     return { kind: "cancelled" };
   }
 
   async ingestEvidence(value: unknown, envelopeValue: unknown): Promise<{ status: "verified" | "quarantined"; reason?: string }> {
-    const verifiedEnvelope = this.envelopeVerifier.verify(envelopeValue);
+    let verifiedEnvelope: VerifyExecutionEnvelopeResult;
+    try {
+      verifiedEnvelope = this.envelopeVerifier.verify(envelopeValue);
+    } catch {
+      return this.quarantineUnknown("evidence_envelope_verification_failed");
+    }
     if (!verifiedEnvelope.ok) return this.quarantineUnknown("evidence_envelope_verification_failed");
     const envelope = verifiedEnvelope.envelope;
     if (containsForbiddenLifecycleKey(value)) return this.quarantine(envelope, "evidence_forbidden_lifecycle_claim");
@@ -287,9 +302,14 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     ) {
       return this.quarantine(envelope, "evidence_stale_or_chronology_invalid");
     }
-    const result = await this.verifier.verify({ envelope, evidence: parsed.data });
+    let result: { ok: boolean; reason?: string };
+    try {
+      result = await this.verifier.verify({ envelope, evidence: parsed.data });
+    } catch {
+      return this.quarantine(envelope, "independent_verification_failed");
+    }
     if (!result.ok) return this.quarantine(envelope, "independent_verification_failed");
-    this.audit.append({ name: "execution.codex_swarm.evidence_verified", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId });
+    if (!this.appendAudit({ name: "execution.codex_swarm.evidence_verified", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId })) return { status: "quarantined", reason: "codex_swarm_audit_unavailable" };
     return { status: "verified" };
   }
 
@@ -324,24 +344,33 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
   }
 
   private quarantine(envelope: ExecutionEnvelope, reason: string): { status: "quarantined"; reason: string } {
-    this.audit.append({ name: "execution.codex_swarm.evidence_quarantined", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason });
+    if (!this.appendAudit({ name: "execution.codex_swarm.evidence_quarantined", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason })) return { status: "quarantined", reason: "codex_swarm_audit_unavailable" };
     return { status: "quarantined", reason };
   }
 
   private quarantineUnknown(reason: string): { status: "quarantined"; reason: string } {
-    this.audit.append({ name: "execution.codex_swarm.evidence_quarantined", workItemId: "unknown", attemptId: "unknown", reason });
+    if (!this.appendAudit({ name: "execution.codex_swarm.evidence_quarantined", workItemId: "unknown", attemptId: "unknown", reason })) return { status: "quarantined", reason: "codex_swarm_audit_unavailable" };
     return { status: "quarantined", reason };
   }
 
   private denyDispatch(reason: string, envelope?: ExecutionEnvelope): { kind: "denied"; reason: string } {
     const stableReason = reason.split(":", 1)[0] || "envelope_verification_failed";
-    this.audit.append({
+    if (!this.appendAudit({
       name: "execution.codex_swarm.dispatch_denied",
       workItemId: envelope?.acsWorkItemId ?? "unknown",
       attemptId: envelope?.acsAttemptId ?? "unknown",
       reason: stableReason
-    });
+    })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
     return { kind: "denied", reason: stableReason };
+  }
+
+  private appendAudit(event: Parameters<CanonicalAuditPort["append"]>[0]): boolean {
+    try {
+      this.audit.append(event);
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
