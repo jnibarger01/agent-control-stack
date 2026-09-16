@@ -1008,6 +1008,10 @@ export interface WorkItemStore {
     input: CodexSwarmDispatchReservationInput,
     result: CodexSwarmDispatchStartResult
   ): CompleteCodexSwarmDispatchStartResult;
+  /** Records an externally-started child whose completion outcome could not be persisted. */
+  interruptCodexSwarmDispatch(input: CodexSwarmDispatchReservationInput): {
+    kind: "interrupted" | "replay" | "conflict";
+  };
   cancelCodexSwarmAttempt(input: AuthenticatedCodexSwarmCancellation): CancelCodexSwarmAttemptResult;
   recordWorkspaceAllocation(
     input: RecordWorkspaceAllocationInput,
@@ -2809,7 +2813,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
           input.envelopeHash,
           now
         );
-      return { value: { kind: "reserved" as const }, events: [] };
+      const event = this.appendAuditEvent(codexSwarmLifecycleEvent("execution.codex_swarm.dispatch_reserved", input));
+      return { value: { kind: "reserved" as const }, events: [event] };
     });
   }
 
@@ -2896,7 +2901,53 @@ export class SqliteWorkItemStore implements WorkItemStore {
            WHERE idempotency_key = ? AND start_status = 'reserved'`
         )
         .run(expectedStatus, startCode, new Date().toISOString(), input.idempotencyKey);
-      return { value: { kind: updated.changes === 1 ? "completed" : "conflict" }, events: [] };
+      if (updated.changes !== 1) return { value: { kind: "conflict" }, events: [] };
+      const event = this.appendAuditEvent(
+        codexSwarmLifecycleEvent(
+          result.kind === "started" ? "execution.codex_swarm.started" : "execution.codex_swarm.start_failed",
+          input,
+          result.kind === "failed_start" ? "codex_swarm_child_start_failed" : undefined
+        )
+      );
+      return { value: { kind: "completed" }, events: [event] };
+    });
+  }
+
+  interruptCodexSwarmDispatch(input: CodexSwarmDispatchReservationInput): {
+    kind: "interrupted" | "replay" | "conflict";
+  } {
+    if (!isNonEmptyIdentifier(input.idempotencyKey) || !isLowercaseSha256(input.envelopeHash))
+      return { kind: "conflict" };
+    return this.write<{ kind: "interrupted" | "replay" | "conflict" }>(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT work_item_id, attempt_id, lease_id, fencing_epoch, envelope_hash, start_status FROM codex_swarm_dispatch_reservations WHERE idempotency_key = ?`
+        )
+        .get(input.idempotencyKey) as
+        | {
+            work_item_id: string;
+            attempt_id: string;
+            lease_id: string;
+            fencing_epoch: number;
+            envelope_hash: string;
+            start_status: string;
+          }
+        | undefined;
+      if (!existing || !sameDispatchReservationBinding(existing, input))
+        return { value: { kind: "conflict" as const }, events: [] };
+      if (existing.start_status === "interrupted") return { value: { kind: "replay" as const }, events: [] };
+      if (existing.start_status !== "reserved") return { value: { kind: "conflict" as const }, events: [] };
+      const now = new Date().toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE codex_swarm_dispatch_reservations SET start_status = 'interrupted', start_code = 'codex_swarm_start_completion_interrupted', completed_at = ? WHERE idempotency_key = ? AND start_status = 'reserved'`
+        )
+        .run(now, input.idempotencyKey);
+      if (updated.changes !== 1) return { value: { kind: "conflict" as const }, events: [] };
+      const event = this.appendAuditEvent(
+        codexSwarmLifecycleEvent("execution.codex_swarm.interrupted", input, "codex_swarm_start_completion_interrupted")
+      );
+      return { value: { kind: "interrupted" as const }, events: [event] };
     });
   }
 
@@ -3052,9 +3103,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
           )
           .run(cancellationId, input.attemptId, input.leaseId, input.fencingEpoch);
       }
+      const event = this.appendAuditEvent(
+        codexSwarmLifecycleEvent(
+          outcomeStatus === "accepted"
+            ? "execution.codex_swarm.cancel_authorized"
+            : "execution.codex_swarm.cancel_stale",
+          input
+        )
+      );
       return {
         value: { kind: "committed", cancellationId, serializedOutcome, outcomeHash, replay: false },
-        events: []
+        events: [event]
       };
     });
   }
@@ -5849,6 +5908,35 @@ function isNonEmptyIdentifier(value: string): boolean {
 
 function isLowercaseSha256(value: string): boolean {
   return /^[a-f0-9]{64}$/u.test(value);
+}
+
+function codexSwarmLifecycleEvent(
+  name:
+    | "execution.codex_swarm.dispatch_reserved"
+    | "execution.codex_swarm.started"
+    | "execution.codex_swarm.start_failed"
+    | "execution.codex_swarm.cancel_authorized"
+    | "execution.codex_swarm.cancel_stale"
+    | "execution.codex_swarm.interrupted",
+  input: Pick<CodexSwarmDispatchReservationInput, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch">,
+  reason?: string
+): AuditEvent {
+  return createEvent(
+    name,
+    {
+      workItemId: input.workItemId,
+      attemptId: input.attemptId,
+      leaseId: input.leaseId,
+      fencingEpoch: input.fencingEpoch,
+      ...(reason ? { reason } : {})
+    },
+    {
+      "work_item.id": input.workItemId,
+      "attempt.id": input.attemptId,
+      "lease.id": input.leaseId,
+      "lease.fencing_epoch": input.fencingEpoch
+    }
+  );
 }
 
 function sameDispatchReservationBinding(

@@ -43,34 +43,92 @@ async function concurrentlyCancel(dbPath: string, cancellation: object) {
 }
 
 function databaseOf(store: SqliteWorkItemStore) {
-  return (store as unknown as {
-    db: { prepare(query: string): { get(...params: unknown[]): unknown; run(...params: unknown[]): unknown } };
-  }).db;
+  return (
+    store as unknown as {
+      db: { prepare(query: string): { get(...params: unknown[]): unknown; run(...params: unknown[]): unknown } };
+    }
+  ).db;
 }
 
 function createCancellableAttempt(store: SqliteWorkItemStore, options: { ttlMs?: number } = {}) {
   store.registerActor({ id: "actor-user", actorType: "HUMAN", displayName: "requester" });
   store.registerActor({ id: "actor-attacker", actorType: "HUMAN", displayName: "attacker" });
-  const workItem = store.create({ title: "durable cancellation", requester: "user", requesterSubject: "actor-user", intent: "test", target: { cwd: "/repo", files: ["src/index.ts"] }, requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"], write: false } }], risk: "low" });
-  const plan = store.createExecutionPlan({ workItemId: workItem.id, definition: defaultExecutionPlanForWorkItem(workItem), createdByActorId: "actor-user" });
-  const admission = store.admitExecutionPlan({ workItemId: workItem.id, planHash: plan.planHash, policyVersion: "acs.policy.v1", policyDecisionHash: hash("d"), requiresApproval: false, admittedByActorId: "policy-gate" }, { via: "policy_gate" });
-  const attempt = store.createAttempt({ workItemId: workItem.id, planHash: plan.planHash, inputHash: hash("e") }, { via: "domain_service" });
-  const lease = store.leaseAttempt({ attemptId: attempt.attemptId, workItemId: workItem.id, admissionId: admission.admissionId, workerId: "worker-1", leaseToken: "x".repeat(32), policyVersion: "acs.policy.v1", policyDecisionHash: hash("d"), ttlMs: options.ttlMs ?? 60_000 }, { via: "domain_service" });
-  store.recordWorkspaceAllocation({ allocationId: "workspace-cancel-1", workItemId: workItem.id, attemptId: attempt.attemptId, leaseId: lease.leaseId, workerId: lease.workerId, fencingEpoch: lease.fencingEpoch, hostPath: "/isolated/workspace-cancel-1", branch: "acs/test", baseRef: "HEAD" }, { via: "domain_service" });
+  const workItem = store.create({
+    title: "durable cancellation",
+    requester: "user",
+    requesterSubject: "actor-user",
+    intent: "test",
+    target: { cwd: "/repo", files: ["src/index.ts"] },
+    requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"], write: false } }],
+    risk: "low"
+  });
+  const plan = store.createExecutionPlan({
+    workItemId: workItem.id,
+    definition: defaultExecutionPlanForWorkItem(workItem),
+    createdByActorId: "actor-user"
+  });
+  const admission = store.admitExecutionPlan(
+    {
+      workItemId: workItem.id,
+      planHash: plan.planHash,
+      policyVersion: "acs.policy.v1",
+      policyDecisionHash: hash("d"),
+      requiresApproval: false,
+      admittedByActorId: "policy-gate"
+    },
+    { via: "policy_gate" }
+  );
+  const attempt = store.createAttempt(
+    { workItemId: workItem.id, planHash: plan.planHash, inputHash: hash("e") },
+    { via: "domain_service" }
+  );
+  const lease = store.leaseAttempt(
+    {
+      attemptId: attempt.attemptId,
+      workItemId: workItem.id,
+      admissionId: admission.admissionId,
+      workerId: "worker-1",
+      leaseToken: "x".repeat(32),
+      policyVersion: "acs.policy.v1",
+      policyDecisionHash: hash("d"),
+      ttlMs: options.ttlMs ?? 60_000
+    },
+    { via: "domain_service" }
+  );
+  store.recordWorkspaceAllocation(
+    {
+      allocationId: "workspace-cancel-1",
+      workItemId: workItem.id,
+      attemptId: attempt.attemptId,
+      leaseId: lease.leaseId,
+      workerId: lease.workerId,
+      fencingEpoch: lease.fencingEpoch,
+      hostPath: "/isolated/workspace-cancel-1",
+      branch: "acs/test",
+      baseRef: "HEAD"
+    },
+    { via: "domain_service" }
+  );
   return { workItem, attempt, lease };
 }
 
-function cancellationSideEffectCounts(database: { prepare(query: string): { get(...params: unknown[]): unknown; run(...params: unknown[]): unknown } }): {
+function cancellationSideEffectCounts(database: {
+  prepare(query: string): { get(...params: unknown[]): unknown; run(...params: unknown[]): unknown };
+}): {
   receipts: number;
   supervision: number;
 } {
   return {
-    receipts: (database.prepare("SELECT COUNT(*) AS count FROM codex_swarm_cancellation_receipts").get() as {
-      count: number;
-    }).count,
-    supervision: (database.prepare("SELECT COUNT(*) AS count FROM codex_swarm_cancellation_supervision").get() as {
-      count: number;
-    }).count
+    receipts: (
+      database.prepare("SELECT COUNT(*) AS count FROM codex_swarm_cancellation_receipts").get() as {
+        count: number;
+      }
+    ).count,
+    supervision: (
+      database.prepare("SELECT COUNT(*) AS count FROM codex_swarm_cancellation_supervision").get() as {
+        count: number;
+      }
+    ).count
   };
 }
 
@@ -79,7 +137,11 @@ describe("Codex Swarm durable authority migration", () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-codex-swarm-authority-"));
     try {
       expect(controlPlaneMigrations()).toContainEqual(
-        expect.objectContaining({ version: 23, name: "codex_swarm_authoritative_store", filename: "023_codex_swarm_authoritative_store.sql" })
+        expect.objectContaining({
+          version: 23,
+          name: "codex_swarm_authoritative_store",
+          filename: "023_codex_swarm_authoritative_store.sql"
+        })
       );
       const store = new SqliteWorkItemStore(join(directory, "control.db"));
       expect(store.health().checks.migrations).toEqual({ ok: true });
@@ -92,17 +154,157 @@ describe("Codex Swarm durable authority migration", () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-codex-swarm-authority-"));
     try {
       const store = new SqliteWorkItemStore(join(directory, "control.db"));
-      const workItem = store.create({ title: "durable authority", requester: "user", requesterSubject: "actor-user", intent: "test", target: { cwd: "/repo", files: ["src/index.ts"] }, requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"], write: false } }], risk: "low" });
-      const plan = store.createExecutionPlan({ workItemId: workItem.id, definition: defaultExecutionPlanForWorkItem(workItem), createdByActorId: "actor-user" });
-      const admission = store.admitExecutionPlan({ workItemId: workItem.id, planHash: plan.planHash, policyVersion: "acs.policy.v1", policyDecisionHash: hash("a"), requiresApproval: false, admittedByActorId: "policy-gate" }, { via: "policy_gate" });
-      const attempt = store.createAttempt({ workItemId: workItem.id, planHash: plan.planHash, inputHash: hash("b") }, { via: "domain_service" });
-      const lease = store.leaseAttempt({ attemptId: attempt.attemptId, workItemId: workItem.id, admissionId: admission.admissionId, workerId: "worker-1", leaseToken: "x".repeat(32), policyVersion: "acs.policy.v1", policyDecisionHash: hash("a"), ttlMs: 60_000 }, { via: "domain_service" });
-      store.recordWorkspaceAllocation({ allocationId: "workspace-1", workItemId: workItem.id, attemptId: attempt.attemptId, leaseId: lease.leaseId, workerId: lease.workerId, fencingEpoch: lease.fencingEpoch, hostPath: "/isolated/workspace-1", branch: "acs/test", baseRef: "HEAD" }, { via: "domain_service" });
-      const authority = store as unknown as { reserveCodexSwarmDispatch(input: { workItemId: string; attemptId: string; leaseId: string; fencingEpoch: number; envelopeHash: string; idempotencyKey: string }): { kind: string } };
-      const input = { workItemId: workItem.id, attemptId: attempt.attemptId, leaseId: lease.leaseId, fencingEpoch: lease.fencingEpoch, envelopeHash: hash("c"), idempotencyKey: "dispatch-1" };
+      const workItem = store.create({
+        title: "durable authority",
+        requester: "user",
+        requesterSubject: "actor-user",
+        intent: "test",
+        target: { cwd: "/repo", files: ["src/index.ts"] },
+        requestedActions: [
+          { kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"], write: false } }
+        ],
+        risk: "low"
+      });
+      const plan = store.createExecutionPlan({
+        workItemId: workItem.id,
+        definition: defaultExecutionPlanForWorkItem(workItem),
+        createdByActorId: "actor-user"
+      });
+      const admission = store.admitExecutionPlan(
+        {
+          workItemId: workItem.id,
+          planHash: plan.planHash,
+          policyVersion: "acs.policy.v1",
+          policyDecisionHash: hash("a"),
+          requiresApproval: false,
+          admittedByActorId: "policy-gate"
+        },
+        { via: "policy_gate" }
+      );
+      const attempt = store.createAttempt(
+        { workItemId: workItem.id, planHash: plan.planHash, inputHash: hash("b") },
+        { via: "domain_service" }
+      );
+      const lease = store.leaseAttempt(
+        {
+          attemptId: attempt.attemptId,
+          workItemId: workItem.id,
+          admissionId: admission.admissionId,
+          workerId: "worker-1",
+          leaseToken: "x".repeat(32),
+          policyVersion: "acs.policy.v1",
+          policyDecisionHash: hash("a"),
+          ttlMs: 60_000
+        },
+        { via: "domain_service" }
+      );
+      store.recordWorkspaceAllocation(
+        {
+          allocationId: "workspace-1",
+          workItemId: workItem.id,
+          attemptId: attempt.attemptId,
+          leaseId: lease.leaseId,
+          workerId: lease.workerId,
+          fencingEpoch: lease.fencingEpoch,
+          hostPath: "/isolated/workspace-1",
+          branch: "acs/test",
+          baseRef: "HEAD"
+        },
+        { via: "domain_service" }
+      );
+      const authority = store as unknown as {
+        reserveCodexSwarmDispatch(input: {
+          workItemId: string;
+          attemptId: string;
+          leaseId: string;
+          fencingEpoch: number;
+          envelopeHash: string;
+          idempotencyKey: string;
+        }): { kind: string };
+      };
+      const input = {
+        workItemId: workItem.id,
+        attemptId: attempt.attemptId,
+        leaseId: lease.leaseId,
+        fencingEpoch: lease.fencingEpoch,
+        envelopeHash: hash("c"),
+        idempotencyKey: "dispatch-1"
+      };
       expect(authority.reserveCodexSwarmDispatch(input)).toEqual({ kind: "reserved" });
       expect(authority.reserveCodexSwarmDispatch(input)).toEqual({ kind: "replay" });
       expect(authority.reserveCodexSwarmDispatch({ ...input, envelopeHash: hash("d") })).toEqual({ kind: "conflict" });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("rolls back the reservation when its canonical lifecycle audit append fails", () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-codex-swarm-audit-rollback-"));
+    try {
+      const store = new SqliteWorkItemStore(join(directory, "control.db"));
+      const { workItem, attempt, lease } = createCancellableAttempt(store);
+      const input = {
+        workItemId: workItem.id,
+        attemptId: attempt.attemptId,
+        leaseId: lease.leaseId,
+        fencingEpoch: lease.fencingEpoch,
+        envelopeHash: hash("c"),
+        idempotencyKey: "dispatch-audit-rollback"
+      };
+      const unsafeStore = store as unknown as { appendAuditEvent: () => never };
+      const original = unsafeStore.appendAuditEvent;
+      unsafeStore.appendAuditEvent = () => {
+        throw new Error("injected audit append failure");
+      };
+      expect(() => store.reserveCodexSwarmDispatch(input)).toThrow("injected audit append failure");
+      expect(
+        databaseOf(store)
+          .prepare("SELECT COUNT(*) AS count FROM codex_swarm_dispatch_reservations WHERE idempotency_key = ?")
+          .get(input.idempotencyKey)
+      ).toEqual({ count: 0 });
+      unsafeStore.appendAuditEvent = original;
+      expect(store.reserveCodexSwarmDispatch(input)).toEqual({ kind: "reserved" });
+      expect(
+        store.readEvents().filter((event) => event.name === "execution.codex_swarm.dispatch_reserved")
+      ).toHaveLength(1);
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
+  it("rolls back cancellation receipt, revocation, and supervision when its audit append fails", () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-codex-swarm-cancel-audit-rollback-"));
+    try {
+      const store = new SqliteWorkItemStore(join(directory, "control.db"), {
+        currentProviderBindingValidator: { validateCurrent: () => ({ kind: "current" }) }
+      });
+      const { workItem, attempt, lease } = createCancellableAttempt(store);
+      const cancellation = {
+        requestId: "cancel-audit-rollback",
+        workItemId: workItem.id,
+        attemptId: attempt.attemptId,
+        leaseId: lease.leaseId,
+        fencingEpoch: lease.fencingEpoch,
+        authenticatedPrincipalId: "actor-user",
+        canonicalIntentHash: hash("f"),
+        providerBinding
+      };
+      const unsafeStore = store as unknown as { appendAuditEvent: () => never };
+      const original = unsafeStore.appendAuditEvent;
+      unsafeStore.appendAuditEvent = () => {
+        throw new Error("injected audit append failure");
+      };
+      expect(() => store.cancelCodexSwarmAttempt(cancellation)).toThrow("injected audit append failure");
+      expect(cancellationSideEffectCounts(databaseOf(store))).toEqual({ receipts: 0, supervision: 0 });
+      expect(store.getAttempt(attempt.attemptId)?.status).toBe("leased");
+      expect(
+        (
+          databaseOf(store).prepare("SELECT status FROM attempt_leases WHERE lease_id = ?").get(lease.leaseId) as {
+            status: string;
+          }
+        ).status
+      ).toBe("active");
+      unsafeStore.appendAuditEvent = original;
     } finally {
       rmSync(directory, { force: true, recursive: true });
     }
@@ -122,7 +324,12 @@ describe("Codex Swarm durable authority migration", () => {
           fencingEpoch: 1,
           authenticatedPrincipalId: "actor-canceller",
           canonicalIntentHash: hash("a"),
-          providerBinding: { contextHash: hash("b"), proofBindingHash: hash("c"), providerGeneration: 1, sessionEpochBindingHash: hash("d") }
+          providerBinding: {
+            contextHash: hash("b"),
+            proofBindingHash: hash("c"),
+            providerGeneration: 1,
+            sessionEpochBindingHash: hash("d")
+          }
         })
       ).toEqual({ kind: "denied", reason: "codex_swarm_cancel_provider_revoked" });
     } finally {
@@ -141,7 +348,11 @@ describe("Codex Swarm durable authority migration", () => {
       const before = {
         workItemStatus: store.get(workItem.id)?.status,
         attemptStatus: store.getAttempt(attempt.attemptId)?.status,
-        leaseStatus: (database.prepare("SELECT status FROM attempt_leases WHERE lease_id = ?").get(lease.leaseId) as { status: string }).status
+        leaseStatus: (
+          database.prepare("SELECT status FROM attempt_leases WHERE lease_id = ?").get(lease.leaseId) as {
+            status: string;
+          }
+        ).status
       };
 
       expect(
@@ -159,7 +370,11 @@ describe("Codex Swarm durable authority migration", () => {
       expect({
         workItemStatus: store.get(workItem.id)?.status,
         attemptStatus: store.getAttempt(attempt.attemptId)?.status,
-        leaseStatus: (database.prepare("SELECT status FROM attempt_leases WHERE lease_id = ?").get(lease.leaseId) as { status: string }).status
+        leaseStatus: (
+          database.prepare("SELECT status FROM attempt_leases WHERE lease_id = ?").get(lease.leaseId) as {
+            status: string;
+          }
+        ).status
       }).toEqual(before);
       expect(cancellationSideEffectCounts(database)).toEqual({ receipts: 0, supervision: 0 });
     } finally {
@@ -223,11 +438,16 @@ describe("Codex Swarm durable authority migration", () => {
       };
 
       expect(store.cancelCodexSwarmAttempt(cancellation)).toMatchObject({ kind: "committed", replay: false });
+      expect(store.cancelCodexSwarmAttempt({ ...cancellation, canonicalIntentHash: hash("e") })).toEqual({
+        kind: "conflict",
+        reason: "cancellation_request_key_conflict"
+      });
       expect(
-        store.cancelCodexSwarmAttempt({ ...cancellation, canonicalIntentHash: hash("e") })
-      ).toEqual({ kind: "conflict", reason: "cancellation_request_key_conflict" });
-      expect(
-        store.cancelCodexSwarmAttempt({ ...cancellation, requestId: "cancel-binding-conflict-2", leaseId: "other-lease" })
+        store.cancelCodexSwarmAttempt({
+          ...cancellation,
+          requestId: "cancel-binding-conflict-2",
+          leaseId: "other-lease"
+        })
       ).toEqual({ kind: "denied", reason: "codex_swarm_cancel_binding_invalid" });
       expect(cancellationSideEffectCounts(databaseOf(store))).toEqual({ receipts: 1, supervision: 1 });
     } finally {
@@ -293,7 +513,9 @@ describe("Codex Swarm durable authority migration", () => {
 
       expect(store.completeCodexSwarmDispatchStart(tuple, { kind: "started" })).toEqual({ kind: "conflict" });
       expect(
-        database.prepare("SELECT start_status, completed_at FROM codex_swarm_dispatch_reservations WHERE idempotency_key = ?").get(tuple.idempotencyKey)
+        database
+          .prepare("SELECT start_status, completed_at FROM codex_swarm_dispatch_reservations WHERE idempotency_key = ?")
+          .get(tuple.idempotencyKey)
       ).toEqual({ start_status: "reserved", completed_at: null });
       expect(cancellationSideEffectCounts(database)).toEqual({ receipts: 0, supervision: 0 });
     } finally {
@@ -317,7 +539,9 @@ describe("Codex Swarm durable authority migration", () => {
       expect(store.reserveCodexSwarmDispatch(tuple)).toEqual({ kind: "reserved" });
       const database = databaseOf(store);
       const now = new Date().toISOString();
-      database.prepare("UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE lease_id = ?").run(now, lease.leaseId);
+      database
+        .prepare("UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE lease_id = ?")
+        .run(now, lease.leaseId);
       database
         .prepare("UPDATE execution_attempts SET status = 'interrupted', updated_at = ? WHERE attempt_id = ?")
         .run(now, attempt.attemptId);
@@ -338,7 +562,9 @@ describe("Codex Swarm durable authority migration", () => {
 
       expect(store.completeCodexSwarmDispatchStart(tuple, { kind: "started" })).toEqual({ kind: "conflict" });
       expect(
-        database.prepare("SELECT start_status, completed_at FROM codex_swarm_dispatch_reservations WHERE idempotency_key = ?").get(tuple.idempotencyKey)
+        database
+          .prepare("SELECT start_status, completed_at FROM codex_swarm_dispatch_reservations WHERE idempotency_key = ?")
+          .get(tuple.idempotencyKey)
       ).toEqual({ start_status: "reserved", completed_at: null });
     } finally {
       rmSync(directory, { force: true, recursive: true });
@@ -389,21 +615,86 @@ describe("Codex Swarm durable authority migration", () => {
     const dbPath = join(directory, "control.db");
     try {
       const store = new SqliteWorkItemStore(dbPath);
-      const workItem = store.create({ title: "durable failed start", requester: "user", requesterSubject: "actor-user", intent: "test", target: { cwd: "/repo", files: ["src/index.ts"] }, requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"], write: false } }], risk: "low" });
-      const plan = store.createExecutionPlan({ workItemId: workItem.id, definition: defaultExecutionPlanForWorkItem(workItem), createdByActorId: "actor-user" });
-      const admission = store.admitExecutionPlan({ workItemId: workItem.id, planHash: plan.planHash, policyVersion: "acs.policy.v1", policyDecisionHash: hash("a"), requiresApproval: false, admittedByActorId: "policy-gate" }, { via: "policy_gate" });
-      const attempt = store.createAttempt({ workItemId: workItem.id, planHash: plan.planHash, inputHash: hash("b") }, { via: "domain_service" });
-      const lease = store.leaseAttempt({ attemptId: attempt.attemptId, workItemId: workItem.id, admissionId: admission.admissionId, workerId: "worker-1", leaseToken: "x".repeat(32), policyVersion: "acs.policy.v1", policyDecisionHash: hash("a"), ttlMs: 60_000 }, { via: "domain_service" });
-      store.recordWorkspaceAllocation({ allocationId: "workspace-1", workItemId: workItem.id, attemptId: attempt.attemptId, leaseId: lease.leaseId, workerId: lease.workerId, fencingEpoch: lease.fencingEpoch, hostPath: "/isolated/workspace-1", branch: "acs/test", baseRef: "HEAD" }, { via: "domain_service" });
-      const tuple = { workItemId: workItem.id, attemptId: attempt.attemptId, leaseId: lease.leaseId, fencingEpoch: lease.fencingEpoch, envelopeHash: hash("c"), idempotencyKey: "dispatch-failed-start" };
+      const workItem = store.create({
+        title: "durable failed start",
+        requester: "user",
+        requesterSubject: "actor-user",
+        intent: "test",
+        target: { cwd: "/repo", files: ["src/index.ts"] },
+        requestedActions: [
+          { kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"], write: false } }
+        ],
+        risk: "low"
+      });
+      const plan = store.createExecutionPlan({
+        workItemId: workItem.id,
+        definition: defaultExecutionPlanForWorkItem(workItem),
+        createdByActorId: "actor-user"
+      });
+      const admission = store.admitExecutionPlan(
+        {
+          workItemId: workItem.id,
+          planHash: plan.planHash,
+          policyVersion: "acs.policy.v1",
+          policyDecisionHash: hash("a"),
+          requiresApproval: false,
+          admittedByActorId: "policy-gate"
+        },
+        { via: "policy_gate" }
+      );
+      const attempt = store.createAttempt(
+        { workItemId: workItem.id, planHash: plan.planHash, inputHash: hash("b") },
+        { via: "domain_service" }
+      );
+      const lease = store.leaseAttempt(
+        {
+          attemptId: attempt.attemptId,
+          workItemId: workItem.id,
+          admissionId: admission.admissionId,
+          workerId: "worker-1",
+          leaseToken: "x".repeat(32),
+          policyVersion: "acs.policy.v1",
+          policyDecisionHash: hash("a"),
+          ttlMs: 60_000
+        },
+        { via: "domain_service" }
+      );
+      store.recordWorkspaceAllocation(
+        {
+          allocationId: "workspace-1",
+          workItemId: workItem.id,
+          attemptId: attempt.attemptId,
+          leaseId: lease.leaseId,
+          workerId: lease.workerId,
+          fencingEpoch: lease.fencingEpoch,
+          hostPath: "/isolated/workspace-1",
+          branch: "acs/test",
+          baseRef: "HEAD"
+        },
+        { via: "domain_service" }
+      );
+      const tuple = {
+        workItemId: workItem.id,
+        attemptId: attempt.attemptId,
+        leaseId: lease.leaseId,
+        fencingEpoch: lease.fencingEpoch,
+        envelopeHash: hash("c"),
+        idempotencyKey: "dispatch-failed-start"
+      };
       expect(store.reserveCodexSwarmDispatch(tuple)).toEqual({ kind: "reserved" });
 
-      expect(store.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })).toEqual({ kind: "completed" });
-      expect(store.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })).toEqual({ kind: "replay" });
+      expect(
+        store.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })
+      ).toEqual({ kind: "completed" });
+      expect(
+        store.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })
+      ).toEqual({ kind: "replay" });
       expect(store.completeCodexSwarmDispatchStart(tuple, { kind: "started" })).toEqual({ kind: "conflict" });
 
       const reopened = new SqliteWorkItemStore(dbPath);
-      expect(reopened.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })).toEqual({ kind: "replay" });
+      expect(
+        reopened.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })
+      ).toEqual({ kind: "replay" });
     } finally {
       rmSync(directory, { force: true, recursive: true });
     }

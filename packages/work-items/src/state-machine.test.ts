@@ -899,7 +899,8 @@ describe("work item state machine", () => {
           filename: "021_advisory_evidence_and_verification.sql"
         },
         { version: 22, name: "device_auth", filename: "022_device_auth.sql" },
-        { version: 23, name: "codex_swarm_authoritative_store", filename: "023_codex_swarm_authoritative_store.sql" }
+        { version: 23, name: "codex_swarm_authoritative_store", filename: "023_codex_swarm_authoritative_store.sql" },
+        { version: 24, name: "codex_swarm_atomic_lifecycle", filename: "024_codex_swarm_atomic_lifecycle.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -1012,7 +1013,8 @@ describe("work item state machine", () => {
         { version: 20 },
         { version: 21 },
         { version: 22 },
-        { version: 23 }
+        { version: 23 },
+        { version: 24 }
       ]);
     } finally {
       db.close();
@@ -1121,7 +1123,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(copiedPath);
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1196,7 +1198,7 @@ describe("work item state machine", () => {
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([

@@ -55,7 +55,8 @@ const migrationFiles = [
     filename: "021_advisory_evidence_and_verification.sql"
   },
   { version: 22, name: "device_auth", filename: "022_device_auth.sql" },
-  { version: 23, name: "codex_swarm_authoritative_store", filename: "023_codex_swarm_authoritative_store.sql" }
+  { version: 23, name: "codex_swarm_authoritative_store", filename: "023_codex_swarm_authoritative_store.sql" },
+  { version: 24, name: "codex_swarm_atomic_lifecycle", filename: "024_codex_swarm_atomic_lifecycle.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
