@@ -51,11 +51,12 @@ function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = 
   const cancels = cancel;
   const audit = vi.fn();
   const atomicCancel = vi.fn((): { kind: "cancelled" | "replay" | "stale" } => ({ kind: "cancelled" }));
+  const reserve = vi.fn((_tuple: DispatchReservation) => ({ kind: mode }));
   const completeStart = vi.fn(() => ({ kind: "completed" as const }));
   const coordinator = createCodexSwarmTestCoordinator(
     {
       authority: { read: vi.fn(() => authority), cancel: atomicCancel },
-      reservations: { reserve: vi.fn((_tuple: DispatchReservation) => ({ kind: mode })), completeStart },
+      reservations: { reserve, completeStart },
       child: { start: starts, cancel: cancels }, audit: { append: audit },
       verifier: { verify: vi.fn(async () => ({ ok: true })) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
@@ -63,7 +64,7 @@ function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = 
     },
     { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" }
   );
-  return { coordinator, authority, starts, cancels, audit, atomicCancel, completeStart };
+  return { coordinator, authority, starts, cancels, audit, atomicCancel, reserve, completeStart };
 }
 
 describe("CodexSwarmCoordinator", () => {
@@ -123,12 +124,16 @@ describe("CodexSwarmCoordinator", () => {
     await expect(first.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "started" });
     expect(first.starts).toHaveBeenCalledTimes(1);
     expect(first.completeStart).toHaveBeenCalledWith(expect.anything(), { kind: "started" });
+    expect(first.reserve.mock.invocationCallOrder[0]).toBeLessThan(first.audit.mock.invocationCallOrder[0]);
+    expect(first.audit).toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.dispatched" }));
     const replay = harness("replay");
     await expect(replay.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "replay" });
     expect(replay.starts).not.toHaveBeenCalled();
+    expect(replay.audit).not.toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.dispatched" }));
     const conflict = harness("conflict");
     await expect(conflict.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_dispatch_idempotency_conflict" });
     expect(conflict.starts).not.toHaveBeenCalled();
+    expect(conflict.audit).not.toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.dispatched" }));
   });
 
   it("denies a malformed runtime envelope before reservation or child start and audits only a stable redacted reason", async () => {
@@ -249,6 +254,7 @@ describe("CodexSwarmCoordinator", () => {
     expect(h.audit).toHaveBeenCalledWith(expect.objectContaining({ reason: "codex_swarm_dispatch_reservation_failed" }));
     expect(h.completeStart).not.toHaveBeenCalled();
     expect(h.starts).not.toHaveBeenCalled();
+    expect(h.audit).not.toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.dispatched" }));
     expect(JSON.stringify(h.audit.mock.calls)).not.toContain("SECRET_RESERVATION");
     expect(JSON.stringify(h.audit.mock.calls)).not.toContain("ß");
   });
@@ -263,6 +269,7 @@ describe("CodexSwarmCoordinator", () => {
     await expect(authenticationFailure.cancel(request)).resolves.toEqual({ kind: "denied", reason: "codex_swarm_cancellation_authentication_failed" });
     expect(authentication.atomicCancel).not.toHaveBeenCalled();
     expect(authentication.cancels).not.toHaveBeenCalled();
+    expect(authentication.audit).not.toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.cancelled" }));
 
     const cancellation = harness();
     const cancellationFailure = createCodexSwarmTestCoordinator({
@@ -270,6 +277,7 @@ describe("CodexSwarmCoordinator", () => {
     }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
     await expect(cancellationFailure.cancel(request)).resolves.toEqual({ kind: "denied", reason: "codex_swarm_cancel_authority_unavailable" });
     expect(cancellation.cancels).not.toHaveBeenCalled();
+    expect(cancellation.audit).not.toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.cancelled" }));
 
     const envelopeFailure = harness();
     const envelopeEvidenceFailure = createCodexSwarmTestCoordinator({
@@ -288,7 +296,7 @@ describe("CodexSwarmCoordinator", () => {
     expect(persisted).not.toContain("😈");
   });
 
-  it("fails closed when canonical audit append throws without durable effects", async () => {
+  it("fails closed when canonical audit append throws after the durable transition", async () => {
     const hostile = "SECRET_AUDIT=top-secret\r\n\u0000雪😈".repeat(20_000);
     const h = harness();
     const reserve = vi.fn(() => ({ kind: "reserved" as const }));
@@ -299,10 +307,10 @@ describe("CodexSwarmCoordinator", () => {
     await expect(coordinator.dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_audit_unavailable" });
     await expect(coordinator.cancel(request)).resolves.toEqual({ kind: "denied", reason: "codex_swarm_audit_unavailable" });
     await expect(coordinator.ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "codex_swarm_audit_unavailable" });
-    expect(reserve).not.toHaveBeenCalled();
+    expect(reserve).toHaveBeenCalledTimes(1);
     expect(h.completeStart).not.toHaveBeenCalled();
     expect(h.starts).not.toHaveBeenCalled();
-    expect(h.atomicCancel).not.toHaveBeenCalled();
+    expect(h.atomicCancel).toHaveBeenCalledTimes(1);
     expect(h.cancels).not.toHaveBeenCalled();
   });
 
@@ -316,13 +324,27 @@ describe("CodexSwarmCoordinator", () => {
     const request = { workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_1" };
     await expect(h.coordinator.cancel(request)).resolves.toEqual({ kind: "cancelled" });
     expect(h.atomicCancel).toHaveBeenCalledTimes(1);
+    expect(h.atomicCancel.mock.invocationCallOrder[0]).toBeLessThan(h.audit.mock.invocationCallOrder[0]);
+    expect(h.audit).toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.cancelled" }));
     h.atomicCancel.mockReturnValue({ kind: "replay" });
     await expect(h.coordinator.cancel(request)).resolves.toEqual({ kind: "replay" });
     expect(h.cancels).toHaveBeenCalledTimes(1);
+    expect(h.audit).toHaveBeenCalledTimes(1);
 
     const cancelFailure = harness("reserved", vi.fn(async () => undefined), vi.fn(async () => { throw new Error("cancel failed"); }));
     await expect(cancelFailure.coordinator.cancel({ ...request, requestId: "r_2" })).resolves.toEqual({ kind: "cancelled", reason: "codex_swarm_child_cancel_failed" });
     expect(cancelFailure.audit).toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.cancelled", reason: "codex_swarm_child_cancel_failed" }));
+  });
+
+  it("does not emit a cancellation success audit for stale authority", async () => {
+    const h = harness();
+    h.atomicCancel.mockReturnValue({ kind: "stale" });
+    await expect(h.coordinator.cancel({ workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, requestId: "r_stale" })).resolves.toEqual({
+      kind: "denied",
+      reason: "codex_swarm_cancel_stale_authority"
+    });
+    expect(h.cancels).not.toHaveBeenCalled();
+    expect(h.audit).not.toHaveBeenCalledWith(expect.objectContaining({ name: "execution.codex_swarm.cancelled" }));
   });
 
   it("quarantines future evidence and forged evidence envelopes before verification", async () => {

@@ -216,7 +216,6 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     const binding = bindingFromEnvelope(envelope);
     const authorityDenial = this.currentAuthorityDenial(envelope);
     if (authorityDenial) return this.denyDispatch(authorityDenial, envelope);
-    if (!this.appendAudit({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
     const tuple = { ...binding, envelopeHash: envelope.envelopeHash, idempotencyKey: envelope.idempotencyKey };
     let reservation: ReturnType<DispatchReservationPort["reserve"]>;
     try {
@@ -226,6 +225,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     }
     if (reservation.kind === "conflict") return this.denyDispatch("codex_swarm_dispatch_idempotency_conflict", envelope);
     if (reservation.kind === "replay") return { kind: "replay" };
+    if (!this.appendAudit({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
     try {
       await this.child.start({ envelope });
     } catch {
@@ -256,7 +256,6 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     if (!authenticated || !sameCancellationBinding(input, authenticated)) {
       throw new Error("codex_swarm_cancel_unauthenticated");
     }
-    if (!this.appendAudit({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
     let cancellation: ReturnType<CodexSwarmAuthorityPort["cancel"]>;
     try {
       cancellation = this.authority.cancel(authenticated);
@@ -265,6 +264,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     }
     if (cancellation.kind === "stale") return { kind: "denied", reason: "codex_swarm_cancel_stale_authority" };
     if (cancellation.kind === "replay") return { kind: "replay" };
+    if (!this.appendAudit({ name: "execution.codex_swarm.cancelled", workItemId: input.workItemId, attemptId: input.attemptId })) return { kind: "denied", reason: "codex_swarm_audit_unavailable" };
     try {
       await this.child.cancel(input);
     } catch {
