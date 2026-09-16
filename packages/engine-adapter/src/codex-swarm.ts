@@ -20,6 +20,16 @@ export const CODEX_SWARM_TEST_PROVIDER = "in_memory" as const;
 const evidenceFreshnessMs = 30_000;
 const evidenceMaxClockSkewMs = 5_000;
 const forbiddenLifecycleKeys = new Set(["succeeded", "approved", "promoted", "granted", "authorized", "accepted"]);
+const verifiedEnvelopeDenialReasons = new Set([
+  "envelope_schema_invalid",
+  "envelope_hash_mismatch",
+  "envelope_mac_secret_invalid",
+  "envelope_mac_mismatch",
+  "envelope_ttl_exceeded",
+  "envelope_expired",
+  "envelope_issued_at_in_future",
+  "envelope_attempt_mismatch"
+]);
 
 export interface DispatchReservation {
   workItemId: string;
@@ -195,29 +205,40 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
   ) {}
 
   async dispatch(value: unknown): Promise<{ kind: "started" | "replay" | "failed_start" } | { kind: "denied"; reason: string }> {
-    const verified = this.envelopeVerifier.verify(value);
-    if (!verified.ok) return this.denyDispatch(verified.reason);
+    let verified: VerifyExecutionEnvelopeResult;
+    try {
+      verified = this.envelopeVerifier.verify(value);
+    } catch {
+      return this.denyDispatch("envelope_verification_failed");
+    }
+    if (!verified.ok) return this.denyDispatch(stableEnvelopeDenialReason(verified.reason));
     const envelope = verified.envelope;
     const binding = bindingFromEnvelope(envelope);
-    try {
-      this.assertCurrent(envelope);
-    } catch (error) {
-      return this.denyDispatch((error as Error).message, envelope);
-    }
+    const authorityDenial = this.currentAuthorityDenial(envelope);
+    if (authorityDenial) return this.denyDispatch(authorityDenial, envelope);
     const tuple = { ...binding, envelopeHash: envelope.envelopeHash, idempotencyKey: envelope.idempotencyKey };
-    const reservation = this.reservations.reserve(tuple);
+    let reservation: ReturnType<DispatchReservationPort["reserve"]>;
+    try {
+      reservation = this.reservations.reserve(tuple);
+    } catch {
+      return this.denyDispatch("codex_swarm_dispatch_reservation_failed", envelope);
+    }
     if (reservation.kind === "conflict") return this.denyDispatch("codex_swarm_dispatch_idempotency_conflict", envelope);
     if (reservation.kind === "replay") return { kind: "replay" };
     try {
       await this.child.start({ envelope });
     } catch {
-      if (this.reservations.completeStart(tuple, { kind: "failed_start", reason: "codex_swarm_child_start_failed" }).kind === "conflict") {
+      const completion = this.completeStart(tuple, { kind: "failed_start", reason: "codex_swarm_child_start_failed" });
+      if (!completion) return this.denyDispatch("codex_swarm_start_completion_failed", envelope);
+      if (completion === "conflict") {
         return this.denyDispatch("codex_swarm_start_outcome_conflict", envelope);
       }
       this.audit.append({ name: "execution.codex_swarm.start_failed", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason: "codex_swarm_child_start_failed" });
       return { kind: "failed_start" };
     }
-    if (this.reservations.completeStart(tuple, { kind: "started" }).kind === "conflict") {
+    const completion = this.completeStart(tuple, { kind: "started" });
+    if (!completion) return this.denyDispatch("codex_swarm_start_completion_failed", envelope);
+    if (completion === "conflict") {
       return this.denyDispatch("codex_swarm_start_outcome_conflict", envelope);
     }
     this.audit.append({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId });
@@ -252,11 +273,7 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     if (!parsed.success) return this.quarantine(envelope, "evidence_schema_invalid");
     const echo = evidenceMatchesEnvelope(parsed.data, envelope);
     if (!echo.ok) return this.quarantine(envelope, echo.reason);
-    try {
-      this.assertCurrent(envelope);
-    } catch {
-      return this.quarantine(envelope, "evidence_stale_authority");
-    }
+    if (this.currentAuthorityDenial(envelope)) return this.quarantine(envelope, "evidence_stale_authority");
     const now = this.now().getTime();
     const endedAt = Date.parse(parsed.data.endedAt);
     const startedAt = Date.parse(parsed.data.startedAt);
@@ -276,16 +293,33 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     return { status: "verified" };
   }
 
-  private assertCurrent(envelope: ExecutionEnvelope): void {
-    const authority = this.authority.read(bindingFromEnvelope(envelope));
-    if (!authority || !authority.active || authority.revoked) throw new Error("codex_swarm_authority_inactive");
+  private currentAuthorityDenial(envelope: ExecutionEnvelope): string | undefined {
+    let authority: AttemptAuthority | undefined;
+    try {
+      authority = this.authority.read(bindingFromEnvelope(envelope));
+    } catch {
+      return "codex_swarm_authority_unavailable";
+    }
+    if (!authority || !authority.active || authority.revoked) return "codex_swarm_authority_inactive";
     if (
       authority.workspace.allocationId !== envelope.workspace.allocationId ||
       authority.workspace.hostPath !== envelope.workspace.hostPath ||
       authority.workspace.expectedBaseSha !== envelope.workspace.expectedBaseSha ||
       authority.admittedPlanHash !== envelope.admittedPlanHash
     ) {
-      throw new Error("codex_swarm_authority_binding_mismatch");
+      return "codex_swarm_authority_binding_mismatch";
+    }
+    return undefined;
+  }
+
+  private completeStart(
+    tuple: DispatchReservation,
+    result: { kind: "started" } | { kind: "failed_start"; reason: string }
+  ): "completed" | "replay" | "conflict" | undefined {
+    try {
+      return this.reservations.completeStart(tuple, result).kind;
+    } catch {
+      return undefined;
     }
   }
 
@@ -325,6 +359,11 @@ function sameCancellationBinding(request: CancellationRequest, authenticated: Au
 
 function bindingFromEnvelope(envelope: ExecutionEnvelope): Pick<DispatchReservation, "workItemId" | "attemptId" | "leaseId" | "fencingEpoch"> {
   return { workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, leaseId: envelope.leaseId, fencingEpoch: envelope.fencingEpoch };
+}
+
+function stableEnvelopeDenialReason(reason: string): string {
+  const candidate = reason.split(":", 1)[0];
+  return candidate && verifiedEnvelopeDenialReasons.has(candidate) ? candidate : "envelope_verification_failed";
 }
 
 function containsForbiddenLifecycleKey(value: unknown, seen = new Set<unknown>()): boolean {

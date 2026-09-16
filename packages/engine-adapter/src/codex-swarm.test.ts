@@ -176,29 +176,81 @@ describe("CodexSwarmCoordinator", () => {
     await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "independent_verification_failed" });
   });
 
-  it("never forwards hostile verifier output into canonical audit", async () => {
+  it("denies hostile verifier output with a stable code before reservation or child start", async () => {
     const h = harness();
-    const hostile = "SECRET_TOKEN=top-secret\n\u0000".repeat(20_000);
+    const hostile = "SECRET_TOKEN=top-secret\n\u0000😈".repeat(20_000);
+    const reserve = vi.fn(() => ({ kind: "reserved" as const }));
     const verifierFail = createCodexSwarmTestCoordinator({
       authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) },
-      reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => ({ kind: "completed" as const }) },
-      child: { start: vi.fn(), cancel: vi.fn() }, audit: { append: h.audit },
+      reservations: { reserve, completeStart: () => ({ kind: "completed" as const }) },
+      child: { start: h.starts, cancel: h.cancels }, audit: { append: h.audit },
       verifier: { verify: async () => ({ ok: false, reason: hostile }) },
+      envelopeVerifier: { verify: () => ({ ok: false, reason: hostile }) },
+      cancellationAuthentication: { verify: authenticatedCancellation }, now: () => now
+    }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
+
+    await expect(verifierFail.dispatch(envelope())).resolves.toEqual({
+      kind: "denied",
+      reason: "envelope_verification_failed"
+    });
+    expect(h.audit).toHaveBeenCalledWith({
+      name: "execution.codex_swarm.dispatch_denied",
+      workItemId: "unknown",
+      attemptId: "unknown",
+      reason: "envelope_verification_failed"
+    });
+    expect(reserve).not.toHaveBeenCalled();
+    expect(h.starts).not.toHaveBeenCalled();
+    expect(JSON.stringify({ result: await verifierFail.dispatch(envelope()), audit: h.audit.mock.calls })).not.toContain("SECRET_TOKEN");
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("😈");
+  });
+
+  it("denies authority exceptions with a stable code before reservation or child start", async () => {
+    const h = harness();
+    const hostile = "SECRET_AUTHORITY=top-secret\r\n\u0000雪".repeat(20_000);
+    const reserve = vi.fn(() => ({ kind: "reserved" as const }));
+    const coordinator = createCodexSwarmTestCoordinator({
+      authority: { read: () => { throw new Error(hostile); }, cancel: () => ({ kind: "cancelled" }) },
+      reservations: { reserve, completeStart: h.completeStart },
+      child: { start: h.starts, cancel: h.cancels }, audit: { append: h.audit },
+      verifier: { verify: async () => ({ ok: true }) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
       cancellationAuthentication: { verify: authenticatedCancellation }, now: () => now
     }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
 
-    await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({
-      status: "quarantined",
-      reason: "independent_verification_failed"
-    });
+    await expect(coordinator.dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_authority_unavailable" });
     expect(h.audit).toHaveBeenCalledWith({
-      name: "execution.codex_swarm.evidence_quarantined",
+      name: "execution.codex_swarm.dispatch_denied",
       workItemId: "wrk_1",
       attemptId: "attempt_1",
-      reason: "independent_verification_failed"
+      reason: "codex_swarm_authority_unavailable"
     });
-    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("SECRET_TOKEN");
+    expect(reserve).not.toHaveBeenCalled();
+    expect(h.completeStart).not.toHaveBeenCalled();
+    expect(h.starts).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("SECRET_AUTHORITY");
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("雪");
+  });
+
+  it("denies reservation exceptions with a stable code before child start", async () => {
+    const h = harness();
+    const hostile = "SECRET_RESERVATION=top-secret\r\n\u0000ß".repeat(20_000);
+    const reserve = vi.fn(() => { throw new Error(hostile); });
+    const coordinator = createCodexSwarmTestCoordinator({
+      authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) },
+      reservations: { reserve, completeStart: h.completeStart },
+      child: { start: h.starts, cancel: h.cancels }, audit: { append: h.audit },
+      verifier: { verify: async () => ({ ok: true }) },
+      envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
+      cancellationAuthentication: { verify: authenticatedCancellation }, now: () => now
+    }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
+
+    await expect(coordinator.dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_dispatch_reservation_failed" });
+    expect(h.audit).toHaveBeenCalledWith(expect.objectContaining({ reason: "codex_swarm_dispatch_reservation_failed" }));
+    expect(h.completeStart).not.toHaveBeenCalled();
+    expect(h.starts).not.toHaveBeenCalled();
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("SECRET_RESERVATION");
+    expect(JSON.stringify(h.audit.mock.calls)).not.toContain("ß");
   });
 
   it("persists failed starts and makes cancellation atomic, replay-safe, and auditable", async () => {
