@@ -4,6 +4,7 @@ import {
   buildExecutionEnvelope,
   evidenceMatchesEnvelope,
   executionEnvelopeHash,
+  swarmExecutionEvidenceSchema,
   verifyExecutionEnvelope,
   type BuildExecutionEnvelopeInput,
   type SwarmExecutionEvidence
@@ -45,7 +46,7 @@ function bodyInput(overrides: Partial<BuildExecutionEnvelopeInput> = {}): BuildE
     validationCommands: [["npm", "run", "lint"]],
     evidenceRequirements: ["diff", "tests"],
     issuedAt: "2026-09-03T00:00:00.000Z",
-    expiresAt: "2026-09-03T00:30:00.000Z",
+    expiresAt: "2026-09-03T00:00:30.000Z",
     ...overrides
   };
 }
@@ -53,10 +54,12 @@ function bodyInput(overrides: Partial<BuildExecutionEnvelopeInput> = {}): BuildE
 function evidenceFor(envelope: ReturnType<typeof buildExecutionEnvelope>): SwarmExecutionEvidence {
   return {
     schemaVersion: "acs.codex-swarm-evidence.v1",
+    acsWorkItemId: envelope.acsWorkItemId,
     acsAttemptId: envelope.acsAttemptId,
     envelopeHash: envelope.envelopeHash,
     leaseId: envelope.leaseId,
     fencingEpoch: envelope.fencingEpoch,
+    auditCorrelationId: envelope.auditCorrelationId,
     exitStatus: "completed",
     startedAt: "2026-09-03T00:01:00.000Z",
     endedAt: "2026-09-03T00:09:00.000Z",
@@ -78,7 +81,7 @@ describe("buildExecutionEnvelope / verifyExecutionEnvelope", () => {
   it("round-trips a well-formed envelope", () => {
     const envelope = buildExecutionEnvelope(bodyInput(), SECRET);
     const result = verifyExecutionEnvelope(envelope, SECRET, {
-      now: () => new Date("2026-09-03T00:10:00.000Z"),
+      now: () => new Date("2026-09-03T00:00:10.000Z"),
       expectedAttemptId: "attempt_1"
     });
     expect(result).toEqual({ ok: true, envelope });
@@ -89,7 +92,7 @@ describe("buildExecutionEnvelope / verifyExecutionEnvelope", () => {
     const reordered: BuildExecutionEnvelopeInput = {
       ...bodyInput(),
       // rebuild the object with keys in a different declaration order
-      expiresAt: "2026-09-03T00:30:00.000Z",
+      expiresAt: "2026-09-03T00:00:30.000Z",
       acsWorkItemId: "wrk_1"
     };
     const b = buildExecutionEnvelope(reordered, SECRET);
@@ -128,7 +131,7 @@ describe("buildExecutionEnvelope / verifyExecutionEnvelope", () => {
     const envelope = buildExecutionEnvelope(bodyInput(), SECRET);
     expect(
       verifyExecutionEnvelope(envelope, SECRET, {
-        now: () => new Date("2026-09-03T00:10:00.000Z"),
+        now: () => new Date("2026-09-03T00:00:10.000Z"),
         expectedAttemptId: "attempt_other"
       })
     ).toEqual({ ok: false, reason: "envelope_attempt_mismatch" });
@@ -163,10 +166,27 @@ describe("buildExecutionEnvelope / verifyExecutionEnvelope", () => {
     ).toThrow();
   });
 
+  it("rejects non-UTC-millisecond timestamps and a TTL longer than the frozen v1 limit", () => {
+    expect(() => buildExecutionEnvelope(bodyInput({ issuedAt: "2026-09-03T00:00:00Z" }), SECRET)).toThrow();
+    expect(() =>
+      buildExecutionEnvelope(
+        bodyInput({ issuedAt: "2026-09-03T00:00:00.000Z", expiresAt: "2026-09-03T00:00:30.001Z" }),
+        SECRET
+      )
+    ).toThrow(/lifetime/);
+  });
+
+  it("rejects an envelope issued more than five seconds in the future", () => {
+    const envelope = buildExecutionEnvelope(bodyInput(), SECRET);
+    expect(
+      verifyExecutionEnvelope(envelope, SECRET, { now: () => new Date("2026-09-02T23:59:54.999Z") })
+    ).toEqual({ ok: false, reason: "envelope_issued_at_in_future" });
+  });
+
   it("rejects a scoped-egress policy that is not a hash", () => {
     expect(() => buildExecutionEnvelope(bodyInput({ networkPolicy: "scoped-egress:api.openai.com" }), SECRET)).toThrow();
     const ok = buildExecutionEnvelope(bodyInput({ networkPolicy: `scoped-egress:${"f".repeat(64)}` }), SECRET);
-    expect(verifyExecutionEnvelope(ok, SECRET, { now: () => new Date("2026-09-03T00:10:00.000Z") }).ok).toBe(true);
+    expect(verifyExecutionEnvelope(ok, SECRET, { now: () => new Date("2026-09-03T00:00:10.000Z") }).ok).toBe(true);
   });
 });
 
@@ -183,7 +203,7 @@ describe("cross-repo fixture parity", () => {
 
   it("verifies the shared fixture envelope", () => {
     const result = verifyExecutionEnvelope(fixture.body ? { ...fixture.body, envelopeHash: fixture.envelopeHash, mac: fixture.mac } : null, fixture.secret, {
-      now: () => new Date("2026-09-03T00:10:00.000Z")
+      now: () => new Date("2026-09-03T00:00:10.000Z")
     });
     expect(result.ok).toBe(true);
   });
@@ -207,10 +227,33 @@ describe("evidenceMatchesEnvelope", () => {
     expect(evidenceMatchesEnvelope(evidenceFor(envelope), envelope)).toEqual({ ok: true });
   });
 
+  it("requires every authoritative identity echo and rejects lifecycle claims", () => {
+    const evidence = evidenceFor(envelope);
+    expect(swarmExecutionEvidenceSchema.safeParse(evidence).success).toBe(true);
+    const missingWorkItem = { ...evidence } as Record<string, unknown>;
+    delete missingWorkItem.acsWorkItemId;
+    const missingCorrelation = { ...evidence } as Record<string, unknown>;
+    delete missingCorrelation.auditCorrelationId;
+    expect(swarmExecutionEvidenceSchema.safeParse(missingWorkItem).success).toBe(false);
+    expect(swarmExecutionEvidenceSchema.safeParse(missingCorrelation).success).toBe(false);
+    expect(swarmExecutionEvidenceSchema.safeParse({ ...evidence, succeeded: true }).success).toBe(false);
+  });
+
   it("rejects an attempt-id mismatch", () => {
     expect(evidenceMatchesEnvelope({ ...evidenceFor(envelope), acsAttemptId: "attempt_x" }, envelope)).toEqual({
       ok: false,
       reason: "evidence_attempt_mismatch"
+    });
+  });
+
+  it("rejects a work-item or audit-correlation mismatch", () => {
+    expect(evidenceMatchesEnvelope({ ...evidenceFor(envelope), acsWorkItemId: "wrk_x" }, envelope)).toEqual({
+      ok: false,
+      reason: "evidence_work_item_mismatch"
+    });
+    expect(evidenceMatchesEnvelope({ ...evidenceFor(envelope), auditCorrelationId: "evt_x" }, envelope)).toEqual({
+      ok: false,
+      reason: "evidence_audit_correlation_mismatch"
     });
   });
 

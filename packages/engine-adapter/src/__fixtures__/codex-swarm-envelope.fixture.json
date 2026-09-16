@@ -50,10 +50,10 @@
       "tests"
     ],
     "issuedAt": "2026-09-03T00:00:00.000Z",
-    "expiresAt": "2026-09-03T00:30:00.000Z"
+    "expiresAt": "2026-09-03T00:00:30.000Z"
   },
-  "envelopeHash": "f72a8f8681c866f68cc64de7f98ed9903c1156e1865b9fa57133dc80f8b27186",
-  "mac": "1936b3e4df76975ff283f48e862a4d5a8d055dc66c1f43e69906fa5ef5356a3d",
+  "envelopeHash": "1f2fa0cbaae1da046fbc4e93880d8e39083303dc272af1f359be0140da564073",
+  "mac": "2fa94f3fc85423eacb6714d6e3a5372b3733bed5e59b9badfc09fb86a6a6b51e",
   "envelope": {
     "schemaVersion": "acs.codex-swarm-envelope.v1",
     "acsWorkItemId": "wrk_fixture",
@@ -103,8 +103,8 @@
       "tests"
     ],
     "issuedAt": "2026-09-03T00:00:00.000Z",
-    "expiresAt": "2026-09-03T00:30:00.000Z",
-    "envelopeHash": "f72a8f8681c866f68cc64de7f98ed9903c1156e1865b9fa57133dc80f8b27186",
-    "mac": "1936b3e4df76975ff283f48e862a4d5a8d055dc66c1f43e69906fa5ef5356a3d"
+    "expiresAt": "2026-09-03T00:00:30.000Z",
+    "envelopeHash": "1f2fa0cbaae1da046fbc4e93880d8e39083303dc272af1f359be0140da564073",
+    "mac": "2fa94f3fc85423eacb6714d6e3a5372b3733bed5e59b9badfc09fb86a6a6b51e"
   }
 }
