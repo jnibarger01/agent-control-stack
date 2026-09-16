@@ -63,11 +63,15 @@ function containWithin(canonicalRoot: string, requested: string): string {
 
 function containedChild(canonicalRoot: string, candidate: string): string | undefined {
   try {
+    // Recursive readers must apply the same credential-path contract as
+    // read_file before an entry is exposed or opened.
+    if (restrictedPathPattern.test(candidate)) return undefined;
     // Do not follow a symlink while walking. A nested symlink could otherwise
     // turn a contained directory traversal into an external enumeration.
     if (lstatSync(candidate).isSymbolicLink()) return undefined;
     const canonical = realpathSync(candidate);
     if (canonical !== canonicalRoot && !canonical.startsWith(`${canonicalRoot}${sep}`)) return undefined;
+    if (restrictedPathPattern.test(canonical)) return undefined;
     return canonical;
   } catch {
     // A broken, removed, or otherwise unreadable child is not evidence.

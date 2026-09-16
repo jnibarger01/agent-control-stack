@@ -114,6 +114,36 @@ describe("EvidenceReader — instance exposes exactly the read capabilities", ()
     expect(list.entries.some((e) => e.path.endsWith("a.ts"))).toBe(true);
   });
 
+  it("omits restricted files from recursive listings and workspace search", async () => {
+    const restrictedPaths = [
+      ".env",
+      ".npmrc",
+      ".netrc",
+      "credentials.json",
+      "token.json",
+      "id_rsa",
+      "private/.ssh/identity",
+      "private/.aws/credentials",
+      ".git/config"
+    ];
+    mkdirSync(join(dir, "private", ".ssh"), { recursive: true });
+    mkdirSync(join(dir, "private", ".aws"), { recursive: true });
+    mkdirSync(join(dir, ".git"), { recursive: true });
+    for (const path of restrictedPaths) {
+      writeFileSync(join(dir, path), "RESTRICTED_EVIDENCE_MARKER\n");
+    }
+
+    const listed = (await reader.list_directory({ path: ".", depth: 4 })) as {
+      entries: Array<{ path: string }>;
+    };
+    const searched = (await reader.search_workspace({ query: "RESTRICTED_EVIDENCE_MARKER" })) as {
+      matches: Array<{ path: string; text: string }>;
+    };
+
+    expect(listed.entries.some((entry) => restrictedPaths.includes(entry.path))).toBe(false);
+    expect(searched.matches).toEqual([]);
+  });
+
   it("does not follow nested links or a swapped workspace-root alias", async () => {
     const outside = realpathSync(mkdtempSync(join(tmpdir(), "acs-ereader-outside-")));
     const aliasParent = realpathSync(mkdtempSync(join(tmpdir(), "acs-ereader-alias-")));
