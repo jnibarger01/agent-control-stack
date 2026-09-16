@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildExecutionEnvelope, verifyExecutionEnvelope, type SwarmExecutionEvidence } from "./codex-swarm-envelope.js";
-import { assertCodexSwarmTestBackendEnabled, createCodexSwarmStoreReservationPort, createCodexSwarmTestCoordinator, type AttemptAuthority, type DispatchReservation } from "./codex-swarm.js";
+import { assertCodexSwarmTestBackendEnabled, createCodexSwarmStoreAuthorityPort, createCodexSwarmStoreReservationPort, createCodexSwarmTestCoordinator, type AttemptAuthority, type CancellationRequest, type DispatchReservation } from "./codex-swarm.js";
 
 const secret = "s".repeat(48);
 const now = new Date("2026-09-03T00:00:20.000Z");
@@ -28,6 +28,20 @@ function evidence(e = envelope()): SwarmExecutionEvidence {
   };
 }
 
+function authenticatedCancellation(input: CancellationRequest) {
+  return {
+    ...input,
+    principalId: "actor-user",
+    canonicalIntentHash: "f".repeat(64),
+    providerBinding: {
+      contextHash: "1".repeat(64),
+      proofBindingHash: "2".repeat(64),
+      providerGeneration: 1,
+      sessionEpochBindingHash: "3".repeat(64)
+    }
+  };
+}
+
 function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = vi.fn(async () => undefined), cancel = vi.fn(async () => undefined)) {
   const authority: AttemptAuthority = {
     workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, active: true, revoked: false,
@@ -45,7 +59,7 @@ function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = 
       child: { start: starts, cancel: cancels }, audit: { append: audit },
       verifier: { verify: vi.fn(async () => ({ ok: true })) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
-      cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }, now: () => now
+      cancellationAuthentication: { verify: authenticatedCancellation }, now: () => now
     },
     { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" }
   );
@@ -53,6 +67,30 @@ function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = 
 }
 
 describe("CodexSwarmCoordinator", () => {
+  it("forwards only verifier-produced cancellation facts to the durable ACS authority", () => {
+    const cancelCodexSwarmAttempt = vi.fn(() => ({
+      kind: "committed" as const,
+      cancellationId: "cancellation-1",
+      serializedOutcome: '{"status":"accepted"}',
+      outcomeHash: "a".repeat(64),
+      replay: false as const
+    }));
+    const authority = createCodexSwarmStoreAuthorityPort({ cancelCodexSwarmAttempt });
+    const authenticated = {
+      requestId: "request-1", workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1,
+      principalId: "actor-user", canonicalIntentHash: "b".repeat(64),
+      providerBinding: { contextHash: "c".repeat(64), proofBindingHash: "d".repeat(64), providerGeneration: 1, sessionEpochBindingHash: "e".repeat(64) }
+    };
+
+    expect(authority.cancel(authenticated)).toEqual({ kind: "cancelled" });
+    expect(cancelCodexSwarmAttempt).toHaveBeenCalledWith({
+      requestId: authenticated.requestId, workItemId: authenticated.workItemId, attemptId: authenticated.attemptId,
+      leaseId: authenticated.leaseId, fencingEpoch: authenticated.fencingEpoch,
+      authenticatedPrincipalId: authenticated.principalId, canonicalIntentHash: authenticated.canonicalIntentHash,
+      providerBinding: authenticated.providerBinding
+    });
+  });
+
   it("uses the canonical durable store for both reservation and persisted start outcome", () => {
     const reserveCodexSwarmDispatch = vi.fn(() => ({ kind: "reserved" as const }));
     const completeCodexSwarmDispatchStart = vi.fn(() => ({ kind: "completed" as const }));
@@ -76,7 +114,7 @@ describe("CodexSwarmCoordinator", () => {
       authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) }, reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => ({ kind: "completed" as const }) },
       child: { start: async () => undefined, cancel: async () => undefined }, audit: { append: () => undefined }, verifier: { verify: async () => ({ ok: true }) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
-      cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }
+      cancellationAuthentication: { verify: authenticatedCancellation }
     }, { NODE_ENV: "production", ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" })).toThrow(/disabled in production/);
   });
 
@@ -133,7 +171,7 @@ describe("CodexSwarmCoordinator", () => {
       child: { start: vi.fn(), cancel: vi.fn() }, audit: { append: vi.fn() },
       verifier: { verify: async () => ({ ok: false, reason: "verifier_missing" }) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
-      cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }, now: () => now
+      cancellationAuthentication: { verify: authenticatedCancellation }, now: () => now
     }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
     await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({ status: "quarantined", reason: "independent_verification_failed" });
   });
@@ -147,7 +185,7 @@ describe("CodexSwarmCoordinator", () => {
       child: { start: vi.fn(), cancel: vi.fn() }, audit: { append: h.audit },
       verifier: { verify: async () => ({ ok: false, reason: hostile }) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
-      cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }, now: () => now
+      cancellationAuthentication: { verify: authenticatedCancellation }, now: () => now
     }, { ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" });
 
     await expect(verifierFail.ingestEvidence(evidence(), envelope())).resolves.toEqual({

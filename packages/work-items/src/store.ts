@@ -2921,6 +2921,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .prepare(
           `SELECT attempts.status AS attempt_status, work_items.status AS work_item_status
            FROM execution_attempts AS attempts
+           JOIN work_items ON work_items.id = attempts.work_item_id
            JOIN attempt_leases AS leases ON leases.attempt_id = attempts.attempt_id AND leases.work_item_id = attempts.work_item_id
            JOIN workspace_allocations AS workspaces ON workspaces.attempt_id = attempts.attempt_id AND workspaces.lease_id = leases.lease_id AND workspaces.fencing_epoch = leases.fencing_epoch AND workspaces.status = 'active'
            WHERE attempts.attempt_id = ? AND attempts.work_item_id = ? AND attempts.current_fencing_epoch = ?

@@ -7,6 +7,8 @@ import {
   type SwarmExecutionEvidence
 } from "./codex-swarm-envelope.js";
 import type {
+  AuthenticatedCodexSwarmCancellation,
+  CancelCodexSwarmAttemptResult,
   CodexSwarmDispatchReservationInput,
   CodexSwarmDispatchReservationResult,
   CodexSwarmDispatchStartResult,
@@ -48,6 +50,8 @@ export interface CancellationRequest extends Pick<DispatchReservation, "workItem
 /** Produced by the ACS authentication boundary, never supplied by the caller. */
 export interface AuthenticatedCancellationRequest extends CancellationRequest {
   principalId: string;
+  canonicalIntentHash: string;
+  providerBinding: AuthenticatedCodexSwarmCancellation["providerBinding"];
 }
 
 export interface CancellationAuthenticationVerifier {
@@ -84,6 +88,34 @@ export function createCodexSwarmStoreReservationPort(
   return {
     reserve: (tuple) => store.reserveCodexSwarmDispatch(tuple),
     completeStart: (tuple, result) => store.completeCodexSwarmDispatchStart(tuple, result)
+  };
+}
+
+/**
+ * Test-only adapter to the canonical cancellation writer. Authentication facts
+ * are accepted only from the injected verifier and copied into the store-owned
+ * shape; the store revalidates all durable bindings atomically.
+ */
+export function createCodexSwarmStoreAuthorityPort(
+  store: Pick<
+    { cancelCodexSwarmAttempt(input: AuthenticatedCodexSwarmCancellation): CancelCodexSwarmAttemptResult },
+    "cancelCodexSwarmAttempt"
+  >
+): Pick<CodexSwarmAuthorityPort, "cancel"> {
+  return {
+    cancel: (input) => {
+      const result = store.cancelCodexSwarmAttempt({
+        requestId: input.requestId,
+        workItemId: input.workItemId,
+        attemptId: input.attemptId,
+        leaseId: input.leaseId,
+        fencingEpoch: input.fencingEpoch,
+        authenticatedPrincipalId: input.principalId,
+        canonicalIntentHash: input.canonicalIntentHash,
+        providerBinding: input.providerBinding
+      });
+      return result.kind === "committed" ? { kind: "cancelled" } : result.kind === "replay" ? { kind: "replay" } : { kind: "stale" };
+    }
   };
 }
 

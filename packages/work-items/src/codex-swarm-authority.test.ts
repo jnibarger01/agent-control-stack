@@ -64,6 +64,50 @@ describe("Codex Swarm durable authority migration", () => {
     }
   });
 
+  it("commits a current provider-bound cancellation and replays it after reopening", () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-codex-swarm-authority-"));
+    const dbPath = join(directory, "control.db");
+    try {
+      const providerBinding = {
+        contextHash: hash("a"),
+        proofBindingHash: hash("b"),
+        providerGeneration: 1,
+        sessionEpochBindingHash: hash("c")
+      };
+      const store = new SqliteWorkItemStore(dbPath, {
+        currentProviderBindingValidator: { validateCurrent: () => ({ kind: "current" }) }
+      });
+      store.registerActor({ id: "actor-canceller", actorType: "HUMAN", displayName: "canceller" });
+      const workItem = store.create({ title: "durable cancellation", requester: "user", requesterSubject: "actor-user", intent: "test", target: { cwd: "/repo", files: ["src/index.ts"] }, requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"], write: false } }], risk: "low" });
+      const plan = store.createExecutionPlan({ workItemId: workItem.id, definition: defaultExecutionPlanForWorkItem(workItem), createdByActorId: "actor-user" });
+      const admission = store.admitExecutionPlan({ workItemId: workItem.id, planHash: plan.planHash, policyVersion: "acs.policy.v1", policyDecisionHash: hash("d"), requiresApproval: false, admittedByActorId: "policy-gate" }, { via: "policy_gate" });
+      const attempt = store.createAttempt({ workItemId: workItem.id, planHash: plan.planHash, inputHash: hash("e") }, { via: "domain_service" });
+      const lease = store.leaseAttempt({ attemptId: attempt.attemptId, workItemId: workItem.id, admissionId: admission.admissionId, workerId: "worker-1", leaseToken: "x".repeat(32), policyVersion: "acs.policy.v1", policyDecisionHash: hash("d"), ttlMs: 60_000 }, { via: "domain_service" });
+      store.recordWorkspaceAllocation({ allocationId: "workspace-cancel-1", workItemId: workItem.id, attemptId: attempt.attemptId, leaseId: lease.leaseId, workerId: lease.workerId, fencingEpoch: lease.fencingEpoch, hostPath: "/isolated/workspace-cancel-1", branch: "acs/test", baseRef: "HEAD" }, { via: "domain_service" });
+      const cancellation = {
+        requestId: "cancel-current-1",
+        workItemId: workItem.id,
+        attemptId: attempt.attemptId,
+        leaseId: lease.leaseId,
+        fencingEpoch: lease.fencingEpoch,
+        authenticatedPrincipalId: "actor-canceller",
+        canonicalIntentHash: hash("f"),
+        providerBinding
+      };
+
+      const committed = store.cancelCodexSwarmAttempt(cancellation);
+      expect(committed).toMatchObject({ kind: "committed", replay: false });
+      expect(store.getAttempt(attempt.attemptId)?.status).toBe("cancellation_requested");
+
+      const reopened = new SqliteWorkItemStore(dbPath, {
+        currentProviderBindingValidator: { validateCurrent: () => ({ kind: "current" }) }
+      });
+      expect(reopened.cancelCodexSwarmAttempt(cancellation)).toEqual({ ...committed, kind: "replay", replay: true });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
+
   it("persists a failed child start exactly once and survives reopening the canonical store", () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-codex-swarm-authority-"));
     const dbPath = join(directory, "control.db");
