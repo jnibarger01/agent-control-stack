@@ -63,4 +63,29 @@ describe("Codex Swarm durable authority migration", () => {
       rmSync(directory, { force: true, recursive: true });
     }
   });
+
+  it("persists a failed child start exactly once and survives reopening the canonical store", () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-codex-swarm-authority-"));
+    const dbPath = join(directory, "control.db");
+    try {
+      const store = new SqliteWorkItemStore(dbPath);
+      const workItem = store.create({ title: "durable failed start", requester: "user", requesterSubject: "actor-user", intent: "test", target: { cwd: "/repo", files: ["src/index.ts"] }, requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"], write: false } }], risk: "low" });
+      const plan = store.createExecutionPlan({ workItemId: workItem.id, definition: defaultExecutionPlanForWorkItem(workItem), createdByActorId: "actor-user" });
+      const admission = store.admitExecutionPlan({ workItemId: workItem.id, planHash: plan.planHash, policyVersion: "acs.policy.v1", policyDecisionHash: hash("a"), requiresApproval: false, admittedByActorId: "policy-gate" }, { via: "policy_gate" });
+      const attempt = store.createAttempt({ workItemId: workItem.id, planHash: plan.planHash, inputHash: hash("b") }, { via: "domain_service" });
+      const lease = store.leaseAttempt({ attemptId: attempt.attemptId, workItemId: workItem.id, admissionId: admission.admissionId, workerId: "worker-1", leaseToken: "x".repeat(32), policyVersion: "acs.policy.v1", policyDecisionHash: hash("a"), ttlMs: 60_000 }, { via: "domain_service" });
+      store.recordWorkspaceAllocation({ allocationId: "workspace-1", workItemId: workItem.id, attemptId: attempt.attemptId, leaseId: lease.leaseId, workerId: lease.workerId, fencingEpoch: lease.fencingEpoch, hostPath: "/isolated/workspace-1", branch: "acs/test", baseRef: "HEAD" }, { via: "domain_service" });
+      const tuple = { workItemId: workItem.id, attemptId: attempt.attemptId, leaseId: lease.leaseId, fencingEpoch: lease.fencingEpoch, envelopeHash: hash("c"), idempotencyKey: "dispatch-failed-start" };
+      expect(store.reserveCodexSwarmDispatch(tuple)).toEqual({ kind: "reserved" });
+
+      expect(store.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })).toEqual({ kind: "completed" });
+      expect(store.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })).toEqual({ kind: "replay" });
+      expect(store.completeCodexSwarmDispatchStart(tuple, { kind: "started" })).toEqual({ kind: "conflict" });
+
+      const reopened = new SqliteWorkItemStore(dbPath);
+      expect(reopened.completeCodexSwarmDispatchStart(tuple, { kind: "failed_start", reason: "untrusted child error" })).toEqual({ kind: "replay" });
+    } finally {
+      rmSync(directory, { force: true, recursive: true });
+    }
+  });
 });

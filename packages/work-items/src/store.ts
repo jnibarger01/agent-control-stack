@@ -887,6 +887,9 @@ export interface CodexSwarmDispatchReservationInput {
 
 export type CodexSwarmDispatchReservationResult = { kind: "reserved" } | { kind: "replay" } | { kind: "conflict" };
 
+export type CodexSwarmDispatchStartResult = { kind: "started" } | { kind: "failed_start"; reason: string };
+export type CompleteCodexSwarmDispatchStartResult = { kind: "completed" } | { kind: "replay" } | { kind: "conflict" };
+
 export interface CodexSwarmProviderBinding {
   contextHash: string;
   proofBindingHash: string;
@@ -1001,6 +1004,10 @@ export interface WorkItemStore {
   /** Most recent lease for the attempt, active or not - startup reconciliation needs the real status, not an assumption. */
   getActiveLeaseForAttempt(attemptId: string): AttemptLease | undefined;
   reserveCodexSwarmDispatch(input: CodexSwarmDispatchReservationInput): CodexSwarmDispatchReservationResult;
+  completeCodexSwarmDispatchStart(
+    input: CodexSwarmDispatchReservationInput,
+    result: CodexSwarmDispatchStartResult
+  ): CompleteCodexSwarmDispatchStartResult;
   cancelCodexSwarmAttempt(input: AuthenticatedCodexSwarmCancellation): CancelCodexSwarmAttemptResult;
   recordWorkspaceAllocation(
     input: RecordWorkspaceAllocationInput,
@@ -2803,6 +2810,63 @@ export class SqliteWorkItemStore implements WorkItemStore {
           now
         );
       return { value: { kind: "reserved" as const }, events: [] };
+    });
+  }
+
+  /**
+   * A child start is an external side effect, so its bounded outcome is made
+   * durable before the coordinator reports it. Arbitrary child failure text is
+   * intentionally discarded: canonical storage records only the allowlisted
+   * failure code.
+   */
+  completeCodexSwarmDispatchStart(
+    input: CodexSwarmDispatchReservationInput,
+    result: CodexSwarmDispatchStartResult
+  ): CompleteCodexSwarmDispatchStartResult {
+    if (
+      !isNonEmptyIdentifier(input.idempotencyKey) ||
+      !isLowercaseSha256(input.envelopeHash) ||
+      !Number.isInteger(input.fencingEpoch) ||
+      input.fencingEpoch <= 0
+    ) {
+      return { kind: "conflict" };
+    }
+    return this.write<CompleteCodexSwarmDispatchStartResult>(() => {
+      const existing = this.db
+        .prepare(
+          `SELECT work_item_id, attempt_id, lease_id, fencing_epoch, envelope_hash, start_status, start_code
+           FROM codex_swarm_dispatch_reservations WHERE idempotency_key = ?`
+        )
+        .get(input.idempotencyKey) as
+        | {
+            work_item_id: string;
+            attempt_id: string;
+            lease_id: string;
+            fencing_epoch: number;
+            envelope_hash: string;
+            start_status: "reserved" | "started" | "failed_start" | "cancelled";
+            start_code: string | null;
+          }
+        | undefined;
+      if (!existing || !sameDispatchReservationBinding(existing, input)) {
+        return { value: { kind: "conflict" }, events: [] };
+      }
+      const expectedStatus = result.kind;
+      if (existing.start_status !== "reserved") {
+        return {
+          value: { kind: existing.start_status === expectedStatus ? "replay" : "conflict" },
+          events: []
+        };
+      }
+      const startCode = result.kind === "failed_start" ? "codex_swarm_child_start_failed" : null;
+      const updated = this.db
+        .prepare(
+          `UPDATE codex_swarm_dispatch_reservations
+           SET start_status = ?, start_code = ?, completed_at = ?
+           WHERE idempotency_key = ? AND start_status = 'reserved'`
+        )
+        .run(expectedStatus, startCode, new Date().toISOString(), input.idempotencyKey);
+      return { value: { kind: updated.changes === 1 ? "completed" : "conflict" }, events: [] };
     });
   }
 
@@ -5742,6 +5806,25 @@ function isNonEmptyIdentifier(value: string): boolean {
 
 function isLowercaseSha256(value: string): boolean {
   return /^[a-f0-9]{64}$/u.test(value);
+}
+
+function sameDispatchReservationBinding(
+  row: {
+    work_item_id: string;
+    attempt_id: string;
+    lease_id: string;
+    fencing_epoch: number;
+    envelope_hash: string;
+  },
+  input: CodexSwarmDispatchReservationInput
+): boolean {
+  return (
+    row.work_item_id === input.workItemId &&
+    row.attempt_id === input.attemptId &&
+    row.lease_id === input.leaseId &&
+    row.fencing_epoch === input.fencingEpoch &&
+    row.envelope_hash === input.envelopeHash
+  );
 }
 
 function isAuthenticatedCancellation(value: AuthenticatedCodexSwarmCancellation): boolean {
