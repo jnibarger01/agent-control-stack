@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { buildExecutionEnvelope, verifyExecutionEnvelope, type SwarmExecutionEvidence } from "./codex-swarm-envelope.js";
-import { assertCodexSwarmTestBackendEnabled, createCodexSwarmTestCoordinator, type AttemptAuthority, type DispatchReservation } from "./codex-swarm.js";
+import { assertCodexSwarmTestBackendEnabled, createCodexSwarmStoreReservationPort, createCodexSwarmTestCoordinator, type AttemptAuthority, type DispatchReservation } from "./codex-swarm.js";
 
 const secret = "s".repeat(48);
 const now = new Date("2026-09-03T00:00:20.000Z");
@@ -37,7 +37,7 @@ function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = 
   const cancels = cancel;
   const audit = vi.fn();
   const atomicCancel = vi.fn((): { kind: "cancelled" | "replay" | "stale" } => ({ kind: "cancelled" }));
-  const completeStart = vi.fn();
+  const completeStart = vi.fn(() => ({ kind: "completed" as const }));
   const coordinator = createCodexSwarmTestCoordinator(
     {
       authority: { read: vi.fn(() => authority), cancel: atomicCancel },
@@ -53,6 +53,17 @@ function harness(mode: "reserved" | "replay" | "conflict" = "reserved", start = 
 }
 
 describe("CodexSwarmCoordinator", () => {
+  it("uses the canonical durable store for both reservation and persisted start outcome", () => {
+    const reserveCodexSwarmDispatch = vi.fn(() => ({ kind: "reserved" as const }));
+    const completeCodexSwarmDispatchStart = vi.fn(() => ({ kind: "completed" as const }));
+    const port = createCodexSwarmStoreReservationPort({ reserveCodexSwarmDispatch, completeCodexSwarmDispatchStart });
+    const tuple: DispatchReservation = { workItemId: "wrk_1", attemptId: "attempt_1", leaseId: "lease_1", fencingEpoch: 1, envelopeHash: "a".repeat(64), idempotencyKey: "idem_1" };
+
+    expect(port.reserve(tuple)).toEqual({ kind: "reserved" });
+    port.completeStart(tuple, { kind: "failed_start", reason: "untrusted child error" });
+    expect(completeCodexSwarmDispatchStart).toHaveBeenCalledWith(tuple, { kind: "failed_start", reason: "untrusted child error" });
+  });
+
   it("never enables the backend without its injected test provider or in production", () => {
     expect(() => assertCodexSwarmTestBackendEnabled({})).toThrow(/injected/);
     expect(() => assertCodexSwarmTestBackendEnabled({ NODE_ENV: "production", ACS_CODEX_SWARM_TEST_PROVIDER: "in_memory" })).toThrow(/production/);
@@ -62,7 +73,7 @@ describe("CodexSwarmCoordinator", () => {
   it("permits construction only through the guarded test-only factory", () => {
     const h = harness();
     expect(() => createCodexSwarmTestCoordinator({
-      authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) }, reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
+      authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) }, reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => ({ kind: "completed" as const }) },
       child: { start: async () => undefined, cancel: async () => undefined }, audit: { append: () => undefined }, verifier: { verify: async () => ({ ok: true }) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
       cancellationAuthentication: { verify: (input) => ({ ...input, principalId: "actor-user" }) }
@@ -102,7 +113,7 @@ describe("CodexSwarmCoordinator", () => {
     h.authority.revoked = true;
     await expect(h.coordinator.dispatch(envelope())).resolves.toEqual({ kind: "denied", reason: "codex_swarm_authority_inactive" });
     const denied = createCodexSwarmTestCoordinator({
-      authority: { read: () => h.authority, cancel: h.atomicCancel }, reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
+      authority: { read: () => h.authority, cancel: h.atomicCancel }, reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => ({ kind: "completed" as const }) },
       child: { start: h.starts, cancel: h.cancels }, audit: { append: h.audit }, verifier: { verify: async () => ({ ok: true }) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
       cancellationAuthentication: { verify: () => undefined }
@@ -118,7 +129,7 @@ describe("CodexSwarmCoordinator", () => {
     await expect(h.coordinator.ingestEvidence(nested, envelope())).resolves.toEqual({ status: "quarantined", reason: "evidence_forbidden_lifecycle_claim" });
     const verifierFail = createCodexSwarmTestCoordinator({
       authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) },
-      reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
+      reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => ({ kind: "completed" as const }) },
       child: { start: vi.fn(), cancel: vi.fn() }, audit: { append: vi.fn() },
       verifier: { verify: async () => ({ ok: false, reason: "verifier_missing" }) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },
@@ -132,7 +143,7 @@ describe("CodexSwarmCoordinator", () => {
     const hostile = "SECRET_TOKEN=top-secret\n\u0000".repeat(20_000);
     const verifierFail = createCodexSwarmTestCoordinator({
       authority: { read: () => h.authority, cancel: () => ({ kind: "cancelled" }) },
-      reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => undefined },
+      reservations: { reserve: () => ({ kind: "reserved" }), completeStart: () => ({ kind: "completed" as const }) },
       child: { start: vi.fn(), cancel: vi.fn() }, audit: { append: h.audit },
       verifier: { verify: async () => ({ ok: false, reason: hostile }) },
       envelopeVerifier: { verify: (value) => verifyExecutionEnvelope(value, secret, { now: () => now }) },

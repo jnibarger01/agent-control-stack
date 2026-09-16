@@ -6,6 +6,12 @@ import {
   type VerifyExecutionEnvelopeResult,
   type SwarmExecutionEvidence
 } from "./codex-swarm-envelope.js";
+import type {
+  CodexSwarmDispatchReservationInput,
+  CodexSwarmDispatchReservationResult,
+  CodexSwarmDispatchStartResult,
+  CompleteCodexSwarmDispatchStartResult
+} from "@agent-control-stack/work-items";
 
 /** Test-only coordinator boundary. It deliberately has no shell, filesystem, network, or MCP dependency. */
 export const CODEX_SWARM_TEST_PROVIDER = "in_memory" as const;
@@ -52,7 +58,33 @@ export interface DispatchReservationPort {
   /** Must execute atomically in durable ACS storage, never in the child process. */
   reserve(tuple: DispatchReservation): { kind: "reserved" } | { kind: "replay" } | { kind: "conflict" };
   /** Persist the immutable child-start result before the coordinator returns it. */
-  completeStart(tuple: DispatchReservation, result: { kind: "started" } | { kind: "failed_start"; reason: string }): void;
+  completeStart(
+    tuple: DispatchReservation,
+    result: { kind: "started" } | { kind: "failed_start"; reason: string }
+  ): { kind: "completed" } | { kind: "replay" } | { kind: "conflict" };
+}
+
+/**
+ * Test-only adapter to the one canonical durable authority. It does not read
+ * authority and cannot grant it: `reserveCodexSwarmDispatch` revalidates the
+ * current tuple in its writer transaction.
+ */
+export function createCodexSwarmStoreReservationPort(
+  store: Pick<
+    {
+      reserveCodexSwarmDispatch(input: CodexSwarmDispatchReservationInput): CodexSwarmDispatchReservationResult;
+      completeCodexSwarmDispatchStart(
+        input: CodexSwarmDispatchReservationInput,
+        result: CodexSwarmDispatchStartResult
+      ): CompleteCodexSwarmDispatchStartResult;
+    },
+    "reserveCodexSwarmDispatch" | "completeCodexSwarmDispatchStart"
+  >
+): DispatchReservationPort {
+  return {
+    reserve: (tuple) => store.reserveCodexSwarmDispatch(tuple),
+    completeStart: (tuple, result) => store.completeCodexSwarmDispatchStart(tuple, result)
+  };
 }
 
 export interface CodexSwarmChildController {
@@ -147,11 +179,15 @@ class TestOnlyCodexSwarmCoordinator implements CodexSwarmCoordinator {
     try {
       await this.child.start({ envelope });
     } catch {
-      this.reservations.completeStart(tuple, { kind: "failed_start", reason: "codex_swarm_child_start_failed" });
+      if (this.reservations.completeStart(tuple, { kind: "failed_start", reason: "codex_swarm_child_start_failed" }).kind === "conflict") {
+        return this.denyDispatch("codex_swarm_start_outcome_conflict", envelope);
+      }
       this.audit.append({ name: "execution.codex_swarm.start_failed", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId, reason: "codex_swarm_child_start_failed" });
       return { kind: "failed_start" };
     }
-    this.reservations.completeStart(tuple, { kind: "started" });
+    if (this.reservations.completeStart(tuple, { kind: "started" }).kind === "conflict") {
+      return this.denyDispatch("codex_swarm_start_outcome_conflict", envelope);
+    }
     this.audit.append({ name: "execution.codex_swarm.dispatched", workItemId: envelope.acsWorkItemId, attemptId: envelope.acsAttemptId });
     return { kind: "started" };
   }
