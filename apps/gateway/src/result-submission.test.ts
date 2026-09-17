@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { stableHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore, type ClaimedWorkItem } from "@agent-control-stack/work-items";
-import { buildGateway, type GatewayAuthOptions } from "./server.js";
+import { buildGateway, WorkerIdentityRegistry, type GatewayAuthOptions } from "./server.js";
 
 const transition = { via: "domain_service" as const };
 const workerAuth: GatewayAuthOptions = { token: "worker-token", actor: "agent", actorId: "worker-a" };
@@ -227,6 +227,88 @@ describe("authenticated result submission route", () => {
       expect(response.statusCode).toBe(413);
       expect(response.body).not.toContain("/tmp/");
       expect(response.body).not.toContain("stack");
+    } finally {
+      await app.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rotate-then-submit: rotated worker identity can complete a claimed item", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-gateway-identity-rotate-"));
+    const dbPath = join(directory, "control.db");
+    const claimed = seedClaim(dbPath);
+    const workerIdentities = new WorkerIdentityRegistry();
+    const issued = workerIdentities.issue({
+      workerId: "worker-a",
+      ttlMs: 60_000,
+      token: "i".repeat(32)
+    });
+    const rotated = workerIdentities.rotate({
+      workerId: "worker-a",
+      currentToken: issued.token,
+      ttlMs: 60_000,
+      newToken: "r".repeat(32)
+    });
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: { token: "", actor: "", workerIdentities }
+    });
+    try {
+      const withOld = await app.inject({
+        method: "POST",
+        url: `/work-items/${claimed.id}/results`,
+        headers: { authorization: `Bearer ${issued.token}` },
+        payload: submission(claimed)
+      });
+      const withRotated = await app.inject({
+        method: "POST",
+        url: `/work-items/${claimed.id}/results`,
+        headers: { authorization: `Bearer ${rotated.token}` },
+        payload: submission(claimed)
+      });
+      expect(withOld.statusCode).toBe(401);
+      expect(withOld.json()).toMatchObject({ code: "worker_identity_revoked" });
+      expect(withRotated.statusCode).toBe(201);
+      expect(withRotated.json().workItem.status).toBe("succeeded");
+    } finally {
+      await app.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("expired-then-deny: expired worker identity cannot complete a claimed item", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-gateway-identity-expire-"));
+    const dbPath = join(directory, "control.db");
+    const claimed = seedClaim(dbPath);
+    const workerIdentities = new WorkerIdentityRegistry();
+    const issued = workerIdentities.issue({
+      workerId: "worker-a",
+      ttlMs: 1_000,
+      token: "e".repeat(32),
+      // Issued in the past so wall-clock authenticate in the gateway sees expiry.
+      now: new Date(Date.now() - 60_000)
+    });
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: { token: "", actor: "", workerIdentities }
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: `/work-items/${claimed.id}/results`,
+        headers: { authorization: `Bearer ${issued.token}` },
+        payload: submission(claimed)
+      });
+      expect(response.statusCode).toBe(410);
+      expect(response.json()).toMatchObject({ code: "worker_identity_expired" });
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(check.get(claimed.id)?.status).toBe("running");
+      } finally {
+        check.close();
+      }
     } finally {
       await app.close();
       rmSync(directory, { recursive: true, force: true });

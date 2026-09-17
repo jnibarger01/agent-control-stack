@@ -15,6 +15,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
+import { explainPolicy } from "./explain.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
 
 export const workItemToolNames = [
@@ -24,7 +25,8 @@ export const workItemToolNames = [
   "approve_work_item",
   "unblock_work_item",
   "reject_work_item",
-  "cancel_work_item"
+  "cancel_work_item",
+  "explain_policy"
 ] as const;
 
 // Note: claim_next_approved_work_item and claim_approved_work_item_by_id are
@@ -450,6 +452,9 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
     },
     list_work_items(input: unknown = {}): WorkItem[] {
       return store.list(input);
+    },
+    explain_policy(input: unknown) {
+      return explainPolicy(input);
     },
     approve_work_item(input: unknown): { decision: PolicyDecision; workItem: WorkItem; approvals: ApprovalGrant[] } {
       return gateApproval(store, policy, input);

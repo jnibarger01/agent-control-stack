@@ -148,6 +148,7 @@
       ],
       "properties": [
         "intent",
+        "metadata",
         "requestedActions",
         "requester",
         "requesterSubject",
@@ -164,7 +165,8 @@
         "intent": "\"string\"",
         "target": "\"object\"",
         "requestedActions": "\"array\"",
-        "risk": "\"string\""
+        "risk": "\"string\"",
+        "metadata": "\"object\""
       },
       "propertyEnums": {
         "requester": [
@@ -175,6 +177,58 @@
         "status": [
           "draft",
           "pending_policy"
+        ],
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
+    },
+    "POST /policy/explain": {
+      "required": [
+        "action",
+        "actor",
+        "operation",
+        "requester",
+        "risk",
+        "workItemId"
+      ],
+      "properties": [
+        "action",
+        "actor",
+        "command",
+        "cwd",
+        "destructive",
+        "network",
+        "operation",
+        "paths",
+        "requester",
+        "risk",
+        "workItemId",
+        "write"
+      ],
+      "propertyTypes": {
+        "workItemId": "\"string\"",
+        "actor": "\"string\"",
+        "operation": "\"string\"",
+        "requester": "\"string\"",
+        "risk": "\"string\"",
+        "action": "\"object\"",
+        "cwd": "\"string\"",
+        "command": "\"array\"",
+        "paths": "\"array\"",
+        "network": "\"boolean\"",
+        "write": "\"boolean\"",
+        "destructive": "\"boolean\""
+      },
+      "propertyEnums": {
+        "operation": [
+          "approve",
+          "claim",
+          "create",
+          "unblock"
         ],
         "risk": [
           "critical",
@@ -318,7 +372,7 @@
         "artifacts": "\"array\"",
         "error": "\"string\"",
         "resourceUsage": "\"object\"",
-        "simulationMetadata": "null"
+        "simulationMetadata": "\"object\""
       },
       "propertyEnums": {
         "outcome": [
@@ -606,6 +660,7 @@
       ],
       "properties": [
         "intent",
+        "metadata",
         "requestedActions",
         "requester",
         "requesterSubject",
@@ -622,7 +677,8 @@
         "intent": "\"string\"",
         "target": "\"object\"",
         "requestedActions": "\"array\"",
-        "risk": "\"string\""
+        "risk": "\"string\"",
+        "metadata": "\"object\""
       },
       "propertyEnums": {
         "requester": [
@@ -738,6 +794,58 @@
       },
       "propertyEnums": {}
     },
+    "explain_policy": {
+      "required": [
+        "action",
+        "actor",
+        "operation",
+        "requester",
+        "risk",
+        "workItemId"
+      ],
+      "properties": [
+        "action",
+        "actor",
+        "command",
+        "cwd",
+        "destructive",
+        "network",
+        "operation",
+        "paths",
+        "requester",
+        "risk",
+        "workItemId",
+        "write"
+      ],
+      "propertyTypes": {
+        "workItemId": "\"string\"",
+        "actor": "\"string\"",
+        "operation": "\"string\"",
+        "requester": "\"string\"",
+        "risk": "\"string\"",
+        "action": "\"object\"",
+        "cwd": "\"string\"",
+        "command": "\"array\"",
+        "paths": "\"array\"",
+        "network": "\"boolean\"",
+        "write": "\"boolean\"",
+        "destructive": "\"boolean\""
+      },
+      "propertyEnums": {
+        "operation": [
+          "approve",
+          "claim",
+          "create",
+          "unblock"
+        ],
+        "risk": [
+          "critical",
+          "high",
+          "low",
+          "medium"
+        ]
+      }
+    },
     "open_acs_dashboard": {
       "required": [],
       "properties": [],
@@ -753,6 +861,94 @@
       ],
       "propertyTypes": {
         "id": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.get_summary": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "portfolio.list_repositories": {
+      "required": [],
+      "properties": [
+        "lifecycle",
+        "limit",
+        "status"
+      ],
+      "propertyTypes": {
+        "status": "\"string\"",
+        "lifecycle": "\"string\"",
+        "limit": "\"integer\""
+      },
+      "propertyEnums": {
+        "status": [
+          "ARCHIVED",
+          "ATTENTION",
+          "BLOCKED",
+          "HEALTHY",
+          "UNKNOWN"
+        ],
+        "lifecycle": [
+          "ACTIVE",
+          "ARCHIVED",
+          "DORMANT",
+          "EXPERIMENTAL",
+          "MAINTENANCE",
+          "UNKNOWN"
+        ]
+      }
+    },
+    "portfolio.list_attention_required": {
+      "required": [],
+      "properties": [
+        "limit"
+      ],
+      "propertyTypes": {
+        "limit": "\"integer\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.get_repository": {
+      "required": [
+        "repository"
+      ],
+      "properties": [
+        "repository"
+      ],
+      "propertyTypes": {
+        "repository": "\"string\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.list_failures": {
+      "required": [],
+      "properties": [
+        "limit"
+      ],
+      "propertyTypes": {
+        "limit": "\"integer\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.list_pending_work": {
+      "required": [],
+      "properties": [
+        "limit"
+      ],
+      "propertyTypes": {
+        "limit": "\"integer\""
+      },
+      "propertyEnums": {}
+    },
+    "portfolio.list_recent_progress": {
+      "required": [],
+      "properties": [
+        "limit"
+      ],
+      "propertyTypes": {
+        "limit": "\"integer\""
       },
       "propertyEnums": {}
     },

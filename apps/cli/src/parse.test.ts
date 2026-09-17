@@ -48,4 +48,21 @@ describe("parseAcsArgs", () => {
     expect(() => parseAcsArgs(["worker", "--daemon"])).toThrow(/invalid worker argument/);
     expect(() => parseAcsArgs(["mcp", "--listen"])).toThrow(/invalid mcp argument/);
   });
+
+  it("parses audit export and verify", () => {
+    expect(parseAcsArgs(["audit", "export", "--db", "a.db", "-o", "out.jsonl"])).toEqual({
+      kind: "audit-export",
+      dbPath: "a.db",
+      outputPath: "out.jsonl"
+    });
+    expect(parseAcsArgs(["audit", "verify", "--file", "out.jsonl"])).toEqual({
+      kind: "audit-verify",
+      filePath: "out.jsonl"
+    });
+    expect(parseAcsArgs(["audit", "verify", "--db", "a.db"])).toEqual({
+      kind: "audit-verify",
+      dbPath: "a.db"
+    });
+    expect(() => parseAcsArgs(["audit", "verify", "--file", "a", "--db", "b"])).toThrow(AcsUsageError);
+  });
 });

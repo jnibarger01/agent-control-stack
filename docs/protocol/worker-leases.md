@@ -79,15 +79,24 @@ The store validates the work item, attempt, current plan, active lease, worker b
 
 ## Renewal
 
-Lease renewal is deferred until long-running real execution exists.
+Workers renew an active attempt lease through `renewAttemptLease` before wall-clock expiry.
 
-When added, renewal must require:
+Renewal requires:
 
 - Same `worker_id`
+- Same fencing epoch
 - Same valid lease token
-- Maximum total lease duration
-- Audit event
+- Active, non-expired lease
+- New expiry strictly after the current expiry and at or before `max_expires_at`
+
+Successful renewal updates `expires_at` / `last_renewed_at` on the attempt lease (and the dual legacy lease projection), updates `work_items.lease_expires_at`, and emits `attempt_lease.renewed`. Exhausted max duration returns `lease_renewal_exhausted`.
+
+Expiry reaping (`failExpiredLeases`) uses the authoritative attempt-lease clock when present, marks the attempt lease `expired`, emits `attempt_lease.expired`, and records a derived `lease_expired` result so a stale worker cannot complete afterward.
+
+Re-leasing an interrupted attempt revokes any prior active lease first and emits `attempt_lease.stolen` so concurrent workers cannot double-complete under a stale fencing epoch.
 
 ## Security rule
 
 Worker identity without an active matching lease is not authority. A lease without the authenticated worker binding and action hash is not authority. Both are required, and results remain dry-run records until a separately gated sandbox wave exists.
+
+Worker bearer credentials additionally support TTL, rotation, and revoke — see [`worker-identity.md`](worker-identity.md).

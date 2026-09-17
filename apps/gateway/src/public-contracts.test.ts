@@ -1,8 +1,10 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { FastifyInstance } from "fastify";
+import { workItemToolNames } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
 import {
@@ -45,6 +47,31 @@ afterEach(() => {
   for (const directory of directories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+describe("frozen MCP/OpenAPI snapshot coverage", () => {
+  const contractsRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../contracts/public/v1");
+  const mcpTools = JSON.parse(readFileSync(resolve(contractsRoot, "mcp-tools.json"), "utf8")) as {
+    tools: Array<{ name: string; inputSchema: unknown }>;
+  };
+  const baseline = JSON.parse(readFileSync(resolve(contractsRoot, "compatibility-baseline.json"), "utf8")) as {
+    tools: Record<string, unknown>;
+  };
+  const required = [...workItemToolNames, ...portfolioToolNames];
+
+  it("keeps work-item and portfolio tools in the committed mcp-tools snapshot", () => {
+    const names = new Set(mcpTools.tools.map((tool) => tool.name));
+    for (const name of required) {
+      expect(names.has(name), `${name} missing from mcp-tools.json`).toBe(true);
+      expect(mcpTools.tools.find((tool) => tool.name === name)?.inputSchema).toBeDefined();
+    }
+  });
+
+  it("keeps work-item and portfolio tools in the compatibility baseline", () => {
+    for (const name of required) {
+      expect(baseline.tools[name], `${name} missing from compatibility-baseline.json`).toBeDefined();
+    }
+  });
 });
 
 describe("generated public contract clients", () => {

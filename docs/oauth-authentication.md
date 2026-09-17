@@ -202,8 +202,35 @@ The CLI stores its device keypair and session (`~/.config/acs/credentials.json` 
 
 ### Server-side model
 
-- **Device identity:** a `devices` table (`storage/migrations/022_device_auth.sql`), separate from `connector_records` (which represents operator-provisioned tunnel-proxy infrastructure, a different trust model — see ADR 0016). Device identity is the Ed25519 public key, not any issued token: refreshing an access token never touches the `devices` table, so a stolen refresh token cannot enroll a second trusted device.
+- **Device identity:** a `devices` table (`storage/migrations/023_device_auth.sql`), separate from `connector_records` (which represents operator-provisioned tunnel-proxy infrastructure, a different trust model — see ADR 0016). Device identity is the Ed25519 public key, not any issued token: refreshing an access token never touches the `devices` table, so a stolen refresh token cannot enroll a second trusted device.
 - **Scope:** device tokens are limited to `acs:device` by default. `acs:work:approve` is never granted to a CLI device by this flow.
 - **Fail closed:** malformed, expired, denied, or replayed device codes always return an RFC 8628 error (`authorization_pending`, `slow_down`, `access_denied`, `expired_token`, or `invalid_grant`/`invalid_client`) and never issue a token. `device_code` and `user_code` are stored only as SHA-256 hashes.
 - Device tokens authenticate the CLI to the ACS gateway's own REST surface. They are issued and verified by ACS itself (a narrowly-scoped authorization-server component for this one grant type), independent of whatever external OAuth/OIDC provider is configured for ChatGPT/Claude MCP access via `ACS_OAUTH_ISSUER`/`ACS_OAUTH_AUDIENCE`/`ACS_OAUTH_JWKS_URI` above — the two flows do not need to share an issuer.
 - Secrets (device codes, tokens, private keys) are never written to gateway or CLI logs.
+
+## Per-agent MCP tool allowlist
+
+Multi-agent deployments can restrict which MCP tools each authenticated identity
+may call with `ACS_MCP_TOOL_ALLOWLIST_JSON` (or `GatewayOptions.mcpToolAllowlist`):
+
+```json
+{
+  "agent-a": ["list_work_items"],
+  "agent-b": ["get_work_item", "list_work_items", "create_work_item"]
+}
+```
+
+Identity keys match the gateway MCP actor string: tunnel `connectorId` when
+present, otherwise the OAuth/local bearer `subject` (local bearer uses
+`local-dev`).
+
+Behavior:
+
+- **Unset / empty** — feature off; scopes alone gate tools (current default).
+- **Listed identity** — may call only tools on its list (both local and production).
+- **Unknown identity + production** (`NODE_ENV=production`) — **default-deny**.
+- **Unknown identity + local** — **permissive default** (allowed); listed peers
+  remain restricted. This keeps single-agent local development ergonomic.
+
+Enforcement is on `tools/call` after authentication and scope checks. Denied
+calls return JSON-RPC error `-32003` with HTTP 403.

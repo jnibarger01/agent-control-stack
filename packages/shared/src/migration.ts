@@ -44,21 +44,22 @@ const migrationFiles = [
   },
   { version: 18, name: "attempt_lease_approvals", filename: "018_attempt_lease_approvals.sql" },
   { version: 19, name: "work_item_metadata", filename: "019_work_item_metadata.sql" },
-  {
-    version: 20,
-    name: "desktop_commander_execution_mode",
-    filename: "020_desktop_commander_execution_mode.sql"
-  },
+  { version: 20, name: "lease_renewal", filename: "020_lease_renewal.sql" },
   {
     version: 21,
-    name: "advisory_evidence_and_verification",
-    filename: "021_advisory_evidence_and_verification.sql"
+    name: "desktop_commander_execution_mode",
+    filename: "021_desktop_commander_execution_mode.sql"
   },
-  { version: 22, name: "device_auth", filename: "022_device_auth.sql" },
   {
-    version: 23,
+    version: 22,
+    name: "advisory_evidence_and_verification",
+    filename: "022_advisory_evidence_and_verification.sql"
+  },
+  { version: 23, name: "device_auth", filename: "023_device_auth.sql" },
+  {
+    version: 24,
     name: "desktop_commander_runtime_capabilities",
-    filename: "023_desktop_commander_runtime_capabilities.sql"
+    filename: "024_desktop_commander_runtime_capabilities.sql"
   }
 ] as const;
 
@@ -89,6 +90,7 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
     db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
   }
   repairExactAlternateSeventeenToTwentyOneLayout(db);
+  repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db);
   for (const migration of controlPlaneMigrations()) {
     // The "already applied?" question is answered fresh inside this
     // migration's own transaction, after BEGIN IMMEDIATE's write lock is
@@ -207,14 +209,97 @@ function repairExactAlternateSeventeenToTwentyOneLayout(db: SqliteLike): void {
       throw new Error("alternate migration layout schema validation failed");
     }
   }
-  const canonical = controlPlaneMigrations().filter((migration) => migration.version >= 17 && migration.version <= 21);
+  const canonical = new Map(controlPlaneMigrations().map((migration) => [migration.version, migration]));
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version BETWEEN 17 AND 21").run();
-    for (const migration of canonical) {
+    for (const [oldVersion, newVersion] of [
+      [19, 17],
+      [20, 18],
+      [21, 19],
+      [17, 21],
+      [18, 22]
+    ] as const) {
+      const migration = canonical.get(newVersion);
+      if (!migration) throw new Error(`canonical migration ${newVersion} missing during lineage repair`);
       db.prepare(
         "UPDATE schema_migrations SET version = ?, name = ?, filename = ?, checksum = ? WHERE version = ?"
-      ).run(migration.version, migration.name, migration.filename, migration.checksum, migration.version + 100);
+      ).run(migration.version, migration.name, migration.filename, migration.checksum, oldVersion + 100);
+    }
+    applyMigrationInsideRepair(db, canonical, 20);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* no active transaction */
+    }
+    throw error;
+  }
+}
+
+/** Repairs the exact pre-lease-renewal 20-23 layout deployed by this branch. */
+function repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db: SqliteLike): void {
+  const deployed = [
+    [
+      20,
+      "desktop_commander_execution_mode",
+      "020_desktop_commander_execution_mode.sql",
+      "23c5d1ce662f032aa88df3ccf6a810fe0c08ef4ead22787365401befd39109fe"
+    ],
+    [
+      21,
+      "advisory_evidence_and_verification",
+      "021_advisory_evidence_and_verification.sql",
+      "0a530ca728bda97f7aedfa1ff89e2ae9a70cc0313d5208a5e7ca1089d7fc80a2"
+    ],
+    [22, "device_auth", "022_device_auth.sql", "a6527d63c1a6c3549c6c2a69b6b255be0dea751b70c3a4227f67e1deab1883e3"],
+    [
+      23,
+      "desktop_commander_runtime_capabilities",
+      "023_desktop_commander_runtime_capabilities.sql",
+      "5aae973d05b6bca6e0f6157eaa739a570c8e6dd19116f89a8e7fbfc82470059a"
+    ]
+  ] as const;
+  const rows = db
+    .prepare(
+      "SELECT version, name, filename, checksum FROM schema_migrations WHERE version BETWEEN 20 AND 23 ORDER BY version"
+    )
+    .all() as Array<{ version: number; name: string; filename: string; checksum: string }>;
+  if (
+    rows.length !== deployed.length ||
+    !rows.every((row, index) => {
+      const expected = deployed[index];
+      return (
+        row.version === expected[0] &&
+        row.name === expected[1] &&
+        row.filename === expected[2] &&
+        row.checksum === expected[3]
+      );
+    })
+  )
+    return;
+  for (const table of ["execution_results", "plan_proposals", "devices", "desktop_commander_runtimes"]) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)) {
+      throw new Error("pre-lease-renewal migration layout schema validation failed");
+    }
+  }
+  const canonical = new Map(controlPlaneMigrations().map((migration) => [migration.version, migration]));
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version BETWEEN 20 AND 23").run();
+    applyMigrationInsideRepair(db, canonical, 20);
+    for (const [oldVersion, newVersion] of [
+      [20, 21],
+      [21, 22],
+      [22, 23],
+      [23, 24]
+    ] as const) {
+      const migration = canonical.get(newVersion);
+      if (!migration) throw new Error(`canonical migration ${newVersion} missing during lineage repair`);
+      db.prepare(
+        "UPDATE schema_migrations SET version = ?, name = ?, filename = ?, checksum = ? WHERE version = ?"
+      ).run(migration.version, migration.name, migration.filename, migration.checksum, oldVersion + 100);
     }
     db.exec("COMMIT");
   } catch (error) {
@@ -225,6 +310,20 @@ function repairExactAlternateSeventeenToTwentyOneLayout(db: SqliteLike): void {
     }
     throw error;
   }
+}
+
+function applyMigrationInsideRepair(
+  db: SqliteLike,
+  canonical: ReadonlyMap<number, ControlPlaneMigration>,
+  version: number
+): void {
+  const migration = canonical.get(version);
+  if (!migration) throw new Error(`canonical migration ${version} missing during lineage repair`);
+  db.exec(migration.sql);
+  db.prepare(
+    `INSERT INTO schema_migrations (version, name, filename, checksum, applied_at)
+       VALUES (?, ?, ?, ?, ?)`
+  ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
 }
 
 function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMigration): string {

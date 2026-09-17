@@ -67,6 +67,45 @@ export interface MissionControlViewModel {
   now?: Date;
 }
 
+export type SseConnectionRoot = {
+  querySelector(selectors: string): SseConnectionElement | null;
+  querySelectorAll(selectors: string): ArrayLike<SseConnectionButton>;
+};
+
+export type SseConnectionElement = {
+  hidden: boolean;
+  classList: { toggle(token: string, force?: boolean): unknown };
+  innerHTML: string;
+};
+
+export type SseConnectionButton = {
+  disabled: boolean;
+  getAttribute(name: string): string | null;
+};
+
+/** Exponential backoff for EventSource reconnect: 1s, 2s, 4s, 8s, 16s, then 30s cap. */
+export function nextSseReconnectDelayMs(attempt: number): number {
+  const n = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return Math.min(30_000, 1_000 * 2 ** Math.min(n, 5));
+}
+
+/** Show/hide the stale-stream banner and disable approve/deny/unblock while disconnected. */
+export function applySseConnectionState(root: SseConnectionRoot, connected: boolean): void {
+  const banner = root.querySelector("#sse-stale-banner");
+  if (banner) banner.hidden = connected;
+  const live = root.querySelector(".live");
+  if (live) {
+    live.classList.toggle("disconnected", !connected);
+    live.innerHTML = connected
+      ? `<span aria-hidden="true"></span> Live`
+      : `<span aria-hidden="true"></span> Disconnected`;
+  }
+  for (const button of Array.from(root.querySelectorAll("[data-approve],[data-reject],[data-unblock]"))) {
+    const approveWithoutHash = button.getAttribute("data-approve") !== null && !button.getAttribute("data-action-hash");
+    button.disabled = !connected || approveWithoutHash;
+  }
+}
+
 const OPERATOR_ATTENTION_STATUSES: ReadonlySet<WorkItem["status"]> = new Set([
   "blocked",
   "needs_approval",
@@ -77,10 +116,51 @@ function needsOperatorAttention(status: WorkItem["status"]): boolean {
   return OPERATOR_ATTENTION_STATUSES.has(status);
 }
 
+export interface WorkItemDetailView {
+  id: string;
+  title: string;
+  status: string;
+  risk: string;
+  requester?: string;
+  intent?: string;
+  target?: unknown;
+  createdAt?: string;
+  requestedActions?: Array<{ kind: string; description?: string }>;
+}
+
+/** Markup for the work-item detail panel (axe smoke + client parity). */
+export function renderWorkItemDetailHtml(
+  workItem: WorkItemDetailView,
+  events: Array<{ name?: string; timeUnixNano?: string; attributes?: Record<string, string> }> = []
+): string {
+  const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
+  const actionList = actions.length
+    ? `<ul class="action-list">${actions
+        .map(
+          (action) =>
+            `<li><strong>${escapeHtml(action.kind)}</strong><small>${escapeHtml(action.description ?? "")}</small></li>`
+        )
+        .join("")}</ul>`
+    : `<p class="muted">No requested actions.</p>`;
+  const eventItems = events.length
+    ? `<ol class="detail-events">${events
+        .slice(0, 8)
+        .map((event) => {
+          const attrs = event.attributes ?? {};
+          const ref = attrs["work_item.id"] || attrs["agent.id"] || attrs["connector.id"] || "";
+          const when = event.timeUnixNano ? time(nanoToIso(event.timeUnixNano)) : "—";
+          return `<li><time>${when}</time><strong>${escapeHtml(event.name || "event")}</strong><small>${escapeHtml(ref)}</small></li>`;
+        })
+        .join("")}</ol>`
+    : `<p class="muted">No matching events.</p>`;
+  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(workItem.intent || "—")}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? JSON.stringify(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div><div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
+}
+
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
   const model = Array.isArray(input) ? { workItems: input, events: [] } : input;
   const events = model.events ?? [];
-  const agents = model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date(), model.registeredAgents ?? []);
+  const agents =
+    model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date(), model.registeredAgents ?? []);
   const stats = summarize(model.workItems, agents);
   const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
   const recentEvents = [...events].slice(-10).reverse();
@@ -98,23 +178,26 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <style>${styles()}</style>
   </head>
   <body>
-    <aside>
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <aside aria-label="Mission control navigation">
       <div class="brand">ACS<span>MISSION CONTROL</span></div>
-      <nav>
+      <nav aria-label="Primary">
         <a href="#overview" class="active">Overview</a>
         <a href="#agents">Agents</a>
         <a href="#queue">Work Queue</a>
         <a href="#approvals">Approvals</a>
+        <a href="#operator-metrics">Metrics</a>
         <a href="#dispatch">New Task</a>
         <a href="#events">Events</a>
       </nav>
       <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream.</p>
     </aside>
-    <main>
+    <main id="main-content" tabindex="-1">
       <header>
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
-        <div class="live"><span></span> SSE ready</div>
+        <div class="live" aria-live="polite"><span aria-hidden="true"></span> SSE ready</div>
       </header>
+      <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve and deny are disabled until the live stream reconnects.</div>
       <section id="overview" class="cards">${overviewCards(stats)}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
@@ -124,6 +207,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
       </section>
       <section class="grid lower">
+        <article id="operator-metrics" class="panel"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div>${operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, model.now ?? new Date())}</article>
         <article id="events" class="panel"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline(recentEvents)}</article>
         <article id="system" class="panel"><div class="panel-head"><h2>System Health</h2><span>derived</span></div>${systemPanel(stats, agents)}</article>
       </section>
@@ -157,7 +241,12 @@ export function projectAgents(
     const capabilities = patch.capabilities
       ? [...new Set([...current.capabilities, ...patch.capabilities])]
       : current.capabilities;
-    agents.set(id, { ...current, ...patch, capabilities, metadata: { ...current.metadata, ...(patch.metadata ?? {}) } });
+    agents.set(id, {
+      ...current,
+      ...patch,
+      capabilities,
+      metadata: { ...current.metadata, ...(patch.metadata ?? {}) }
+    });
   };
 
   for (const agent of registeredAgents) {
@@ -184,8 +273,13 @@ export function projectAgents(
   for (const event of events) {
     const body = asRecord(event.body);
     const attrs = event.attributes ?? {};
-    const ids = [attrs["worker.id"], attrs["connector.id"], attrs["auth.connector_id"], body.connectorId, body.workerId]
-      .filter((value): value is string => typeof value === "string" && value.length > 0);
+    const ids = [
+      attrs["worker.id"],
+      attrs["connector.id"],
+      attrs["auth.connector_id"],
+      body.connectorId,
+      body.workerId
+    ].filter((value): value is string => typeof value === "string" && value.length > 0);
     for (const id of ids) {
       touch(id, eventPatch(id, event, body));
     }
@@ -193,8 +287,12 @@ export function projectAgents(
 
   return [...agents.values()]
     .map((agent) => finalizeAgent(agent, now))
-    .sort((left, right) => statusRank(left.status) - statusRank(right.status) || left.displayName.localeCompare(right.displayName));
-}function eventPatch(id: string, event: StoredAuditEvent, body: Record<string, unknown>): Partial<MissionControlAgent> {
+    .sort(
+      (left, right) =>
+        statusRank(left.status) - statusRank(right.status) || left.displayName.localeCompare(right.displayName)
+    );
+}
+function eventPatch(id: string, event: StoredAuditEvent, body: Record<string, unknown>): Partial<MissionControlAgent> {
   const patch: Partial<MissionControlAgent> = { lastEventAt: nanoToIso(event.timeUnixNano) };
   if (typeof body.displayName === "string") patch.displayName = body.displayName;
   if (event.name.includes("heartbeat")) patch.lastHeartbeatAt = patch.lastEventAt;
@@ -218,17 +316,27 @@ export function projectAgents(
 }
 
 function finalizeAgent(agent: MissionControlAgent, now: Date): MissionControlAgent {
-  const heartbeatAgeMs = agent.lastHeartbeatAt ? now.getTime() - Date.parse(agent.lastHeartbeatAt) : Number.POSITIVE_INFINITY;
+  const heartbeatAgeMs = agent.lastHeartbeatAt
+    ? now.getTime() - Date.parse(agent.lastHeartbeatAt)
+    : Number.POSITIVE_INFINITY;
   const eventAgeMs = agent.lastEventAt ? now.getTime() - Date.parse(agent.lastEventAt) : Number.POSITIVE_INFINITY;
   let status = agent.status;
   let health = agent.health;
   if (agent.lastHeartbeatAt) {
-    status = heartbeatAgeMs <= DEFAULT_HEARTBEAT_ONLINE_WINDOW_MS
-      ? "online"
-      : heartbeatAgeMs <= DEFAULT_HEARTBEAT_TTL_MS
-        ? "stale"
-        : "offline";
-    health = status === "online" ? "healthy" : status === "stale" ? "warning" : health === "unhealthy" ? "unhealthy" : "unknown";
+    status =
+      heartbeatAgeMs <= DEFAULT_HEARTBEAT_ONLINE_WINDOW_MS
+        ? "online"
+        : heartbeatAgeMs <= DEFAULT_HEARTBEAT_TTL_MS
+          ? "stale"
+          : "offline";
+    health =
+      status === "online"
+        ? "healthy"
+        : status === "stale"
+          ? "warning"
+          : health === "unhealthy"
+            ? "unhealthy"
+            : "unknown";
   } else if (status !== "offline" && eventAgeMs > DEFAULT_HEARTBEAT_TTL_MS) {
     status = "stale";
   }
@@ -253,7 +361,12 @@ function overviewCards(stats: ReturnType<typeof summarize>): string {
     ["Pending Approvals", stats.approvals, "Policy-gated work waiting on a human"],
     ["Failed / Blocked", stats.failed, "Items that need operator attention"]
   ];
-  return cards.map(([label, value, help]) => `<article class="card"><span>${label}</span><strong>${value}</strong><p>${help}</p></article>`).join("");
+  return cards
+    .map(
+      ([label, value, help]) =>
+        `<article class="card"><span>${label}</span><strong>${value}</strong><p>${help}</p></article>`
+    )
+    .join("");
 }
 
 function agentTable(agents: MissionControlAgent[]): string {
@@ -267,7 +380,7 @@ function agentTable(agents: MissionControlAgent[]): string {
 }
 
 function agentDetailPanel(): string {
-  return `<section id="agent-detail" class="detail-panel agent-detail" aria-live="polite">
+  return `<section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
     <div class="detail-empty"><h3>No agent selected</h3><p>Backend detail pending.</p></div>
   </section>`;
 }
@@ -290,7 +403,9 @@ function workQueue(
       const leases = attemptLeasesByWorkItem[item.id] ?? [];
       return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
-    .join("")}</div><section id="work-detail" class="detail-panel work-detail" aria-live="polite"><div class="detail-empty"><h3>No work item selected</h3><p>Timeline pending.</p></div></section>`;
+    .join(
+      ""
+    )}</div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section>`;
 }
 
 function attentionBadge(): string {
@@ -316,29 +431,31 @@ function executionSummary(attempts: ExecutionAttempt[], leases: MissionControlAt
 
 function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Record<string, string[]>): string {
   if (!items.length) return `<p class="empty">No approvals or blocked work.</p>`;
-  return `<div class="approvals-list">${items
+  return `<div class="approvals-list" role="list">${items
     .map((item) => {
       const actions = item.requestedActions.map((action) => action.kind).join(", ") || "none";
       const error = workItemResultError(item);
-      const reason = `<input data-reason="${escapeHtml(item.id)}" required placeholder="Reason required" />`;
-      const outcome = `<output id="approval-result-${escapeHtml(item.id)}"></output>`;
-      const approvalButtons = approvalButtonsFor(item, approvalActionHashesByWorkItem[item.id] ?? []);
+      const reasonId = `reason-${escapeHtml(item.id)}`;
+      const resultId = `approval-result-${escapeHtml(item.id)}`;
+      const reason = `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="${reasonId}" data-reason="${escapeHtml(item.id)}" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label>`;
+      const outcome = `<output id="${resultId}" class="approval-result" aria-live="polite"></output>`;
+      const approvalButtons = approvalButtonsFor(item, approvalActionHashesByWorkItem[item.id] ?? [], reasonId);
       if (item.status === "blocked") {
-        return `<article class="approval-item"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions"><button type="button" data-unblock="${escapeHtml(item.id)}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}">Reject</button></div>${outcome}</article>`;
+        return `<article class="approval-item" role="listitem"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article class="approval-item"><span>${pill(item.status)} ${pill(item.risk)}</span><strong>${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requester)} · Actions: ${escapeHtml(actions)}</small>${reason}<div class="approval-actions">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}">Reject</button></div>${outcome}</article>`;
+      return `<article class="approval-item" role="listitem"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requester)} · Actions: ${escapeHtml(actions)}</small>${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
 }
 
-function approvalButtonsFor(item: WorkItem, hashes: string[]): string {
+function approvalButtonsFor(item: WorkItem, hashes: string[], reasonId: string): string {
   if (!hashes.length) {
-    return `<button type="button" data-approve="${escapeHtml(item.id)}" disabled>Approval hash unavailable</button>`;
+    return `<button type="button" data-approve="${escapeHtml(item.id)}" disabled aria-describedby="${reasonId}">Approval hash unavailable</button>`;
   }
   return hashes
     .map(
       (hash, index) =>
-        `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(hash)}">Approve ${index + 1}</button>`
+        `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(hash)}" aria-describedby="${reasonId}">Approve ${index + 1}</button>`
     )
     .join("");
 }
@@ -353,9 +470,59 @@ function workItemResultError(item: WorkItem): string | undefined {
   return result && typeof result.error === "string" ? result.error : undefined;
 }
 
+function operatorMetricsPanel(
+  workItems: WorkItem[],
+  attemptLeasesByWorkItem: Record<string, MissionControlAttemptLease[]>,
+  now: Date
+): string {
+  const activeLeases = Object.values(attemptLeasesByWorkItem)
+    .flat()
+    .filter((lease) => lease.status === "active");
+  const pendingApprovals = workItems.filter((item) => item.status === "needs_approval");
+  const oldestLeaseAge = maxAgeMs(
+    activeLeases.map((lease) => lease.issuedAt),
+    now
+  );
+  const oldestApprovalWait = maxAgeMs(
+    pendingApprovals.map((item) => item.createdAt),
+    now
+  );
+  return `<div class="operator-metrics"><dl>
+    <div><dt>Active leases</dt><dd>${activeLeases.length}</dd></div>
+    <div><dt>Oldest lease age</dt><dd>${formatDuration(oldestLeaseAge)}</dd></div>
+    <div><dt>Pending approvals</dt><dd>${pendingApprovals.length}</dd></div>
+    <div><dt>Oldest approval wait</dt><dd>${formatDuration(oldestApprovalWait)}</dd></div>
+  </dl>
+  <p class="metrics-scrape">429s / rate limits: scrape authenticated <a href="/metrics"><code>GET /metrics</code></a> for <code>acs_rate_limit_rejected_total</code> and <code>acs_http_requests_total{status="429"}</code>. Full names: <code>docs/runbooks/operator-metrics.md</code>.</p>
+  </div>`;
+}
+
+function maxAgeMs(timestamps: string[], now: Date): number | undefined {
+  let oldest: number | undefined;
+  for (const value of timestamps) {
+    const parsed = Date.parse(value);
+    if (!Number.isFinite(parsed)) continue;
+    const age = Math.max(0, now.getTime() - parsed);
+    if (oldest === undefined || age > oldest) oldest = age;
+  }
+  return oldest;
+}
+
+function formatDuration(ageMs: number | undefined): string {
+  if (ageMs === undefined) return "—";
+  const totalSeconds = Math.floor(ageMs / 1000);
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  if (minutes < 60) return `${minutes}m ${totalSeconds % 60}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
 function systemPanel(stats: ReturnType<typeof summarize>, agents: MissionControlAgent[]): string {
-  const unhealthy = agents.filter((agent) => agent.health === "unhealthy" || agent.status === "offline").length + stats.failed;
-  const warning = agents.filter((agent) => agent.health === "warning" || agent.status === "stale").length + stats.approvals;
+  const unhealthy =
+    agents.filter((agent) => agent.health === "unhealthy" || agent.status === "offline").length + stats.failed;
+  const warning =
+    agents.filter((agent) => agent.health === "warning" || agent.status === "stale").length + stats.approvals;
   const score = Math.max(0, 100 - unhealthy * 18 - warning * 6);
   const label = score >= 90 ? "Healthy" : score >= 70 ? "Degraded" : "Unhealthy";
   return `<div class="system-panel"><strong>${score}</strong><span>${escapeHtml(label)}</span><dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div></dl></div>`;
@@ -364,7 +531,10 @@ function systemPanel(stats: ReturnType<typeof summarize>, agents: MissionControl
 function eventTimeline(events: StoredAuditEvent[]): string {
   if (!events.length) return `<p class="empty">No audit events recorded.</p>`;
   return `<ol class="timeline">${events
-    .map((event) => `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(JSON.stringify(event.attributes))}</small></li>`)
+    .map(
+      (event) =>
+        `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(JSON.stringify(event.attributes))}</small></li>`
+    )
     .join("")}</ol>`;
 }
 
@@ -381,8 +551,12 @@ function composer(): string {
 
 function clientScript(): string {
   return `
-const source = new EventSource('/events');
-[
+let sseSource = null;
+let sseReconnectAttempt = 0;
+let sseReconnectTimer = null;
+let sseEverOpened = false;
+let sseConnected = false;
+const sseEventNames = [
   'work_item.created',
   'work_item.needs_approval',
   'work_item.approved',
@@ -400,7 +574,65 @@ const source = new EventSource('/events');
   'acp.disconnected',
   'acp.error',
   'tunnel_session.heartbeat'
-].forEach((name) => source.addEventListener(name, appendAuditEvent));
+];
+
+function nextSseReconnectDelayMs(attempt) {
+  const n = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return Math.min(30000, 1000 * Math.pow(2, Math.min(n, 5)));
+}
+
+function applySseConnectionState(root, connected) {
+  sseConnected = connected;
+  const banner = root.querySelector('#sse-stale-banner');
+  if (banner) banner.hidden = connected;
+  const live = root.querySelector('.live');
+  if (live) {
+    live.classList.toggle('disconnected', !connected);
+    live.innerHTML = connected
+      ? '<span aria-hidden="true"></span> Live'
+      : '<span aria-hidden="true"></span> Disconnected';
+  }
+  root.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach(function (button) {
+    const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
+    button.disabled = !connected || approveWithoutHash;
+  });
+}
+
+function connectSse() {
+  if (sseReconnectTimer) {
+    clearTimeout(sseReconnectTimer);
+    sseReconnectTimer = null;
+  }
+  if (sseSource) {
+    sseSource.close();
+    sseSource = null;
+  }
+  sseSource = new EventSource('/events');
+  sseSource.addEventListener('open', function () {
+    const shouldRefresh = sseEverOpened && !sseConnected;
+    sseReconnectAttempt = 0;
+    applySseConnectionState(document, true);
+    sseEverOpened = true;
+    if (shouldRefresh) location.assign(location.href);
+  });
+  sseSource.addEventListener('error', function () {
+    applySseConnectionState(document, false);
+    if (sseSource) {
+      sseSource.close();
+      sseSource = null;
+    }
+    if (sseReconnectTimer) return;
+    const delay = nextSseReconnectDelayMs(sseReconnectAttempt);
+    sseReconnectAttempt += 1;
+    sseReconnectTimer = setTimeout(function () {
+      sseReconnectTimer = null;
+      connectSse();
+    }, delay);
+  });
+  sseEventNames.forEach(function (name) {
+    sseSource.addEventListener(name, appendAuditEvent);
+  });
+}
 
 function appendAuditEvent(event) {
   let data;
@@ -477,12 +709,17 @@ function bindWorkItems() {
     button.addEventListener('click', async function () {
       const target = document.querySelector('#work-detail');
       if (!target) return;
+      document.querySelectorAll('[data-work-item]').forEach(function (candidate) { candidate.classList.remove('selected'); candidate.removeAttribute('aria-current'); });
+      button.classList.add('selected');
+      button.setAttribute('aria-current', 'true');
       target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
       try {
         const body = await fetchJson('/work-items/' + encodeURIComponent(button.dataset.workItem));
         renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
+        target.focus({ preventScroll: false });
       } catch (error) {
-        target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
+        target.innerHTML = '<div class="detail-error" role="alert">' + escapeClient(error.message) + '</div>';
+        target.focus({ preventScroll: false });
       }
     });
   });
@@ -674,7 +911,8 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
     return;
   }
   const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
-  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + '</small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
+  target.setAttribute('aria-labelledby', 'work-detail-title');
+  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + '</small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +
@@ -689,16 +927,23 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
 bindWorkItems();
 bindAgentRows();
 refreshAgentRoster();
+connectSse();
 
 document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
   button.addEventListener('click', async () => {
     const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
     const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'reject' : 'unblock';
+    if (!sseConnected) {
+      const output = document.querySelector('#approval-result-' + id);
+      if (output) output.textContent = 'Disconnected: actions disabled until reconnect';
+      return;
+    }
     const reasonInput = document.querySelector('[data-reason="' + id + '"]');
     const reason = reasonInput ? reasonInput.value.trim() : '';
     const output = document.querySelector('#approval-result-' + id);
     if (action !== 'unblock' && !reason) {
       output.textContent = 'Reason required';
+      if (reasonInput) reasonInput.focus();
       return;
     }
     const headers = { 'content-type': 'application/json' };
@@ -811,6 +1056,9 @@ h1 { margin: 0; font-size: 26px; color: var(--ink); }
 p { color: var(--muted); margin: 6px 0 0; }
 .live { border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: var(--surface); white-space: nowrap; }
 .live span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
+.live.disconnected span { background: var(--red); }
+.stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid #f1d18a; background: #fff8e6; color: var(--amber); border-radius: 8px; font-weight: 600; }
+.stale-banner[hidden] { display: none; }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px rgba(23, 32, 42, .06); }
 .card { padding: 15px; min-height: 108px; }
@@ -818,7 +1066,7 @@ p { color: var(--muted); margin: 6px 0 0; }
 .card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
 .card p { font-size: 12px; line-height: 1.35; }
 .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
-.lower { grid-template-columns: minmax(380px, .9fr) minmax(0, 1.1fr); }
+.lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .panel { min-width: 0; overflow: hidden; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: #fbfcfd; }
 .panel-head p { font-size: 12px; margin-top: 3px; }
@@ -843,7 +1091,8 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .execution-status { color: #43536a !important; }
 .queue { display: grid; }
 .queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid #edf1f5; padding: 12px 14px; cursor: pointer; }
-.queue-item:hover { background: #f4f8ff; }
+.queue-item:hover, .queue-item.selected { background: #f4f8ff; }
+.queue-item.selected { box-shadow: inset 3px 0 0 var(--accent); }
 .approval-item > button { text-align: left; background: transparent; color: inherit; border: 0; cursor: pointer; }
 .approval-actions { display: flex; gap: 8px; }
 .approval-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
@@ -856,6 +1105,13 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
 .system-panel dt { color: var(--muted); }
 .system-panel dd { margin: 0; color: var(--ink); }
+.operator-metrics { padding: 18px; display: grid; gap: 14px; }
+.operator-metrics dl { margin: 0; display: grid; gap: 8px; }
+.operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
+.operator-metrics dt { color: var(--muted); }
+.operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+.metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.metrics-scrape code { font-size: 12px; }
 .queue-item strong, .queue-item small { display: block; margin-top: 6px; }
 .queue-item small { color: var(--muted); }
 .error-line { color: var(--red) !important; }
@@ -902,9 +1158,38 @@ output { color: var(--accent); min-height: 20px; }
 .timeline { list-style: none; margin: 0; padding: 10px 14px 14px; display: grid; gap: 10px; }
 .timeline li { border-left: 2px solid #2563eb; padding-left: 10px; }
 .timeline time, .timeline small { display: block; color: var(--muted); font-size: 11px; word-break: break-word; }
+.skip-link { position: absolute; left: -9999px; top: 0; z-index: 1000; background: #2563eb; color: #fff; padding: 10px 14px; border-radius: 8px; font-weight: 700; }
+.skip-link:focus { left: 12px; top: 12px; }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.reason-field { display: grid; gap: 5px; }
+.reason-label { color: var(--muted); font-size: 12px; }
+.reason-label .req { color: var(--red); font-weight: 600; }
+.approval-result { display: block; min-height: 1.25em; }
+.approval-actions button:disabled { opacity: .55; cursor: not-allowed; }
 @media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
 @media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
-@media (max-width: 760px) { main { padding: 16px; } header { display: grid; } .cards { grid-template-columns: 1fr 1fr; } .detail-grid, .form-row { grid-template-columns: 1fr; } }
+@media (max-width: 767px) {
+  body { grid-template-columns: 1fr; }
+  aside { position: static; height: auto; padding: 12px 14px; }
+  nav { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 14px; }
+  nav a { padding: 8px 10px; font-size: 13px; }
+  .rail-note { display: none; }
+  main { padding: 14px 12px 28px; }
+  header { display: grid; gap: 10px; }
+  .cards { grid-template-columns: 1fr; }
+  .grid, .lower, .detail-grid, .form-row, .system-panel { grid-template-columns: 1fr; }
+  .system-panel span { margin: 0; }
+  .approvals-list { grid-template-columns: 1fr; padding: 12px; }
+  .approval-actions { flex-direction: column; }
+  .approval-actions button { width: 100%; min-height: 44px; font-size: 15px; }
+  .table-wrap { max-height: none; }
+  .agent-table th:nth-child(n+5), .agent-table td:nth-child(n+5) { display: none; }
+  .queue-item { padding: 14px 12px; min-height: 44px; }
+  .detail-panel { margin: 8px; max-height: none; }
+  .live { justify-self: start; }
+}
 `;
 }
 

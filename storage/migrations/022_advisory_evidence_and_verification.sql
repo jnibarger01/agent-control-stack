@@ -1,4 +1,4 @@
--- 021_advisory_evidence_and_verification
+-- 022_advisory_evidence_and_verification
 --
 -- ADR 0015. Append-only, content-addressed PROJECTIONS over the canonical
 -- work-item + audit state. None of these tables is a second authoritative

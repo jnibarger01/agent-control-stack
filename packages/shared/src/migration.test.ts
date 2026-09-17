@@ -52,20 +52,49 @@ const alternate = [
 ] as const;
 
 function applyAlternateMetadata(db: DatabaseSync): void {
+  db.prepare("DELETE FROM schema_migrations WHERE version >= 17").run();
   for (const [version, name, filename, checksum] of alternate) {
-    db.prepare("UPDATE schema_migrations SET name = ?, filename = ?, checksum = ? WHERE version = ?").run(
-      name,
-      filename,
-      checksum,
-      version
-    );
+    db.prepare(
+      "INSERT INTO schema_migrations (version, name, filename, checksum, applied_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(version, name, filename, checksum, new Date().toISOString());
+  }
+}
+
+const preLeaseRenewal = [
+  [
+    20,
+    "desktop_commander_execution_mode",
+    "020_desktop_commander_execution_mode.sql",
+    "23c5d1ce662f032aa88df3ccf6a810fe0c08ef4ead22787365401befd39109fe"
+  ],
+  [
+    21,
+    "advisory_evidence_and_verification",
+    "021_advisory_evidence_and_verification.sql",
+    "0a530ca728bda97f7aedfa1ff89e2ae9a70cc0313d5208a5e7ca1089d7fc80a2"
+  ],
+  [22, "device_auth", "022_device_auth.sql", "a6527d63c1a6c3549c6c2a69b6b255be0dea751b70c3a4227f67e1deab1883e3"],
+  [
+    23,
+    "desktop_commander_runtime_capabilities",
+    "023_desktop_commander_runtime_capabilities.sql",
+    "5aae973d05b6bca6e0f6157eaa739a570c8e6dd19116f89a8e7fbfc82470059a"
+  ]
+] as const;
+
+function applyPreLeaseRenewalMetadata(db: DatabaseSync): void {
+  db.prepare("DELETE FROM schema_migrations WHERE version >= 20").run();
+  for (const [version, name, filename, checksum] of preLeaseRenewal) {
+    db.prepare(
+      "INSERT INTO schema_migrations (version, name, filename, checksum, applied_at) VALUES (?, ?, ?, ?, ?)"
+    ).run(version, name, filename, checksum, new Date().toISOString());
   }
 }
 
 describe("control-plane migration alternate 17-21 repair", () => {
   it("migrates a fresh database and leaves canonical metadata unchanged", () => {
     const db = database();
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 23 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 24 });
     db.close();
   });
 
@@ -83,7 +112,7 @@ describe("control-plane migration alternate 17-21 repair", () => {
       .map(({ version, name, filename, checksum }) => ({ version, name, filename, checksum }));
     expect(rows).toEqual(canonical);
     applyControlPlaneMigrations(db);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 23 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 24 });
     db.close();
   });
 
@@ -148,6 +177,35 @@ describe("control-plane migration alternate 17-21 repair", () => {
         )
         .all()
     ).toEqual(before);
+    db.close();
+  });
+});
+
+describe("control-plane migration pre-lease-renewal 20-23 repair", () => {
+  it("transactionally inserts lease renewal and shifts the exact deployed layout to 21-24", () => {
+    const db = database();
+    applyPreLeaseRenewalMetadata(db);
+    applyControlPlaneMigrations(db);
+    const rows = db
+      .prepare("SELECT version, name, filename, checksum FROM schema_migrations WHERE version >= 20 ORDER BY version")
+      .all();
+    const canonical = controlPlaneMigrations()
+      .filter((migration) => migration.version >= 20)
+      .map(({ version, name, filename, checksum }) => ({ version, name, filename, checksum }));
+    expect(rows).toEqual(canonical);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 24 });
+    applyControlPlaneMigrations(db);
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 24 });
+    db.close();
+  });
+
+  it("rejects a checksum mismatch without shifting or applying lease renewal", () => {
+    const db = database();
+    applyPreLeaseRenewalMetadata(db);
+    db.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = 22").run("0".repeat(64));
+    const before = db.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+    expect(() => applyControlPlaneMigrations(db)).toThrow("migration metadata mismatch for version 20");
+    expect(db.prepare("SELECT * FROM schema_migrations ORDER BY version").all()).toEqual(before);
     db.close();
   });
 });

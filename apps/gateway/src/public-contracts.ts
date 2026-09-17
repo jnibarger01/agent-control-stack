@@ -1,5 +1,5 @@
 import { directAgentNames } from "@agent-control-stack/machine-controller";
-import { workItemToolNames } from "@agent-control-stack/policy-gate";
+import { explainPolicyInputSchema, workItemToolNames } from "@agent-control-stack/policy-gate";
 import {
   acpRoles,
   actionRequestSchema,
@@ -176,6 +176,7 @@ export const gatewayMcpInputSchemas = {
   unblock_work_item: idSchema,
   reject_work_item: reasonSchema,
   cancel_work_item: reasonSchema,
+  explain_policy: explainPolicyInputSchema,
   open_acs_dashboard: z.object({}),
   get_execution_detail: idSchema,
   "portfolio.get_summary": z.object({}).strict(),
@@ -195,6 +196,7 @@ export function mcpRequiredScopes(name: McpToolName): McpScope[] {
       return ["acs:work:create"];
     case "get_work_item":
     case "list_work_items":
+    case "explain_policy":
     case "open_acs_dashboard":
     case "get_execution_detail":
     case "portfolio.get_summary":
@@ -218,6 +220,7 @@ export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
   switch (name) {
     case "get_work_item":
     case "list_work_items":
+    case "explain_policy":
     case "open_acs_dashboard":
     case "get_execution_detail":
     case "portfolio.get_summary":
@@ -259,6 +262,8 @@ export function mcpToolDescription(name: McpToolName): string {
       return "Reject a work item through a distinct terminal denial state.";
     case "cancel_work_item":
       return "Cancel a work item through the work-item state machine.";
+    case "explain_policy":
+      return "Read-only policy explain for a candidate action: decision, matched rule ids, and action hash. Does not execute or record.";
     case "portfolio.get_summary":
       return "Read the Visualizer GitHub portfolio summary. This never mutates GitHub.";
     case "portfolio.list_repositories":
@@ -289,6 +294,13 @@ export type PublicHttpOperation = {
    * generated OpenAPI document keeps matching the real response.
    */
   successStatus?: number;
+  /**
+   * Statuses this operation can return beyond the 400/401/403 set every route
+   * shares. Set this whenever server.ts introduces a status a client is
+   * expected to branch on, so the generated OpenAPI document keeps describing
+   * every response a caller can actually observe.
+   */
+  additionalResponses?: Readonly<Record<string, { description: string }>>;
 };
 
 export const publicHttpOperations: readonly PublicHttpOperation[] = [
@@ -358,6 +370,13 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     summary: "Read MCP OAuth protected-resource metadata."
   },
   { method: "get", path: "/work-items", operationId: "listWorkItems", summary: "List governed work items." },
+  {
+    method: "post",
+    path: "/policy/explain",
+    operationId: "explainPolicy",
+    summary: "Explain a candidate policy decision without executing it.",
+    requestSchema: explainPolicyInputSchema
+  },
   {
     method: "post",
     path: "/work-items",
@@ -490,7 +509,18 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     operationId: "getAcpAgent",
     summary: "Read an agent through the ACP view."
   },
-  { method: "get", path: "/events", operationId: "streamEvents", summary: "Stream audit events over SSE." }
+  {
+    method: "get",
+    path: "/events",
+    operationId: "streamEvents",
+    summary: "Stream audit events over SSE.",
+    additionalResponses: {
+      "503": {
+        description:
+          "Event stream capacity reached, globally or for this principal. Body carries code sse_capacity_reached; retry-after indicates when to retry."
+      }
+    }
+  }
 ] as const;
 
 export const publicContractExamples = {

@@ -4,6 +4,9 @@ coverage/
 *.tsbuildinfo
 storage/*.db
 storage/*.db-*
+storage/**/*.db
+storage/**/*.db-*
+storage/fixtures/
 
 .env
 .env.*

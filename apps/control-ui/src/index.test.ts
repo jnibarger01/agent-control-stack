@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { projectAgents, renderDashboard, type MissionControlViewModel } from "./index.js";
+import { JSDOM } from "jsdom";
+import {
+  applySseConnectionState,
+  nextSseReconnectDelayMs,
+  projectAgents,
+  renderDashboard,
+  type MissionControlViewModel
+} from "./index.js";
 
 describe("renderDashboard", () => {
   const workItem = {
@@ -55,12 +62,132 @@ describe("renderDashboard", () => {
     expect(html).not.toContain("data-approve-all");
   });
 
+  it("renders an operator metrics panel with lease age, approval wait, and /metrics scrape notes", () => {
+    const lease = {
+      leaseId: "lease_ops",
+      attemptId: "attempt_ops",
+      workItemId: "wrk_test",
+      admissionId: "admission_ops",
+      workerId: "worker-ops",
+      planHash: "a".repeat(64),
+      inputHash: "b".repeat(64),
+      fencingEpoch: 1,
+      protocolVersion: "acs.worker.v2" as const,
+      policyVersion: "policy-v1",
+      policyDecisionHash: "c".repeat(64),
+      issuedAt: "2026-07-05T00:00:00.000Z",
+      expiresAt: "2026-07-05T00:10:00.000Z",
+      maxExpiresAt: "2026-07-05T00:30:00.000Z",
+      lastRenewedAt: "2026-07-05T00:00:00.000Z",
+      status: "active" as const
+    };
+    const html = renderDashboard({
+      workItems: [workItem],
+      events: [],
+      attemptLeasesByWorkItem: { wrk_test: [lease] },
+      now: new Date("2026-07-05T00:01:30.000Z")
+    });
+
+    expect(html).toContain('id="operator-metrics"');
+    expect(html).toContain("Operator metrics");
+    expect(html).toContain("Oldest lease age");
+    expect(html).toContain("1m 30s");
+    expect(html).toContain("Oldest approval wait");
+    expect(html).toContain('href="/metrics"');
+    expect(html).toContain("acs_rate_limit_rejected_total");
+    expect(html).toContain("docs/runbooks/operator-metrics.md");
+  });
+
   it("does not hard-reload the dashboard for SSE audit events", () => {
     const html = renderDashboard({ workItems: [workItem], events: [], now: new Date("2026-07-05T00:01:00.000Z") });
 
     expect(html).toContain("new EventSource('/events')");
     expect(html).toContain("'work_item.rejected'");
     expect(html).not.toContain("location.reload");
+  });
+
+  it("backs off EventSource reconnect delays up to 30s", () => {
+    expect(nextSseReconnectDelayMs(0)).toBe(1_000);
+    expect(nextSseReconnectDelayMs(1)).toBe(2_000);
+    expect(nextSseReconnectDelayMs(2)).toBe(4_000);
+    expect(nextSseReconnectDelayMs(3)).toBe(8_000);
+    expect(nextSseReconnectDelayMs(4)).toBe(16_000);
+    expect(nextSseReconnectDelayMs(5)).toBe(30_000);
+    expect(nextSseReconnectDelayMs(8)).toBe(30_000);
+    expect(nextSseReconnectDelayMs(-2)).toBe(1_000);
+  });
+
+  it("shows a stale banner and disables approve/deny while SSE is disconnected", () => {
+    const html = renderDashboard({
+      workItems: [workItem, blockedItem],
+      events: [],
+      approvalActionHashesByWorkItem: { wrk_test: ["hash-one"] },
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain('id="sse-stale-banner"');
+    expect(html).toContain("Displayed work items may be stale");
+    expect(html).toContain("function connectSse()");
+    expect(html).toContain("nextSseReconnectDelayMs(sseReconnectAttempt)");
+    expect(html).toContain("addEventListener('error'");
+    expect(html).toContain("if (!sseConnected)");
+
+    const dom = new JSDOM(html);
+    const { document } = dom.window;
+    const button = (selector: string) =>
+      document.querySelector(selector) as { disabled: boolean; getAttribute(name: string): string | null } | null;
+    const banner = document.querySelector("#sse-stale-banner") as {
+      hidden: boolean;
+      hasAttribute(name: string): boolean;
+    } | null;
+    const approve = button('[data-approve="wrk_test"]');
+    const reject = button('[data-reject="wrk_test"]');
+    const unblock = button('[data-unblock="wrk_blocked"]');
+    const live = document.querySelector(".live") as {
+      classList: { contains(name: string): boolean };
+      textContent: string;
+    } | null;
+
+    expect(banner).not.toBeNull();
+    expect(banner?.hasAttribute("hidden")).toBe(true);
+    expect(approve?.disabled).toBe(false);
+    expect(reject?.disabled).toBe(false);
+    expect(unblock?.disabled).toBe(false);
+
+    applySseConnectionState(document, false);
+    expect(banner?.hidden).toBe(false);
+    expect(live?.classList.contains("disconnected")).toBe(true);
+    expect(live?.textContent).toContain("Disconnected");
+    expect(approve?.disabled).toBe(true);
+    expect(reject?.disabled).toBe(true);
+    expect(unblock?.disabled).toBe(true);
+
+    applySseConnectionState(document, true);
+    expect(banner?.hidden).toBe(true);
+    expect(live?.classList.contains("disconnected")).toBe(false);
+    expect(live?.textContent).toContain("Live");
+    expect(approve?.disabled).toBe(false);
+    expect(reject?.disabled).toBe(false);
+    expect(unblock?.disabled).toBe(false);
+  });
+
+  it("keeps hash-unavailable approve buttons disabled after SSE reconnect", () => {
+    const html = renderDashboard({
+      workItems: [workItem],
+      events: [],
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+    const dom = new JSDOM(html);
+    const approve = dom.window.document.querySelector('[data-approve="wrk_test"]') as {
+      disabled: boolean;
+      getAttribute(name: string): string | null;
+    } | null;
+    expect(approve?.disabled).toBe(true);
+    applySseConnectionState(dom.window.document, false);
+    expect(approve?.disabled).toBe(true);
+    applySseConnectionState(dom.window.document, true);
+    expect(approve?.disabled).toBe(true);
+    expect(approve?.getAttribute("data-action-hash")).toBeNull();
   });
 
   it("posts reject actions to the reject route instead of cancellation", () => {
@@ -98,7 +225,12 @@ describe("renderDashboard", () => {
   it("visually distinguishes work items that need operator attention from normally running ones", () => {
     const runningItem = { ...workItem, id: "wrk_running", status: "running" as const, title: "Running task" };
     const succeededItem = { ...workItem, id: "wrk_succeeded", status: "succeeded" as const, title: "Succeeded task" };
-    const quarantinedItem = { ...workItem, id: "wrk_quarantined", status: "quarantined" as const, title: "Quarantined task" };
+    const quarantinedItem = {
+      ...workItem,
+      id: "wrk_quarantined",
+      status: "quarantined" as const,
+      title: "Quarantined task"
+    };
 
     const html = renderDashboard({
       workItems: [workItem, blockedItem, runningItem, succeededItem, quarantinedItem],

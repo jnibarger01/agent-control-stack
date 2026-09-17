@@ -19,6 +19,8 @@ Commands:
   status [--json]
   doctor [--json]
   publication list [--json]
+  audit export [--db <path>] [-o <file>]
+  audit verify (--file <jsonl> | [--db <path>])
 
 Legacy binaries remain available: acs-worker, acs-scheduler, acs-mcp, acs-gateway.
 `;
@@ -34,6 +36,8 @@ export type AcsCommand =
   | { kind: "status"; json: boolean }
   | { kind: "doctor"; json: boolean }
   | { kind: "publication-list"; json: boolean }
+  | { kind: "audit-export"; dbPath?: string; outputPath?: string }
+  | { kind: "audit-verify"; dbPath?: string; filePath?: string }
   | { kind: "skills"; args: string[] };
 
 export class AcsUsageError extends Error {
@@ -106,13 +110,67 @@ function rejectUnexpectedArgs(command: string, args: string[]): string[] {
 }
 
 function parseStatusArgs(command: "status" | "doctor", args: string[]): AcsCommand {
-  if (args.length > 1 || (args.length === 1 && args[0] !== "--json")) throw new AcsUsageError(`Usage: acs ${command} [--json]`);
+  if (args.length > 1 || (args.length === 1 && args[0] !== "--json"))
+    throw new AcsUsageError(`Usage: acs ${command} [--json]`);
   return { kind: command, json: args[0] === "--json" };
 }
 
 function parsePublicationArgs(args: string[]): AcsCommand {
-  if (args[0] !== "list" || args.length > 2 || (args[1] && args[1] !== "--json")) throw new AcsUsageError("Usage: acs publication list [--json]");
+  if (args[0] !== "list" || args.length > 2 || (args[1] && args[1] !== "--json"))
+    throw new AcsUsageError("Usage: acs publication list [--json]");
   return { kind: "publication-list", json: args[1] === "--json" };
+}
+
+function parseAuditArgs(args: string[]): AcsCommand {
+  const sub = args[0];
+  if (sub === "export") {
+    let dbPath: string | undefined;
+    let outputPath: string | undefined;
+    for (let index = 1; index < args.length; index += 1) {
+      const flag = args[index];
+      if (flag === "--db") {
+        const value = args[index + 1];
+        if (!value) throw new AcsUsageError("acs audit export --db requires a path");
+        dbPath = value;
+        index += 1;
+      } else if (flag === "-o" || flag === "--output") {
+        const value = args[index + 1];
+        if (!value) throw new AcsUsageError(`acs audit export ${flag} requires a path`);
+        outputPath = value;
+        index += 1;
+      } else {
+        throw new AcsUsageError(`invalid audit export argument: ${flag}`);
+      }
+    }
+    return { kind: "audit-export", dbPath, outputPath };
+  }
+  if (sub === "verify") {
+    let dbPath: string | undefined;
+    let filePath: string | undefined;
+    for (let index = 1; index < args.length; index += 1) {
+      const flag = args[index];
+      if (flag === "--db") {
+        const value = args[index + 1];
+        if (!value) throw new AcsUsageError("acs audit verify --db requires a path");
+        dbPath = value;
+        index += 1;
+      } else if (flag === "--file") {
+        const value = args[index + 1];
+        if (!value) throw new AcsUsageError("acs audit verify --file requires a path");
+        filePath = value;
+        index += 1;
+      } else {
+        throw new AcsUsageError(`invalid audit verify argument: ${flag}`);
+      }
+    }
+    if (dbPath && filePath) {
+      throw new AcsUsageError("acs audit verify accepts either --file or --db, not both");
+    }
+    return { kind: "audit-verify", dbPath, filePath };
+  }
+  throw new AcsUsageError(
+    "Usage: acs audit export [--db <path>] [-o <file>] | acs audit verify (--file <jsonl> | [--db <path>])"
+  );
 }
 
 export function parseAcsArgs(args: string[]): AcsCommand {
@@ -141,6 +199,8 @@ export function parseAcsArgs(args: string[]): AcsCommand {
       return parseStatusArgs("doctor", rest);
     case "publication":
       return parsePublicationArgs(rest);
+    case "audit":
+      return parseAuditArgs(rest);
     case "skills":
       return { kind: "skills", args: rest };
     default:

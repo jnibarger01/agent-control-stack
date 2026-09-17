@@ -3,7 +3,13 @@ import { installGracefulShutdown, startGateway } from "@agent-control-stack/gate
 import { MachineController, loadMachineControllerConfig } from "@agent-control-stack/machine-controller";
 import { McpStdioServer } from "@agent-control-stack/mcp";
 import { runSchedulerOnce } from "@agent-control-stack/scheduler";
+import {
+  exportAuditChainJsonlFromDatabaseFile,
+  verifyAuditChainFromDatabaseFile,
+  verifyAuditChainJsonl
+} from "@agent-control-stack/shared";
 import { DEFAULT_HEARTBEAT_TTL_MS, SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { readFileSync, writeFileSync } from "node:fs";
 import { runWorkerOnce } from "@agent-control-stack/worker";
 import { listAvailableActors } from "./available-actors.js";
 import { discoverLocalActors as runLocalActorDiscovery } from "./discover-actors.js";
@@ -23,6 +29,10 @@ export interface AcsAdapters {
   startGateway: () => Promise<void>;
   readStatus: () => { health: { ok: boolean }; audit: { ok: boolean } };
   listPublications: () => unknown[];
+  exportAuditJsonl: (dbPath: string) => string;
+  writeAuditExport: (outputPath: string, jsonl: string) => void;
+  verifyAuditJsonlFile: (filePath: string) => { ok: boolean; eventCount: number; headHash: string; failure?: unknown };
+  verifyAuditDatabase: (dbPath: string) => { ok: boolean; eventCount: number; headHash: string; failure?: unknown };
 }
 
 const defaultIo: AcsIo = {
@@ -68,7 +78,31 @@ export function readControlPlaneStatus() {
 
 export function listControlPlanePublications() {
   const store = new SqliteWorkItemStore(process.env.ACS_DB_PATH ?? "storage/local.db");
-  try { return store.listPublications(); } finally { store.close(); }
+  try {
+    return store.listPublications();
+  } finally {
+    store.close();
+  }
+}
+
+function defaultDbPath(explicit?: string): string {
+  return explicit ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+}
+
+export function exportControlPlaneAuditJsonl(dbPath: string): string {
+  return exportAuditChainJsonlFromDatabaseFile(dbPath);
+}
+
+export function writeControlPlaneAuditExport(outputPath: string, jsonl: string): void {
+  writeFileSync(outputPath, jsonl, "utf8");
+}
+
+export function verifyControlPlaneAuditJsonlFile(filePath: string) {
+  return verifyAuditChainJsonl(readFileSync(filePath, "utf8"));
+}
+
+export function verifyControlPlaneAuditDatabase(dbPath: string) {
+  return verifyAuditChainFromDatabaseFile(dbPath);
 }
 
 export const defaultAcsAdapters: AcsAdapters = {
@@ -79,7 +113,11 @@ export const defaultAcsAdapters: AcsAdapters = {
   startMcp: startMcpFromArgs,
   startGateway: startGatewayFromCli,
   readStatus: readControlPlaneStatus,
-  listPublications: listControlPlanePublications
+  listPublications: listControlPlanePublications,
+  exportAuditJsonl: exportControlPlaneAuditJsonl,
+  writeAuditExport: writeControlPlaneAuditExport,
+  verifyAuditJsonlFile: verifyControlPlaneAuditJsonlFile,
+  verifyAuditDatabase: verifyControlPlaneAuditDatabase
 };
 
 async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapters): Promise<number> {
@@ -122,18 +160,45 @@ async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapt
       return 0;
     case "status": {
       const status = adapters.readStatus();
-      io.stdout.write(command.json ? `${JSON.stringify(status)}\n` : `health=${status.health.ok} audit=${status.audit.ok}\n`);
+      io.stdout.write(
+        command.json ? `${JSON.stringify(status)}\n` : `health=${status.health.ok} audit=${status.audit.ok}\n`
+      );
       return status.health.ok && status.audit.ok ? 0 : 1;
     }
     case "doctor": {
       const status = adapters.readStatus();
-      io.stdout.write(command.json ? `${JSON.stringify(status)}\n` : `health=${status.health.ok} audit=${status.audit.ok}\n`);
+      io.stdout.write(
+        command.json ? `${JSON.stringify(status)}\n` : `health=${status.health.ok} audit=${status.audit.ok}\n`
+      );
       return status.health.ok && status.audit.ok ? 0 : 1;
     }
     case "publication-list": {
       const publications = adapters.listPublications();
-      io.stdout.write(command.json ? `${JSON.stringify(publications)}\n` : publications.length ? `${publications.map((publication) => JSON.stringify(publication)).join("\n")}\n` : "No publications.\n");
+      io.stdout.write(
+        command.json
+          ? `${JSON.stringify(publications)}\n`
+          : publications.length
+            ? `${publications.map((publication) => JSON.stringify(publication)).join("\n")}\n`
+            : "No publications.\n"
+      );
       return 0;
+    }
+    case "audit-export": {
+      const jsonl = adapters.exportAuditJsonl(defaultDbPath(command.dbPath));
+      if (command.outputPath) {
+        adapters.writeAuditExport(command.outputPath, jsonl);
+        io.stdout.write(`wrote ${command.outputPath}\n`);
+      } else {
+        io.stdout.write(jsonl);
+      }
+      return 0;
+    }
+    case "audit-verify": {
+      const verification = command.filePath
+        ? adapters.verifyAuditJsonlFile(command.filePath)
+        : adapters.verifyAuditDatabase(defaultDbPath(command.dbPath));
+      io.stdout.write(`${JSON.stringify(verification)}\n`);
+      return verification.ok ? 0 : 1;
     }
     case "skills":
       return runSkillsCommand(command.args, io);

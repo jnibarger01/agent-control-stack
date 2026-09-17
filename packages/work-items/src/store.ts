@@ -68,6 +68,7 @@ import {
   executionAttemptSchema,
   hashAttemptLeaseToken,
   issueLeaseInputSchema,
+  renewAttemptLeaseInputSchema,
   recordWorkspaceAllocationInputSchema,
   transitionAttemptInputSchema,
   workspaceAllocationSchema,
@@ -78,6 +79,7 @@ import {
   type IssueLeaseInput,
   type LeaseApprovalBinding,
   type RecordWorkspaceAllocationInput,
+  type RenewAttemptLeaseInput,
   type TransitionAttemptInput,
   type WorkspaceAllocation
 } from "./attempt.js";
@@ -880,6 +882,7 @@ export interface WorkItemStore {
   createAttempt(input: CreateAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
   getAttempt(attemptId: string): ExecutionAttempt | undefined;
   leaseAttempt(input: IssueLeaseInput, options: PrivilegedTransitionOptions): AttemptLease;
+  renewAttemptLease(input: RenewAttemptLeaseInput): AttemptLease;
   transitionAttempt(input: TransitionAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
   recordActorRoutingDecision(
     input: RecordActorRoutingDecisionInput,
@@ -1624,9 +1627,61 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const nextEpoch = attemptRow.current_fencing_epoch + 1;
       const now = (parsed.now ?? new Date()).toISOString();
       const expiresAt = new Date(Date.parse(now) + parsed.ttlMs).toISOString();
-      const maxExpiresAt = new Date(
-        Date.parse(now) + Math.max(parsed.ttlMs, parsed.maxTtlMs ?? parsed.ttlMs)
-      ).toISOString();
+      // Renewal is useless if max equals the initial TTL. Default the ceiling to
+      // at least one hour (still capped by issueLeaseInputSchema's 24h max).
+      const maxTtlMs = parsed.maxTtlMs ?? Math.max(parsed.ttlMs, 60 * 60 * 1_000);
+      const maxExpiresAt = new Date(Date.parse(now) + maxTtlMs).toISOString();
+      const events: StoredAuditEvent[] = [];
+
+      // One active lease per attempt is a DB invariant. Re-leasing an interrupted
+      // attempt must revoke the prior holder first and audit the steal so a stale
+      // worker cannot keep submitting under the old fencing epoch.
+      const previousActive = this.db
+        .prepare(`SELECT * FROM attempt_leases WHERE attempt_id = ? AND status = 'active'`)
+        .get(parsed.attemptId) as unknown as AttemptLeaseRow | undefined;
+      if (previousActive) {
+        if (attemptRow.status !== "interrupted") {
+          throw new ControlStackError("attempt_lease_conflict", "attempt already has an active lease");
+        }
+        const stolen = this.db
+          .prepare(
+            `UPDATE attempt_leases SET status = 'revoked', closed_at = ?
+             WHERE lease_id = ? AND status = 'active'`
+          )
+          .run(now, previousActive.lease_id);
+        if (stolen.changes !== 1) {
+          throw new ControlStackError("attempt_lease_conflict", "previous attempt lease changed while stealing");
+        }
+        this.db
+          .prepare(
+            `UPDATE leases SET status = 'revoked', closed_at = ?
+             WHERE lease_id = ? AND status = 'active'`
+          )
+          .run(now, previousActive.lease_id);
+        events.push(
+          this.appendAuditEvent(
+            createEvent(
+              "attempt_lease.stolen",
+              {
+                previousLeaseId: previousActive.lease_id,
+                previousWorkerId: previousActive.worker_id,
+                previousFencingEpoch: previousActive.fencing_epoch,
+                attemptId: parsed.attemptId,
+                workItemId: parsed.workItemId,
+                newWorkerId: parsed.workerId,
+                stolenAt: now
+              },
+              {
+                "work_item.id": parsed.workItemId,
+                "attempt.id": parsed.attemptId,
+                "lease.id": previousActive.lease_id,
+                "worker.id": previousActive.worker_id,
+                "lease.stolen_by": parsed.workerId
+              }
+            )
+          )
+        );
+      }
 
       const updated = this.db
         .prepare(
@@ -1711,13 +1766,117 @@ export class SqliteWorkItemStore implements WorkItemStore {
         lastRenewedAt: now,
         status: "active"
       });
+      events.push(
+        this.appendAuditEvent(
+          createEvent("attempt_lease.issued", lease, {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "lease.id": leaseId,
+            "worker.id": parsed.workerId
+          })
+        )
+      );
+      return { value: lease, events };
+    });
+  }
+
+  renewAttemptLease(input: RenewAttemptLeaseInput): AttemptLease {
+    const parsed = renewAttemptLeaseInputSchema.parse(input);
+    return this.write(() => {
+      const nowDate = parsed.now ?? new Date();
+      const now = nowDate.toISOString();
+      const nowMs = Date.parse(now);
+      const row = this.db
+        .prepare(
+          `SELECT * FROM attempt_leases
+           WHERE lease_id = ? AND attempt_id = ? AND work_item_id = ? AND status = 'active'`
+        )
+        .get(parsed.leaseId, parsed.attemptId, parsed.workItemId) as unknown as AttemptLeaseRow | undefined;
+      if (!row) {
+        throw new ControlStackError("attempt_lease_missing", "active attempt lease is required for renewal");
+      }
+      if (row.worker_id !== parsed.workerId || row.fencing_epoch !== parsed.fencingEpoch) {
+        throw new ControlStackError("attempt_fence_mismatch", "lease renewal fence is stale or mismatched");
+      }
+      if (row.token_hash !== hashAttemptLeaseToken(parsed.leaseToken)) {
+        throw new ControlStackError("worker_lease_mismatch", "lease token does not match the active lease");
+      }
+      if (Date.parse(row.expires_at) <= nowMs) {
+        throw new ControlStackError("worker_lease_expired", "worker lease has expired");
+      }
+
+      const maxExpiresMs = Date.parse(row.max_expires_at);
+      if (!Number.isFinite(maxExpiresMs)) {
+        throw new ControlStackError("lease_state_inconsistent", "lease max expiry is invalid");
+      }
+      const requestedExpiresMs = nowMs + parsed.ttlMs;
+      const nextExpiresMs = Math.min(requestedExpiresMs, maxExpiresMs);
+      if (nextExpiresMs <= Date.parse(row.expires_at)) {
+        throw new ControlStackError("lease_renewal_exhausted", "lease cannot be renewed beyond its maximum duration");
+      }
+      const expiresAt = new Date(nextExpiresMs).toISOString();
+
+      const renewed = this.db
+        .prepare(
+          `UPDATE attempt_leases
+           SET expires_at = ?, last_renewed_at = ?
+           WHERE lease_id = ? AND status = 'active' AND fencing_epoch = ? AND worker_id = ?
+             AND expires_at = ? AND last_renewed_at = ? AND max_expires_at = ?`
+        )
+        .run(
+          expiresAt,
+          now,
+          parsed.leaseId,
+          parsed.fencingEpoch,
+          parsed.workerId,
+          row.expires_at,
+          row.last_renewed_at,
+          row.max_expires_at
+        );
+      if (renewed.changes !== 1) {
+        throw new ControlStackError("attempt_lease_conflict", "attempt lease changed while renewing");
+      }
+
+      // Keep dual lease projections and the work-item expiry display in lockstep.
+      this.db
+        .prepare(
+          `UPDATE leases SET expires_at = ?
+           WHERE lease_id = ? AND status = 'active' AND worker_id = ?`
+        )
+        .run(expiresAt, parsed.leaseId, parsed.workerId);
+      this.db
+        .prepare(
+          `UPDATE work_items SET lease_expires_at = ?
+           WHERE id = ? AND status = 'running' AND worker_id = ?`
+        )
+        .run(expiresAt, parsed.workItemId, parsed.workerId);
+
+      const lease = rowToAttemptLease({
+        ...row,
+        expires_at: expiresAt,
+        last_renewed_at: now
+      });
       const event = this.appendAuditEvent(
-        createEvent("attempt_lease.issued", lease, {
-          "work_item.id": parsed.workItemId,
-          "attempt.id": parsed.attemptId,
-          "lease.id": leaseId,
-          "worker.id": parsed.workerId
-        })
+        createEvent(
+          "attempt_lease.renewed",
+          {
+            leaseId: lease.leaseId,
+            attemptId: lease.attemptId,
+            workItemId: lease.workItemId,
+            workerId: lease.workerId,
+            fencingEpoch: lease.fencingEpoch,
+            expiresAt: lease.expiresAt,
+            maxExpiresAt: lease.maxExpiresAt,
+            lastRenewedAt: lease.lastRenewedAt,
+            previousExpiresAt: row.expires_at
+          },
+          {
+            "work_item.id": lease.workItemId,
+            "attempt.id": lease.attemptId,
+            "lease.id": lease.leaseId,
+            "worker.id": lease.workerId
+          }
+        )
       );
       return { value: lease, events: [event] };
     });
@@ -4421,8 +4580,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
   failExpiredLeases(now = new Date()): WorkItem[] {
     return this.write(() => {
       const nowIso = now.toISOString();
+      // Prefer the authoritative attempt-lease clock when dual projections exist so
+      // renewals that extend attempt_leases (and legacy leases) keep expiry clear.
       const rows = this.db
-        .prepare(`SELECT * FROM leases WHERE status = 'active' AND expires_at <= ? ORDER BY issued_at ASC`)
+        .prepare(
+          `SELECT leases.*
+           FROM leases
+           LEFT JOIN attempt_leases
+             ON attempt_leases.lease_id = leases.lease_id AND attempt_leases.status = 'active'
+           WHERE leases.status = 'active'
+             AND COALESCE(attempt_leases.expires_at, leases.expires_at) <= ?
+           ORDER BY leases.issued_at ASC`
+        )
         .all(nowIso) as unknown as LeaseRow[];
       const failed: WorkItem[] = [];
       const events: StoredAuditEvent[] = [];
@@ -4461,6 +4630,28 @@ export class SqliteWorkItemStore implements WorkItemStore {
           if (expiredAttemptLease.changes !== 1) {
             throw new ControlStackError("attempt_lease_conflict", "attempt lease changed while expiring");
           }
+          events.push(
+            this.appendAuditEvent(
+              createEvent(
+                "attempt_lease.expired",
+                {
+                  leaseId: attemptLease.lease_id,
+                  attemptId: attemptLease.attempt_id,
+                  workItemId: attemptLease.work_item_id,
+                  workerId: attemptLease.worker_id,
+                  fencingEpoch: attemptLease.fencing_epoch,
+                  expiresAt: attemptLease.expires_at,
+                  expiredAt: nowIso
+                },
+                {
+                  "work_item.id": attemptLease.work_item_id,
+                  "attempt.id": attemptLease.attempt_id,
+                  "lease.id": attemptLease.lease_id,
+                  "worker.id": attemptLease.worker_id
+                }
+              )
+            )
+          );
         }
         const accepted = this.acceptResultInTransaction(input, {
           now: nowIso,

@@ -16,7 +16,11 @@ pass.
 - A persistent volume with enough free space for SQLite WAL growth and backups.
 - `ACS_GATEWAY_CREDENTIALS_JSON` containing credential-bound operator/service/worker identities and either a complete OAuth issuer/audience/JWKS configuration or trusted signed-tunnel configuration.
 - `ACS_MCP_ALLOWED_ORIGINS` containing the explicit browser origins permitted to call MCP; non-browser clients without an `Origin` header remain supported.
+- Optional `ACS_MCP_TOOL_ALLOWLIST_JSON` mapping each MCP identity to allowed tool names. When set, unknown identities are default-denied in production.
 - `ACS_MAX_PENDING_WORK_ITEMS` set to an operationally safe queue ceiling.
+- Rate-limit / auth defaults and local-vs-deployed knobs: [gateway-abuse-controls.md](./gateway-abuse-controls.md).
+- `ACS_MAX_SSE_CLIENTS` set to the number of dashboard/event subscribers the host can hold concurrently; each stream pins a socket for its lifetime.
+- `ACS_MAX_SSE_CLIENTS_PER_PRINCIPAL` set below `ACS_MAX_SSE_CLIENTS`, so one credential cannot consume every slot and lock other operators out of the live audit channel during an incident. The gateway clamps it to one below the global cap if the two are set inconsistently, and logs a warning when it does.
 - A versioned image tag and a recorded previous image tag.
 
 ## Build and verify
@@ -56,13 +60,23 @@ Keep real secrets in the deployment secret store or process environment. Do not 
 4. Verify:
 
    ```sh
-   curl -fsS http://127.0.0.1:3000/livez
-   curl -fsS http://127.0.0.1:3000/readyz
+   ./scripts/gateway-post-deploy-healthcheck.sh http://127.0.0.1:3000
    docker compose -f compose.production.yml ps
    docker compose -f compose.production.yml logs --tail=100 gateway
    ```
 
-`/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain. Route traffic only when readiness is HTTP 200. Authenticated operators can scrape `/metrics` for request latency/status, rate-limit outcomes, audit lifecycle events, and SQLite readiness.
+   The healthcheck script probes `/livez` then `/readyz` (same contract as the
+   curls below). Prefer it so operators share one post-deploy check. Manual
+   equivalent:
+
+   ```sh
+   curl -fsS http://127.0.0.1:3000/livez
+   curl -fsS http://127.0.0.1:3000/readyz
+   ```
+
+   Gateway host map (what is supported vs Vercel-disabled): [README Deploy](../../README.md#deploy).
+
+`/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain. Route traffic only when readiness is HTTP 200. Authenticated operators can scrape `/metrics` for request latency/status, rate-limit outcomes (`acs_rate_limit_rejected_total`), audit lifecycle events, and SQLite readiness. Metric names, local scrape examples, and the Mission Control operator metrics panel: [operator-metrics.md](./operator-metrics.md).
 
 ## Shutdown
 
@@ -152,3 +166,9 @@ directory.
 Gateway request logs are structured JSON on stdout and include Fastify request IDs. MCP authenticated requests also persist `connector.requested` audit events with actor, auth method, request ID, and tool. Work-item lifecycle events live in SQLite. Configure container log rotation in the deployment platform. Managed backup retention applies only to encrypted backup artifacts and their manifests; this repository does not silently delete audit history from the live database.
 
 The gateway exposes a Prometheus-compatible `/metrics` endpoint, but it is intentionally local to this service. Alert on container health/readiness, restart count, nonzero exits, disk usage, rate-limit responses, lease/worker lifecycle counters, and error-level structured logs. A hosted metrics/alerting backend remains a deployment responsibility.
+
+## Pending-approval digest (optional)
+
+Operators who do not keep Mission Control open can enable an optional oneshot
+digest of stale `needs_approval` work (item id + action hash only). Default off.
+See [pending-approval-digest.md](./pending-approval-digest.md).

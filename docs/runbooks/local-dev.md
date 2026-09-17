@@ -38,6 +38,12 @@ Open `http://127.0.0.1:3000`.
 
 For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send it as `Authorization: Bearer <token>` on `/mcp` requests. OAuth and tunnel ID setup are documented in `docs/oauth-authentication.md`.
 
+Optional per-identity tool allowlists use `ACS_MCP_TOOL_ALLOWLIST_JSON`. Local mode keeps a permissive default for identities not listed in the map; see `docs/oauth-authentication.md`.
+
+Default per-principal rate limits and the pending work-item ceiling apply on local MCP/HTTP writes; see [gateway-abuse-controls.md](./gateway-abuse-controls.md) for knobs and recommended local vs deployed values.
+
+Authenticated local scrape of gateway metrics (`GET /metrics`) and the Mission Control operator metrics panel are documented in [operator-metrics.md](./operator-metrics.md).
+
 The real loopback MCP interoperability smoke path uses a temporary SQLite
 database, deterministic OAuth test keys, and an explicitly registered harmless
 fixture agent. It starts the gateway on `127.0.0.1` and sends the actual
@@ -93,6 +99,24 @@ existing configuration contracts. Check composed runtime state with:
 curl -fsS http://127.0.0.1:3001/readyz
 curl -fsS http://127.0.0.1:3001/status
 ```
+
+## Portfolio MCP (Visualizer loopback)
+
+Read-only `portfolio.*` tools need `ACS_PORTFOLIO_BASE_URL` pointing at a
+loopback Visualizer (`127.0.0.1` or `localhost` only). Without it the tools
+stay listed and return `PORTFOLIO_UNAVAILABLE`; CI does not require Visualizer.
+
+See [portfolio-mcp.md](portfolio-mcp.md) for env, Visualizer branch/contract,
+Vitest contract suites, and `scripts/portfolio-mcp-smoke.mjs`.
+
+SQLite backup / restore for the work-items store (snapshot, dry-run, /health + audit-chain):
+[sqlite-backup-restore.md](./sqlite-backup-restore.md).
+
+Pending-approval digest (optional stdout / local webhook for stale `needs_approval` items; default off):
+[pending-approval-digest.md](./pending-approval-digest.md).
+
+Gateway rate limits, pending-queue ceiling, structured 429s, and local vs deployed auth knobs:
+[gateway-abuse-controls.md](./gateway-abuse-controls.md).
 
 ## ChatGPT App UI
 

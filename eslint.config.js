@@ -14,6 +14,17 @@ export default tseslint.config(
   },
   {
     files: ["**/*.js", "**/*.mjs"],
-    languageOptions: { globals: { console: "readonly", process: "readonly", Buffer: "readonly" } }
+    languageOptions: {
+      globals: {
+        console: "readonly",
+        process: "readonly",
+        Buffer: "readonly",
+        URL: "readonly",
+        AbortController: "readonly",
+        setTimeout: "readonly",
+        clearTimeout: "readonly",
+        fetch: "readonly"
+      }
+    }
   }
 );

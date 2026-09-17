@@ -4,7 +4,7 @@
 // from apps/gateway/src/auth.ts (the MCP *resource-server* JWT verifier) and from
 // packages/work-items/src/store.ts's connector_records (operator-provisioned tunnel
 // infrastructure, a different trust model). It owns exactly two tables: `devices` and
-// `oauth_device_authorizations` (storage/migrations/022_device_auth.sql).
+// `oauth_device_authorizations` (storage/migrations/023_device_auth.sql).
 import { createHash, randomBytes, randomInt } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { createId } from "@agent-control-stack/shared";

@@ -155,7 +155,7 @@ not a silent gap: `acs auth status` and the docs both say so.
 
 - `apps/gateway/src/auth.ts` gains one scope (`acs:device`); JWT verification, audience
   checks, and the tunnel/local-bearer paths are unchanged.
-- New SQLite migration `storage/migrations/022_device_auth.sql` (registered in
+- New SQLite migration `storage/migrations/023_device_auth.sql` (registered in
   `packages/shared/src/migration.ts`), applied through the existing
   `applyControlPlaneMigrations` path already run by `SqliteWorkItemStore`'s constructor.
 - New gateway routes: `POST /oauth/device/code`, `POST /oauth/token`,

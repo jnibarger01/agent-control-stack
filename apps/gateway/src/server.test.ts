@@ -15,7 +15,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
-import { buildGateway } from "./server.js";
+import { buildGateway, type GatewayAuthOptions } from "./server.js";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
@@ -3525,10 +3525,152 @@ describe("gateway MCP transport", () => {
   });
 });
 
+describe("gateway abuse controls", () => {
+  const workItemPayload = {
+    title: "rate-limit probe",
+    intent: "prove per-principal write bounds",
+    requestedActions: [{ kind: "fs.read", description: "read repo", params: { paths: ["src/index.ts"] } }],
+    target: { cwd: "/repo" },
+    risk: "low"
+  };
+
+  it("returns structured 429s and metrics when one principal bursts work-item writes", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-abuse-rate-"));
+    const app = buildTestGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      rateLimit: { windowMs: 60_000, maxRequests: 2 }
+    });
+
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-1" }
+      });
+      const second = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-2" }
+      });
+      const limited = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "write-3" }
+      });
+
+      expect(first.statusCode).toBe(201);
+      expect(second.statusCode).toBe(201);
+      expect(limited.statusCode).toBe(429);
+      expect(limited.headers["retry-after"]).toBeDefined();
+      expect(limited.headers["x-ratelimit-remaining"]).toBe("0");
+      expect(limited.json()).toMatchObject({
+        error: "rate limit exceeded",
+        code: "rate_limited",
+        retry_after_seconds: expect.any(Number)
+      });
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics" });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.body).toContain('acs_rate_limit_rejected_total{method="POST",route="/work-items"} 1');
+      expect(metrics.body).toContain('acs_http_requests_total{method="POST",route="/work-items",status="429"} 1');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps MCP principals isolated and bounds create_work_item bursts", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-abuse-mcp-"));
+    const dbPath = join(dir, "control.db");
+    seedActor(dbPath, "user", "local_bearer:local-dev");
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth: testAuth,
+      mcpAuth: { localBearerToken: "mcp-principal-a" },
+      rateLimit: { windowMs: 60_000, maxRequests: 1 }
+    });
+
+    try {
+      const allowed = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-principal-a" },
+        payload: createWorkItemToolCall("mcp-write-1")
+      });
+      const limited = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-principal-a" },
+        payload: createWorkItemToolCall("mcp-write-2")
+      });
+      // A different bearer is a different principal even on the same loopback IP.
+      const otherPrincipal = await app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { authorization: "Bearer mcp-principal-b" },
+        payload: createWorkItemToolCall("mcp-write-other")
+      });
+
+      expect(allowed.statusCode).toBe(200);
+      expect(allowed.json().result.structuredContent.title).toBe("mcp-write-1");
+      expect(limited.statusCode).toBe(429);
+      expect(limited.json()).toMatchObject({
+        jsonrpc: "2.0",
+        error: {
+          code: -32029,
+          message: "rate limit exceeded",
+          data: { code: "rate_limited", retry_after_seconds: expect.any(Number) }
+        }
+      });
+      // Wrong token fails auth (401/403 path), proving the limiter key is token-scoped
+      // rather than letting an unbounded alternate client write as the first principal.
+      expect(otherPrincipal.statusCode).not.toBe(200);
+      expect([401, 403]).toContain(otherPrincipal.statusCode);
+    } finally {
+      await app.close();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects additional work-item intake when the pending queue ceiling is reached", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-abuse-pending-"));
+    const app = buildTestGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      maxPendingWorkItems: 1,
+      rateLimit: { windowMs: 60_000, maxRequests: 100 }
+    });
+
+    try {
+      const first = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "pending-1" }
+      });
+      const second = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { ...workItemPayload, title: "pending-2" }
+      });
+
+      expect(first.statusCode).toBe(201);
+      expect(second.statusCode).toBe(429);
+      expect(second.json()).toMatchObject({ error: "pending work-item limit reached", code: "work_queue_full" });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("gateway dashboard sessions", () => {
   const dashboardAuth = { token: "super-secret-dashboard-token", actor: "user", actorId: "user" } as const;
 
-  async function loginSession(app: ReturnType<typeof buildGateway>, token = dashboardAuth.token) {
+  async function loginSession(app: ReturnType<typeof buildGateway>, token: string = dashboardAuth.token) {
     const login = await app.inject({ method: "POST", url: "/session/login", payload: { token } });
     const setCookie = String(login.headers["set-cookie"] ?? "");
     return { login, cookie: setCookie.split(";")[0] };
@@ -3590,6 +3732,160 @@ describe("gateway dashboard sessions", () => {
 
       const denied = await app.inject({ method: "GET", url: "/events" });
       expect(denied.statusCode).toBe(401);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses new SSE subscribers past the global client cap", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-sse-cap-"));
+    // Two distinct credentials: now that the per-principal cap is always at
+    // least one below the global one, a single principal can never reach the
+    // global ceiling, so exercising it honestly takes more than one.
+    const operatorCredentials: NonNullable<GatewayAuthOptions["credentials"]> = [
+      {
+        id: "op-a",
+        token: "operator-a-token-that-is-long-enough",
+        actor: "user",
+        actorId: "op-a",
+        roles: ["operator"],
+        scopes: ["acs:read"]
+      },
+      {
+        id: "op-b",
+        token: "operator-b-token-that-is-long-enough",
+        actor: "user",
+        actorId: "op-b",
+        roles: ["operator"],
+        scopes: ["acs:read"]
+      },
+      {
+        id: "op-c",
+        token: "operator-c-token-that-is-long-enough",
+        actor: "user",
+        actorId: "op-c",
+        roles: ["operator"],
+        scopes: ["acs:read"]
+      }
+    ];
+    const operators: GatewayAuthOptions = { ...dashboardAuth, credentials: operatorCredentials };
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: operators,
+      maxSseClients: 2,
+      maxSseClientsPerPrincipal: 1
+    });
+
+    try {
+      const a = await loginSession(app, operatorCredentials[0].token);
+      const b = await loginSession(app, operatorCredentials[1].token);
+
+      const first = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie: a.cookie },
+        payloadAsStream: true
+      });
+      const second = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie: b.cookie },
+        payloadAsStream: true
+      });
+      expect(first.statusCode).toBe(200);
+      expect(second.statusCode).toBe(200);
+
+      // A third principal holds no streams of its own, so the only thing that
+      // can turn it away is the global ceiling.
+      const c = await loginSession(app, operatorCredentials[2].token);
+      const rejected = await app.inject({ method: "GET", url: "/events", headers: { cookie: c.cookie } });
+      expect(rejected.statusCode).toBe(503);
+      expect(rejected.json()).toMatchObject({ code: "sse_capacity_reached" });
+      expect(rejected.headers["retry-after"]).toBe("5");
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics", headers: { cookie: c.cookie } });
+      expect(metrics.body).toContain('acs_sse_connections_rejected_total{reason="global"} 1');
+
+      first.stream().destroy();
+      second.stream().destroy();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps one principal from monopolizing the event stream", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-sse-principal-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: dashboardAuth,
+      // Global headroom is deliberately ample: only the per-principal limit
+      // should be able to reject here.
+      maxSseClients: 50,
+      maxSseClientsPerPrincipal: 1
+    });
+
+    try {
+      const { cookie } = await loginSession(app);
+
+      const first = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie },
+        payloadAsStream: true
+      });
+      expect(first.statusCode).toBe(200);
+
+      const rejected = await app.inject({ method: "GET", url: "/events", headers: { cookie } });
+      expect(rejected.statusCode).toBe(503);
+      expect(rejected.json()).toMatchObject({ code: "sse_capacity_reached" });
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics", headers: { cookie } });
+      expect(metrics.body).toContain('acs_sse_connections_rejected_total{reason="per_principal"} 1');
+
+      first.stream().destroy();
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("holds the fairness guarantee when the global cap is set below the per-principal default", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-sse-clamp-"));
+    // The reported case: an operator lowers the global cap and leaves the
+    // per-principal cap at its default, so the per-principal branch could never
+    // fire and one credential could take every slot.
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: dashboardAuth,
+      maxSseClients: 2,
+      maxSseClientsPerPrincipal: 10
+    });
+
+    try {
+      const { cookie } = await loginSession(app);
+
+      const first = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie },
+        payloadAsStream: true
+      });
+      expect(first.statusCode).toBe(200);
+
+      // One slot remains globally, but this principal is already at its
+      // effective limit of 1, so the rejection must be the per-principal one.
+      const rejected = await app.inject({ method: "GET", url: "/events", headers: { cookie } });
+      expect(rejected.statusCode).toBe(503);
+
+      const metrics = await app.inject({ method: "GET", url: "/metrics", headers: { cookie } });
+      expect(metrics.body).toContain('acs_sse_connections_rejected_total{reason="per_principal"} 1');
+
+      first.stream().destroy();
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -11,7 +11,12 @@ import {
   loadMachineControllerConfig,
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
-import { createPolicyEngine, createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
+import {
+  createPolicyEngine,
+  createWorkItemTools,
+  explainPolicy,
+  workItemToolNames
+} from "@agent-control-stack/policy-gate";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
   listWorkItemsSchema,
@@ -24,6 +29,7 @@ import {
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
   validateHeartbeatTtl,
+  WorkerIdentityRegistry,
   type ReadEventsOptions,
   type RegistryAgentDetail,
   type RegistryStatus,
@@ -47,6 +53,7 @@ import {
   type GatewayDirectAgentController,
   type LocalAgentAuditEvent
 } from "./mcp.js";
+import { resolveMcpToolAllowlist, type McpToolAllowlistMode } from "./mcp-tool-allowlist.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
 import { SqliteMoaIdempotencyStore } from "./moa/idempotency.js";
 import {
@@ -78,6 +85,9 @@ import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
 const MAX_RESULT_BODY_BYTES = 256 * 1024;
+// Well above the socket's 16 KB high-water mark, so ordinary bursts ride
+// through; only a subscriber that has genuinely stopped draining reaches this.
+const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
 const sessionCookiePayloadSchema = z.object({
   v: z.literal(1),
   credentialId: z.string().min(1).optional(),
@@ -92,7 +102,10 @@ const gatewayCredentialSchema = z.object({
   actor: z.string().min(1),
   actorId: z.string().min(1),
   roles: z.array(z.enum(["operator", "service", "worker"])).min(1),
-  scopes: z.array(z.string().min(1)).min(1)
+  scopes: z.array(z.string().min(1)).min(1),
+  /** Optional wall-clock expiry for worker (and other) credentials. */
+  expiresAt: z.string().datetime({ offset: true }).optional(),
+  status: z.enum(["active", "revoked"]).optional()
 });
 export type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
 export interface GatewayAuthOptions {
@@ -101,7 +114,15 @@ export interface GatewayAuthOptions {
   /** Registry actor ID this credential is bound to; registry mutations fail closed without it. */
   actorId?: string;
   credentials?: readonly GatewayCredential[];
+  /**
+   * Mutable worker identity registry with TTL, rotation, and revoke.
+   * When present, bearer tokens known to the registry authenticate workers
+   * for result submission and reject expired/revoked identities.
+   */
+  workerIdentities?: WorkerIdentityRegistry;
 }
+
+export { WorkerIdentityRegistry };
 
 export interface GatewayOptions {
   dbPath?: string;
@@ -111,6 +132,10 @@ export interface GatewayOptions {
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
   mcpAllowedOrigins?: string[];
+  /** Per-identity MCP tool allowlist (identity → tool names). */
+  mcpToolAllowlist?: Record<string, readonly string[]>;
+  /** Override allowlist mode; defaults from NODE_ENV. */
+  mcpToolAllowlistMode?: McpToolAllowlistMode;
   machineControllerConfigPath?: string;
   directAgentRunner?: DirectAgentRunner;
   directAgentController?: GatewayDirectAgentController;
@@ -119,6 +144,8 @@ export interface GatewayOptions {
   moa?: MoaGatewayOverrides | false;
   rateLimit?: RateLimitOptions;
   maxPendingWorkItems?: number;
+  maxSseClients?: number;
+  maxSseClientsPerPrincipal?: number;
   portfolioClient?: PortfolioClient;
 }
 
@@ -128,6 +155,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const directAgentController = resolveDirectAgentController(options);
   const app = Fastify({ logger: options.logger ?? true });
   const sseClients = new Set<ServerResponse>();
+  // Principal is retained per stream so a disconnect can decrement the right
+  // bucket without rescanning every open client.
+  const sseClientPrincipals = new Map<ServerResponse, string>();
+  const sseClientsPerPrincipal = new Map<string, number>();
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
     heartbeatTtlMs
@@ -139,8 +170,25 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const auth = resolveAuth(options);
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
+  const mcpToolAllowlist = resolveMcpToolAllowlist({
+    allowlist: options.mcpToolAllowlist,
+    mode: options.mcpToolAllowlistMode
+  });
   const rateLimiter = new SlidingWindowRateLimiter(options.rateLimit ?? resolveRateLimitFromEnv());
   const maxPendingWorkItems = options.maxPendingWorkItems ?? resolveMaxPendingWorkItemsFromEnv();
+  const maxSseClients = options.maxSseClients ?? resolveMaxSseClientsFromEnv();
+  const configuredMaxSseClientsPerPrincipal =
+    options.maxSseClientsPerPrincipal ?? resolveMaxSseClientsPerPrincipalFromEnv();
+  const maxSseClientsPerPrincipal = effectiveMaxSseClientsPerPrincipal(
+    configuredMaxSseClientsPerPrincipal,
+    maxSseClients
+  );
+  if (maxSseClientsPerPrincipal < configuredMaxSseClientsPerPrincipal) {
+    app.log.warn(
+      { configured: configuredMaxSseClientsPerPrincipal, effective: maxSseClientsPerPrincipal, maxSseClients },
+      "per-principal SSE cap lowered to stay below the global cap"
+    );
+  }
   const metrics = new GatewayMetrics();
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const requestStartTimes = new WeakMap<object, number>();
@@ -155,11 +203,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const decision = rateLimiter.check(rateLimitKey(request, auth));
     reply.header("x-ratelimit-remaining", String(decision.remaining));
     if (!decision.allowed) {
+      const route = request.routeOptions.url ?? "<unmatched>";
+      metrics.increment("acs_rate_limit_rejected_total", { method: request.method, route });
       const limitedReply = reply.header("retry-after", String(decision.retryAfterSeconds)).code(429);
-      if (request.routeOptions.url === "/mcp") {
-        return limitedReply.send(jsonRpcError(jsonRpcRequestId(request.body), -32029, "rate limit exceeded"));
+      if (route === "/mcp") {
+        return limitedReply.send(
+          jsonRpcError(jsonRpcRequestId(request.body), -32029, "rate limit exceeded", {
+            code: "rate_limited",
+            retry_after_seconds: decision.retryAfterSeconds
+          })
+        );
       }
-      return limitedReply.send({ error: "rate limit exceeded", code: "rate_limited" });
+      return limitedReply.send({
+        error: "rate limit exceeded",
+        code: "rate_limited",
+        retry_after_seconds: decision.retryAfterSeconds
+      });
     }
   });
   app.addHook("onResponse", async (request, reply) => {
@@ -203,14 +262,35 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   }
 
+  function releaseSseClient(client: ServerResponse): void {
+    if (!sseClients.delete(client)) return;
+    const principal = sseClientPrincipals.get(client);
+    sseClientPrincipals.delete(client);
+    if (principal === undefined) return;
+    const remaining = (sseClientsPerPrincipal.get(principal) ?? 1) - 1;
+    if (remaining > 0) sseClientsPerPrincipal.set(principal, remaining);
+    else sseClientsPerPrincipal.delete(principal);
+  }
+
   function broadcast(event: StoredAuditEvent): void {
     metrics.increment("acs_audit_events_total", { event_name: event.name });
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const client of sseClients) {
       try {
         client.write(frame);
+        // A false return from write() is ordinary transient backpressure and is
+        // not itself interesting. What matters is a subscriber that never
+        // drains: its queued frames grow without bound while audit events keep
+        // arriving, which exhausts the same memory the connection cap exists to
+        // protect. Drop it rather than let one stalled reader take the gateway
+        // down for everyone.
+        if (client.writableLength > MAX_SSE_BUFFER_BYTES) {
+          metrics.increment("acs_sse_clients_dropped_total", { reason: "backpressure" });
+          releaseSseClient(client);
+          client.destroy();
+        }
       } catch {
-        sseClients.delete(client);
+        releaseSseClient(client);
       }
     }
   }
@@ -477,7 +557,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       auditLocalAgentEvent: recordLocalAgentEvent,
       resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth),
       maxPendingWorkItems,
-      portfolioClient
+      portfolioClient,
+      toolAllowlist: mcpToolAllowlist
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);
@@ -507,6 +588,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/work-items", { preHandler: requireRead }, async (request, reply) => {
     try {
       return { workItems: tools.list_work_items(listWorkItemsSchema.parse(request.query)) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/policy/explain", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      return explainPolicy(request.body);
     } catch (error) {
       return sendError(reply, error);
     }
@@ -963,6 +1052,26 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.get("/events", { preHandler: requireRead }, (request, reply) => {
+    // Each stream pins a socket and its buffered writes for as long as the
+    // client holds it. Unbounded, an authenticated client can open sockets
+    // until the process runs out of memory, so refuse past the cap rather than
+    // degrade every existing subscriber.
+    //
+    // The process-wide ceiling alone is not enough: one principal holding every
+    // slot locks every other credential out of the live audit channel, which is
+    // a denial of service against exactly the people who need to watch during
+    // an incident. The per-principal limit is what keeps the channel fair; the
+    // global one is the safety ceiling.
+    const principal = ssePrincipalKey(request, auth);
+    const principalStreams = sseClientsPerPrincipal.get(principal) ?? 0;
+    if (sseClients.size >= maxSseClients || principalStreams >= maxSseClientsPerPrincipal) {
+      const reason = principalStreams >= maxSseClientsPerPrincipal ? "per_principal" : "global";
+      metrics.increment("acs_sse_connections_rejected_total", { reason });
+      return reply
+        .header("retry-after", "5")
+        .code(503)
+        .send({ error: "event stream capacity reached", code: "sse_capacity_reached" });
+    }
     reply.hijack();
     reply.raw.writeHead(200, {
       "content-type": "text/event-stream",
@@ -971,8 +1080,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
     reply.raw.write(`event: ready\ndata: {}\n\n`);
     sseClients.add(reply.raw);
+    sseClientPrincipals.set(reply.raw, principal);
+    sseClientsPerPrincipal.set(principal, principalStreams + 1);
     request.raw.on("close", () => {
-      sseClients.delete(reply.raw);
+      releaseSseClient(reply.raw);
     });
   });
 
@@ -1219,6 +1330,51 @@ function resolveRateLimitFromEnv(env: NodeJS.ProcessEnv = process.env): RateLimi
   };
 }
 
+function resolveMaxSseClientsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100_000)
+    .parse(env.ACS_MAX_SSE_CLIENTS ?? 100);
+}
+
+function resolveMaxSseClientsPerPrincipalFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  return z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(100_000)
+    .parse(env.ACS_MAX_SSE_CLIENTS_PER_PRINCIPAL ?? 10);
+}
+
+/**
+ * The fairness guarantee is that no single principal can occupy every stream
+ * slot. The two caps are configured independently, so an operator who lowers
+ * ACS_MAX_SSE_CLIENTS below the per-principal default would otherwise void that
+ * guarantee silently — with a global cap of 5 and the default 10, the
+ * per-principal branch can never fire. Derive the effective limit from both
+ * rather than trusting them to be coherent.
+ *
+ * One slot below the global ceiling is the minimum that actually enforces the
+ * promise, and it leaves an explicit per-principal setting alone whenever that
+ * setting is already consistent. A global cap of 1 has no fairness to give;
+ * the floor of 1 keeps that degenerate case working rather than unservable.
+ */
+export function effectiveMaxSseClientsPerPrincipal(configured: number, globalMax: number): number {
+  return Math.max(1, Math.min(configured, globalMax - 1));
+}
+
+/**
+ * Shares the credential-or-IP identity the rate limiter uses, minus the
+ * method/route prefix: the same operator across two browser tabs must land in
+ * one bucket, or the per-principal cap is trivially sidestepped.
+ */
+function ssePrincipalKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
+  const credential = gatewayCredentialForRequest(request, auth);
+  return credential ? `credential:${credential.id}` : `ip:${request.ip}`;
+}
+
 function resolveMaxPendingWorkItemsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   return z.coerce
     .number()
@@ -1246,6 +1402,7 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/oauth/token" ||
     path === "/device/verify" ||
     path === "/work-items" ||
+    path === "/policy/explain" ||
     path.startsWith("/work-items/") ||
     path.startsWith("/webhooks/")
   );
@@ -1253,8 +1410,18 @@ function isRateLimitedRoute(url: string): boolean {
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
   const credential = gatewayCredentialForRequest(request, auth);
-  const principal = credential ? `credential:${credential.id}` : `ip:${request.ip}`;
+  const principal = credential
+    ? `credential:${credential.id}`
+    : (bearerPrincipal(request.headers.authorization) ?? `ip:${request.ip}`);
   return `${request.method}:${request.routeOptions.url ?? "<unmatched>"}:${principal}`;
+}
+
+function bearerPrincipal(authorization: string | string[] | undefined): string | undefined {
+  if (Array.isArray(authorization)) return undefined;
+  const match = /^Bearer\s+(\S+)$/i.exec(authorization ?? "");
+  if (!match) return undefined;
+  const digest = createHash("sha256").update(match[1]).digest("hex").slice(0, 16);
+  return `bearer:${digest}`;
 }
 
 function jsonRpcRequestId(body: unknown): string | number | null {
@@ -1274,11 +1441,15 @@ function isJsonParseError(error: unknown): boolean {
   return (error as { code?: string }).code === "FST_ERR_CTP_INVALID_JSON_BODY";
 }
 
-function jsonRpcError(id: string | number | null, code: number, message: string) {
+function jsonRpcError(id: string | number | null, code: number, message: string, data?: unknown) {
   return {
     jsonrpc: "2.0" as const,
     id,
-    error: { code, message }
+    error: {
+      code,
+      message,
+      ...(data === undefined ? {} : { data })
+    }
   };
 }
 
@@ -1370,16 +1541,46 @@ function requireWorkerIdentity(
     reply.code(503).send({ error: "worker auth is not configured", code: "worker_auth_unconfigured" });
     return undefined;
   }
-  const credential = gatewayCredentialForRequest(request, auth);
-  if (!credential) {
+  const token = bearerToken(request.headers.authorization);
+  const now = new Date();
+
+  if (auth.workerIdentities && token) {
+    const resolved = auth.workerIdentities.resolve(token, now);
+    if (resolved.ok) {
+      return resolved.identity.workerId;
+    }
+    if (resolved.code === "worker_identity_expired") {
+      reply.code(410).send({ error: "worker identity has expired", code: resolved.code });
+      return undefined;
+    }
+    if (resolved.code === "worker_identity_revoked") {
+      reply.code(401).send({ error: "worker identity has been revoked", code: resolved.code });
+      return undefined;
+    }
+    // Unknown to the registry: fall through to static gateway credentials.
+  }
+
+  // Match before the live-credential filter so expiry can return 410 instead of a
+  // generic 401, matching lease-expiry semantics for worker authority. Cookie
+  // sessions fall through gatewayCredentialForRequest when no bearer is present.
+  const matched = token ? matchGatewayCredential(token, auth) : gatewayCredentialForRequest(request, auth);
+  if (!matched) {
     reply.code(401).send({ error: "unauthorized" });
     return undefined;
   }
-  if (!credential.roles.includes("worker") || !credential.scopes.includes("acs:worker") || !credential.actorId) {
+  if (matched.status === "revoked") {
+    reply.code(401).send({ error: "worker identity has been revoked", code: "worker_identity_revoked" });
+    return undefined;
+  }
+  if (matched.expiresAt && Date.parse(matched.expiresAt) <= now.getTime()) {
+    reply.code(410).send({ error: "worker identity has expired", code: "worker_identity_expired" });
+    return undefined;
+  }
+  if (!matched.roles.includes("worker") || !matched.scopes.includes("acs:worker") || !matched.actorId) {
     reply.code(403).send({ error: "worker role is required", code: "insufficient_worker_authority" });
     return undefined;
   }
-  return credential.actorId;
+  return matched.actorId;
 }
 
 function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {
@@ -1427,7 +1628,7 @@ export function gatewayCredentialForRequest(
   return cookie ? gatewayCredentialForSessionCookie(cookie, auth) : undefined;
 }
 
-function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
+function matchGatewayCredential(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
   if (!token) return undefined;
   const credential = auth.credentials?.find((candidate) => constantTimeEqual(token, candidate.token));
   if (credential) return credential;
@@ -1442,6 +1643,14 @@ function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthO
     };
   }
   return undefined;
+}
+
+function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
+  const credential = matchGatewayCredential(token, auth);
+  if (!credential) return undefined;
+  if (credential.status === "revoked") return undefined;
+  if (credential.expiresAt && Date.parse(credential.expiresAt) <= Date.now()) return undefined;
+  return credential;
 }
 
 function bearerToken(authorization: string | string[] | undefined): string | undefined {

@@ -676,6 +676,129 @@
         }
       }
     },
+    "/policy/explain": {
+      "post": {
+        "operationId": "explainPolicy",
+        "summary": "Explain a candidate policy decision without executing it.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "workItemId": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "actor": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "operation": {
+                    "type": "string",
+                    "enum": [
+                      "create",
+                      "approve",
+                      "unblock",
+                      "claim"
+                    ]
+                  },
+                  "requester": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "risk": {
+                    "type": "string",
+                    "enum": [
+                      "low",
+                      "medium",
+                      "high",
+                      "critical"
+                    ]
+                  },
+                  "action": {
+                    "type": "object",
+                    "properties": {
+                      "kind": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "description": {
+                        "type": "string",
+                        "minLength": 1
+                      },
+                      "params": {
+                        "default": {},
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {}
+                      }
+                    },
+                    "required": [
+                      "kind",
+                      "description"
+                    ]
+                  },
+                  "cwd": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "command": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "paths": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    }
+                  },
+                  "network": {
+                    "type": "boolean"
+                  },
+                  "write": {
+                    "type": "boolean"
+                  },
+                  "destructive": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "workItemId",
+                  "actor",
+                  "operation",
+                  "requester",
+                  "risk",
+                  "action"
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
     "/webhooks/{source}": {
       "post": {
         "operationId": "ingestWebhook",
@@ -2165,6 +2288,9 @@
           },
           "403": {
             "description": "The authenticated principal is not authorized."
+          },
+          "503": {
+            "description": "Event stream capacity reached, globally or for this principal. Body carries code sse_capacity_reached; retry-after indicates when to retry."
           }
         }
       }
