@@ -584,6 +584,8 @@ const executionAuditEventNames = new Set([
   "execution.started",
   "execution.result_persisted",
   "execution.completed",
+  "desktop_commander.capability_issued",
+  "desktop_commander.capability_denied",
   "desktop_commander.tool_called",
   "desktop_commander.tool_succeeded",
   "desktop_commander.tool_failed"

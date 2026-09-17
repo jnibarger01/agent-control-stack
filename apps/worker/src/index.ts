@@ -33,6 +33,7 @@ import {
   authorizationRequestedEvent,
   authorizeDesktopCommanderExecution,
   desktopCommanderAdapterConfigFromEnv,
+  desktopCommanderContainmentFromEnv,
   DesktopCommanderMachineExecutor,
   executionCompletedEvent,
   executionStartedEvent,
@@ -179,7 +180,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   let machineExecutor: MachineExecutor | undefined = options.machineExecutor;
   let ownsMachineExecutor = false;
   if (executionBackend === "desktop_commander" && !machineExecutor) {
-    const adapterConfig = desktopCommanderAdapterConfigFromEnv();
+    const adapterConfig = desktopCommanderAdapterConfigFromEnv(process.env, dbPath);
     if (!adapterConfig) {
       workItems.close();
       if (ownsLearning) learning.close();
@@ -778,11 +779,7 @@ async function recordGovernedExecutionEvidence(input: GovernedEvidenceInput): Pr
 }
 
 function machineExecutorContainmentFromEnv(): { allowedRoots: string[]; deniedRoots: string[] } {
-  const config = desktopCommanderAdapterConfigFromEnv();
-  if (!config) {
-    throw new Error("Desktop Commander adapter configuration is unavailable");
-  }
-  return { allowedRoots: config.allowedRoots, deniedRoots: config.deniedRoots };
+  return desktopCommanderContainmentFromEnv();
 }
 
 export function workerResultIdempotencyKey(attemptId: string): string {

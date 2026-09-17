@@ -1,6 +1,9 @@
 import { existsSync, realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { ControlStackError } from "@agent-control-stack/shared";
+import type { AuditEventDraft } from "./audit.js";
+import type { CapabilityIssuanceBinding } from "./runtime-registry.js";
+import type { RuntimeBootstrapRegistry } from "./runtime-registry.js";
 
 /**
  * Configuration for the local Desktop Commander MCP subprocess and the ACS-side
@@ -25,6 +28,24 @@ export interface DesktopCommanderAdapterConfig {
   requestTimeoutMs: number;
   /** Hard cap on a single tool result's textual payload after normalisation. */
   maxResultBytes: number;
+  /** ACS-only Ed25519 signing material for managed DC calls. */
+  capability?: {
+    runtimeId: string;
+    /** SHA-256 fingerprint of the configured Desktop Commander identity/config. */
+    runtimeIdentityConfigFingerprint: string;
+    /** Explicit sorted v1 scopes granted to this managed runtime. */
+    runtimeScopes: readonly string[];
+    keyId: string;
+    privateKey: string;
+    /** Authoritative ACS control-plane database; never forwarded to DC. */
+    databasePath?: string;
+    /** Authoritative ACS wiring; absent configuration fails closed at execution. */
+    issuanceRegistry?: {
+      recordIssuance(input: CapabilityIssuanceBinding): { requestHash: string; approvalId?: string };
+    };
+    runtimeRegistry?: RuntimeBootstrapRegistry;
+    persistAuditEvent?: (event: AuditEventDraft) => void | Promise<void>;
+  };
 }
 
 const DEFAULT_LOCAL_FORK_ENTRYPOINT = "/home/jacen/projects/desktop-commander/dist/index.js";
@@ -83,18 +104,48 @@ function parsePositiveInt(raw: string | undefined, fallback: number, label: stri
 }
 
 /**
+ * Read only the containment boundary needed to authorize an already-injected
+ * executor. Production startup still builds the complete managed configuration
+ * through `desktopCommanderAdapterConfigFromEnv()` and fails closed without its
+ * runtime identity and capability credentials.
+ */
+export function desktopCommanderContainmentFromEnv(env: NodeJS.ProcessEnv = process.env): {
+  allowedRoots: string[];
+  deniedRoots: string[];
+} {
+  const allowedRoots = parseRoots(env.ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS, "ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS");
+  if (allowedRoots.length === 0) {
+    throw new ControlStackError(
+      "desktop_commander_config_invalid",
+      "ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS must list at least one absolute containment root when Desktop Commander execution is enabled"
+    );
+  }
+  return {
+    allowedRoots,
+    deniedRoots: parseRoots(env.ACS_DESKTOP_COMMANDER_DENIED_ROOTS, "ACS_DESKTOP_COMMANDER_DENIED_ROOTS")
+  };
+}
+
+/**
  * Build the adapter config from environment. Returns `undefined` when Desktop
  * Commander execution is not configured at all, so callers can stay dry-run.
  * Throws (fail closed) when it is partially/incorrectly configured.
  */
 export function desktopCommanderAdapterConfigFromEnv(
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  authoritativeDatabasePath?: string
 ): DesktopCommanderAdapterConfig | undefined {
   const explicitCommand = env.ACS_DESKTOP_COMMANDER_COMMAND?.trim() || undefined;
   const explicitArgs = parseArgsJson(env.ACS_DESKTOP_COMMANDER_ARGS_JSON);
   const allowedRoots = parseRoots(env.ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS, "ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS");
   const deniedRoots = parseRoots(env.ACS_DESKTOP_COMMANDER_DENIED_ROOTS, "ACS_DESKTOP_COMMANDER_DENIED_ROOTS");
   const cwd = env.ACS_DESKTOP_COMMANDER_CWD?.trim() || undefined;
+  const runtimeId = env.ACS_DESKTOP_COMMANDER_RUNTIME_ID?.trim() || undefined;
+  const runtimeIdentityConfigFingerprint =
+    env.ACS_DESKTOP_COMMANDER_RUNTIME_IDENTITY_CONFIG_FINGERPRINT?.trim() || undefined;
+  const runtimeScopes = parseArgsJson(env.ACS_DESKTOP_COMMANDER_RUNTIME_SCOPES_JSON);
+  const keyId = env.ACS_DESKTOP_COMMANDER_CAPABILITY_KEY_ID?.trim() || undefined;
+  const privateKey = env.ACS_DESKTOP_COMMANDER_CAPABILITY_PRIVATE_KEY?.trim() || undefined;
 
   const configured =
     explicitCommand !== undefined ||
@@ -121,11 +172,49 @@ export function desktopCommanderAdapterConfigFromEnv(
     command = process.execPath;
     args = explicitArgs ?? [entrypoint];
   }
+  if (args.includes("--standalone")) {
+    throw new ControlStackError(
+      "desktop_commander_config_invalid",
+      "managed Desktop Commander must not be launched with --standalone"
+    );
+  }
 
   if (allowedRoots.length === 0) {
     throw new ControlStackError(
       "desktop_commander_config_invalid",
       "ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS must list at least one absolute containment root when Desktop Commander execution is enabled"
+    );
+  }
+  const databasePath = authoritativeDatabasePath ?? (env.ACS_DB_PATH?.trim() || undefined);
+  if (!runtimeId || !runtimeIdentityConfigFingerprint || !runtimeScopes || !keyId || !privateKey || !databasePath) {
+    throw new ControlStackError(
+      "desktop_commander_config_invalid",
+      "managed Desktop Commander requires runtime id, runtime identity fingerprint/scopes, capability key id, private key, and the authoritative database path"
+    );
+  }
+  if (!/^[a-f0-9]{64}$/u.test(runtimeIdentityConfigFingerprint)) {
+    throw new ControlStackError(
+      "desktop_commander_config_invalid",
+      "ACS_DESKTOP_COMMANDER_RUNTIME_IDENTITY_CONFIG_FINGERPRINT must be lowercase SHA-256 hex"
+    );
+  }
+  const knownScopes = new Set([
+    "fs.read",
+    "fs.write",
+    "process.exec",
+    "process.spawn",
+    "network.read",
+    "network.write"
+  ]);
+  if (
+    runtimeScopes.length === 0 ||
+    new Set(runtimeScopes).size !== runtimeScopes.length ||
+    runtimeScopes.some((scope) => !knownScopes.has(scope)) ||
+    runtimeScopes.some((scope, index) => index > 0 && runtimeScopes[index - 1]! >= scope)
+  ) {
+    throw new ControlStackError(
+      "desktop_commander_config_invalid",
+      "ACS_DESKTOP_COMMANDER_RUNTIME_SCOPES_JSON must be a sorted, unique nonempty v1 scope array"
     );
   }
 
@@ -149,6 +238,7 @@ export function desktopCommanderAdapterConfigFromEnv(
       env.ACS_DESKTOP_COMMANDER_MAX_RESULT_BYTES,
       DEFAULT_MAX_RESULT_BYTES,
       "ACS_DESKTOP_COMMANDER_MAX_RESULT_BYTES"
-    )
+    ),
+    capability: { runtimeId, runtimeIdentityConfigFingerprint, runtimeScopes, keyId, privateKey, databasePath }
   };
 }

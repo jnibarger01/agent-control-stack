@@ -16,6 +16,8 @@ export const ExecutionAuditEvent = {
   AuthorizationDenied: "execution.authorization_denied",
   Started: "execution.started",
   ToolCalled: "desktop_commander.tool_called",
+  CapabilityIssued: "desktop_commander.capability_issued",
+  CapabilityDenied: "desktop_commander.capability_denied",
   ToolSucceeded: "desktop_commander.tool_succeeded",
   ToolFailed: "desktop_commander.tool_failed",
   ResultPersisted: "execution.result_persisted",
@@ -134,6 +136,55 @@ export function toolCalledEvent(auth: ExecutionAuthorization): AuditEventDraft {
       arguments: auth.normalizedArguments
     },
     attributes: executionAuditAttributes(auth)
+  };
+}
+
+/** Capability evidence intentionally excludes nonce, signature, and arguments. */
+export function capabilityIssuedEvent(input: {
+  auth: ExecutionAuthorization;
+  runtimeId: string;
+  keyId: string;
+  requestHash: string;
+  expiresAt: string;
+}): AuditEventDraft {
+  return {
+    name: ExecutionAuditEvent.CapabilityIssued,
+    body: {
+      workItemId: input.auth.workItemId,
+      attemptId: input.auth.attemptId,
+      leaseId: input.auth.leaseId,
+      runtimeId: input.runtimeId,
+      keyId: input.keyId,
+      requestHash: input.requestHash,
+      expiresAt: input.expiresAt
+    },
+    attributes: {
+      ...executionAuditAttributes(input.auth),
+      "desktop_commander.runtime_id": input.runtimeId,
+      "desktop_commander.key_id": input.keyId,
+      "execution.request_hash": input.requestHash
+    }
+  };
+}
+
+export function capabilityDeniedEvent(input: {
+  auth: ExecutionAuthorization;
+  runtimeId: string;
+  code: string;
+}): AuditEventDraft {
+  return {
+    name: ExecutionAuditEvent.CapabilityDenied,
+    body: {
+      workItemId: input.auth.workItemId,
+      attemptId: input.auth.attemptId,
+      runtimeId: input.runtimeId,
+      code: input.code
+    },
+    attributes: {
+      ...executionAuditAttributes(input.auth),
+      "desktop_commander.runtime_id": input.runtimeId,
+      "execution.deny_code": input.code
+    }
   };
 }
 

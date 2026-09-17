@@ -12,7 +12,7 @@
  * not exported.
  */
 
-export { desktopCommanderAdapterConfigFromEnv } from "./config.js";
+export { desktopCommanderAdapterConfigFromEnv, desktopCommanderContainmentFromEnv } from "./config.js";
 export type { DesktopCommanderAdapterConfig } from "./config.js";
 
 export {
@@ -36,6 +36,16 @@ export {
 } from "./arguments.js";
 export type { NormalizedInvocation } from "./arguments.js";
 
+export { DESKTOP_COMMANDER_CAPABILITY_VERSION, desktopCommanderCapabilityNonceHash } from "./capability.js";
+export type {
+  CapabilitySigningConfig,
+  DesktopCommanderCapability,
+  DesktopCommanderCapabilityPayload
+} from "./capability.js";
+
+export { SqliteDesktopCommanderRuntimeRegistry } from "./runtime-registry.js";
+export type { RuntimeAttestation, RuntimeBootstrapChallenge, CapabilityIssuanceBinding } from "./runtime-registry.js";
+
 export { authorizeDesktopCommanderExecution, isExecutionAuthorization } from "./execution-authorization.js";
 export type { ExecutionAuthorization, AuthorizeExecutionInput } from "./execution-authorization.js";
 
@@ -48,6 +58,8 @@ export {
   authorizationRequestedEvent,
   authorizationGrantedEvent,
   authorizationDeniedEvent,
+  capabilityIssuedEvent,
+  capabilityDeniedEvent,
   executionStartedEvent,
   toolCalledEvent,
   toolOutcomeEvent,

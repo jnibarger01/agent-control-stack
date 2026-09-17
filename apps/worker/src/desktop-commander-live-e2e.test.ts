@@ -1,3 +1,4 @@
+import { generateKeyPairSync } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +16,7 @@ const ENABLED = process.env.ACS_DC_LIVE_INTEGRATION === "1" && existsSync(ENTRYP
 let dir: string;
 let root: string;
 let dbPath: string;
+let runtimeId: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "acs-dc-e2e-"));
@@ -22,10 +24,27 @@ beforeEach(() => {
   mkdirSync(join(root, "pkg"));
   writeFileSync(join(root, "pkg", "readme.txt"), "END TO END EVIDENCE LINE\n");
   dbPath = join(dir, "control.db");
+  runtimeId = "runtime_e2e";
+  const stateDirectory = join(root, ".desktop-commander");
+  mkdirSync(stateDirectory);
+  writeFileSync(
+    join(stateDirectory, "runtime-identity.json"),
+    `${JSON.stringify({ schemaVersion: 1, runtimeId, createdAt: new Date().toISOString() })}\n`,
+    { mode: 0o600 }
+  );
+  const privateKey = generateKeyPairSync("ed25519")
+    .privateKey.export({ format: "der", type: "pkcs8" })
+    .toString("base64url");
+  vi.stubEnv("HOME", root);
   vi.stubEnv("ACS_EXECUTION_BACKEND", "desktop_commander");
   vi.stubEnv("ACS_DESKTOP_COMMANDER_COMMAND", process.execPath);
   vi.stubEnv("ACS_DESKTOP_COMMANDER_ARGS_JSON", JSON.stringify([ENTRYPOINT]));
   vi.stubEnv("ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS", root);
+  vi.stubEnv("ACS_DESKTOP_COMMANDER_RUNTIME_ID", runtimeId);
+  vi.stubEnv("ACS_DESKTOP_COMMANDER_RUNTIME_IDENTITY_CONFIG_FINGERPRINT", "f".repeat(64));
+  vi.stubEnv("ACS_DESKTOP_COMMANDER_RUNTIME_SCOPES_JSON", JSON.stringify(["fs.read"]));
+  vi.stubEnv("ACS_DESKTOP_COMMANDER_CAPABILITY_KEY_ID", "e2e-key-1");
+  vi.stubEnv("ACS_DESKTOP_COMMANDER_CAPABILITY_PRIVATE_KEY", privateKey);
 });
 
 afterEach(() => {

@@ -46,6 +46,15 @@ export interface McpToolCallResult {
   [key: string]: unknown;
 }
 
+export interface McpRuntimeBootstrap {
+  readonly schemaVersion: 1;
+  readonly runtimeId: string;
+  readonly challenge: string;
+  readonly scopes: readonly string[];
+}
+
+export type McpRuntimeIdentity = McpRuntimeBootstrap;
+
 export interface McpStdioClientOptions {
   command: string;
   args?: readonly string[];
@@ -162,7 +171,9 @@ export class McpStdioClient {
     return this.connected && !this.closed && this.fatalError === undefined;
   }
 
-  async connect(): Promise<McpServerInfo> {
+  async connect(
+    runtimeBootstrap?: McpRuntimeBootstrap
+  ): Promise<McpServerInfo & { runtimeIdentity?: McpRuntimeIdentity }> {
     if (this.child) {
       throw new ControlStackError("desktop_commander_already_connected", "MCP stdio client already connected");
     }
@@ -201,10 +212,19 @@ export class McpStdioClient {
         clientInfo: {
           name: this.options.clientName ?? "acs-desktop-commander-adapter",
           version: this.options.clientVersion ?? "0.1.0"
-        }
+        },
+        ...(runtimeBootstrap ? { _meta: { acsRuntimeBootstrap: runtimeBootstrap } } : {})
       },
       connectTimeoutMs
-    )) as { protocolVersion?: string; serverInfo?: { name?: string; version?: string } };
+    )) as {
+      protocolVersion?: string;
+      serverInfo?: { name?: string; version?: string };
+      _meta?: { acsRuntimeIdentity?: unknown };
+    };
+
+    const runtimeIdentity = runtimeBootstrap
+      ? requireExactRuntimeIdentity(initialize?._meta?.acsRuntimeIdentity, runtimeBootstrap)
+      : undefined;
 
     this.serverInfo = {
       name: initialize?.serverInfo?.name,
@@ -213,7 +233,7 @@ export class McpStdioClient {
     };
     this.notify("notifications/initialized", {});
     this.connected = true;
-    return this.getServerInfo();
+    return { ...this.getServerInfo(), ...(runtimeIdentity ? { runtimeIdentity } : {}) };
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
@@ -221,10 +241,11 @@ export class McpStdioClient {
     return Array.isArray(result?.tools) ? result.tools : [];
   }
 
-  async callTool(name: string, args: unknown): Promise<McpToolCallResult> {
+  async callTool(name: string, args: unknown, meta?: Record<string, unknown>): Promise<McpToolCallResult> {
     const result = (await this.request("tools/call", {
       name,
-      arguments: args ?? {}
+      arguments: args ?? {},
+      ...(meta ? { _meta: meta } : {})
     })) as McpToolCallResult;
     return result ?? {};
   }
@@ -364,4 +385,41 @@ export class McpStdioClient {
       }
     }
   }
+}
+
+function requireExactRuntimeIdentity(value: unknown, expected: McpRuntimeBootstrap): McpRuntimeIdentity {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ControlStackError(
+      "desktop_commander_runtime_identity_rejected",
+      "runtime identity is missing or malformed"
+    );
+  }
+  const identity = value as Record<string, unknown>;
+  const keys = Object.keys(identity).sort();
+  const expectedKeys = ["challenge", "runtimeId", "schemaVersion", "scopes"];
+  if (keys.length !== expectedKeys.length || keys.some((key, index) => key !== expectedKeys[index])) {
+    throw new ControlStackError(
+      "desktop_commander_runtime_identity_rejected",
+      "runtime identity has unexpected fields"
+    );
+  }
+  if (
+    identity.schemaVersion !== 1 ||
+    identity.runtimeId !== expected.runtimeId ||
+    identity.challenge !== expected.challenge ||
+    !Array.isArray(identity.scopes) ||
+    identity.scopes.length !== expected.scopes.length ||
+    identity.scopes.some((scope, index) => scope !== expected.scopes[index])
+  ) {
+    throw new ControlStackError(
+      "desktop_commander_runtime_identity_rejected",
+      "runtime identity does not exactly match bootstrap"
+    );
+  }
+  return {
+    schemaVersion: 1,
+    runtimeId: expected.runtimeId,
+    challenge: expected.challenge,
+    scopes: [...expected.scopes]
+  };
 }
