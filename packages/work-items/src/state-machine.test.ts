@@ -898,7 +898,12 @@ describe("work item state machine", () => {
           name: "advisory_evidence_and_verification",
           filename: "021_advisory_evidence_and_verification.sql"
         },
-        { version: 22, name: "device_auth", filename: "022_device_auth.sql" }
+        { version: 22, name: "device_auth", filename: "022_device_auth.sql" },
+        {
+          version: 23,
+          name: "desktop_commander_runtime_capabilities",
+          filename: "023_desktop_commander_runtime_capabilities.sql"
+        }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -944,6 +949,15 @@ describe("work item state machine", () => {
     expect(tableColumns(dbPath, "audit_events")).toEqual(expect.arrayContaining(["previous_hash", "event_hash"]));
     expect(tableColumns(dbPath, "approval_records")).toEqual(
       expect.arrayContaining(["request_hash", "approval_token_hash", "status", "expires_at", "consumed_at"])
+    );
+    expect(tableNames(dbPath)).toEqual(
+      expect.arrayContaining([
+        "desktop_commander_runtimes",
+        "desktop_commander_runtime_scopes",
+        "desktop_commander_bootstrap_challenges",
+        "desktop_commander_capability_issuances",
+        "desktop_commander_capability_issuance_scopes"
+      ])
     );
   });
 
@@ -1010,7 +1024,8 @@ describe("work item state machine", () => {
         { version: 19 },
         { version: 20 },
         { version: 21 },
-        { version: 22 }
+        { version: 22 },
+        { version: 23 }
       ]);
     } finally {
       db.close();
@@ -1119,7 +1134,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(copiedPath);
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1194,7 +1209,7 @@ describe("work item state machine", () => {
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([

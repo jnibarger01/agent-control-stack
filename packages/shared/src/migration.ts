@@ -54,7 +54,12 @@ const migrationFiles = [
     name: "advisory_evidence_and_verification",
     filename: "021_advisory_evidence_and_verification.sql"
   },
-  { version: 22, name: "device_auth", filename: "022_device_auth.sql" }
+  { version: 22, name: "device_auth", filename: "022_device_auth.sql" },
+  {
+    version: 23,
+    name: "desktop_commander_runtime_capabilities",
+    filename: "023_desktop_commander_runtime_capabilities.sql"
+  }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -83,6 +88,7 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   if (!hasColumn(db, "schema_migrations", "checksum")) {
     db.exec(`ALTER TABLE schema_migrations ADD COLUMN checksum TEXT NOT NULL DEFAULT ''`);
   }
+  repairExactAlternateSeventeenToTwentyOneLayout(db);
   for (const migration of controlPlaneMigrations()) {
     // The "already applied?" question is answered fresh inside this
     // migration's own transaction, after BEGIN IMMEDIATE's write lock is
@@ -133,6 +139,91 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       }
       throw error;
     }
+  }
+}
+
+/** Repairs only the fully verified deployed alternate 17-21 metadata layout. */
+function repairExactAlternateSeventeenToTwentyOneLayout(db: SqliteLike): void {
+  const alternate = [
+    [
+      17,
+      "desktop_commander_execution_mode",
+      "017_desktop_commander_execution_mode.sql",
+      "aedd1140975cd1a9197df06f1dbd9906b8b3ab143b4025bcc2e4ba0e758f5d43"
+    ],
+    [
+      18,
+      "advisory_evidence_and_verification",
+      "018_advisory_evidence_and_verification.sql",
+      "456755abba99bae8a282b1f0544b4f0e798f57a27d4e717ec4b28ba79d4a9f7d"
+    ],
+    [
+      19,
+      "scheduler_firing_callback_pending",
+      "019_scheduler_firing_callback_pending.sql",
+      "51bc791cc466b83d6e80dccd10ab077dd37118899d860e2e53cf6d187fec9124"
+    ],
+    [
+      20,
+      "attempt_lease_approvals",
+      "020_attempt_lease_approvals.sql",
+      "dc9481337e06d8c6a118883d6e8f656be6e8c0321b44a952936d81e18a552f7c"
+    ],
+    [
+      21,
+      "work_item_metadata",
+      "021_work_item_metadata.sql",
+      "65b2abe0bd8b6bd15723b656fa0ddd62359adf02d65d0239742a950f1c37da9e"
+    ]
+  ] as const;
+  const rows = db
+    .prepare(
+      "SELECT version, name, filename, checksum FROM schema_migrations WHERE version BETWEEN 17 AND 21 ORDER BY version"
+    )
+    .all() as Array<{ version: number; name: string; filename: string; checksum: string }>;
+  if (
+    rows.length !== alternate.length ||
+    !rows.every((row, index) => {
+      const expected = alternate[index];
+      return (
+        row.version === expected[0] &&
+        row.name === expected[1] &&
+        row.filename === expected[2] &&
+        row.checksum === expected[3]
+      );
+    })
+  )
+    return;
+  for (const table of [
+    "execution_results",
+    "attempt_results",
+    "plan_proposals",
+    "evidence_manifests",
+    "review_findings",
+    "scheduler_firings",
+    "execution_plan_approvals"
+  ]) {
+    if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)) {
+      throw new Error("alternate migration layout schema validation failed");
+    }
+  }
+  const canonical = controlPlaneMigrations().filter((migration) => migration.version >= 17 && migration.version <= 21);
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version BETWEEN 17 AND 21").run();
+    for (const migration of canonical) {
+      db.prepare(
+        "UPDATE schema_migrations SET version = ?, name = ?, filename = ?, checksum = ? WHERE version = ?"
+      ).run(migration.version, migration.name, migration.filename, migration.checksum, migration.version + 100);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* no active transaction */
+    }
+    throw error;
   }
 }
 
