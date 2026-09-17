@@ -101,27 +101,23 @@ npm run device:start
 
 ### 2. Authenticate
 
-On first run, the device uses the **OAuth 2.0 Device Authorization Flow** for secure authentication:
+On first run, the device uses the hosted **Add Device → Verify Device** flow for secure authentication:
 
-1. **Request Device Code**: The device requests a unique verification code from the server.
-2. **User Verification**: 
-   - A browser window will automatically open to the verification page
-   - If the browser doesn't open, you'll see a URL to visit manually
-   - Enter the displayed code when prompted (e.g., `BLPU-9E9R`)
-3. **Authorization**: Sign in with your account and authorize the device
-4. **Automatic Connection**: The device polls the server and automatically connects once you've authorized
+1. **Create Pairing Session**: The device requests a runtime pairing session.
+2. **Add Device**: A browser window automatically opens to the server's `/add-device?session_id=...` page.
+3. **Verify Device**: Complete the hosted sign-in and Verify Device action.
+4. **Automatic Connection**: The device polls the server and connects only after authoritative verification succeeds.
 
 **Example Output**:
 ```
 🔐 Starting device authorization flow...
-   - 📡 Requesting device code...
-   - ✅ Device code received
+   - 📡 Requesting pairing session...
+   - ✅ Pairing session created
 
-📋 Please complete authentication:
+📋 Please complete authentication in your browser:
    1. Open this URL in your browser:
-      https://test.acidpictures.org/device/verify
-   2. Enter this code when prompted:
-      BLPU-9E9R
+      https://mcp.desktopcommander.app/add-device?session_id=...
+   2. Complete the Add Device and Verify Device steps.
    Code expires in 15 minutes.
    - ⏳ Waiting for authorization...
    - ✅ Authorization successful!

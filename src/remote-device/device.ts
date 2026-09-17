@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { RemoteChannel } from './remote-channel.js';
-import { DeviceAuthenticator } from './device-authenticator.js';
+import { DeviceAuthenticator, normalizeRemoteControlPlaneUrl } from './device-authenticator.js';
+import type { DeviceAuthState } from './device-authenticator.js';
 import { DesktopCommanderIntegration } from './desktop-commander-integration.js';
 import { fileURLToPath } from 'url';
 import os from 'os';
@@ -31,6 +32,7 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, operatio
 export interface MCPDeviceOptions {
     persistSession?: boolean;
     standalone?: boolean;
+    onStateChange?: (state: DeviceAuthState) => void;
 }
 
 /**
@@ -52,6 +54,8 @@ export class MCPDevice {
     private desktop: DesktopCommanderIntegration;
     private startPromise: Promise<void> | null = null;
     private shutdownPromise: Promise<void> | null = null;
+    private readonly onStateChange?: (state: DeviceAuthState) => void;
+    private currentState: DeviceAuthState = 'DISCONNECTED';
     /** Call ids already handled by THIS process (insertion-ordered, bounded). */
     private seenCallIds: Set<string> = new Set();
 
@@ -60,7 +64,9 @@ export class MCPDevice {
     }
 
     constructor(options: MCPDeviceOptions = {}) {
-        this.baseServerUrl = process.env.MCP_SERVER_URL || 'https://mcp.desktopcommander.app';
+        this.baseServerUrl = normalizeRemoteControlPlaneUrl(
+            process.env.MCP_SERVER_URL || 'https://mcp.desktopcommander.app',
+        );
         this.remoteChannel = new RemoteChannel({
             onReconnectExhausted: async ({ attempts, message }) => {
                 if (this.isShuttingDown) return;
@@ -89,12 +95,18 @@ export class MCPDevice {
         // refresh-token families get replayed, trip GoTrue's reuse detection, and
         // take the whole family down including the token a healthy connector holds.
         this.persistSession = options.persistSession ?? true;
+        this.onStateChange = options.onStateChange;
 
         // Initialize desktop integration
         this.desktop = new DesktopCommanderIntegration(options.standalone === true);
 
         // Graceful shutdown handlers (only set once)
         this.setupShutdownHandlers();
+    }
+
+    private transition(state: DeviceAuthState): void {
+        this.currentState = state;
+        this.onStateChange?.(state);
     }
 
     private setupShutdownHandlers() {
@@ -158,6 +170,7 @@ export class MCPDevice {
 
     private async startInternal() {
         try {
+            this.transition('DISCONNECTED');
             console.log('🚀 Starting MCP Device...');
             if (process.env.DEBUG_MODE === 'true') {
                 console.log(`  - 🐞 DEBUG_MODE`);
@@ -190,6 +203,7 @@ export class MCPDevice {
 
             // 2. Set Session or Authenticate
             if (session) {
+                this.transition('CONNECTING');
                 const { error } = await this.remoteChannel.setSession(session);
                 this.assertRunning();
 
@@ -203,7 +217,9 @@ export class MCPDevice {
 
             if (!session) {
                 console.log('\n🔐 Authenticating with Remote MCP server...');
-                const authenticator = new DeviceAuthenticator(this.baseServerUrl);
+                const authenticator = new DeviceAuthenticator(this.baseServerUrl, {
+                    onStateChange: (state) => this.transition(state),
+                });
                 session = await authenticator.authenticate(this.deviceId);
                 this.assertRunning();
                 if (session.device_id) {
@@ -226,6 +242,7 @@ export class MCPDevice {
                     this.deviceId = session.device_id;
                 }
                 // Set session in Remote Channel
+                this.transition('CONNECTING');
                 const { error } = await this.remoteChannel.setSession(session);
                 this.assertRunning();
                 if (error) throw error;
@@ -258,8 +275,12 @@ export class MCPDevice {
 
             // Keep process alive
             this.remoteChannel.startHeartbeat(this.deviceId!);
+            this.transition('CONNECTED');
 
         } catch (error: any) {
+            if (!['PAIRING_SESSION_FAILED', 'PAIRING_SESSION_EXPIRED', 'VERIFICATION_REJECTED', 'VERIFICATION_EXPIRED', 'VERIFICATION_TIMEOUT'].includes(this.currentState)) {
+                this.transition('CONNECTION_FAILED');
+            }
             console.error(' - ❌ Device startup failed:', error.message);
             if (error.stack && process.env.DEBUG_MODE === 'true') {
                 console.error('Stack trace:', error.stack);
