@@ -6,4 +6,5 @@ export * from "./plan-tools.js";
 export * from "./policy.js";
 export * from "./rules.js";
 export * from "./tools.js";
+export * from "./verification-policy.js";
 export * from "./pending-approval-digest.js";

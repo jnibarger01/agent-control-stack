@@ -5,7 +5,8 @@ import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/po
 import { executeSandboxed } from "@agent-control-stack/sandbox";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertDryRunExecutionMode, runWorkerOnce } from "./index.js";
+import { resolveExecutionBackend } from "@agent-control-stack/work-items";
+import { assertDryRunExecutionMode, assertExecutionModeForBackend, runWorkerOnce } from "./index.js";
 
 vi.mock("@agent-control-stack/sandbox", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@agent-control-stack/sandbox")>();
@@ -50,9 +51,47 @@ describe("worker dry-run lock", () => {
   });
 
   it("fails closed on an unknown execution mode", () => {
-    expect(() => assertDryRunExecutionMode("future_mode", "test")).toThrow(
-      "worker requires dry_run execution mode"
+    expect(() => assertDryRunExecutionMode("future_mode", "test")).toThrow("worker requires dry_run execution mode");
+  });
+
+  it("resolveExecutionBackend defaults to dry_run and fails closed on garbage", () => {
+    expect(resolveExecutionBackend({})).toBe("dry_run");
+    expect(resolveExecutionBackend({ ACS_EXECUTION_BACKEND: "" })).toBe("dry_run");
+    expect(resolveExecutionBackend({ ACS_EXECUTION_BACKEND: "dry_run" })).toBe("dry_run");
+    expect(resolveExecutionBackend({ ACS_EXECUTION_BACKEND: "desktop_commander" })).toBe("desktop_commander");
+    expect(() => resolveExecutionBackend({ ACS_EXECUTION_BACKEND: "live" })).toThrow(/unknown ACS_EXECUTION_BACKEND/);
+    expect(() => resolveExecutionBackend({ ACS_EXECUTION_BACKEND: "bubblewrap" })).toThrow(/unknown/);
+  });
+
+  it("assertExecutionModeForBackend pins the mode to the backend", () => {
+    expect(() => assertExecutionModeForBackend("dry_run", "dry_run", "test")).not.toThrow();
+    expect(() => assertExecutionModeForBackend("desktop_commander", "desktop_commander", "test")).not.toThrow();
+    expect(() => assertExecutionModeForBackend("desktop_commander", "dry_run", "production")).toThrow(
+      "production worker requires dry_run execution mode"
     );
+    expect(() => assertExecutionModeForBackend("dry_run", "desktop_commander", "test")).toThrow(
+      "desktop_commander backend requires desktop_commander execution mode"
+    );
+    expect(() => assertExecutionModeForBackend("live", "desktop_commander", "test")).toThrow(
+      "desktop_commander backend requires desktop_commander execution mode"
+    );
+  });
+
+  it("desktop_commander backend fails closed when the adapter is not configured", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-dc-unconfigured-"));
+    const dbPath = join(dir, "control.db");
+    createReadyReadWork(dbPath);
+    try {
+      vi.stubEnv("ACS_DESKTOP_COMMANDER_COMMAND", "");
+      vi.stubEnv("ACS_DESKTOP_COMMANDER_ARGS_JSON", "");
+      vi.stubEnv("ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS", "");
+      vi.stubEnv("ACS_EXECUTION_BACKEND", "");
+      await expect(
+        runWorkerOnce({ dbPath, workerId: "dc-worker", executionBackend: "desktop_commander" })
+      ).rejects.toThrow(/Desktop Commander adapter is not configured/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it("does not report a live production result", async () => {

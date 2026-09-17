@@ -128,11 +128,28 @@ function booleanValue(value: unknown): boolean | undefined {
   return typeof value === "boolean" ? value : undefined;
 }
 
+const NAMED_RESOURCE_PATH_KEYS = ["sourcePath", "destinationPath", "targetPath", "outputPath", "templatePath"] as const;
+
+function unionResourcePaths(
+  params: Record<string, unknown>,
+  fallback: string[] | undefined
+): string[] | undefined {
+  const explicit = stringArray(params.paths) ?? [];
+  const named = NAMED_RESOURCE_PATH_KEYS.map((key) => stringValue(params[key])).filter(
+    (value): value is string => typeof value === "string"
+  );
+  const merged = [...explicit, ...named];
+  if (merged.length > 0) {
+    return [...new Set(merged)];
+  }
+  return fallback;
+}
+
 function normalizeAction(workItem: WorkItem, action: ActionRequest): Partial<PolicyContext> {
   const params = action.params;
   const kind = canonicalActionKind(action.kind);
   const cwd = stringValue(params.cwd) ?? workItem.target.cwd;
-  const paths = stringArray(params.paths) ?? workItem.target.files;
+  const paths = unionResourcePaths(params, workItem.target.files);
   const common = {
     network: booleanValue(params.network),
     write: booleanValue(params.write),

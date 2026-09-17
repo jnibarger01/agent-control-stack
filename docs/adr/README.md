@@ -11,23 +11,26 @@ ADR status values:
 
 ## Current ADRs
 
-| ADR                                                       | Title                                                           | Status                            |
-| --------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------- |
-| [0001](0001-local-control-plane-boundary.md)              | Local control plane is the security boundary                    | Accepted                          |
-| [0002](0002-fail-closed-policy-gate.md)                   | Fail-closed policy gate for every privileged action             | Accepted                          |
-| [0003](0003-out-of-band-human-approval.md)                | Out-of-band human approval for risky actions                    | Accepted                          |
-| [0004](0004-request-bound-approval-tokens.md)             | Request-bound approvals (amended: no separate bearer token)     | Accepted, amended                 |
-| [0005](0005-hash-chained-audit-log.md)                    | Hash-chained audit/event log                                    | Accepted                          |
-| [0006](0006-read-only-by-default-tooling.md)              | Read-only by default MCP tooling                                | Accepted                          |
-| [0007](0007-chatgpt-https-mcp-transport.md)               | HTTPS streaming MCP transport for ChatGPT connector mode        | Proposed                          |
-| [0008](0008-mission-intake-authority-boundary.md)         | Mission intake is advisory; ACS is the sole execution authority | Accepted for migration Phases 0–2 |
-| [0009](0009-engine-harness-authority-and-dependencies.md) | ACS remains the sole Engine Harness authority                   | Accepted                          |
-| [0010](0010-fail-closed-linux-sandbox.md)                 | Live execution requires a fail-closed Linux sandbox             | Accepted                          |
-| [0011](0011-canonical-audit-sink.md)                      | The SQLite hash chain is the canonical audit sink               | Accepted                          |
-| [0012](0012-retire-ed25519-approval-artifact-reference.md) | Retire the orphaned Ed25519/"locked PDP contract" reference     | Accepted                          |
-| [0013](0013-systemd-timer-worker-invocation.md)           | Systemd-timer-driven worker invocation, not a daemon             | Accepted                          |
-| [0014](0014-engine-isolation-boundary.md)                 | Engines get an ACS-enforced isolation boundary independent of the CommandBroker sandbox | Accepted |
-| [0015](0015-archive-hourly-pr-workflow.md)                 | Archive the disabled Hourly Pull Request Cycle workflow         | Accepted                          |
+| ADR                                                                      | Title                                                                                     | Status                            |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- | --------------------------------- |
+| [0001](0001-local-control-plane-boundary.md)                             | Local control plane is the security boundary                                              | Accepted                          |
+| [0002](0002-fail-closed-policy-gate.md)                                  | Fail-closed policy gate for every privileged action                                       | Accepted                          |
+| [0003](0003-out-of-band-human-approval.md)                               | Out-of-band human approval for risky actions                                              | Accepted                          |
+| [0004](0004-request-bound-approval-tokens.md)                            | Request-bound approvals (amended: no separate bearer token)                               | Accepted, amended                 |
+| [0005](0005-hash-chained-audit-log.md)                                   | Hash-chained audit/event log                                                              | Accepted                          |
+| [0006](0006-read-only-by-default-tooling.md)                             | Read-only by default MCP tooling                                                          | Accepted                          |
+| [0007](0007-chatgpt-https-mcp-transport.md)                              | HTTPS streaming MCP transport for ChatGPT connector mode                                  | Proposed                          |
+| [0008](0008-mission-intake-authority-boundary.md)                        | Mission intake is advisory; ACS is the sole execution authority                           | Accepted for migration Phases 0–2 |
+| [0009](0009-engine-harness-authority-and-dependencies.md)                | ACS remains the sole Engine Harness authority                                             | Accepted                          |
+| [0010](0010-fail-closed-linux-sandbox.md)                                | Live execution requires a fail-closed Linux sandbox                                       | Accepted                          |
+| [0011](0011-canonical-audit-sink.md)                                     | The SQLite hash chain is the canonical audit sink                                         | Accepted                          |
+| [0012](0012-retire-ed25519-approval-artifact-reference.md)               | Retire the orphaned Ed25519/"locked PDP contract" reference                               | Accepted                          |
+| [0013](0013-systemd-timer-worker-invocation.md)                          | Systemd-timer-driven worker invocation, not a daemon                                      | Accepted                          |
+| [0014](0014-engine-isolation-boundary.md)                                | Engines get an ACS-enforced isolation boundary independent of the CommandBroker sandbox   | Accepted                          |
+| [0015](0015-advisory-reasoning-evidence-and-independent-verification.md) | Advisory reasoning, machine evidence, and independent verification (four principal roles) | Accepted                          |
+| [0016](0016-public-oauth-device-authorization.md)                        | Public HTTPS OAuth resource + RFC 8628 CLI device authorization                           | Accepted                          |
+| [0017](0017-codex-swarm-subordinate-execution-engine.md)                 | Codex Swarm is a subordinate execution engine, not a peer control plane                   | Proposed                          |
+| [0018](0018-archive-hourly-pr-workflow.md)                               | Archive the disabled Hourly Pull Request Cycle workflow                                   | Accepted                          |
 
 ## Decision rules
 

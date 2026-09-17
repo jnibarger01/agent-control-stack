@@ -33,7 +33,7 @@ export const executionPlanDefinitionSchema = z
     steps: z.array(executionPlanStepSchema).min(1).max(128),
     constraints: z
       .object({
-        executionMode: z.literal("dry_run"),
+        executionMode: z.enum(["dry_run", "desktop_commander"]),
         network: z.literal("none"),
         localGitOnly: z.literal(true),
         allowPush: z.literal(false),
@@ -196,7 +196,8 @@ export function executionAttemptInputHash(input: {
 }
 
 export function defaultExecutionPlanForWorkItem(
-  workItem: Pick<WorkItem, "id" | "requester" | "requesterSubject" | "intent" | "target" | "requestedActions" | "risk">
+  workItem: Pick<WorkItem, "id" | "requester" | "requesterSubject" | "intent" | "target" | "requestedActions" | "risk">,
+  options: { executionMode?: "dry_run" | "desktop_commander" } = {}
 ): ExecutionPlanDefinition {
   if (workItem.requestedActions.length === 0) {
     throw new ControlStackError(
@@ -218,7 +219,7 @@ export function defaultExecutionPlanForWorkItem(
       successCriteria: []
     })),
     constraints: {
-      executionMode: "dry_run",
+      executionMode: options.executionMode ?? "dry_run",
       network: "none",
       localGitOnly: true,
       allowPush: false,

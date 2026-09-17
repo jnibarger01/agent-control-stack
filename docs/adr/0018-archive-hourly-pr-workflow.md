@@ -1,4 +1,4 @@
-# ADR 0015: Archive the disabled Hourly Pull Request Cycle workflow
+# ADR 0018: Archive the disabled Hourly Pull Request Cycle workflow
 
 ## Status
 

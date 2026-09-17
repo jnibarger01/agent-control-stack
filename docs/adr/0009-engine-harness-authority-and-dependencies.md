@@ -46,6 +46,33 @@ existing control plane; they do not form a peer control plane.
 Policy can increase restrictions at any later boundary. No advisory component
 may lower a decision already made by ACS.
 
+### Advisory reasoning, machine evidence, and independent verification
+
+[ADR 0015](0015-advisory-reasoning-evidence-and-independent-verification.md)
+extends this table with four explicit principal roles — `CONTROL_AUTHORITY`
+(ACS only), `ADVISORY_REASONER` (planner/reviewer models), `EXECUTION_PRINCIPAL`
+(execution backends), and `EVIDENCE_AUTHORITY` (ACS-controlled sandbox /
+workspace / git / test-runner / audit infrastructure) — and the domain concepts
+`PlanProposal`, `AdmittedPlan` (`admittedPlanHash`), `EvidenceManifest`,
+`ReviewFinding`, and the ACS verification `Decision`. Its additional authority
+rows:
+
+| Concern                    | Authority                                            |
+| -------------------------- | --------------------------------------------------- |
+| Reasoning / planning        | advisory agents (`PlanProposal`, untrusted)         |
+| `admittedPlanHash` binding | ACS (`packages/work-items`)                         |
+| Machine evidence           | ACS evidence subsystem (`EvidenceManifest`)         |
+| Semantic review            | advisory reviewer (`ReviewFinding`, evidence only)  |
+| Verification policy        | ACS (`packages/policy-gate`)                        |
+| Verification decision      | ACS (`packages/work-items`, `Decision`)             |
+| Terminal result acceptance | ACS (`packages/work-items` only)                    |
+
+A `ReviewFinding` verdict (`PASS`/`NEEDS_CHANGES`/`BLOCK`/`UNKNOWN`) is evidence
+to ACS verification policy; it never transitions a work item. The read-only
+evidence surface (`packages/evidence`, `apps/evidence-mcp`) exposes no write,
+exec, approval, or lifecycle capability — by construction, not by policy
+toggle.
+
 ### Dependency direction
 
 The allowed dependency direction is inward:

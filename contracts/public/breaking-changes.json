@@ -1,4 +1,12 @@
 {
   "schemaVersion": "acs.public-contract-breaking-changes.v1",
-  "changes": []
+  "changes": [
+    {
+      "id": "operation-property-type-changed:POST /work-items/{id}/results:simulationMetadata",
+      "contractVersion": "1.0.0",
+      "summary": "simulationMetadata becomes a discriminated union keyed on executionMode.",
+      "detail": "The dry_run branch is byte-identical to the prior single-object schema. A new desktop_commander branch (executionMode='desktop_commander', simulated=false, backend='desktop-commander-mcp', toolName, invocationFingerprint, requestId) is added so an ACS-authorized real execution through the local Desktop Commander MCP can persist an honest, non-simulated result. Existing dry_run submitters are unaffected.",
+      "migration": "No action for dry_run clients. Real-execution results are only produced by the ACS worker after the full execution-authorization chain (auth -> scope -> work item -> policy -> approval -> exact action hash -> worker lease -> tool allowlist -> argument/path/command validation) has passed."
+    }
+  ]
 }

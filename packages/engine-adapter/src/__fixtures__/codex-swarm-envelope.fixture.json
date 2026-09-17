@@ -1,0 +1,110 @@
+{
+  "note": "Cross-repo parity fixture for the ACS<->Codex Swarm ExecutionEnvelope (ADR 0017). Generated from agent-control-stack packages/engine-adapter. Both repos assert their implementation reproduces envelopeHash and mac exactly.",
+  "secret": "acs-codex-swarm-fixture-secret-0000000000",
+  "body": {
+    "schemaVersion": "acs.codex-swarm-envelope.v1",
+    "acsWorkItemId": "wrk_fixture",
+    "acsAttemptId": "attempt_fixture",
+    "planId": "plan_fixture",
+    "admittedPlanHash": "abababababababababababababababababababababababababababababababab",
+    "leaseId": "lease_fixture",
+    "fencingEpoch": 7,
+    "auditCorrelationId": "evt_fixture_started",
+    "idempotencyKey": "idem_fixture",
+    "workspace": {
+      "allocationId": "ws_fixture",
+      "hostPath": "/srv/acs/workspaces/attempt_fixture",
+      "expectedBaseSha": "abcdef0123456789abcdef0123456789abcdef01"
+    },
+    "objective": "fixture objective: parity across repos",
+    "permittedPaths": [
+      "src/**",
+      "test/**"
+    ],
+    "forbiddenPaths": [
+      ".github/**"
+    ],
+    "permittedOwnerProfiles": [
+      "codex",
+      "claude"
+    ],
+    "maxLanes": 3,
+    "maxLoopIterations": 2,
+    "networkPolicy": "none",
+    "timeoutMs": 1200000,
+    "acceptanceCommands": [
+      [
+        "npm",
+        "test"
+      ]
+    ],
+    "validationCommands": [
+      [
+        "npm",
+        "run",
+        "lint"
+      ]
+    ],
+    "evidenceRequirements": [
+      "diff",
+      "tests"
+    ],
+    "issuedAt": "2026-09-03T00:00:00.000Z",
+    "expiresAt": "2026-09-03T00:30:00.000Z"
+  },
+  "envelopeHash": "f72a8f8681c866f68cc64de7f98ed9903c1156e1865b9fa57133dc80f8b27186",
+  "mac": "1936b3e4df76975ff283f48e862a4d5a8d055dc66c1f43e69906fa5ef5356a3d",
+  "envelope": {
+    "schemaVersion": "acs.codex-swarm-envelope.v1",
+    "acsWorkItemId": "wrk_fixture",
+    "acsAttemptId": "attempt_fixture",
+    "planId": "plan_fixture",
+    "admittedPlanHash": "abababababababababababababababababababababababababababababababab",
+    "leaseId": "lease_fixture",
+    "fencingEpoch": 7,
+    "auditCorrelationId": "evt_fixture_started",
+    "idempotencyKey": "idem_fixture",
+    "workspace": {
+      "allocationId": "ws_fixture",
+      "hostPath": "/srv/acs/workspaces/attempt_fixture",
+      "expectedBaseSha": "abcdef0123456789abcdef0123456789abcdef01"
+    },
+    "objective": "fixture objective: parity across repos",
+    "permittedPaths": [
+      "src/**",
+      "test/**"
+    ],
+    "forbiddenPaths": [
+      ".github/**"
+    ],
+    "permittedOwnerProfiles": [
+      "codex",
+      "claude"
+    ],
+    "maxLanes": 3,
+    "maxLoopIterations": 2,
+    "networkPolicy": "none",
+    "timeoutMs": 1200000,
+    "acceptanceCommands": [
+      [
+        "npm",
+        "test"
+      ]
+    ],
+    "validationCommands": [
+      [
+        "npm",
+        "run",
+        "lint"
+      ]
+    ],
+    "evidenceRequirements": [
+      "diff",
+      "tests"
+    ],
+    "issuedAt": "2026-09-03T00:00:00.000Z",
+    "expiresAt": "2026-09-03T00:30:00.000Z",
+    "envelopeHash": "f72a8f8681c866f68cc64de7f98ed9903c1156e1865b9fa57133dc80f8b27186",
+    "mac": "1936b3e4df76975ff283f48e862a4d5a8d055dc66c1f43e69906fa5ef5356a3d"
+  }
+}

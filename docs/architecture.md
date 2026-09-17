@@ -41,6 +41,17 @@ process logs are telemetry only. The fail-closed Linux backend from
 host-level test gate, but the production worker remains dry-run-only until
 per-attempt workspaces and authoritative attempt wiring are implemented.
 
+The worker's execution backend is explicit configuration (`ACS_EXECUTION_BACKEND`).
+The default is `dry_run`. Setting `desktop_commander` routes an already-authorized
+attempt to the local Desktop Commander MCP through
+`packages/desktop-commander-adapter`: a real tool call happens only after an
+authenticated actor, scope, work item, policy decision, required approval, exact
+current action hash, valid unconsumed lease, ACS-side tool allowlist,
+tool-specific argument validation, path/cwd containment, and command validation
+all succeed. Failure of any check fails closed and Desktop Commander is never
+invoked. The adapter never depends on any hosted Desktop Commander service. ACS
+decides; Desktop Commander executes.
+
 Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. `blocked` remains a recoverable policy state; an accepted execution result is immutable and terminal. In this alpha, worker simulation only starts by transitioning an approved work item to `running`; no real command execution is claimed. The worker then applies a second, execution-side read-only scope check: filesystem inspection items may be simulated, while approved writes, shell commands, and other non-read-only actions are recorded as blocked rather than falsely reported as successful.
 
 Policy decisions are recorded as `policy.decided` audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated and records who approved it and why.
