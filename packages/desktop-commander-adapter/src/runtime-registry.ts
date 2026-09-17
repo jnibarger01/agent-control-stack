@@ -107,9 +107,9 @@ export class SqliteDesktopCommanderRuntimeRegistry {
     this.transaction(() => {
       this.db
         .prepare(
-          "UPDATE desktop_commander_bootstrap_challenges SET status = 'expired' WHERE runtime_id = ? AND status = 'pending' AND expires_at <= ?"
+          "UPDATE desktop_commander_bootstrap_challenges SET status = 'expired' WHERE runtime_id = ? AND status = 'pending'"
         )
-        .run(input.runtimeId, issuedAt);
+        .run(input.runtimeId);
       this.db
         .prepare(
           `INSERT INTO desktop_commander_bootstrap_challenges

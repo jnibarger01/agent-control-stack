@@ -115,6 +115,16 @@ describe("SqliteDesktopCommanderRuntimeRegistry", () => {
     store.close();
   });
 
+  it("supersedes an unconsumed bootstrap challenge so immediate startup retry is safe", () => {
+    const store = registry();
+    const first = store.issueBootstrap({ runtimeId: "runtime_1", identityConfigFingerprint: identity, scopes: ["fs.read"] });
+    const second = store.issueBootstrap({ runtimeId: "runtime_1", identityConfigFingerprint: identity, scopes: ["fs.read"] });
+    expect(second.challenge).not.toBe(first.challenge);
+    expect(() => store.completeBootstrap(first)).toThrow(/challenge or identity/);
+    store.completeBootstrap(second);
+    store.close();
+  });
+
   it("fails closed on changed identity, scope drift, replay, and revocation", () => {
     const store = registry();
     const bootstrap = store.issueBootstrap({ runtimeId: "runtime_1", identityConfigFingerprint: identity, scopes: ["fs.read"] });
