@@ -56,10 +56,11 @@ function redactSensitiveString(value: string): string {
 /** Remove secret-bearing fields recursively before transport. */
 export function sanitizeTelemetryProperties(properties: unknown): Record<string, unknown> {
     if (!properties || typeof properties !== 'object' || Array.isArray(properties)) return {};
-    const output: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(properties as Record<string, unknown>)) {
+    const output = properties as Record<string, unknown>;
+    for (const [key, value] of Object.entries(output)) {
         const lowerKey = key.toLowerCase();
         if (SENSITIVE_PROPERTY_KEY_SUBSTRINGS.some((part) => lowerKey.includes(part)) && lowerKey !== 'fileextension') {
+            delete output[key];
             continue;
         }
         if (typeof value === 'string') {
@@ -72,8 +73,6 @@ export function sanitizeTelemetryProperties(properties: unknown): Record<string,
             });
         } else if (value && typeof value === 'object') {
             output[key] = sanitizeTelemetryProperties(value);
-        } else {
-            output[key] = value;
         }
     }
     return output;
