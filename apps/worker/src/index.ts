@@ -805,14 +805,16 @@ export function requireAffectedWorkspaceRoot(
   containment: { allowedRoots: readonly string[] },
   canonicalPaths: readonly string[]
 ): string | undefined {
+  const normalizedRoots = containment.allowedRoots.map((candidate) => resolve(candidate));
   const affected = new Set<string>();
   for (const canonical of canonicalPaths) {
-    const root = containment.allowedRoots.find((candidate) => {
-      const normalizedRoot = resolve(candidate);
-      const normalizedPath = resolve(canonical);
-      return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}${sep}`);
-    });
-    if (root !== undefined) affected.add(resolve(root));
+    const normalizedPath = resolve(canonical);
+    const containing = normalizedRoots.filter(
+      (root) => normalizedPath === root || normalizedPath.startsWith(`${root}${sep}`)
+    );
+    if (containing.length === 0) continue;
+    // Nested allow roots: the deepest containing root is the actual workspace.
+    affected.add(containing.reduce((deepest, root) => (root.length > deepest.length ? root : deepest)));
   }
   if (affected.size === 0) return undefined;
   if (affected.size > 1) {

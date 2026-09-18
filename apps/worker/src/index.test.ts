@@ -638,6 +638,12 @@ describe("requireAffectedWorkspaceRoot (workspace revision evidence binding)", (
     expect(requireAffectedWorkspaceRoot(containment, [])).toBeUndefined();
   });
 
+  it("prefers the deepest containing root when allow roots are nested", () => {
+    const nested = { allowedRoots: ["/tmp/acs-parent", "/tmp/acs-parent/child"] };
+    expect(requireAffectedWorkspaceRoot(nested, ["/tmp/acs-parent/child/pkg/a.ts"])).toBe("/tmp/acs-parent/child");
+    expect(requireAffectedWorkspaceRoot(nested, ["/tmp/acs-parent/other.ts"])).toBe("/tmp/acs-parent");
+  });
+
   it("fails closed when an invocation spans multiple independent roots", () => {
     expect(() => requireAffectedWorkspaceRoot(containment, [`${firstRoot}/a.ts`, `${secondRoot}/b.ts`])).toThrowError(
       /multiple containment roots/
