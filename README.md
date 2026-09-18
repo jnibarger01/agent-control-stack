@@ -671,9 +671,12 @@ The server provides a comprehensive set of tools organized into several categori
 This fork can run Desktop Commander as the local execution backend for a GPT-5.6 Responses API agent. The harness loads `SYSTEM.md`, keeps conversation state in-process, converts the ACS-policy MCP tool allowlist into OpenAI function tools, and asks before mutating operations.
 
 ```bash
+npm ci
 export OPENAI_API_KEY="..."
 npm run agent
 ```
+
+Run `npm ci` once per fresh clone or worktree before starting the harness.
 
 Run a one-shot task:
 
