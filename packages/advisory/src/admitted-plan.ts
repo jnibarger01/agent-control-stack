@@ -33,14 +33,14 @@ export const sandboxProfileSchema = z.enum([
   "engine-isolation-v1"
 ]);
 
-/** `none` or `scoped-egress:<sha256 of the sorted host:port allowlist>`. */
+/** `none`, `scoped-egress:<sha256 of the sorted host:port allowlist>`, or `unmanaged-egress`. */
 export const networkProfileSchema = z
   .string()
   .min(1)
   .max(128)
   .refine(
-    (value) => value === "none" || /^scoped-egress:[a-f0-9]{64}$/u.test(value),
-    "networkProfile must be 'none' or 'scoped-egress:<64-hex>'"
+    (value) => value === "none" || value === "unmanaged-egress" || /^scoped-egress:[a-f0-9]{64}$/u.test(value),
+    "networkProfile must be 'none', 'scoped-egress:<64-hex>', or 'unmanaged-egress'"
   );
 
 export const admittedPlanBindingSchema = z
@@ -80,10 +80,7 @@ export function admittedPlanHash(input: AdmittedPlanBinding): string {
  * Fail-closed: an authority issued for `expected` must not be used against
  * `actual`. Returns the mismatched field names (empty ⇒ same authority).
  */
-export function admittedPlanAuthorityMismatch(
-  expected: AdmittedPlanBinding,
-  actual: AdmittedPlanBinding
-): string[] {
+export function admittedPlanAuthorityMismatch(expected: AdmittedPlanBinding, actual: AdmittedPlanBinding): string[] {
   const mismatched: string[] = [];
   const check = (field: string, a: unknown, b: unknown): void => {
     if (JSON.stringify(a) !== JSON.stringify(b)) mismatched.push(field);

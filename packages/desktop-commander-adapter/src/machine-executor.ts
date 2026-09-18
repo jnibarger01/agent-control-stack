@@ -87,6 +87,7 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
   private readonly ownedRegistry: SqliteDesktopCommanderRuntimeRegistry | undefined;
   private readonly ownedAuditStore: SqliteWorkItemStore | undefined;
   private connecting: Promise<void> | undefined;
+  private closing: Promise<void> | undefined;
 
   constructor(
     private readonly config: DesktopCommanderAdapterConfig,
@@ -173,6 +174,10 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
   }
 
   private async ensureConnected(): Promise<void> {
+    if (this.transport.isConnected()) return;
+    // A timeout/abort may still be tearing the previous transport down; never
+    // reconnect into a half-closed session — wait for the teardown to finish.
+    if (this.closing) await this.closing;
     if (this.transport.isConnected()) return;
     if (!this.connecting) {
       const capability = this.config.capability;
@@ -397,7 +402,13 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
         if (settled) return;
         settled = true;
         this.connecting = undefined;
-        void this.transport.close().catch(() => undefined);
+        // Tear the transport down and remember the teardown promise so the
+        // next ensureConnected() waits for the child to be fully terminated
+        // before spawning a fresh session (no half-closed reconnect).
+        const closed = this.transport.close().catch(() => undefined);
+        this.closing = closed.then(() => {
+          this.closing = undefined;
+        });
         reject(reason);
       };
       const timer = setTimeout(() => {
