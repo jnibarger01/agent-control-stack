@@ -1395,6 +1395,10 @@
                             "type": "string",
                             "maxLength": 128
                           },
+                          "blocked": {
+                            "type": "boolean",
+                            "const": true
+                          },
                           "toolName": {
                             "type": "string",
                             "minLength": 1,
@@ -1431,8 +1435,6 @@
                           "executionMode",
                           "simulated",
                           "backend",
-                          "toolName",
-                          "invocationFingerprint",
                           "requestId"
                         ],
                         "additionalProperties": false

@@ -74,6 +74,30 @@ function challengeHash(challenge: string): string {
 }
 
 /**
+ * Classify a constraint failure from the capability-issuance INSERT.
+ *
+ * Returns the canonical `desktop_commander_capability_already_issued` error
+ * ONLY for a uniqueness violation on `desktop_commander_capability_issuances`
+ * itself (the migration 026 one-per-invocation index or the nonce_hash unique
+ * constraint). Every other integrity failure — foreign key, CHECK, NOT NULL,
+ * or a UNIQUE violation on any other table — is returned unclassified so the
+ * caller surfaces the truthful raw failure instead of a benign duplicate.
+ */
+export function classifyCapabilityIssuanceConstraintError(error: unknown): ControlStackError | undefined {
+  const code = (error as { code?: string }).code ?? "";
+  const message = error instanceof Error ? error.message : String(error);
+  const thisTableUnique =
+    code === "SQLITE_CONSTRAINT_UNIQUE" && message.includes("desktop_commander_capability_issuances");
+  if (thisTableUnique || /UNIQUE constraint failed: desktop_commander_capability_issuances[.\s]/.test(message)) {
+    return new ControlStackError(
+      "desktop_commander_capability_already_issued",
+      "a capability was already issued for this lease and invocation"
+    );
+  }
+  return undefined;
+}
+
+/**
  * Durable ACS-side identity, attestation, and issuance gate. It shares the
  * authoritative control-plane SQLite database; raw challenges/nonces never
  * enter persisted rows. Call `recordIssuance` before signing a capability.
@@ -354,26 +378,40 @@ export class SqliteDesktopCommanderRuntimeRegistry {
         throw new ControlStackError("desktop_commander_approval_rejected", "approval is not permitted for this tool");
       }
       const issuanceId = createId("dc_capability");
-      this.db
-        .prepare(
-          `INSERT INTO desktop_commander_capability_issuances (capability_issuance_id, lease_id, attempt_id, work_item_id, runtime_id, action_hash, request_hash, invocation_hash, approval_id, key_id, nonce_hash, issued_at, expires_at)
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO desktop_commander_capability_issuances (capability_issuance_id, lease_id, attempt_id, work_item_id, runtime_id, action_hash, request_hash, invocation_hash, approval_id, key_id, nonce_hash, issued_at, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          issuanceId,
-          input.leaseId,
-          input.attemptId,
-          input.workItemId,
-          input.runtimeId,
-          input.actionHash,
-          requestHash,
-          input.invocationHash,
-          approvalId ?? null,
-          input.keyId,
-          desktopCommanderCapabilityNonceHash(input.nonce),
-          now,
-          input.expiresAt
-        );
+          )
+          .run(
+            issuanceId,
+            input.leaseId,
+            input.attemptId,
+            input.workItemId,
+            input.runtimeId,
+            input.actionHash,
+            requestHash,
+            input.invocationHash,
+            approvalId ?? null,
+            input.keyId,
+            desktopCommanderCapabilityNonceHash(input.nonce),
+            now,
+            input.expiresAt
+          );
+      } catch (error) {
+        // Database authority: migration 026 enforces one capability per
+        // (lease, attempt, work item, invocation). Concurrent mint attempts
+        // serialize on BEGIN IMMEDIATE and the loser violates the unique
+        // index — surface a deterministic control-stack error, never a raw
+        // SQLite constraint failure. Only a uniqueness violation ON THIS
+        // TABLE maps to `already_issued`; nonce duplicates, foreign keys,
+        // CHECKs, NOT NULLs, and any other integrity failure keep their own
+        // truthful failure path.
+        const classified = classifyCapabilityIssuanceConstraintError(error);
+        if (classified) throw classified;
+        throw error;
+      }
       const insertScope = this.db.prepare(
         "INSERT INTO desktop_commander_capability_issuance_scopes (capability_issuance_id, scope_name) VALUES (?, ?)"
       );

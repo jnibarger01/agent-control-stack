@@ -15,7 +15,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
-import { buildGateway, type GatewayAuthOptions } from "./server.js";
+import { buildGateway, type GatewayAuthOptions, type GatewayCredential } from "./server.js";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
@@ -2762,7 +2762,7 @@ describe("gateway MCP transport", () => {
       displayName: "OAuth User",
       externalRef: "oauth_jwt:user_123"
     });
-    setup.blockWorkItem(unblockItem.id);
+    setup.blockWorkItem(unblockItem.id, { via: "domain_service" });
     setup.close();
 
     const oauth = createTestOAuth();
@@ -3323,13 +3323,31 @@ describe("gateway MCP transport", () => {
     expect(result.response.statusCode).toBe(401);
     expect(result.response.headers["www-authenticate"]).toBe(authChallenge(result.response.json()));
     expect(authChallenge(result.response.json())).toBe(
-      'Bearer resource_metadata="http://localhost:80/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="missing bearer token", scope="acs:work:create"'
+      'Bearer resource_metadata="https://acs.example.test/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="missing bearer token", scope="acs:work:create"'
     );
     expect(result.response.json().result.structuredContent).toMatchObject({
       authError: "missing_token",
       requiredScopes: ["acs:work:create"]
     });
     expect(result.workItems).toEqual([]);
+  });
+
+  it("does not derive OAuth resource metadata from forwarded host headers", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: {
+        host: "attacker.example.invalid",
+        "x-forwarded-host": "proxy-attacker.example.invalid",
+        "x-forwarded-proto": "https"
+      }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(authChallenge(result.response.json())).toContain(
+      'resource_metadata="https://acs.example.test/.well-known/oauth-protected-resource/mcp"'
+    );
+    expect(authChallenge(result.response.json())).not.toContain("attacker.example.invalid");
   });
 
   it("fails closed for expired OAuth bearer JWT on tools/call", async () => {
@@ -3452,7 +3470,7 @@ describe("gateway MCP transport", () => {
     expect(result.response.statusCode).toBe(403);
     expect(result.response.headers["www-authenticate"]).toBe(authChallenge(result.response.json()));
     expect(authChallenge(result.response.json())).toBe(
-      'Bearer resource_metadata="http://localhost:80/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", error_description="insufficient scope", scope="acs:work:create"'
+      'Bearer resource_metadata="https://acs.example.test/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", error_description="insufficient scope", scope="acs:work:create"'
     );
     expect(result.response.json().result.structuredContent).toMatchObject({
       authError: "insufficient_scope",
@@ -3928,6 +3946,43 @@ describe("gateway dashboard sessions", () => {
       });
       expect(created.statusCode).toBe(201);
       expect(created.json().requester).toBe("user");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a previously issued session cookie after its backing credential is revoked", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-revoked-"));
+    const credential: GatewayCredential = {
+      id: "revocable-operator",
+      token: "revocable-operator-token-that-is-long-enough",
+      actor: "user",
+      actorId: "revocable-operator",
+      roles: ["operator"],
+      scopes: ["acs:read", "acs:write"],
+      status: "active"
+    };
+    const auth: GatewayAuthOptions = {
+      token: "legacy-dashboard-token-that-is-long-enough",
+      actor: "user",
+      actorId: "legacy",
+      credentials: [credential]
+    };
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+
+    try {
+      const { cookie } = await loginSession(app, credential.token);
+      credential.status = "revoked";
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie },
+        payloadAsStream: true
+      });
+      if (response.statusCode === 200) response.stream().destroy();
+      expect(response.statusCode).toBe(401);
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -4426,7 +4481,7 @@ describe("gateway work-item routes", () => {
       requestedActions: [{ kind: "fs.read", description: "read", params: { paths: ["src/index.ts"] } }],
       risk: "low"
     });
-    setup.blockWorkItem(blocked.id);
+    setup.blockWorkItem(blocked.id, { via: "domain_service" });
     setup.close();
     const app = buildTestGateway({ dbPath, logger: false });
 

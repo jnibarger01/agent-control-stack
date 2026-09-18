@@ -1,3 +1,4 @@
+import { createPrivateKey, sign } from "node:crypto";
 // RFC 8628 Device Authorization Grant client. Talks to the ACS gateway's
 // /oauth/device/code and /oauth/token endpoints (apps/gateway/src/device-auth.ts).
 export interface DeviceCodeResponse {
@@ -69,6 +70,7 @@ export async function pollForToken(
   acsUrl: string,
   clientId: string,
   code: DeviceCodeResponse,
+  devicePrivateKeyPem: string,
   deps: DeviceFlowDeps = {}
 ): Promise<DevicePollOutcome> {
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -84,6 +86,7 @@ export async function pollForToken(
       body: new URLSearchParams({
         grant_type: "urn:ietf:params:oauth:grant-type:device_code",
         device_code: code.deviceCode,
+        device_signature: signDeviceCodeProof(devicePrivateKeyPem, code.deviceCode),
         client_id: clientId
       }).toString()
     });
@@ -110,6 +113,14 @@ export async function pollForToken(
     return { status: "error", error };
   }
   return { status: "expired" };
+}
+
+function signDeviceCodeProof(privateKeyPem: string, deviceCode: string): string {
+  const privateKey = createPrivateKey(privateKeyPem);
+  if (privateKey.asymmetricKeyType !== "ed25519") {
+    throw new Error("device private key must be Ed25519");
+  }
+  return sign(null, Buffer.from(`acs-device-code-proof-v1\n${deviceCode}`, "utf8"), privateKey).toString("base64url");
 }
 
 function trimTrailingSlash(url: string): string {

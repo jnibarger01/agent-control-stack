@@ -15,14 +15,14 @@ ACS already owns policy, approval, work-item lifecycle, worker claims/leases,
 result acceptance, and the canonical hash-chained audit
 ([ADR 0009](0009-engine-harness-authority-and-dependencies.md),
 [ADR 0011](0011-canonical-audit-sink.md)). ADR 0008 established that mission
-intake and classifiers are *advisory evidence*, never authority. ADR 0014 gave
+intake and classifiers are _advisory evidence_, never authority. ADR 0014 gave
 model-backed engines an ACS-enforced isolation boundary.
 
 Two capabilities are still missing and are easy to build wrong:
 
 1. **Reasoning as a first-class, attributable, untrusted artifact.** Today a
-   plan is only ever the *admitted* `ExecutionPlanDefinition`. There is no
-   distinct, content-addressed record of *what an advisory model proposed*,
+   plan is only ever the _admitted_ `ExecutionPlanDefinition`. There is no
+   distinct, content-addressed record of _what an advisory model proposed_,
    attributed to that principal, that ACS then admits (or refuses). Without it,
    model reasoning leaks into the authoritative plan with no provenance and no
    "untrusted until admitted" gate.
@@ -32,7 +32,7 @@ Two capabilities are still missing and are easy to build wrong:
    cannot act.** `packages/verification` already runs an independence-enforced
    maker/verifier loop (`runIndependentVerification` rejects a verifier whose
    `engineId` equals the implementer's), and `VerificationEvidence` already
-   carries an *untrusted* `implementerClaim` alongside a `diffSummary` and
+   carries an _untrusted_ `implementerClaim` alongside a `diffSummary` and
    `commandResults`. But there is no ACS-owned, content-addressed
    **evidence manifest** that pins base/result workspace revision, diff hash,
    command metadata, exit codes, bounded output hashes, test evidence, sandbox
@@ -50,7 +50,7 @@ sink. It also risks trusting a model's summary as a machine fact.
 > **Models may propose. Execution backends may act. Evidence collectors may
 > observe. Reviewers may judge. Only ACS may authorize or conclude.**
 
-Four principal roles are defined. They are *roles*, not new services; an
+Four principal roles are defined. They are _roles_, not new services; an
 existing component may hold one.
 
 ### `CONTROL_AUTHORITY`
@@ -59,7 +59,7 @@ existing component may hold one.
 verification policy) plus `packages/work-items` (lifecycle, leases/fencing,
 plan admission, result acceptance, terminal state, canonical audit).
 
-Owns and is the *sole* authority for:
+Owns and is the _sole_ authority for:
 
 - execution authorization and denial
 - approval requirements and approval decisions
@@ -69,7 +69,7 @@ Owns and is the *sole* authority for:
 - **result acceptance** — `succeeded` / `failed` is set only by
   `packages/work-items`, never by a reviewer, engine, adapter, or evidence
   collector
-- verification *policy* (how many reviewers, independence constraints, conflict
+- verification _policy_ (how many reviewers, independence constraints, conflict
   resolution) and the verification **decision** that consumes review findings
 - the hash-chained `audit_events` chain
 
@@ -90,7 +90,7 @@ proposal; mutate any canonical work-item, attempt, lease, plan, approval,
 result, or audit state; mark an execution successful or failed; assert a
 machine fact without a referenced `EvidenceManifest`.
 
-A `PlanProposal` and a `ReviewFinding` are *evidence to ACS*, nothing more. A
+A `PlanProposal` and a `ReviewFinding` are _evidence to ACS_, nothing more. A
 `ReviewFinding.verdict` of `PASS` does not transition anything; ACS verification
 policy decides what a set of findings means.
 
@@ -120,21 +120,21 @@ content-addressed `EvidenceManifest`. A model-generated summary is never an
 
 ## Authority table (extends ADR 0009 §"Authority ownership")
 
-| Concern                     | Authority                                            |
-| --------------------------- | --------------------------------------------------- |
-| Reasoning / planning         | `ADVISORY_REASONER` (produces `PlanProposal`)       |
-| Plan admission              | ACS — `packages/policy-gate` + `packages/work-items` |
-| `admittedPlanHash` binding  | ACS — `packages/work-items` / this ADR              |
-| Policy / risk               | ACS — `packages/policy-gate`                        |
-| Approval                    | ACS — `packages/policy-gate` + `packages/work-items` |
-| Execution authorization     | ACS — claim-time policy/approval/lease checks       |
-| Physical execution          | `EXECUTION_PRINCIPAL` (ACS-authorized backend)      |
-| Machine evidence            | `EVIDENCE_AUTHORITY` — `EvidenceManifest`           |
-| Semantic review             | `ADVISORY_REASONER` (produces `ReviewFinding`)      |
-| Verification policy         | ACS — `packages/policy-gate`                        |
-| Verification decision       | ACS — `packages/work-items` (`Decision`)            |
-| Terminal result acceptance  | ACS — `packages/work-items` only                    |
-| Canonical audit             | ACS — hash-chained `audit_events`                   |
+| Concern                    | Authority                                            |
+| -------------------------- | ---------------------------------------------------- |
+| Reasoning / planning       | `ADVISORY_REASONER` (produces `PlanProposal`)        |
+| Plan admission             | ACS — `packages/policy-gate` + `packages/work-items` |
+| `admittedPlanHash` binding | ACS — `packages/work-items` / this ADR               |
+| Policy / risk              | ACS — `packages/policy-gate`                         |
+| Approval                   | ACS — `packages/policy-gate` + `packages/work-items` |
+| Execution authorization    | ACS — claim-time policy/approval/lease checks        |
+| Physical execution         | `EXECUTION_PRINCIPAL` (ACS-authorized backend)       |
+| Machine evidence           | `EVIDENCE_AUTHORITY` — `EvidenceManifest`            |
+| Semantic review            | `ADVISORY_REASONER` (produces `ReviewFinding`)       |
+| Verification policy        | ACS — `packages/policy-gate`                         |
+| Verification decision      | ACS — `packages/work-items` (`Decision`)             |
+| Terminal result acceptance | ACS — `packages/work-items` only                     |
+| Canonical audit            | ACS — hash-chained `audit_events`                    |
 
 ## Domain model
 
@@ -161,19 +161,19 @@ hash>)`. Untrusted until ACS admits it. Admission is `packages/policy-gate` +
 
 An ACS-authorized, immutable plan revision. It does **not** replace
 `ExecutionPlanRecord` / `ExecutionPlanAdmission`; it is the superset binding
-that ties one admitted `ExecutionPlanDefinition` to *all* materially relevant
+that ties one admitted `ExecutionPlanDefinition` to _all_ materially relevant
 execution authority:
 
 `admittedPlanHash = domainHash("acs:admitted-plan:v1", {`
 `  schemaVersion, workItemId,`
-`  proposalHash | null,`              — which advisory proposal, if any
-`  executionPlanHash,`                — existing `executionPlanHash` (steps/actions/constraints)
-`  requestedActionsHash,`             — hash of the work item's requested actions
-`  workspace: { workspaceId, baseRevision },`  — workspace identity + base tree revision
-`  sandboxProfile,`                   — named profile id (`dry_run` | `desktop_commander` | `bubblewrap-systemd-v1` | `engine-isolation-v1`)
-`  networkProfile,`                   — `none` | `scoped-egress:<allowlistHash>`
-`  capabilityProfileHash,`            — hash of the tool/capability allowlist
-`  validationProfileHash,`            — hash of the validation/test profile
+`  proposalHash | null,` — which advisory proposal, if any
+`  executionPlanHash,` — existing `executionPlanHash` (steps/actions/constraints)
+`  requestedActionsHash,` — hash of the work item's requested actions
+`  workspace: { workspaceId, baseRevision },` — workspace identity + base tree revision
+`  sandboxProfile,` — named profile id (`dry_run` | `desktop_commander` | `bubblewrap-systemd-v1` | `engine-isolation-v1`)
+`  networkProfile,` — `none` | `scoped-egress:<allowlistHash>` | `unmanaged-egress` (ACS cannot prove isolation)
+`  capabilityProfileHash,` — hash of the tool/capability allowlist
+`  validationProfileHash,` — hash of the validation/test profile
 `  policyVersion`
 `})`
 
@@ -189,7 +189,7 @@ verification layer, recorded in the canonical audit, and covered by tests.
 
 The top-level work-item lifecycle (`draft … succeeded/failed/blocked/cancelled`)
 and the attempt status machine (`pending … quarantined`) are **not** changed.
-Planning/review microstates would contaminate them. Instead an *attempt phase*
+Planning/review microstates would contaminate them. Instead an _attempt phase_
 is an additive, non-authoritative projection over `execution_attempts`
 (`current_phase` column, nullable) plus a canonical audit-event stream:
 
@@ -242,16 +242,16 @@ Kept structurally distinct, in three different packages:
   `ReviewFinding`.
 - **`Decision`** (`packages/work-items`) — an ACS authority outcome:
   `{ outcome, basis: { evidenceManifestHash, reviewFindingHashes[],
-  verificationPolicyVersion }, decidedAt }` with `outcome` ∈
+verificationPolicyVersion }, decidedAt }` with `outcome` ∈
   `attempt_accepted | attempt_rejected | replan_required |
-  verification_disputed | human_escalation_required`. Recorded as
+verification_disputed | human_escalation_required`. Recorded as
   `verification.decision` in the canonical audit.
 
 ## Evidence plane
 
 An attempt-scoped, **read-only** Evidence surface (`packages/evidence`,
 optionally exposed by `apps/evidence-mcp` — a standalone stdio MCP server
-modelled on `apps/mcp`, *not* routed through the gateway, so the public
+modelled on `apps/mcp`, _not_ routed through the gateway, so the public
 contract surface is untouched).
 
 Capabilities are read-only only: `work_item_info`, `attempt_info`,
@@ -304,27 +304,27 @@ ACS never executes an admitted plan against an unknown base revision.
 
 ## Verification policy
 
-A policy *layer* (`packages/policy-gate/src/verification-policy.ts`), not a
+A policy _layer_ (`packages/policy-gate/src/verification-policy.ts`), not a
 second result authority. It answers two questions and nothing else:
 
 1. **Requirement** — given `{ riskClass, actionKinds, executorPrincipalId,
-   executorProvider }` it returns a `VerificationRequirement`:
+executorProvider }` it returns a `VerificationRequirement`:
    `{ reviewersRequired, requireIndependentPrincipal, requireIndependentProvider,
-   conflictResolution, humanEscalationRiskClasses }`. Defaults: `0` reviewers
+conflictResolution, humanEscalationRiskClasses }`. Defaults: `0` reviewers
    for read-only low-risk; `1` for source-code mutation; `2` for
    destructive/high risk; `requireIndependentPrincipal` always true when
    `reviewersRequired > 0` (so `executorPrincipal != reviewerPrincipal`);
    `requireIndependentProvider` configurable.
 2. **Classification** — `classifyReviewOutcome(findings, requirement)` returns
    one of `pass | needs_changes | blocked | disputed | unknown |
-   insufficient_reviews`. `BLOCK` from any reviewer ⇒ `blocked`. Disagreement
+insufficient_reviews`. `BLOCK` from any reviewer ⇒ `blocked`. Disagreement
    among reviewers ⇒ `disputed` — **never a silent pick of one**. `UNKNOWN` or
    too few independent reviewers ⇒ `unknown` / `insufficient_reviews`.
    `conflictResolution` (`another_reviewer` | `unanimous` | `majority` |
    `designated_reviewer` | `human_approval`) decides what `disputed` requires
    next.
 
-ACS `packages/work-items` remains the only thing that *accepts* a terminal
+ACS `packages/work-items` remains the only thing that _accepts_ a terminal
 result. `submitWorkResult` gains a fail-closed guard: when a
 `VerificationRequirement` is on record for the attempt and the recorded
 outcome is not `pass`, `outcome: "succeeded"` is refused. This strengthens the
@@ -349,7 +349,7 @@ canonical evidence, become an orchestrator, or bypass sandbox/policy/audit.
 
 ## Consequences
 
-- Model reasoning becomes an attributable, content-addressed, *untrusted*
+- Model reasoning becomes an attributable, content-addressed, _untrusted_
   artifact with an explicit admission gate, instead of leaking into the
   authoritative plan.
 - Machine evidence is content-addressed, attempt-and-revision-bound, and
@@ -397,15 +397,16 @@ verification policy + `packages/work-items` may conclude an attempt.
 
 ### Reuse `packages/verification`'s `pass/fail/inconclusive` verdicts verbatim
 
-Kept as the *engine-verifier* contract; `ReviewFinding` deliberately uses
+Kept as the _engine-verifier_ contract; `ReviewFinding` deliberately uses
 `PASS/NEEDS_CHANGES/BLOCK/UNKNOWN` because a semantic reviewer needs to express
 "changes needed" and "blocked" distinctly, and ACS needs an explicit `disputed`
 concept `pass/fail/inconclusive` cannot represent.
 
 ### Store advisory artifacts and evidence in their own tables with their own
+
 ### history semantics
 
-Rejected as written — they are persisted as append-only *projections* over
+Rejected as written — they are persisted as append-only _projections_ over
 `packages/work-items` with canonical audit events, so there is exactly one
 authoritative history.
 

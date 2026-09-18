@@ -66,9 +66,9 @@ describe("admittedPlanHash — binds all execution authority", () => {
 
   it("networkProfile format is enforced", () => {
     expect(() => admittedPlanHash({ ...binding, networkProfile: "wide-open" })).toThrow();
-    expect(() =>
-      admittedPlanHash({ ...binding, networkProfile: `scoped-egress:${H("1")}` })
-    ).not.toThrow();
+    expect(() => admittedPlanHash({ ...binding, networkProfile: `scoped-egress:${H("1")}` })).not.toThrow();
+    // Fail-closed unmanaged egress is a truthful, schema-valid profile.
+    expect(() => admittedPlanHash({ ...binding, networkProfile: "unmanaged-egress" })).not.toThrow();
   });
 
   it("rejects a host path as workspaceId and accepts a containment identity", () => {

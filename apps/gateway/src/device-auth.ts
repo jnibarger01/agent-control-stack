@@ -40,8 +40,8 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
   app.post("/oauth/device/code", async (request, reply) => {
     const body = (request.body ?? {}) as Record<string, unknown>;
     const clientId = stringField(body.client_id);
-    const devicePublicKeyPem = stringField(body.device_public_key);
-    const deviceName = stringField(body.device_name) ?? "unnamed-device";
+    const devicePublicKeyPem = boundedStringField(body.device_public_key, 8 * 1024);
+    const deviceName = boundedStringField(body.device_name, 128) ?? "unnamed-device";
     const scopes = stringField(body.scope)?.split(/\s+/).filter(Boolean) ?? DEFAULT_REQUESTED_SCOPES;
 
     if (!clientId || !devicePublicKeyPem) {
@@ -78,11 +78,12 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     }
 
     if (grantType === "urn:ietf:params:oauth:grant-type:device_code") {
-      const deviceCode = stringField(body.device_code);
-      if (!deviceCode) {
+      const deviceCode = boundedStringField(body.device_code, 256);
+      const deviceSignature = boundedStringField(body.device_signature, 256);
+      if (!deviceCode || !deviceSignature) {
         return reply.code(400).send({ error: "invalid_request" });
       }
-      const result = options.store.pollToken(deviceCode, clientId);
+      const result = options.store.pollToken(deviceCode, clientId, deviceSignature);
       if (result.status === "success") {
         return reply.code(200).send({
           access_token: result.accessToken,
@@ -135,6 +136,9 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     if (!credential) {
       return reply.code(401).send({ error: "unauthorized" });
     }
+    if (!gatewayCredentialCanMutate(credential)) {
+      return reply.code(403).send({ error: "forbidden" });
+    }
     if (!credential.actorId) {
       return reply.code(503).send({ error: "registry actor binding is not configured; set ACS_GATEWAY_ACTOR_ID" });
     }
@@ -143,6 +147,12 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     const action = stringField(body.action);
     if (!userCode || (action !== "approve" && action !== "deny")) {
       return reply.code(400).send({ error: "invalid_request" });
+    }
+    if (action === "approve") {
+      const summary = options.store.findByUserCode(userCode);
+      if (summary && !summary.requestedScopes.every((scope) => credential.scopes.includes(scope))) {
+        return reply.code(403).send({ error: "insufficient_scope" });
+      }
     }
     const result =
       action === "approve" ? options.store.approve(userCode, credential.actorId) : options.store.deny(userCode);
@@ -173,16 +183,15 @@ function stringField(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
-function publicOrigin(request: FastifyRequest, override: string | undefined): string {
-  if (override) return override.replace(/\/+$/, "");
-  const forwardedProto = firstHeader(request.headers["x-forwarded-proto"]);
-  const proto = forwardedProto ?? request.protocol;
-  const host = firstHeader(request.headers["x-forwarded-host"]) ?? request.headers.host;
-  return host ? `${proto}://${host}` : "http://127.0.0.1";
+function boundedStringField(value: unknown, maxBytes: number): string | undefined {
+  const field = stringField(value);
+  return field && Buffer.byteLength(field, "utf8") <= maxBytes ? field : undefined;
 }
 
-function firstHeader(value: string | string[] | undefined): string | undefined {
-  return Array.isArray(value) ? value[0] : value;
+function publicOrigin(request: FastifyRequest, override: string | undefined): string {
+  if (override) return override.replace(/\/+$/, "");
+  const host = request.headers.host;
+  return host ? `${request.protocol}://${host}` : "http://127.0.0.1";
 }
 
 function renderDeviceVerifyPage(input: {

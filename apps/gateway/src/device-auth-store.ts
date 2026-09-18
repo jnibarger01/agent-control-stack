@@ -5,9 +5,10 @@
 // packages/work-items/src/store.ts's connector_records (operator-provisioned tunnel
 // infrastructure, a different trust model). It owns exactly two tables: `devices` and
 // `oauth_device_authorizations` (storage/migrations/023_device_auth.sql).
-import { createHash, randomBytes, randomInt } from "node:crypto";
+import { createHash, createPublicKey, randomBytes, randomInt, verify as verifySignature } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { createId } from "@agent-control-stack/shared";
+import { MCP_SCOPES } from "./auth.js";
 
 export const DEFAULT_DEVICE_AUTH_CLIENT_ID = "acs-cli";
 const DEVICE_CODE_TTL_SECONDS = 15 * 60;
@@ -17,6 +18,10 @@ const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
 const REFRESH_TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60;
 const USER_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // no 0/O/1/I - avoids transcription errors
 const DISALLOWED_DEVICE_SCOPES = new Set(["acs:work:approve"]);
+const ALLOWED_DEVICE_SCOPES = new Set<string>(MCP_SCOPES);
+const MAX_DEVICE_PUBLIC_KEY_BYTES = 8 * 1024;
+const MAX_DEVICE_NAME_LENGTH = 128;
+const DEVICE_CODE_PROOF_DOMAIN = "acs-device-code-proof-v1";
 
 export interface DeviceCodeRequestInput {
   clientId: string;
@@ -35,7 +40,7 @@ export type DeviceCodeRequestResult =
       expiresIn: number;
       interval: number;
     }
-  | { ok: false; error: "invalid_client" | "invalid_scope" };
+  | { ok: false; error: "invalid_client" | "invalid_scope" | "invalid_request" };
 
 export type DeviceTokenPollResult =
   | { status: "authorization_pending" }
@@ -108,10 +113,20 @@ interface DeviceRow {
   metadata_json: string;
   refresh_token_hash: string | null;
   refresh_token_expires_at: string | null;
+  previous_refresh_token_hash: string | null;
+  access_token_hash: string | null;
+  access_token_expires_at: string | null;
   created_at: string;
   updated_at: string;
   last_seen_at: string | null;
   revoked_at: string | null;
+}
+
+export interface DeviceAccessIdentity {
+  deviceId: string;
+  principalId: string;
+  scopes: string[];
+  expiresAt: string;
 }
 
 export class DeviceAuthStore {
@@ -134,8 +149,18 @@ export class DeviceAuthStore {
       return { ok: false, error: "invalid_client" };
     }
     const scopes = [...new Set(input.requestedScopes)];
-    if (scopes.length === 0 || scopes.some((scope) => DISALLOWED_DEVICE_SCOPES.has(scope))) {
+    if (
+      scopes.length === 0 ||
+      scopes.some((scope) => DISALLOWED_DEVICE_SCOPES.has(scope) || !ALLOWED_DEVICE_SCOPES.has(scope))
+    ) {
       return { ok: false, error: "invalid_scope" };
+    }
+    if (
+      Buffer.byteLength(input.devicePublicKeyPem, "utf8") > MAX_DEVICE_PUBLIC_KEY_BYTES ||
+      input.deviceName.length > MAX_DEVICE_NAME_LENGTH ||
+      !isValidEd25519PublicKey(input.devicePublicKeyPem)
+    ) {
+      return { ok: false, error: "invalid_request" };
     }
     const now = input.now ?? new Date();
     const deviceCode = randomBytes(32).toString("base64url");
@@ -209,6 +234,17 @@ export class DeviceAuthStore {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const existing = this.db
+        .prepare(`SELECT * FROM devices WHERE public_key_pem = ?`)
+        .get(fresh.device_public_key_pem) as DeviceRow | undefined;
+      if (existing?.status === "revoked") {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "device_revoked" };
+      }
+      if (existing && existing.principal_id !== principalId) {
+        this.db.exec("ROLLBACK");
+        return { ok: false, error: "device_key_conflict" };
+      }
       const deviceId = this.upsertDeviceForApproval(fresh, principalId, now);
       this.db
         .prepare(
@@ -243,12 +279,20 @@ export class DeviceAuthStore {
     return { ok: true };
   }
 
-  pollToken(deviceCode: string, clientId: string, now: Date = new Date()): DeviceTokenPollResult {
+  pollToken(
+    deviceCode: string,
+    clientId: string,
+    deviceSignature: string | undefined,
+    now: Date = new Date()
+  ): DeviceTokenPollResult {
     const row = this.db
       .prepare(`SELECT * FROM oauth_device_authorizations WHERE device_code_hash = ?`)
       .get(sha256(deviceCode)) as DeviceAuthorizationRow | undefined;
     if (!row) return { status: "invalid_grant" };
     if (row.client_id !== clientId) return { status: "invalid_grant" };
+    if (!verifyDeviceCodeProof(row.device_public_key_pem, deviceCode, deviceSignature)) {
+      return { status: "invalid_grant" };
+    }
     this.expireIfNeeded(row, now);
     const fresh = this.getById(row.id)!;
 
@@ -295,10 +339,14 @@ export class DeviceAuthStore {
       this.db
         .prepare(
           `UPDATE devices
-           SET refresh_token_hash = ?, refresh_token_expires_at = ?, last_seen_at = ?, updated_at = ?
+           SET access_token_hash = ?, access_token_expires_at = ?,
+               refresh_token_hash = ?, refresh_token_expires_at = ?, previous_refresh_token_hash = NULL,
+               last_seen_at = ?, updated_at = ?
            WHERE id = ?`
         )
         .run(
+          sha256(accessToken),
+          new Date(now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString(),
           sha256(refreshToken),
           new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString(),
           now.toISOString(),
@@ -339,35 +387,86 @@ export class DeviceAuthStore {
       }
     | { ok: false; error: "invalid_grant" | "device_revoked" } {
     const hash = sha256(rawRefreshToken);
-    const row = this.db.prepare(`SELECT * FROM devices WHERE refresh_token_hash = ?`).get(hash) as
-      DeviceRow | undefined;
-    if (!row) return { ok: false, error: "invalid_grant" };
-    if (row.status === "revoked") return { ok: false, error: "device_revoked" };
-    if (!row.refresh_token_expires_at || Date.parse(row.refresh_token_expires_at) <= now.getTime()) {
-      return { ok: false, error: "invalid_grant" };
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db.prepare(`SELECT * FROM devices WHERE refresh_token_hash = ?`).get(hash) as
+        DeviceRow | undefined;
+      if (!row) {
+        const reused = this.db.prepare(`SELECT * FROM devices WHERE previous_refresh_token_hash = ?`).get(hash) as
+          DeviceRow | undefined;
+        if (reused?.status === "active") {
+          this.db
+            .prepare(
+              `UPDATE devices
+               SET status = 'revoked', revoked_at = ?, updated_at = ?,
+                   access_token_hash = NULL, access_token_expires_at = NULL,
+                   refresh_token_hash = NULL, refresh_token_expires_at = NULL
+               WHERE id = ? AND status = 'active'`
+            )
+            .run(now.toISOString(), now.toISOString(), reused.id);
+        }
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant" };
+      }
+      if (row.status === "revoked") {
+        this.db.exec("COMMIT");
+        return { ok: false, error: "device_revoked" };
+      }
+      if (!row.refresh_token_expires_at || Date.parse(row.refresh_token_expires_at) <= now.getTime()) {
+        this.db.exec("COMMIT");
+        return { ok: false, error: "invalid_grant" };
+      }
+      const accessToken = randomBytes(32).toString("base64url");
+      const refreshToken = randomBytes(32).toString("base64url");
+      const updated = this.db
+        .prepare(
+          `UPDATE devices
+           SET access_token_hash = ?, access_token_expires_at = ?,
+               previous_refresh_token_hash = refresh_token_hash,
+               refresh_token_hash = ?, refresh_token_expires_at = ?,
+               last_seen_at = ?, updated_at = ?
+           WHERE id = ? AND refresh_token_hash = ? AND status = 'active'`
+        )
+        .run(
+          sha256(accessToken),
+          new Date(now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString(),
+          sha256(refreshToken),
+          new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString(),
+          now.toISOString(),
+          now.toISOString(),
+          row.id,
+          hash
+        );
+      if (Number(updated.changes) !== 1) {
+        throw new Error("refresh-token rotation invariant violated");
+      }
+      this.db.exec("COMMIT");
+      return {
+        ok: true,
+        deviceId: row.id,
+        principalId: row.principal_id,
+        scopes: JSON.parse(row.allowed_scopes_json) as string[],
+        accessToken,
+        accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
+        refreshToken,
+        refreshTokenExpiresIn: REFRESH_TOKEN_TTL_SECONDS
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
     }
-    const accessToken = randomBytes(32).toString("base64url");
-    const refreshToken = randomBytes(32).toString("base64url");
-    this.db
-      .prepare(
-        `UPDATE devices SET refresh_token_hash = ?, refresh_token_expires_at = ?, last_seen_at = ?, updated_at = ? WHERE id = ?`
-      )
-      .run(
-        sha256(refreshToken),
-        new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString(),
-        now.toISOString(),
-        now.toISOString(),
-        row.id
-      );
+  }
+
+  authenticateAccessToken(rawAccessToken: string, now: Date = new Date()): DeviceAccessIdentity | undefined {
+    const row = this.db.prepare(`SELECT * FROM devices WHERE access_token_hash = ?`).get(sha256(rawAccessToken)) as
+      DeviceRow | undefined;
+    if (!row || row.status !== "active" || !row.access_token_expires_at) return undefined;
+    if (Date.parse(row.access_token_expires_at) <= now.getTime()) return undefined;
     return {
-      ok: true,
       deviceId: row.id,
       principalId: row.principal_id,
       scopes: JSON.parse(row.allowed_scopes_json) as string[],
-      accessToken,
-      accessTokenExpiresIn: ACCESS_TOKEN_TTL_SECONDS,
-      refreshToken,
-      refreshTokenExpiresIn: REFRESH_TOKEN_TTL_SECONDS
+      expiresAt: row.access_token_expires_at
     };
   }
 
@@ -379,7 +478,10 @@ export class DeviceAuthStore {
   revokeDevice(deviceId: string, now: Date = new Date()): boolean {
     const result = this.db
       .prepare(
-        `UPDATE devices SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ? AND status = 'active'`
+        `UPDATE devices
+         SET status = 'revoked', revoked_at = ?, updated_at = ?,
+             access_token_hash = NULL, access_token_expires_at = NULL
+         WHERE id = ? AND status = 'active'`
       )
       .run(now.toISOString(), now.toISOString(), deviceId);
     return Number(result.changes) > 0;
@@ -387,14 +489,15 @@ export class DeviceAuthStore {
 
   private upsertDeviceForApproval(auth: DeviceAuthorizationRow, principalId: string, now: Date): string {
     const existing = this.db
-      .prepare(`SELECT id FROM devices WHERE public_key_pem = ?`)
-      .get(auth.device_public_key_pem) as { id: string } | undefined;
+      .prepare(`SELECT * FROM devices WHERE public_key_pem = ?`)
+      .get(auth.device_public_key_pem) as DeviceRow | undefined;
     if (existing) {
+      if (existing.status !== "active" || existing.principal_id !== principalId) {
+        throw new Error("device approval invariant violated");
+      }
       this.db
-        .prepare(
-          `UPDATE devices SET status = 'active', principal_id = ?, name = ?, allowed_scopes_json = ?, updated_at = ? WHERE id = ?`
-        )
-        .run(principalId, auth.device_name, auth.requested_scopes_json, now.toISOString(), existing.id);
+        .prepare(`UPDATE devices SET name = ?, allowed_scopes_json = ?, updated_at = ? WHERE id = ?`)
+        .run(auth.device_name, auth.requested_scopes_json, now.toISOString(), existing.id);
       return existing.id;
     }
     const id = createId("dev");
@@ -475,4 +578,30 @@ function normalizeUserCode(input: string): string | undefined {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function isValidEd25519PublicKey(publicKeyPem: string): boolean {
+  try {
+    return createPublicKey(publicKeyPem).asymmetricKeyType === "ed25519";
+  } catch {
+    return false;
+  }
+}
+
+function verifyDeviceCodeProof(publicKeyPem: string, deviceCode: string, signature: string | undefined): boolean {
+  if (!signature) return false;
+  try {
+    const publicKey = createPublicKey(publicKeyPem);
+    if (publicKey.asymmetricKeyType !== "ed25519") return false;
+    const rawSignature = Buffer.from(signature, "base64url");
+    if (rawSignature.length !== 64) return false;
+    return verifySignature(
+      null,
+      Buffer.from(`${DEVICE_CODE_PROOF_DOMAIN}\n${deviceCode}`, "utf8"),
+      publicKey,
+      rawSignature
+    );
+  } catch {
+    return false;
+  }
 }

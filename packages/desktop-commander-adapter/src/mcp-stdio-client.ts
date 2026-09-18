@@ -150,7 +150,7 @@ interface PendingRequest {
 export class McpStdioClient {
   private child: ChildProcessWithoutNullStreams | undefined;
   private readonly pending = new Map<JsonRpcId, PendingRequest>();
-  private readonly stdout: LineBuffer;
+  private stdout: LineBuffer;
   private nextId = 1;
   private closed = false;
   private connected = false;
@@ -203,37 +203,53 @@ export class McpStdioClient {
       );
     });
 
-    const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
-    const initialize = (await this.request(
-      "initialize",
-      {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: {
-          name: this.options.clientName ?? "acs-desktop-commander-adapter",
-          version: this.options.clientVersion ?? "0.1.0"
+    try {
+      const connectTimeoutMs = this.options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+      const initialize = (await this.request(
+        "initialize",
+        {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: {
+            name: this.options.clientName ?? "acs-desktop-commander-adapter",
+            version: this.options.clientVersion ?? "0.1.0"
+          },
+          ...(runtimeBootstrap ? { _meta: { acsRuntimeBootstrap: runtimeBootstrap } } : {})
         },
-        ...(runtimeBootstrap ? { _meta: { acsRuntimeBootstrap: runtimeBootstrap } } : {})
-      },
-      connectTimeoutMs
-    )) as {
-      protocolVersion?: string;
-      serverInfo?: { name?: string; version?: string };
-      _meta?: { acsRuntimeIdentity?: unknown };
-    };
+        connectTimeoutMs
+      )) as {
+        protocolVersion?: string;
+        serverInfo?: { name?: string; version?: string };
+        _meta?: { acsRuntimeIdentity?: unknown };
+      };
 
-    const runtimeIdentity = runtimeBootstrap
-      ? requireExactRuntimeIdentity(initialize?._meta?.acsRuntimeIdentity, runtimeBootstrap)
-      : undefined;
+      const runtimeIdentity = runtimeBootstrap
+        ? requireExactRuntimeIdentity(initialize?._meta?.acsRuntimeIdentity, runtimeBootstrap)
+        : undefined;
 
-    this.serverInfo = {
-      name: initialize?.serverInfo?.name,
-      version: initialize?.serverInfo?.version,
-      protocolVersion: initialize?.protocolVersion
-    };
-    this.notify("notifications/initialized", {});
-    this.connected = true;
-    return { ...this.getServerInfo(), ...(runtimeIdentity ? { runtimeIdentity } : {}) };
+      this.serverInfo = {
+        name: initialize?.serverInfo?.name,
+        version: initialize?.serverInfo?.version,
+        protocolVersion: initialize?.protocolVersion
+      };
+      this.notify("notifications/initialized", {});
+      this.connected = true;
+      return { ...this.getServerInfo(), ...(runtimeIdentity ? { runtimeIdentity } : {}) };
+    } catch (error) {
+      // A failed connect must not poison the client: kill the half-open child
+      // and reset state so the next connect() starts a clean session.
+      if (child && !child.killed) {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          /* already gone */
+        }
+      }
+      this.child = undefined;
+      this.connected = false;
+      this.fatalError = undefined;
+      throw error;
+    }
   }
 
   async listTools(): Promise<McpToolDescriptor[]> {
@@ -250,6 +266,15 @@ export class McpStdioClient {
     return result ?? {};
   }
 
+  /**
+   * Fully tear down the transport and leave the client reusable.
+   *
+   * This is a reconnectable lifecycle, not a one-shot dispose: `close()` kills
+   * the child (terminating any in-flight tool execution - stdio MCP has no
+   * server-side cancellation), then resets all transport state so a later
+   * `connect()` spawns a clean fresh session. Callers rely on this to recover
+   * from timeouts and aborts without discarding the executor.
+   */
   async close(): Promise<void> {
     if (this.closed) return;
     this.closed = true;
@@ -261,22 +286,32 @@ export class McpStdioClient {
     }
     this.pending.clear();
     const child = this.child;
-    if (!child || child.killed) return;
-    child.kill("SIGTERM");
-    await new Promise<void>((resolve) => {
-      const timer = setTimeout(() => {
-        try {
-          child.kill("SIGKILL");
-        } catch {
-          /* already gone */
-        }
-        resolve();
-      }, 2_000);
-      child.once("exit", () => {
-        clearTimeout(timer);
-        resolve();
+    if (child && !child.killed) {
+      child.kill("SIGTERM");
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(() => {
+          try {
+            child.kill("SIGKILL");
+          } catch {
+            /* already gone */
+          }
+          resolve();
+        }, 2_000);
+        child.once("exit", () => {
+          clearTimeout(timer);
+          resolve();
+        });
       });
-    });
+    }
+    // The 'exit' listener installed in connect() calls failFatally() while the
+    // child dies; that state belonged to the torn-down session. Reset every
+    // field so the next connect() starts from a clean slate.
+    this.child = undefined;
+    this.closed = false;
+    this.connected = false;
+    this.fatalError = undefined;
+    this.serverInfo = {};
+    this.stdout = new LineBuffer(this.options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES);
   }
 
   private async request(method: string, params: unknown, timeoutMs = this.requestTimeoutMs): Promise<unknown> {

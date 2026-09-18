@@ -6,7 +6,13 @@ import { DatabaseSync } from "node:sqlite";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore, type ClaimedWorkItem, type WorkItem } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
-import { assertDryRunExecutionMode, runWorkerOnce, workerResultIdempotencyKey } from "./index.js";
+import {
+  assertDryRunExecutionMode,
+  configuredNetworkProfile,
+  requireAffectedWorkspaceRoot,
+  runWorkerOnce,
+  workerResultIdempotencyKey
+} from "./index.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -590,3 +596,57 @@ function authoritativeResult(claimed: ClaimedWorkItem) {
     simulationMetadata: { executionMode: "dry_run" as const, simulated: true as const }
   };
 }
+
+// --- Honest execution-evidence semantics -------------------------------------
+
+describe("configuredNetworkProfile (fail-closed network evidence)", () => {
+  it("never claims network isolation: zero network scopes still means unmanaged ambient egress", () => {
+    // Even with no network.* scope, the Desktop Commander process runs with
+    // ambient host networking and start_process can spawn node/npm/python3/
+    // docker with inherited network authority. ACS cannot prove isolation.
+    expect(
+      configuredNetworkProfile({
+        ACS_DESKTOP_COMMANDER_RUNTIME_SCOPES_JSON: JSON.stringify(["fs.read", "fs.write", "process.spawn"])
+      })
+    ).toBe("unmanaged-egress");
+  });
+
+  it("a start_process execution with ambient egress can never produce network 'none' evidence", () => {
+    for (const scopes of ["[]", "not-json", JSON.stringify(["process.exec", "network.write"])]) {
+      expect(configuredNetworkProfile({ ACS_DESKTOP_COMMANDER_RUNTIME_SCOPES_JSON: scopes })).not.toBe("none");
+    }
+  });
+});
+
+describe("requireAffectedWorkspaceRoot (workspace revision evidence binding)", () => {
+  const firstRoot = "/tmp/acs-root-one";
+  const secondRoot = "/tmp/acs-root-two";
+  const containment = { allowedRoots: [firstRoot, secondRoot] };
+
+  it("binds revision evidence to the root the authorized paths actually target", () => {
+    expect(requireAffectedWorkspaceRoot(containment, [`${firstRoot}/pkg/a.ts`])).toBe(firstRoot);
+    // A mutation in the SECOND allowed root must resolve to that root, never
+    // silently fall back to allowedRoots[0].
+    expect(requireAffectedWorkspaceRoot(containment, [`${secondRoot}/pkg/b.ts`])).toBe(secondRoot);
+  });
+
+  it("resolves the shared root for multiple paths within one root", () => {
+    expect(requireAffectedWorkspaceRoot(containment, [`${firstRoot}/a.ts`, `${firstRoot}/b/c.ts`])).toBe(firstRoot);
+  });
+
+  it("returns no root when the invocation targets no workspace path", () => {
+    expect(requireAffectedWorkspaceRoot(containment, [])).toBeUndefined();
+  });
+
+  it("prefers the deepest containing root when allow roots are nested", () => {
+    const nested = { allowedRoots: ["/tmp/acs-parent", "/tmp/acs-parent/child"] };
+    expect(requireAffectedWorkspaceRoot(nested, ["/tmp/acs-parent/child/pkg/a.ts"])).toBe("/tmp/acs-parent/child");
+    expect(requireAffectedWorkspaceRoot(nested, ["/tmp/acs-parent/other.ts"])).toBe("/tmp/acs-parent");
+  });
+
+  it("fails closed when an invocation spans multiple independent roots", () => {
+    expect(() => requireAffectedWorkspaceRoot(containment, [`${firstRoot}/a.ts`, `${secondRoot}/b.ts`])).toThrowError(
+      /multiple containment roots/
+    );
+  });
+});

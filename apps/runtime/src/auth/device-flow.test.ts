@@ -1,5 +1,9 @@
+import { generateKeyPairSync } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { pollForToken, requestDeviceCode } from "./device-flow.js";
+
+const devicePair = generateKeyPairSync("ed25519");
+const devicePrivateKeyPem = devicePair.privateKey.export({ type: "pkcs8", format: "pem" }).toString();
 
 function jsonResponse(status: number, body: unknown) {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
@@ -61,7 +65,7 @@ describe("pollForToken", () => {
           principal: "operator-1"
         })
       );
-    const outcome = await pollForToken("https://acs.example.com", "acs-cli", code, { fetchImpl, sleepImpl });
+    const outcome = await pollForToken("https://acs.example.com", "acs-cli", code, devicePrivateKeyPem, { fetchImpl, sleepImpl });
     expect(outcome).toEqual({
       status: "success",
       accessToken: "at",
@@ -73,6 +77,9 @@ describe("pollForToken", () => {
     });
     expect(sleepImpl).toHaveBeenCalledTimes(2);
     expect(sleepImpl).toHaveBeenNthCalledWith(1, 5000);
+    const firstPollBody = String(fetchImpl.mock.calls[0]?.[1]?.body);
+    expect(firstPollBody).toContain("device_signature=");
+    expect(firstPollBody).not.toContain("device_signature=&");
   });
 
   it("increases the interval on slow_down and keeps polling", async () => {
@@ -90,7 +97,7 @@ describe("pollForToken", () => {
           principal: "operator-1"
         })
       );
-    await pollForToken("https://acs.example.com", "acs-cli", code, { fetchImpl, sleepImpl });
+    await pollForToken("https://acs.example.com", "acs-cli", code, devicePrivateKeyPem, { fetchImpl, sleepImpl });
     expect(sleepImpl).toHaveBeenNthCalledWith(1, 5000);
     expect(sleepImpl).toHaveBeenNthCalledWith(2, 10000);
   });
@@ -98,7 +105,7 @@ describe("pollForToken", () => {
   it("stops immediately on access_denied", async () => {
     const sleepImpl = vi.fn().mockResolvedValue(undefined);
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(400, { error: "access_denied" }));
-    const outcome = await pollForToken("https://acs.example.com", "acs-cli", code, { fetchImpl, sleepImpl });
+    const outcome = await pollForToken("https://acs.example.com", "acs-cli", code, devicePrivateKeyPem, { fetchImpl, sleepImpl });
     expect(outcome).toEqual({ status: "denied" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
@@ -106,14 +113,14 @@ describe("pollForToken", () => {
   it("stops on expired_token", async () => {
     const sleepImpl = vi.fn().mockResolvedValue(undefined);
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(400, { error: "expired_token" }));
-    const outcome = await pollForToken("https://acs.example.com", "acs-cli", code, { fetchImpl, sleepImpl });
+    const outcome = await pollForToken("https://acs.example.com", "acs-cli", code, devicePrivateKeyPem, { fetchImpl, sleepImpl });
     expect(outcome).toEqual({ status: "expired" });
   });
 
   it("surfaces an unrecognized server error without retrying forever", async () => {
     const sleepImpl = vi.fn().mockResolvedValue(undefined);
     const fetchImpl = vi.fn().mockResolvedValue(jsonResponse(400, { error: "invalid_grant" }));
-    const outcome = await pollForToken("https://acs.example.com", "acs-cli", code, { fetchImpl, sleepImpl });
+    const outcome = await pollForToken("https://acs.example.com", "acs-cli", code, devicePrivateKeyPem, { fetchImpl, sleepImpl });
     expect(outcome).toEqual({ status: "error", error: "invalid_grant" });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });

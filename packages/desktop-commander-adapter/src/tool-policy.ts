@@ -114,8 +114,7 @@ const startProcessArgs = z
       .number()
       .int()
       .min(1)
-      .max(15 * 60 * 1_000),
-    shell: z.string().min(1).max(256).optional()
+      .max(15 * 60 * 1_000)
   })
   .strict();
 

@@ -56,7 +56,7 @@ export async function runLogin(options: LoginOptions): Promise<LoginResult> {
   }
   print("Waiting for authorization...");
 
-  const outcome = await pollForToken(options.acsUrl, clientId, code, options.deps);
+  const outcome = await pollForToken(options.acsUrl, clientId, code, identity.devicePrivateKeyPem, options.deps);
 
   if (outcome.status === "denied") {
     print("");

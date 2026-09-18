@@ -265,7 +265,8 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "guard" }],
         risk: "low"
       });
-      store.blockWorkItem(workItem.id);
+      expectControlError(() => store.blockWorkItem(workItem.id), "policy_gate_required");
+      store.blockWorkItem(workItem.id, domainTransition);
 
       expectControlError(() => store.approveWorkItem(workItem.id), "policy_gate_required");
       expectControlError(() => store.unblockWorkItem(workItem.id), "policy_gate_required");
@@ -274,6 +275,48 @@ describe("work item state machine", () => {
       expectControlError(() => store.transition(workItem.id, "approved"), "policy_gate_required");
     } finally {
       store.close();
+    }
+  });
+
+  it("requires active lease proof before blocking a running work item", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-running-block-fence-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Running block fence",
+        requester: "user",
+        intent: "prevent stale workers from revoking another worker lease",
+        requestedActions: [{ kind: "fs.read", description: "read" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id, domainTransition);
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
+      if (!claimed) throw new Error("expected running claim");
+
+      expectControlError(
+        () => store.blockWorkItem(workItem.id, { via: "domain_service", actorId: "worker-a", leaseToken: "stale" }),
+        "worker_lease_token_mismatch"
+      );
+      expectControlError(
+        () =>
+          store.transition(workItem.id, "blocked", {
+            via: "domain_service",
+            actorId: "worker-b",
+            leaseToken: claimed.leaseToken
+          }),
+        "worker_lease_actor_mismatch"
+      );
+
+      const blocked = store.blockWorkItem(workItem.id, {
+        via: "domain_service",
+        actorId: "worker-a",
+        leaseToken: claimed.leaseToken
+      });
+      expect(blocked.status).toBe("blocked");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -904,6 +947,12 @@ describe("work item state machine", () => {
           version: 24,
           name: "desktop_commander_runtime_capabilities",
           filename: "024_desktop_commander_runtime_capabilities.sql"
+        },
+        { version: 25, name: "device_auth_hardening", filename: "025_device_auth_hardening.sql" },
+        {
+          version: 26,
+          name: "desktop_commander_capability_uniqueness",
+          filename: "026_desktop_commander_capability_uniqueness.sql"
         }
       ]);
       expect(store.listActors()).toEqual(
@@ -1027,7 +1076,9 @@ describe("work item state machine", () => {
         { version: 21 },
         { version: 22 },
         { version: 23 },
-        { version: 24 }
+        { version: 24 },
+        { version: 25 },
+        { version: 26 }
       ]);
     } finally {
       db.close();
@@ -1136,7 +1187,7 @@ describe("work item state machine", () => {
     const store = new SqliteWorkItemStore(copiedPath);
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1211,7 +1262,7 @@ describe("work item state machine", () => {
     try {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([
@@ -1650,6 +1701,58 @@ describe("work item state machine", () => {
       } catch {
         // already closed in the tamper path
       }
+    }
+  });
+
+  it("fails closed when persisted audit hashes are blank instead of silently re-anchoring them", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-audit-blank-hash-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+
+    try {
+      store.create({
+        title: "Audit hash fixture",
+        requester: "agent",
+        intent: "prove blank hashes are tamper evidence",
+        requestedActions: [{ kind: "manual", description: "audit" }],
+        risk: "low"
+      });
+      store.close();
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.prepare(`UPDATE audit_events SET previous_hash = '', event_hash = ''`).run();
+      } finally {
+        db.close();
+      }
+
+      const reopened = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(reopened.verifyAuditChain()).toMatchObject({
+          ok: false,
+          failure: { sequence: 1, reason: "event_hash_mismatch" }
+        });
+        expectControlError(
+          () =>
+            reopened.create({
+              title: "must not append",
+              requester: "agent",
+              intent: "fail closed on invalid audit chain",
+              requestedActions: [{ kind: "manual", description: "audit" }],
+              risk: "low"
+            }),
+          "audit_chain_invalid"
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // already closed in the tamper path
+      }
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

@@ -1,3 +1,4 @@
+import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -5,8 +6,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { DeviceAuthStore } from "./device-auth-store.js";
 
-const DEVICE_KEY_A = "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----";
-const DEVICE_KEY_B = "-----BEGIN PUBLIC KEY-----\nBBBB\n-----END PUBLIC KEY-----";
+const DEVICE_PAIR_A = generateKeyPairSync("ed25519");
+const DEVICE_PAIR_B = generateKeyPairSync("ed25519");
+const DEVICE_KEY_A = DEVICE_PAIR_A.publicKey.export({ type: "spki", format: "pem" }).toString();
+const DEVICE_KEY_B = DEVICE_PAIR_B.publicKey.export({ type: "spki", format: "pem" }).toString();
+
+function proof(deviceCode: string, privateKey = DEVICE_PAIR_A.privateKey): string {
+  return sign(null, Buffer.from(`acs-device-code-proof-v1\n${deviceCode}`, "utf8"), privateKey).toString("base64url");
+}
 
 function setup() {
   const directory = mkdtempSync(join(tmpdir(), "acs-device-auth-"));
@@ -95,7 +102,7 @@ describe("DeviceAuthStore", () => {
     const issued = requestCode(store);
     if (!issued.ok) throw new Error("setup failed");
     const now = new Date(Date.now() + 10_000);
-    expect(store.pollToken(issued.deviceCode, "acs-cli", now)).toEqual({ status: "authorization_pending" });
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), now)).toEqual({ status: "authorization_pending" });
   });
 
   it("polling faster than the interval returns slow_down and escalates the interval", () => {
@@ -104,24 +111,24 @@ describe("DeviceAuthStore", () => {
     const issued = requestCode(store, { now: start });
     if (!issued.ok) throw new Error("setup failed");
     // First poll establishes last_polled_at.
-    expect(store.pollToken(issued.deviceCode, "acs-cli", new Date(start.getTime() + 6_000))).toEqual({
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), new Date(start.getTime() + 6_000))).toEqual({
       status: "authorization_pending"
     });
     // Second poll arrives before the 5s interval elapses -> slow_down, interval grows to 10s.
-    const second = store.pollToken(issued.deviceCode, "acs-cli", new Date(start.getTime() + 7_000));
+    const second = store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), new Date(start.getTime() + 7_000));
     expect(second).toEqual({ status: "slow_down", interval: 10 });
   });
 
   it("rejects an unknown device_code with invalid_grant", () => {
     ({ directory, workItems, store } = setup());
-    expect(store.pollToken("not-a-real-code", "acs-cli")).toEqual({ status: "invalid_grant" });
+    expect(store.pollToken("not-a-real-code", "acs-cli", proof("not-a-real-code"))).toEqual({ status: "invalid_grant" });
   });
 
   it("rejects a device_code presented with the wrong client_id", () => {
     ({ directory, workItems, store } = setup());
     const issued = requestCode(store);
     if (!issued.ok) throw new Error("setup failed");
-    expect(store.pollToken(issued.deviceCode, "some-other-app")).toEqual({ status: "invalid_grant" });
+    expect(store.pollToken(issued.deviceCode, "some-other-app", proof(issued.deviceCode))).toEqual({ status: "invalid_grant" });
   });
 
   it("expires a device code after its TTL and fails closed", () => {
@@ -130,7 +137,7 @@ describe("DeviceAuthStore", () => {
     const issued = requestCode(store, { now: start });
     if (!issued.ok) throw new Error("setup failed");
     const later = new Date(start.getTime() + 16 * 60 * 1000);
-    expect(store.pollToken(issued.deviceCode, "acs-cli", later)).toEqual({ status: "expired_token" });
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), later)).toEqual({ status: "expired_token" });
     expect(store.approve(issued.userCode, "operator-1", later)).toEqual({ ok: false, error: "expired" });
   });
 
@@ -139,7 +146,7 @@ describe("DeviceAuthStore", () => {
     const issued = requestCode(store);
     if (!issued.ok) throw new Error("setup failed");
     expect(store.deny(issued.userCode)).toEqual({ ok: true });
-    expect(store.pollToken(issued.deviceCode, "acs-cli")).toEqual({ status: "access_denied" });
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode))).toEqual({ status: "access_denied" });
     // Denied is terminal: cannot later approve the same code.
     expect(store.approve(issued.userCode, "operator-1")).toEqual({ ok: false, error: "not_pending" });
   });
@@ -150,7 +157,7 @@ describe("DeviceAuthStore", () => {
     if (!issued.ok) throw new Error("setup failed");
     expect(store.approve(issued.userCode, "operator-1")).toEqual({ ok: true });
 
-    const success = store.pollToken(issued.deviceCode, "acs-cli");
+    const success = store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode));
     expect(success.status).toBe("success");
     if (success.status !== "success") return;
     expect(success.principalId).toBe("operator-1");
@@ -164,7 +171,7 @@ describe("DeviceAuthStore", () => {
     expect(device?.principalId).toBe("operator-1");
 
     // Replay: the same device_code cannot be exchanged again.
-    expect(store.pollToken(issued.deviceCode, "acs-cli")).toEqual({ status: "invalid_grant" });
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode))).toEqual({ status: "invalid_grant" });
   });
 
   it("cannot approve an already-approved (or already-consumed) code a second time", () => {
@@ -180,13 +187,13 @@ describe("DeviceAuthStore", () => {
     const first = requestCode(store);
     if (!first.ok) throw new Error("setup failed");
     store.approve(first.userCode, "operator-1");
-    const firstSuccess = store.pollToken(first.deviceCode, "acs-cli");
+    const firstSuccess = store.pollToken(first.deviceCode, "acs-cli", proof(first.deviceCode));
     if (firstSuccess.status !== "success") throw new Error("expected success");
 
     const second = requestCode(store); // same DEVICE_KEY_A -> same device row
     if (!second.ok) throw new Error("setup failed");
     store.approve(second.userCode, "operator-1");
-    const secondSuccess = store.pollToken(second.deviceCode, "acs-cli");
+    const secondSuccess = store.pollToken(second.deviceCode, "acs-cli", proof(second.deviceCode));
     if (secondSuccess.status !== "success") throw new Error("expected success");
 
     expect(secondSuccess.deviceId).toBe(firstSuccess.deviceId);
@@ -197,7 +204,7 @@ describe("DeviceAuthStore", () => {
     const issued = requestCode(store, { devicePublicKeyPem: DEVICE_KEY_B });
     if (!issued.ok) throw new Error("setup failed");
     store.approve(issued.userCode, "operator-1");
-    const success = store.pollToken(issued.deviceCode, "acs-cli");
+    const success = store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode, DEVICE_PAIR_B.privateKey));
     if (success.status !== "success") throw new Error("expected success");
 
     const refreshed = store.refreshAccessToken(success.refreshToken);
@@ -218,7 +225,7 @@ describe("DeviceAuthStore", () => {
     const issued = requestCode(store);
     if (!issued.ok) throw new Error("setup failed");
     store.approve(issued.userCode, "operator-1");
-    const success = store.pollToken(issued.deviceCode, "acs-cli");
+    const success = store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode));
     if (success.status !== "success") throw new Error("expected success");
 
     expect(store.revokeDevice(success.deviceId)).toBe(true);
@@ -226,6 +233,79 @@ describe("DeviceAuthStore", () => {
     expect(store.refreshAccessToken(success.refreshToken)).toEqual({ ok: false, error: "device_revoked" });
     // Revoking an already-revoked (or unknown) device is a no-op, not an error.
     expect(store.revokeDevice(success.deviceId)).toBe(false);
+  });
+
+  it("requires a valid Ed25519 proof over the device_code", () => {
+    ({ directory, workItems, store } = setup());
+    const issued = requestCode(store);
+    if (!issued.ok) throw new Error("setup failed");
+    expect(store.pollToken(issued.deviceCode, "acs-cli", undefined)).toEqual({ status: "invalid_grant" });
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode, DEVICE_PAIR_B.privateKey))).toEqual({
+      status: "invalid_grant"
+    });
+    expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode))).toEqual({
+      status: "authorization_pending"
+    });
+  });
+
+  it("rejects unknown device scopes", () => {
+    ({ directory, workItems, store } = setup());
+    expect(requestCode(store, { requestedScopes: ["acs:admin"] })).toEqual({ ok: false, error: "invalid_scope" });
+  });
+
+  it("does not let an approval rebind an existing public key to another principal", () => {
+    ({ directory, workItems, store } = setup());
+    const first = requestCode(store);
+    if (!first.ok) throw new Error("setup failed");
+    expect(store.approve(first.userCode, "operator-1")).toEqual({ ok: true });
+    const firstToken = store.pollToken(first.deviceCode, "acs-cli", proof(first.deviceCode));
+    if (firstToken.status !== "success") throw new Error("expected success");
+
+    const second = requestCode(store);
+    if (!second.ok) throw new Error("setup failed");
+    expect(store.approve(second.userCode, "operator-2")).toEqual({ ok: false, error: "device_key_conflict" });
+    expect(store.getDevice(firstToken.deviceId)?.principalId).toBe("operator-1");
+  });
+
+  it("never reactivates a revoked device through re-registration", () => {
+    ({ directory, workItems, store } = setup());
+    const first = requestCode(store);
+    if (!first.ok) throw new Error("setup failed");
+    expect(store.approve(first.userCode, "operator-1")).toEqual({ ok: true });
+    const token = store.pollToken(first.deviceCode, "acs-cli", proof(first.deviceCode));
+    if (token.status !== "success") throw new Error("expected success");
+    expect(store.revokeDevice(token.deviceId)).toBe(true);
+
+    const second = requestCode(store);
+    if (!second.ok) throw new Error("setup failed");
+    expect(store.approve(second.userCode, "operator-1")).toEqual({ ok: false, error: "device_revoked" });
+    expect(store.getDevice(token.deviceId)?.status).toBe("revoked");
+  });
+
+  it("persists access-token hashes and rejects revoked access tokens", () => {
+    ({ directory, workItems, store } = setup());
+    const issued = requestCode(store);
+    if (!issued.ok) throw new Error("setup failed");
+    expect(store.approve(issued.userCode, "operator-1")).toEqual({ ok: true });
+    const token = store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode));
+    if (token.status !== "success") throw new Error("expected success");
+    expect(store.authenticateAccessToken(token.accessToken)?.deviceId).toBe(token.deviceId);
+    expect(store.authenticateAccessToken("not-the-token")).toBeUndefined();
+    expect(store.revokeDevice(token.deviceId)).toBe(true);
+    expect(store.authenticateAccessToken(token.accessToken)).toBeUndefined();
+  });
+
+  it("revokes the device when a rotated refresh token is reused", () => {
+    ({ directory, workItems, store } = setup());
+    const issued = requestCode(store);
+    if (!issued.ok) throw new Error("setup failed");
+    expect(store.approve(issued.userCode, "operator-1")).toEqual({ ok: true });
+    const token = store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode));
+    if (token.status !== "success") throw new Error("expected success");
+    const refreshed = store.refreshAccessToken(token.refreshToken);
+    expect(refreshed.ok).toBe(true);
+    expect(store.refreshAccessToken(token.refreshToken)).toEqual({ ok: false, error: "invalid_grant" });
+    expect(store.getDevice(token.deviceId)?.status).toBe("revoked");
   });
 
   it("never persists the raw device_code or user_code (only their hashes)", () => {
