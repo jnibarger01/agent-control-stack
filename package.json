@@ -17,6 +17,7 @@
   },
   "bin": {
     "desktop-commander": "dist/index.js",
+    "dc-agent": "dist/harness/cli.js",
     "setup": "dist/setup-claude-server.js",
     "remove": "dist/uninstall-claude-server.js"
   },
@@ -24,6 +25,7 @@
   "types": "dist/local-runtime.d.ts",
   "files": [
     "dist",
+    "SYSTEM.md",
     "logo.png",
     "testemonials"
   ],
@@ -33,11 +35,12 @@
     "device:install": "cd src/remote-device && npm install",
     "device:start": "tsx src/remote-device/device.ts --standalone",
     "device:start:dev": "nodemon --watch src/remote-device --exec tsx src/remote-device/device.ts --standalone",
+    "agent": "npm run build && node dist/harness/cli.js",
     "sync-version": "node scripts/sync-version.js",
     "bump": "node scripts/sync-version.js --bump",
     "bump:minor": "node scripts/sync-version.js --bump --minor",
     "bump:major": "node scripts/sync-version.js --bump --major",
-    "build": "tsc && shx cp setup-claude-server.js uninstall-claude-server.js track-installation.js dist/ && shx chmod +x dist/*.js && shx mkdir -p dist/data && shx cp src/data/onboarding-prompts.json dist/data/ && shx mkdir -p dist/remote-device/scripts && shx cp src/remote-device/scripts/blocking-offline-update.js dist/remote-device/scripts/ && node scripts/build-ui-runtime.cjs",
+    "build": "tsc && shx cp setup-claude-server.js uninstall-claude-server.js track-installation.js dist/ && shx chmod +x dist/*.js dist/harness/*.js && shx mkdir -p dist/data && shx cp src/data/onboarding-prompts.json dist/data/ && shx mkdir -p dist/remote-device/scripts && shx cp src/remote-device/scripts/blocking-offline-update.js dist/remote-device/scripts/ && node scripts/build-ui-runtime.cjs",
     "watch": "tsc --watch",
     "start": "node dist/index.js",
     "start:standalone": "node dist/index.js --standalone",

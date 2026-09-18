@@ -271,6 +271,29 @@ export class LocalMcpRuntime {
     }
   }
 
+  async listTools(timeoutMs?: number) {
+    if (this.state !== 'ready' || !this.client) {
+      throw new LocalMcpRuntimeError('RUNTIME_NOT_READY', `Cannot list tools: local MCP runtime state is ${this.state}`);
+    }
+
+    const listTimeoutMs = positiveTimeout(timeoutMs, this.options.healthTimeoutMs, 'timeoutMs');
+    try {
+      return await this.client.listTools(undefined, {
+        timeout: listTimeoutMs,
+        maxTotalTimeout: listTimeoutMs,
+      });
+    } catch (error) {
+      if (error instanceof McpError && error.code === ErrorCode.RequestTimeout) {
+        throw new LocalMcpRuntimeError('TOOL_LIST_TIMEOUT', `Desktop Commander tool listing timed out after ${listTimeoutMs}ms`, error);
+      }
+      throw new LocalMcpRuntimeError(
+        'TOOL_LIST_FAILED',
+        `Desktop Commander tool listing failed: ${error instanceof Error ? error.message : String(error)}`,
+        error,
+      );
+    }
+  }
+
   async callTool(
     name: string,
     args: Record<string, unknown> = {},

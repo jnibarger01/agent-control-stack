@@ -666,6 +666,23 @@ The server provides a comprehensive set of tools organized into several categori
 "Start Node.js and test this API" → Claude runs interactive Node session
 ```
 
+### OpenAI Agent Harness
+
+This fork can run Desktop Commander as the local execution backend for a GPT-5.6 Responses API agent. The harness loads `SYSTEM.md`, keeps conversation state in-process, converts the ACS-policy MCP tool allowlist into OpenAI function tools, and asks before mutating operations.
+
+```bash
+export OPENAI_API_KEY="..."
+npm run agent
+```
+
+Run a one-shot task:
+
+```bash
+npm run agent -- "Inspect this repository and summarize its current state"
+```
+
+Use `--system /path/to/SYSTEM.md` to load a different instruction file. Use `--approve-mutations` only when the entire invocation is intentionally pre-authorized to run mutating tools. The CLI runs in explicit standalone mode; managed ACS execution requires embedding `DesktopCommanderAgent` with a per-call `toolMetaProvider` that supplies fresh ACS capability metadata.
+
 ### Tool Usage Examples
 
 Search/Replace Block Format:
