@@ -160,6 +160,17 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   const networkProfile: NetworkProfile = cap ? cap.network
     : (process.env.DC_NETWORK_PROFILE as NetworkProfile | undefined) ?? 'full';
   const rawCommand = typeof ctx.args.command === 'string' ? ctx.args.command : '';
+  // Fail closed (round-2 LOW): a non-string command would silently skip the
+  // network blocklist; reject it instead of gating an unparseable command.
+  if ('command' in ctx.args && ctx.args.command !== undefined && rawCommand === '') {
+    return {
+      allowed: false,
+      kind: 'capability-rejected',
+      code: 'COMMAND_MALFORMED',
+      message: `args.command must be a string (got ${typeof ctx.args.command}); refusing to gate an unparseable command`,
+      classification,
+    };
+  }
   const argv: string[] = rawCommand.split(/\s+/).filter(Boolean);
   if (rawCommand.length > 0) {
     const check = checkNetworkBinariesInRaw(rawCommand, networkProfile)
@@ -206,8 +217,15 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
     if (store.decision(presentedApprovalId) === 'approved') {
       const recorded = (store as InMemoryApprovalStore).getRequest(presentedApprovalId);
       const command = classification.command;
+      // Match scope: tool + command + resolved paths + network targets. An
+      // approval minted for one request can never authorize a different one
+      // (round-2 review: command-less tools previously matched on tool alone).
+      const samePaths = JSON.stringify(recorded?.resolvedPaths ?? []) === JSON.stringify([...classification.paths].sort());
+      const sameTargets = JSON.stringify(recorded?.networkTargets ?? []) === JSON.stringify([...classification.networkTargets].sort());
       const matches = recorded
         && recorded.tool === ctx.tool
+        && samePaths
+        && sameTargets
         && (recorded.command ?? undefined) === (command ?? undefined);
       if (matches) {
         return {
