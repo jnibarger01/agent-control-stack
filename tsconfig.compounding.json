@@ -5,5 +5,6 @@
     "outDir": "dist/compounding",
     "tsBuildInfoFile": "dist/compounding/.tsbuildinfo"
   },
-  "include": ["harness/**/*.ts", "evals/**/*.ts", "packages/shared/src/redact.ts"]
+  "include": ["harness/**/*.ts", "evals/**/*.ts", "packages/shared/src/redact.ts"],
+  "exclude": ["evals/vercel-mcp-bridge.integration.test.ts"]
 }
