@@ -1,3 +1,4 @@
+import { generateKeyPairSync, sign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -6,6 +7,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
 
 const testAuth = { token: "operator-token-0123456789abcdef", actor: "user", actorId: "operator-1" } as const;
+
+const devicePair = generateKeyPairSync("ed25519");
+const devicePublicKeyPem = devicePair.publicKey.export({ type: "spki", format: "pem" }).toString();
+
+function deviceProof(deviceCode: string): string {
+  return sign(null, Buffer.from(`acs-device-code-proof-v1\n${deviceCode}`, "utf8"), devicePair.privateKey).toString("base64url");
+}
 
 function seedActor(dbPath: string): void {
   const store = new SqliteWorkItemStore(dbPath);
@@ -28,11 +36,14 @@ describe("device authorization HTTP surface", () => {
     dir = undefined;
   });
 
-  async function buildTestApp() {
+  async function buildTestApp(
+    rateLimit?: { windowMs: number; maxRequests: number },
+    auth = testAuth
+  ) {
     dir = mkdtempSync(join(tmpdir(), "acs-device-http-"));
     const dbPath = join(dir, "control.db");
     seedActor(dbPath);
-    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const app = buildGateway({ dbPath, logger: false, auth, ...(rateLimit ? { rateLimit } : {}) });
     await app.ready();
     return app;
   }
@@ -47,7 +58,7 @@ describe("device authorization HTTP surface", () => {
         payload: form({
           client_id: "acs-cli",
           scope: "acs:device",
-          device_public_key: "PEM",
+          device_public_key: devicePublicKeyPem,
           device_name: "workstation"
         })
       });
@@ -71,7 +82,7 @@ describe("device authorization HTTP surface", () => {
         method: "POST",
         url: "/oauth/device/code",
         headers: { "content-type": "application/x-www-form-urlencoded" },
-        payload: form({ client_id: "not-acs-cli", device_public_key: "PEM" })
+        payload: form({ client_id: "not-acs-cli", device_public_key: devicePublicKeyPem })
       });
       expect(response.statusCode).toBe(400);
       expect(response.json()).toEqual({ error: "invalid_client" });
@@ -92,6 +103,20 @@ describe("device authorization HTTP surface", () => {
     }
   });
 
+  it("rate limits repeated GET /device/verify authorization attempts", async () => {
+    const app = await buildTestApp({ windowMs: 60_000, maxRequests: 1 });
+    try {
+      const first = await app.inject({ method: "GET", url: "/device/verify" });
+      const limited = await app.inject({ method: "GET", url: "/device/verify" });
+      expect(first.statusCode).toBe(401);
+      expect(limited.statusCode).toBe(429);
+      expect(limited.headers["retry-after"]).toBeDefined();
+      expect(limited.json()).toMatchObject({ code: "rate_limited" });
+    } finally {
+      await app.close();
+    }
+  });
+
   it("POST /device/verify rejects an unauthenticated approval attempt", async () => {
     const app = await buildTestApp();
     try {
@@ -106,6 +131,67 @@ describe("device authorization HTTP surface", () => {
     }
   });
 
+  it("rejects device token polling without proof of possession", async () => {
+    const app = await buildTestApp();
+    try {
+      const issue = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem })
+      });
+      const { device_code: deviceCode } = issue.json();
+      const poll = await app.inject({
+        method: "POST",
+        url: "/oauth/token",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({
+          grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+          device_code: deviceCode,
+          client_id: "acs-cli"
+        })
+      });
+      expect(poll.statusCode).toBe(400);
+      expect(poll.json()).toEqual({ error: "invalid_request" });
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("does not allow a read-only gateway credential to approve a device", async () => {
+    const readOnlyAuth = {
+      token: "",
+      actor: "",
+      credentials: [{
+        id: "reader",
+        token: "reader-token-0123456789abcdef012345",
+        actor: "user",
+        actorId: "operator-1",
+        roles: ["operator"],
+        scopes: ["acs:read", "acs:device"]
+      }]
+    } as const;
+    const app = await buildTestApp(undefined, readOnlyAuth);
+    try {
+      const issue = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem })
+      });
+      const { user_code: userCode } = issue.json();
+      const approve = await app.inject({
+        method: "POST",
+        url: "/device/verify",
+        headers: { authorization: `Bearer ${readOnlyAuth.credentials[0].token}` },
+        payload: { user_code: userCode, action: "approve" }
+      });
+      expect(approve.statusCode).toBe(403);
+    } finally {
+      await app.close();
+    }
+  });
+
   it("full approval round trip: issue -> pending poll -> authenticated approve -> token exchange -> replay rejected", async () => {
     const app = await buildTestApp();
     try {
@@ -113,7 +199,7 @@ describe("device authorization HTTP surface", () => {
         method: "POST",
         url: "/oauth/device/code",
         headers: { "content-type": "application/x-www-form-urlencoded" },
-        payload: form({ client_id: "acs-cli", device_public_key: "PEM-ROUNDTRIP", device_name: "laptop" })
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem, device_name: "laptop" })
       });
       const { device_code: deviceCode, user_code: userCode } = issueResponse.json();
 
@@ -124,6 +210,7 @@ describe("device authorization HTTP surface", () => {
         payload: form({
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
           device_code: deviceCode,
+          device_signature: deviceProof(deviceCode),
           client_id: "acs-cli"
         })
       });
@@ -155,6 +242,7 @@ describe("device authorization HTTP surface", () => {
         payload: form({
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
           device_code: deviceCode,
+          device_signature: deviceProof(deviceCode),
           client_id: "acs-cli"
         })
       });
@@ -172,6 +260,7 @@ describe("device authorization HTTP surface", () => {
         payload: form({
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
           device_code: deviceCode,
+          device_signature: deviceProof(deviceCode),
           client_id: "acs-cli"
         })
       });
@@ -189,7 +278,7 @@ describe("device authorization HTTP surface", () => {
         method: "POST",
         url: "/oauth/device/code",
         headers: { "content-type": "application/x-www-form-urlencoded" },
-        payload: form({ client_id: "acs-cli", device_public_key: "PEM-DENY", device_name: "laptop" })
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem, device_name: "laptop" })
       });
       const { device_code: deviceCode, user_code: userCode } = issueResponse.json();
 
@@ -208,6 +297,7 @@ describe("device authorization HTTP surface", () => {
         payload: form({
           grant_type: "urn:ietf:params:oauth:grant-type:device_code",
           device_code: deviceCode,
+          device_signature: deviceProof(deviceCode),
           client_id: "acs-cli"
         })
       });
@@ -233,7 +323,7 @@ describe("device authorization HTTP surface", () => {
         method: "POST",
         url: "/oauth/device/code",
         headers: { "content-type": "application/x-www-form-urlencoded" },
-        payload: form({ client_id: "acs-cli", device_public_key: "PEM-REDACT", device_name: "laptop" })
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem, device_name: "laptop" })
       });
       const { device_code: deviceCode, user_code: userCode } = issueResponse.json();
       const verifyPage = await app.inject({

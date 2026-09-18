@@ -41,6 +41,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import {
   authorizeMcpRequest,
   createProtectedResourceMetadata,
+  MCP_SCOPES,
   mcpAuthorizationHttpError,
   resolveMcpAuthOptions,
   type McpAuthenticatedRequest,
@@ -120,6 +121,13 @@ export interface GatewayAuthOptions {
    * for result submission and reject expired/revoked identities.
    */
   workerIdentities?: WorkerIdentityRegistry;
+  /** Internal verifier for opaque device access tokens issued by this gateway. */
+  deviceAccessTokenResolver?: (token: string) => {
+    deviceId: string;
+    principalId: string;
+    scopes: string[];
+    expiresAt: string;
+  } | undefined;
 }
 
 export { WorkerIdentityRegistry };
@@ -167,7 +175,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
-  const auth = resolveAuth(options);
+  const resolvedAuth = resolveAuth(options);
+  const auth = resolvedAuth
+    ? { ...resolvedAuth, deviceAccessTokenResolver: (token: string) => deviceAuthStore.authenticateAccessToken(token) }
+    : resolvedAuth;
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
   const mcpToolAllowlist = resolveMcpToolAllowlist({
@@ -199,7 +210,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       : new ReadonlyAcpAdapter({ ...acpAdapterConfig, store: workItems });
   app.addHook("preHandler", async (request, reply) => {
     requestStartTimes.set(request, performance.now());
-    if (request.method === "GET" || !isRateLimitedRoute(request.url)) return;
+    if (!isRateLimitedRoute(request.url) || (request.method === "GET" && !isRateLimitedGetRoute(request.url))) return;
     const decision = rateLimiter.check(rateLimitKey(request, auth));
     reply.header("x-ratelimit-remaining", String(decision.remaining));
     if (!decision.allowed) {
@@ -1408,6 +1419,10 @@ function isRateLimitedRoute(url: string): boolean {
   );
 }
 
+function isRateLimitedGetRoute(url: string): boolean {
+  return url.split("?", 1)[0] === "/device/verify";
+}
+
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
   const credential = gatewayCredentialForRequest(request, auth);
   const principal = credential
@@ -1639,7 +1654,7 @@ function matchGatewayCredential(token: string | undefined, auth: GatewayAuthOpti
       actor: auth.actor,
       actorId: auth.actorId ?? "",
       roles: auth.actor === "agent" ? ["operator", "worker"] : ["operator"],
-      scopes: ["acs:read", "acs:write", "acs:approve", "acs:worker"]
+      scopes: ["acs:read", "acs:write", "acs:approve", "acs:worker", ...MCP_SCOPES]
     };
   }
   return undefined;
@@ -1647,9 +1662,26 @@ function matchGatewayCredential(token: string | undefined, auth: GatewayAuthOpti
 
 function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
   const credential = matchGatewayCredential(token, auth);
-  if (!credential) return undefined;
-  if (!gatewayCredentialIsLive(credential)) return undefined;
-  return credential;
+  if (credential) {
+    if (!gatewayCredentialIsLive(credential)) return undefined;
+    return credential;
+  }
+  if (!token || !auth.deviceAccessTokenResolver) return undefined;
+  const device = auth.deviceAccessTokenResolver(token);
+  if (!device || Date.parse(device.expiresAt) <= Date.now()) return undefined;
+  const scopes = new Set(device.scopes);
+  if (scopes.has("acs:work:read")) scopes.add("acs:read");
+  if (scopes.has("acs:work:create")) scopes.add("acs:write");
+  return {
+    id: `device:${device.deviceId}`,
+    token,
+    actor: "user",
+    actorId: device.principalId,
+    roles: ["service"],
+    scopes: [...scopes],
+    expiresAt: device.expiresAt,
+    status: "active"
+  };
 }
 
 function gatewayCredentialIsLive(credential: GatewayCredential, nowMs = Date.now()): boolean {

@@ -60,7 +60,8 @@ const migrationFiles = [
     version: 24,
     name: "desktop_commander_runtime_capabilities",
     filename: "024_desktop_commander_runtime_capabilities.sql"
-  }
+  },
+  { version: 25, name: "device_auth_hardening", filename: "025_device_auth_hardening.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -341,6 +342,15 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
   }
   if (migration.version === 12 && hasColumn(db, "workspace_allocations", "attempt_id")) {
     return "SELECT 1;";
+  }
+  if (migration.version === 25) {
+    let sql = migration.sql;
+    for (const column of ["access_token_hash", "access_token_expires_at", "previous_refresh_token_hash"]) {
+      if (hasColumn(db, "devices", column)) {
+        sql = sql.replace(new RegExp(`\\s*ALTER TABLE devices ADD COLUMN ${column} TEXT;\\s*`, "u"), "\n");
+      }
+    }
+    return sql;
   }
   return migration.sql;
 }
