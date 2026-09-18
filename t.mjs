@@ -1,0 +1,13 @@
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { randomUUID, webcrypto } from 'node:crypto';
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
+const up = new StdioClientTransport({command:'/home/linuxbrew/.linuxbrew/bin/node',args:['/home/jacen/projects/desktop-commander/dist/index.js','--standalone']});
+const httpT = new StreamableHTTPServerTransport({sessionIdGenerator:()=>randomUUID(),enableJsonResponse:false});
+up.onmessage=(m)=>httpT.send(m).catch(e=>console.error('send err',e));
+httpT.onmessage=(m)=>up.send(m).catch(e=>console.error('up send err',e));
+up.onerror=e=>console.error('up err',e);
+httpT.onerror=(e)=>console.log('HTTPERR STACK', e.stack || String(e));
+await up.start();
+const http = (await import('node:http')).default;
+http.createServer(async(req,res)=>{try{await httpT.handleRequest(req,res)}catch(e){console.log('ERR',e.stack||String(e)); if(!res.headersSent){res.writeHead(500);res.end()}}}).listen(8022,'127.0.0.1',()=>console.log('test up on 8022'));
