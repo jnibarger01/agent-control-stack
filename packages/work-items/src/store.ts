@@ -575,6 +575,10 @@ export interface ConnectorRequestRecord {
 export interface ExecutionAuditEventRecord {
   name: string;
   workItemId: string;
+  attemptId?: string;
+  leaseId?: string;
+  workerId?: string;
+  fencingEpoch?: number;
   body?: Record<string, unknown>;
   attributes?: Record<string, AttributeValue>;
 }
@@ -1074,7 +1078,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     `);
     try {
       applyControlPlaneMigrations(this.db);
-      this.backfillAuditChain();
       this.auditChainValid = this.verifyAuditChain().ok;
     } catch (error) {
       this.db.close();
@@ -4074,12 +4077,57 @@ export class SqliteWorkItemStore implements WorkItemStore {
       );
     }
     const workItemId = requiredString(input.workItemId, "workItemId");
+    const suppliedAttributes = input.attributes ?? {};
+    const attributeString = (key: string): string => {
+      const value = suppliedAttributes[key];
+      return typeof value === "string" ? value : "";
+    };
+    const attemptId = requiredString(
+      input.attemptId ?? attributeString("attempt.id"),
+      "attemptId"
+    );
+    const leaseId = requiredString(
+      input.leaseId ?? attributeString("lease.id"),
+      "leaseId"
+    );
+    const workerId = requiredString(
+      input.workerId ?? attributeString("worker.id"),
+      "workerId"
+    );
+    const suppliedFencingEpoch =
+      input.fencingEpoch ??
+      (typeof suppliedAttributes["lease.fencing_epoch"] === "number"
+        ? suppliedAttributes["lease.fencing_epoch"]
+        : undefined);
+    if (
+      suppliedFencingEpoch !== undefined &&
+      (!Number.isInteger(suppliedFencingEpoch) || suppliedFencingEpoch <= 0)
+    ) {
+      throw new ControlStackError("execution_audit_fence_invalid", "fencingEpoch must be a positive integer");
+    }
     return this.write(() => {
+      const fencingEpoch = this.assertExecutionAuditAuthority({
+        workItemId,
+        attemptId,
+        leaseId,
+        workerId,
+        fencingEpoch: suppliedFencingEpoch
+      });
       const attributes: Record<string, AttributeValue> = {
+        ...suppliedAttributes,
         "work_item.id": workItemId,
-        ...(input.attributes ?? {})
+        "attempt.id": attemptId,
+        "lease.id": leaseId,
+        "worker.id": workerId,
+        "lease.fencing_epoch": fencingEpoch
       };
-      const event = this.appendAuditEvent(createEvent(input.name, { workItemId, ...(input.body ?? {}) }, attributes));
+      const event = this.appendAuditEvent(
+        createEvent(
+          input.name,
+          { ...(input.body ?? {}), workItemId, attemptId, leaseId, workerId, fencingEpoch },
+          attributes
+        )
+      );
       return { value: event, events: [event] };
     });
   }
@@ -5430,6 +5478,49 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  private assertExecutionAuditAuthority(input: {
+    workItemId: string;
+    attemptId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch?: number;
+  }): number {
+    const attempt = this.db
+      .prepare(
+        `SELECT status, current_fencing_epoch, claimed_by_worker_id
+         FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`
+      )
+      .get(input.attemptId, input.workItemId) as
+      | { status: string; current_fencing_epoch: number; claimed_by_worker_id: string | null }
+      | undefined;
+    const lease = this.db
+      .prepare(
+        `SELECT status, expires_at, worker_id, fencing_epoch
+         FROM attempt_leases WHERE lease_id = ? AND attempt_id = ? AND work_item_id = ?`
+      )
+      .get(input.leaseId, input.attemptId, input.workItemId) as
+      | { status: string; expires_at: string; worker_id: string; fencing_epoch: number }
+      | undefined;
+    if (
+      !attempt ||
+      !lease ||
+      attempt.current_fencing_epoch !== lease.fencing_epoch ||
+      attempt.claimed_by_worker_id !== input.workerId ||
+      lease.worker_id !== input.workerId ||
+      (input.fencingEpoch !== undefined && lease.fencing_epoch !== input.fencingEpoch)
+    ) {
+      throw new ControlStackError("execution_audit_fence_stale", "execution audit authority is stale or mismatched");
+    }
+
+    const liveAttempt = ["leased", "running", "cancellation_requested"].includes(attempt.status);
+    const terminalAttempt = ["succeeded", "failed", "cancelled", "unknown", "quarantined"].includes(attempt.status);
+    if (liveAttempt && lease.status === "active" && Date.parse(lease.expires_at) > Date.now()) {
+      return lease.fencing_epoch;
+    }
+    if (terminalAttempt && lease.status === "consumed") return lease.fencing_epoch;
+    throw new ControlStackError("execution_audit_fence_stale", "execution audit lease is not authoritative");
+  }
+
   private assertActorOwnsActiveLease(workItemId: string, actorId: string | undefined): void {
     if (!actorId) return;
     const lease = this.db
@@ -5628,19 +5719,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return row?.event_hash ?? "";
   }
 
-  private backfillAuditChain(): void {
-    const rows = this.db.prepare(`SELECT * FROM audit_events ORDER BY sequence ASC`).all() as unknown as EventRow[];
-    let previousHash = "";
-    for (const row of rows) {
-      const eventHash = row.event_hash || auditEventHash(rowToEvent({ ...row, previous_hash: previousHash }));
-      if (!row.event_hash) {
-        this.db
-          .prepare(`UPDATE audit_events SET previous_hash = ?, event_hash = ? WHERE sequence = ?`)
-          .run(previousHash, eventHash, row.sequence);
-      }
-      previousHash = eventHash;
-    }
-  }
 }
 
 function rowToWorkItem(row: WorkItemRow): WorkItem {

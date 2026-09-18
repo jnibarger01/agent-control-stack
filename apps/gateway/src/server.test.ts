@@ -3323,13 +3323,31 @@ describe("gateway MCP transport", () => {
     expect(result.response.statusCode).toBe(401);
     expect(result.response.headers["www-authenticate"]).toBe(authChallenge(result.response.json()));
     expect(authChallenge(result.response.json())).toBe(
-      'Bearer resource_metadata="http://localhost:80/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="missing bearer token", scope="acs:work:create"'
+      'Bearer resource_metadata="https://acs.example.test/.well-known/oauth-protected-resource/mcp", error="invalid_token", error_description="missing bearer token", scope="acs:work:create"'
     );
     expect(result.response.json().result.structuredContent).toMatchObject({
       authError: "missing_token",
       requiredScopes: ["acs:work:create"]
     });
     expect(result.workItems).toEqual([]);
+  });
+
+  it("does not derive OAuth resource metadata from forwarded host headers", async () => {
+    const oauth = createTestOAuth();
+    const result = await injectRejectedOAuthToolCall({
+      oauth,
+      headers: {
+        host: "attacker.example.invalid",
+        "x-forwarded-host": "proxy-attacker.example.invalid",
+        "x-forwarded-proto": "https"
+      }
+    });
+
+    expect(result.response.statusCode).toBe(401);
+    expect(authChallenge(result.response.json())).toContain(
+      'resource_metadata="https://acs.example.test/.well-known/oauth-protected-resource/mcp"'
+    );
+    expect(authChallenge(result.response.json())).not.toContain("attacker.example.invalid");
   });
 
   it("fails closed for expired OAuth bearer JWT on tools/call", async () => {
@@ -3452,7 +3470,7 @@ describe("gateway MCP transport", () => {
     expect(result.response.statusCode).toBe(403);
     expect(result.response.headers["www-authenticate"]).toBe(authChallenge(result.response.json()));
     expect(authChallenge(result.response.json())).toBe(
-      'Bearer resource_metadata="http://localhost:80/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", error_description="insufficient scope", scope="acs:work:create"'
+      'Bearer resource_metadata="https://acs.example.test/.well-known/oauth-protected-resource/mcp", error="insufficient_scope", error_description="insufficient scope", scope="acs:work:create"'
     );
     expect(result.response.json().result.structuredContent).toMatchObject({
       authError: "insufficient_scope",

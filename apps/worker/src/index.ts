@@ -420,6 +420,10 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
     workItems.recordExecutionEvent({
       name: draft.name,
       workItemId: running.id,
+      attemptId,
+      leaseId: running.leaseId,
+      workerId,
+      fencingEpoch: running.fencingEpoch!,
       body: draft.body,
       attributes: draft.attributes
     });

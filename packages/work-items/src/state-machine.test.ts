@@ -1698,6 +1698,58 @@ describe("work item state machine", () => {
     }
   });
 
+  it("fails closed when persisted audit hashes are blank instead of silently re-anchoring them", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-audit-blank-hash-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+
+    try {
+      store.create({
+        title: "Audit hash fixture",
+        requester: "agent",
+        intent: "prove blank hashes are tamper evidence",
+        requestedActions: [{ kind: "manual", description: "audit" }],
+        risk: "low"
+      });
+      store.close();
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        db.prepare(`UPDATE audit_events SET previous_hash = '', event_hash = ''`).run();
+      } finally {
+        db.close();
+      }
+
+      const reopened = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(reopened.verifyAuditChain()).toMatchObject({
+          ok: false,
+          failure: { sequence: 1, reason: "event_hash_mismatch" }
+        });
+        expectControlError(
+          () =>
+            reopened.create({
+              title: "must not append",
+              requester: "agent",
+              intent: "fail closed on invalid audit chain",
+              requestedActions: [{ kind: "manual", description: "audit" }],
+              risk: "low"
+            }),
+          "audit_chain_invalid"
+        );
+      } finally {
+        reopened.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // already closed in the tamper path
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("keeps the work item store as the only active audit chain implementation", () => {
     const repoRoot = process.cwd();
     const duplicateAuditPackageName = "@agent-control-stack/" + "audit-log";

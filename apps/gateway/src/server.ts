@@ -1482,14 +1482,20 @@ function resolveMcpActorId(
   return workItems.resolveActorId(candidates);
 }
 
-function mcpResourceMetadataUrl(request: FastifyRequest, oauth: McpOAuthOptions | undefined): string | undefined {
+function mcpResourceMetadataUrl(_request: FastifyRequest, oauth: McpOAuthOptions | undefined): string | undefined {
   if (!oauth) return undefined;
   const configured = process.env.ACS_MCP_RESOURCE_METADATA_URL;
   if (configured) return configured;
-  const forwardedProto = firstHeader(request.headers["x-forwarded-proto"]);
-  const proto = forwardedProto ?? request.protocol;
-  const host = firstHeader(request.headers["x-forwarded-host"]) ?? request.headers.host;
-  return host ? `${proto}://${host}/.well-known/oauth-protected-resource/mcp` : undefined;
+  try {
+    const resource = new URL(oauth.resource ?? oauth.audience);
+    const resourcePath = resource.pathname === "/" ? "" : resource.pathname;
+    resource.pathname = `/.well-known/oauth-protected-resource${resourcePath}`;
+    resource.search = "";
+    resource.hash = "";
+    return resource.toString();
+  } catch {
+    return undefined;
+  }
 }
 
 function protectedResourceMetadata(auth: McpAuthOptions | undefined) {
