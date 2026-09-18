@@ -15,7 +15,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
-import { buildGateway, type GatewayAuthOptions } from "./server.js";
+import { buildGateway, type GatewayAuthOptions, type GatewayCredential } from "./server.js";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
@@ -2762,7 +2762,7 @@ describe("gateway MCP transport", () => {
       displayName: "OAuth User",
       externalRef: "oauth_jwt:user_123"
     });
-    setup.blockWorkItem(unblockItem.id);
+    setup.blockWorkItem(unblockItem.id, { via: "domain_service" });
     setup.close();
 
     const oauth = createTestOAuth();
@@ -3934,6 +3934,43 @@ describe("gateway dashboard sessions", () => {
     }
   });
 
+  it("rejects a previously issued session cookie after its backing credential is revoked", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-revoked-"));
+    const credential: GatewayCredential = {
+      id: "revocable-operator",
+      token: "revocable-operator-token-that-is-long-enough",
+      actor: "user",
+      actorId: "revocable-operator",
+      roles: ["operator"],
+      scopes: ["acs:read", "acs:write"],
+      status: "active"
+    };
+    const auth: GatewayAuthOptions = {
+      token: "legacy-dashboard-token-that-is-long-enough",
+      actor: "user",
+      actorId: "legacy",
+      credentials: [credential]
+    };
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth });
+
+    try {
+      const { cookie } = await loginSession(app, credential.token);
+      credential.status = "revoked";
+
+      const response = await app.inject({
+        method: "GET",
+        url: "/events",
+        headers: { cookie },
+        payloadAsStream: true
+      });
+      if (response.statusCode === 200) response.stream().destroy();
+      expect(response.statusCode).toBe(401);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects expired dashboard session cookies on SSE, work creation, approval, and rejection routes", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-session-expiry-"));
     const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
@@ -4426,7 +4463,7 @@ describe("gateway work-item routes", () => {
       requestedActions: [{ kind: "fs.read", description: "read", params: { paths: ["src/index.ts"] } }],
       risk: "low"
     });
-    setup.blockWorkItem(blocked.id);
+    setup.blockWorkItem(blocked.id, { via: "domain_service" });
     setup.close();
     const app = buildTestGateway({ dbPath, logger: false });
 

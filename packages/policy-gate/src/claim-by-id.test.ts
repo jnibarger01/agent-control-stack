@@ -44,6 +44,50 @@ describe("gateWorkerClaimById (claim_approved_work_item_by_id)", () => {
     }
   });
 
+  it("binds every required approval to an exact-id claim lease", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-claim-by-id-multi-approval-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const policy = createPolicyEngine();
+    const tools = createWorkItemTools(store, policy);
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Exact-id multi approval",
+        requester: "user",
+        intent: "verify every approved action is lease-bound",
+        target: { cwd: "/repo" },
+        requestedActions: [
+          { kind: "fs.write", description: "write one", params: { paths: ["src/one.ts"] } },
+          { kind: "fs.write", description: "write two", params: { paths: ["src/two.ts"] } }
+        ],
+        risk: "high"
+      });
+      const evaluations = policy.evaluateWorkItem(workItem, "approver", "approve");
+      for (const evaluation of evaluations) {
+        tools.approve_work_item({
+          id: workItem.id,
+          approvedBy: "approver",
+          reason: "approve exact action",
+          actionHash: evaluation.actionHash
+        });
+      }
+
+      const claimed = tools.claim_approved_work_item_by_id({ id: workItem.id, workerId: "worker-a" });
+      expect(claimed?.status).toBe("running");
+
+      const dbAny = store as unknown as {
+        db: { prepare: (sql: string) => { all: (...args: unknown[]) => Array<{ approval_id: string }> } };
+      };
+      const additional = dbAny.db
+        .prepare("SELECT approval_id FROM attempt_lease_approvals WHERE work_item_id = ?")
+        .all(workItem.id);
+      expect(additional).toHaveLength(1);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("claims only the requested item and leaves an older approved item untouched", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-claim-by-id-tools-isolation-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));

@@ -854,6 +854,8 @@ export interface PrivilegedTransitionOptions {
    * caller cannot assert authority on behalf of a worker that does not hold the lease.
    */
   actorId?: string;
+  /** Lease bearer proof required for non-terminal transitions away from running. */
+  leaseToken?: string;
 }
 
 export interface SqliteWorkItemStoreOptions {
@@ -982,7 +984,7 @@ export interface WorkItemStore {
   verifyAuditChain(): AuditChainVerification;
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
   approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
-  blockWorkItem(id: string): WorkItem;
+  blockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
   unblockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
   cancelWorkItem(id: string, input?: unknown, options?: PrivilegedTransitionOptions): WorkItem;
   rejectWorkItem(id: string, input?: unknown, options?: PrivilegedTransitionOptions): WorkItem;
@@ -3409,12 +3411,16 @@ export class SqliteWorkItemStore implements WorkItemStore {
       status === "approved" ||
       status === "pending_policy" ||
       status === "needs_approval" ||
+      status === "blocked" ||
       status === "cancelled" ||
       status === "rejected"
     ) {
       requirePrivilegedTransition(options, status);
     }
-    return this.transitionWithEvent(id, status, { actorId: options?.actorId });
+    return this.transitionWithEvent(id, status, {
+      actorId: options?.actorId,
+      leaseToken: options?.leaseToken
+    });
   }
 
   approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem {
@@ -3422,8 +3428,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.transitionWithEvent(id, "approved", { actorId: options?.actorId });
   }
 
-  blockWorkItem(id: string): WorkItem {
-    return this.transitionWithEvent(id, "blocked");
+  blockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem {
+    requirePrivilegedTransition(options, "block");
+    return this.transitionWithEvent(id, "blocked", {
+      actorId: options?.actorId,
+      leaseToken: options?.leaseToken
+    });
   }
 
   unblockWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem {
@@ -5355,6 +5365,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const current = this.getRequired(id);
       const actorId = options.actorId === undefined ? undefined : requiredActorId(options.actorId);
       this.assertActorOwnsActiveLease(id, actorId);
+      if (current.status === "running" && status === "blocked") {
+        this.assertRunningTransitionLeaseProof(id, actorId, options.leaseToken);
+      }
       const updated = transitionWorkItem(current, status);
       const result =
         status === "running"
@@ -5424,6 +5437,30 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .get(workItemId) as { worker_id: string } | undefined;
     if (lease && lease.worker_id !== actorId) {
       throw new ControlStackError("worker_lease_actor_mismatch", "actor does not own the active worker lease");
+    }
+  }
+
+  private assertRunningTransitionLeaseProof(
+    workItemId: string,
+    actorId: string | undefined,
+    leaseToken: string | undefined
+  ): void {
+    if (!actorId || !leaseToken) {
+      throw new ControlStackError(
+        "worker_lease_proof_required",
+        "blocking a running work item requires the active worker identity and lease token"
+      );
+    }
+    const row = this.getRowRequired(workItemId);
+    const lease = this.db
+      .prepare("SELECT worker_id, token_hash FROM leases WHERE work_item_id = ? AND status = 'active'")
+      .get(workItemId) as { worker_id: string; token_hash: string } | undefined;
+    if (!lease || !row.lease_token_hash) {
+      throw new ControlStackError("worker_lease_missing", "active worker lease is required");
+    }
+    const expectedHash = hashLeaseToken(workItemId, actorId, leaseToken);
+    if (lease.worker_id !== actorId || lease.token_hash !== expectedHash || row.lease_token_hash !== expectedHash) {
+      throw new ControlStackError("worker_lease_token_mismatch", "worker lease token does not match the active lease");
     }
   }
 

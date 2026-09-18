@@ -100,7 +100,7 @@ export function evaluateAndRecordPolicy(
 
 export function applyPolicyStatus(store: WorkItemStore, workItem: WorkItem, decision: PolicyDecision): WorkItem {
   if (decision.decision === "deny") {
-    return workItem.status === "blocked" ? workItem : store.blockWorkItem(workItem.id);
+    return workItem.status === "blocked" ? workItem : store.blockWorkItem(workItem.id, policyTransition);
   }
 
   const pending =
@@ -222,7 +222,10 @@ function gateUnblockInTransaction(
 
   const { decision } = evaluateAndRecordPolicy(store, policy, workItem, parsed.actor, "unblock");
   if (decision.decision === "deny") {
-    return { decision, workItem: workItem.status === "blocked" ? workItem : store.blockWorkItem(workItem.id) };
+    return {
+      decision,
+      workItem: workItem.status === "blocked" ? workItem : store.blockWorkItem(workItem.id, policyTransition)
+    };
   }
 
   const pending = workItem.status === "blocked" ? store.unblockWorkItem(workItem.id, policyTransition) : workItem;
@@ -291,7 +294,7 @@ function gateWorkerClaimInTransaction(
     store.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)
   );
   if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
-    const blocked = store.blockWorkItem(candidate.id);
+    const blocked = store.blockWorkItem(candidate.id, policyTransition);
     return {
       ...blocked,
       workerId: parsed.workerId,
@@ -390,7 +393,7 @@ function gateWorkerClaimByIdInTransaction(
     store.getExecutionPlanApproval(candidate.id, plan.planHash, evaluation.actionHash)
   );
   if (decision.decision === "deny" || !admission || missing || planApprovals.some((approval) => !approval)) {
-    const blocked = store.blockWorkItem(candidate.id);
+    const blocked = store.blockWorkItem(candidate.id, policyTransition);
     return {
       ...blocked,
       workerId: parsed.workerId,
@@ -402,12 +405,16 @@ function gateWorkerClaimByIdInTransaction(
     };
   }
 
+  const [firstApproval, ...restApprovals] = planApprovals;
   const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
     attemptAuthority: {
       planHash: plan.planHash,
       admissionId: admission.admissionId,
-      ...(planApprovals[0] ? { approvalId: planApprovals[0].approvalId } : {}),
+      ...(firstApproval ? { approvalId: firstApproval.approvalId } : {}),
+      additionalApprovals: restApprovals
+        .filter((approval): approval is NonNullable<typeof approval> => approval !== undefined)
+        .map((approval) => ({ approvalId: approval.approvalId, actionHash: approval.actionHash })),
       policyVersion: admission.policyVersion,
       policyDecisionHash: admission.policyDecisionHash
     }

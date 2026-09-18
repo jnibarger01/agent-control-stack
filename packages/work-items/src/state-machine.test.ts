@@ -265,7 +265,8 @@ describe("work item state machine", () => {
         requestedActions: [{ kind: "manual", description: "guard" }],
         risk: "low"
       });
-      store.blockWorkItem(workItem.id);
+      expectControlError(() => store.blockWorkItem(workItem.id), "policy_gate_required");
+      store.blockWorkItem(workItem.id, domainTransition);
 
       expectControlError(() => store.approveWorkItem(workItem.id), "policy_gate_required");
       expectControlError(() => store.unblockWorkItem(workItem.id), "policy_gate_required");
@@ -274,6 +275,48 @@ describe("work item state machine", () => {
       expectControlError(() => store.transition(workItem.id, "approved"), "policy_gate_required");
     } finally {
       store.close();
+    }
+  });
+
+  it("requires active lease proof before blocking a running work item", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-running-block-fence-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+
+    try {
+      const workItem = store.create({
+        title: "Running block fence",
+        requester: "user",
+        intent: "prevent stale workers from revoking another worker lease",
+        requestedActions: [{ kind: "fs.read", description: "read" }],
+        risk: "low"
+      });
+      store.approveWorkItem(workItem.id, domainTransition);
+      const claimed = store.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
+      if (!claimed) throw new Error("expected running claim");
+
+      expectControlError(
+        () => store.blockWorkItem(workItem.id, { via: "domain_service", actorId: "worker-a", leaseToken: "stale" }),
+        "worker_lease_token_mismatch"
+      );
+      expectControlError(
+        () =>
+          store.transition(workItem.id, "blocked", {
+            via: "domain_service",
+            actorId: "worker-b",
+            leaseToken: claimed.leaseToken
+          }),
+        "worker_lease_actor_mismatch"
+      );
+
+      const blocked = store.blockWorkItem(workItem.id, {
+        via: "domain_service",
+        actorId: "worker-a",
+        leaseToken: claimed.leaseToken
+      });
+      expect(blocked.status).toBe("blocked");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 

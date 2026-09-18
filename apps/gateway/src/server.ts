@@ -1648,9 +1648,13 @@ function matchGatewayCredential(token: string | undefined, auth: GatewayAuthOpti
 function gatewayCredentialForToken(token: string | undefined, auth: GatewayAuthOptions): GatewayCredential | undefined {
   const credential = matchGatewayCredential(token, auth);
   if (!credential) return undefined;
-  if (credential.status === "revoked") return undefined;
-  if (credential.expiresAt && Date.parse(credential.expiresAt) <= Date.now()) return undefined;
+  if (!gatewayCredentialIsLive(credential)) return undefined;
   return credential;
+}
+
+function gatewayCredentialIsLive(credential: GatewayCredential, nowMs = Date.now()): boolean {
+  if (credential.status === "revoked") return false;
+  return !credential.expiresAt || Date.parse(credential.expiresAt) > nowMs;
 }
 
 function bearerToken(authorization: string | string[] | undefined): string | undefined {
@@ -1708,7 +1712,13 @@ function gatewayCredentialForSessionCookie(
     const credential =
       configuredCredential ??
       (parsed.credentialId === "legacy" ? gatewayCredentialForToken(auth.token, auth) : undefined);
-    if (!credential || !constantTimeEqual(signature, sessionSignature(credential.token, payload))) return undefined;
+    if (
+      !credential ||
+      !gatewayCredentialIsLive(credential, now.getTime()) ||
+      !constantTimeEqual(signature, sessionSignature(credential.token, payload))
+    ) {
+      return undefined;
+    }
     const nowSeconds = Math.floor(now.getTime() / 1000);
     return parsed.actor === credential.actor &&
       (parsed.actorId ?? "") === credential.actorId &&
