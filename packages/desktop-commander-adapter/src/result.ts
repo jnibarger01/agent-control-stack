@@ -24,6 +24,8 @@ export interface MachineExecutionResult {
   output: string;
   /** Bounded + redacted error text when `isError`. */
   error?: string;
+  /** Canonical ControlStackError code when the failure came from ACS itself. */
+  errorCode?: string;
   /** Whether `output` was truncated to fit the byte cap. */
   truncated: boolean;
   /** Deterministic hash of the normalised result for replay detection. */

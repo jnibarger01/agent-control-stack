@@ -21,6 +21,7 @@ import { buildEvidenceManifest, computeWorkspaceRevision, observation } from "@a
 import {
   resolveExecutionBackend,
   SqliteWorkItemStore,
+  type AttemptLease,
   type ClaimedWorkItem,
   type ExecutionBackend,
   type WorkItem,
@@ -430,7 +431,17 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
   };
 
   // --- Phase 12: a failed audit precondition blocks execution -----------------
-  emit(authorizationRequestedEvent({ workItemId: running.id, workerId, requestId, toolName: "<pending>" }));
+  emit(
+    authorizationRequestedEvent({
+      workItemId: running.id,
+      workerId,
+      requestId,
+      toolName: "<pending>",
+      attemptId: attemptId,
+      leaseId: running.leaseId,
+      fencingEpoch: running.fencingEpoch
+    })
+  );
 
   // Trusted state re-read from the authoritative store (never transport input).
   const trustedWorkItem = workItems.get(running.id);
@@ -445,7 +456,10 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
         workerId,
         requestId,
         code: "plan_execution_mode_mismatch",
-        reason: `admitted plan execution mode is ${plan?.definition.constraints.executionMode ?? "missing"}`
+        reason: `admitted plan execution mode is ${plan?.definition.constraints.executionMode ?? "missing"}`,
+        attemptId,
+        leaseId: running.leaseId,
+        fencingEpoch: running.fencingEpoch
       })
     );
     return submitDesktopCommanderFailure(input, requestId, "plan_execution_mode_mismatch");
@@ -458,7 +472,10 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
         workerId,
         requestId,
         code: "lease_missing",
-        reason: "no active attempt lease"
+        reason: "no active attempt lease",
+        attemptId,
+        leaseId: running.leaseId,
+        fencingEpoch: running.fencingEpoch
       })
     );
     return submitDesktopCommanderFailure(input, requestId, "lease_missing");
@@ -483,7 +500,10 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
         workerId,
         requestId,
         code,
-        reason: error instanceof Error ? error.message : String(error)
+        reason: error instanceof Error ? error.message : String(error),
+        attemptId,
+        leaseId: running.leaseId,
+        fencingEpoch: running.fencingEpoch
       })
     );
     return submitDesktopCommanderFailure(input, requestId, code);
@@ -493,17 +513,78 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
   emit(executionStartedEvent(authorization));
   emit(toolCalledEvent(authorization));
 
-  const executionResult = await machineExecutor.execute({ authorization });
+  // --- Honest execution evidence: base revision must be captured BEFORE the
+  // tool runs; the result revision is recomputed AFTER it runs so real
+  // mutations are reflected. networkProfile reports the actually granted
+  // runtime network scopes (ACS does not contain Desktop Commander egress).
+  const containment = machineExecutorContainmentFromEnv();
+  const allowedRoot = containment.allowedRoots[0] ?? "none";
+  const workspaceId = workspaceIdentityFromContainment(containment.allowedRoots);
+  const noWorkspaceRevision = (seed: unknown): string =>
+    `unavailable:${domainHash("acs:no-workspace:v1", seed)}`;
+  let baseRevision = noWorkspaceRevision({ attemptId });
+  try {
+    baseRevision = (await computeWorkspaceRevision(allowedRoot)).revision;
+  } catch {
+    // Not a git worktree — the sentinel revision is deterministic and honest.
+  }
+  const networkProfile = configuredNetworkProfile();
 
-  emit(
-    toolOutcomeEvent(authorization, {
-      ok: !executionResult.isError,
-      durationMs: executionResult.durationMs,
-      resultHash: executionResult.resultHash,
-      truncated: executionResult.truncated,
-      isError: executionResult.isError
-    })
-  );
+  // Exactly one terminal tool-outcome audit record per execution path.
+  let terminalEmitted = false;
+  const emitTerminalOutcome = (
+    outcome: Parameters<typeof toolOutcomeEvent>[1]
+  ): void => {
+    if (terminalEmitted) return;
+    // Mark terminal only AFTER the store accepts the event: if the lease
+    // lapsed mid-execution and the audit authority rejects the emit, the
+    // failure must propagate (fail-closed) rather than silently suppress the
+    // terminal record.
+    emit(toolOutcomeEvent(authorization, outcome));
+    terminalEmitted = true;
+  };
+
+  let executionResult: MachineExecutionResult;
+  try {
+    executionResult = await machineExecutor.execute({ authorization });
+  } catch (error) {
+    // execute() threw before producing a result (authorization/capability/
+    // connection failure): emit the terminal audit outcome, then preserve the
+    // original error semantics for the caller.
+    const errorCode =
+      error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : undefined;
+    emitTerminalOutcome({
+      ok: false,
+      durationMs: Math.max(0, Date.now() - Date.parse(startedAt)),
+      resultHash: "",
+      truncated: false,
+      isError: true,
+      outcome: thrownOutcomeFor(errorCode),
+      ...(errorCode ? { errorCode } : {})
+    });
+    throw error;
+  }
+  const terminalOutcome = executionResult.errorCode
+    ? thrownOutcomeFor(executionResult.errorCode)
+    : executionResult.isError
+      ? ("failed" as const)
+      : ("succeeded" as const);
+  emitTerminalOutcome({
+    ok: !executionResult.isError,
+    durationMs: executionResult.durationMs,
+    resultHash: executionResult.resultHash,
+    truncated: executionResult.truncated,
+    isError: executionResult.isError,
+    outcome: terminalOutcome,
+    ...(executionResult.errorCode ? { errorCode: executionResult.errorCode } : {})
+  });
+
+  let resultRevision = noWorkspaceRevision({ attemptId, phase: "result" });
+  try {
+    resultRevision = (await computeWorkspaceRevision(allowedRoot)).revision;
+  } catch {
+    // Not a git worktree — the sentinel revision is deterministic and honest.
+  }
 
   const finishedAt = executionResult.completedAt;
   const ok = !executionResult.isError;
@@ -522,7 +603,12 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
       executionResult,
       workerId,
       startedAt,
-      finishedAt
+      finishedAt,
+      allowedRoot,
+      workspaceId,
+      baseRevision,
+      resultRevision,
+      networkProfile
     });
     if (awaiting) {
       return {
@@ -583,7 +669,10 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
         requestId,
         toolName: authorization.toolName,
         code: "result_persistence_failed",
-        reason: error instanceof Error ? error.message : String(error)
+        reason: error instanceof Error ? error.message : String(error),
+        attemptId,
+        leaseId: running.leaseId,
+        fencingEpoch: running.fencingEpoch
       })
     );
     throw new Error(
@@ -629,23 +718,74 @@ function submitDesktopCommanderFailure(
     error: code,
     structuredOutput: { simulated: false, blocked: true, reason: code },
     artifacts: [],
-    simulationMetadata: { executionMode: "dry_run", simulated: true, reason: code }
+    // A policy denial never invoked Desktop Commander: record it truthfully as
+    // a blocked desktop_commander authorization, not as a simulated dry run.
+    simulationMetadata: {
+      executionMode: "desktop_commander",
+      simulated: false,
+      blocked: true,
+      backend: "desktop-commander-mcp",
+      requestId,
+      reason: code
+    }
   });
   return { executed: false, workItemId: running.id, reason: `desktop_commander authorization denied: ${code}` };
+}
+
+/** Canonical ACS error code → terminal audit outcome classification. */
+function thrownOutcomeFor(
+  errorCode: string | undefined
+): "succeeded" | "failed" | "timeout" | "aborted" | "runtime_error" {
+  if (errorCode === "desktop_commander_tool_timeout") return "timeout";
+  if (errorCode === "desktop_commander_tool_aborted") return "aborted";
+  if (errorCode) return "failed";
+  return "runtime_error";
+}
+
+/**
+ * Honest network egress profile for evidence/telemetry.
+ *
+ * Desktop Commander's MCP process is NOT network-contained by ACS, so when the
+ * configured runtime grants any `network.*` scope the execution could reach the
+ * network and the profile must say so explicitly ("unmanaged:..."). Only a
+ * runtime granted zero network scopes is honestly reported as "none".
+ */
+export function configuredNetworkProfile(env: NodeJS.ProcessEnv = process.env): string {
+  let scopes: unknown;
+  try {
+    scopes = JSON.parse(env.ACS_DESKTOP_COMMANDER_RUNTIME_SCOPES_JSON ?? "[]");
+  } catch {
+    return "unmanaged:unknown";
+  }
+  if (!Array.isArray(scopes)) return "unmanaged:unknown";
+  const networkScopes = scopes
+    .filter((scope): scope is string => typeof scope === "string" && scope.startsWith("network."))
+    .sort();
+  if (networkScopes.length === 0) return "none";
+  return `unmanaged:${networkScopes.join("+")}`;
 }
 
 interface GovernedEvidenceInput {
   workItems: WorkItemStore;
   running: ClaimedWorkItem;
-  plan: { planId: string; planHash: string };
-  trustedWorkItem: Pick<WorkItem, "id" | "risk" | "requestedActions" | "target">;
-  lease: { policyVersion: string };
+  plan: NonNullable<ReturnType<WorkItemStore["getCurrentExecutionPlan"]>>;
+  trustedWorkItem: WorkItem;
+  lease: AttemptLease;
   authorization: ExecutionAuthorization;
   executionResult: MachineExecutionResult;
   workerId: string;
   startedAt: string;
   finishedAt: string;
+  allowedRoot: string;
+  workspaceId: string;
+  /** Workspace revision captured before the tool ran. */
+  baseRevision: string;
+  /** Workspace revision recomputed after the tool ran (real mutations). */
+  resultRevision: string;
+  /** Actually granted network egress profile (honest, never a default). */
+  networkProfile: string;
 }
+
 
 /**
  * ADR 0015: build + record an ACS-owned evidence manifest and a verification
@@ -655,19 +795,21 @@ interface GovernedEvidenceInput {
  * the `submitWorkResult` guard keeps `succeeded` unreachable until a decision.
  */
 async function recordGovernedExecutionEvidence(input: GovernedEvidenceInput): Promise<boolean> {
-  const { workItems, running, plan, trustedWorkItem, lease, authorization, executionResult } = input;
+  const {
+    workItems,
+    running,
+    plan,
+    trustedWorkItem,
+    lease,
+    authorization,
+    executionResult,
+    workspaceId,
+    baseRevision,
+    resultRevision,
+    networkProfile
+  } = input;
   const attemptId = running.attemptId!;
   const via = { via: "domain_service" as const, actorId: input.workerId };
-  const containment = machineExecutorContainmentFromEnv();
-  const allowedRoot = containment.allowedRoots[0] ?? "none";
-  const workspaceId = workspaceIdentityFromContainment(containment.allowedRoots);
-
-  let baseRevision = `unavailable:${domainHash("acs:no-workspace:v1", { attemptId })}`;
-  try {
-    baseRevision = (await computeWorkspaceRevision(allowedRoot)).revision;
-  } catch {
-    // Not a git worktree — the sentinel revision is deterministic and honest.
-  }
 
   const binding: AdmittedPlanBinding = {
     schemaVersion: "acs.admitted-plan.v1",
@@ -677,7 +819,7 @@ async function recordGovernedExecutionEvidence(input: GovernedEvidenceInput): Pr
     requestedActionsHash: domainHash("acs:requested-actions:v1", trustedWorkItem.requestedActions),
     workspace: { workspaceId, baseRevision },
     sandboxProfile: "desktop_commander",
-    networkProfile: "none",
+    networkProfile,
     capabilityProfileHash: capabilityProfileHash([authorization.toolName]),
     validationProfileHash: validationProfileHash({}),
     policyVersion: lease.policyVersion
@@ -691,7 +833,7 @@ async function recordGovernedExecutionEvidence(input: GovernedEvidenceInput): Pr
     planHash: plan.planHash,
     actionHash: authorization.actionHash,
     baseWorkspaceRevision: baseRevision,
-    resultWorkspaceRevision: baseRevision,
+    resultWorkspaceRevision: resultRevision,
     changedPaths: [...authorization.canonicalPaths],
     diffHash: executionResult.resultHash || domainHash("acs:no-diff:v1", { attemptId }),
     commands: [
@@ -706,7 +848,7 @@ async function recordGovernedExecutionEvidence(input: GovernedEvidenceInput): Pr
     ],
     testEvidence: null,
     sandboxProfile: "desktop_commander",
-    networkProfile: "none",
+    networkProfile,
     networkDecisions: { allowed: 0, denied: 0 },
     observations: [
       observation("desktop_commander.result_hash", "execution-controller", executionResult.resultHash),
@@ -728,7 +870,7 @@ async function recordGovernedExecutionEvidence(input: GovernedEvidenceInput): Pr
       planHash: plan.planHash,
       actionHash: authorization.actionHash,
       baseWorkspaceRevision: baseRevision,
-      resultWorkspaceRevision: baseRevision,
+      resultWorkspaceRevision: resultRevision,
       manifest: manifest as unknown as Record<string, unknown>
     },
     via

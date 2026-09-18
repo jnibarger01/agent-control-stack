@@ -113,14 +113,38 @@ const simulationMetadataSchema = z.discriminatedUnion("executionMode", [
       simulated: z.literal(false),
       backend: z.literal("desktop-commander-mcp"),
       backendVersion: z.string().max(128).optional(),
-      toolName: z.string().min(1).max(128),
-      invocationFingerprint: hashSchema,
+      /**
+       * True when execution was authorized-then-denied before any Desktop
+       * Commander invocation. A blocked execution is a real desktop_commander
+       * authorization outcome, never a simulated dry run; toolName and
+       * invocationFingerprint are only required once a tool was invoked.
+       */
+      blocked: z.literal(true).optional(),
+      toolName: z.string().min(1).max(128).optional(),
+      invocationFingerprint: hashSchema.optional(),
       requestId: identifierSchema,
       approvalId: identifierSchema.optional(),
       workerVersion: identifierSchema.optional(),
       reason: z.string().max(512).optional()
     })
     .strict()
+    .superRefine((value, context) => {
+      if (value.blocked) return;
+      if (value.toolName === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["toolName"],
+          message: "toolName is required unless the execution was blocked before invocation"
+        });
+      }
+      if (value.invocationFingerprint === undefined) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["invocationFingerprint"],
+          message: "invocationFingerprint is required unless the execution was blocked before invocation"
+        });
+      }
+    })
 ]);
 
 const structuredOutputSchema = z.record(z.string(), z.unknown()).superRefine((value, context) => {

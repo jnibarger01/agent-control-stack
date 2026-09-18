@@ -271,3 +271,69 @@ describe("SqliteDesktopCommanderRuntimeRegistry", () => {
     }
   });
 });
+
+describe("capability issuance uniqueness (migration 026 database authority)", () => {
+  it("rejects a second mint for the same lease/attempt/invocation with a deterministic error", () => {
+    const fixture = issuanceFixture();
+    try {
+      fixture.registry.recordIssuance(fixture.binding);
+      // Different nonce (so nonce_hash uniqueness is not what fires) but the
+      // same invocation: the lease/invocation unique index must be the
+      // authority, surfaced as a canonical ControlStackError.
+      expect(() => fixture.registry.recordIssuance({ ...fixture.binding, nonce: "B".repeat(43) })).toThrowError(
+        /already issued/
+      );
+      const db = new DatabaseSync(fixture.dbPath);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM desktop_commander_capability_issuances").get()).toEqual({ count: 1 });
+      db.close();
+    } finally {
+      fixture.registry.close();
+      fixture.store.close();
+    }
+  });
+
+  it("permits distinct invocations on the same lease", () => {
+    const fixture = issuanceFixture();
+    try {
+      fixture.registry.recordIssuance(fixture.binding);
+      fixture.registry.recordIssuance({
+        ...fixture.binding,
+        invocationHash: hex("5"),
+        nonce: "C".repeat(43)
+      });
+      const db = new DatabaseSync(fixture.dbPath);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM desktop_commander_capability_issuances").get()).toEqual({ count: 2 });
+      db.close();
+    } finally {
+      fixture.registry.close();
+      fixture.store.close();
+    }
+  });
+
+  it("allows only one valid capability under concurrent mint attempts", async () => {
+    const fixture = issuanceFixture();
+    const secondConnection = new SqliteDesktopCommanderRuntimeRegistry(fixture.dbPath);
+    try {
+      const results = await Promise.allSettled([
+        Promise.resolve().then(() => fixture.registry.recordIssuance(fixture.binding)),
+        Promise.resolve().then(() =>
+          secondConnection.recordIssuance({ ...fixture.binding, nonce: "D".repeat(43) })
+        )
+      ]);
+      const fulfilled = results.filter((result) => result.status === "fulfilled");
+      const rejected = results.filter((result) => result.status === "rejected");
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      if (rejected[0]?.status === "rejected") {
+        expect(String((rejected[0] as PromiseRejectedResult).reason)).toMatch(/already issued/);
+      }
+      const db = new DatabaseSync(fixture.dbPath);
+      expect(db.prepare("SELECT COUNT(*) AS count FROM desktop_commander_capability_issuances").get()).toEqual({ count: 1 });
+      db.close();
+    } finally {
+      secondConnection.close();
+      fixture.registry.close();
+      fixture.store.close();
+    }
+  });
+});

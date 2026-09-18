@@ -61,7 +61,12 @@ const migrationFiles = [
     name: "desktop_commander_runtime_capabilities",
     filename: "024_desktop_commander_runtime_capabilities.sql"
   },
-  { version: 25, name: "device_auth_hardening", filename: "025_device_auth_hardening.sql" }
+  { version: 25, name: "device_auth_hardening", filename: "025_device_auth_hardening.sql" },
+  {
+    version: 26,
+    name: "desktop_commander_capability_uniqueness",
+    filename: "026_desktop_commander_capability_uniqueness.sql"
+  }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

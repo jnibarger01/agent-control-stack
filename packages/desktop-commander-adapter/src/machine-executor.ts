@@ -209,8 +209,14 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
             this.now()
           );
         })
-        .then(() => undefined)
+        .then(() => {
+          // Success: drop the cached promise so a later disconnect can
+          // reconnect instead of awaiting a stale resolved promise.
+          this.connecting = undefined;
+        })
         .catch((error) => {
+          // Failure: never cache a rejected promise; the next caller must be
+          // able to retry the connection from scratch.
           this.connecting = undefined;
           throw error instanceof Error
             ? new ControlStackError("desktop_commander_connect_failed", error.message)
@@ -299,6 +305,7 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
         isError: true,
         output: "",
         error: message.slice(0, 4000),
+        ...(error instanceof ControlStackError ? { errorCode: error.code } : {}),
         truncated: false,
         resultHash: "",
         omittedBlocks: 0
@@ -377,8 +384,24 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
     signal?: AbortSignal
   ): Promise<T> {
     return await new Promise<T>((resolve, reject) => {
+      let settled = false;
+      // The stdio MCP transport has no server-side cancellation primitive and
+      // carries one execution at a time, so the only way to guarantee a
+      // timed-out or aborted tool call does not keep executing in the
+      // background is to tear the transport down. This intentionally kills
+      // any sibling in-flight call (the worker executes one attempt at a
+      // time); the next ensureConnected() call establishes a fresh child.
+      // Known trade-off: repeated slow tool calls cause bounded spawn/kill
+      // churn — no unbounded background execution is possible.
+      const cancelUnderlying = (reason: ControlStackError): void => {
+        if (settled) return;
+        settled = true;
+        this.connecting = undefined;
+        void this.transport.close().catch(() => undefined);
+        reject(reason);
+      };
       const timer = setTimeout(() => {
-        reject(
+        cancelUnderlying(
           new ControlStackError(
             "desktop_commander_tool_timeout",
             `Desktop Commander tool '${toolName}' timed out after ${timeoutMs}ms`
@@ -387,7 +410,7 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
       }, timeoutMs);
       const onAbort = () => {
         clearTimeout(timer);
-        reject(new ControlStackError("desktop_commander_tool_aborted", `tool '${toolName}' aborted`));
+        cancelUnderlying(new ControlStackError("desktop_commander_tool_aborted", `tool '${toolName}' aborted`));
       };
       if (signal) {
         if (signal.aborted) {
@@ -398,11 +421,15 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
       }
       promise.then(
         (value) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           resolve(value);
         },
         (error) => {
+          if (settled) return;
+          settled = true;
           clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           reject(error);

@@ -354,26 +354,50 @@ export class SqliteDesktopCommanderRuntimeRegistry {
         throw new ControlStackError("desktop_commander_approval_rejected", "approval is not permitted for this tool");
       }
       const issuanceId = createId("dc_capability");
-      this.db
-        .prepare(
-          `INSERT INTO desktop_commander_capability_issuances (capability_issuance_id, lease_id, attempt_id, work_item_id, runtime_id, action_hash, request_hash, invocation_hash, approval_id, key_id, nonce_hash, issued_at, expires_at)
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO desktop_commander_capability_issuances (capability_issuance_id, lease_id, attempt_id, work_item_id, runtime_id, action_hash, request_hash, invocation_hash, approval_id, key_id, nonce_hash, issued_at, expires_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-        )
-        .run(
-          issuanceId,
-          input.leaseId,
-          input.attemptId,
-          input.workItemId,
-          input.runtimeId,
-          input.actionHash,
-          requestHash,
-          input.invocationHash,
-          approvalId ?? null,
-          input.keyId,
-          desktopCommanderCapabilityNonceHash(input.nonce),
-          now,
-          input.expiresAt
-        );
+          )
+          .run(
+            issuanceId,
+            input.leaseId,
+            input.attemptId,
+            input.workItemId,
+            input.runtimeId,
+            input.actionHash,
+            requestHash,
+            input.invocationHash,
+            approvalId ?? null,
+            input.keyId,
+            desktopCommanderCapabilityNonceHash(input.nonce),
+            now,
+            input.expiresAt
+          );
+      } catch (error) {
+        // Database authority: migration 026 enforces one capability per
+        // (lease, attempt, work item, invocation). Concurrent mint attempts
+        // serialize on BEGIN IMMEDIATE and the loser violates the unique
+        // index — surface a deterministic control-stack error, never a raw
+        // SQLite constraint failure. Match ONLY uniqueness violations on this
+        // table (its UNIQUE constraints are exactly the duplicate-mint
+        // guards: nonce_hash and the one-per-invocation index). Foreign-key,
+        // CHECK, and NOT NULL integrity failures must not be misreported as
+        // a benign duplicate.
+        const code = (error as { code?: string }).code ?? "";
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          code === "SQLITE_CONSTRAINT_UNIQUE" ||
+          /UNIQUE constraint failed: desktop_commander_capability_issuances[.\s]/.test(message)
+        ) {
+          throw new ControlStackError(
+            "desktop_commander_capability_already_issued",
+            "a capability was already issued for this lease and invocation"
+          );
+        }
+        throw error;
+      }
       const insertScope = this.db.prepare(
         "INSERT INTO desktop_commander_capability_issuance_scopes (capability_issuance_id, scope_name) VALUES (?, ?)"
       );
