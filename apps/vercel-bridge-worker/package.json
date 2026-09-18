@@ -1,0 +1,17 @@
+{
+  "name": "@agent-control-stack/vercel-bridge-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "acs-vercel-bridge": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "npm run build -w @agent-control-stack/vercel-bridge-contract && tsc -b"
+  },
+  "dependencies": {
+    "@agent-control-stack/vercel-bridge-contract": "0.1.0",
+    "@vercel/queue": "^0.6.0"
+  }
+}
