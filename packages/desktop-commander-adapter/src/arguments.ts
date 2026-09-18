@@ -108,10 +108,8 @@ export function normalizeInvocation(
     }
     // Throws on any forbidden/destructive command. The contained cwd (already
     // canonicalised + proven inside an allow root) is the command policy's base.
-    validateProcessCommand(commandLine, [
-      commandCwd ?? (containment.allowedRoots[0] as string),
-      ...containment.allowedRoots
-    ]);
+    const validatedCommand = validateProcessCommand(commandLine, containment, commandCwd);
+    args[key] = validatedCommand.resolvedCommandLine;
   }
 
   return {

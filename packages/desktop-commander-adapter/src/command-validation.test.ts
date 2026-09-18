@@ -40,6 +40,26 @@ describe("validateProcessCommand", () => {
     expect(() => validateProcessCommand("chmod 777 /etc", roots)).toThrow(/forbidden|approval|destructive/);
   });
 
+  it("rejects caller-supplied executable paths", () => {
+    expect(() => validateProcessCommand("/tmp/evil/git status", roots)).toThrow(/executable paths are forbidden/);
+  });
+
+  it("rejects command-policy bypass flags", () => {
+    expect(() => validateProcessCommand("git diff --no-index /etc/shadow /dev/null", roots)).toThrow(/dangerous command argument/);
+    expect(() => validateProcessCommand("docker run --privileged alpine", roots)).toThrow(/dangerous command argument/);
+    expect(() => validateProcessCommand("docker run -v /:/host alpine", roots)).toThrow(/dangerous command argument/);
+  });
+
+  it("contains path-bearing output flags", () => {
+    expect(() => validateProcessCommand("git diff --output=/etc/acs-command-escape", roots)).toThrow(/outside every allow root/);
+  });
+
+  it("resolves accepted executables from a fixed system path", () => {
+    const result = validateProcessCommand("git status", roots);
+    expect(result.resolvedExecutable).toMatch(/^\/(usr\/)?bin\/git$|^\/usr\/local\/bin\/git$/);
+    expect(result.resolvedCommandLine).toContain("git status");
+  });
+
   it("rejects NUL bytes", () => {
     expect(() => validateProcessCommand("git\0status", roots)).toThrow(/NUL/);
   });

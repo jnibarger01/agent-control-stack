@@ -55,6 +55,22 @@ describe("normalizeInvocation", () => {
     expect(ok.canonicalPaths).toContain(root);
   });
 
+  it("start_process rejects a caller-supplied shell", () => {
+    expect(() =>
+      normalizeInvocation(
+        "start_process",
+        { command: "git status", timeout_ms: 1000, cwd: root, shell: "/tmp/evil/sh" },
+        config
+      )
+    ).toThrow(/invalid arguments/);
+  });
+
+  it("start_process rejects credential paths in command arguments", () => {
+    expect(() =>
+      normalizeInvocation("start_process", { command: "cat .ssh/id_rsa", timeout_ms: 1000, cwd: root }, config)
+    ).toThrow(/forbidden|credential\/system path is denied/);
+  });
+
   it("start_process requires an explicit contained cwd", () => {
     expect(() => normalizeInvocation("start_process", { command: "git status", timeout_ms: 1000 }, config)).toThrow(
       /invalid arguments/
