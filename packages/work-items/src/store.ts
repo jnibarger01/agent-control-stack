@@ -4082,27 +4082,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const value = suppliedAttributes[key];
       return typeof value === "string" ? value : "";
     };
-    const attemptId = requiredString(
-      input.attemptId ?? attributeString("attempt.id"),
-      "attemptId"
-    );
-    const leaseId = requiredString(
-      input.leaseId ?? attributeString("lease.id"),
-      "leaseId"
-    );
-    const workerId = requiredString(
-      input.workerId ?? attributeString("worker.id"),
-      "workerId"
-    );
+    const attemptId = requiredString(input.attemptId ?? attributeString("attempt.id"), "attemptId");
+    const leaseId = requiredString(input.leaseId ?? attributeString("lease.id"), "leaseId");
+    const workerId = requiredString(input.workerId ?? attributeString("worker.id"), "workerId");
     const suppliedFencingEpoch =
       input.fencingEpoch ??
       (typeof suppliedAttributes["lease.fencing_epoch"] === "number"
         ? suppliedAttributes["lease.fencing_epoch"]
         : undefined);
-    if (
-      suppliedFencingEpoch !== undefined &&
-      (!Number.isInteger(suppliedFencingEpoch) || suppliedFencingEpoch <= 0)
-    ) {
+    if (suppliedFencingEpoch !== undefined && (!Number.isInteger(suppliedFencingEpoch) || suppliedFencingEpoch <= 0)) {
       throw new ControlStackError("execution_audit_fence_invalid", "fencingEpoch must be a positive integer");
     }
     return this.write(() => {
@@ -5491,16 +5479,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
          FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`
       )
       .get(input.attemptId, input.workItemId) as
-      | { status: string; current_fencing_epoch: number; claimed_by_worker_id: string | null }
-      | undefined;
+      { status: string; current_fencing_epoch: number; claimed_by_worker_id: string | null } | undefined;
     const lease = this.db
       .prepare(
         `SELECT status, expires_at, worker_id, fencing_epoch
          FROM attempt_leases WHERE lease_id = ? AND attempt_id = ? AND work_item_id = ?`
       )
       .get(input.leaseId, input.attemptId, input.workItemId) as
-      | { status: string; expires_at: string; worker_id: string; fencing_epoch: number }
-      | undefined;
+      { status: string; expires_at: string; worker_id: string; fencing_epoch: number } | undefined;
     if (
       !attempt ||
       !lease ||
@@ -5718,7 +5704,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       { event_hash: string } | undefined;
     return row?.event_hash ?? "";
   }
-
 }
 
 function rowToWorkItem(row: WorkItemRow): WorkItem {

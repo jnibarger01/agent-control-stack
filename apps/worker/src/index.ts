@@ -9,6 +9,7 @@ import {
   type InjectedSkill
 } from "@agent-control-stack/procedural-learning";
 import { executeSandboxed, type SandboxResult } from "@agent-control-stack/sandbox";
+import { resolve, sep } from "node:path";
 import { ControlStackError, domainHash, stableHash } from "@agent-control-stack/shared";
 import {
   admittedPlanHash,
@@ -510,31 +511,59 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
   }
 
   emit(authorizationGrantedEvent(authorization));
+
+  // Fail closed BEFORE any execution: workspace revision evidence must bind to
+  // the single containment root the invocation actually targets. An invocation
+  // whose canonical paths span multiple independent roots cannot be represented
+  // truthfully by one base/result revision pair, so it is denied instead of
+  // fabricating evidence from root 0.
+  const containment = machineExecutorContainmentFromEnv();
+  let affectedRoot: string | undefined;
+  try {
+    affectedRoot = requireAffectedWorkspaceRoot(containment, authorization.canonicalPaths);
+  } catch (error) {
+    const code = error instanceof ControlStackError ? error.code : "workspace_ambiguous";
+    emit(
+      authorizationDeniedEvent({
+        workItemId: running.id,
+        workerId,
+        requestId,
+        code,
+        reason: error instanceof Error ? error.message : String(error),
+        attemptId,
+        leaseId: running.leaseId,
+        fencingEpoch: running.fencingEpoch
+      })
+    );
+    return submitDesktopCommanderFailure(input, requestId, code);
+  }
+
   emit(executionStartedEvent(authorization));
   emit(toolCalledEvent(authorization));
 
   // --- Honest execution evidence: base revision must be captured BEFORE the
-  // tool runs; the result revision is recomputed AFTER it runs so real
-  // mutations are reflected. networkProfile reports the actually granted
-  // runtime network scopes (ACS does not contain Desktop Commander egress).
-  const containment = machineExecutorContainmentFromEnv();
-  const allowedRoot = containment.allowedRoots[0] ?? "none";
-  const workspaceId = workspaceIdentityFromContainment(containment.allowedRoots);
-  const noWorkspaceRevision = (seed: unknown): string =>
-    `unavailable:${domainHash("acs:no-workspace:v1", seed)}`;
+  // tool runs, on the root the invocation actually targets; the result revision
+  // is recomputed AFTER it runs so real mutations are reflected. networkProfile
+  // reports the actual containment/authority of the execution (ACS does not
+  // contain Desktop Commander egress, so it is never declared isolated).
+  const allowedRoot = affectedRoot ?? "none";
+  const workspaceId = affectedRoot
+    ? workspaceIdentityFromContainment([affectedRoot])
+    : workspaceIdentityFromContainment(containment.allowedRoots);
+  const noWorkspaceRevision = (seed: unknown): string => `unavailable:${domainHash("acs:no-workspace:v1", seed)}`;
   let baseRevision = noWorkspaceRevision({ attemptId });
-  try {
-    baseRevision = (await computeWorkspaceRevision(allowedRoot)).revision;
-  } catch {
-    // Not a git worktree — the sentinel revision is deterministic and honest.
+  if (affectedRoot) {
+    try {
+      baseRevision = (await computeWorkspaceRevision(affectedRoot)).revision;
+    } catch {
+      // Not a git worktree — the sentinel revision is deterministic and honest.
+    }
   }
   const networkProfile = configuredNetworkProfile();
 
   // Exactly one terminal tool-outcome audit record per execution path.
   let terminalEmitted = false;
-  const emitTerminalOutcome = (
-    outcome: Parameters<typeof toolOutcomeEvent>[1]
-  ): void => {
+  const emitTerminalOutcome = (outcome: Parameters<typeof toolOutcomeEvent>[1]): void => {
     if (terminalEmitted) return;
     // Mark terminal only AFTER the store accepts the event: if the lease
     // lapsed mid-execution and the audit authority rejects the emit, the
@@ -580,10 +609,12 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
   });
 
   let resultRevision = noWorkspaceRevision({ attemptId, phase: "result" });
-  try {
-    resultRevision = (await computeWorkspaceRevision(allowedRoot)).revision;
-  } catch {
-    // Not a git worktree — the sentinel revision is deterministic and honest.
+  if (affectedRoot) {
+    try {
+      resultRevision = (await computeWorkspaceRevision(affectedRoot)).revision;
+    } catch {
+      // Not a git worktree — the sentinel revision is deterministic and honest.
+    }
   }
 
   const finishedAt = executionResult.completedAt;
@@ -743,26 +774,54 @@ function thrownOutcomeFor(
 }
 
 /**
- * Honest network egress profile for evidence/telemetry.
+ * Fail-closed network egress profile for evidence/telemetry.
  *
- * Desktop Commander's MCP process is NOT network-contained by ACS, so when the
- * configured runtime grants any `network.*` scope the execution could reach the
- * network and the profile must say so explicitly ("unmanaged:..."). Only a
- * runtime granted zero network scopes is honestly reported as "none".
+ * ACS provides NO network containment for the Desktop Commander process. Its
+ * MCP child always runs with ambient host networking, and `start_process` can
+ * spawn arbitrary executables (node, npm, python3, docker, ...) that inherit
+ * that access even when no `network.*` scope is granted. Declared scope intent
+ * therefore never proves isolation: the profile always reports the actual
+ * containment state — `unmanaged-egress` — regardless of which network scopes
+ * the runtime granted. A truthful `"none"` is only possible for execution
+ * paths where ACS can prove real network isolation, which Desktop Commander
+ * is not.
  */
-export function configuredNetworkProfile(env: NodeJS.ProcessEnv = process.env): string {
-  let scopes: unknown;
-  try {
-    scopes = JSON.parse(env.ACS_DESKTOP_COMMANDER_RUNTIME_SCOPES_JSON ?? "[]");
-  } catch {
-    return "unmanaged:unknown";
+export function configuredNetworkProfile(_env: NodeJS.ProcessEnv = process.env): "unmanaged-egress" {
+  return "unmanaged-egress";
+}
+
+/**
+ * Resolve the single containment root an authorized invocation actually
+ * targets, for workspace revision evidence.
+ *
+ * Returns the root that contains every canonical path of the authorization
+ * (so base/result revisions describe the workspace that is really affected,
+ * never silently root 0), `undefined` when the invocation carries no paths
+ * (no workspace is targeted; evidence uses explicit unavailable sentinels),
+ * and throws fail-closed when the paths span multiple independent roots —
+ * a single revision pair cannot represent that truthfully.
+ */
+export function requireAffectedWorkspaceRoot(
+  containment: { allowedRoots: readonly string[] },
+  canonicalPaths: readonly string[]
+): string | undefined {
+  const affected = new Set<string>();
+  for (const canonical of canonicalPaths) {
+    const root = containment.allowedRoots.find((candidate) => {
+      const normalizedRoot = resolve(candidate);
+      const normalizedPath = resolve(canonical);
+      return normalizedPath === normalizedRoot || normalizedPath.startsWith(`${normalizedRoot}${sep}`);
+    });
+    if (root !== undefined) affected.add(resolve(root));
   }
-  if (!Array.isArray(scopes)) return "unmanaged:unknown";
-  const networkScopes = scopes
-    .filter((scope): scope is string => typeof scope === "string" && scope.startsWith("network."))
-    .sort();
-  if (networkScopes.length === 0) return "none";
-  return `unmanaged:${networkScopes.join("+")}`;
+  if (affected.size === 0) return undefined;
+  if (affected.size > 1) {
+    throw new ControlStackError(
+      "desktop_commander_workspace_ambiguous",
+      "authorized paths span multiple containment roots; workspace revision evidence cannot represent a single workspace truthfully"
+    );
+  }
+  return [...affected][0];
 }
 
 interface GovernedEvidenceInput {
@@ -785,7 +844,6 @@ interface GovernedEvidenceInput {
   /** Actually granted network egress profile (honest, never a default). */
   networkProfile: string;
 }
-
 
 /**
  * ADR 0015: build + record an ACS-owned evidence manifest and a verification

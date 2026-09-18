@@ -122,12 +122,14 @@ export interface GatewayAuthOptions {
    */
   workerIdentities?: WorkerIdentityRegistry;
   /** Internal verifier for opaque device access tokens issued by this gateway. */
-  deviceAccessTokenResolver?: (token: string) => {
-    deviceId: string;
-    principalId: string;
-    scopes: string[];
-    expiresAt: string;
-  } | undefined;
+  deviceAccessTokenResolver?: (token: string) =>
+    | {
+        deviceId: string;
+        principalId: string;
+        scopes: string[];
+        expiresAt: string;
+      }
+    | undefined;
 }
 
 export { WorkerIdentityRegistry };
