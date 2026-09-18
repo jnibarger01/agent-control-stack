@@ -20,7 +20,9 @@
     "dc-agent": "dist/harness/cli.js",
     "desktop-commander-openclaw-bridge": "dist/openclaw-bridge/index.js",
     "setup": "dist/setup-claude-server.js",
-    "remove": "dist/uninstall-claude-server.js"
+    "remove": "dist/uninstall-claude-server.js",
+    "dc-health": "dist/health/health-check.js",
+    "dc-audit-ui": "dist/audit/audit-server.js"
   },
   "main": "dist/local-runtime.js",
   "types": "dist/local-runtime.d.ts",
@@ -72,7 +74,9 @@
     "logs:export": "npm run build && node scripts/export-fuzzy-logs.js",
     "count-tokens": "npm run build && node scripts/count-tokens.js",
     "count-tokens:json": "npm run build && node scripts/count-tokens.js --json",
-    "sbom": "npm sbom --sbom-format cyclonedx"
+    "sbom": "npm sbom --sbom-format cyclonedx",
+    "health": "node dist/health/health-check.js",
+    "audit-ui": "node dist/audit/audit-server.js"
   },
   "publishConfig": {
     "access": "public"

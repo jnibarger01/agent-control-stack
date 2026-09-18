@@ -14,10 +14,42 @@ import {
     type InitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability } from './enforcement/pipeline.js';
+import { InMemoryApprovalStore } from './security/approval.js';
+
+// Item #5: pending approval requests live here until an approver (Telegram
+// hook, UI, or the ACS orchestrator) resolves them.
+const approvalStore = new InMemoryApprovalStore();
+import { runRecoveryCheckup } from './cancellation/executor-recovery.js';
+import { claimCanonicalExecutor } from './executor-lock.js';
 import { getSystemInfo, getOSSpecificGuidance, getPathGuidance, getDevelopmentToolGuidance } from './utils/system-info.js';
 
 // Get system information once at startup
 const SYSTEM_INFO = getSystemInfo();
+
+// Item #2: enforce the ONE canonical executor. Unless explicitly disabled
+// (DC_DISABLE_EXECUTOR_LEASE=1), this runtime claims a file-based singleton
+// lease at startup. npm exec, old forks, stale systemd services, and
+// alternate gateways therefore cannot run a second concurrent executor: the
+// loser refuses to start rather than silently executing in parallel.
+let EXECUTOR_LEASE_CLAIMED = false;
+if (process.env.DC_DISABLE_EXECUTOR_LEASE !== '1') {
+    let claim;
+    try {
+        claim = claimCanonicalExecutor();
+    } catch (error) {
+        const blockedBy = (error as { blockedBy?: string })?.blockedBy ?? 'unknown';
+        console.error(`[executor-lease] REFUSED to start: canonical executor lease is held (blocked by: ${blockedBy}). Only one Desktop Commander executor may run. Set DC_DISABLE_EXECUTOR_LEASE=1 to explicitly bypass.`);
+        process.exit(1);
+    }
+    if (claim.ok) {
+        EXECUTOR_LEASE_CLAIMED = true;
+        console.error(`[executor-lease] claimed canonical executor lease (pid ${process.pid}${claim.tookOverStale ? ', took over stale lease' : ''})`);
+    } else {
+        console.error(`[executor-lease] REFUSED to start: canonical executor lease is held (blocked by: ${claim.blockedBy ?? 'unknown'}). Only one Desktop Commander executor may run. Set DC_DISABLE_EXECUTOR_LEASE=1 to explicitly bypass.`);
+        process.exit(1);
+    }
+}
 const OS_GUIDANCE = getOSSpecificGuidance(SYSTEM_INFO);
 const DEV_TOOL_GUIDANCE = getDevelopmentToolGuidance(SYSTEM_INFO);
 const PATH_GUIDANCE = `IMPORTANT: ${getPathGuidance(SYSTEM_INFO)} Relative paths may fail as they depend on the current working directory. Tilde paths (~/...) might not work in all contexts. Unless the user explicitly asks for relative paths, use absolute paths.`;
@@ -1447,6 +1479,43 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         }
     }
     const startTime = Date.now();
+    // Item #10 execution kernel: validate -> authorize -> execute -> observe ->
+    // attest. The enforcement gate runs after ACS authorization and is
+    // fail-closed: a presented capability must verify; policy-required
+    // approvals are returned to the caller as structured errors carrying the
+    // exact mutation scope.
+    const enforcementAgent = agentFromMeta(request.params._meta);
+    const enforcementTransport = enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp';
+    const reqHash = requestHash(name, toolArguments);
+    const cap = extractCapability(request.params._meta);
+    const gate = await preExecuteEnforcement({
+        tool: name,
+        args: toolArguments,
+        meta: request.params._meta,
+        transport: enforcementTransport,
+    });
+    if (!gate.allowed) {
+        if (gate.kind === 'approval-required' && gate.approvalRequest) {
+            approvalStore.submit(gate.approvalRequest);
+        }
+        attestRequest({
+            requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+            capabilityId: cap?.capabilityId, commandClass: gate.classification.commandClass,
+            args: { blocked: gate.code, message: gate.message },
+        });
+        return {
+            content: [{
+                type: "text",
+                text: `Blocked by execution-kernel policy (${gate.code}): ${gate.message}` +
+                    (gate.approvalRequest ? `\n\nAPPROVAL REQUIRED — mutation scope:\n${JSON.stringify(gate.approvalRequest, null, 2)}` : ''),
+            }],
+            isError: true,
+        };
+    }
+    attestRequest({
+        requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+        capabilityId: cap?.capabilityId, commandClass: gate.classification.commandClass, args: toolArguments,
+    });
     // Hoisted above the try so the finally block can read them when emitting the
     // server_call_tool completion event (duration + status), even on the crash path.
     let telemetryData: any = { tool_name: name };
@@ -1894,6 +1963,19 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         isError = true;
         const errorMessage = error instanceof Error ? error.message : String(error);
 
+        // Item #6: after a cancellation/timeout, verify the executor is
+        // recovered (child dead, descendants cleaned, environment usable)
+        // before answering, so a timed-out process cannot poison the
+        // transport or the next command.
+        if (/timeout|timed out|cancel|abort|kill|terminated/i.test(errorMessage)) {
+            try {
+                const recovery = await runRecoveryCheckup({});
+                console.error(`[recovery] post-cancellation checkup: ${JSON.stringify(recovery)}`);
+            } catch (recoveryError) {
+                console.error(`[recovery] checkup failed: ${recoveryError}`);
+            }
+        }
+
         // Track the failure
         await usageTracker.trackFailure(name);
 
@@ -1908,6 +1990,16 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 : {}),
         };
     } finally {
+        // Item #7 attest: hash-link the completion of every agent-driven tool
+        // call into the audit chain. Best-effort; never breaks the response.
+        try {
+            attestResult({
+                requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+                capabilityId: cap?.capabilityId, isError, durationMs: Date.now() - startTime,
+                executorPid: process.pid,
+                error: isError ? `tool ${name} returned isError` : undefined,
+            });
+        } catch { /* audit must never break execution */ }
         // Single tool-call telemetry event, fired AFTER execution so it can carry
         // timing. In a finally so it still fires on the hard-crash path (the catch
         // above). Only missed if a tool never returns or throws (a true hang).
