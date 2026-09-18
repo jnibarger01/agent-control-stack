@@ -17,7 +17,7 @@ describe("ChatGPT dashboard data", () =>
         requestedActions: [],
         risk: "low"
       });
-      store.blockWorkItem(item.id);
+      store.blockWorkItem(item.id, { via: "domain_service" });
       expect(dashboardOverview(store)).toMatchObject({ blockedExecutions: 1, findings: { total: 1 } });
       expect(executionDetail(store, item.id)).toMatchObject({
         execution: { id: item.id, intent: "Inspect ACS" },
