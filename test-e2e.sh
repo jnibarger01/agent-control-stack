@@ -3,7 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 PASSPHRASE=$(cut -d= -f2- CONSENT_PASSPHRASE.txt)
-GW=http://127.0.0.1:8010
+GW=${GW:-http://127.0.0.1:8010}
 
 # 1. Dynamic client registration
 REG=$(curl -s -X POST $GW/register -H 'Content-Type: application/json' \
