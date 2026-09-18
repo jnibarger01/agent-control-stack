@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
-import { buildGateway } from "./server.js";
+import { buildGateway, type GatewayAuthOptions } from "./server.js";
 
 const testAuth = { token: "operator-token-0123456789abcdef", actor: "user", actorId: "operator-1" } as const;
 
@@ -38,7 +38,7 @@ describe("device authorization HTTP surface", () => {
 
   async function buildTestApp(
     rateLimit?: { windowMs: number; maxRequests: number },
-    auth = testAuth
+    auth: GatewayAuthOptions = testAuth
   ) {
     dir = mkdtempSync(join(tmpdir(), "acs-device-http-"));
     const dbPath = join(dir, "control.db");
@@ -159,7 +159,7 @@ describe("device authorization HTTP surface", () => {
   });
 
   it("does not allow a read-only gateway credential to approve a device", async () => {
-    const readOnlyAuth = {
+    const readOnlyAuth: GatewayAuthOptions = {
       token: "",
       actor: "",
       credentials: [{
@@ -170,7 +170,7 @@ describe("device authorization HTTP surface", () => {
         roles: ["operator"],
         scopes: ["acs:read", "acs:device"]
       }]
-    } as const;
+    };
     const app = await buildTestApp(undefined, readOnlyAuth);
     try {
       const issue = await app.inject({
@@ -183,7 +183,7 @@ describe("device authorization HTTP surface", () => {
       const approve = await app.inject({
         method: "POST",
         url: "/device/verify",
-        headers: { authorization: `Bearer ${readOnlyAuth.credentials[0].token}` },
+        headers: { authorization: "Bearer reader-token-0123456789abcdef012345" },
         payload: { user_code: userCode, action: "approve" }
       });
       expect(approve.statusCode).toBe(403);

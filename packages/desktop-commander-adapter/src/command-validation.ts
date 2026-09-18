@@ -4,7 +4,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 import { previewCommand, type MachineControllerConfig, type RiskLevel } from "@agent-control-stack/machine-controller";
 import { containPath, type ContainmentConfig } from "./containment.js";
 
-const shellMetaPattern = /[;&|\`$<>(){}[\]!*?~\n\r'"\\]/;
+const shellMetaPattern = /[;&|`$<>(){}[\]!*?~\n\r'"\\]/;
 const privilegeEscalation = new Set(["sudo", "su", "doas", "pkexec", "runas"]);
 const shellWrappers = new Set([
   "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
@@ -72,9 +72,10 @@ export function validateProcessCommand(
     throw new ControlStackError("desktop_commander_command_shell_wrapper", `shell/exec wrapper is forbidden as the executable: ${executableBase}`);
   }
 
-  const containment = Array.isArray(containmentInput)
-    ? { allowedRoots: containmentInput, deniedRoots: [] }
-    : containmentInput;
+  const containment: ContainmentConfig =
+    "allowedRoots" in containmentInput
+      ? containmentInput
+      : { allowedRoots: [...containmentInput], deniedRoots: [] };
   const cwd = baseCwd ?? containment.allowedRoots[0];
   if (!cwd) {
     throw new ControlStackError("desktop_commander_path_no_root", "no Desktop Commander allow root is configured");
@@ -148,7 +149,9 @@ function resolveExecutableFromFixedPath(executable: string): string {
     try {
       accessSync(candidate, fsConstants.X_OK);
       return candidate;
-    } catch {}
+    } catch {
+      // not executable in this directory; try the next fixed directory
+    }
   }
   throw new ControlStackError("desktop_commander_command_executable_missing", `allowlisted executable not found on fixed system PATH: ${executable}`);
 }
