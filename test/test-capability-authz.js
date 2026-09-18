@@ -163,8 +163,49 @@ async function testSymlinkPathIsolation() {
   assert.equal(future.ok, true, 'nonexistent leaf with in-root ancestors must be authorized');
 }
 
+async function testLexicalTraversalEscape() {
+  // Red-team fix #4: raw lexical prefix matching let
+  // '/allowed/project/../../../home/user/.ssh' pass. Both sides must be
+  // normalized (and realpath'd when they exist) before containment compare.
+  const issuer = new LocalCapabilityIssuer(path.join(tmp, 'key-3'));
+  const root = fs.realpathSync(tmp);
+  const cap = issuer.issue({
+    workItemId: 'wi-6',
+    agent: 'agent-a',
+    tool: 'read_file',
+    paths: [path.join(root, 'allowed', 'project')],
+    commandClass: 'read-only',
+    network: 'none',
+  });
+  const request = { tool: 'read_file', commandClass: 'read-only', network: 'none' };
+
+  const traversal = issuer.verify(cap, {
+    ...request,
+    paths: [path.join(root, 'allowed', 'project', '..', '..', '..', 'tmp', 'escape-target')],
+  });
+  assert.equal(traversal.ok, false, 'dot-dot traversal outside the root must be rejected');
+  assert.equal(traversal.ok === false && traversal.code, 'CAPABILITY_PATH_ESCALATION');
+
+  // A traversal that lands back INSIDE the root is fine.
+  const inside = issuer.verify(cap, {
+    ...request,
+    paths: [path.join(root, 'allowed', 'project', 'sub', '..', 'file.txt')],
+  });
+  assert.equal(inside.ok, true, 'traversal that normalizes back inside the root must pass');
+
+  // Symlink escape: requested path resolves (realpath) outside the root.
+  const outside = path.join(tmp, 'outside-real');
+  fs.mkdirSync(outside, { recursive: true });
+  const linkPath = path.join(root, 'allowed', 'project', 'in-link');
+  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+  try { fs.symlinkSync(outside, linkPath); } catch { /* already exists */ }
+  const viaSymlink = issuer.verify(cap, { ...request, paths: [path.join(linkPath, 'file.txt')] });
+  assert.equal(viaSymlink.ok, false, 'symlink resolving outside the root must be rejected');
+}
+
 await testIssueAndVerifyHappyPath();
 await testRejections();
 await testKeyPersistenceAndPermissions();
 await testSymlinkPathIsolation();
+await testLexicalTraversalEscape();
 console.log('Capability authz tests passed.');

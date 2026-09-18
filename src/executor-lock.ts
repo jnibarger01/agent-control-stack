@@ -9,8 +9,10 @@
  *  - optional advisory flock() via a tiny fs.flockSync binding when the
  *    platform exposes it (Linux), used as a second belt on top of O_EXCL
  *
- * Crash recovery: a lease left behind by a dead process (PID not alive) or
- * one whose TTL has expired is reported as stale and can be taken over.
+ * Crash recovery: a lease left behind by a dead process (PID not alive) is
+ * reported as stale and can be taken over after a short grace window.
+ * An expired TTL alone NEVER makes a lease stale while its holder PID is
+ * alive — live holders renew the lease on an interval instead.
  */
 import fs from 'fs';
 import os from 'os';
@@ -59,7 +61,7 @@ export class ExecutorLeaseConflictError extends Error {
 
 interface LeaseOptions {
   instanceId?: string;
-  /** Lease TTL. Expired-TTL or dead-PID leases are stale; dead-PID leases get a grace window of staleAfterMs since acquiredAt before takeover. Default 5 minutes. */
+  /** Lease TTL / dead-PID takeover grace. Dead-PID leases get this grace window since acquiredAt before takeover; live holders renew to extend the TTL. Default 10 seconds. */
   staleAfterMs?: number;
   /** Called when we detect the lease we hold (or see) is stale. */
   onStale?: (info: { leasePath: string; previous?: LeaseInfo; cause?: 'dead-pid' | 'expired-ttl' }) => void;
@@ -71,7 +73,12 @@ interface LeaseOptions {
   useFlock?: boolean;
 }
 
-const DEFAULT_STALE_AFTER_MS = 5 * 60 * 1000;
+/**
+ * Dead-PID takeover grace window. After a holder's PID is observed dead we
+ * still wait this long before taking its lease over, to cover PID reuse and
+ * coarse clock granularity. Default 10 seconds (configurable per call).
+ */
+const DEFAULT_STALE_AFTER_MS = 10 * 1000;
 
 function defaultLockDir(): string {
   return path.join(os.homedir(), '.desktop-commander');
@@ -128,8 +135,11 @@ function classifyLease(info: LeaseInfo | null, staleAfterMs: number): {
 } {
   if (!info) return { stale: true, cause: 'dead-pid' }; // unparsable garbage is stale
   if (!isPidAlive(info.pid)) return { stale: true, cause: 'dead-pid' };
-  if (Date.now() > info.expiresAt) return { stale: true, cause: 'expired-ttl' };
-  void staleAfterMs;
+  // NEVER classify an expired-TTL lease as stale while the holder PID is
+  // still alive: a live holder that simply has not renewed yet (GC pause,
+  // busy event loop, slow disk) must not be taken over — that would break
+  // the singleton guarantee. Expired TTL + alive PID => conflict, and the
+  // holder is expected to renew. Only a dead PID is stale.
   return { stale: false };
 }
 

@@ -65,7 +65,11 @@ export interface StoredEvent extends AuditEvent {
   hash: string;
 }
 
-export const AUDIT_DIR = path.join(os.homedir(), '.desktop-commander', 'audit');
+// The audit directory can be redirected via DC_AUDIT_DIR (used by diagnostics
+// probes and tests so they never write to the production chain).
+export const AUDIT_DIR = process.env.DC_AUDIT_DIR
+  ? path.resolve(process.env.DC_AUDIT_DIR)
+  : path.join(os.homedir(), '.desktop-commander', 'audit');
 export const OUTPUTS_DIR = path.join(AUDIT_DIR, 'outputs');
 const INLINE_PAYLOAD_LIMIT = 4 * 1024;
 /** Rotate the active file if it exceeds ~16MB. */
@@ -73,9 +77,46 @@ const ROTATE_SIZE_BYTES = 16 * 1024 * 1024;
 
 const GENESIS_HASH = '0'.repeat(64);
 
+/** Canonicalization version for newly appended events (cv:2). */
+const CANONICAL_VERSION = 2;
+
+/**
+ * Deterministic stable JSON serialization: object keys are recursively sorted
+ * lexicographically, so identical logical values always serialize to identical
+ * bytes regardless of insertion order — across processes and releases.
+ * Unlike the legacy form below this binds NESTED object content into the hash.
+ */
 export function canonicalJson(value: unknown): string {
-  // Deterministic key order so hashing is stable across processes.
+  if (value === null || typeof value !== 'object') return JSON.stringify(value) ?? 'null';
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalJson(entry)).join(',')}]`;
+  }
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  const parts: string[] = [];
+  for (const key of keys) {
+    const v = record[key];
+    if (v === undefined) continue; // matches JSON.stringify semantics
+    parts.push(`${JSON.stringify(key)}:${canonicalJson(v)}`);
+  }
+  return `{${parts.join(',')}}`;
+}
+
+/**
+ * LEGACY (lossy) canonicalization — the pre-cv:2 form. Kept ONLY so that
+ * audit events written before the cv field existed still verify. It used
+ * JSON.stringify's replacer-array form, which silently DROPS every nested
+ * object key that is not also a top-level key (e.g. nested:{} was emitted).
+ * Never use for new events.
+ */
+function legacyCanonicalJson(value: unknown): string {
   return JSON.stringify(value, Object.keys(value as object).sort());
+}
+
+/** Pick the canonicalization matching an event's stored cv version. */
+function canonicalJsonForEvent(event: Record<string, unknown>): string {
+  if (event.cv === CANONICAL_VERSION) return canonicalJson(event);
+  return legacyCanonicalJson(event);
 }
 
 export function sha256Hex(data: string | Buffer): string {
@@ -125,6 +166,59 @@ function appendLine(filePath: string, event: StoredEvent): void {
     fs.fsyncSync(fd);
   } finally {
     if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * Cross-process append lock. Two processes appending concurrently would
+ * otherwise each read the same lastEvent and fork the chain (non-atomic
+ * lastEvent+append). Guard the critical section with an exclusive
+ * `<file>.lock` created via O_EXCL; a lockfile older than LOCK_STALE_MS is
+ * considered abandoned by a crashed writer and can be stolen.
+ */
+const LOCK_STALE_MS = 5 * 1000;
+const LOCK_TIMEOUT_MS = 10 * 1000;
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withAppendLock<T>(filePath: string, fn: () => T): T {
+  const lockPath = `${filePath}.lock`;
+  const start = Date.now();
+  let fd: number | undefined;
+  for (;;) {
+    try {
+      fd = fs.openSync(lockPath, 'wx', 0o600);
+      break;
+    } catch (err: unknown) {
+      const e = err as NodeJS.ErrnoException;
+      if (e?.code !== 'EEXIST') throw err;
+      // Steal a stale lock left behind by a crashed writer.
+      try {
+        if (Date.now() - fs.statSync(lockPath).mtimeMs > LOCK_STALE_MS) {
+          fs.unlinkSync(lockPath);
+          continue;
+        }
+      } catch {
+        continue; // vanished — retry immediately
+      }
+      if (Date.now() - start > LOCK_TIMEOUT_MS) {
+        throw new Error(`audit append lock timed out: ${lockPath}`);
+      }
+      sleepSync(10);
+    }
+  }
+  try {
+    fs.writeFileSync(fd, String(process.pid));
+    return fn();
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch { /* ignore */ }
+    try {
+      fs.unlinkSync(lockPath);
+    } catch { /* ignore */ }
   }
 }
 
@@ -179,19 +273,24 @@ export class AuditChain {
 
   append(event: Omit<AuditEvent, 'seq' | 'ts'> & { ts?: string }): StoredEvent {
     this.maybeRotate();
-    const prev = lastEvent(this.filePath);
-    const prevHash = prev ? prev.hash : GENESIS_HASH;
-    const seq = prev ? prev.seq + 1 : 1;
-    const full: Omit<StoredEvent, 'hash'> = {
-      ...event,
-      ts: event.ts ?? new Date().toISOString(),
-      seq,
-      prevHash,
-    } as Omit<StoredEvent, 'hash'>;
-    const hash = sha256Hex(canonicalJson(full));
-    const stored = { ...full, hash } as StoredEvent;
-    appendLine(this.filePath, stored);
-    return stored;
+    // Serialize the read-last + append critical section across processes so
+    // concurrent writers cannot fork the chain.
+    return withAppendLock(this.filePath, () => {
+      const prev = lastEvent(this.filePath);
+      const prevHash = prev ? prev.hash : GENESIS_HASH;
+      const seq = prev ? prev.seq + 1 : 1;
+      const full: Omit<StoredEvent, 'hash'> = {
+        ...event,
+        cv: CANONICAL_VERSION, // canonicalization version (see canonicalJsonForEvent)
+        ts: event.ts ?? new Date().toISOString(),
+        seq,
+        prevHash,
+      } as Omit<StoredEvent, 'hash'>;
+      const hash = sha256Hex(canonicalJsonForEvent(full as Record<string, unknown>));
+      const stored = { ...full, hash } as StoredEvent;
+      appendLine(this.filePath, stored);
+      return stored;
+    });
   }
 
   get path(): string {
@@ -281,7 +380,10 @@ export function verifyChain(filePath: string): VerifyResult {
     if (rest.prevHash !== prevHash) {
       return { valid: false, events: events.length, brokenAt: i, error: `prevHash mismatch at seq ${events[i].seq}` };
     }
-    const expected = sha256Hex(canonicalJson(rest));
+    // cv:2 events use the lossless recursive canonicalization; events written
+    // before cv existed are hashed with the legacy (lossy) form so old files
+    // still verify.
+    const expected = sha256Hex(canonicalJsonForEvent(rest as Record<string, unknown>));
     if (expected !== hash) {
       return { valid: false, events: events.length, brokenAt: i, error: `hash mismatch at seq ${events[i].seq}` };
     }

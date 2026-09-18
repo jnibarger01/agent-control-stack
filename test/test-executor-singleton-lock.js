@@ -194,11 +194,64 @@ async function testDetectCompetingExecutorsReportsStaleLease() {
   console.log(`ok: detectCompetingExecutors found stale lease: ${stale[0].detail}`);
 }
 
+async function testExpiredTtlWithAlivePidIsNotStale() {
+  console.log('\n--- Test: expired TTL + alive PID => conflict, NOT stale takeover ---');
+  const dir = freshLockDir();
+  // Claim with OUR pid but a long-expired TTL: a live holder that simply has
+  // not renewed must never be taken over (red-team fix #1).
+  writeLeaseFile(dir, {
+    instanceId: 'live-holder',
+    pid: process.pid, // alive by definition
+    acquiredAt: Date.now() - 60 * 60 * 1000,
+    renews: 0,
+    expiresAt: Date.now() - 30 * 60 * 1000, // long expired
+    hostname: 'local',
+  });
+  const result = acquireExecutorLease({
+    instanceId: 'challenger',
+    lockDir: dir,
+    staleAfterMs: 1, // any TTL would look stale under the old logic
+  });
+  assert.strictEqual(result.ok, false, 'expired TTL with alive holder PID must NOT be takeable');
+  assert.strictEqual(result.reason, 'held-by-live-process');
+  assert.match(result.blockedBy ?? '', new RegExp(`pid:${process.pid}`));
+  assert.notStrictEqual(result.tookOverStale, true);
+
+  // Renewal re-arms an expired-but-held lease.
+  const renewEvents = [];
+  const renewed = renewLease({
+    lockDir: dir,
+    staleAfterMs: 60_000,
+    onStale: (info) => renewEvents.push(info),
+  });
+  // Our process did not acquire through acquireExecutorLease, so heldLeases
+  // does not know 'live-holder'; renewLease must report not-held rather than
+  // clobber someone else's lease.
+  assert.strictEqual(renewed.ok, false);
+  assert.strictEqual(renewed.reason, 'not-held');
+
+  // Full lifecycle: acquire -> let TTL lapse -> still held -> renew -> release.
+  const dir2 = freshLockDir();
+  const mine = acquireExecutorLease({ instanceId: 'renewer', lockDir: dir2, staleAfterMs: 30 });
+  assert.strictEqual(mine.ok, true);
+  await new Promise((r) => setTimeout(r, 60)); // TTL lapses
+  const challenger = acquireExecutorLease({ instanceId: 'other', lockDir: dir2, staleAfterMs: 30 });
+  assert.strictEqual(challenger.ok, false, 'expired TTL must not let another instance take over a live holder');
+  const selfRenew = renewLease({ lockDir: dir2, staleAfterMs: 60_000 });
+  assert.strictEqual(selfRenew.ok, true, 'holder must be able to renew past its own TTL');
+  const onDisk = JSON.parse(fs.readFileSync(path.join(dir2, 'executor.lock'), 'utf8'));
+  assert.ok(onDisk.expiresAt > Date.now(), 'renewal must extend expiresAt into the future');
+  assert.strictEqual(onDisk.renews, 1);
+  releaseLease({ lockDir: dir2 });
+  console.log('ok: expired TTL + alive PID stays held; renewal re-arms the lease');
+}
+
 export default async function runTests() {
   try {
     await testFirstLeaseAcquires();
     await testSecondConcurrentAcquireFails();
     await testStaleTakeoverWithFakeDeadPid();
+    await testExpiredTtlWithAlivePidIsNotStale();
     await testReleaseAllowsReacquire();
     await testRenewExtendsTtl();
     await testClaimCanonicalExecutorThrowsWhenBlocked();

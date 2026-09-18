@@ -127,6 +127,35 @@ export interface NetworkBinaryCheck {
   binary?: string;
 }
 
+/**
+ * Word-boundary regex per blocklisted binary basename. Scanning the RAW
+ * command string (not argv tokens) catches obfuscations like `"curl`,
+ * `(/usr/bin/curl`, `x=curl`, `$IFS`-joined paths, etc. that token-splitting
+ * misses. The boundary class [^\w/-] lets absolute paths like /usr/bin/curl
+ * match while preventing false hits inside words like `curlfoo` or `my-curl`.
+ */
+function blocklistRegex(binary: string): RegExp {
+  const escaped = binary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  // Preceding char may be '/' (absolute/relative paths like /usr/bin/curl)
+  // but not a word char or '-' (so curlfoo / my-curl do not match).
+  return new RegExp(`(^|[^\\w-])${escaped}([^\\w]|$)`);
+}
+
+/** Rejects blocklisted network binaries appearing anywhere in the raw command string. */
+export function checkNetworkBinariesInRaw(command: string, networkProfile: string): NetworkBinaryCheck {
+  if (networkProfile !== 'none') return { ok: true };
+  for (const binary of NETWORK_BLOCKLIST_BINARIES) {
+    if (blocklistRegex(binary).test(command)) {
+      return {
+        ok: false,
+        reason: `binary '${binary}' is blocklisted because the capability grants network='none'`,
+        binary,
+      };
+    }
+  }
+  return { ok: true };
+}
+
 /** Rejects explicit network binaries when the profile is 'none'. */
 export function checkNetworkBinaries(argv: readonly string[], networkProfile: string): NetworkBinaryCheck {
   if (networkProfile !== 'none') return { ok: true };
@@ -137,4 +166,38 @@ export function checkNetworkBinaries(argv: readonly string[], networkProfile: st
     }
   }
   return { ok: true };
+}
+
+export interface NetworkGuardSummary {
+  profile: string;
+  /** Whether `unshare -n` netns isolation is actually usable on this host. */
+  sandboxAvailable: boolean;
+  /**
+   * True when the configured profile cannot actually be enforced. A
+   * non-sandboxed 'none' profile is DEGRADED (blocklist + env-scrub only),
+   * never silently claimed as enforced.
+   */
+  degraded: boolean;
+}
+
+/**
+ * Honest degradation summary for the active network profile. Attached to
+ * enforcement pass decisions and audit attest events whenever the profile is
+ * 'none' so downstream consumers can see exactly what was (and was not)
+ * enforced.
+ */
+export async function networkGuardSummary(profile: string): Promise<NetworkGuardSummary> {
+  let sandboxAvailable = false;
+  if (profile === 'none' && process.platform === 'linux') {
+    try {
+      sandboxAvailable = await isUnshareNetworkSandboxAvailable();
+    } catch {
+      sandboxAvailable = false;
+    }
+  }
+  return {
+    profile,
+    sandboxAvailable,
+    degraded: profile === 'none' && !sandboxAvailable,
+  };
 }

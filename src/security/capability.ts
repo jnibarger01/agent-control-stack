@@ -159,9 +159,43 @@ export function issueCapabilityWithKey(
   return Object.freeze({ ...unsigned, signature });
 }
 
+/**
+ * Best-effort canonicalization of a path for containment checks:
+ *  - lexical normalization (resolves .. and . segments), then
+ *  - fs.realpathSync when the path exists on disk (resolves symlinks),
+ *  - falling back to the normalized lexical path when it does not (e.g. a
+ *    file that will be created by the operation being authorized).
+ */
+function canonicalPathForCheck(candidate: string): string {
+  const normalized = path.normalize(candidate);
+  try {
+    return fs.realpathSync(normalized);
+  } catch {
+    // The leaf may not exist yet (it will be created by the authorized
+    // operation). Realpath the deepest existing ancestor so symlinks along
+    // the existing prefix are still resolved, then re-append the remainder.
+    const resolved = path.resolve(normalized);
+    const parts = resolved.split(path.sep);
+    for (let i = parts.length - 1; i > 0; i--) {
+      const prefix = parts.slice(0, i).join(path.sep);
+      try {
+        const realPrefix = fs.realpathSync(prefix.length ? prefix : path.sep);
+        return path.join(realPrefix, ...parts.slice(i));
+      } catch {
+        continue; // this ancestor doesn't exist either — walk up
+      }
+    }
+    return resolved;
+  }
+}
+
 function pathIsWithinRoot(candidate: string, root: string): boolean {
-  if (candidate === root) return true;
-  return candidate.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+  const canonicalCandidate = canonicalPathForCheck(candidate);
+  const canonicalRoot = canonicalPathForCheck(root);
+  if (canonicalCandidate === canonicalRoot) return true;
+  return canonicalCandidate.startsWith(
+    canonicalRoot.endsWith(path.sep) ? canonicalRoot : canonicalRoot + path.sep,
+  );
 }
 
 export function verifyCapability(

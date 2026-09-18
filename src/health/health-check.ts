@@ -191,12 +191,16 @@ async function checkEndToEndMcp(): Promise<HealthCheck> {
   }
   try {
     const { spawn } = await import('node:child_process');
+    // Red-team fix #9c: the probe child is ephemeral — point its audit chain
+    // at a fresh temp dir so diagnostics never write to (or rotate) the
+    // production audit chain.
+    const probeAuditDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dc-health-audit-'));
     const child = spawn(process.execPath, [entry], {
         stdio: ['pipe', 'pipe', 'pipe'],
         // The synthetic probe child is a second, ephemeral server instance for
         // diagnostics only — it must not contend for the canonical executor
         // lease (item #2) or the health check would self-block.
-        env: { ...process.env, DC_DISABLE_EXECUTOR_LEASE: '1' },
+        env: { ...process.env, DC_DISABLE_EXECUTOR_LEASE: '1', DC_AUDIT_DIR: probeAuditDir },
     });
     const result = await new Promise<{ ok: boolean; detail: string }>((resolve) => {
       let buf = '';
@@ -223,6 +227,7 @@ async function checkEndToEndMcp(): Promise<HealthCheck> {
       }, 300);
     });
     child.kill();
+    try { fs.rmSync(probeAuditDir, { recursive: true, force: true }); } catch { /* best-effort */ }
     t.done(result.ok ? 'PASS' : 'DEGRADED', result.detail);
   } catch (err) {
     t.done('DEGRADED', `end-to-end not attempted: ${String(err)}`);

@@ -141,8 +141,21 @@ export function classifyOperation(input: OperationInput): ClassifiedOperation {
       commandClass = 'external';
       reason = 'terminal command invokes a network-capable binary (curl, wget, git push, package installs, ...)';
     } else {
-      commandClass = 'local-write';
-      reason = 'terminal command spawns a local process with unknown side effects';
+      // FAIL-CLOSED DEFAULT (red-team fix): a terminal command that matches no
+      // known read/destructive/secret/network pattern has UNKNOWN side
+      // effects. Classifying it 'local-write' (auto-approved) let commands
+      // like `find / -delete`, `shred`, or `echo ... | base64 -d | sh` run
+      // with zero approval. It now defaults to 'destructive' (requires
+      // explicit approval). Operators may opt back into the old permissive
+      // behavior with DC_UNMATCHED_COMMAND_POLICY=auto.
+      const unmatchedPolicy = process.env.DC_UNMATCHED_COMMAND_POLICY;
+      if (unmatchedPolicy === 'auto') {
+        commandClass = 'local-write';
+        reason = 'terminal command spawns a local process with unknown side effects (DC_UNMATCHED_COMMAND_POLICY=auto)';
+      } else {
+        commandClass = 'destructive';
+        reason = 'terminal command matched no known read-safe pattern; fail-closed default requires approval (set DC_UNMATCHED_COMMAND_POLICY=auto to permit unmatched commands without approval)';
+      }
     }
   } else if (networkTargets.length > 0 && !READ_TOOLS.has(tool)) {
     commandClass = 'external';
@@ -264,5 +277,10 @@ export class InMemoryApprovalStore implements ApprovalStore {
       return 'expired';
     }
     return this.requests.has(approvalId) ? 'pending' : undefined;
+  }
+
+  /** The recorded request for an approvalId, if any (used to re-validate a re-presented approval). */
+  getRequest(approvalId: string): ApprovalRequest | undefined {
+    return this.requests.get(approvalId);
   }
 }
