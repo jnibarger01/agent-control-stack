@@ -106,6 +106,26 @@
         }
       }
     },
+    "/session": {
+      "get": {
+        "operationId": "getSession",
+        "summary": "Read the sanitized identity of the authenticated caller.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
     "/mcp/tools": {
       "get": {
         "operationId": "listMcpTools",
@@ -127,6 +147,24 @@
       }
     },
     "/connectors": {
+      "get": {
+        "operationId": "listConnectors",
+        "summary": "List registered connectors and their tunnel sessions. Never includes key material.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
       "post": {
         "operationId": "registerConnector",
         "summary": "Register an authenticated connector.",

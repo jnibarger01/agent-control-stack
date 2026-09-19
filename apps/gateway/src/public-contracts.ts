@@ -314,7 +314,19 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     summary: "Create an authenticated operator session.",
     requestSchema: sessionLoginBodySchema
   },
+  {
+    method: "get",
+    path: "/session",
+    operationId: "getSession",
+    summary: "Read the sanitized identity of the authenticated caller."
+  },
   { method: "get", path: "/mcp/tools", operationId: "listMcpTools", summary: "List gateway MCP tools." },
+  {
+    method: "get",
+    path: "/connectors",
+    operationId: "listConnectors",
+    summary: "List registered connectors and their tunnel sessions. Never includes key material."
+  },
   {
     method: "post",
     path: "/connectors",

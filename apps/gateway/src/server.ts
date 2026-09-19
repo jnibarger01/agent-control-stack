@@ -6,6 +6,7 @@ import {
   type ReadonlyAcpAdapterConfig
 } from "@agent-control-stack/acp-adapter";
 import { projectAgents, renderDashboard, toMissionControlAttemptLease } from "@agent-control-stack/control-ui";
+import { registerConsole } from "./console.js";
 import {
   MachineController,
   loadMachineControllerConfig,
@@ -367,6 +368,26 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  /**
+   * Sanitized identity projection for the signed-in caller: never the token,
+   * never the credential's scopes list, just enough for the console to show
+   * who is signed in. Loopback dev access with no auth configured has no
+   * credential to report, so it reports a fixed "local" identity instead of
+   * fabricating an operator name.
+   */
+  app.get("/session", async (request, reply) => {
+    if (!hasReadAccess(request, auth)) {
+      sendReadAccessError(reply, auth);
+      return;
+    }
+    const credential = auth ? gatewayCredentialForRequest(request, auth) : undefined;
+    return {
+      actor: credential?.actor ?? "local",
+      actorId: credential?.actorId ? credential.actorId : null,
+      roles: credential?.roles ?? []
+    };
+  });
+
   registerDeviceAuthRoutes(app, {
     store: deviceAuthStore,
     auth,
@@ -415,6 +436,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  registerConsole(app);
+
   app.get("/mcp/tools", async (request, reply) => {
     const requiredScopes = ["acs:work:read"] as const;
     const authorization = await authorizeMcpRequest({
@@ -440,6 +463,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       auth: authorization.auth
     });
     return { tools: workItemToolNames };
+  });
+
+  app.get("/connectors", { preHandler: requireRead }, async () => {
+    return { connectors: workItems.listConnectors() };
   });
 
   app.post("/connectors", async (request, reply) => {

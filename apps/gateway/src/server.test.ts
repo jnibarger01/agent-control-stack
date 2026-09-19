@@ -2980,6 +2980,66 @@ describe("gateway MCP transport", () => {
     }
   });
 
+  it("lists connectors and their tunnel sessions without ever exposing key material", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-connector-list-"));
+    const dbPath = join(dir, "control.db");
+    const { publicKey } = generateKeyPairSync("ed25519");
+    const pem = String(publicKey.export({ type: "spki", format: "pem" }));
+    const anonymousApp = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const anonymous = await anonymousApp.inject({ method: "GET", url: "/connectors" });
+      expect(anonymous.statusCode).toBe(401);
+
+      const empty = await app.inject({ method: "GET", url: "/connectors" });
+      expect(empty.statusCode).toBe(200);
+      expect(empty.json()).toEqual({ connectors: [] });
+
+      const created = await app.inject({
+        method: "POST",
+        url: "/connectors",
+        payload: {
+          id: "chatgpt-prod",
+          displayName: "ChatGPT Desktop",
+          publicKeyPem: pem,
+          allowedScopes: ["acs:work:create", "acs:work:read"]
+        }
+      });
+      expect(created.statusCode).toBe(201);
+      await app.inject({
+        method: "POST",
+        url: "/connectors/chatgpt-prod/tunnel-sessions",
+        payload: {
+          tunnelId: "tunnel_abc123",
+          sessionId: "session_1",
+          expiresAt: new Date(Date.now() + 60_000).toISOString()
+        }
+      });
+
+      const list = await app.inject({ method: "GET", url: "/connectors" });
+      expect(list.statusCode).toBe(200);
+      const body = list.json() as { connectors: unknown[] };
+      expect(body.connectors).toHaveLength(1);
+      expect(body.connectors[0]).toMatchObject({
+        id: "chatgpt-prod",
+        displayName: "ChatGPT Desktop",
+        allowedScopes: ["acs:work:create", "acs:work:read"],
+        status: "active",
+        tunnelSessions: [
+          expect.objectContaining({ tunnelId: "tunnel_abc123", sessionId: "session_1", status: "active" })
+        ]
+      });
+      expect(body.connectors[0]).not.toHaveProperty("publicKeyPem");
+      expect(JSON.stringify(body)).not.toContain("BEGIN PUBLIC KEY");
+      expect((body.connectors[0] as { publicKeyFingerprint: string }).publicKeyFingerprint).toMatch(/^[\w-]{20,}$/u);
+    } finally {
+      await anonymousApp.close();
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("accepts a signed persistent tunnel session and audits connector to tunnel to work item", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-gateway-tunnel-"));
     const dbPath = join(dir, "control.db");
@@ -3750,6 +3810,52 @@ describe("gateway dashboard sessions", () => {
 
       const denied = await app.inject({ method: "GET", url: "/events" });
       expect(denied.statusCode).toBe(401);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("reports the signed-in caller's sanitized identity from GET /session, never the token", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-whoami-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: dashboardAuth });
+
+    try {
+      const anonymous = await app.inject({ method: "GET", url: "/session" });
+      expect(anonymous.statusCode).toBe(401);
+
+      const { cookie } = await loginSession(app);
+      const whoami = await app.inject({ method: "GET", url: "/session", headers: { cookie } });
+      expect(whoami.statusCode).toBe(200);
+      expect(whoami.json()).toEqual({ actor: dashboardAuth.actor, actorId: dashboardAuth.actorId, roles: ["operator"] });
+      expect(JSON.stringify(whoami.json())).not.toContain(dashboardAuth.token);
+
+      const viaBearer = await app.inject({
+        method: "GET",
+        url: "/session",
+        headers: { authorization: `Bearer ${dashboardAuth.token}` }
+      });
+      expect(viaBearer.statusCode).toBe(200);
+      expect(viaBearer.json()).toEqual({
+        actor: dashboardAuth.actor,
+        actorId: dashboardAuth.actorId,
+        roles: ["operator"]
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("normalizes a missing bound actor id to null instead of an empty string", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-whoami-no-actorid-"));
+    const noActorIdAuth = { token: "another-long-enough-token", actor: "user" } as const;
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false, auth: noActorIdAuth });
+
+    try {
+      const { cookie } = await loginSession(app, noActorIdAuth.token);
+      const whoami = await app.inject({ method: "GET", url: "/session", headers: { cookie } });
+      expect(whoami.json()).toEqual({ actor: "user", actorId: null, roles: ["operator"] });
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });

@@ -15,8 +15,16 @@ export default defineConfig({
       )
     }
   },
+  // The Mission Control SPA is TSX; component tests opt into jsdom with a per-file docblock.
+  esbuild: { jsx: "automatic" },
   test: {
-    include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "harness/**/*.test.ts", "evals/**/*.test.ts"],
+    include: [
+      "packages/**/*.test.ts",
+      "apps/**/*.test.ts",
+      "apps/**/*.test.tsx",
+      "harness/**/*.test.ts",
+      "evals/**/*.test.ts"
+    ],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "json"],

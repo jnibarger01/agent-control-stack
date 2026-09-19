@@ -16,9 +16,17 @@ const operations = {
     "method": "POST",
     "path": "/session/login"
   },
+  "getSession": {
+    "method": "GET",
+    "path": "/session"
+  },
   "listMcpTools": {
     "method": "GET",
     "path": "/mcp/tools"
+  },
+  "listConnectors": {
+    "method": "GET",
+    "path": "/connectors"
   },
   "registerConnector": {
     "method": "POST",

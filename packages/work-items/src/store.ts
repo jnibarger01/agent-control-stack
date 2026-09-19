@@ -673,6 +673,22 @@ export interface RegisteredConnector {
   updatedAt: string;
 }
 
+/**
+ * Sanitized connector listing: the raw PEM never leaves the store past this
+ * point, only its fingerprint. Tunnel sessions are joined in so the console
+ * doesn't need a second round trip per connector.
+ */
+export interface ConnectorSummary {
+  id: string;
+  displayName: string;
+  allowedScopes: string[];
+  publicKeyFingerprint: string;
+  status: "active" | "revoked";
+  createdAt: string;
+  updatedAt: string;
+  tunnelSessions: RegisteredTunnelSession[];
+}
+
 export interface ActorRegistration {
   id: string;
   actorType: ActorType;
@@ -994,6 +1010,7 @@ export interface WorkItemStore {
   rejectWorkItem(id: string, input?: unknown, options?: PrivilegedTransitionOptions): WorkItem;
   registerConnector(input: ConnectorRegistration): RegisteredConnector;
   rotateConnectorKey(input: ConnectorKeyRotation): RegisteredConnector;
+  listConnectors(): ConnectorSummary[];
   registerActor(input: ActorRegistration): RegistryActor;
   listActors(): RegistryActor[];
   resolveActorId(candidates: string[]): string | undefined;
@@ -3555,6 +3572,31 @@ export class SqliteWorkItemStore implements WorkItemStore {
       );
       return { value: connector, events: [event] };
     });
+  }
+
+  listConnectors(): ConnectorSummary[] {
+    const connectors = (
+      this.db.prepare(`SELECT * FROM connector_records ORDER BY id ASC`).all() as unknown as ConnectorRow[]
+    ).map(rowToConnector);
+    const sessionsByConnector = new Map<string, RegisteredTunnelSession[]>();
+    for (const row of this.db
+      .prepare(`SELECT * FROM tunnel_sessions ORDER BY connector_id ASC, tunnel_id ASC, session_id ASC`)
+      .all() as unknown as TunnelSessionRow[]) {
+      const session = rowToTunnelSession(row);
+      const list = sessionsByConnector.get(session.connectorId);
+      if (list) list.push(session);
+      else sessionsByConnector.set(session.connectorId, [session]);
+    }
+    return connectors.map((connector) => ({
+      id: connector.id,
+      displayName: connector.displayName,
+      allowedScopes: connector.allowedScopes,
+      publicKeyFingerprint: publicKeyFingerprint(connector.publicKeyPem),
+      status: connector.status,
+      createdAt: connector.createdAt,
+      updatedAt: connector.updatedAt,
+      tunnelSessions: sessionsByConnector.get(connector.id) ?? []
+    }));
   }
 
   registerActor(input: ActorRegistration): RegistryActor {
