@@ -10,6 +10,122 @@ import { createWorkItemTools } from "./tools.js";
 const domainTransition = { via: "domain_service" } as const;
 
 describe("policy-gated work item tools", () => {
+  it("persists a native route binding atomically with a created work item", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-native-route-persistence-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Inspect a source file",
+        requester: "user",
+        intent: "inspect the source code",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+
+      expect(store.getVerifiedMissionRouting(workItem.id)).toMatchObject({
+        workItemId: workItem.id,
+        route: { decision: "routed", engineId: "codex" }
+      });
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("persists only a redacted presence projection of native intake and audit evidence", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-native-route-redaction-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    const apiKeyLiteral = "native-api-key-literal";
+    try {
+      const workItem = tools.create_work_item({
+        title: "Inspect /private/.ssh/id_rsa source file",
+        requester: "user",
+        intent: "inspect private/.env and /private/.ssh/id_rsa source code",
+        target: { cwd: "/private/.ssh/id_rsa", files: ["private/.env"] },
+        requestedActions: [
+          {
+            kind: "fs.read",
+            description: "inspect src/index.ts and /private/.ssh/id_rsa",
+            params: {
+              paths: ["private/.env", "/private/.ssh/id_rsa"],
+              password: "native-password-literal",
+              apiKey: apiKeyLiteral,
+              token: "native-token-literal",
+              authorization: "Bearer native-bearer-literal",
+              secret: "native-secret-literal"
+            }
+          }
+        ],
+        risk: "low"
+      });
+      const db = (
+        store as unknown as { db: { prepare(sql: string): { get(...args: unknown[]): { canonical_json: string } } } }
+      ).db;
+      const canonical = db
+        .prepare(
+          `SELECT canonical_json FROM mission_intake_records WHERE intake_hash = (SELECT intake_hash FROM work_item_mission_routing WHERE work_item_id = ?)`
+        )
+        .get(workItem.id).canonical_json;
+      const audit = JSON.stringify(store.readEvents());
+      expect(JSON.parse(canonical)).toMatchObject({
+        target: { files: [] },
+        proposedActions: [{ params: { declared: true } }]
+      });
+      for (const literal of [
+        "native-password-literal",
+        apiKeyLiteral,
+        "native-token-literal",
+        "native-bearer-literal",
+        "native-secret-literal",
+        "/private/.ssh/id_rsa",
+        "private/.env"
+      ]) {
+        expect(canonical).not.toContain(literal);
+        expect(audit).not.toContain(literal);
+      }
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects persisted route-table metadata tampering", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-native-route-tamper-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Inspect a source file",
+        requester: "user",
+        intent: "inspect the source code",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      const db = (
+        store as unknown as { db: { exec(sql: string): void; prepare(sql: string): { run(...args: unknown[]): void } } }
+      ).db;
+      db.exec(`DROP TRIGGER mission_route_evidence_records_no_update`);
+      db.prepare(
+        `UPDATE mission_route_evidence_records
+         SET route_table_hash = ?
+         WHERE route_evidence_hash = (SELECT route_evidence_hash FROM work_item_mission_routing WHERE work_item_id = ?)`
+      ).run("0".repeat(64), workItem.id);
+
+      expect(() => store.getVerifiedMissionRouting(workItem.id)).toThrowError(
+        expect.objectContaining({ code: "mission_routing_evidence_invalid" })
+      );
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects invalid contract envelopes before creating work items", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-contract-invalid-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
@@ -339,6 +455,8 @@ describe("policy-gated work item tools", () => {
 
       const retried = tools.retry_work_item({ id: source.id, actor: "operator", reason: "repeat inspection" });
       const cloned = tools.clone_work_item({ id: source.id, actor: "operator", risk: "high" });
+      expect(store.getVerifiedMissionRouting(retried.id)).toBeDefined();
+      expect(store.getVerifiedMissionRouting(cloned.id)).toBeDefined();
       const policyEvents = store
         .readEvents()
         .filter((event) => event.name === "policy.decided")

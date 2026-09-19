@@ -66,7 +66,9 @@ const migrationFiles = [
     version: 26,
     name: "desktop_commander_capability_uniqueness",
     filename: "026_desktop_commander_capability_uniqueness.sql"
-  }
+  },
+  { version: 27, name: "native_mission_routing_evidence", filename: "027_native_mission_routing_evidence.sql" },
+  { version: 28, name: "native_engine_execution_mode", filename: "028_native_engine_execution_mode.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

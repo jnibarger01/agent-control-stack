@@ -31,6 +31,7 @@ ADR status values:
 | [0016](0016-public-oauth-device-authorization.md)                        | Public HTTPS OAuth resource + RFC 8628 CLI device authorization                           | Accepted                          |
 | [0017](0017-codex-swarm-subordinate-execution-engine.md)                 | Codex Swarm is a subordinate execution engine, not a peer control plane                   | Proposed                          |
 | [0018](0018-archive-hourly-pr-workflow.md)                               | Archive the disabled Hourly Pull Request Cycle workflow                                   | Accepted                          |
+| [0019](0019-native-route-engine-dispatch-contract.md)       | Native route to persisted engine adapter dispatch contract     | Accepted |
 
 ## Decision rules
 

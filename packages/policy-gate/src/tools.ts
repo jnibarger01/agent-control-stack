@@ -1,4 +1,9 @@
-import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import {
+  collectSensitiveValues,
+  ControlStackError,
+  redactSensitiveText,
+  stableHash
+} from "@agent-control-stack/shared";
 import {
   type ApprovalGrant,
   approvalRequestHash,
@@ -16,6 +21,8 @@ import {
 import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
 import { explainPolicy } from "./explain.js";
+import { classifyMissionIntake } from "./mission-classifier.js";
+import { requireRoutedMission, routeMission } from "./mission-route.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
 
 export const workItemToolNames = [
@@ -263,6 +270,9 @@ function gateWorkerClaimInTransaction(
   if (!candidate) {
     return undefined;
   }
+  if (!hasCurrentNativeRoute(store, candidate)) {
+    return blockedClaim(store, candidate, parsed.workerId);
+  }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
   const plan = ensureExecutionPlan(store, candidate, parsed.workerId);
@@ -362,6 +372,9 @@ function gateWorkerClaimByIdInTransaction(
   if (!candidate || candidate.status !== "approved") {
     return undefined;
   }
+  if (!hasCurrentNativeRoute(store, candidate)) {
+    return blockedClaim(store, candidate, parsed.workerId);
+  }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");
   const plan = ensureExecutionPlan(store, candidate, parsed.workerId);
@@ -405,6 +418,11 @@ function gateWorkerClaimByIdInTransaction(
     };
   }
 
+  // Match the next-item claim path: the lease's primary approval column can
+  // bind one required action, while every remaining required action must be
+  // persisted in attempt_lease_approvals before any approval is consumed.
+  // Omitting these bindings would let an exact-id/resume claim consume an
+  // approval that its attempt authority does not carry.
   const [firstApproval, ...restApprovals] = planApprovals;
   const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
@@ -449,6 +467,9 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.withTransaction(() => {
         evaluateContractAdmission(input);
         const workItem = store.create(input);
+        if (workItem.requestedActions.length > 0) {
+          recordNativeMissionRouting(store, workItem);
+        }
         const { decision } = evaluateAndRecordPolicy(store, policy, workItem, workItem.requester, "create");
         return applyPolicyStatus(store, workItem, decision);
       });
@@ -481,6 +502,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       const parsed = retryInputSchema.parse(input);
       return store.withTransaction(() => {
         const workItem = store.retryWorkItem(parsed.id, { actor: parsed.actor, reason: parsed.reason });
+        recordNativeMissionRouting(store, workItem);
         evaluateContractAdmission({
           title: workItem.title,
           requester: workItem.requester,
@@ -499,6 +521,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       const parsed = cloneInputSchema.parse(input);
       return store.withTransaction(() => {
         const workItem = store.cloneWorkItem(parsed.id, parsed);
+        recordNativeMissionRouting(store, workItem);
         evaluateContractAdmission({
           title: workItem.title,
           requester: workItem.requester,
@@ -539,11 +562,146 @@ export function policyContextAuditReceipt(context: PolicyContext): Record<string
     action: {
       kind: context.action.kind
     },
-    cwd: context.cwd,
-    paths: context.paths,
+    // The action hash binds raw policy inputs. Durable audit evidence records
+    // only their presence so unrestricted paths do not become a retention path.
+    hasCwd: context.cwd !== undefined,
+    pathCount: context.paths?.length ?? 0,
     commandHash: context.command ? stableHash(context.command) : undefined,
     network: context.network,
     write: context.write,
     destructive: context.destructive
   };
+}
+
+function nativeMissionIntakeForWorkItem(workItem: WorkItem) {
+  const explicitSecrets = collectSensitiveValues({ target: workItem.target, actions: workItem.requestedActions });
+  const hasFilesystemAction = workItem.requestedActions.some((action) => action.kind.startsWith("fs."));
+  const network = workItem.requestedActions.some(
+    (action) => action.params.network === true || action.params.allowNetwork === true
+  )
+    ? "declared"
+    : "none";
+  return {
+    schemaVersion: "acs.mission-intake.v1" as const,
+    requestId: `intake-${workItem.id}`,
+    title: redactedNativeIntakeText(workItem.title, explicitSecrets),
+    // The native classifier consumes the immutable intake goal. Include
+    // normalized action intent so a caller cannot hide an otherwise explicit
+    // filesystem task behind a generic natural-language goal.
+    goal: [
+      redactedNativeIntakeText(workItem.title, explicitSecrets),
+      redactedNativeIntakeText(workItem.intent, explicitSecrets),
+      ...workItem.requestedActions.map(
+        (action) => `${action.kind}: ${redactedNativeIntakeText(action.description, explicitSecrets)}`
+      ),
+      ...(hasFilesystemAction ? ["coding"] : [])
+    ].join("\n"),
+    origin: workItem.requester === "user" ? "dashboard" : workItem.requester === "agent" ? "hermes" : "api",
+    target: { files: [] },
+    proposedActions: workItem.requestedActions.map((action, index) => ({
+      clientActionId: `action-${String(index + 1).padStart(3, "0")}`,
+      kind: action.kind,
+      description: redactedNativeIntakeText(action.description, explicitSecrets),
+      params: { declared: Object.keys(action.params).length > 0 }
+    })),
+    constraints: {
+      network,
+      maxRuntimeMs: maxRuntimeMs(workItem),
+      successCriteria: [redactedNativeIntakeText(workItem.intent, explicitSecrets)]
+    },
+    submittedClaims: { risk: missionRiskForWorkItem(workItem.risk) }
+  };
+}
+
+function recordNativeMissionRouting(store: WorkItemStore, workItem: WorkItem): void {
+  const intake = nativeMissionIntakeForWorkItem(workItem);
+  const classifier = classifyMissionIntake(intake, {
+    evidenceId: `classifier-${workItem.id}`,
+    generatedAt: workItem.createdAt
+  });
+  const route = routeMission({
+    intake,
+    classifierEvidence: classifier,
+    routeId: `route-${workItem.id}`,
+    decidedAt: workItem.createdAt
+  });
+  store.recordMissionRouting({ workItemId: workItem.id, intake, classifier, route, createdAt: workItem.createdAt });
+}
+
+function redactedNativeIntakeText(value: string, explicitSecrets: readonly string[]): string {
+  const redacted = redactSensitiveText(value, explicitSecrets);
+  if (typeof redacted !== "string" || redacted.length === 0) {
+    throw new ControlStackError(
+      "mission_intake_projection_invalid",
+      "native mission intake could not be projected safely"
+    );
+  }
+  return redacted;
+}
+
+/** Recompute the complete native evidence chain immediately before a lease is issued. */
+function hasCurrentNativeRoute(store: WorkItemStore, workItem: WorkItem): boolean {
+  try {
+    const persisted = store.getVerifiedMissionRouting(workItem.id);
+    // Direct store creation is a legacy compatibility path. It never creates
+    // native evidence and remains governed by the existing claim checks. Once
+    // a native binding exists, however, it is mandatory and fail-closed.
+    if (!persisted) return true;
+    const classifier = classifyMissionIntake(persisted.intake, {
+      evidenceId: persisted.classifier.evidenceId,
+      generatedAt: persisted.classifier.generatedAt
+    });
+    if (stableHash(classifier) !== stableHash(persisted.classifier)) return false;
+    const route = routeMission({
+      intake: persisted.intake,
+      classifierEvidence: classifier,
+      routeId: persisted.route.routeId,
+      decidedAt: persisted.route.decidedAt
+    });
+    if (stableHash(route) !== stableHash(persisted.route)) return false;
+    requireRoutedMission(route);
+    return (
+      missionRiskRank(route.effectiveRisk) >= missionRiskRank(persisted.intake.submittedClaims?.risk ?? "unknown") &&
+      missionRiskRank(route.effectiveRisk) >= missionRiskRank(missionRiskForWorkItem(workItem.risk))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function blockedClaim(store: WorkItemStore, workItem: WorkItem, workerId: string): ClaimedWorkItem {
+  const blocked = store.blockWorkItem(workItem.id);
+  return {
+    ...blocked,
+    workerId,
+    leaseToken: "",
+    leaseId: "",
+    actionHash: "",
+    startedAt: blocked.updatedAt,
+    leaseExpiresAt: blocked.updatedAt
+  };
+}
+
+function maxRuntimeMs(workItem: WorkItem): number {
+  const timeouts = workItem.requestedActions
+    .map((action) => action.params.timeoutMs)
+    .filter((value): value is number => typeof value === "number" && Number.isInteger(value) && value > 0);
+  return Math.min(86_400_000, Math.max(1, ...(timeouts.length ? timeouts : [900_000])));
+}
+
+function missionRiskForWorkItem(risk: WorkItem["risk"]): "read_only" | "draft" | "write" | "destructive" {
+  switch (risk) {
+    case "low":
+      return "read_only";
+    case "medium":
+      return "draft";
+    case "high":
+      return "write";
+    case "critical":
+      return "destructive";
+  }
+}
+
+function missionRiskRank(risk: "read_only" | "draft" | "write" | "destructive" | "unknown"): number {
+  return { read_only: 0, draft: 1, write: 2, destructive: 3, unknown: 4 }[risk];
 }

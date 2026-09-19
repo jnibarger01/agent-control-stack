@@ -17,8 +17,9 @@ const sensitiveValuePattern =
 
 export function redactValue(value: unknown, explicitSecrets: readonly string[] = []): unknown {
   const ancestors = new WeakSet<object>();
-  const replacements = [...new Set(explicitSecrets.filter((secret) => secret.length > 0))]
-    .sort((left, right) => right.length - left.length);
+  const replacements = [...new Set(explicitSecrets.filter((secret) => secret.length > 0))].sort(
+    (left, right) => right.length - left.length
+  );
 
   function walk(key: string, input: unknown): unknown {
     if (isSensitiveKey(key)) {
@@ -41,10 +42,7 @@ export function redactValue(value: unknown, explicitSecrets: readonly string[] =
     }
 
     if (typeof input === "string") {
-      const explicitlyRedacted = replacements.reduce(
-        (text, secret) => text.replaceAll(secret, "[redacted]"),
-        input
-      );
+      const explicitlyRedacted = replacements.reduce((text, secret) => text.replaceAll(secret, "[redacted]"), input);
       if (sensitiveValuePattern.test(explicitlyRedacted)) return "[redacted]";
       return explicitlyRedacted;
     }
@@ -53,6 +51,16 @@ export function redactValue(value: unknown, explicitSecrets: readonly string[] =
   }
 
   return walk("", value);
+}
+
+// Text fields are also durable evidence. Redact path-shaped literals even
+// when they occur in free text rather than under a path-bearing key.
+const sensitivePathPattern = /(?:~\/|\/)[^\s"'`<>]+|(?:\b[\w.-]+\/)+[\w.-]+/gu;
+
+export function redactSensitiveText(value: string, explicitSecrets: readonly string[] = []): string {
+  const redacted = redactValue(value, explicitSecrets);
+  if (typeof redacted !== "string") return "[redacted]";
+  return redacted.replace(sensitivePathPattern, "[redacted-path]");
 }
 
 export function collectSensitiveValues(value: unknown): string[] {
