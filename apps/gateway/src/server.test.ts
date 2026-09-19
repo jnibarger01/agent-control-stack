@@ -1600,7 +1600,7 @@ describe("gateway MCP transport", () => {
           security: { max_output_bytes: 256, command_timeout_ms: 5_000 },
           agents: [
             {
-              id: "fixture-agent",
+              id: "pi",
               command: "node",
               args: ["-e", "process.stdout.write('fixture-response:' + process.argv.at(-1))"],
               permission_mode: "read-only"
@@ -1729,7 +1729,7 @@ describe("gateway MCP transport", () => {
             call = emit("tool_call", {
               name: describedName,
               arguments: {
-                agent: "fixture-agent",
+                agent: "pi",
                 prompt: "Hermes deterministic interoperability check",
                 cwd: allowed,
                 timeoutSeconds: 5,

@@ -426,3 +426,10 @@ Final reports must use one verdict:
 * `PARTIAL`: useful work completed, but clearly identified items remain.
 * `BLOCK`: work cannot safely proceed because a required condition is unresolved.
 * `FAIL`: the requested result was attempted and did not meet its acceptance criteria.
+
+
+When using Bend:
+- run `bend guide` to learn it
+- use `LAWS.bend` to keep important rules
+- run `bend PROOF.bend` before committing
+- parallelize the code whenever possible

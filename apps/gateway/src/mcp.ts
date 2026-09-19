@@ -19,7 +19,6 @@ import {
 import { chatgptDashboardWidgetHtml } from "./chatgpt-dashboard-widget.generated.js";
 import {
   directAgentToolName,
-  gatewayMcpInputSchemas,
   gatewayMcpDispatchInputSchemas,
   jsonRpcRequestSchema,
   MCP_PROTOCOL_VERSION,
@@ -512,7 +511,10 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
     return {
       name,
       description: mcpToolDescription(name),
-      inputSchema: z.toJSONSchema(gatewayMcpInputSchemas[name], { target: "draft-7", io: "input" }),
+      inputSchema: z.toJSONSchema(gatewayMcpDispatchInputSchemas[name], {
+        target: "draft-7",
+        io: "input"
+      }),
       securitySchemes,
       _meta: {
         securitySchemes,

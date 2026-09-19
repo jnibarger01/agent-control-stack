@@ -5,7 +5,8 @@ Agent Control Stack is a single TypeScript monorepo. Apps depend inward on packa
 ACS is also the sole Engine Harness authority. Model and protocol adapters are
 untrusted capability adapters; they do not own policy, approval, lifecycle,
 leases, result acceptance, or audit. See
-[ADR 0009](adr/0009-engine-harness-authority-and-dependencies.md).
+[ADR 0009](adr/0009-engine-harness-authority-and-dependencies.md) and
+[ADR 0017](adr/0017-native-route-engine-dispatch-contract.md).
 
 External agent runtimes and launch protocols—including OpenClaw, Hermes,
 Codex, Claude, Gemini, OpenCode, Pi, ACP, and ACPX—remain below this authority
@@ -30,7 +31,7 @@ retired OpenClaw Agent Orchestrator are captured in
 
 - `apps/gateway`: Fastify HTTP/SSE gateway and control UI host.
 - `apps/control-ui`: server-rendered dashboard HTML.
-- `apps/worker`: one-shot worker that claims the next approved item and records a dry-run result for the read-only vertical slice.
+- `apps/worker`: one-shot worker that claims the next approved item and coordinates the explicitly selected dry-run, Desktop Commander, or native-engine execution path.
 
 SQLite is the local durability layer. `work_items` holds the current control-plane state, while `audit_events` records append-only lifecycle events. Work-item mutations insert their matching audit event in the same SQLite transaction. Events use `name`, `timeUnixNano`, `attributes`, and `body` so they can be mapped to OpenTelemetry exporters later without changing the domain model.
 
@@ -38,8 +39,9 @@ The SQLite hash chain is the sole canonical audit and replay source
 ([ADR 0011](adr/0011-canonical-audit-sink.md)). Machine-controller JSONL and
 process logs are telemetry only. The fail-closed Linux backend from
 [ADR 0010](adr/0010-fail-closed-linux-sandbox.md) exists and has a separate
-host-level test gate, but the production worker remains dry-run-only until
-per-attempt workspaces and authoritative attempt wiring are implemented.
+host-level test gate. Native engines use the independent isolation contract in
+[ADR 0014](adr/0014-engine-isolation-boundary.md); the worker does not fall
+back to dry-run when that contract is unavailable.
 
 The worker's execution backend is explicit configuration (`ACS_EXECUTION_BACKEND`).
 The default is `dry_run`. Setting `desktop_commander` routes an already-authorized
@@ -52,7 +54,18 @@ all succeed. Failure of any check fails closed and Desktop Commander is never
 invoked. The adapter never depends on any hosted Desktop Commander service. ACS
 decides; Desktop Commander executes.
 
-Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. `blocked` remains a recoverable policy state; an accepted execution result is immutable and terminal. In this alpha, worker simulation only starts by transitioning an approved work item to `running`; no real command execution is claimed. The worker then applies a second, execution-side read-only scope check: filesystem inspection items may be simulated, while approved writes, shell commands, and other non-read-only actions are recorded as blocked rather than falsely reported as successful.
+Native routing is a separate, explicit path. For a claimed item with verified
+persisted mission routing, the worker requires the routed `engineId` from the
+closed `EngineAdapterRegistry` and invokes exactly that adapter. The adapter
+receives an ACS authority-bound task containing the admitted plan, attempt,
+lease, worker/fencing, policy, idempotency, and attempt-scoped workspace
+bindings, then executes through the independent EngineIsolation boundary in
+ADR 0014. Native outcomes are recorded as `native_engine`; missing routes,
+adapters, authority, or isolation prerequisites fail closed with no dry-run,
+Desktop Commander, or direct-host fallback. The work-item store remains the
+sole result/lifecycle authority.
+
+Work moves through enforced statuses: `draft`, `pending_policy`, `needs_approval`, `approved`, `running`, `succeeded`, `failed`, `blocked`, and `cancelled`. `blocked` remains a recoverable policy state; an accepted execution result is immutable and terminal. The compatibility dry-run path applies an execution-side read-only scope check: filesystem inspection items may be simulated, while approved writes, shell commands, and other non-read-only actions are recorded as blocked rather than falsely reported as successful. Desktop Commander and native-engine results are only reported with their corresponding truthful execution modes.
 
 Policy decisions are recorded as `policy.decided` audit events. Required approvals are stored by `work_item_id` plus exact action hash, so approval is bound to the action that policy evaluated and records who approved it and why.
 
