@@ -1,6 +1,10 @@
 [codespell]
 # Ref: https://github.com/codespell-project/codespell#using-a-config-file
-skip = .git*,*.svg,package-lock.json,*.css,.codespellrc
+# node_modules and dist are third-party/generated output, not first-party text
+skip = .git*,*.svg,package-lock.json,*.css,.codespellrc,node_modules,dist*
 check-hidden = true
-# ignore-regex = 
-# ignore-words-list =
+# ignore-regex =
+# Targeted false positives, not blanket ignores:
+#   fo          = Windows `tasklist /fo csv` format flag (issue #662)
+#   unparseable = valid English variant ("unparsable" is not required)
+ignore-words-list = fo,unparseable
