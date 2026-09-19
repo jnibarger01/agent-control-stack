@@ -4,7 +4,7 @@
 // submitted. See src/bootstrap.ts for why import order matters.
 import './bootstrap.js';
 import { FilteredStdioServerTransport } from './custom-stdio.js';
-import { server, flushDeferredMessages } from './server.js';
+import { server, flushDeferredMessages, ensureCanonicalExecutorLease } from './server.js';
 import { commandManager } from './command-manager.js';
 import { configManager } from './config-manager.js';
 import { featureFlagManager } from './utils/feature-flags.js';
@@ -58,6 +58,12 @@ async function runServer() {
 
     const executionMode = desktopCommanderExecutionMode();
     logToStderr('info', `Desktop Commander execution mode: ${executionMode}`);
+
+    // Item #2 ownership semantics: this process (the executor entrypoint)
+    // claims the canonical executor lease — the remote-device supervisor that
+    // spawned it does NOT claim (it is a relay/client, not an executor). Any
+    // second executor refuses here, fail closed.
+    ensureCanonicalExecutorLease();
 
     // Create transport FIRST so all logging gets properly buffered
     // This must happen before any code that might use logger.*

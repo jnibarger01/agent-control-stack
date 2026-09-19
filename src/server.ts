@@ -26,13 +26,19 @@ import { getSystemInfo, getOSSpecificGuidance, getPathGuidance, getDevelopmentTo
 // Get system information once at startup
 const SYSTEM_INFO = getSystemInfo();
 
-// Item #2: enforce the ONE canonical executor. Unless explicitly disabled
-// (DC_DISABLE_EXECUTOR_LEASE=1), this runtime claims a file-based singleton
-// lease at startup. npm exec, old forks, stale systemd services, and
-// alternate gateways therefore cannot run a second concurrent executor: the
-// loser refuses to start rather than silently executing in parallel.
+// Item #2: enforce the ONE canonical executor. The lease is claimed ONLY by
+// the canonical executor entrypoint (src/index.ts) via
+// ensureCanonicalExecutorLease() below — NOT at module init. Module-init
+// claiming made every process that merely IMPORTS this module (the remote
+// device supervisor loads utils/capture.js -> server.js for telemetry
+// context) consume the lease, so its spawned dist/index.js executor child
+// was correctly refused: a self-conflict. Ownership semantics: the process
+// that actually executes tools owns the lease; supervisors/relays/clients do
+// not. A second independent executor still fails closed at index.ts.
 let EXECUTOR_LEASE_CLAIMED = false;
-if (process.env.DC_DISABLE_EXECUTOR_LEASE !== '1') {
+export function ensureCanonicalExecutorLease(): void {
+    if (process.env.DC_DISABLE_EXECUTOR_LEASE === '1') return;
+    if (EXECUTOR_LEASE_CLAIMED) return;
     let claim;
     try {
         claim = claimCanonicalExecutor();
