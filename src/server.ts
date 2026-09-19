@@ -63,12 +63,20 @@ export function ensureCanonicalExecutorLease(): void {
         }, 60 * 1000);
         renewTimer.unref();
         // Red-team fix #7: release the lease on shutdown so a restart is not
-        // locked out behind a dead-PID grace window.
+        // locked out behind a dead-PID grace window. IMPORTANT: registering a
+        // SIGTERM/SIGINT listener disables Node's default terminate-on-signal,
+        // so the handler must also actually terminate the process after
+        // releasing — otherwise SIGTERM would merely drop the lease while the
+        // executor kept running (regression caught by the onboarding test).
         const shutdownRelease = () => {
             try { releaseLease(); } catch { /* best-effort */ }
         };
-        process.once('SIGINT', shutdownRelease);
-        process.once('SIGTERM', shutdownRelease);
+        const shutdownAndExit = (signal: string) => {
+            shutdownRelease();
+            process.exit(0);
+        };
+        process.once('SIGINT', () => shutdownAndExit('SIGINT'));
+        process.once('SIGTERM', () => shutdownAndExit('SIGTERM'));
         process.once('exit', shutdownRelease);
     } else {
         console.error(`[executor-lease] REFUSED to start: canonical executor lease is held (blocked by: ${claim.blockedBy ?? 'unknown'}). Only one Desktop Commander executor may run. Set DC_DISABLE_EXECUTOR_LEASE=1 to explicitly bypass.`);

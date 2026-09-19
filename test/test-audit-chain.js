@@ -149,8 +149,9 @@ try {
 
   // 8. Concurrent writers must not fork the chain (red-team fix #9).
   const concFile = path.join(chainDir, 'audit-concurrent.jsonl');
+  const auditModuleUrl = new URL('../dist/audit/audit-chain.js', import.meta.url).href;
   const childScript = `
-    const { AuditChain } = await import(${JSON.stringify(path.resolve('dist/audit/audit-chain.js'))});
+    const { AuditChain } = await import(${JSON.stringify(auditModuleUrl)});
     const chain = new AuditChain(${JSON.stringify(concFile)});
     for (let i = 0; i < 10; i++) chain.append({ kind: 'invocation', agent: ${"'writer-' + process.pid"} , exitCode: 0 });
   `;

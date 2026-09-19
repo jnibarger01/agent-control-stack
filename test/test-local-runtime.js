@@ -42,6 +42,10 @@ const runtime = createLocalMcpRuntime({
   env: {
     DESKTOP_COMMANDER_DISABLE_TELEMETRY: '1',
     DESKTOP_COMMANDER_STATE_DIR: stateDir,
+    // This suite smokes runtime mechanics (spawn/read/reap), not the
+    // approval gate, which has dedicated coverage elsewhere. The fail-closed
+    // unmatched-command default would otherwise block the smoke spawn.
+    DC_UNMATCHED_COMMAND_POLICY: 'auto',
   },
 });
 

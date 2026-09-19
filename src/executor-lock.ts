@@ -105,10 +105,15 @@ export function isPidAlive(pid: number): boolean {
  * can get the same advisory lock via `flock` from util-linux when present.
  * Returns true if the lock was taken, false on conflict, null if unavailable.
  */
-function tryFlock(fd: number, lockPath: string): boolean | null {
+function tryFlock(_fd: number, lockPath: string): boolean | null {
   if (process.platform !== 'linux') return null;
   try {
-    execFileSync('flock', ['-n', String(fd)], { stdio: 'ignore' });
+    // Lock by PATH, not by fd number: Node does not inherit fds >= 3 into
+    // spawned children, so `flock -n <fdnum>` makes the utility treat the
+    // number as a FILENAME (undefined behavior — it made the takeover path
+    // flaky). `flock -n <path>` opens and locks the file itself, which is
+    // well-defined and provides the same secondary guard.
+    execFileSync('flock', ['-n', lockPath], { stdio: 'ignore' });
     return true;
   } catch (err: any) {
     if (err && err.status === 1) return false; // flock(1) exits 1 on conflict
