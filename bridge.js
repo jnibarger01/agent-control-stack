@@ -17,16 +17,26 @@ import http from 'node:http';
 import { randomUUID, webcrypto } from 'node:crypto';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { recycleDecision } from './recycle-policy.js';
 
 // SDK transports expect the webcrypto global on some runtimes.
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const PORT = parseInt(process.env.BRIDGE_PORT || '8002', 10);
+// MANAGED MODE (ACS_MANAGED_MODE=1, docs/acs-managed-mode.md): Desktop
+// Commander is spawned WITHOUT --standalone. Authority comes only from
+// ACS-issued acs.dc.v1 capabilities transported by the auth gateway; the
+// bridge never mints or injects capabilities. No --standalone fallback.
+const MANAGED = process.env.ACS_MANAGED_MODE === '1';
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
-const DC_ARGS = (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js --standalone').split(' ');
+const DC_ARGS = MANAGED
+  ? (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js').split(' ').filter((a) => a !== '--standalone')
+  : (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js --standalone').split(' ');
 const DC_CWD = process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
+const RECYCLE_WAIT_MS = parseInt(process.env.BRIDGE_RECYCLE_WAIT_MS || '15000', 10);
 
 let pair = null; // { upstream, httpTransport }
+let inFlight = 0; // tools/call requests currently executing against the pair
 
 function spawnPair() {
   const upstream = new StdioClientTransport({
@@ -46,16 +56,48 @@ function spawnPair() {
   console.log('bridge: Desktop Commander stdio executor started');
 }
 
-function recyclePair() {
-  if (!pair) return spawnPair();
-  console.log('bridge: new client session requested; recycling executor');
-  const old = pair;
-  pair = null;
-  spawnPair();
+function idleClose(old) {
   setTimeout(() => { try { old.upstream.close(); } catch { /* noop */ } try { old.httpTransport.close?.(); } catch { /* noop */ } }, 1000);
 }
 
+/**
+ * Lease-safe recycle. While a tools/call is in flight the running session may
+ * own an ACS attempt/lease — killing it mid-attempt could strand governed
+ * work. The recycle is deferred until inFlight drains; if the bounded wait
+ * expires the new session is refused (fail closed), never a mid-attempt kill.
+ */
+function requestRecycle(waitMs = RECYCLE_WAIT_MS) {
+  if (!pair) return spawnPair();
+  if (inFlight === 0) {
+    console.log('bridge: new client session requested; recycling idle executor');
+    const old = pair;
+    pair = null;
+    spawnPair();
+    idleClose(old);
+    return { recycled: true };
+  }
+  console.log('bridge: recycle deferred — tools/call in flight (lease-safe)');
+  const deadline = Date.now() + waitMs;
+  const poll = setInterval(() => {
+    if (!pair) { clearInterval(poll); return; }
+    if (inFlight === 0) {
+      clearInterval(poll);
+      const old = pair;
+      pair = null;
+      spawnPair();
+      idleClose(old);
+    } else if (Date.now() > deadline) {
+      clearInterval(poll);
+      console.log('bridge: recycle wait expired; new session refused (fail closed, lease preserved)');
+    }
+  }, 100);
+  return { recycled: false, deferred: true };
+}
+
+
+
 spawnPair();
+console.log(`bridge: executor mode: ${MANAGED ? 'managed (ACS-authorized capabilities only)' : 'standalone'}`);
 
 const httpServer = http.createServer(async (req, res) => {
   const path = req.url ? req.url.split('?')[0] : '/';
@@ -65,9 +107,30 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
   if (path === '/mcp') {
-    // A request without a session id is a brand-new client: give it a fresh pair.
-    if (!req.headers['mcp-session-id']) recyclePair();
+    // A request without a session id is a brand-new client: recycle when safe.
+    if (!req.headers['mcp-session-id']) requestRecycle();
+    let isCall = false;
     try {
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const body = Buffer.concat(chunks);
+      let parsed; try { parsed = JSON.parse(body.toString('utf8')); } catch { parsed = null; }
+      isCall = Boolean(parsed && typeof parsed.method === 'string' && parsed.method.startsWith('tools/'));
+      // Re-body the request for the SDK transport after inspection.
+      const headers = { ...req.headers };
+      delete headers['content-length'];
+      headers['content-length'] = String(body.length);
+      Object.defineProperty(req, 'headers', { value: headers });
+      req.push(body);
+    } catch (e) {
+      console.error('bridge: body read error:', e && e.message);
+    }
+    try {
+      if (isCall && pair) {
+        inFlight += 1;
+        try { await pair.httpTransport.handleRequest(req, res); } finally { inFlight -= 1; }
+        return;
+      }
       await pair.httpTransport.handleRequest(req, res);
     } catch (e) {
       console.error('bridge: handleRequest error:', e && e.message);
@@ -86,5 +149,5 @@ httpServer.headersTimeout = 30_000;
 httpServer.requestTimeout = 0;
 httpServer.keepAliveTimeout = 65_000;
 httpServer.listen(PORT, '127.0.0.1', () => {
-  console.log(`bridge: Streamable HTTP MCP on http://127.0.0.1:${PORT}/mcp (127.0.0.1 only)`);
+  console.log(`bridge: Streamable HTTP MCP on http://127.0.0.1:${PORT}/mcp (127.0.0.1 only, ${MANAGED ? 'managed' : 'standalone'})`);
 });
