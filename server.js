@@ -15,6 +15,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { managedModeFromEnv, identityAttribution, capabilityTransport, isToolsCall } from './managed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -37,6 +38,14 @@ const MAX_BODY = 2 * 1024 * 1024; // 2 MB
 
 for (const [k, v] of Object.entries({ PUBLIC_ORIGIN, CONSENT_PASSPHRASE, SIGNING_KEY })) {
   if (!v) { console.error(`gateway: missing required env ${k}; refusing to start`); process.exit(1); }
+}
+let MANAGED = { enabled: false };
+try {
+  MANAGED = managedModeFromEnv();
+  if (MANAGED.enabled) console.log('gateway: ACS MANAGED MODE enabled (capabilities issued by ACS only; no standalone fallback)');
+} catch (e) {
+  console.error(`gateway: ${e.message}`);
+  process.exit(1);
 }
 if (!GATEWAY_EXECUTION_TOKEN) console.log('gateway: GATEWAY_EXECUTION_TOKEN not set; executor identity attestation disabled (log-once)');
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
@@ -438,7 +447,23 @@ const server = http.createServer(async (req, res) => {
         log(req.method, '/mcp', 401, 'auth required');
         return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': CHALLENGE() });
       }
-      const body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
+      let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
+      if (MANAGED.enabled && req.method === 'POST') {
+        const { isCall, parsed } = isToolsCall(body);
+        if (isCall) {
+          try {
+            const rewrite = capabilityTransport(MANAGED, {
+              identity: identityAttribution(auth),
+              requestId: randId(),
+            });
+            body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
+          } catch (e) {
+            const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
+            log(req.method, '/mcp', 503, `managed fail-closed: ${code}`);
+            return send(res, 503, { error: 'managed_authorization_unavailable', code });
+          }
+        }
+      }
       proxyMcp(req, res, body, auth);
       log(req.method, '/mcp', 200, 'proxied'); // status approximate; stream continues
       return;

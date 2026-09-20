@@ -16,8 +16,14 @@ import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const PORT = parseInt(process.env.BRIDGE_PORT || '8002', 10);
+// Explicit ACS managed mode: the executor is started without --standalone;
+// authority comes only from ACS-issued capabilities transported by the
+// authenticated gateway. The normal standalone mode remains unchanged.
+const MANAGED = process.env.ACS_MANAGED_MODE === '1';
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
-const DC_ARGS = (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js --standalone').split(' ');
+const DC_ARGS = MANAGED
+  ? (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js').split(' ').filter((arg) => arg !== '--standalone')
+  : (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js --standalone').split(' ');
 const DC_CWD = process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || '';
 const MAX_BODY = 2 * 1024 * 1024;
@@ -195,6 +201,7 @@ function createSession(headers) {
 }
 
 spawnPair();
+console.log(`bridge: executor mode: ${MANAGED ? 'managed (ACS-authorized capabilities only)' : 'standalone'}`);
 
 const httpServer = http.createServer(async (req, res) => {
   const path = req.url ? req.url.split('?')[0] : '/';
