@@ -1,153 +1,273 @@
 #!/usr/bin/env node
 /**
- * bridge.js — stdio → Streamable HTTP bridge for Desktop Commander,
- * replacing Supergateway so the listener binds strictly to 127.0.0.1.
+ * stdio -> Streamable HTTP MCP multiplexer for Desktop Commander.
  *
- * Pure JSON-RPC relay between two MCP SDK transports:
- *   StdioClientTransport (spawns Desktop Commander dist/index.js)
- *     <-> StreamableHTTPServerTransport (loopback HTTP for the auth gateway)
- *
- * Session policy: one canonical Desktop Commander executor at a time. A new
- * client initialize (POST /mcp without an Mcp-Session-Id) recycles the
- * executor + transport pair so the latest client always gets a clean session.
- *
- * Serves:  GET /healthz -> "ok"   |   POST/GET/DELETE /mcp -> MCP transport
+ * There is exactly one upstream StdioClientTransport (and therefore one
+ * Desktop Commander executor). Each downstream HTTP client gets its own
+ * StreamableHTTPServerTransport and gateway session record. The gateway
+ * rewrites request ids at the shared-upstream boundary so independent clients
+ * may reuse JSON-RPC ids without response crossover.
  */
 import http from 'node:http';
-import { randomUUID, webcrypto } from 'node:crypto';
+import { randomUUID, webcrypto, createHmac, timingSafeEqual } from 'node:crypto';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { recycleDecision } from './recycle-policy.js';
 
-// SDK transports expect the webcrypto global on some runtimes.
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const PORT = parseInt(process.env.BRIDGE_PORT || '8002', 10);
-// MANAGED MODE (ACS_MANAGED_MODE=1, docs/acs-managed-mode.md): Desktop
-// Commander is spawned WITHOUT --standalone. Authority comes only from
-// ACS-issued acs.dc.v1 capabilities transported by the auth gateway; the
-// bridge never mints or injects capabilities. No --standalone fallback.
+// Explicit ACS managed mode: the executor is started without --standalone;
+// authority comes only from ACS-issued capabilities transported by the
+// authenticated gateway. The normal standalone mode remains unchanged.
 const MANAGED = process.env.ACS_MANAGED_MODE === '1';
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
 const DC_ARGS = MANAGED
-  ? (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js').split(' ').filter((a) => a !== '--standalone')
+  ? (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js').split(' ').filter((arg) => arg !== '--standalone')
   : (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js --standalone').split(' ');
 const DC_CWD = process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
-const RECYCLE_WAIT_MS = parseInt(process.env.BRIDGE_RECYCLE_WAIT_MS || '15000', 10);
+const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || '';
+const MAX_BODY = 2 * 1024 * 1024;
 
-let pair = null; // { upstream, httpTransport }
-let inFlight = 0; // tools/call requests currently executing against the pair
+let pair = null; // { upstream, sessions, routes, initResponse, initPromise }
+let spawnCount = 0;
+let lastDebug = { last_headers: null, last_upstream_message: null };
+let shuttingDown = false;
+
+function idKey(id) { return `${typeof id}:${JSON.stringify(id)}`; }
+function hasId(msg) { return Object.prototype.hasOwnProperty.call(msg, 'id'); }
+function isRequest(msg) { return hasId(msg) && typeof msg.method === 'string'; }
+function isNotification(msg) { return !hasId(msg) && typeof msg.method === 'string'; }
+function isResponse(msg) { return hasId(msg) && !isRequest(msg) && (msg.result !== undefined || msg.error !== undefined); }
+function isInitialize(msg) { return msg?.method === 'initialize'; }
+
+function verifyAttestation(value, agentHeader) {
+  try {
+    const [body, sig] = String(value).split('.');
+    if (!body || !sig) return null;
+    const expect = createHmac('sha256', EXECUTION_TOKEN).update(body).digest('base64url');
+    const a = Buffer.from(sig); const b = Buffer.from(expect);
+    if (a.length !== b.length || !timingSafeEqual(a, b)) return null;
+    const payload = JSON.parse(Buffer.from(body, 'base64url').toString('utf8'));
+    const t = Math.floor(Date.now() / 1000);
+    if (typeof payload.exp !== 'number' || payload.exp < t) return null;
+    if (typeof payload.iat === 'number' && payload.exp - payload.iat > 60) return null;
+    if (agentHeader && payload.sub !== agentHeader) return null;
+    return payload;
+  } catch { return null; }
+}
+
+function injectAttestation(msg, headers) {
+  if (!EXECUTION_TOKEN) return msg;
+  const att = headers['x-dc-attestation'];
+  if (!att) return msg; // local loopback callers retain legacy pass-through behavior
+  const payload = verifyAttestation(att, headers['x-dc-agent']);
+  if (!payload) return msg; // HTTP layer rejects before this point
+  const agent = String(payload.sub || '');
+  const meta = { ...(msg.params?._meta || {}) };
+  meta.agent = agent.startsWith('chatgpt:') ? agent : `chatgpt:${agent}`;
+  meta.gateway = { verified: true, sub: payload.sub, client_id: payload.client_id, jti: payload.jti, ts: Math.floor(Date.now() / 1000) };
+  if (!meta.transport) meta.transport = 'oauth-gateway';
+  msg.params = { ...(msg.params || {}), _meta: meta };
+  return msg;
+}
+
+function sendJsonRpcError(res, status, code, message) {
+  if (res.headersSent) return res.destroy();
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ jsonrpc: '2.0', error: { code, message }, id: null }));
+}
+
+async function readJsonBody(req) {
+  const chunks = []; let size = 0;
+  for await (const chunk of req) {
+    size += chunk.length;
+    if (size > MAX_BODY) throw Object.assign(new Error('request body too large'), { status: 413 });
+    chunks.push(chunk);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch { throw Object.assign(new Error('invalid JSON'), { status: 400 }); }
+}
+
+function failClosed(reason, target = pair) {
+  console.error(`bridge: fail-closed upstream routing fault: ${reason}`);
+  if (!target) return;
+  target.initReject?.(new Error(reason));
+  for (const session of target.sessions.values()) { session.closed = true; session.transport.close().catch(() => {}); }
+  target.sessions.clear(); target.routes.clear();
+}
+
+async function forward(session, msg, headers) {
+  if (session.closed || !pair || pair !== session.pair) return;
+  const outbound = injectAttestation(structuredClone(msg), headers);
+  lastDebug = { last_headers: headers, last_upstream_message: outbound };
+
+  if (isInitialize(msg)) {
+    if (pair.initResponse) { await session.transport.send({ ...pair.initResponse, id: msg.id }); return; }
+    if (!pair.initPromise) {
+      pair.initPromise = new Promise((resolve, reject) => { pair.initResolve = resolve; pair.initReject = reject; });
+      pair.initPromise.catch(() => {});
+      const upstreamId = `gw-init-${randomUUID()}`;
+      pair.routes.set(upstreamId, { session, downstreamId: msg.id, initialize: true });
+      outbound.id = upstreamId;
+      session.pending.set(idKey(msg.id), upstreamId);
+      await pair.upstream.send(outbound);
+      return;
+    }
+    const response = await pair.initPromise;
+    if (!session.closed) await session.transport.send({ ...response, id: msg.id });
+    return;
+  }
+
+  if (isResponse(msg)) { failClosed(`downstream response has no deterministic server-request route (${String(msg.id)})`, session.pair); return; }
+  if (!isRequest(msg) && !isNotification(msg)) { failClosed('malformed message after SDK validation', session.pair); return; }
+  if (pair.initPromise) await pair.initPromise;
+  if (!pair.initResponse || session.closed) return;
+  if (isNotification(msg)) { await pair.upstream.send(outbound); return; }
+
+  const key = idKey(msg.id);
+  if (session.pending.has(key)) { failClosed(`duplicate downstream request id in session ${session.id}`, session.pair); return; }
+  const upstreamId = `gw-${randomUUID()}`;
+  session.pending.set(key, upstreamId);
+  pair.routes.set(upstreamId, { session, downstreamId: msg.id, initialize: false });
+  outbound.id = upstreamId;
+  try { await pair.upstream.send(outbound); }
+  catch (error) { pair.routes.delete(upstreamId); session.pending.delete(key); throw error; }
+}
 
 function spawnPair() {
-  const upstream = new StdioClientTransport({
-    command: DC_CMD, args: DC_ARGS, cwd: DC_CWD, stderr: 'inherit',
-  });
-  const httpTransport = new StreamableHTTPServerTransport({
-    sessionIdGenerator: () => randomUUID(),
-    enableJsonResponse: false, // preserve SSE streaming semantics end to end
-  });
-  upstream.onmessage = (msg) => { httpTransport.send(msg).catch((e) => console.error('bridge: send->http failed:', e && e.message)); };
-  upstream.onerror = (e) => console.error('bridge: upstream error:', e && e.message);
-  upstream.onclose = () => console.error('bridge: upstream closed');
-  httpTransport.onmessage = (msg) => { upstream.send(msg).catch((e) => console.error('bridge: send->stdio failed:', e && e.message)); };
-  httpTransport.onerror = (e) => console.error('bridge: http transport error:', e && e.message);
-  upstream.start().catch((e) => { console.error('bridge: upstream start failed:', e && e.message); process.exit(1); });
-  pair = { upstream, httpTransport };
-  console.log('bridge: Desktop Commander stdio executor started');
-}
-
-function idleClose(old) {
-  setTimeout(() => { try { old.upstream.close(); } catch { /* noop */ } try { old.httpTransport.close?.(); } catch { /* noop */ } }, 1000);
-}
-
-/**
- * Lease-safe recycle. While a tools/call is in flight the running session may
- * own an ACS attempt/lease — killing it mid-attempt could strand governed
- * work. The recycle is deferred until inFlight drains; if the bounded wait
- * expires the new session is refused (fail closed), never a mid-attempt kill.
- */
-function requestRecycle(waitMs = RECYCLE_WAIT_MS) {
-  if (!pair) return spawnPair();
-  if (inFlight === 0) {
-    console.log('bridge: new client session requested; recycling idle executor');
-    const old = pair;
-    pair = null;
-    spawnPair();
-    idleClose(old);
-    return { recycled: true };
-  }
-  console.log('bridge: recycle deferred — tools/call in flight (lease-safe)');
-  const deadline = Date.now() + waitMs;
-  const poll = setInterval(() => {
-    if (!pair) { clearInterval(poll); return; }
-    if (inFlight === 0) {
-      clearInterval(poll);
-      const old = pair;
-      pair = null;
-      spawnPair();
-      idleClose(old);
-    } else if (Date.now() > deadline) {
-      clearInterval(poll);
-      console.log('bridge: recycle wait expired; new session refused (fail closed, lease preserved)');
+  const upstream = new StdioClientTransport({ command: DC_CMD, args: DC_ARGS, cwd: DC_CWD, stderr: 'inherit' });
+  const next = { upstream, sessions: new Map(), routes: new Map(), initResponse: null, initPromise: null };
+  upstream.onmessage = async (msg) => {
+    if (isResponse(msg)) {
+      const route = next.routes.get(String(msg.id));
+      if (!route || !route.session || route.session.closed) return failClosed(`orphan upstream response ${String(msg.id)}`, next);
+      next.routes.delete(String(msg.id)); route.session.pending.delete(idKey(route.downstreamId));
+      const response = { ...msg, id: route.downstreamId };
+      if (route.initialize) { next.initResponse = response; next.initResolve?.(response); }
+      try { await route.session.transport.send(response); }
+      catch (error) { failClosed(`downstream response delivery failed: ${error.message}`, next); }
+      return;
     }
-  }, 100);
-  return { recycled: false, deferred: true };
+    if (hasId(msg) && typeof msg.method === 'string') return failClosed(`unsupported upstream server request ${String(msg.method)}`, next);
+    for (const session of next.sessions.values()) if (!session.closed) session.transport.send(msg).catch(() => {});
+  };
+  upstream.onerror = (e) => console.error('bridge: upstream error:', e?.message);
+  upstream.onclose = () => {
+    console.error('bridge: upstream closed');
+    if (pair === next) {
+      failClosed('upstream closed', next);
+      if (!shuttingDown) spawnPair();
+    }
+  };
+  upstream.start().catch((e) => { console.error('bridge: upstream start failed:', e?.message); process.exit(1); });
+  spawnCount++; pair = next;
+  console.log(`bridge: Desktop Commander stdio executor started (spawn_count=${spawnCount})`);
 }
 
-
+function createSession(headers) {
+  const session = {
+    id: null,
+    pair,
+    transport: null,
+    pending: new Map(),
+    closed: false,
+    initialized: false,
+    createdAt: Date.now(),
+    lastActivityAt: Date.now(),
+    metadata: { client: headers['user-agent'] || null },
+  };
+  const transport = new StreamableHTTPServerTransport({
+    sessionIdGenerator: () => randomUUID(), enableJsonResponse: false,
+    onsessioninitialized: (sid) => {
+      if (pair !== session.pair || session.pair.sessions.has(sid)) throw new Error('ambiguous downstream session ownership');
+      session.id = sid; session.initialized = true; session.lastActivityAt = Date.now(); session.pair.sessions.set(sid, session);
+    },
+    onsessionclosed: (sid) => {
+      if (session.pair.sessions.get(sid) === session) session.pair.sessions.delete(sid);
+      session.closed = true;
+      for (const upstreamId of session.pending.values()) session.pair.routes.delete(upstreamId);
+      session.pending.clear();
+    },
+  });
+  session.transport = transport;
+  transport.onmessage = (msg, extra) => {
+    session.lastActivityAt = Date.now();
+    const requestHeaders = extra?.requestInfo?.headers || headers;
+    session.metadata.protocolVersion = msg.params?.protocolVersion || session.metadata.protocolVersion;
+    forward(session, msg, requestHeaders).catch((error) => { console.error('bridge: send->stdio failed:', error?.message); failClosed('upstream forwarding failure'); });
+  };
+  transport.onerror = (e) => console.error('bridge: downstream transport error:', e?.message);
+  return session;
+}
 
 spawnPair();
 console.log(`bridge: executor mode: ${MANAGED ? 'managed (ACS-authorized capabilities only)' : 'standalone'}`);
 
 const httpServer = http.createServer(async (req, res) => {
   const path = req.url ? req.url.split('?')[0] : '/';
-  if (path === '/healthz') {
-    res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end('ok');
+  if (path === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok'); return; }
+  if (path === '/debug/last-headers') {
+    const pendingCount = pair ? [...pair.sessions.values()].reduce((count, session) => count + session.pending.size, 0) : 0;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ...lastDebug, spawn_count: spawnCount, session_count: pair?.sessions.size || 0, pending_count: pendingCount }));
     return;
   }
-  if (path === '/mcp') {
-    // A request without a session id is a brand-new client: recycle when safe.
-    if (!req.headers['mcp-session-id']) requestRecycle();
-    let isCall = false;
-    try {
-      const chunks = [];
-      for await (const c of req) chunks.push(c);
-      const body = Buffer.concat(chunks);
-      let parsed; try { parsed = JSON.parse(body.toString('utf8')); } catch { parsed = null; }
-      isCall = Boolean(parsed && typeof parsed.method === 'string' && parsed.method.startsWith('tools/'));
-      // Re-body the request for the SDK transport after inspection.
-      const headers = { ...req.headers };
-      delete headers['content-length'];
-      headers['content-length'] = String(body.length);
-      Object.defineProperty(req, 'headers', { value: headers });
-      req.push(body);
-    } catch (e) {
-      console.error('bridge: body read error:', e && e.message);
-    }
-    try {
-      if (isCall && pair) {
-        inFlight += 1;
-        try { await pair.httpTransport.handleRequest(req, res); } finally { inFlight -= 1; }
-        return;
-      }
-      await pair.httpTransport.handleRequest(req, res);
-    } catch (e) {
-      console.error('bridge: handleRequest error:', e && e.message);
-      if (!res.headersSent) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ jsonrpc: '2.0', error: { code: -32603, message: 'bridge error' }, id: null }));
-      } else res.destroy();
-    }
-    return;
+  if (path !== '/mcp') { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' })); return; }
+
+  if (EXECUTION_TOKEN && req.method === 'POST') {
+    const att = req.headers['x-dc-attestation'];
+    if (att && !verifyAttestation(att, req.headers['x-dc-agent'])) { console.error('bridge: invalid gateway attestation; rejecting without forward'); return sendJsonRpcError(res, 400, -32001, 'gateway attestation invalid'); }
   }
-  res.writeHead(404, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({ error: 'not_found' }));
+
+  const sid = req.headers['mcp-session-id'];
+  let session = sid ? pair.sessions.get(sid) : null;
+  if (sid && (!session || session.closed)) return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+  try {
+    let body;
+    if (req.method === 'POST') body = await readJsonBody(req);
+    if (req.method === 'POST') {
+      const messages = Array.isArray(body) ? body : [body];
+      const initialization = messages.some(isInitialize);
+      if (!session && !initialization) return sendJsonRpcError(res, 400, -32000, 'Mcp-Session-Id header is required');
+      if (!session) session = createSession(req.headers);
+    } else if (!session) return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+    lastDebug.last_headers = req.headers;
+    await session.transport.handleRequest(req, res, body);
+  } catch (e) {
+    console.error('bridge: handleRequest error:', e?.message);
+    if (!res.headersSent) {
+      const parseFailure = e.status === 400;
+      sendJsonRpcError(res, e.status || 500, parseFailure ? -32700 : -32603, parseFailure ? 'Parse error' : 'bridge error');
+    } else res.destroy();
+  }
 });
 
 httpServer.headersTimeout = 30_000;
 httpServer.requestTimeout = 0;
 httpServer.keepAliveTimeout = 65_000;
-httpServer.listen(PORT, '127.0.0.1', () => {
-  console.log(`bridge: Streamable HTTP MCP on http://127.0.0.1:${PORT}/mcp (127.0.0.1 only, ${MANAGED ? 'managed' : 'standalone'})`);
-});
+httpServer.listen(PORT, '127.0.0.1', () => console.log(`bridge: Streamable HTTP MCP on http://127.0.0.1:${PORT}/mcp (127.0.0.1 only)`));
+
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`bridge: ${signal} received; shutting down cleanly`);
+  const activePair = pair;
+  const closeListener = new Promise((resolve) => httpServer.close(() => resolve()));
+  if (activePair) {
+    const transports = [...activePair.sessions.values()].map((session) => session.transport);
+    failClosed('gateway shutdown', activePair);
+    await Promise.allSettled(transports.map((transport) => transport.close()));
+    await activePair.upstream.close().catch((error) => console.error('bridge: upstream close failed:', error?.message));
+  }
+  await closeListener;
+  console.log('bridge: shutdown complete; canonical executor transport closed');
+}
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.once(signal, () => {
+    shutdown(signal).then(() => process.exit(0)).catch((error) => {
+      console.error('bridge: shutdown failed:', error?.message);
+      process.exit(1);
+    });
+  });
+}

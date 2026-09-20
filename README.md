@@ -22,10 +22,27 @@ ChatGPT ──HTTPS──► https://jacen-ubuntu.tailaa6d41.ts.net/mcp
   - RFC 9728 protected-resource metadata + RFC 8414 AS metadata discovery.
   - `/mcp` proxy: validates HS256 JWT (iss, exp, aud == RESOURCE) before
     forwarding; streams responses (SSE preserved); never logs tokens or args.
+  - Identity forwarding: on each authorized `/mcp` request the gateway
+    attests the authenticated identity to the executor (`x-dc-agent`,
+    `x-dc-client`, `x-dc-attestation` — short-lived HMAC over the identity,
+    keyed by `GATEWAY_EXECUTION_TOKEN`). The bearer token is never forwarded;
+    client-supplied `x-dc-*` headers are always stripped.
   - Consent page gated by `CONSENT_PASSPHRASE` (typed by the owner in a browser).
-- `bridge.js` — MCP SDK stdio→Streamable HTTP relay, bound to 127.0.0.1 only
-  (replaces Supergateway, which cannot bind loopback). One canonical Desktop
-  Commander executor; a new client initialize recycles the executor.
+- `bridge.js` — MCP SDK stdio→Streamable HTTP multiplexer, bound to 127.0.0.1
+  only (replaces Supergateway, which cannot bind loopback). It owns one
+  long-lived `StdioClientTransport` and therefore one canonical Desktop
+  Commander executor (lease-claimed by DC itself), while creating one
+  downstream HTTP transport and session record per client.
+  - Downstream request ids are rewritten to gateway-generated upstream ids and
+    restored on response, so independent clients may reuse JSON-RPC ids.
+  - Downstream `initialize` handshakes are virtualized from the single
+    canonical upstream initialization; notifications are forwarded without
+    response routes. An unexpected upstream client-directed request or orphan
+    response fails closed because it has no deterministic downstream owner.
+  - Unknown/mismatched `Mcp-Session-Id` gets HTTP 400
+    'session unknown; reconnect and re-initialize'; closing one session leaves
+    other sessions live. If the executor crashes, the pair is respawned once
+    and existing sessions must re-initialize.
 - `test-e2e.sh` — end-to-end flow test (run against `GW=<url>`).
 
 ## Files that must never be committed (gitignored)

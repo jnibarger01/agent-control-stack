@@ -28,10 +28,11 @@ Status: implemented on the gateway side against the contract in
    originates from ACS state; ACS consumes approvals transactionally at
    issuance. The gateway's OAuth consent passphrase remains pure UX for
    client registration and creates no second approval authority.
-5. **Lease-safe recycling.** `bridge.js` defers an executor recycle while a
-   `tools/call` is in flight (the running session may own an ACS attempt and
-   lease) and refuses the new session when its bounded wait expires — never a
-   mid-attempt kill (`recycle-policy.js`).
+5. **Lease-safe lifecycle.** The multi-session bridge never recycles the
+   canonical executor for normal downstream session creation. It invalidates
+   sessions and replaces the upstream transport only after an actual upstream
+   exit; `recycle-policy.js` remains a pure, tested policy helper for any
+   future governed recovery path and never authorizes a mid-attempt kill.
 
 ## Required ACS endpoints (issuer side; contract)
 
@@ -64,9 +65,9 @@ the ACS process boundary.
 - `server.js` `ACS_MANAGED_MODE=1`: on each `tools/call`, request capability
   from ACS → inject → forward; any failure → 503 `{error:
   managed_authorization_unavailable, code}`, nothing reaches DC.
-- `bridge.js` `ACS_MANAGED_MODE=1`: spawns DC without `--standalone`,
-  lease-safe recycling via `recycle-policy.js`, `/healthz` returns
-  `ok-managed`.
+- `bridge.js` `ACS_MANAGED_MODE=1`: spawns DC without `--standalone` while
+  preserving the multi-session router; `/healthz` remains the stable `ok`
+  response for existing MCP health checks.
 
 ## Test evidence
 

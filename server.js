@@ -30,6 +30,7 @@ const UPSTREAM = process.env.UPSTREAM || 'http://127.0.0.1:8002';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CONSENT_PASSPHRASE = process.env.CONSENT_PASSPHRASE || '';
 const SIGNING_KEY = process.env.SIGNING_KEY || ''; // hex
+const GATEWAY_EXECUTION_TOKEN = process.env.GATEWAY_EXECUTION_TOKEN || ''; // optional; enables executor identity attestation
 const ACCESS_TTL_S = 3600;
 const REFRESH_TTL_S = 30 * 24 * 3600;
 const CODE_TTL_S = 300;
@@ -38,11 +39,6 @@ const MAX_BODY = 2 * 1024 * 1024; // 2 MB
 for (const [k, v] of Object.entries({ PUBLIC_ORIGIN, CONSENT_PASSPHRASE, SIGNING_KEY })) {
   if (!v) { console.error(`gateway: missing required env ${k}; refusing to start`); process.exit(1); }
 }
-
-// ACS managed mode (docs/acs-managed-mode.md). Opt-in and explicit: when
-// enabled, every tools/ call is forwarded to ACS for an already-authorized
-// capability before it may reach Desktop Commander, and any failure fails
-// closed. There is no standalone fallback on this path.
 let MANAGED = { enabled: false };
 try {
   MANAGED = managedModeFromEnv();
@@ -51,6 +47,7 @@ try {
   console.error(`gateway: ${e.message}`);
   process.exit(1);
 }
+if (!GATEWAY_EXECUTION_TOKEN) console.log('gateway: GATEWAY_EXECUTION_TOKEN not set; executor identity attestation disabled (log-once)');
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 
 const META = {
@@ -110,6 +107,15 @@ const verifyJwt = (token) => {
 };
 const randId = () => crypto.randomBytes(24).toString('base64url');
 const now = () => Math.floor(Date.now() / 1000);
+
+// Per-request identity attestation for the executor (bridge): base64url(JSON
+// payload) + '.' + HMAC-SHA256(GATEWAY_EXECUTION_TOKEN, base64url-part).
+// Short-lived (60s), minted fresh on every authorized /mcp request.
+function mintAttestation(payload) {
+  const body = b64u(JSON.stringify(payload));
+  const sig = crypto.createHmac('sha256', GATEWAY_EXECUTION_TOKEN).update(body).digest('base64url');
+  return `${body}.${sig}`;
+}
 
 // ---------------------------------------------------------------------------
 // HTTP helpers
@@ -361,16 +367,27 @@ function checkAuth(req) {
 // ---------------------------------------------------------------------------
 const HOP = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'authorization', 'content-length', 'expect']);
 
-function proxyMcp(req, res, bodyBuf) {
+function proxyMcp(req, res, bodyBuf, auth) {
   const url = new URL(req.url, UPSTREAM);
   const headers = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const lk = k.toLowerCase();
     if (HOP.has(lk)) continue;
     if (lk === 'x-forwarded-host' || lk === 'x-forwarded-proto' || lk === 'forwarded') continue; // never leak origin hints upstream
+    if (lk === 'x-dc-agent' || lk === 'x-dc-client' || lk === 'x-dc-attestation') continue; // never trust client-supplied identity headers
     headers[k] = v;
   }
   headers['x-forwarded-for'] = 'gateway-authenticated';
+  if (GATEWAY_EXECUTION_TOKEN && auth) {
+    // Trusted transport attribution: attest the authenticated identity to the
+    // executor. The bearer token itself is never forwarded (HOP-stripped).
+    const iat = now();
+    headers['x-dc-agent'] = String(auth.sub || '');
+    headers['x-dc-client'] = String(auth.client_id || '');
+    headers['x-dc-attestation'] = mintAttestation({
+      sub: auth.sub, client_id: auth.client_id, jti: auth.jti, iat, exp: iat + 60,
+    });
+  }
   const upstream = new URL(UPSTREAM);
   headers.host = upstream.host;
   const opts = { protocol: upstream.protocol, hostname: upstream.hostname, port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80), path: url.pathname + url.search, method: req.method, headers };
@@ -435,15 +452,11 @@ const server = http.createServer(async (req, res) => {
         const { isCall, parsed } = isToolsCall(body);
         if (isCall) {
           try {
-            // Stage 1: identity is attribution only. Stage 2: ACS is the sole
-            // issuer; the capability is requested, received, and transported —
-            // never minted here. Any failure is fail-closed (nothing reaches DC).
             const rewrite = capabilityTransport(MANAGED, {
               identity: identityAttribution(auth),
               requestId: randId(),
             });
-            const rewritten = await rewrite(parsed);
-            body = Buffer.from(JSON.stringify(rewritten), 'utf8');
+            body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
             log(req.method, '/mcp', 503, `managed fail-closed: ${code}`);
@@ -451,7 +464,7 @@ const server = http.createServer(async (req, res) => {
           }
         }
       }
-      proxyMcp(req, res, body);
+      proxyMcp(req, res, body, auth);
       log(req.method, '/mcp', 200, 'proxied'); // status approximate; stream continues
       return;
     }
