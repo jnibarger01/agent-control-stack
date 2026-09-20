@@ -14,6 +14,15 @@
  * the forwarded JSON-RPC params._meta (trusted transport attribution).
  * Requests without the header pass through unchanged (local non-gateway use).
  *
+ * Session policy: ONE canonical Desktop Commander executor for the bridge
+ * lifetime — it is lease-claimed by DC itself, so the bridge never spawns a
+ * second one. A POST without Mcp-Session-Id is treated as a fresh
+ * initialize against the persistent pair; a POST whose session id does not
+ * match gets HTTP 400 'session unknown; reconnect and re-initialize' (the
+ * executor pair is NOT recycled). If the executor crashes, the pair is
+ * respawned once and all existing HTTP sessions become invalid (clients
+ * must re-initialize).
+ *
  * Serves:  GET /healthz -> "ok"   |   POST/GET/DELETE /mcp -> MCP transport
  *          GET /debug/last-headers -> last forwarded headers/message (test aid)
  */
@@ -82,7 +91,16 @@ function spawnPair() {
   });
   upstream.onmessage = (msg) => { httpTransport.send(msg).catch((e) => console.error('bridge: send->http failed:', e && e.message)); };
   upstream.onerror = (e) => console.error('bridge: upstream error:', e && e.message);
-  upstream.onclose = () => console.error('bridge: upstream closed');
+  upstream.onclose = () => {
+    console.error('bridge: upstream closed');
+    // Executor crash: respawn a single replacement pair (never a second
+    // concurrent one). The old HTTP transport — and its session id — dies
+    // with it, so stale clients get 400 and must re-initialize.
+    if (pair && pair.upstream === upstream) {
+      try { httpTransport.close?.(); } catch { /* noop */ }
+      spawnPair();
+    }
+  };
   httpTransport.onmessage = (msg, extra) => {
     try {
       const headers = extra?.requestInfo?.headers || {};
@@ -96,15 +114,6 @@ function spawnPair() {
   spawnCount++;
   pair = { upstream, httpTransport };
   console.log('bridge: Desktop Commander stdio executor started');
-}
-
-function recyclePair() {
-  if (!pair) return spawnPair();
-  console.log('bridge: new client session requested; recycling executor');
-  const old = pair;
-  pair = null;
-  spawnPair();
-  setTimeout(() => { try { old.upstream.close(); } catch { /* noop */ } try { old.httpTransport.close?.(); } catch { /* noop */ } }, 1000);
 }
 
 spawnPair();
@@ -136,8 +145,12 @@ const httpServer = http.createServer(async (req, res) => {
         return sendJsonRpcError(res, 400, -32001, 'gateway attestation invalid');
       }
     }
-    // A request without a session id is a brand-new client: give it a fresh pair.
-    if (!req.headers['mcp-session-id']) recyclePair();
+    // Lease-safe sessions: never recycle the executor on session-less POSTs.
+    // A session id that does not match the single live transport is unknown.
+    const sid = req.headers['mcp-session-id'];
+    if (sid && sid !== pair.httpTransport.sessionId) {
+      return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+    }
     try {
       await pair.httpTransport.handleRequest(req, res);
     } catch (e) {

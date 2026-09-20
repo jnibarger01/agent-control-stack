@@ -188,6 +188,56 @@ try {
   assert.equal(dbg3.last_upstream_message.params._meta, undefined, '_meta injected without attestation');
   console.log('no-attestation pass-through unchanged: OK');
 
+  // --- 5. lease-safe session recycling ---
+  // 5a. second POST without session id: no recycle, single executor, 400.
+  const again = await post(`${BR}/mcp`, {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+  }, JSON.stringify({
+    jsonrpc: '2.0', id: 2, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'second', version: '0' } },
+  }));
+  assert.equal(again.status, 400, `second session-less initialize status: ${again.status}`);
+  let dbg4 = await (await fetch(`${BR}/debug/last-headers`)).json();
+  assert.equal(dbg4.spawn_count, 1, `executor respawned on session-less POST (spawn_count=${dbg4.spawn_count})`);
+  console.log('second session-less POST -> 400, still ONE executor: OK');
+
+  // 5b. mismatched session id -> 400 'session unknown', no recycle.
+  const bogus = await post(`${BR}/mcp`, {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'mcp-session-id': 'not-a-real-session',
+  }, JSON.stringify({ jsonrpc: '2.0', id: 3, method: 'ping' }));
+  assert.equal(bogus.status, 400, `bogus session status: ${bogus.status}`);
+  assert.equal(JSON.parse(bogus.text).error.message, 'session unknown; reconnect and re-initialize');
+  console.log('session mismatch -> 400 session unknown: OK');
+
+  // 5c. executor crash -> single respawn, old session dies.
+  const crash = await post(`${BR}/mcp`, {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'mcp-session-id': sessionId,
+  }, JSON.stringify({ jsonrpc: '2.0', method: 'test/crash' }));
+  assert.equal(crash.status, 202, `crash notification status: ${crash.status}`);
+  const crashDeadline = Date.now() + 5000;
+  do { dbg4 = await (await fetch(`${BR}/debug/last-headers`)).json(); if (dbg4.spawn_count === 2) break; await sleep(150); } while (Date.now() < crashDeadline);
+  assert.equal(dbg4.spawn_count, 2, `executor not respawned after crash (spawn_count=${dbg4.spawn_count})`);
+  const stale = await post(`${BR}/mcp`, {
+    'Content-Type': 'application/json',
+    Accept: 'application/json, text/event-stream',
+    'mcp-session-id': sessionId,
+  }, JSON.stringify({ jsonrpc: '2.0', id: 4, method: 'ping' }));
+  assert.equal(stale.status, 400, `stale session after respawn status: ${stale.status}`);
+
+  // 5d. the respawned pair still serves a full gateway-authenticated initialize.
+  const reinit = await post(`${GW}/mcp`, authHeaders, JSON.stringify({
+    jsonrpc: '2.0', id: 5, method: 'initialize',
+    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'reinit', version: '0' } },
+  }));
+  assert.equal(reinit.status, 200, `re-initialize after respawn failed: ${reinit.status} ${reinit.text}`);
+  assert.ok(extractSseData(reinit.text)?.result?.serverInfo?.name === 'stub-dc');
+  console.log('crash respawn (single), stale session 400, re-initialize OK: OK');
+
   console.log('PASS');
 } finally {
   for (const p of [gateway, bridge, bridge2]) { try { p.kill('SIGTERM'); } catch { /* noop */ } }

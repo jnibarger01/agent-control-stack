@@ -30,7 +30,11 @@ ChatGPT ──HTTPS──► https://jacen-ubuntu.tailaa6d41.ts.net/mcp
   - Consent page gated by `CONSENT_PASSPHRASE` (typed by the owner in a browser).
 - `bridge.js` — MCP SDK stdio→Streamable HTTP relay, bound to 127.0.0.1 only
   (replaces Supergateway, which cannot bind loopback). One canonical Desktop
-  Commander executor; a new client initialize recycles the executor.
+  Commander executor for the bridge lifetime (lease-claimed by DC itself).
+  - Session leasing: the executor pair is persistent and never recycled
+    mid-flight. Unknown/mismatched `Mcp-Session-Id` gets HTTP 400
+    'session unknown; reconnect and re-initialize'; if the executor crashes
+    the pair is respawned once and existing sessions must re-initialize.
 - `test-e2e.sh` — end-to-end flow test (run against `GW=<url>`).
 
 ## Files that must never be committed (gitignored)
