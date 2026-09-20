@@ -162,7 +162,7 @@ function timingSafeEqualStr(a: string, b: string): boolean {
   if (ab.length !== bb.length) {
     // Compare a digest of each to keep the comparison constant-time even
     // across length mismatch.
-    crypto.timingSafeEqual(sha256Hex(a), sha256Hex(b));
+    crypto.timingSafeEqual(Buffer.from(sha256Hex(a), 'hex'), Buffer.from(sha256Hex(b), 'hex'));
     return false;
   }
   return crypto.timingSafeEqual(ab, bb);
