@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import { dirname, resolve } from "node:path";
 import {
@@ -7,12 +7,18 @@ import {
   type ReadonlyAcpAdapterConfig
 } from "@agent-control-stack/acp-adapter";
 import {
+  authorizeDesktopCommanderExecution,
+  authorizationDeniedEvent,
+  capabilityDeniedEvent,
   capabilityIssuedEvent,
   desktopCommanderAdapterConfigFromEnv,
+  desktopCommanderContainmentFromEnv,
   desktopCommanderToolPolicy,
   prepareDesktopCommanderCapability,
   signPreparedDesktopCommanderCapability,
+  SqliteDesktopCommanderRuntimeRegistry,
   type CapabilitySigningConfig,
+  type ContainmentConfig,
   type ExecutionAuthorization
 } from "@agent-control-stack/desktop-commander-adapter";
 import { projectAgents, renderDashboard, toMissionControlAttemptLease } from "@agent-control-stack/control-ui";
@@ -27,7 +33,7 @@ import {
   explainPolicy,
   workItemToolNames
 } from "@agent-control-stack/policy-gate";
-import { ControlStackError, domainHash, stableHash } from "@agent-control-stack/shared";
+import { ControlStackError, stableHash, strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import {
   executionActionHash,
   executionPlanApprovalRequestHash,
@@ -80,14 +86,16 @@ import {
   connectorKeyRotationBodySchema,
   cloneBodySchema,
   createWorkItemSchema,
+  dcCapabilityIssueSchema,
+  dcRuntimeBootstrapCompleteSchema,
+  dcRuntimeBootstrapSchema,
   eventQuerySchema,
   heartbeatBodySchema,
   retryBodySchema,
   sessionLoginBodySchema,
   tunnelSessionBodySchema,
   unblockBodySchema,
-  webhookIngestSchema,
-  dcCapabilityIssueSchema
+  webhookIngestSchema
 } from "./public-contracts.js";
 import { SlidingWindowRateLimiter, type RateLimitOptions } from "./rate-limit.js";
 import { GatewayMetrics } from "./metrics.js";
@@ -98,6 +106,8 @@ import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-
 
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
+/** Attempt lease TTL for gateway-claimed Desktop Commander bridge executions. */
+const DC_BRIDGE_LEASE_MS = 300_000;
 const MAX_RESULT_BODY_BYTES = 256 * 1024;
 // Well above the socket's 16 KB high-water mark, so ordinary bursts ride
 // through; only a subscriber that has genuinely stopped draining reaches this.
@@ -174,9 +184,16 @@ export interface GatewayOptions {
    * ACS-only Desktop Commander capability signing material for
    * POST /dc/capability/issue. Defaults to the existing
    * desktopCommanderAdapterConfigFromEnv() capability env (fail closed: when
-   * absent the endpoint answers 503 rather than issuing anything).
+   * absent the endpoint answers 503 rather than issuing anything). The durable
+   * issuance registry additionally requires the runtime identity fingerprint
+   * and granted runtime scopes.
    */
-  desktopCommanderCapability?: CapabilitySigningConfig;
+  desktopCommanderCapability?: CapabilitySigningConfig & {
+    identityConfigFingerprint?: string;
+    runtimeScopes?: readonly string[];
+  };
+  /** Containment roots for the gateway-side Phase 6-8 re-authorization. */
+  desktopCommanderContainment?: ContainmentConfig;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -225,6 +242,24 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const metrics = new GatewayMetrics();
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
+  const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
+  const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
+  /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
+  function recordLeaseAuthorizedExecutionEvent(
+    authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch?: number },
+    draft: { name: string; body: Record<string, unknown>; attributes: Record<string, string | number | boolean> }
+  ): void {
+    workItems.recordExecutionEvent({
+      name: draft.name,
+      workItemId: authority.workItemId,
+      attemptId: authority.attemptId,
+      leaseId: authority.leaseId,
+      workerId: authority.workerId,
+      fencingEpoch: authority.fencingEpoch,
+      body: draft.body,
+      attributes: draft.attributes
+    });
+  }
   const requestStartTimes = new WeakMap<object, number>();
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
   const acpAdapter =
@@ -924,28 +959,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-  // ACS-issued Desktop Commander capability issuance (per-call).
+  // ACS-issued Desktop Commander capability issuance (lease-bound, per call).
   //
-  // A trusted bridge (e.g. the OAuth gateway) asks ACS for a short-lived
-  // acs.dc.v1 capability for exactly ONE MCP tool call. ACS remains the sole
-  // issuer: the request flows through the normal work-item + policy-gate state
-  // machine (draft -> pending_policy -> approved | needs_approval), approvals
-  // use the existing recordApproval/approval binding, and the envelope is
-  // produced by the existing prepare/sign capability functions. There is no
-  // parallel approval store and no direct-to-Desktop-Commander path.
-  //
-  // Stateless issuance: this endpoint does not claim an attempt lease (the
-  // bridge executes the call immediately, and the work item stays in its
-  // approved/running state rather than being consumed by a worker claim).
-  // Because attempt/lease-bound fields are still required by the v1 envelope
-  // format, attemptId is freshly minted per issuance, and leaseId/leaseEpoch
-  // carry the STABLE per-work-item values `dc-issue:<workItemId>` / 1 — they
-  // identify the issuance binding, not a fencing lease. The invariant that
-  // matters is unchanged: only ACS holds the signing key, so only ACS can
-  // mint a valid envelope. For the same reason the lease-authority-checked
-  // recordExecutionEvent path is not available here; hash-chained audit
-  // evidence rides the existing connector.requested events (issued vs denied
-  // source) plus the policy.decided events the state machine records.
+  // A trusted bridge asks ACS for a short-lived acs.dc.v1 capability for
+  // exactly ONE MCP tool call. ACS remains the sole authority: the request
+  // flows through the normal work-item + policy-gate state machine (draft ->
+  // pending_policy -> approved | needs_approval), approvals use the existing
+  // approve/recordApproval/grantExecutionPlanApproval flow, the attempt and
+  // attempt lease are minted by the canonical claim machinery
+  // (claim_approved_work_item_by_id -> attempt_authority), and the envelope is
+  // produced by the existing prepare/sign capability functions only AFTER the
+  // durable issuance registry (recordIssuance) re-derives and accepts the
+  // lease, plan-head, runtime-identity, scope, and approval bindings from the
+  // authoritative store. There is no synthetic attemptId/leaseId/leaseEpoch,
+  // no parallel approval store, and no direct-to-Desktop-Commander path: a
+  // capability that cannot be bound to a live fenced attempt is never signed.
   app.post("/dc/capability/issue", async (request, reply) => {
     try {
       const actor = requireMutationActor(request, reply, auth);
@@ -1019,6 +1047,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 description: `Desktop Commander tool ${body.tool}`,
                 params: {
                   tool: body.tool,
+                  arguments: normalizedArguments,
                   argsSummary: body.argsSummary,
                   argsSummaryFingerprint,
                   write: dcPolicy.mutating,
@@ -1058,13 +1087,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
       }
 
-      const plan = workItems.getCurrentExecutionPlan(workItem.id);
-      const approvalId = required[0]
-        ? plan
-          ? workItems.getExecutionPlanApproval(workItem.id, plan.planHash, required[0].actionHash)?.approvalId
-          : undefined
-        : undefined;
-      if (dcPolicy.requiresApproval && !approvalId) {
+      // ---- Canonical ACS authority: claim the attempt -------------------------
+      // The capability carries REAL attempt/lease/fencing values minted by the
+      // ACS claim machinery (execution_attempts + attempt_leases rows). There
+      // is no synthetic issuance identity anywhere in this lane:
+      // recordIssuance re-derives the lease binding, execution-plan head, and
+      // approval consumption from the authoritative store and fails closed on
+      // any drift, and all execution evidence flows through the
+      // lease-authorized recordExecutionEvent path.
+      const workerId = "acs-dc-bridge";
+      const claimed = tools.claim_approved_work_item_by_id({
+        id: workItem.id,
+        workerId,
+        leaseMs: DC_BRIDGE_LEASE_MS
+      });
+      if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
         recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
         return reply.code(409).send({
           decision: "require_approval",
@@ -1074,73 +1111,256 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
       }
 
-      // The execution plan may not exist yet for auto-approved items (plans are
-      // normally minted at claim time); the deterministic substitute keeps the
-      // request hash stable per work item + action without inventing plan rows.
-      const planHash =
-        plan?.planHash ??
-        stableHash({ schemaVersion: "acs.dc.capability-issue.plan.v1", workItemId: workItem.id, actionHash });
-      const requestHash = executionPlanApprovalRequestHash({ workItemId: workItem.id, planHash, actionHash });
-      const authorization = {
-        requestId: request.id,
-        workItemId: workItem.id,
-        attemptId: `dc-issue-${randomUUID()}`,
-        // Stable per-work-item issuance binding, not a fencing lease (see the
-        // stateless-issuance note above).
-        leaseId: `dc-issue:${workItem.id}`,
-        workerId: "acs-gateway-dc-issuance",
-        planHash,
-        inputHash: domainHash("acs:dc-capability-issue.input.v1", normalizedArguments),
-        fencingEpoch: 1,
-        actionHash,
-        requestHash,
-        invocationFingerprint: domainHash("acs:dc-capability-issue.invocation.v1", {
-          tool: body.tool,
-          argsSummary: body.argsSummary
-        }),
-        toolName: body.tool,
-        normalizedArguments,
-        canonicalPaths: paths,
-        risk: dcPolicy.riskClass,
-        requiresApproval: dcPolicy.requiresApproval,
-        ...(approvalId ? { approvalId } : {}),
-        policyVersion: "acs.policy.v1",
-        policyDecisionHash: stableHash({ actionHash, decision: policy.summarize(evaluations) }),
-        authorizedAt: new Date().toISOString()
-        // Cast is safe: prepare/sign only read the fields below, and the
-        // branded symbol minted by authorizeDesktopCommanderExecution cannot be
-        // constructed outside that path by design.
-      } as unknown as ExecutionAuthorization;
+      const trustedWorkItem = workItems.get(workItem.id);
+      const lease = trustedWorkItem ? workItems.getActiveLeaseForAttempt(claimed.attemptId) : undefined;
+      if (!trustedWorkItem || !lease || !dcContainment) {
+        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        return reply
+          .code(503)
+          .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
+      }
 
-      const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
-      const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
+      let authorization: ExecutionAuthorization;
       try {
-        // Works only when the work item happens to carry live lease authority;
-        // stateless per-call issuance normally takes the connector.requested
-        // fallback below (see the comment at the top of this route).
-        const issuanceEvent = capabilityIssuedEvent({
-          auth: authorization,
-          runtimeId: capabilitySigningConfig.runtimeId,
+        authorization = authorizeDesktopCommanderExecution({
+          claimed,
+          trustedWorkItem,
+          lease,
+          workerId,
+          containment: dcContainment,
+          requestId: request.id
+        });
+      } catch (error) {
+        const code = error instanceof ControlStackError ? error.code : "authorization_failed";
+        try {
+          recordLeaseAuthorizedExecutionEvent(
+            {
+              workItemId: claimed.id,
+              attemptId: claimed.attemptId,
+              leaseId: claimed.leaseId,
+              workerId,
+              fencingEpoch: claimed.fencingEpoch
+            },
+            authorizationDeniedEvent({
+              workItemId: workItem.id,
+              workerId,
+              requestId: request.id,
+              toolName: body.tool,
+              attemptId: claimed.attemptId,
+              leaseId: claimed.leaseId,
+              fencingEpoch: claimed.fencingEpoch,
+              code,
+              reason: error instanceof Error ? error.message : String(error)
+            })
+          );
+        } catch {
+          // Attempt/lease authority already lapsed; the connector.requested
+          // event below still carries hash-chained evidence of the denial.
+        }
+        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        return reply
+          .code(403)
+          .send({ decision: "deny", reason: "authorization_failed", code, workItemId: workItem.id });
+      }
+
+      // Approval binding: the payload must carry the EXACT action hash the
+      // execution-plan approval was granted and consumed under, so the durable
+      // issuance gate can re-derive the binding from the lease.
+      let approvalActionHash: string | undefined;
+      if (dcPolicy.requiresApproval) {
+        const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
+        if (!approval) {
+          recordLeaseAuthorizedExecutionEvent(
+            authorization,
+            capabilityDeniedEvent({
+              auth: authorization,
+              runtimeId: capabilitySigningConfig.runtimeId,
+              code: "desktop_commander_approval_rejected"
+            })
+          );
+          recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply
+            .code(403)
+            .send({
+              decision: "deny",
+              reason: "issuance_rejected",
+              code: "approval_binding_missing",
+              workItemId: workItem.id
+            });
+        }
+        approvalActionHash = approval.actionHash;
+      }
+      if (approvalActionHash !== undefined) {
+        // Spread keeps the authorization brand: the object is still only the
+        // branded authority produced by authorizeDesktopCommanderExecution.
+        authorization = { ...authorization, approvalActionHash } as ExecutionAuthorization;
+      }
+
+      // Fail closed on canonicalization drift: the capability's arguments are
+      // compared STRUCTURALLY by Desktop Commander against the exact request
+      // arguments, so ACS must bind what the caller will actually send. If
+      // containment canonicalization would rewrite any argument, refuse rather
+      // than silently authorize a different invocation.
+      if (strictCanonicalJsonV1(authorization.normalizedArguments) !== strictCanonicalJsonV1(normalizedArguments)) {
+        recordLeaseAuthorizedExecutionEvent(
+          authorization,
+          capabilityDeniedEvent({
+            auth: authorization,
+            runtimeId: capabilitySigningConfig.runtimeId,
+            code: "desktop_commander_argument_invalid"
+          })
+        );
+        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        return reply.code(403).send({
+          decision: "deny",
+          reason: "issuance_rejected",
+          code: "desktop_commander_argument_invalid",
+          workItemId: workItem.id,
+          detail: "arguments require canonicalization drift; resend exact canonical absolute paths"
+        });
+      }
+
+      const payloadActionHash = approvalActionHash ?? claimed.actionHash;
+      const requestHash = executionPlanApprovalRequestHash({
+        workItemId: workItem.id,
+        planHash: claimed.planHash,
+        actionHash: payloadActionHash
+      });
+      const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
+      if (!capabilitySigningConfig.identityConfigFingerprint || !capabilitySigningConfig.runtimeScopes) {
+        return reply
+          .code(503)
+          .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
+      }
+      try {
+        const recorded = capabilityIssuanceRegistry.recordIssuance({
+          runtimeId: payload.runtimeId,
+          identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+          leaseId: payload.leaseId,
+          attemptId: payload.attemptId,
+          workItemId: payload.workItemId,
+          workerId,
+          fencingEpoch: payload.leaseEpoch,
+          planHash: payload.planHash,
+          actionHash: payload.actionHash,
+          invocationHash: payload.invocationHash,
+          requiredScopes: payload.scopes,
+          approvalRequired: dcPolicy.requiresApproval,
+          approvalId: payload.approvalId,
           keyId: capabilitySigningConfig.keyId,
-          requestHash,
+          nonce: payload.nonce,
+          issuedAt: payload.issuedAt,
           expiresAt: payload.expiresAt
         });
-        workItems.recordExecutionEvent({
-          name: issuanceEvent.name,
-          workItemId: authorization.workItemId,
-          attemptId: authorization.attemptId,
-          leaseId: authorization.leaseId,
-          workerId: authorization.workerId,
-          fencingEpoch: authorization.fencingEpoch,
-          body: issuanceEvent.body,
-          attributes: issuanceEvent.attributes
-        });
-      } catch {
-        // No lease authority for a stateless issuance - connector.requested
-        // below is the hash-chained audit evidence.
+        if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
+          throw new ControlStackError(
+            "desktop_commander_capability_issuance_rejected",
+            "issuance binding does not match capability payload"
+          );
+        }
+      } catch (error) {
+        const code = error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
+        try {
+          recordLeaseAuthorizedExecutionEvent(
+            authorization,
+            capabilityDeniedEvent({ auth: authorization, runtimeId: payload.runtimeId, code })
+          );
+        } catch {
+          // Lease authority may already have lapsed; connector.requested below
+          // still records the denial on the hash chain.
+        }
+        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        return reply.code(403).send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
       }
+
+      // Canonical execution evidence: lease-authorized recordExecutionEvent. A
+      // capability is NEVER returned without its audit evidence committing.
+      try {
+        const issuanceEvent = capabilityIssuedEvent({
+          auth: authorization,
+          runtimeId: payload.runtimeId,
+          keyId: capabilitySigningConfig.keyId,
+          requestHash: payload.requestHash,
+          expiresAt: payload.expiresAt
+        });
+        recordLeaseAuthorizedExecutionEvent(authorization, issuanceEvent);
+      } catch (error) {
+        return reply.code(503).send({
+          error: "capability evidence could not be committed",
+          code: "capability_evidence_unavailable",
+          detail: error instanceof Error ? error.message : String(error)
+        });
+      }
+      const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
       recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "issued", workItem.id);
-      return { decision: "allow", capability, workItemId: workItem.id };
+      return {
+        decision: "allow",
+        capability,
+        workItemId: workItem.id,
+        attemptId: payload.attemptId,
+        leaseId: payload.leaseId,
+        leaseEpoch: payload.leaseEpoch,
+        planHash: payload.planHash,
+        // The approval-bound hash inside the payload AND the claim's execution
+        // action hash (the one the lease/result contract is bound to).
+        actionHash: payload.actionHash,
+        claimActionHash: claimed.actionHash,
+        inputHash: claimed.inputHash,
+        invocationHash: payload.invocationHash,
+        workerId
+      };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  // Managed-runtime bootstrap: the bridge fetches an ACS-issued runtime
+  // identity challenge and presents it to the managed Desktop Commander child
+  // during MCP initialize; on the child's acceptance the bridge completes the
+  // challenge so the runtime becomes an active attested identity in the
+  // authoritative registry. Without an attested runtime, recordIssuance fails
+  // closed — no capability can be minted for an unregistered runtime.
+  app.post("/dc/runtime/bootstrap", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const body = dcRuntimeBootstrapSchema.parse(requestObject(request.body));
+      const challenge = capabilityIssuanceRegistry.issueBootstrap(
+        {
+          runtimeId: body.runtimeId,
+          identityConfigFingerprint: body.identityConfigFingerprint,
+          scopes: [...body.scopes]
+        },
+        new Date()
+      );
+      return reply.code(201).send({
+        runtimeId: challenge.runtimeId,
+        challenge: challenge.challenge,
+        scopes: challenge.scopes,
+        expiresAt: challenge.expiresAt
+      });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/dc/runtime/bootstrap/complete", async (request, reply) => {
+    try {
+      if (!requireMutationActor(request, reply, auth)) {
+        return;
+      }
+      const body = dcRuntimeBootstrapCompleteSchema.parse(requestObject(request.body));
+      capabilityIssuanceRegistry.completeBootstrap(
+        {
+          runtimeId: body.runtimeId,
+          identityConfigFingerprint: body.identityConfigFingerprint,
+          scopes: [...body.scopes],
+          challenge: body.challenge
+        },
+        new Date()
+      );
+      return reply.code(204).send();
     } catch (error) {
       return sendError(reply, error);
     }
@@ -1347,6 +1567,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     await acpAdapter?.stop();
     executionReads.close();
     deviceAuthStore.close();
+    capabilityIssuanceRegistry.close();
     workItems.close();
   });
 
@@ -1495,11 +1716,27 @@ function collectDcArgumentPaths(
   ];
 }
 
+/** Signing material plus the durable-issuance runtime identity binding. */
+type DcCapabilitySigningConfig = CapabilitySigningConfig & {
+  identityConfigFingerprint: string;
+  runtimeScopes: readonly string[];
+};
+
 function resolveCapabilitySigningConfig(
-  override: CapabilitySigningConfig | undefined,
+  override: GatewayOptions["desktopCommanderCapability"],
   dbPath: string
-): CapabilitySigningConfig | undefined {
-  if (override) return override;
+): DcCapabilitySigningConfig | undefined {
+  if (override) {
+    if (!override.identityConfigFingerprint || !override.runtimeScopes) return undefined;
+    return {
+      runtimeId: override.runtimeId,
+      keyId: override.keyId,
+      privateKey: override.privateKey,
+      ttlMs: override.ttlMs ?? 29_000,
+      identityConfigFingerprint: override.identityConfigFingerprint,
+      runtimeScopes: override.runtimeScopes
+    };
+  }
   try {
     const config = desktopCommanderAdapterConfigFromEnv(process.env, dbPath);
     return config?.capability
@@ -1507,12 +1744,25 @@ function resolveCapabilitySigningConfig(
           runtimeId: config.capability.runtimeId,
           keyId: config.capability.keyId,
           privateKey: config.capability.privateKey,
-          ttlMs: 29_000
+          ttlMs: 29_000,
+          identityConfigFingerprint: config.capability.runtimeIdentityConfigFingerprint,
+          runtimeScopes: config.capability.runtimeScopes
         }
       : undefined;
   } catch {
     // Partially/incorrectly configured Desktop Commander capability env must
     // not crash gateway startup; the endpoint fails closed with 503 instead.
+    return undefined;
+  }
+}
+
+function resolveDcContainment(override: ContainmentConfig | undefined): ContainmentConfig | undefined {
+  if (override) return override;
+  try {
+    return desktopCommanderContainmentFromEnv();
+  } catch {
+    // Fail closed at request time: without containment roots the gateway
+    // cannot run the Phase 6-8 re-authorization, so no capability is issued.
     return undefined;
   }
 }
@@ -1743,6 +1993,8 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/device/verify" ||
     path === "/work-items" ||
     path === "/dc/capability/issue" ||
+    path === "/dc/runtime/bootstrap" ||
+    path === "/dc/runtime/bootstrap/complete" ||
     path === "/policy/explain" ||
     path.startsWith("/work-items/") ||
     path.startsWith("/webhooks/")

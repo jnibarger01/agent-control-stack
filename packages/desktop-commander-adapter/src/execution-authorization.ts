@@ -43,6 +43,13 @@ export interface ExecutionAuthorization {
   readonly risk: DesktopCommanderRiskClass;
   readonly requiresApproval: boolean;
   readonly approvalId?: string;
+  /**
+   * The approval-bound action fingerprint (execution_plan_approvals.action_hash)
+   * when this authorization rides a consumed approval. Capability issuance
+   * binds this value into the payload so the durable issuance gate can
+   * re-derive the approval binding; absent means bind authorization.actionHash.
+   */
+  readonly approvalActionHash?: string;
   readonly policyVersion: string;
   readonly policyDecisionHash: string;
   readonly authorizedAt: string;

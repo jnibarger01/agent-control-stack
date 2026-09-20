@@ -139,6 +139,21 @@ export const dcCapabilityIssueSchema = z
   })
   .strict();
 
+/** Managed-runtime bootstrap request: an ACS-issued identity challenge. */
+export const dcRuntimeBootstrapSchema = z
+  .object({
+    runtimeId: z.string().min(1).max(128),
+    identityConfigFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+    scopes: z.array(z.enum(["fs.read", "fs.write", "process.exec", "process.spawn", "network.read", "network.write"]))
+  })
+  .strict();
+
+export const dcRuntimeBootstrapCompleteSchema = dcRuntimeBootstrapSchema
+  .extend({
+    challenge: z.string().min(1).max(128)
+  })
+  .strict();
+
 export const jsonRpcRequestSchema = z.object({
   jsonrpc: z.literal("2.0"),
   id: z.union([z.string(), z.number(), z.null()]).default(null),

@@ -884,6 +884,8 @@ export interface WorkItemStore {
     options: PrivilegedTransitionOptions
   ): ExecutionPlanApproval;
   getExecutionPlanApproval(workItemId: string, planHash: string, actionHash: string): ExecutionPlanApproval | undefined;
+  /** Read one execution-plan approval by its identifier (no state checks). */
+  getExecutionPlanApprovalById(approvalId: string): ExecutionPlanApproval | undefined;
   hasExecutionPlanApproval(workItemId: string, planHash: string, actionHash: string): boolean;
   createAttempt(input: CreateAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
   getAttempt(attemptId: string): ExecutionAttempt | undefined;
@@ -1475,6 +1477,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
       )
       .get(workItemId, planHash, actionHash, new Date().toISOString()) as unknown as
       ExecutionPlanApprovalRow | undefined;
+    return row ? rowToExecutionPlanApproval(row) : undefined;
+  }
+
+  getExecutionPlanApprovalById(approvalId: string): ExecutionPlanApproval | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM execution_plan_approvals WHERE approval_id = ?`)
+      .get(approvalId) as unknown as ExecutionPlanApprovalRow | undefined;
     return row ? rowToExecutionPlanApproval(row) : undefined;
   }
 
