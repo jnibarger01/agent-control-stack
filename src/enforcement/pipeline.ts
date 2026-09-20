@@ -15,6 +15,15 @@
  *                                     bridge HMAC (see the TRUST CHAIN note
  *                                     below) or they are rejected fail-closed.
  *                                     Unset = behavior unchanged (backwards compat).
+ *   DC_ACS_CAPABILITY_PUBLIC_KEY=... base64url SPKI Ed25519 public key of the
+ *                                     ACS capability issuer. With (optionally)
+ *                                     DC_ACS_CAPABILITY_KEY_ID, any request
+ *                                     presenting _meta.capability is verified
+ *                                     as an ACS-issued acs.dc.v1 capability
+ *                                     (see ACS CAPABILITY note below); a
+ *                                     presented capability that fails
+ *                                     verification is rejected fail-closed.
+ *                                     Unset = behavior unchanged (backwards compat).
  *
  * When an ACS capability is presented in `_meta.capability`, it is always
  * verified regardless of DC_ENFORCEMENT — a presented capability must be
@@ -25,6 +34,7 @@ import { canonicalCapabilityPayload, signCapabilityPayload, verifyCapability, Lo
 import { classifyOperation, buildApprovalRequest, getApprovalPolicy, InMemoryApprovalStore, type ClassifiedOperation, type ApprovalRequest, type ApprovalStore } from '../security/approval.js';
 import { checkNetworkBinaries, checkNetworkBinariesInRaw, networkGuardSummary, scrubEnvironmentForNoNetwork, type NetworkGuardSummary } from '../security/network-guard.js';
 import { AuditChain, canonicalJson, sha256Hex } from '../audit/audit-chain.js';
+import { ACS_CAPABILITY_VERSION, FIXED_ACS_SCOPES, computeDesktopCommanderInvocationHash, getManagedAcsToolPolicy, strictCanonicalJsonV1 } from '../managed-acs.js';
 
 export type EnforcementBlockKind =
   | 'capability-rejected'
@@ -49,6 +59,12 @@ export interface EnforcementPass {
   gatewayTrusted?: true;
   /** Present when gatewayTrusted: the gateway-vetted actor identity. */
   gatewayActor?: GatewayActor;
+  /**
+   * Present when the request carried an ACS capability that VERIFIED under
+   * DC_ACS_CAPABILITY_PUBLIC_KEY: the envelope-derived attestation recorded
+   * in the audit trail (capabilityId/workItemId/attemptId/leaseId/leaseEpoch).
+   */
+  acsCapability?: AcsCapabilityAttestation;
   /**
    * Present when the active network profile is 'none': a scrubbed copy of the
    * spawn environment (proxy vars removed, NO_PROXY='*'). Consumers that
@@ -181,6 +197,209 @@ export function gatewayActorFromMeta(meta: unknown): GatewayActor | undefined {
   return { sub: gw.sub as string, client_id: gw.client_id as string };
 }
 
+/**
+ * ACS-issued capability verification (acs.dc.v1, Ed25519, fail-closed).
+ *
+ * TRUST CHAIN: ACS mints a capability envelope { payload, signature, keyId }
+ * where signature = base64url(Ed25519.sign(null, strictCanonicalJsonV1(payload)))
+ * under a PKCS#8 key held ONLY in ACS process memory. A standalone Desktop
+ * Commander deployment opts in by configuring the matching public key as
+ * DC_ACS_CAPABILITY_PUBLIC_KEY (base64url SPKI) and optionally pinning the
+ * expected key id via DC_ACS_CAPABILITY_KEY_ID. When configured, ANY request
+ * presenting _meta.capability is verified as an ACS capability — the local
+ * HMAC issuer path is bypassed — and a presented capability that fails any
+ * check is rejected fail-closed, regardless of DC_ENFORCEMENT. When the env
+ * is unset, behavior is unchanged byte-for-byte.
+ */
+
+export type AcsCapabilityRejectionCode =
+  | 'ACS_CAPABILITY_INVALID_SIGNATURE'
+  | 'ACS_CAPABILITY_EXPIRED'
+  | 'ACS_CAPABILITY_TOOL_MISMATCH'
+  | 'ACS_CAPABILITY_ARGS_MISMATCH'
+  | 'ACS_CAPABILITY_MALFORMED';
+
+export interface AcsCapabilityAttestation {
+  capabilityId: string;
+  workItemId: string;
+  attemptId: string;
+  leaseId: string;
+  leaseEpoch: number;
+}
+
+export type AcsCapabilityVerifyResult =
+  | { ok: true; attestation: AcsCapabilityAttestation }
+  | { ok: false; code: AcsCapabilityRejectionCode; reason: string };
+
+/** The configured ACS capability verification public key (SPKI, base64url), when set. */
+export function acsCapabilityPublicKeyEnv(): string | undefined {
+  const key = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY;
+  return key && key.length > 0 ? key : undefined;
+}
+
+/** The pinned ACS capability key id, when set. */
+export function acsCapabilityKeyIdEnv(): string | undefined {
+  const key = process.env.DC_ACS_CAPABILITY_KEY_ID;
+  return key && key.length > 0 ? key : undefined;
+}
+
+let cachedAcsKey: { env: string; key: crypto.KeyObject } | undefined;
+function acsPublicKey(): crypto.KeyObject {
+  const env = acsCapabilityPublicKeyEnv() as string;
+  if (cachedAcsKey && cachedAcsKey.env === env) return cachedAcsKey.key;
+  let key: crypto.KeyObject;
+  try {
+    key = crypto.createPublicKey({ key: Buffer.from(env, 'base64url'), format: 'der', type: 'spki' });
+  } catch (error) {
+    throw new Error('DC_ACS_CAPABILITY_PUBLIC_KEY is not a valid base64url SPKI Ed25519 key: ' + (error instanceof Error ? error.message : String(error)));
+  }
+  if (key.asymmetricKeyType !== 'ed25519') {
+    throw new Error(`DC_ACS_CAPABILITY_PUBLIC_KEY must be an Ed25519 key (got ${key.asymmetricKeyType})`);
+  }
+  cachedAcsKey = { env, key };
+  return key;
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const proto = Object.getPrototypeOf(value);
+  return proto === Object.prototype || proto === null;
+}
+
+function requireHex64(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+}
+
+function requireIdString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 128;
+}
+
+/** Base64url Ed25519 signatures are exactly 64 bytes (86 base64url chars). */
+function isBase64urlSignature(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{86}$/.test(value);
+}
+
+/**
+ * Verify an ACS-issued acs.dc.v1 capability envelope against the configured
+ * public key. Checks, in order: envelope structure (MALFORMED), key id pin +
+ * Ed25519 signature over strictCanonicalJsonV1(payload) (INVALID_SIGNATURE),
+ * issuance window / 30s TTL ceiling (EXPIRED), tool match + scope coverage
+ * (TOOL_MISMATCH), and binding of normalizedArguments to the actual request
+ * args via structural equality plus the SAME invocation hash construction the
+ * ACS side uses (ARGS_MISMATCH).
+ */
+export function verifyAcsCapability(
+  envelope: unknown,
+  request: { tool: string; args: Record<string, unknown>; now?: number },
+): AcsCapabilityVerifyResult {
+  const reject = (code: AcsCapabilityRejectionCode, reason: string): AcsCapabilityVerifyResult => ({ ok: false, code, reason });
+  if (!isPlainRecord(envelope)) return reject('ACS_CAPABILITY_MALFORMED', 'capability envelope must be a plain object');
+  const payload = envelope.payload;
+  if (!isPlainRecord(payload)) return reject('ACS_CAPABILITY_MALFORMED', 'capability payload must be a plain object');
+  if (payload.version !== ACS_CAPABILITY_VERSION) return reject('ACS_CAPABILITY_MALFORMED', `capability version must be ${ACS_CAPABILITY_VERSION}`);
+  if (payload.issuer !== 'acs') return reject('ACS_CAPABILITY_MALFORMED', 'capability issuer must be "acs"');
+  if (payload.audience !== 'desktop-commander') return reject('ACS_CAPABILITY_MALFORMED', 'capability audience must be "desktop-commander"');
+  for (const field of ['runtimeId', 'workItemId', 'attemptId', 'leaseId', 'toolName'] as const) {
+    if (!requireIdString(payload[field])) return reject('ACS_CAPABILITY_MALFORMED', `${field} must be a bounded non-empty string`);
+  }
+  if (typeof payload.leaseEpoch !== 'number' || !Number.isInteger(payload.leaseEpoch) || payload.leaseEpoch < 0) {
+    return reject('ACS_CAPABILITY_MALFORMED', 'leaseEpoch must be a non-negative integer');
+  }
+  if (!isPlainRecord(payload.normalizedArguments)) return reject('ACS_CAPABILITY_MALFORMED', 'normalizedArguments must be a plain object');
+  for (const field of ['invocationHash', 'actionHash', 'requestHash', 'planHash'] as const) {
+    if (!requireHex64(payload[field])) return reject('ACS_CAPABILITY_MALFORMED', `${field} must be a lowercase sha256 hex digest`);
+  }
+  if (!Array.isArray(payload.scopes) || payload.scopes.length === 0
+    || !payload.scopes.every((scope) => typeof scope === 'string' && (FIXED_ACS_SCOPES as readonly string[]).includes(scope))) {
+    return reject('ACS_CAPABILITY_MALFORMED', 'scopes must be a non-empty array of fixed ACS scopes');
+  }
+  if (payload.approvalId !== undefined && !requireIdString(payload.approvalId)) {
+    return reject('ACS_CAPABILITY_MALFORMED', 'approvalId must be a bounded non-empty string when present');
+  }
+  if (typeof payload.issuedAt !== 'string' || Number.isNaN(Date.parse(payload.issuedAt))
+    || typeof payload.expiresAt !== 'string' || Number.isNaN(Date.parse(payload.expiresAt))) {
+    return reject('ACS_CAPABILITY_MALFORMED', 'issuedAt/expiresAt must be ISO-8601 timestamps');
+  }
+  if (typeof payload.nonce !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(payload.nonce)) {
+    return reject('ACS_CAPABILITY_MALFORMED', 'nonce must be 32 bytes of base64url');
+  }
+  const pinnedKeyId = acsCapabilityKeyIdEnv();
+  if (pinnedKeyId && envelope.keyId !== pinnedKeyId) {
+    return reject('ACS_CAPABILITY_INVALID_SIGNATURE', `capability keyId "${String(envelope.keyId)}" is not the pinned ACS key id`);
+  }
+  if (!isBase64urlSignature(envelope.signature)) {
+    return reject('ACS_CAPABILITY_INVALID_SIGNATURE', 'signature must be a 64-byte base64url Ed25519 signature');
+  }
+
+  // Signature over the EXACT strict canonical signing bytes the ACS side uses.
+  let canonicalBytes: Buffer;
+  try {
+    canonicalBytes = Buffer.from(strictCanonicalJsonV1(payload), 'utf8');
+  } catch (error) {
+    return reject('ACS_CAPABILITY_MALFORMED', `payload is not strict-canonicalizable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  let signatureValid = false;
+  try {
+    signatureValid = crypto.verify(null, canonicalBytes, acsPublicKey(), Buffer.from(envelope.signature as string, 'base64url'));
+  } catch {
+    signatureValid = false;
+  }
+  if (!signatureValid) return reject('ACS_CAPABILITY_INVALID_SIGNATURE', 'Ed25519 signature does not verify under DC_ACS_CAPABILITY_PUBLIC_KEY');
+
+  // Time window: protocol TTL ceiling is 30 seconds; expired is expired.
+  const now = request.now ?? Date.now();
+  const issuedAtMs = Date.parse(payload.issuedAt as string);
+  const expiresAtMs = Date.parse(payload.expiresAt as string);
+  const ttlMs = expiresAtMs - issuedAtMs;
+  if (!(ttlMs > 0) || ttlMs > 30_000 || now > expiresAtMs) {
+    return reject('ACS_CAPABILITY_EXPIRED', `capability time window invalid or expired (issuedAt=${payload.issuedAt as string}, expiresAt=${payload.expiresAt as string}, ttlMs=${ttlMs})`);
+  }
+
+  // Tool + scope binding: the requested tool must be the capability's tool and
+  // the capability scopes must cover every scope the tool's fixed policy needs.
+  if (payload.toolName !== request.tool) {
+    return reject('ACS_CAPABILITY_TOOL_MISMATCH', `capability authorizes tool "${payload.toolName}" but request targets "${request.tool}"`);
+  }
+  const policy = getManagedAcsToolPolicy(request.tool);
+  if (!policy) return reject('ACS_CAPABILITY_TOOL_MISMATCH', `tool "${request.tool}" has no ACS v1 scope mapping`);
+  const granted = payload.scopes as string[];
+  const missing = policy.scopes.filter((scope) => !granted.includes(scope));
+  if (missing.length > 0) {
+    return reject('ACS_CAPABILITY_TOOL_MISMATCH', `capability scopes [${granted.join(', ')}] do not cover required scope(s) ${missing.join(', ')} for tool "${request.tool}"`);
+  }
+
+  // Argument binding (fail closed): the presented normalizedArguments must be
+  // the EXACT arguments of this request (structural equality over strict
+  // canonical JSON), and the invocationHash must be reproducible over the
+  // actual args with the SAME construction the ACS side uses
+  // (sha256("acs:desktop-commander-invocation:v1\n" + canonical JSON of
+  // { toolName, arguments })). Normalization is the caller's duty (ACS
+  // normalizes before minting); any drift is a mismatch, not a coercion.
+  try {
+    if (strictCanonicalJsonV1(payload.normalizedArguments) !== strictCanonicalJsonV1(request.args)) {
+      return reject('ACS_CAPABILITY_ARGS_MISMATCH', 'capability normalizedArguments do not match the actual request arguments');
+    }
+  } catch (error) {
+    return reject('ACS_CAPABILITY_ARGS_MISMATCH', `arguments are not strict-canonicalizable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  const recomputedInvocationHash = computeDesktopCommanderInvocationHash(payload.toolName as string, request.args);
+  if (recomputedInvocationHash !== payload.invocationHash) {
+    return reject('ACS_CAPABILITY_ARGS_MISMATCH', `invocationHash mismatch (expected ${recomputedInvocationHash}, got ${payload.invocationHash as string})`);
+  }
+
+  const capabilityId = `acs.dc.v1:${sha256Hex(canonicalJson(payload)).slice(0, 32)}`;
+  return {
+    ok: true,
+    attestation: {
+      capabilityId,
+      workItemId: payload.workItemId as string,
+      attemptId: payload.attemptId as string,
+      leaseId: payload.leaseId as string,
+      leaseEpoch: payload.leaseEpoch as number,
+    },
+  };
+}
+
 let sharedIssuer: LocalCapabilityIssuer | undefined;
 function getIssuer(): LocalCapabilityIssuer {
   if (!sharedIssuer) sharedIssuer = new LocalCapabilityIssuer();
@@ -249,9 +468,34 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
     gatewayActor = gatewayActorFromMeta(ctx.meta);
   }
 
+  // 0b. ACS-issued capability verification (fail-closed). Only active when
+  //     DC_ACS_CAPABILITY_PUBLIC_KEY is configured — env unset means behavior
+  //     is unchanged (no new rejections, HMAC issuer path intact). When set,
+  //     ANY presented _meta.capability is verified as an acs.dc.v1 Ed25519
+  //     capability; a presented capability that fails verification is
+  //     rejected REGARDLESS of DC_ENFORCEMENT (a presented trust token must
+  //     be genuine, same fail-closed posture as the gateway attestation).
+  //     This runs BEFORE the HMAC capability path below, which is bypassed
+  //     entirely in ACS mode.
+  let acsCapability: AcsCapabilityAttestation | undefined;
+  const acsMode = !!acsCapabilityPublicKeyEnv();
+  if (acsMode && cap) {
+    const acs = verifyAcsCapability(cap, { tool: ctx.tool, args: ctx.args, now });
+    if (!acs.ok) {
+      return {
+        allowed: false,
+        kind: 'capability-rejected',
+        code: acs.code,
+        message: `ACS capability rejected: ${acs.reason}`,
+        classification,
+      };
+    }
+    acsCapability = acs.attestation;
+  }
+
   // 1. Capability verification — mandatory whenever one is presented.
   let verified: VerifyResult | undefined;
-  if (cap) {
+  if (cap && !acsMode) {
     verified = verifyCapability(cap, {
       tool: ctx.tool,
       paths: classification.paths,
@@ -273,7 +517,8 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
 
   if (enforcementOff) {
     return { allowed: true, classification, capability: cap,
-      ...(gatewayTrusted ? { gatewayTrusted, gatewayActor } : {}) };
+      ...(gatewayTrusted ? { gatewayTrusted, gatewayActor } : {}),
+      ...(acsCapability ? { acsCapability } : {}) };
   }
 
   // 2. Network profile enforcement. An explicit 'none' is enforced locally:
@@ -283,7 +528,7 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   //    `"curl`, `(/usr/bin/curl` or `x=curl` cannot bypass the blocklist.
   //    (Sandbox wrapping of spawned processes happens in the terminal-manager
   //    via network-guard; this gate catches tool-level intent.)
-  const networkProfile: NetworkProfile = cap ? cap.network
+  const networkProfile: NetworkProfile = (cap && !acsMode) ? cap.network
     : (process.env.DC_NETWORK_PROFILE as NetworkProfile | undefined) ?? 'full';
   const rawCommand = typeof ctx.args.command === 'string' ? ctx.args.command : '';
   // Fail closed (round-2 LOW): a non-string command would silently skip the
@@ -323,12 +568,13 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   // 3. Risk-aware approval policy. A presented capability with a matching
   //    (non-escalated) command class is itself the authorization for that
   //    class, so no additional approval prompt is needed.
-  if (cap && verified?.ok) {
+  if (cap && (verified?.ok || acsCapability)) {
     return {
       allowed: true,
       classification,
       capability: cap,
       ...(gatewayTrusted ? { gatewayTrusted, gatewayActor } : {}),
+      ...(acsCapability ? { acsCapability } : {}),
       ...(noneProfileGuard ? { networkGuard: noneProfileGuard, spawnEnvOverride } : {}),
     };
   }
@@ -454,6 +700,13 @@ export function attestRequest(event: {
    * client-supplied verified flag).
    */
   gatewayActor?: GatewayActor;
+  /**
+   * Present when the request carried an ACS capability that verified under
+   * DC_ACS_CAPABILITY_PUBLIC_KEY: envelope-derived attribution fields
+   * (additive — old events without them still verify).
+   */
+  workItemId?: string;
+  attemptId?: string;
 }): boolean {
   try {
     auditChain().append({
@@ -468,6 +721,8 @@ export function attestRequest(event: {
       mutations: [],
       ...(event.networkGuard ? { networkGuard: event.networkGuard } : {}),
       ...(event.gatewayActor ? { gatewayActor: event.gatewayActor } : {}),
+      ...(event.workItemId ? { workItemId: event.workItemId } : {}),
+      ...(event.attemptId ? { attemptId: event.attemptId } : {}),
       ...(event.args ? { argsPreview: canonicalJson(event.args).slice(0, 4096) } : {}),
     } as Parameters<AuditChain['append']>[0]);
     return true;

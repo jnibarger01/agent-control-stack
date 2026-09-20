@@ -1579,9 +1579,14 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
     }
     const allowedAttestOk = attestRequest({
         requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
-        capabilityId: cap?.capabilityId, commandClass: gate.classification.commandClass, args: toolArguments,
+        capabilityId: gate.allowed && gate.acsCapability ? gate.acsCapability.capabilityId : cap?.capabilityId,
+        commandClass: gate.classification.commandClass, args: toolArguments,
         ...(gate.allowed && gate.networkGuard ? { networkGuard: gate.networkGuard } : {}),
         ...(attestGatewayActor ? { gatewayActor: attestGatewayActor } : {}),
+        ...(gate.allowed && gate.acsCapability ? {
+            workItemId: gate.acsCapability.workItemId,
+            attemptId: gate.acsCapability.attemptId,
+        } : {}),
     });
     if (!allowedAttestOk) {
         if (process.env.DC_AUDIT_STRICT === '1') {
