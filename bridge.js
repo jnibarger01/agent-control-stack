@@ -12,20 +12,61 @@ import http from 'node:http';
 import { randomUUID, webcrypto, createHmac, timingSafeEqual } from 'node:crypto';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { createHash } from 'node:crypto';
+
+const ACS_CAPABILITY_META_KEY = 'capability';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 const PORT = parseInt(process.env.BRIDGE_PORT || '8002', 10);
-// Explicit ACS managed mode: the executor is started without --standalone;
+// Explicit ACS managed mode: the executor is started WITHOUT --standalone;
 // authority comes only from ACS-issued capabilities transported by the
-// authenticated gateway. The normal standalone mode remains unchanged.
+// authenticated gateway. A configured --standalone argument in managed mode
+// is refused outright (never silently stripped) so no legacy execution path
+// can exist on the managed lane.
 const MANAGED = process.env.ACS_MANAGED_MODE === '1';
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
-const DC_ARGS = MANAGED
-  ? (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js').split(' ').filter((arg) => arg !== '--standalone')
-  : (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js --standalone').split(' ');
+const DC_ARGS = (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js').split(' ');
+if (MANAGED && DC_ARGS.includes('--standalone')) {
+  console.error('bridge: managed mode refuses a --standalone executor; fix DC_ARGS');
+  process.exit(1);
+}
 const DC_CWD = process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || '';
+// ACS capability verification material for the managed child. The child gets
+// PUBLIC verification keys only; the ACS signing key never leaves ACS.
+const ACS_DC_PUBLIC_KEY = process.env.ACS_DC_PUBLIC_KEY || '';
+const ACS_DC_KEY_ID = process.env.ACS_DC_KEY_ID || '';
+const ACS_DC_SCOPES = process.env.ACS_DC_RUNTIME_SCOPES || 'fs.read,fs.write,process.exec,process.spawn';
+const CHILD_ENV = {
+  PATH: process.env.PATH || '',
+  HOME: process.env.HOME || '',
+  LANG: process.env.LANG || 'C.UTF-8',
+  TMPDIR: process.env.TMPDIR || '/tmp',
+  NODE_ENV: process.env.NODE_ENV || 'production',
+  ...(process.env.DESKTOP_COMMANDER_STATE_DIR ? { DESKTOP_COMMANDER_STATE_DIR: process.env.DESKTOP_COMMANDER_STATE_DIR } : {}),
+  ...(MANAGED && ACS_DC_PUBLIC_KEY && ACS_DC_KEY_ID
+    ? {
+        DESKTOP_COMMANDER_ACS_PUBLIC_KEY: ACS_DC_PUBLIC_KEY,
+        DESKTOP_COMMANDER_ACS_KEY_ID: ACS_DC_KEY_ID,
+        DESKTOP_COMMANDER_ACS_SCOPES: ACS_DC_SCOPES,
+        DC_ACS_CAPABILITY_PUBLIC_KEY: ACS_DC_PUBLIC_KEY,
+        DC_ACS_CAPABILITY_KEY_ID: ACS_DC_KEY_ID,
+      }
+    : {}),
+};
+if (MANAGED && (!ACS_DC_PUBLIC_KEY || !ACS_DC_KEY_ID)) {
+  console.error('bridge: managed mode requires ACS_DC_PUBLIC_KEY and ACS_DC_KEY_ID; refusing to start');
+  process.exit(1);
+}
+// Canonical result submission: after each governed tool call completes, the
+// bridge reports the outcome back to ACS bound to the capability's attempt and
+// lease. ACS remains the sole owner of canonical result state; the bridge only
+// reports what it observed. Submission failures never alter the tool result
+// delivered to the client; ACS's lease-expiry reconciliation still wins.
+const ACS_BASE_URL = (process.env.ACS_GATEWAY_URL || '').replace(/\/+$/, '');
+const ACS_WORKER_TOKEN = process.env.ACS_WORKER_TOKEN || '';
+const ACS_WORKER_ID = process.env.ACS_WORKER_ID || 'acs-dc-bridge';
 const MAX_BODY = 2 * 1024 * 1024;
 
 let pair = null; // { upstream, sessions, routes, initResponse, initPromise }
@@ -63,12 +104,83 @@ function injectAttestation(msg, headers) {
   const payload = verifyAttestation(att, headers['x-dc-agent']);
   if (!payload) return msg; // HTTP layer rejects before this point
   const agent = String(payload.sub || '');
+  const sub = String(payload.sub || '');
+  const clientId = String(payload.client_id || '');
+  const jti = String(payload.jti || '');
+  const iat = Date.now();
+  const material = `${sub}.${clientId}.${jti}.${iat}`;
+  const sig = createHmac('sha256', EXECUTION_TOKEN).update(material).digest('base64url');
   const meta = { ...(msg.params?._meta || {}) };
   meta.agent = agent.startsWith('chatgpt:') ? agent : `chatgpt:${agent}`;
-  meta.gateway = { verified: true, sub: payload.sub, client_id: payload.client_id, jti: payload.jti, ts: Math.floor(Date.now() / 1000) };
-  if (!meta.transport) meta.transport = 'oauth-gateway';
+  // Force-overwrite client-writable provenance fields. Desktop Commander
+  // independently verifies this HMAC before trusting gateway identity.
+  meta.gateway = { verified: true, sub, client_id: clientId, jti, iat, sig };
+  meta.transport = 'oauth-gateway';
   msg.params = { ...(msg.params || {}), _meta: meta };
   return msg;
+}
+
+/** Canonical attempt-bound idempotency key (stableHash over sorted-key JSON). */
+function attemptResultIdempotencyKey(attemptId) {
+  return createHash('sha256')
+    .update(`{"attemptId":"${attemptId}","domain":"acs.attempt-result.v1"}`)
+    .digest('hex');
+}
+
+/**
+ * Submit the canonical result for a governed tool call to ACS. Bound to the
+ * capability's real attempt/lease/fencing authority; ACS validates everything
+ * and owns the resulting state transition. Fire-and-forget: the client result
+ * is unaffected, and ACS lease-expiry reconciliation remains authoritative if
+ * submission fails.
+ */
+async function submitAcsResult(route, msg) {
+  if (!ACS_BASE_URL || !ACS_WORKER_TOKEN || !route?.capability) return;
+  const payload = route.capability?.payload;
+  if (!payload || typeof msg.result !== 'object' || msg.result === null) return;
+  const isError = msg.result.isError === true;
+  const texts = Array.isArray(msg.result?.content)
+    ? msg.result.content.filter((c) => c && c.type === 'text' && typeof c.text === 'string').map((c) => c.text)
+    : [];
+  const summary = (isError ? texts.join('\n') : texts.join('\n') || 'ok').slice(0, 2000);
+  const body = {
+    workItemId: payload.workItemId,
+    attemptId: payload.attemptId,
+    leaseId: payload.leaseId,
+    workerId: route.leaseBinding?.workerId || ACS_WORKER_ID,
+    actionHash: route.leaseBinding?.claimActionHash || payload.actionHash,
+    planHash: payload.planHash,
+    inputHash: route.leaseBinding?.inputHash || route.inputHash,
+    fencingEpoch: payload.leaseEpoch,
+    idempotencyKey: attemptResultIdempotencyKey(payload.attemptId),
+    outcome: isError ? 'failed' : 'succeeded',
+    startedAt: route.startedAt || new Date().toISOString(),
+    finishedAt: new Date().toISOString(),
+    summary: isError ? `tool failed: ${summary}` : summary,
+    structuredOutput: {},
+    artifacts: [],
+    ...(isError ? { error: summary.slice(0, 4000) } : {}),
+    simulationMetadata: {
+      executionMode: 'desktop_commander',
+      simulated: false,
+      backend: 'desktop-commander-mcp',
+      toolName: payload.toolName,
+      invocationFingerprint: payload.invocationHash,
+      requestId: payload.attemptId,
+    },
+  };
+  try {
+    const url = new URL(`/work-items/${encodeURIComponent(payload.workItemId)}/results`, ACS_BASE_URL);
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${ACS_WORKER_TOKEN}` },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) console.error(`bridge: ACS result submission declined (HTTP ${res.status})`);
+    else console.log(`bridge: ACS result submitted for attempt ${payload.attemptId}`);
+  } catch (error) {
+    console.error(`bridge: ACS result submission failed: ${error?.message}`);
+  }
 }
 
 function sendJsonRpcError(res, status, code, message) {
@@ -128,14 +240,32 @@ async function forward(session, msg, headers) {
   if (session.pending.has(key)) { failClosed(`duplicate downstream request id in session ${session.id}`, session.pair); return; }
   const upstreamId = `gw-${randomUUID()}`;
   session.pending.set(key, upstreamId);
-  pair.routes.set(upstreamId, { session, downstreamId: msg.id, initialize: false });
+  const governed = outbound.params && typeof outbound.params._meta === 'object' && outbound.params._meta !== null
+    ? outbound.params._meta[ACS_CAPABILITY_META_KEY]
+    : undefined;
+  pair.routes.set(upstreamId, {
+    session, downstreamId: msg.id, initialize: false,
+    ...(governed ? { capability: governed, startedAt: new Date().toISOString(), leaseBinding: outbound.params._meta.acsLeaseBinding } : {}),
+  });
   outbound.id = upstreamId;
   try { await pair.upstream.send(outbound); }
   catch (error) { pair.routes.delete(upstreamId); session.pending.delete(key); throw error; }
 }
 
 function spawnPair() {
-  const upstream = new StdioClientTransport({ command: DC_CMD, args: DC_ARGS, cwd: DC_CWD, stderr: 'inherit' });
+  // The MCP SDK otherwise supplies a minimal default environment to stdio
+  // children. Pass the bridge environment explicitly so Desktop Commander
+  // receives the configured gateway-HMAC and ACS public verification keys.
+  const upstream = new StdioClientTransport({
+    command: DC_CMD,
+    args: DC_ARGS,
+    cwd: DC_CWD,
+    stderr: 'inherit',
+    // Explicit allowlist: the managed child receives PATH/HOME/LANG/TMPDIR
+    // (plus DESKTOP_COMMANDER_STATE_DIR when set) and only the ACS PUBLIC
+    // verification material — never the full parent environment.
+    env: CHILD_ENV,
+  });
   const next = { upstream, sessions: new Map(), routes: new Map(), initResponse: null, initPromise: null };
   upstream.onmessage = async (msg) => {
     if (isResponse(msg)) {
@@ -146,6 +276,9 @@ function spawnPair() {
       if (route.initialize) { next.initResponse = response; next.initResolve?.(response); }
       try { await route.session.transport.send(response); }
       catch (error) { failClosed(`downstream response delivery failed: ${error.message}`, next); }
+      if (route.capability) {
+        submitAcsResult(route, msg).catch(() => {});
+      }
       return;
     }
     if (hasId(msg) && typeof msg.method === 'string') return failClosed(`unsupported upstream server request ${String(msg.method)}`, next);

@@ -133,7 +133,15 @@ try {
   // --- 1. MCP initialize through the gateway ---
   const init = await post(`${GW}/mcp`, authHeaders, JSON.stringify({
     jsonrpc: '2.0', id: 1, method: 'initialize',
-    params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'selftest', version: '0' } },
+    params: {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'selftest', version: '0' },
+      _meta: {
+        gateway: { verified: true, sub: 'forged', client_id: 'forged', jti: 'forged', iat: 1, sig: 'forged' },
+        transport: 'client-spoof',
+      },
+    },
   }));
   assert.equal(init.status, 200, `initialize failed: ${init.status} ${init.text}`);
   const sessionId = init.headers['mcp-session-id'];
@@ -154,8 +162,16 @@ try {
   assert.equal(fwd.params._meta.gateway.sub, 'jacen');
   assert.equal(fwd.params._meta.gateway.client_id, 'https://chatgpt.example/client');
   assert.equal(fwd.params._meta.gateway.jti, 'test-jti-1');
-  assert.equal(fwd.params._meta.transport, 'oauth-gateway');
-  console.log('attested identity + _meta injection: OK');
+  assert.equal(typeof fwd.params._meta.gateway.iat, 'number');
+  assert.ok(Number.isFinite(fwd.params._meta.gateway.iat));
+  const gw = fwd.params._meta.gateway;
+  const expectedGatewaySig = crypto.createHmac('sha256', EXEC_TOKEN)
+    .update(`${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`)
+    .digest('base64url');
+  assert.equal(gw.sig, expectedGatewaySig, 'gateway meta HMAC must verify under the shared key');
+  assert.equal(fwd.params._meta.transport, 'oauth-gateway', 'client transport must be force-overwritten');
+  assert.notEqual(gw.sub, 'forged', 'client gateway metadata must be force-overwritten');
+  console.log('attested identity + signed _meta.gateway injection: OK');
 
   // --- 3. tampered attestation -> -32001, no forward ---
   const att = mintAttestation({ sub: 'jacen', client_id: 'c', jti: 'j2', iat: t, exp: t + 30 }, EXEC_TOKEN);

@@ -15,7 +15,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { managedModeFromEnv, identityAttribution, capabilityTransport, isToolsCall } from './managed.js';
+import { managedModeFromEnv, identityAttribution, capabilityTransport, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -460,6 +460,25 @@ const server = http.createServer(async (req, res) => {
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
             log(req.method, '/mcp', 503, `managed fail-closed: ${code}`);
+            return send(res, 503, { error: 'managed_authorization_unavailable', code });
+          }
+        } else if (parsed && parsed.method === 'initialize') {
+          // Managed initialize: fetch an ACS runtime bootstrap challenge and
+          // transport it to the child in _meta.acsRuntimeBootstrap. The child
+          // structurally validates it during initialize; the challenge is then
+          // completed in ACS's registry so the runtime becomes attested. Any
+          // failure is fail-closed: initialize is not forwarded.
+          try {
+            const identity = dcRuntimeIdentityFromState();
+            if (!identity) throw Object.assign(new Error('DC runtime identity unavailable'), { acsCode: 'runtime_identity_unavailable' });
+            const challenge = await issueRuntimeBootstrap(MANAGED, identity);
+            body = Buffer.from(JSON.stringify(injectRuntimeBootstrap(parsed, challenge)), 'utf8');
+            completeRuntimeBootstrap(MANAGED, identity, challenge)
+              .then(() => log(req.method, '/dc/runtime/bootstrap/complete', 204))
+              .catch((e) => log(req.method, '/dc/runtime/bootstrap/complete', 503, e?.acsCode || 'bootstrap_complete_failed'));
+          } catch (e) {
+            const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
+            log(req.method, '/mcp', 503, `managed initialize fail-closed: ${code}`);
             return send(res, 503, { error: 'managed_authorization_unavailable', code });
           }
         }

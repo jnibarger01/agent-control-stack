@@ -25,8 +25,14 @@
  * Never logs capability contents, signatures, tokens, or tool arguments.
  */
 import http from 'node:http';
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
-export const ACS_CAPABILITY_META_KEY = 'acsCapability';
+export const ACS_CAPABILITY_META_KEY = 'capability';
+/** Desktop Commander's managed guard transports the same envelope at this key. */
+export const ACS_GUARD_META_KEY = 'acsCapability';
 
 export function managedModeFromEnv(env = process.env) {
   const enabled = env.ACS_MANAGED_MODE === '1';
@@ -39,8 +45,95 @@ export function managedModeFromEnv(env = process.env) {
   return { enabled: true, acsGatewayUrl, acsGatewayToken, timeoutMs: parseInt(env.ACS_ISSUANCE_TIMEOUT_MS || '5000', 10) };
 }
 
+export function sortedScopes(raw) {
+  const scopes = String(raw || 'fs.read,fs.write,process.exec,process.spawn')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const sorted = [...new Set(scopes)].sort();
+  if (sorted.length === 0 || JSON.stringify(sorted) !== JSON.stringify(scopes)) {
+    throw new Error('runtime scopes must be sorted, unique, and non-empty');
+  }
+  return sorted;
+}
+
+/**
+ * The managed Desktop Commander runtime identity, derived from the child's
+ * persisted state directory (runtime-identity.json) and a SHA-256 fingerprint
+ * of the built entrypoint. Used for the bootstrap request AND its completion,
+ * so both sides validate the same identity binding. Returns null when the
+ * child state is unavailable — managed mode then fails closed.
+ */
+export function dcRuntimeIdentityFromState(env = process.env) {
+  try {
+    const stateDir = env.DESKTOP_COMMANDER_STATE_DIR || path.join(os.homedir(), '.desktop-commander');
+    const identity = JSON.parse(fs.readFileSync(path.join(stateDir, 'runtime-identity.json'), 'utf8'));
+    if (typeof identity.runtime_id !== 'string' || !identity.runtime_id) return null;
+    const entrypoint = env.ACS_DC_ENTRYPOINT || '/home/jacen/projects/desktop-commander/dist/index.js';
+    const identityConfigFingerprint = crypto.createHash('sha256').update(fs.readFileSync(entrypoint)).digest('hex');
+    return {
+      runtimeId: identity.runtime_id,
+      identityConfigFingerprint,
+      scopes: sortedScopes(env.ACS_DC_RUNTIME_SCOPES),
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Fetch an ACS-issued runtime bootstrap challenge for the managed child. */
+export async function issueRuntimeBootstrap(managed, identity) {
+  const { status, json } = await acsPost(managed, '/dc/runtime/bootstrap', {
+    runtimeId: identity.runtimeId,
+    identityConfigFingerprint: identity.identityConfigFingerprint,
+    scopes: [...identity.scopes],
+  });
+  if (status !== 201 || !json || typeof json.challenge !== 'string' || json.runtimeId !== identity.runtimeId) {
+    throw Object.assign(new Error('ACS runtime bootstrap failed'), { acsCode: 'runtime_bootstrap_failed' });
+  }
+  return json;
+}
+
+/**
+ * Complete the challenge on the ACS side. The child has already validated the
+ * bootstrap structure during MCP initialize; this marks the runtime attested
+ * in ACS's authoritative registry so capability issuance can proceed. The
+ * cryptographic execution gate remains the per-call capability signature.
+ */
+export async function completeRuntimeBootstrap(managed, identity, challenge) {
+  const { status } = await acsPost(managed, '/dc/runtime/bootstrap/complete', {
+    runtimeId: identity.runtimeId,
+    identityConfigFingerprint: identity.identityConfigFingerprint,
+    scopes: [...identity.scopes],
+    challenge: challenge.challenge,
+  });
+  if (status !== 204) {
+    throw Object.assign(new Error('ACS runtime bootstrap completion failed'), { acsCode: 'runtime_bootstrap_rejected' });
+  }
+}
+
+export function injectRuntimeBootstrap(parsed, challenge) {
+  const params = parsed && typeof parsed === 'object' ? parsed.params : undefined;
+  if (!params) throw Object.assign(new Error('initialize has no params'), { acsCode: 'managed_not_a_tool_call' });
+  return {
+    ...parsed,
+    params: {
+      ...params,
+      _meta: {
+        ...(params._meta || {}),
+        acsRuntimeBootstrap: {
+          schemaVersion: 1,
+          runtimeId: challenge.runtimeId,
+          challenge: challenge.challenge,
+          scopes: challenge.scopes,
+        },
+      },
+    },
+  };
+}
+
 /** Post a JSON body to the ACS gateway; resolves {status, json}. Never logs the body. */
-export function acsPost(managed, pathname, body) {
+export function acsPost(managed, pathname, body, extraHeaders = {}) {
   return new Promise((resolve, reject) => {
     const url = new URL(pathname, managed.acsGatewayUrl);
     const payload = JSON.stringify(body);
@@ -55,6 +148,7 @@ export function acsPost(managed, pathname, body) {
           authorization: `Bearer ${managed.acsGatewayToken}`,
           'content-type': 'application/json',
           'content-length': Buffer.byteLength(payload),
+          ...extraHeaders,
         },
       },
       (res) => {
@@ -107,24 +201,36 @@ export function capabilityTransport(managed, { identity, requestId }) {
     if (!toolName || !params || typeof params !== 'object' || typeof parsed.method !== 'string' || !parsed.method.startsWith('tools/')) {
       throw Object.assign(new Error('managed mode requires a tools/ call'), { acsCode: 'managed_not_a_tool_call' });
     }
-    // Anti-spoof: drop every client-supplied ACS metadata field.
+    // Anti-spoof: drop every client-supplied ACS authority field.
     const clientMeta = typeof params._meta === 'object' && params._meta !== null ? params._meta : {};
-    const spoofed = Object.keys(clientMeta).filter((k) => k.startsWith('acs'));
+    const spoofed = Object.keys(clientMeta).filter((k) => k === 'capability' || k.startsWith('acs'));
     const cleanParams = { ...params };
-    const strippedMeta = Object.fromEntries(Object.entries(clientMeta).filter(([k]) => !k.startsWith('acs')));
+    const strippedMeta = Object.fromEntries(
+      Object.entries(clientMeta).filter(([k]) => k !== 'capability' && !k.startsWith('acs')),
+    );
     if (Object.keys(strippedMeta).length > 0) cleanParams._meta = strippedMeta;
     else delete cleanParams._meta;
 
-    const { status, json } = await acsPost(managed, '/desktop-commander/capability/issue', {
-      toolName,
-      arguments: cleanParams.arguments ?? {},
-      identity,
-      requestId,
-      // Client-supplied ACS metadata is reported for audit only; it carries no authority.
-      strippedMetaKeys: spoofed,
-    });
-    if (status !== 200 || !json || json.ok !== true) {
-      const code = json && typeof json.code === 'string' ? json.code : `acs_http_${status || 'unreachable'}`;
+    const subject = typeof identity?.subject === 'string' ? identity.subject : '';
+    const clientId = typeof identity?.clientId === 'string' ? identity.clientId : '';
+    if (!subject || !clientId) {
+      throw Object.assign(new Error('managed mode requires authenticated subject and client_id'), { acsCode: 'identity_missing' });
+    }
+    const actor = subject.startsWith('chatgpt:') ? subject : `chatgpt:${subject}`;
+    const { status, json } = await acsPost(managed, '/dc/capability/issue', {
+      client_id: clientId,
+      tool: toolName,
+      argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
+      correlationId: requestId,
+    }, { 'x-dc-actor': actor });
+    if (status !== 200 || !json || json.decision !== 'allow') {
+      const code = json && typeof json.code === 'string'
+        ? json.code
+        : json && typeof json.reason === 'string'
+          ? json.reason
+          : json && typeof json.decision === 'string'
+            ? json.decision
+            : `acs_http_${status || 'unreachable'}`;
       throw Object.assign(new Error(`ACS did not authorize this invocation (${code})`), { acsCode: code });
     }
     const envelope = json.capability;
@@ -140,7 +246,18 @@ export function capabilityTransport(managed, { identity, requestId }) {
       ...parsed,
       params: {
         ...cleanParams,
-        _meta: { ...(cleanParams._meta || {}), [ACS_CAPABILITY_META_KEY]: envelope },
+        _meta: {
+          ...(cleanParams._meta || {}),
+          [ACS_CAPABILITY_META_KEY]: envelope,
+          [ACS_GUARD_META_KEY]: envelope,
+          // Authoritative lease/result binding derived by ACS (transport only;
+          // ACS validates every binding independently at result acceptance).
+          acsLeaseBinding: {
+            claimActionHash: json.claimActionHash,
+            inputHash: json.inputHash,
+            workerId: json.workerId,
+          },
+        },
       },
     };
   };
@@ -149,7 +266,7 @@ export function capabilityTransport(managed, { identity, requestId }) {
 export function isToolsCall(bodyText) {
   try {
     const parsed = JSON.parse(bodyText.toString('utf8'));
-    return { isCall: typeof parsed?.method === 'string' && parsed.method.startsWith('tools/'), parsed };
+    return { isCall: parsed?.method === 'tools/call', parsed };
   } catch {
     return { isCall: false, parsed: null };
   }
