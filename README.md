@@ -22,6 +22,11 @@ ChatGPT ──HTTPS──► https://jacen-ubuntu.tailaa6d41.ts.net/mcp
   - RFC 9728 protected-resource metadata + RFC 8414 AS metadata discovery.
   - `/mcp` proxy: validates HS256 JWT (iss, exp, aud == RESOURCE) before
     forwarding; streams responses (SSE preserved); never logs tokens or args.
+  - Identity forwarding: on each authorized `/mcp` request the gateway
+    attests the authenticated identity to the executor (`x-dc-agent`,
+    `x-dc-client`, `x-dc-attestation` — short-lived HMAC over the identity,
+    keyed by `GATEWAY_EXECUTION_TOKEN`). The bearer token is never forwarded;
+    client-supplied `x-dc-*` headers are always stripped.
   - Consent page gated by `CONSENT_PASSPHRASE` (typed by the owner in a browser).
 - `bridge.js` — MCP SDK stdio→Streamable HTTP relay, bound to 127.0.0.1 only
   (replaces Supergateway, which cannot bind loopback). One canonical Desktop
