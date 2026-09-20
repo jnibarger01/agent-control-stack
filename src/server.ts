@@ -14,7 +14,7 @@ import {
     type InitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability, getApprovalStore } from './enforcement/pipeline.js';
+import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability, getApprovalStore, GATEWAY_TRANSPORT_VERIFIED } from './enforcement/pipeline.js';
 // Item #5: pending approval requests live in the pipeline-owned store until
 // an approver (Telegram hook, UI, or the ACS orchestrator) resolves them;
 // the enforcement gate consults the same store for approval re-execution.
@@ -1518,29 +1518,42 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
     // approvals are returned to the caller as structured errors carrying the
     // exact mutation scope.
     const enforcementAgent = agentFromMeta(request.params._meta);
-    const enforcementTransport = enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp';
     const reqHash = requestHash(name, toolArguments);
     const cap = extractCapability(request.params._meta);
     const gate = await preExecuteEnforcement({
         tool: name,
         args: toolArguments,
         meta: request.params._meta,
-        transport: enforcementTransport,
+        transport: enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp',
     });
+    // Trusted transport attribution: when an attestation key is configured,
+    // the audit trail trusts ONLY HMAC-verified gateway meta. Trusted
+    // requests record the verified transport string and carry gatewayActor
+    // (gateway-vetted sub/client_id). Everything else — including a
+    // self-reported _meta.agent on a direct client while gateway mode is on —
+    // stays untrusted: agent 'unknown', base transport.
+    const enforcementTransport = (gate.allowed && gate.gatewayTrusted)
+        ? GATEWAY_TRANSPORT_VERIFIED
+        : (enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp');
+    const auditAgent = (process.env.DC_GATEWAY_ATTESTATION_KEY && !(gate.allowed && gate.gatewayTrusted))
+        ? 'unknown'
+        : enforcementAgent;
+    const attestAgent = auditAgent;
+    const attestGatewayActor = gate.allowed ? gate.gatewayActor : undefined;
     if (!gate.allowed) {
         // Red-team fix #8: record in the audit chain WHAT needed approval,
         // keyed by its approvalId, before returning the block.
         if (gate.kind === 'approval-required' && gate.approvalRequest) {
             approvalStore.submit(gate.approvalRequest);
             attestRequest({
-                requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+                requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
                 capabilityId: cap?.capabilityId, approvalId: gate.approvalRequest.approvalId,
                 commandClass: gate.classification.commandClass,
                 args: { approvalRequired: gate.code, command: gate.classification.command ?? null },
             });
         }
         const blockedAttestOk = attestRequest({
-            requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+            requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
             capabilityId: cap?.capabilityId, commandClass: gate.classification.commandClass,
             args: { blocked: gate.code, message: gate.message },
         });
@@ -1565,9 +1578,10 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         };
     }
     const allowedAttestOk = attestRequest({
-        requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+        requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
         capabilityId: cap?.capabilityId, commandClass: gate.classification.commandClass, args: toolArguments,
         ...(gate.allowed && gate.networkGuard ? { networkGuard: gate.networkGuard } : {}),
+        ...(attestGatewayActor ? { gatewayActor: attestGatewayActor } : {}),
     });
     if (!allowedAttestOk) {
         if (process.env.DC_AUDIT_STRICT === '1') {
@@ -2056,7 +2070,7 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         // call into the audit chain. Best-effort; never breaks the response.
         try {
             const resultAttestOk = attestResult({
-                requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+                requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
                 capabilityId: cap?.capabilityId, isError, durationMs: Date.now() - startTime,
                 executorPid: process.pid,
                 error: isError ? `tool ${name} returned isError` : undefined,

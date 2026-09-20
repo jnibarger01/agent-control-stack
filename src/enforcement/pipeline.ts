@@ -9,6 +9,12 @@
  *   DC_NETWORK_PROFILE=none|restricted|full   default network profile for calls
  *                                             that carry no capability (default: full)
  *   DC_DISABLE_EXECUTOR_LEASE=1      opt-out of the singleton executor lease
+ *   DC_GATEWAY_ATTESTATION_KEY=...   shared HMAC secret for trusted gateway
+ *                                     transport attribution; when set, requests
+ *                                     carrying _meta.gateway must carry a valid
+ *                                     bridge HMAC (see the TRUST CHAIN note
+ *                                     below) or they are rejected fail-closed.
+ *                                     Unset = behavior unchanged (backwards compat).
  *
  * When an ACS capability is presented in `_meta.capability`, it is always
  * verified regardless of DC_ENFORCEMENT — a presented capability must be
@@ -35,6 +41,14 @@ export interface EnforcementPass {
    * only), never silently claimed as enforced.
    */
   networkGuard?: NetworkGuardSummary;
+  /**
+   * Present (true) when the request carried a TRUSTED gateway attestation
+   * (HMAC-verified under DC_GATEWAY_ATTESTATION_KEY). Callers should record
+   * the transport as GATEWAY_TRANSPORT_VERIFIED for such requests.
+   */
+  gatewayTrusted?: true;
+  /** Present when gatewayTrusted: the gateway-vetted actor identity. */
+  gatewayActor?: GatewayActor;
   /**
    * Present when the active network profile is 'none': a scrubbed copy of the
    * spawn environment (proxy vars removed, NO_PROXY='*'). Consumers that
@@ -77,6 +91,94 @@ export function agentFromMeta(meta: unknown): string {
   if (!meta || typeof meta !== 'object') return 'unknown';
   const m = meta as Record<string, unknown>;
   return typeof m.agent === 'string' && m.agent ? m.agent : (m.remote ? 'remote-agent' : 'local');
+}
+
+/**
+ * Trusted transport attribution (gateway attestation).
+ *
+ * TRUST CHAIN: the OAuth gateway holds GATEWAY_EXECUTION_TOKEN (a shared HMAC
+ * secret). It authenticates the caller (x-dc-* headers), then the bridge
+ * injects `params._meta.gateway = { sig, sub, client_id, jti, iat }` where
+ * `sig = base64url(HMAC-SHA256(GATEWAY_EXECUTION_TOKEN, `${sub}.${client_id}.${jti}.${iat}`))`
+ * (iat = epoch milliseconds). The bridge verifies the OAuth claims BEFORE
+ * signing, so a valid sig means "gateway-vetted identity", not a client
+ * self-report. Desktop Commander verifies that signature with the SAME
+ * secret, supplied as DC_GATEWAY_ATTESTATION_KEY. `_meta.gateway.verified`
+ * is display-only: a direct client can set verified=true itself, so the
+ * boolean alone is NEVER trusted — only the HMAC is.
+ *
+ * When DC_GATEWAY_ATTESTATION_KEY is unset, gateway attribution is not
+ * enforced and behavior is unchanged (backwards compatible).
+ */
+
+export interface GatewayActor {
+  sub: string;
+  client_id: string;
+}
+
+/** The verified transport string recorded in audit events for trusted gateway requests. */
+export const GATEWAY_TRANSPORT_VERIFIED = 'oauth-gateway->mcp (verified)';
+
+/** How far an attestation's iat may drift from now. */
+const GATEWAY_ATTESTATION_WINDOW_MS = 10 * 60 * 1000;
+
+/** The shared HMAC secret DC uses to verify bridge attestations, when configured. */
+export function gatewayAttestationKey(): string | undefined {
+  const key = process.env.DC_GATEWAY_ATTESTATION_KEY;
+  return key && key.length > 0 ? key : undefined;
+}
+
+function gatewayFromMeta(meta: unknown): Record<string, unknown> | undefined {
+  if (!meta || typeof meta !== 'object') return undefined;
+  const gw = (meta as Record<string, unknown>).gateway;
+  return gw && typeof gw === 'object' ? (gw as Record<string, unknown>) : undefined;
+}
+
+/** Recompute the expected base64url HMAC sig over the attestation fields. */
+function expectedGatewaySig(key: string, gw: Record<string, unknown>): string {
+  const material = `${gw.sub}.${gw.client_id}.${gw.jti}.${gw.iat}`;
+  return crypto.createHmac('sha256', key).update(material).digest('base64url');
+}
+
+function timingSafeEqualStr(a: string, b: string): boolean {
+  const ab = Buffer.from(a, 'utf8');
+  const bb = Buffer.from(b, 'utf8');
+  if (ab.length !== bb.length) {
+    // Compare a digest of each to keep the comparison constant-time even
+    // across length mismatch.
+    crypto.timingSafeEqual(sha256Hex(a), sha256Hex(b));
+    return false;
+  }
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+/**
+ * True ONLY when DC_GATEWAY_ATTESTATION_KEY is set and the request's
+ * _meta.gateway carries a structurally complete attestation whose HMAC
+ * verifies under that key, with iat inside the 10-minute window and a
+ * non-empty jti. A bare `verified: true` boolean (client-set) never
+ * satisfies this — the signature is the trust anchor.
+ */
+export function isTrustedGatewayMeta(meta: unknown, now: number = Date.now()): boolean {
+  const key = gatewayAttestationKey();
+  if (!key) return false;
+  const gw = gatewayFromMeta(meta);
+  if (!gw) return false;
+  if (gw.verified !== true) return false;
+  if (typeof gw.sub !== 'string' || !gw.sub) return false;
+  if (typeof gw.client_id !== 'string' || !gw.client_id) return false;
+  if (typeof gw.jti !== 'string' || !gw.jti) return false;
+  if (typeof gw.iat !== 'number' || !Number.isFinite(gw.iat)) return false;
+  if (Math.abs(now - gw.iat) > GATEWAY_ATTESTATION_WINDOW_MS) return false;
+  if (typeof gw.sig !== 'string' || !gw.sig) return false;
+  return timingSafeEqualStr(gw.sig, expectedGatewaySig(key, gw));
+}
+
+/** Trusted gateway identity for audit events, or undefined when untrusted. */
+export function gatewayActorFromMeta(meta: unknown): GatewayActor | undefined {
+  if (!isTrustedGatewayMeta(meta)) return undefined;
+  const gw = gatewayFromMeta(meta) as Record<string, unknown>;
+  return { sub: gw.sub as string, client_id: gw.client_id as string };
 }
 
 let sharedIssuer: LocalCapabilityIssuer | undefined;
@@ -124,6 +226,29 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   const cap = extractCapability(ctx.meta);
   const enforcementOff = process.env.DC_ENFORCEMENT === 'off';
 
+  // 0. Trusted gateway attestation (fail-closed). Only enforced when
+  //    DC_GATEWAY_ATTESTATION_KEY is configured — env unset means behavior is
+  //    unchanged (no new rejections). When set, any request presenting
+  //    _meta.gateway MUST carry a valid bridge HMAC (isTrustedGatewayMeta);
+  //    a self-claimed verified:true boolean is not a trust anchor. Like
+  //    capability verification, this runs regardless of DC_ENFORCEMENT —
+  //    transport trust is not optional where an attestation key exists.
+  let gatewayTrusted: true | undefined;
+  let gatewayActor: GatewayActor | undefined;
+  if (gatewayAttestationKey() && gatewayFromMeta(ctx.meta)) {
+    if (!isTrustedGatewayMeta(ctx.meta, now)) {
+      return {
+        allowed: false,
+        kind: 'capability-rejected',
+        code: 'GATEWAY_ATTESTATION_INVALID',
+        message: 'gateway attestation invalid: _meta.gateway failed HMAC verification (verified flag alone is not trusted; sig/sub/client_id/jti/iat must verify under DC_GATEWAY_ATTESTATION_KEY within 10 minutes)',
+        classification,
+      };
+    }
+    gatewayTrusted = true;
+    gatewayActor = gatewayActorFromMeta(ctx.meta);
+  }
+
   // 1. Capability verification — mandatory whenever one is presented.
   let verified: VerifyResult | undefined;
   if (cap) {
@@ -147,7 +272,8 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   }
 
   if (enforcementOff) {
-    return { allowed: true, classification, capability: cap };
+    return { allowed: true, classification, capability: cap,
+      ...(gatewayTrusted ? { gatewayTrusted, gatewayActor } : {}) };
   }
 
   // 2. Network profile enforcement. An explicit 'none' is enforced locally:
@@ -202,6 +328,7 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
       allowed: true,
       classification,
       capability: cap,
+      ...(gatewayTrusted ? { gatewayTrusted, gatewayActor } : {}),
       ...(noneProfileGuard ? { networkGuard: noneProfileGuard, spawnEnvOverride } : {}),
     };
   }
@@ -232,6 +359,7 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
           allowed: true,
           classification,
           capability: cap,
+          ...(gatewayTrusted ? { gatewayTrusted, gatewayActor } : {}),
           ...(noneProfileGuard ? { networkGuard: noneProfileGuard, spawnEnvOverride } : {}),
         };
       }
@@ -263,6 +391,7 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
     allowed: true,
     classification,
     capability: undefined,
+    ...(gatewayTrusted ? { gatewayTrusted, gatewayActor } : {}),
     ...(noneProfileGuard ? { networkGuard: noneProfileGuard, spawnEnvOverride } : {}),
   };
 }
@@ -319,6 +448,12 @@ export function attestRequest(event: {
   commandClass?: CommandClass;
   args?: Record<string, unknown>;
   networkGuard?: NetworkGuardSummary;
+  /**
+   * Present when the request carried a TRUSTED gateway attestation: the
+   * gateway-vetted identity recorded in the audit event (never taken from a
+   * client-supplied verified flag).
+   */
+  gatewayActor?: GatewayActor;
 }): boolean {
   try {
     auditChain().append({
@@ -332,6 +467,7 @@ export function attestRequest(event: {
       sourceAgent: event.agent,
       mutations: [],
       ...(event.networkGuard ? { networkGuard: event.networkGuard } : {}),
+      ...(event.gatewayActor ? { gatewayActor: event.gatewayActor } : {}),
       ...(event.args ? { argsPreview: canonicalJson(event.args).slice(0, 4096) } : {}),
     } as Parameters<AuditChain['append']>[0]);
     return true;
