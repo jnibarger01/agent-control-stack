@@ -129,6 +129,10 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     return reply.code(400).send({ error: "unsupported_grant_type" });
   });
 
+  // Rate-limited via enforceDeviceVerifyRateLimit (SlidingWindowRateLimiter) before auth;
+  // auth-failure lockout also applies on POST. CodeQL js/missing-rate-limiting does not
+  // model our in-process limiter (same false positive class as other Fastify ACS routes).
+  // codeql[js/missing-rate-limiting]
   app.get("/device/verify", async (request, reply) => {
     if (!enforceDeviceVerifyRateLimit(options, request, reply)) return reply;
     const credential = gatewayCredentialForRequest(request, options.auth);
@@ -140,6 +144,7 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     return reply.type("text/html").send(renderDeviceVerifyPage({ userCode, summary }));
   });
 
+  // codeql[js/missing-rate-limiting] -- see GET /device/verify note above
   app.post("/device/verify", async (request, reply) => {
     if (!enforceDeviceVerifyRateLimit(options, request, reply)) return reply;
     const credential = gatewayCredentialForRequest(request, options.auth);
