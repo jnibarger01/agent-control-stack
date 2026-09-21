@@ -38,12 +38,19 @@ describe("device authorization HTTP surface", () => {
 
   async function buildTestApp(
     rateLimit?: { windowMs: number; maxRequests: number },
-    auth: GatewayAuthOptions = testAuth
+    auth: GatewayAuthOptions = testAuth,
+    authLockout?: { windowMs: number; maxFailures: number }
   ) {
     dir = mkdtempSync(join(tmpdir(), "acs-device-http-"));
     const dbPath = join(dir, "control.db");
     seedActor(dbPath);
-    const app = buildGateway({ dbPath, logger: false, auth, ...(rateLimit ? { rateLimit } : {}) });
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      auth,
+      ...(rateLimit ? { rateLimit } : {}),
+      ...(authLockout ? { authLockout } : {})
+    });
     await app.ready();
     return app;
   }
@@ -311,6 +318,128 @@ describe("device authorization HTTP surface", () => {
         payload: { user_code: userCode, action: "approve" }
       });
       expect(lateApprove.statusCode).toBe(409);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("locks device-auth verification after N failed user_code attempts and stays 429 until cleared by success", async () => {
+    const app = await buildTestApp(
+      { windowMs: 60_000, maxRequests: 100 },
+      testAuth,
+      { windowMs: 60_000, maxFailures: 3 }
+    );
+    try {
+      const issue = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem, device_name: "laptop" })
+      });
+      const { user_code: userCode } = issue.json();
+
+      const fail = async (code: string) =>
+        app.inject({
+          method: "POST",
+          url: "/device/verify",
+          headers: { authorization: `Bearer ${testAuth.token}` },
+          payload: { user_code: code, action: "approve" }
+        });
+
+      expect((await fail("AAAA-BBBB")).statusCode).toBe(404);
+      expect((await fail("CCCC-DDDD")).statusCode).toBe(404);
+      const locked = await fail("EEEE-FFFF");
+      expect(locked.statusCode).toBe(429);
+      expect(locked.headers["retry-after"]).toBeDefined();
+      expect(locked.json()).toMatchObject({
+        error: "too many failed verification attempts",
+        code: "auth_lockout",
+        retry_after_seconds: expect.any(Number)
+      });
+
+      // Further attempts (even with the real user_code) stay locked — skip store lookup.
+      const stillLocked = await fail(userCode);
+      expect(stillLocked.statusCode).toBe(429);
+      expect(stillLocked.json()).toMatchObject({ code: "auth_lockout" });
+
+      const metrics = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: `Bearer ${testAuth.token}` }
+      });
+      expect(metrics.body).toContain('acs_auth_lockout_total{route="/device/verify"}');
+      expect(metrics.body).not.toContain(userCode);
+      expect(metrics.body).not.toContain("AAAA-BBBB");
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("clears device-auth failure streak after a successful verification", async () => {
+    const app = await buildTestApp(
+      { windowMs: 60_000, maxRequests: 100 },
+      testAuth,
+      { windowMs: 60_000, maxFailures: 3 }
+    );
+    try {
+      const issue = await app.inject({
+        method: "POST",
+        url: "/oauth/device/code",
+        headers: { "content-type": "application/x-www-form-urlencoded" },
+        payload: form({ client_id: "acs-cli", device_public_key: devicePublicKeyPem, device_name: "laptop" })
+      });
+      const { user_code: userCode } = issue.json();
+
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/device/verify",
+            headers: { authorization: `Bearer ${testAuth.token}` },
+            payload: { user_code: "AAAA-BBBB", action: "approve" }
+          })
+        ).statusCode
+      ).toBe(404);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/device/verify",
+            headers: { authorization: `Bearer ${testAuth.token}` },
+            payload: { user_code: "CCCC-DDDD", action: "approve" }
+          })
+        ).statusCode
+      ).toBe(404);
+
+      const approve = await app.inject({
+        method: "POST",
+        url: "/device/verify",
+        headers: { authorization: `Bearer ${testAuth.token}` },
+        payload: { user_code: userCode, action: "approve" }
+      });
+      expect(approve.statusCode).toBe(200);
+
+      // IP streak cleared: two more bad codes do not lock yet.
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/device/verify",
+            headers: { authorization: `Bearer ${testAuth.token}` },
+            payload: { user_code: "EEEE-FFFF", action: "approve" }
+          })
+        ).statusCode
+      ).toBe(404);
+      expect(
+        (
+          await app.inject({
+            method: "POST",
+            url: "/device/verify",
+            headers: { authorization: `Bearer ${testAuth.token}` },
+            payload: { user_code: "GGGG-HHHH", action: "approve" }
+          })
+        ).statusCode
+      ).toBe(404);
     } finally {
       await app.close();
     }

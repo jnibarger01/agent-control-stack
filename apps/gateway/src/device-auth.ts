@@ -4,12 +4,14 @@
 // in ./device-auth-store.ts. Human authentication for /device/verify is NOT reimplemented
 // here - it reuses the gateway's existing Mission Control session (gatewayCredentialForRequest
 // / renderLoginPage), the only human-auth mechanism ACS has.
+import { createHash } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   DEFAULT_DEVICE_AUTH_CLIENT_ID,
   DeviceAuthStore,
   type DeviceAuthorizationSummary
 } from "./device-auth-store.js";
+import type { AuthFailureLockout } from "./auth-lockout.js";
 import {
   gatewayCredentialCanMutate,
   gatewayCredentialForRequest,
@@ -20,6 +22,8 @@ import {
 export interface DeviceAuthRouteOptions {
   store: DeviceAuthStore;
   auth: GatewayAuthOptions | undefined;
+  authLockout?: AuthFailureLockout;
+  onAuthLockout?: (route: "/device/verify") => void;
   allowedClientIds?: readonly string[];
   publicOriginOverride?: string;
 }
@@ -148,6 +152,27 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     if (!userCode || (action !== "approve" && action !== "deny")) {
       return reply.code(400).send({ error: "invalid_request" });
     }
+
+    const lockout = options.authLockout;
+    const ipKey = `device_verify:ip:${request.ip}`;
+    const codeKey = userCodeLockoutKey(userCode);
+    if (lockout) {
+      for (const key of [ipKey, codeKey]) {
+        const locked = lockout.isLocked(key);
+        if (locked.locked) {
+          options.onAuthLockout?.("/device/verify");
+          return reply
+            .header("retry-after", String(locked.retryAfterSeconds))
+            .code(429)
+            .send({
+              error: "too many failed verification attempts",
+              code: "auth_lockout",
+              retry_after_seconds: locked.retryAfterSeconds
+            });
+        }
+      }
+    }
+
     if (action === "approve") {
       const summary = options.store.findByUserCode(userCode);
       if (summary && !summary.requestedScopes.every((scope) => credential.scopes.includes(scope))) {
@@ -157,9 +182,29 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     const result =
       action === "approve" ? options.store.approve(userCode, credential.actorId) : options.store.deny(userCode);
     if (!result.ok) {
+      if (lockout) {
+        const decisions = [lockout.recordFailure(ipKey), lockout.recordFailure(codeKey)];
+        const locked = decisions.find((decision) => decision.locked);
+        if (locked) {
+          options.onAuthLockout?.("/device/verify");
+          if (decisions.some((decision) => decision.justLocked)) {
+            request.log.warn({ route: "/device/verify", code: "auth_lockout" }, "auth lockout triggered");
+          }
+          return reply
+            .header("retry-after", String(locked.retryAfterSeconds))
+            .code(429)
+            .send({
+              error: "too many failed verification attempts",
+              code: "auth_lockout",
+              retry_after_seconds: locked.retryAfterSeconds
+            });
+        }
+      }
       const status = result.error === "not_found" ? 404 : result.error === "expired" ? 410 : 409;
       return reply.code(status).send({ error: result.error });
     }
+    lockout?.clear(ipKey);
+    lockout?.clear(codeKey);
     return reply.code(200).send({ ok: true });
   });
 
@@ -177,6 +222,14 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     }
     return reply.code(200).send({ ok: true });
   });
+}
+
+
+/** Hash-only lockout key — never stores or logs the raw user_code. */
+function userCodeLockoutKey(rawUserCode: string): string {
+  const normalized = rawUserCode.toUpperCase().replace(/[^A-Z0-9]/g, "");
+  const digest = createHash("sha256").update(normalized || rawUserCode).digest("hex").slice(0, 16);
+  return `device_verify:code:${digest}`;
 }
 
 function stringField(value: unknown): string | undefined {

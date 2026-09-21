@@ -77,6 +77,12 @@ import {
   webhookIngestSchema
 } from "./public-contracts.js";
 import { SlidingWindowRateLimiter, type RateLimitOptions } from "./rate-limit.js";
+import {
+  AuthFailureLockout,
+  DEFAULT_AUTH_LOCKOUT_MAX_FAILURES,
+  DEFAULT_AUTH_LOCKOUT_WINDOW_MS,
+  type AuthLockoutOptions
+} from "./auth-lockout.js";
 import { GatewayMetrics } from "./metrics.js";
 import { gatewayListenConfig } from "./runtime-config.js";
 import { DeviceAuthStore } from "./device-auth-store.js";
@@ -156,6 +162,7 @@ export interface GatewayOptions {
   acpAdapter?: ReadonlyAcpAdapterConfig | false;
   moa?: MoaGatewayOverrides | false;
   rateLimit?: RateLimitOptions;
+  authLockout?: AuthLockoutOptions;
   maxPendingWorkItems?: number;
   maxSseClients?: number;
   maxSseClientsPerPrincipal?: number;
@@ -191,6 +198,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     mode: options.mcpToolAllowlistMode
   });
   const rateLimiter = new SlidingWindowRateLimiter(options.rateLimit ?? resolveRateLimitFromEnv());
+  const authLockout = new AuthFailureLockout(options.authLockout ?? resolveAuthLockoutFromEnv());
   const maxPendingWorkItems = options.maxPendingWorkItems ?? resolveMaxPendingWorkItemsFromEnv();
   const maxSseClients = options.maxSseClients ?? resolveMaxSseClientsFromEnv();
   const configuredMaxSseClientsPerPrincipal =
@@ -359,11 +367,40 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!auth) {
         return reply.code(503).send({ error: "dashboard auth is not configured" });
       }
+      const lockoutKey = `login:ip:${request.ip}`;
+      const locked = authLockout.isLocked(lockoutKey);
+      if (locked.locked) {
+        metrics.increment("acs_auth_lockout_total", { route: "/session/login" });
+        return reply
+          .header("retry-after", String(locked.retryAfterSeconds))
+          .code(429)
+          .send({
+            error: "too many failed login attempts",
+            code: "auth_lockout",
+            retry_after_seconds: locked.retryAfterSeconds
+          });
+      }
       const body = sessionLoginBodySchema.parse(request.body);
       const credential = gatewayCredentialForToken(body.token, auth);
       if (!credential) {
+        const after = authLockout.recordFailure(lockoutKey);
+        if (after.locked) {
+          metrics.increment("acs_auth_lockout_total", { route: "/session/login" });
+          if (after.justLocked) {
+            request.log.warn({ route: "/session/login", code: "auth_lockout" }, "auth lockout triggered");
+          }
+          return reply
+            .header("retry-after", String(after.retryAfterSeconds))
+            .code(429)
+            .send({
+              error: "too many failed login attempts",
+              code: "auth_lockout",
+              retry_after_seconds: after.retryAfterSeconds
+            });
+        }
         return reply.code(401).send({ error: "unauthorized" });
       }
+      authLockout.clear(lockoutKey);
       return reply
         .header("set-cookie", sessionCookie(auth, process.env.NODE_ENV === "production", credential))
         .code(204)
@@ -376,6 +413,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   registerDeviceAuthRoutes(app, {
     store: deviceAuthStore,
     auth,
+    authLockout,
+    onAuthLockout: (route) => {
+      metrics.increment("acs_auth_lockout_total", { route });
+    },
     publicOriginOverride: process.env.ACS_PUBLIC_URL
   });
 
@@ -1346,6 +1387,23 @@ function resolveRateLimitFromEnv(env: NodeJS.ProcessEnv = process.env): RateLimi
       .min(1)
       .max(100_000)
       .parse(env.ACS_RATE_LIMIT_MAX_REQUESTS ?? 120)
+  };
+}
+
+function resolveAuthLockoutFromEnv(env: NodeJS.ProcessEnv = process.env): AuthLockoutOptions {
+  return {
+    windowMs: z.coerce
+      .number()
+      .int()
+      .min(1_000)
+      .max(3_600_000)
+      .parse(env.ACS_AUTH_LOCKOUT_WINDOW_MS ?? DEFAULT_AUTH_LOCKOUT_WINDOW_MS),
+    maxFailures: z.coerce
+      .number()
+      .int()
+      .min(1)
+      .max(10_000)
+      .parse(env.ACS_AUTH_LOCKOUT_MAX_FAILURES ?? DEFAULT_AUTH_LOCKOUT_MAX_FAILURES)
   };
 }
 

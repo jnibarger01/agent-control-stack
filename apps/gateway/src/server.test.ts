@@ -3727,6 +3727,136 @@ describe("gateway abuse controls", () => {
   });
 });
 
+describe("auth lockout", () => {
+  const dashboardAuth = { token: "super-secret-dashboard-token", actor: "user", actorId: "user" } as const;
+
+  it("locks dashboard login after N failures, stays 429 until the window elapses, and clears on success", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-auth-lockout-login-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: dashboardAuth,
+      rateLimit: { windowMs: 60_000, maxRequests: 100 },
+      authLockout: { windowMs: 60_000, maxFailures: 3 }
+    });
+
+    try {
+      const first = await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong-1" } });
+      const second = await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong-2" } });
+      const third = await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong-3" } });
+      const fourth = await app.inject({
+        method: "POST",
+        url: "/session/login",
+        payload: { token: dashboardAuth.token }
+      });
+
+      expect(first.statusCode).toBe(401);
+      expect(second.statusCode).toBe(401);
+      expect(third.statusCode).toBe(429);
+      expect(third.headers["retry-after"]).toBeDefined();
+      expect(third.json()).toMatchObject({
+        error: "too many failed login attempts",
+        code: "auth_lockout",
+        retry_after_seconds: expect.any(Number)
+      });
+      // Further attempts skip credential checks: even the correct token stays locked.
+      expect(fourth.statusCode).toBe(429);
+      expect(fourth.json()).toMatchObject({ code: "auth_lockout" });
+      expect(fourth.headers["set-cookie"]).toBeUndefined();
+
+      const metrics = await app.inject({
+        method: "GET",
+        url: "/metrics",
+        headers: { authorization: `Bearer ${dashboardAuth.token}` }
+      });
+      expect(metrics.statusCode).toBe(200);
+      expect(metrics.body).toContain('acs_auth_lockout_total{route="/session/login"}');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("clears the login failure streak after a successful login", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-auth-lockout-clear-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: dashboardAuth,
+      rateLimit: { windowMs: 60_000, maxRequests: 100 },
+      authLockout: { windowMs: 60_000, maxFailures: 3 }
+    });
+
+    try {
+      expect(
+        (await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong" } })).statusCode
+      ).toBe(401);
+      expect(
+        (await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong" } })).statusCode
+      ).toBe(401);
+      const success = await app.inject({
+        method: "POST",
+        url: "/session/login",
+        payload: { token: dashboardAuth.token }
+      });
+      expect(success.statusCode).toBe(204);
+
+      // Streak cleared: two more failures do not lock yet.
+      expect(
+        (await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong" } })).statusCode
+      ).toBe(401);
+      expect(
+        (await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong" } })).statusCode
+      ).toBe(401);
+      expect(
+        (await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong" } })).statusCode
+      ).toBe(429);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("unlocks login after the lockout window elapses", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-auth-lockout-window-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: dashboardAuth,
+      rateLimit: { windowMs: 60_000, maxRequests: 100 },
+      authLockout: { windowMs: 50, maxFailures: 2 }
+    });
+
+    try {
+      expect(
+        (await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong" } })).statusCode
+      ).toBe(401);
+      expect(
+        (await app.inject({ method: "POST", url: "/session/login", payload: { token: "wrong" } })).statusCode
+      ).toBe(429);
+
+      await new Promise((resolve) => setTimeout(resolve, 60));
+
+      const afterWindow = await app.inject({
+        method: "POST",
+        url: "/session/login",
+        payload: { token: "wrong-again" }
+      });
+      expect(afterWindow.statusCode).toBe(401);
+
+      const success = await app.inject({
+        method: "POST",
+        url: "/session/login",
+        payload: { token: dashboardAuth.token }
+      });
+      expect(success.statusCode).toBe(204);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe("gateway dashboard sessions", () => {
   const dashboardAuth = { token: "super-secret-dashboard-token", actor: "user", actorId: "user" } as const;
 
