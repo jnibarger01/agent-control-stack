@@ -36,3 +36,10 @@ jobs:
 
       - name: Build production image
         run: docker build -t agent-control-stack:${{ github.sha }} .
+
+      # Hard-fail on GitHub-hosted runners (ubuntu-latest has Docker).
+      # Loopback publish only; no Vercel APIs or ignoreCommand changes.
+      - name: Compose production smoke
+        env:
+          ACS_IMAGE_TAG: ${{ github.sha }}
+        run: ./scripts/ci-compose-production-smoke.sh

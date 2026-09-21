@@ -77,6 +77,12 @@ docker compose -f compose.production.yml config --quiet
 
 Keep real secrets in the deployment secret store or process environment. Do not put them in Compose files or `.env` committed to Git.
 
+GitHub Actions `check` hard-fails a loopback compose smoke after the production
+image build: `./scripts/ci-compose-production-smoke.sh` (`compose.production.yml
+up -d`, `./scripts/gateway-post-deploy-healthcheck.sh`, teardown). See the
+gateway host map in [README Deploy](../../README.md#deploy). That job does not
+deploy to Vercel or change `ignoreCommand`.
+
 ## Deploy
 
 1. Record the current image tag and repository SHA.
