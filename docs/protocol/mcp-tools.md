@@ -263,10 +263,11 @@ Over MCP, `requester`/`requesterSubject` are overwritten server-side to `"agent"
 ### `list_work_items`
 
 ```json
-{ "status": "needs_approval" }
+{ "status": "needs_approval", "limit": 50 }
 ```
 
-`status` is optional; omit to list all.
+`status` is optional. `limit` is optional (default **100**, hard max **500**);
+oversize values are clamped to the max rather than rejected.
 
 ### `approve_work_item` (not reachable over remote MCP)
 

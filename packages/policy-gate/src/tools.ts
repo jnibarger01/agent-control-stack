@@ -4,8 +4,10 @@ import {
   approvalRequestHash,
   approvalRequestSchema,
   cancelRequestSchema,
+  DEFAULT_WORK_ITEM_LIST_LIMIT,
   defaultExecutionPlanForWorkItem,
   executionActionHash,
+  listWorkItemsSchema,
   resolveExecutionBackend,
   rejectRequestSchema,
   type ClaimedWorkItem,
@@ -458,7 +460,13 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.get(parsed.id);
     },
     list_work_items(input: unknown = {}): WorkItem[] {
-      return store.list(input);
+      const parsed = listWorkItemsSchema.parse(input ?? {});
+      // Public list surface always applies a page size (default or client-provided,
+      // clamped to MAX_WORK_ITEM_LIST_LIMIT inside the schema).
+      return store.list({
+        ...parsed,
+        limit: parsed.limit ?? DEFAULT_WORK_ITEM_LIST_LIMIT
+      });
     },
     explain_policy(input: unknown) {
       return explainPolicy(input);

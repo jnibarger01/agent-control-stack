@@ -253,7 +253,7 @@ export function mcpToolDescription(name: McpToolName): string {
     case "get_work_item":
       return "Read one work item by id.";
     case "list_work_items":
-      return "List work items, optionally filtered by status.";
+      return "List work items, optionally filtered by status. Page size defaults to 100 and is hard-capped at 500.";
     case "approve_work_item":
       return "Record user approval for the exact policy-evaluated action hash on a work item.";
     case "unblock_work_item":

@@ -372,7 +372,7 @@
         "artifacts": "\"array\"",
         "error": "\"string\"",
         "resourceUsage": "\"object\"",
-        "simulationMetadata": "\"object\""
+        "simulationMetadata": "null"
       },
       "propertyEnums": {
         "outcome": [
@@ -713,10 +713,12 @@
     "list_work_items": {
       "required": [],
       "properties": [
+        "limit",
         "status"
       ],
       "propertyTypes": {
-        "status": "\"string\""
+        "status": "\"string\"",
+        "limit": "\"integer\""
       },
       "propertyEnums": {
         "status": [
