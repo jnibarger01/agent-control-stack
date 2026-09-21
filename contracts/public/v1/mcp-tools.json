@@ -167,7 +167,7 @@
     {
       "name": "list_work_items",
       "exposure": "remote",
-      "description": "List work items, optionally filtered by status.",
+      "description": "List work items, optionally filtered by status. Page size defaults to 100 and is hard-capped at 500.",
       "inputSchema": {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
@@ -189,6 +189,11 @@
               "unknown",
               "quarantined"
             ]
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 500
           }
         }
       },

@@ -283,8 +283,29 @@ export const submitWorkResultSchema = z
     }
   });
 
+/** Default page size for list_work_items when the client omits `limit`. */
+export const DEFAULT_WORK_ITEM_LIST_LIMIT = 100;
+/** Hard server cap for list_work_items (and store.list when `limit` is set). */
+export const MAX_WORK_ITEM_LIST_LIMIT = 500;
+
+/**
+ * Clamp an oversize positive integer page size down to {@link MAX_WORK_ITEM_LIST_LIMIT}.
+ * Invalid values are left untouched so Zod can reject them with a stable error.
+ */
+export function clampWorkItemListLimit(value: unknown): unknown {
+  if (value === undefined || value === null || value === "") {
+    return undefined;
+  }
+  const numeric = typeof value === "number" ? value : Number(value);
+  if (typeof numeric === "number" && Number.isInteger(numeric) && numeric > MAX_WORK_ITEM_LIST_LIMIT) {
+    return MAX_WORK_ITEM_LIST_LIMIT;
+  }
+  return Number.isNaN(numeric) ? value : numeric;
+}
+
 export const listWorkItemsSchema = z.object({
-  status: workItemStatusSchema.optional()
+  status: workItemStatusSchema.optional(),
+  limit: z.preprocess(clampWorkItemListLimit, z.number().int().min(1).max(MAX_WORK_ITEM_LIST_LIMIT).optional())
 });
 
 export type Requester = z.infer<typeof requesterSchema>;

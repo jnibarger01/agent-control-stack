@@ -67,6 +67,20 @@ describe("frozen MCP/OpenAPI snapshot coverage", () => {
     }
   });
 
+  it("freezes list_work_items limit maximum in the mcp-tools snapshot", async () => {
+    const { MAX_WORK_ITEM_LIST_LIMIT } = await import("@agent-control-stack/work-items");
+    const tool = mcpTools.tools.find((entry) => entry.name === "list_work_items");
+    expect(tool).toBeDefined();
+    const schema = tool?.inputSchema as {
+      properties?: { limit?: { type?: string; minimum?: number; maximum?: number } };
+    };
+    expect(schema.properties?.limit).toMatchObject({
+      type: "integer",
+      minimum: 1,
+      maximum: MAX_WORK_ITEM_LIST_LIMIT
+    });
+  });
+
   it("keeps work-item and portfolio tools in the compatibility baseline", () => {
     for (const name of required) {
       expect(baseline.tools[name], `${name} missing from compatibility-baseline.json`).toBeDefined();

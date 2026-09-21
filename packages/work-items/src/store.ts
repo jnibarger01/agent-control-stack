@@ -1119,11 +1119,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   list(input: unknown = {}): WorkItem[] {
     const filter = listWorkItemsSchema.parse(input);
+    // When `limit` is omitted, return the full filtered set (internal callers /
+    // digests). Public MCP/HTTP list_work_items always supplies a limit so the
+    // hard page-size cap applies on that surface.
+    if (filter.limit === undefined) {
+      const rows = filter.status
+        ? (this.db
+            .prepare(`SELECT * FROM work_items WHERE status = ? ORDER BY created_at DESC`)
+            .all(filter.status) as unknown as WorkItemRow[])
+        : (this.db.prepare(`SELECT * FROM work_items ORDER BY created_at DESC`).all() as unknown as WorkItemRow[]);
+      return rows.map(rowToWorkItem);
+    }
     const rows = filter.status
       ? (this.db
-          .prepare(`SELECT * FROM work_items WHERE status = ? ORDER BY created_at DESC`)
-          .all(filter.status) as unknown as WorkItemRow[])
-      : (this.db.prepare(`SELECT * FROM work_items ORDER BY created_at DESC`).all() as unknown as WorkItemRow[]);
+          .prepare(`SELECT * FROM work_items WHERE status = ? ORDER BY created_at DESC LIMIT ?`)
+          .all(filter.status, filter.limit) as unknown as WorkItemRow[])
+      : (this.db
+          .prepare(`SELECT * FROM work_items ORDER BY created_at DESC LIMIT ?`)
+          .all(filter.limit) as unknown as WorkItemRow[]);
     return rows.map(rowToWorkItem);
   }
 

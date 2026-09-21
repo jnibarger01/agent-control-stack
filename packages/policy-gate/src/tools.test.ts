@@ -2,7 +2,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { stableHash } from "@agent-control-stack/shared";
-import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
+import {
+  DEFAULT_WORK_ITEM_LIST_LIMIT,
+  MAX_WORK_ITEM_LIST_LIMIT,
+  SqliteWorkItemStore,
+  type WorkItem
+} from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { createPolicyEngine, type PolicyDecision, type PolicyEngine, type PolicyOperation } from "./policy.js";
 import { createWorkItemTools } from "./tools.js";
@@ -392,3 +397,34 @@ function fakePolicy(decision: PolicyDecision["decision"]): PolicyEngine {
 function testActionHash(index: number): string {
   return index.toString(16).padStart(64, "0");
 }
+
+describe("list_work_items page-size cap", () => {
+  it("defaults omitted limit and clamps oversize limit without throwing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-list-cap-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      for (let index = 0; index < DEFAULT_WORK_ITEM_LIST_LIMIT + 5; index += 1) {
+        store.create({
+          title: `Cap item ${index}`,
+          requester: "user",
+          intent: `cap seed ${index}`,
+          target: {},
+          requestedActions: [{ kind: "manual", description: "seed" }],
+          risk: "low"
+        });
+      }
+
+      const defaulted = tools.list_work_items({});
+      expect(defaulted).toHaveLength(DEFAULT_WORK_ITEM_LIST_LIMIT);
+
+      const oversize = tools.list_work_items({ limit: MAX_WORK_ITEM_LIST_LIMIT + 250 });
+      expect(oversize.length).toBeLessThanOrEqual(MAX_WORK_ITEM_LIST_LIMIT);
+      expect(oversize).toHaveLength(DEFAULT_WORK_ITEM_LIST_LIMIT + 5);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
