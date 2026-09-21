@@ -3,12 +3,16 @@ import { JSDOM } from "jsdom";
 import {
   applyQueueFilterToDom,
   applySseConnectionState,
+  approvalActionHashPrefix,
   emptyQueueFilter,
   filterWorkItems,
+  handleApprovalActionClick,
+  isElevatedApprovalRisk,
   nextSseReconnectDelayMs,
   parseQueueFilter,
   projectAgents,
   renderDashboard,
+  requestApprovalConfirm,
   serializeQueueFilter,
   type MissionControlViewModel
 } from "./index.js";
@@ -504,5 +508,228 @@ describe("queue filter", () => {
     const unknownOnly = applyQueueFilterToDom(root, { statuses: ["totally-unknown"], agentId: "", text: "" });
     expect(unknownOnly).toBe(3);
     expect(root.querySelector("#queue-filter-count")?.textContent).toBe("3 items");
+  });
+});
+
+describe("high-risk approval confirm", () => {
+  const lowItem = {
+    id: "wrk_low",
+    title: "Low risk approve",
+    requester: "user" as const,
+    status: "needs_approval" as const,
+    intent: "safe read",
+    target: { cwd: "/repo" },
+    requestedActions: [{ kind: "fs.read", description: "inspect", params: {} }],
+    risk: "low" as const,
+    createdAt: "2026-07-05T00:00:00.000Z",
+    updatedAt: "2026-07-05T00:00:00.000Z"
+  };
+  const highItem = {
+    ...lowItem,
+    id: "wrk_high",
+    title: "High risk approve",
+    risk: "high" as const,
+    requestedActions: [{ kind: "fs.write", description: "mutate", params: {} }]
+  };
+
+  it("treats high and critical as elevated; low and medium are one-click", () => {
+    expect(isElevatedApprovalRisk("high")).toBe(true);
+    expect(isElevatedApprovalRisk("critical")).toBe(true);
+    expect(isElevatedApprovalRisk("HIGH")).toBe(true);
+    expect(isElevatedApprovalRisk("low")).toBe(false);
+    expect(isElevatedApprovalRisk("medium")).toBe(false);
+    expect(approvalActionHashPrefix("abcdef0123456789ffff")).toBe("abcdef012345…");
+    expect(approvalActionHashPrefix("short")).toBe("short");
+  });
+
+  it("renders data-risk on approve/deny controls and embeds confirm helpers in the client script", () => {
+    const html = renderDashboard({
+      workItems: [lowItem, highItem],
+      events: [],
+      approvalActionHashesByWorkItem: {
+        wrk_low: ["lowhash0123456789"],
+        wrk_high: ["highhash0123456789abcd"]
+      },
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain(`data-approve="wrk_high"`);
+    expect(html).toContain(`data-risk="high"`);
+    expect(html).toContain(`data-risk="low"`);
+    expect(html).toContain(`data-reject="wrk_high"`);
+    expect(html).toContain("function isElevatedApprovalRisk(risk)");
+    expect(html).toContain("function requestApprovalConfirm(request)");
+    expect(html).toContain("approval-confirm-dialog");
+    expect(html).toContain("cancelBtn?.focus()");
+    expect(html).toContain("event.key === 'Escape'");
+  });
+
+  it("requires a second confirm click before posting high-risk approve; low-risk posts immediately", async () => {
+    const highHtml = renderDashboard({
+      workItems: [highItem],
+      events: [],
+      approvalActionHashesByWorkItem: { wrk_high: ["highhash0123456789abcd"] },
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+    const highDom = new JSDOM(highHtml);
+    const highDoc = highDom.window.document;
+    const reason = highDoc.querySelector('[data-reason="wrk_high"]') as HTMLInputElement;
+    reason.value = "ship it";
+    const highButton = highDoc.querySelector('[data-approve="wrk_high"]') as HTMLButtonElement;
+    expect(highButton.getAttribute("data-risk")).toBe("high");
+
+    const highFetchCalls: Array<{ url: string; body: string }> = [];
+    const highFetch = async (url: string, init: { method: string; headers: Record<string, string>; body: string }) => {
+      highFetchCalls.push({ url, body: init.body });
+      return { ok: true, status: 200, json: async () => ({}) };
+    };
+
+    // First click opens confirm — no POST yet. Resolve confirm via the real dialog.
+    const pending = handleApprovalActionClick({
+      document: highDoc as unknown as Parameters<typeof handleApprovalActionClick>[0]["document"],
+      button: {
+        dataset: {
+          approve: "wrk_high",
+          actionHash: "highhash0123456789abcd",
+          risk: "high"
+        },
+        getAttribute: (name) => highButton.getAttribute(name)
+      },
+      connected: true,
+      fetchImpl: highFetch
+    });
+
+    // Allow the dialog to mount.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const dialog = highDoc.getElementById("approval-confirm-dialog");
+    expect(dialog).not.toBeNull();
+    expect(dialog?.textContent).toContain("wrk_high");
+    expect(dialog?.textContent).toContain("highhash0123");
+    expect(highFetchCalls).toHaveLength(0);
+    expect(highDoc.activeElement?.id).toBe("approval-confirm-cancel");
+
+    (highDoc.getElementById("approval-confirm-ok") as HTMLButtonElement).click();
+    const highResult = await pending;
+    expect(highResult.posted).toBe(true);
+    expect(highResult.cancelled).toBeUndefined();
+    expect(highFetchCalls).toHaveLength(1);
+    expect(highFetchCalls[0]?.url).toBe("/work-items/wrk_high/approve");
+    expect(highDoc.getElementById("approval-confirm-dialog")).toBeNull();
+
+    const lowHtml = renderDashboard({
+      workItems: [lowItem],
+      events: [],
+      approvalActionHashesByWorkItem: { wrk_low: ["lowhash0123456789"] },
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+    const lowDom = new JSDOM(lowHtml);
+    const lowDoc = lowDom.window.document;
+    (lowDoc.querySelector('[data-reason="wrk_low"]') as HTMLInputElement).value = "ok";
+    const lowFetchCalls: string[] = [];
+    const lowResult = await handleApprovalActionClick({
+      document: lowDoc as unknown as Parameters<typeof handleApprovalActionClick>[0]["document"],
+      button: {
+        dataset: {
+          approve: "wrk_low",
+          actionHash: "lowhash0123456789",
+          risk: "low"
+        }
+      },
+      connected: true,
+      fetchImpl: async (url) => {
+        lowFetchCalls.push(url);
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+    });
+    expect(lowResult.posted).toBe(true);
+    expect(lowFetchCalls).toEqual(["/work-items/wrk_low/approve"]);
+    expect(lowDoc.getElementById("approval-confirm-dialog")).toBeNull();
+  });
+
+  it("does not call the API when denying/cancelling the confirm dialog without confirming", async () => {
+    const html = renderDashboard({
+      workItems: [highItem],
+      events: [],
+      approvalActionHashesByWorkItem: { wrk_high: ["highhash0123456789abcd"] },
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+    const dom = new JSDOM(html);
+    const doc = dom.window.document;
+    (doc.querySelector('[data-reason="wrk_high"]') as HTMLInputElement).value = "nope";
+
+    const fetchCalls: string[] = [];
+    const pendingCancel = handleApprovalActionClick({
+      document: doc as unknown as Parameters<typeof handleApprovalActionClick>[0]["document"],
+      button: {
+        dataset: {
+          approve: "wrk_high",
+          actionHash: "highhash0123456789abcd",
+          risk: "high"
+        }
+      },
+      connected: true,
+      fetchImpl: async (url) => {
+        fetchCalls.push(url);
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(doc.getElementById("approval-confirm-dialog")).not.toBeNull();
+    (doc.getElementById("approval-confirm-cancel") as HTMLButtonElement).click();
+    const cancelResult = await pendingCancel;
+    expect(cancelResult.posted).toBe(false);
+    expect(cancelResult.cancelled).toBe(true);
+    expect(fetchCalls).toHaveLength(0);
+
+    // Esc also cancels without POST.
+    const pendingEsc = handleApprovalActionClick({
+      document: doc as unknown as Parameters<typeof handleApprovalActionClick>[0]["document"],
+      button: {
+        dataset: {
+          reject: "wrk_high",
+          risk: "critical"
+        }
+      },
+      connected: true,
+      fetchImpl: async (url) => {
+        fetchCalls.push(url);
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(doc.getElementById("approval-confirm-dialog")).not.toBeNull();
+    doc.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "Escape" }));
+    const escResult = await pendingEsc;
+    expect(escResult.posted).toBe(false);
+    expect(escResult.cancelled).toBe(true);
+    expect(fetchCalls).toHaveLength(0);
+
+    // Reject/deny click while an approve confirm is already open must not POST.
+    const openConfirm = requestApprovalConfirm(doc as unknown as Parameters<typeof requestApprovalConfirm>[0], {
+      workItemId: "wrk_high",
+      action: "approve",
+      actionHash: "highhash0123456789abcd",
+      risk: "high"
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const blocked = await handleApprovalActionClick({
+      document: doc as unknown as Parameters<typeof handleApprovalActionClick>[0]["document"],
+      button: {
+        dataset: {
+          reject: "wrk_high",
+          risk: "high"
+        }
+      },
+      connected: true,
+      fetchImpl: async (url) => {
+        fetchCalls.push(url);
+        return { ok: true, status: 200, json: async () => ({}) };
+      }
+    });
+    expect(blocked.posted).toBe(false);
+    expect(blocked.cancelled).toBe(true);
+    expect(fetchCalls).toHaveLength(0);
+    (doc.getElementById("approval-confirm-cancel") as HTMLButtonElement).click();
+    await openConfirm;
   });
 });
