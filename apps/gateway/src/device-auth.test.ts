@@ -12,7 +12,9 @@ const devicePair = generateKeyPairSync("ed25519");
 const devicePublicKeyPem = devicePair.publicKey.export({ type: "spki", format: "pem" }).toString();
 
 function deviceProof(deviceCode: string): string {
-  return sign(null, Buffer.from(`acs-device-code-proof-v1\n${deviceCode}`, "utf8"), devicePair.privateKey).toString("base64url");
+  return sign(null, Buffer.from(`acs-device-code-proof-v1\n${deviceCode}`, "utf8"), devicePair.privateKey).toString(
+    "base64url"
+  );
 }
 
 function seedActor(dbPath: string): void {
@@ -169,14 +171,16 @@ describe("device authorization HTTP surface", () => {
     const readOnlyAuth: GatewayAuthOptions = {
       token: "",
       actor: "",
-      credentials: [{
-        id: "reader",
-        token: "reader-token-0123456789abcdef012345",
-        actor: "user",
-        actorId: "operator-1",
-        roles: ["operator"],
-        scopes: ["acs:read", "acs:device"]
-      }]
+      credentials: [
+        {
+          id: "reader",
+          token: "reader-token-0123456789abcdef012345",
+          actor: "user",
+          actorId: "operator-1",
+          roles: ["operator"],
+          scopes: ["acs:read", "acs:device"]
+        }
+      ]
     };
     const app = await buildTestApp(undefined, readOnlyAuth);
     try {
@@ -324,11 +328,10 @@ describe("device authorization HTTP surface", () => {
   });
 
   it("locks device-auth verification after N failed user_code attempts and stays 429 until cleared by success", async () => {
-    const app = await buildTestApp(
-      { windowMs: 60_000, maxRequests: 100 },
-      testAuth,
-      { windowMs: 60_000, maxFailures: 3 }
-    );
+    const app = await buildTestApp({ windowMs: 60_000, maxRequests: 100 }, testAuth, {
+      windowMs: 60_000,
+      maxFailures: 3
+    });
     try {
       const issue = await app.inject({
         method: "POST",
@@ -376,11 +379,10 @@ describe("device authorization HTTP surface", () => {
   });
 
   it("clears device-auth failure streak after a successful verification", async () => {
-    const app = await buildTestApp(
-      { windowMs: 60_000, maxRequests: 100 },
-      testAuth,
-      { windowMs: 60_000, maxFailures: 3 }
-    );
+    const app = await buildTestApp({ windowMs: 60_000, maxRequests: 100 }, testAuth, {
+      windowMs: 60_000,
+      maxFailures: 3
+    });
     try {
       const issue = await app.inject({
         method: "POST",

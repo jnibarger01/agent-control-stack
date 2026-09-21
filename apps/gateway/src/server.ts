@@ -371,14 +371,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const locked = authLockout.isLocked(lockoutKey);
       if (locked.locked) {
         metrics.increment("acs_auth_lockout_total", { route: "/session/login" });
-        return reply
-          .header("retry-after", String(locked.retryAfterSeconds))
-          .code(429)
-          .send({
-            error: "too many failed login attempts",
-            code: "auth_lockout",
-            retry_after_seconds: locked.retryAfterSeconds
-          });
+        return reply.header("retry-after", String(locked.retryAfterSeconds)).code(429).send({
+          error: "too many failed login attempts",
+          code: "auth_lockout",
+          retry_after_seconds: locked.retryAfterSeconds
+        });
       }
       const body = sessionLoginBodySchema.parse(request.body);
       const credential = gatewayCredentialForToken(body.token, auth);
@@ -389,14 +386,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           if (after.justLocked) {
             request.log.warn({ route: "/session/login", code: "auth_lockout" }, "auth lockout triggered");
           }
-          return reply
-            .header("retry-after", String(after.retryAfterSeconds))
-            .code(429)
-            .send({
-              error: "too many failed login attempts",
-              code: "auth_lockout",
-              retry_after_seconds: after.retryAfterSeconds
-            });
+          return reply.header("retry-after", String(after.retryAfterSeconds)).code(429).send({
+            error: "too many failed login attempts",
+            code: "auth_lockout",
+            retry_after_seconds: after.retryAfterSeconds
+          });
         }
         return reply.code(401).send({ error: "unauthorized" });
       }

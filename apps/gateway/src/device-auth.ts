@@ -161,14 +161,11 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
         const locked = lockout.isLocked(key);
         if (locked.locked) {
           options.onAuthLockout?.("/device/verify");
-          return reply
-            .header("retry-after", String(locked.retryAfterSeconds))
-            .code(429)
-            .send({
-              error: "too many failed verification attempts",
-              code: "auth_lockout",
-              retry_after_seconds: locked.retryAfterSeconds
-            });
+          return reply.header("retry-after", String(locked.retryAfterSeconds)).code(429).send({
+            error: "too many failed verification attempts",
+            code: "auth_lockout",
+            retry_after_seconds: locked.retryAfterSeconds
+          });
         }
       }
     }
@@ -190,14 +187,11 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
           if (decisions.some((decision) => decision.justLocked)) {
             request.log.warn({ route: "/device/verify", code: "auth_lockout" }, "auth lockout triggered");
           }
-          return reply
-            .header("retry-after", String(locked.retryAfterSeconds))
-            .code(429)
-            .send({
-              error: "too many failed verification attempts",
-              code: "auth_lockout",
-              retry_after_seconds: locked.retryAfterSeconds
-            });
+          return reply.header("retry-after", String(locked.retryAfterSeconds)).code(429).send({
+            error: "too many failed verification attempts",
+            code: "auth_lockout",
+            retry_after_seconds: locked.retryAfterSeconds
+          });
         }
       }
       const status = result.error === "not_found" ? 404 : result.error === "expired" ? 410 : 409;
@@ -224,11 +218,13 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
   });
 }
 
-
 /** Hash-only lockout key — never stores or logs the raw user_code. */
 function userCodeLockoutKey(rawUserCode: string): string {
   const normalized = rawUserCode.toUpperCase().replace(/[^A-Z0-9]/g, "");
-  const digest = createHash("sha256").update(normalized || rawUserCode).digest("hex").slice(0, 16);
+  const digest = createHash("sha256")
+    .update(normalized || rawUserCode)
+    .digest("hex")
+    .slice(0, 16);
   return `device_verify:code:${digest}`;
 }
 
