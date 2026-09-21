@@ -32,6 +32,22 @@ export async function runRemote() {
         }
     }
 
-    const device = new MCPDevice({ persistSession, standalone: true });
+    const standalone = process.argv.includes('--standalone');
+    const managed = process.argv.includes('--managed');
+
+    if (standalone === managed) {
+        throw new Error('Remote Desktop Commander requires exactly one of --standalone or --managed');
+    }
+
+    const managedMcpUrl = managed ? process.env.DC_MANAGED_MCP_URL : undefined;
+    if (managed && !managedMcpUrl) {
+        throw new Error('DC_MANAGED_MCP_URL is required with --managed');
+    }
+
+    const device = new MCPDevice({
+        persistSession,
+        standalone,
+        managedMcpUrl,
+    });
     await device.start();
 }

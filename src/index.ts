@@ -40,9 +40,13 @@ async function runServer() {
 
     // Check if first argument is "remote"
     if (process.argv[2] === 'remote') {
-      if (!process.argv.includes('--standalone')) {
-        throw new Error('Remote Desktop Commander requires explicit --standalone opt-in');
+      const standalone = process.argv.includes('--standalone');
+      const managed = process.argv.includes('--managed');
+
+      if (standalone === managed) {
+        throw new Error('Remote Desktop Commander requires exactly one of --standalone or --managed');
       }
+
       await runRemote();
       return;
     }
