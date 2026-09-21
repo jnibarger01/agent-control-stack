@@ -119,7 +119,9 @@ Keep real secrets in the deployment secret store or process environment. Do not 
 docker compose -f compose.production.yml stop -t 15 gateway
 ```
 
-Successful shutdown logs `gateway shutdown started` and `gateway shutdown complete`. A timeout or nonzero exit is an incident; verify database integrity before restart.
+On `SIGTERM`/`SIGINT` the gateway flips `shutting_down` so claim tools return `gateway_shutting_down` (HTTP/MCP 503) and MCP mutating intake is refused, then waits up to `ACS_GATEWAY_DRAIN_TIMEOUT_MS` (default 8000) for active attempt leases to complete or expire before `app.close()`. A hard `ACS_GATEWAY_SHUTDOWN_TIMEOUT_MS` (default 10000) force-exits if close hangs. Drain start/finish emit `acs_shutdown_drain_total{phase=...}` and audit events `gateway.shutdown_drain.started` / `gateway.shutdown_drain.finished`.
+
+Successful shutdown logs `gateway shutdown started`, drain progress, and `gateway shutdown complete`. A timeout or nonzero exit is an incident; verify database integrity before restart.
 
 ## Image rollback
 

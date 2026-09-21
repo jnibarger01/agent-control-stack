@@ -84,6 +84,14 @@ import {
   type AuthLockoutOptions
 } from "./auth-lockout.js";
 import { GatewayMetrics } from "./metrics.js";
+import {
+  GATEWAY_SHUTTING_DOWN_CODE,
+  SHUTDOWN_DRAIN_METRIC,
+  ShutdownController,
+  guardWorkItemClaimTools,
+  type DrainFinishInfo,
+  type DrainStartInfo
+} from "./lifecycle.js";
 import { validateProductionConfig } from "./production-config.js";
 import {
   evaluateSandboxReadyzCheck,
@@ -178,6 +186,8 @@ export interface GatewayOptions {
    * Default off via ACS_READYZ_SANDBOX_PROBE; enable on real-execution hosts only.
    */
   sandboxReadiness?: SandboxReadinessOptions;
+  /** Shared shutdown gate; tests may inject one to assert claim drain behavior. */
+  shutdownController?: ShutdownController;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -197,7 +207,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
-  const tools = createWorkItemTools(workItems, policy);
+  const shutdownController = options.shutdownController ?? new ShutdownController();
+  const tools = guardWorkItemClaimTools(createWorkItemTools(workItems, policy), shutdownController);
   const resolvedAuth = resolveAuth(options);
   const auth = resolvedAuth
     ? { ...resolvedAuth, deviceAccessTokenResolver: (token: string) => deviceAuthStore.authenticateAccessToken(token) }
@@ -628,7 +639,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       resolveActorId: (mcpRequest) => resolveMcpActorId(workItems, mcpRequest, auth),
       maxPendingWorkItems,
       portfolioClient,
-      toolAllowlist: mcpToolAllowlist
+      toolAllowlist: mcpToolAllowlist,
+      shutdownController
     });
     if (result.wwwAuthenticate) {
       reply.header("WWW-Authenticate", result.wwwAuthenticate);
@@ -1202,6 +1214,33 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     return status?.agentId === agentId ? status : undefined;
   }
 
+  function recordShutdownDrain(phase: "start" | "finish" | "timeout", details: DrainStartInfo | DrainFinishInfo): void {
+    metrics.increment(SHUTDOWN_DRAIN_METRIC, { phase });
+    try {
+      workItems.recordSystemEvent({
+        name: phase === "start" ? "gateway.shutdown_drain.started" : "gateway.shutdown_drain.finished",
+        body: { phase, ...details },
+        attributes: {
+          "gateway.shutdown_phase": phase,
+          "gateway.active_leases": details.activeLeases
+        }
+      });
+    } catch (error) {
+      app.log.warn({ error, phase }, "failed to record shutdown drain audit event");
+    }
+  }
+
+  app.decorate("acsShutdown", {
+    controller: shutdownController,
+    countActiveLeases: () => workItems.countActiveAttemptLeases(),
+    failExpiredLeases: () => {
+      workItems.failExpiredLeases();
+    },
+    recordDrainStart: (details: DrainStartInfo) => recordShutdownDrain("start", details),
+    recordDrainFinish: (details: DrainFinishInfo) =>
+      recordShutdownDrain(details.timedOut ? "timeout" : "finish", details)
+  });
+
   return app;
 }
 
@@ -1211,23 +1250,26 @@ function sendError(reply: FastifyReply, error: unknown) {
   }
   if (error instanceof ControlStackError) {
     const status =
-      error.code === "work_item_not_found" || error.code === "agent_not_found"
-        ? 404
-        : error.code === "worker_lease_expired"
-          ? 410
-          : error.code === "worker_lease_mismatch" ||
-              error.code === "worker_action_hash_mismatch" ||
-              error.code === "result_outcome_forbidden"
-            ? 403
-            : error.code === "actor_not_found" ||
-                error.code === "invalid_agent_registration" ||
-                error.code === "invalid_event_query" ||
-                error.code === "approval_action_hash_required" ||
-                error.code === "result_invalid" ||
-                error.code === "invalid_retry_request"
-              ? 400
-              : 409;
+      error.code === GATEWAY_SHUTTING_DOWN_CODE
+        ? 503
+        : error.code === "work_item_not_found" || error.code === "agent_not_found"
+          ? 404
+          : error.code === "worker_lease_expired"
+            ? 410
+            : error.code === "worker_lease_mismatch" ||
+                error.code === "worker_action_hash_mismatch" ||
+                error.code === "result_outcome_forbidden"
+              ? 403
+              : error.code === "actor_not_found" ||
+                  error.code === "invalid_agent_registration" ||
+                  error.code === "invalid_event_query" ||
+                  error.code === "approval_action_hash_required" ||
+                  error.code === "result_invalid" ||
+                  error.code === "invalid_retry_request"
+                ? 400
+                : 409;
     const safeMessages: Record<string, string> = {
+      gateway_shutting_down: "gateway is shutting down",
       worker_lease_missing: "active worker lease is required",
       worker_lease_conflict: "worker lease changed while accepting the result",
       lease_state_inconsistent: "worker lease state is invalid",

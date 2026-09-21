@@ -11,6 +11,7 @@ import {
   type McpScope
 } from "./auth.js";
 import { evaluateMcpToolAllowlist, type McpToolAllowlistConfig } from "./mcp-tool-allowlist.js";
+import { GATEWAY_SHUTTING_DOWN_CODE, type ShutdownController } from "./lifecycle.js";
 import {
   ACS_DASHBOARD_CSP,
   ACS_DASHBOARD_RESOURCE_URI,
@@ -112,6 +113,7 @@ export async function handleMcpHttpRequest(input: {
   maxPendingWorkItems?: number;
   portfolioClient?: PortfolioClient;
   toolAllowlist?: McpToolAllowlistConfig;
+  shutdownController?: ShutdownController;
 }): Promise<McpHttpResult> {
   const request = jsonRpcRequestSchema.safeParse(input.body);
   if (!request.success) {
@@ -172,7 +174,8 @@ export async function handleMcpHttpRequest(input: {
         resolveActorId: input.resolveActorId,
         maxPendingWorkItems: input.maxPendingWorkItems,
         portfolioClient: input.portfolioClient,
-        toolAllowlist: input.toolAllowlist
+        toolAllowlist: input.toolAllowlist,
+        shutdownController: input.shutdownController
       });
     default:
       return handleProtectedUnsupportedMethod({
@@ -238,6 +241,7 @@ async function handleToolsCall(input: {
   maxPendingWorkItems?: number;
   portfolioClient?: PortfolioClient;
   toolAllowlist?: McpToolAllowlistConfig;
+  shutdownController?: ShutdownController;
 }): Promise<McpHttpResult> {
   const portfolioClient = input.portfolioClient ?? createUnavailablePortfolioClient();
   const candidateName = toolNameFromParams(input.params);
@@ -327,6 +331,22 @@ async function handleToolsCall(input: {
         auth: authorization.auth
       });
       return jsonRpcError(input.id, -32003, allowlistDecision.reason, 403);
+    }
+  }
+  if (isMutatingTool(parsed.data.name) && input.shutdownController?.isShuttingDown()) {
+    input.auditAuthenticatedRequest?.({
+      requestId: input.requestId ?? String(input.id ?? ""),
+      method: "tools/call",
+      toolName: parsed.data.name,
+      resolvedActor: actor,
+      auth: authorization.auth
+    });
+    try {
+      input.shutdownController.assertAcceptingMutatingIntake();
+    } catch (error) {
+      return jsonRpcError(input.id, -32053, error instanceof Error ? error.message : "gateway is shutting down", 503, {
+        code: GATEWAY_SHUTTING_DOWN_CODE
+      });
     }
   }
   if (parsed.data.name === "create_work_item" && input.maxPendingWorkItems !== undefined) {
