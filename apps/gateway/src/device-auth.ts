@@ -5,13 +5,14 @@
 // here - it reuses the gateway's existing Mission Control session (gatewayCredentialForRequest
 // / renderLoginPage), the only human-auth mechanism ACS has.
 import { createHash } from "node:crypto";
-import type { FastifyInstance, FastifyRequest } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   DEFAULT_DEVICE_AUTH_CLIENT_ID,
   DeviceAuthStore,
   type DeviceAuthorizationSummary
 } from "./device-auth-store.js";
 import type { AuthFailureLockout } from "./auth-lockout.js";
+import type { SlidingWindowRateLimiter } from "./rate-limit.js";
 import {
   gatewayCredentialCanMutate,
   gatewayCredentialForRequest,
@@ -23,6 +24,9 @@ export interface DeviceAuthRouteOptions {
   store: DeviceAuthStore;
   auth: GatewayAuthOptions | undefined;
   authLockout?: AuthFailureLockout;
+  /** In-handler limiter so CodeQL js/missing-rate-limiting sees the control on auth routes. */
+  rateLimiter?: SlidingWindowRateLimiter;
+  onRateLimited?: (route: "/device/verify", method: string) => void;
   onAuthLockout?: (route: "/device/verify") => void;
   allowedClientIds?: readonly string[];
   publicOriginOverride?: string;
@@ -126,6 +130,7 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
   });
 
   app.get("/device/verify", async (request, reply) => {
+    if (!enforceDeviceVerifyRateLimit(options, request, reply)) return reply;
     const credential = gatewayCredentialForRequest(request, options.auth);
     if (!credential) {
       return reply.code(401).type("text/html").send(renderLoginPage(request.url));
@@ -136,6 +141,7 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
   });
 
   app.post("/device/verify", async (request, reply) => {
+    if (!enforceDeviceVerifyRateLimit(options, request, reply)) return reply;
     const credential = gatewayCredentialForRequest(request, options.auth);
     if (!credential) {
       return reply.code(401).send({ error: "unauthorized" });
@@ -216,6 +222,24 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     }
     return reply.code(200).send({ ok: true });
   });
+}
+
+function enforceDeviceVerifyRateLimit(
+  options: DeviceAuthRouteOptions,
+  request: FastifyRequest,
+  reply: FastifyReply
+): boolean {
+  if (!options.rateLimiter) return true;
+  const decision = options.rateLimiter.check(`${request.method}:/device/verify:ip:${request.ip}`);
+  reply.header("x-ratelimit-remaining", String(decision.remaining));
+  if (decision.allowed) return true;
+  options.onRateLimited?.("/device/verify", request.method);
+  reply.header("retry-after", String(decision.retryAfterSeconds)).code(429).send({
+    error: "rate limit exceeded",
+    code: "rate_limited",
+    retry_after_seconds: decision.retryAfterSeconds
+  });
+  return false;
 }
 
 /** Hash-only lockout key — never stores or logs the raw user_code. */

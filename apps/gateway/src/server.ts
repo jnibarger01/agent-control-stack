@@ -408,6 +408,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     store: deviceAuthStore,
     auth,
     authLockout,
+    rateLimiter,
+    onRateLimited: (route, method) => {
+      metrics.increment("acs_rate_limit_rejected_total", { method, route });
+    },
     onAuthLockout: (route) => {
       metrics.increment("acs_auth_lockout_total", { route });
     },
@@ -1471,7 +1475,6 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/session/login" ||
     path === "/oauth/device/code" ||
     path === "/oauth/token" ||
-    path === "/device/verify" ||
     path === "/work-items" ||
     path === "/policy/explain" ||
     path.startsWith("/work-items/") ||
@@ -1479,8 +1482,9 @@ function isRateLimitedRoute(url: string): boolean {
   );
 }
 
-function isRateLimitedGetRoute(url: string): boolean {
-  return url.split("?", 1)[0] === "/device/verify";
+function isRateLimitedGetRoute(_url: string): boolean {
+  // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
+  return false;
 }
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {

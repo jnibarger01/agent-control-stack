@@ -132,8 +132,13 @@ ACS_MCP_BEARER_TOKEN=local-dev-token
 
 - `/mcp`
 - `/session/login`
+- `/oauth/device/code` and `/oauth/token`
 - `/work-items` and `/work-items/*`
 - `/webhooks/*`
+
+`GET`/`POST` `/device/verify` are rate-limited **in-handler** (same
+`SlidingWindowRateLimiter`) so static analysis can see the control on the
+authorization surface; they are not double-counted by the global hook.
 
 GET health/metrics/read routes are not rate-limited by this hook.
 
