@@ -479,6 +479,15 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   //     entirely in ACS mode.
   let acsCapability: AcsCapabilityAttestation | undefined;
   const acsMode = !!acsCapabilityPublicKeyEnv();
+  if (acsMode && !cap) {
+    return {
+      allowed: false,
+      kind: 'capability-rejected',
+      code: 'ACS_CAPABILITY_MALFORMED',
+      message: 'ACS capability rejected: _meta.capability is required when DC_ACS_CAPABILITY_PUBLIC_KEY is configured',
+      classification,
+    };
+  }
   if (acsMode && cap) {
     const acs = verifyAcsCapability(cap, { tool: ctx.tool, args: ctx.args, now });
     if (!acs.ok) {

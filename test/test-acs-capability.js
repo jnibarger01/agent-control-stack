@@ -152,6 +152,10 @@ async function testEnvUnsetHmacPathUnchanged() {
 }
 
 async function testValidAcceptedEvenWithEnforcementOff() {
+  const missing = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, undefined);
+  assert.equal(missing.allowed, false, 'ACS mode must fail closed when _meta.capability is missing');
+  assert.equal(missing.allowed === false && missing.code, 'ACS_CAPABILITY_MALFORMED');
+
   const gate = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, buildEnvelope());
   assert.equal(gate.allowed, true, 'valid ACS capability accepted with DC_ENFORCEMENT=off');
   assert.ok(gate.acsCapability, 'pass carries acsCapability attestation');
