@@ -9,9 +9,12 @@
  *  - optional advisory flock() via a tiny fs.flockSync binding when the
  *    platform exposes it (Linux), used as a second belt on top of O_EXCL
  *
- * Crash recovery: a lease left behind by a dead process (PID not alive) is
- * reported as stale and can be taken over after a short grace window.
- * An expired TTL alone NEVER makes a lease stale while its holder PID is
+ * Crash recovery: a lease left behind by a dead process is reported as stale
+ * and can be taken over after a short grace window. New Linux leases bind
+ * the PID to its boot ID and process start ticks, so PID reuse is not ownership.
+ * Legacy leases with a live PID and no process identity remain fail-closed;
+ * an operator must establish that their old owner is gone before retiring them.
+ * An expired TTL alone NEVER makes a lease stale while its holder process is
  * alive — live holders renew the lease on an interval instead.
  */
 import fs from 'fs';
@@ -27,6 +30,9 @@ export interface LeaseInfo {
   /** Monotonic-ish wall-clock deadline; ISO string for humans. */
   expiresAt: number;
   hostname: string;
+  /** Linux process identity: PID alone can be reused, including after reboot. */
+  bootId?: string;
+  processStartTicks?: string;
 }
 
 export type LeaseFailureReason =
@@ -140,12 +146,35 @@ function readLeaseFile(lockPath: string): LeaseInfo | null {
   }
 }
 
+/** Unavailable process identity is unknown, never evidence that an owner is dead. */
+function linuxProcessIdentity(pid: number): { bootId: string; processStartTicks: string } | undefined {
+  if (process.platform !== 'linux') return undefined;
+  try {
+    const bootId = fs.readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+    const stat = fs.readFileSync(`/proc/${pid}/stat`, 'utf8');
+    // comm (field 2) can contain spaces and parentheses. starttime is field 22.
+    const processStartTicks = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/)[19];
+    if (!/^[a-f0-9-]{36}$/.test(bootId) || !/^\d+$/.test(processStartTicks ?? '')) return undefined;
+    return { bootId, processStartTicks };
+  } catch {
+    return undefined;
+  }
+}
+
+function leaseProcessWasReplaced(info: LeaseInfo): boolean {
+  // Legacy or malformed records cannot prove PID reuse: preserve their live owner.
+  if (typeof info.bootId !== 'string' || !/^[a-f0-9-]{36}$/.test(info.bootId)
+    || typeof info.processStartTicks !== 'string' || !/^\d+$/.test(info.processStartTicks)) return false;
+  const actual = linuxProcessIdentity(info.pid);
+  return !!actual && (actual.bootId !== info.bootId || actual.processStartTicks !== info.processStartTicks);
+}
+
 function classifyLease(info: LeaseInfo | null, staleAfterMs: number): {
   stale: boolean;
   cause?: 'dead-pid' | 'expired-ttl';
 } {
   if (!info) return { stale: true, cause: 'dead-pid' }; // unparsable garbage is stale
-  if (!isPidAlive(info.pid)) return { stale: true, cause: 'dead-pid' };
+  if (!isPidAlive(info.pid) || leaseProcessWasReplaced(info)) return { stale: true, cause: 'dead-pid' };
   // NEVER classify an expired-TTL lease as stale while the holder PID is
   // still alive: a live holder that simply has not renewed yet (GC pause,
   // busy event loop, slow disk) must not be taken over — that would break
@@ -258,6 +287,7 @@ export function acquireExecutorLease(options: LeaseOptions = {}): LeaseResult {
     renews: 0,
     expiresAt: now + staleAfterMs,
     hostname: os.hostname(),
+    ...linuxProcessIdentity(process.pid),
   };
   fs.writeFileSync(fd, JSON.stringify(leaseInfo, null, 2));
   fs.closeSync(fd);
