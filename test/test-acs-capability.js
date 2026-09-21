@@ -268,7 +268,32 @@ async function testEnforcementOnAlsoFailsClosed() {
   process.env.DC_ENFORCEMENT = 'off';
 }
 
+async function testGatewayAcsRequiresAttribution() {
+  const previous = process.env.DC_GATEWAY_ATTESTATION_KEY;
+  process.env.DC_GATEWAY_ATTESTATION_KEY = 'isolated-gateway-test-key';
+  process.env.DC_ACS_CAPABILITY_PUBLIC_KEY = keys.publicBase64url;
+  try {
+    for (const gateway of [undefined, null, 'malformed', {}, { verified: true }]) {
+      const result = await preExecuteEnforcement({ ...REQ,
+        meta: { capability: buildEnvelope(), ...(gateway === undefined ? {} : { gateway }) } });
+      assert.equal(result.allowed, false, 'ACS gateway execution requires authenticated attribution');
+      assert.equal(result.code, 'GATEWAY_ATTESTATION_INVALID');
+    }
+    const gateway = { verified: true, sub: 'test-subject', client_id: 'test-client', jti: 'test-jti', iat: Date.now() };
+    gateway.sig = crypto.createHmac('sha256', process.env.DC_GATEWAY_ATTESTATION_KEY)
+      .update(`${gateway.sub}.${gateway.client_id}.${gateway.jti}.${gateway.iat}`).digest('base64url');
+    const allowed = await preExecuteEnforcement({ ...REQ,
+      meta: { capability: buildEnvelope(), gateway } });
+    assert.equal(allowed.allowed, true, 'valid ACS capability plus signed gateway attribution is accepted');
+    assert.equal(allowed.gatewayTrusted, true);
+  } finally {
+    if (previous === undefined) delete process.env.DC_GATEWAY_ATTESTATION_KEY;
+    else process.env.DC_GATEWAY_ATTESTATION_KEY = previous;
+  }
+}
+
 const tests = [
+  testGatewayAcsRequiresAttribution,
   testEnvUnsetHmacPathUnchanged,
   testValidAcceptedEvenWithEnforcementOff,
   testDirectVerifierResults,

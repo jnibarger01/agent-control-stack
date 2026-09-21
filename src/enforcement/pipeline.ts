@@ -454,7 +454,10 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   //    transport trust is not optional where an attestation key exists.
   let gatewayTrusted: true | undefined;
   let gatewayActor: GatewayActor | undefined;
-  if (gatewayAttestationKey() && gatewayFromMeta(ctx.meta)) {
+  // On an ACS gateway-configured executor, omitting attribution must not
+  // downgrade a request to the local lane. Direct ACS stdio runtimes without
+  // a gateway key retain their separate transport contract.
+  if (gatewayAttestationKey() && (acsCapabilityPublicKeyEnv() || gatewayFromMeta(ctx.meta))) {
     if (!isTrustedGatewayMeta(ctx.meta, now)) {
       return {
         allowed: false,
