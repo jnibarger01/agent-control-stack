@@ -122,6 +122,38 @@ export const webhookIngestSchema = z
   })
   .strict();
 
+/**
+ * Trusted-bridge request for an ACS-issued Desktop Commander capability
+ * (POST /dc/capability/issue). The gateway derives requester/actor identity
+ * server-side (bearer credential + x-dc-actor header); the body only describes
+ * the single tool call to authorize. argsSummary is the truncated/normalized
+ * JSON of the arguments - it is mapped to risk through the policy-gate rules
+ * and lands in a work-item-backed authorization, never a parallel store.
+ */
+export const dcCapabilityIssueSchema = z
+  .object({
+    client_id: z.string().min(1).max(256),
+    tool: z.string().min(1).max(128),
+    argsSummary: z.string().min(1).max(64_000),
+    correlationId: z.string().min(1).max(256).optional()
+  })
+  .strict();
+
+/** Managed-runtime bootstrap request: an ACS-issued identity challenge. */
+export const dcRuntimeBootstrapSchema = z
+  .object({
+    runtimeId: z.string().min(1).max(128),
+    identityConfigFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
+    scopes: z.array(z.enum(["fs.read", "fs.write", "process.exec", "process.spawn", "network.read", "network.write"]))
+  })
+  .strict();
+
+export const dcRuntimeBootstrapCompleteSchema = dcRuntimeBootstrapSchema
+  .extend({
+    challenge: z.string().min(1).max(128)
+  })
+  .strict();
+
 export const jsonRpcRequestSchema = z.object({
   jsonrpc: z.literal("2.0"),
   id: z.union([z.string(), z.number(), z.null()]).default(null),

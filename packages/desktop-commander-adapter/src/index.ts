@@ -36,7 +36,12 @@ export {
 } from "./arguments.js";
 export type { NormalizedInvocation } from "./arguments.js";
 
-export { DESKTOP_COMMANDER_CAPABILITY_VERSION, desktopCommanderCapabilityNonceHash } from "./capability.js";
+export {
+  DESKTOP_COMMANDER_CAPABILITY_VERSION,
+  desktopCommanderCapabilityNonceHash,
+  prepareDesktopCommanderCapability,
+  signPreparedDesktopCommanderCapability
+} from "./capability.js";
 export type {
   CapabilitySigningConfig,
   DesktopCommanderCapability,

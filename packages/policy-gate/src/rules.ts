@@ -92,14 +92,29 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     return risk("read_only", "git inspection is allowed", ["allow:git-read"], { maxRuntimeMs: 30_000 });
   }
   if (isPackageLifecycleCommand(command)) {
-    return risk("requires_approval", "package lifecycle scripts can execute arbitrary code", ["approval:package-script"], {
-      maxRuntimeMs: 120_000
-    });
+    return risk(
+      "requires_approval",
+      "package lifecycle scripts can execute arbitrary code",
+      ["approval:package-script"],
+      {
+        maxRuntimeMs: 120_000
+      }
+    );
   }
   if (isReadOnlyInsideCwd(context)) {
     return risk("read_only", "read-only repo inspection is allowed", ["allow:read-only"], {
       allowedPaths: allowedPaths(context)
     });
+  }
+
+  // Desktop Commander capability issuance (POST /dc/capability/issue) lands as
+  // kind "agent.tool" so it flows through this same state machine. Everything
+  // dangerous about the underlying tool was already mapped onto the context by
+  // normalizeAction/params (write/network/destructive/risk) and handled by the
+  // generic rules above; reaching this point means the call is read-only, so
+  // the fail-closed fallback must not swallow it.
+  if (context.action.kind === "agent.tool") {
+    return risk("read_only", "read-only agent tool call is allowed", ["allow:agent-tool-read"]);
   }
 
   return risk("forbidden", "no policy rule matched", ["deny:fail-closed"]);
@@ -150,6 +165,7 @@ function isSupportedAction(kind: string): boolean {
     kind === "fs.move" ||
     kind === "fs.delete" ||
     kind === "agent.prompt" ||
+    kind === "agent.tool" ||
     kind === "cmd.preview" ||
     kind === "cmd.run" ||
     kind === "service.restart" ||

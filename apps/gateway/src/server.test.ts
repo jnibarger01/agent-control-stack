@@ -3887,6 +3887,36 @@ describe("gateway dashboard sessions", () => {
     }
   });
 
+  it("keeps the legacy gateway token valid when supplemental static credentials are configured", async () => {
+    vi.stubEnv("ACS_GATEWAY_TOKEN", "legacy-short-token");
+    vi.stubEnv("ACS_GATEWAY_ACTOR", "user");
+    vi.stubEnv("ACS_GATEWAY_ACTOR_ID", "legacy-user");
+    vi.stubEnv(
+      "ACS_GATEWAY_CREDENTIALS_JSON",
+      JSON.stringify([
+        {
+          id: "acs-dc-bridge",
+          token: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          actor: "worker",
+          actorId: "acs-dc-bridge",
+          roles: ["worker"],
+          scopes: ["acs:worker"]
+        }
+      ])
+    );
+    const dir = mkdtempSync(join(tmpdir(), "acs-session-supplemental-"));
+    const app = buildGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const { login } = await loginSession(app, "legacy-short-token");
+      expect(login.statusCode).toBe(204);
+    } finally {
+      await app.close();
+      vi.unstubAllEnvs();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("marks dashboard session cookies secure in production", async () => {
     vi.stubEnv("NODE_ENV", "production");
     const dir = mkdtempSync(join(tmpdir(), "acs-session-production-"));

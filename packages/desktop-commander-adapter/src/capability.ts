@@ -7,7 +7,14 @@ export const DESKTOP_COMMANDER_CAPABILITY_VERSION = "acs.dc.v1" as const;
 const ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
 const KEY_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/u;
 const HASH_PATTERN = /^[a-f0-9]{64}$/u;
-const CAPABILITY_SCOPES = new Set(["fs.read", "fs.write", "process.exec", "process.spawn", "network.read", "network.write"]);
+const CAPABILITY_SCOPES = new Set([
+  "fs.read",
+  "fs.write",
+  "process.exec",
+  "process.spawn",
+  "network.read",
+  "network.write"
+]);
 
 export interface DesktopCommanderCapabilityPayload {
   readonly version: typeof DESKTOP_COMMANDER_CAPABILITY_VERSION;
@@ -31,6 +38,18 @@ export interface DesktopCommanderCapabilityPayload {
   readonly nonce: string;
 }
 
+/**
+ * The action hash the durable issuance gate binds: for approval-required
+ * calls this is the approval-bound action fingerprint (the exact hash the
+ * execution-plan approval was granted and consumed under), so recordIssuance
+ * can re-derive the approval binding and fail closed on drift. Absent means
+ * "use authorization.actionHash" (the claim's execution action hash).
+ */
+export interface ApprovalBoundAuthorization {
+  readonly approvalId?: string;
+  readonly approvalActionHash?: string;
+}
+
 export interface DesktopCommanderCapability {
   readonly payload: DesktopCommanderCapabilityPayload;
   readonly signature: string;
@@ -51,7 +70,8 @@ function base64url(bytes: Buffer): string {
 
 function requiredScopes(toolName: string): string[] {
   const policy = desktopCommanderToolPolicy(toolName);
-  if (!policy) throw new ControlStackError("desktop_commander_tool_not_allowlisted", "capability tool is not allowlisted");
+  if (!policy)
+    throw new ControlStackError("desktop_commander_tool_not_allowlisted", "capability tool is not allowlisted");
   // This is a capability vocabulary mapping, not an inference from argument
   // shape: `start_process` creates a process and process inspection consumes
   // process authority even though their arguments have no filesystem path.
@@ -81,7 +101,8 @@ function requireId(label: string, value: string, pattern = ID_PATTERN): void {
 }
 
 function requireHash(label: string, value: string): void {
-  if (!HASH_PATTERN.test(value)) throw new ControlStackError("desktop_commander_capability_invalid", `${label} is invalid`);
+  if (!HASH_PATTERN.test(value))
+    throw new ControlStackError("desktop_commander_capability_invalid", `${label} is invalid`);
 }
 
 /** Creates a v1 envelope using the exact strict canonical signing bytes. */
@@ -103,7 +124,8 @@ export function prepareDesktopCommanderCapability(
     throw new ControlStackError("desktop_commander_capability_invalid", "capability TTL must be between 1 and 30000ms");
   }
   const policy = desktopCommanderToolPolicy(authorization.toolName);
-  if (!policy) throw new ControlStackError("desktop_commander_tool_not_allowlisted", "capability tool is not allowlisted");
+  if (!policy)
+    throw new ControlStackError("desktop_commander_tool_not_allowlisted", "capability tool is not allowlisted");
   if (policy.requiresApproval !== authorization.requiresApproval) {
     throw new ControlStackError("desktop_commander_capability_invalid", "capability approval policy drift");
   }
@@ -113,6 +135,16 @@ export function prepareDesktopCommanderCapability(
   if (!policy.requiresApproval && authorization.approvalId !== undefined) {
     throw new ControlStackError("desktop_commander_capability_invalid", "unexpected approval for non-approval tool");
   }
+  // The payload binds the action hash exactly as the durable issuance gate
+  // will re-derive it: for approval-required calls the approval-bound action
+  // fingerprint (execution_plan_approvals.action_hash), otherwise the claim's
+  // execution action hash. recordIssuance recomputes the request hash from
+  // this value and fails closed on any drift from the granted approval.
+  const payloadActionHash =
+    authorization.approvalId !== undefined && authorization.approvalActionHash !== undefined
+      ? authorization.approvalActionHash
+      : authorization.actionHash;
+  requireHash("actionHash", payloadActionHash);
   const issuedAt = new Date(Math.floor(now.getTime() / 1_000) * 1_000).toISOString();
   const expiresAt = new Date(Date.parse(issuedAt) + ttlMs).toISOString();
   const payload: DesktopCommanderCapabilityPayload = {
@@ -127,7 +159,7 @@ export function prepareDesktopCommanderCapability(
     toolName: authorization.toolName,
     normalizedArguments: authorization.normalizedArguments,
     invocationHash: authorization.invocationFingerprint,
-    actionHash: authorization.actionHash,
+    actionHash: payloadActionHash,
     requestHash,
     planHash: authorization.planHash,
     scopes: requiredScopes(authorization.toolName),
@@ -137,7 +169,8 @@ export function prepareDesktopCommanderCapability(
     nonce: base64url(randomBytes(32))
   };
   for (const scope of payload.scopes) {
-    if (!CAPABILITY_SCOPES.has(scope)) throw new ControlStackError("desktop_commander_capability_invalid", "invalid scope");
+    if (!CAPABILITY_SCOPES.has(scope))
+      throw new ControlStackError("desktop_commander_capability_invalid", "invalid scope");
   }
   return Object.freeze(payload);
 }
@@ -148,13 +181,18 @@ export function signPreparedDesktopCommanderCapability(
   config: Pick<CapabilitySigningConfig, "keyId" | "privateKey">
 ): DesktopCommanderCapability {
   requireId("keyId", config.keyId, KEY_ID_PATTERN);
-  const privateKey = createPrivateKey({ key: Buffer.from(config.privateKey, "base64url"), format: "der", type: "pkcs8" });
+  const privateKey = createPrivateKey({
+    key: Buffer.from(config.privateKey, "base64url"),
+    format: "der",
+    type: "pkcs8"
+  });
   const signature = sign(null, Buffer.from(strictCanonicalJsonV1(payload), "utf8"), privateKey);
   return Object.freeze({ payload, signature: base64url(signature), keyId: config.keyId });
 }
 
 /** Store only this value for audit/provenance; raw nonces must never be persisted. */
 export function desktopCommanderCapabilityNonceHash(nonce: string): string {
-  if (!/^[A-Za-z0-9_-]{43}$/u.test(nonce)) throw new ControlStackError("desktop_commander_capability_invalid", "nonce is invalid");
+  if (!/^[A-Za-z0-9_-]{43}$/u.test(nonce))
+    throw new ControlStackError("desktop_commander_capability_invalid", "nonce is invalid");
   return createHash("sha256").update(Buffer.from(nonce, "base64url")).digest("hex");
 }
