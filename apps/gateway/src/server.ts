@@ -85,7 +85,10 @@ import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-
 
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
-const MAX_RESULT_BODY_BYTES = 256 * 1024;
+/** Conservative Fastify JSON bodyLimit for mutation routes (memory DoS bound). */
+const DEFAULT_JSON_BODY_LIMIT_BYTES = 256 * 1024;
+/** Result submission keeps an explicit route bodyLimit; currently matches the default. */
+const MAX_RESULT_BODY_BYTES = DEFAULT_JSON_BODY_LIMIT_BYTES;
 // Well above the socket's 16 KB high-water mark, so ordinary bursts ride
 // through; only a subscriber that has genuinely stopped draining reaches this.
 const MAX_SSE_BUFFER_BYTES = 1024 * 1024;
@@ -163,7 +166,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
-  const app = Fastify({ logger: options.logger ?? true });
+  const app = Fastify({ logger: options.logger ?? true, bodyLimit: DEFAULT_JSON_BODY_LIMIT_BYTES });
   const sseClients = new Set<ServerResponse>();
   // Principal is retained per stream so a disconnect can decrement the right
   // bucket without rescanning every open client.
@@ -312,6 +315,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.setErrorHandler((error, request, reply) => {
     if (request.url.split("?")[0] === "/mcp" && request.method === "POST" && isJsonParseError(error)) {
       return reply.code(400).send(jsonRpcError(null, -32700, "parse error"));
+    }
+    if (isBodyTooLargeError(error)) {
+      return reply.code(413).send({ error: "request body is too large", code: "body_too_large" });
     }
     return reply.send(error);
   });
@@ -1456,6 +1462,10 @@ function isAllowedMcpOrigin(origin: string | undefined, allowedOrigins: string[]
 
 function isJsonParseError(error: unknown): boolean {
   return (error as { code?: string }).code === "FST_ERR_CTP_INVALID_JSON_BODY";
+}
+
+function isBodyTooLargeError(error: unknown): boolean {
+  return (error as { code?: string }).code === "FST_ERR_CTP_BODY_TOO_LARGE";
 }
 
 function jsonRpcError(id: string | number | null, code: number, message: string, data?: unknown) {

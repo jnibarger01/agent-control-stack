@@ -3683,6 +3683,48 @@ describe("gateway abuse controls", () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it("rejects JSON bodies over the default limit before work-item persistence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-abuse-body-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildTestGateway({
+      dbPath,
+      logger: false,
+      rateLimit: { windowMs: 60_000, maxRequests: 100 }
+    });
+
+    try {
+      const oversizedPayload = JSON.stringify({
+        ...workItemPayload,
+        title: "oversized-body",
+        intent: "x".repeat(256 * 1024)
+      });
+      expect(Buffer.byteLength(oversizedPayload)).toBeGreaterThan(256 * 1024);
+
+      const response = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        headers: { "content-type": "application/json" },
+        payload: oversizedPayload
+      });
+
+      expect(response.statusCode).toBe(413);
+      expect(response.json()).toMatchObject({
+        error: "request body is too large",
+        code: "body_too_large"
+      });
+
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(check.list()).toEqual([]);
+      } finally {
+        check.close();
+      }
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("gateway dashboard sessions", () => {
