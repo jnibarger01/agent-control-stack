@@ -81,6 +81,12 @@ interface LeaseOptions {
 const DEFAULT_STALE_AFTER_MS = 10 * 1000;
 
 function defaultLockDir(): string {
+  // Namespace override for isolated environments (e.g. a certification E2E
+  // sandbox with its own DESKTOP_COMMANDER_STATE_DIR): each lock directory
+  // still enforces exactly one canonical executor within it, and the default
+  // remains the shared home directory, so production behavior is unchanged.
+  const override = process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR;
+  if (override && override.trim().length > 0) return path.resolve(override.trim());
   return path.join(os.homedir(), '.desktop-commander');
 }
 

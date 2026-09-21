@@ -4,7 +4,9 @@ import fs from 'fs/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fileURLToPath } from 'url';
+import type { Readable } from 'stream';
 import { captureRemote } from '../utils/capture.js';
+import { StartupStderrCapture, describeChildStartupFailure } from './startup-stderr.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -69,15 +71,25 @@ export class DesktopCommanderIntegration {
         console.log(` - ⏳ Connecting to Local Desktop Commander MCP using: ${config.command} ${config.args.join(' ')}`);
         console.debug('[DEBUG] MCP config:', JSON.stringify(config, null, 2));
 
+        let startupStderr: StartupStderrCapture | null = null;
+        let childExited = false;
         try {
             console.debug('[DEBUG] Creating StdioClientTransport');
             // DC_REMOTE_DEVICE tells the spawned server it is serving remote
             // services, so it suppresses local-only behavior like opening the
             // welcome page in a browser the remote user would never see.
+            // stderr is piped (and forwarded to ours) rather than inherited so a
+            // child that dies during startup — e.g. refused by the executor
+            // lease — can explain why instead of a bare "Connection closed".
             this.mcpTransport = new StdioClientTransport({
                 ...config,
-                env: { ...getDefaultEnvironment(), ...config.env, DC_REMOTE_DEVICE: 'true' }
+                env: { ...getDefaultEnvironment(), ...config.env, DC_REMOTE_DEVICE: 'true' },
+                stderr: 'pipe',
             });
+            startupStderr = new StartupStderrCapture(this.mcpTransport.stderr as Readable | null);
+            // Client.connect() chains this handler; before initialization
+            // completes, a close can only mean the child went away.
+            this.mcpTransport.onclose = () => { childExited = true; };
 
             // Create MCP client
             console.debug('[DEBUG] Creating MCP Client');
@@ -102,6 +114,7 @@ export class DesktopCommanderIntegration {
                 throw new Error('Desktop Commander integration startup was cancelled by shutdown');
             }
             this.isReady = true;
+            startupStderr.stop();
             this.mcpTransport.onclose = () => this.handleLocalDisconnect('stdio transport closed');
             this.mcpTransport.onerror = (error: Error) =>
                 this.handleLocalDisconnect(`stdio transport error: ${error?.message ?? String(error)}`);
@@ -110,16 +123,23 @@ export class DesktopCommanderIntegration {
             console.debug('[DEBUG] Desktop Commander MCP connection successful');
 
         } catch (error) {
-            console.error(' - ❌ Failed to connect to Desktop Commander MCP:', error);
-            console.debug('[DEBUG] MCP connection error:', error);
             this.isReady = false;
             this.mcpClient = null;
             if (this.mcpTransport) {
                 try { await this.mcpTransport.close(); } catch { /* already dead */ }
                 this.mcpTransport = null;
             }
+            // Let stderr chunks already read from the dead child drain into the capture.
+            await new Promise((resolve) => setImmediate(resolve));
+            const startupError = startupStderr
+                ? describeChildStartupFailure(error, { childExited, stderr: startupStderr.summary() })
+                : error;
+            startupStderr?.stop();
+            console.error(' - ❌ Failed to connect to Desktop Commander MCP:', startupError instanceof Error ? startupError.message : startupError);
+            console.debug('[DEBUG] MCP connection error:', error);
+            // Telemetry keeps the original error only; child stderr stays local.
             await captureRemote('desktop_integration_init_failed', { error });
-            throw error;
+            throw startupError;
         }
     }
 
