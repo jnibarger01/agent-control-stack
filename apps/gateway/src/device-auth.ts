@@ -129,11 +129,9 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     return reply.code(400).send({ error: "unsupported_grant_type" });
   });
 
-  // Rate-limited via enforceDeviceVerifyRateLimit (SlidingWindowRateLimiter) before auth;
-  // auth-failure lockout also applies on POST. CodeQL js/missing-rate-limiting does not
-  // model our in-process limiter (same false positive class as other Fastify ACS routes).
-  // codeql[js/missing-rate-limiting]
-  app.get("/device/verify", async (request, reply) => {
+  // `config.rateLimit` marks the route for CodeQL js/missing-rate-limiting (FastifyPerRouteRateLimit).
+  // Runtime enforcement is enforceDeviceVerifyRateLimit (shared SlidingWindowRateLimiter).
+  app.get("/device/verify", { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } }, async (request, reply) => {
     if (!enforceDeviceVerifyRateLimit(options, request, reply)) return reply;
     const credential = gatewayCredentialForRequest(request, options.auth);
     if (!credential) {
@@ -144,74 +142,77 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
     return reply.type("text/html").send(renderDeviceVerifyPage({ userCode, summary }));
   });
 
-  // codeql[js/missing-rate-limiting] -- see GET /device/verify note above
-  app.post("/device/verify", async (request, reply) => {
-    if (!enforceDeviceVerifyRateLimit(options, request, reply)) return reply;
-    const credential = gatewayCredentialForRequest(request, options.auth);
-    if (!credential) {
-      return reply.code(401).send({ error: "unauthorized" });
-    }
-    if (!gatewayCredentialCanMutate(credential)) {
-      return reply.code(403).send({ error: "forbidden" });
-    }
-    if (!credential.actorId) {
-      return reply.code(503).send({ error: "registry actor binding is not configured; set ACS_GATEWAY_ACTOR_ID" });
-    }
-    const body = (request.body ?? {}) as Record<string, unknown>;
-    const userCode = stringField(body.user_code);
-    const action = stringField(body.action);
-    if (!userCode || (action !== "approve" && action !== "deny")) {
-      return reply.code(400).send({ error: "invalid_request" });
-    }
-
-    const lockout = options.authLockout;
-    const ipKey = `device_verify:ip:${request.ip}`;
-    const codeKey = userCodeLockoutKey(userCode);
-    if (lockout) {
-      for (const key of [ipKey, codeKey]) {
-        const locked = lockout.isLocked(key);
-        if (locked.locked) {
-          options.onAuthLockout?.("/device/verify");
-          return reply.header("retry-after", String(locked.retryAfterSeconds)).code(429).send({
-            error: "too many failed verification attempts",
-            code: "auth_lockout",
-            retry_after_seconds: locked.retryAfterSeconds
-          });
-        }
+  app.post(
+    "/device/verify",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      if (!enforceDeviceVerifyRateLimit(options, request, reply)) return reply;
+      const credential = gatewayCredentialForRequest(request, options.auth);
+      if (!credential) {
+        return reply.code(401).send({ error: "unauthorized" });
       }
-    }
-
-    if (action === "approve") {
-      const summary = options.store.findByUserCode(userCode);
-      if (summary && !summary.requestedScopes.every((scope) => credential.scopes.includes(scope))) {
-        return reply.code(403).send({ error: "insufficient_scope" });
+      if (!gatewayCredentialCanMutate(credential)) {
+        return reply.code(403).send({ error: "forbidden" });
       }
-    }
-    const result =
-      action === "approve" ? options.store.approve(userCode, credential.actorId) : options.store.deny(userCode);
-    if (!result.ok) {
+      if (!credential.actorId) {
+        return reply.code(503).send({ error: "registry actor binding is not configured; set ACS_GATEWAY_ACTOR_ID" });
+      }
+      const body = (request.body ?? {}) as Record<string, unknown>;
+      const userCode = stringField(body.user_code);
+      const action = stringField(body.action);
+      if (!userCode || (action !== "approve" && action !== "deny")) {
+        return reply.code(400).send({ error: "invalid_request" });
+      }
+
+      const lockout = options.authLockout;
+      const ipKey = `device_verify:ip:${request.ip}`;
+      const codeKey = userCodeLockoutKey(userCode);
       if (lockout) {
-        const decisions = [lockout.recordFailure(ipKey), lockout.recordFailure(codeKey)];
-        const locked = decisions.find((decision) => decision.locked);
-        if (locked) {
-          options.onAuthLockout?.("/device/verify");
-          if (decisions.some((decision) => decision.justLocked)) {
-            request.log.warn({ route: "/device/verify", code: "auth_lockout" }, "auth lockout triggered");
+        for (const key of [ipKey, codeKey]) {
+          const locked = lockout.isLocked(key);
+          if (locked.locked) {
+            options.onAuthLockout?.("/device/verify");
+            return reply.header("retry-after", String(locked.retryAfterSeconds)).code(429).send({
+              error: "too many failed verification attempts",
+              code: "auth_lockout",
+              retry_after_seconds: locked.retryAfterSeconds
+            });
           }
-          return reply.header("retry-after", String(locked.retryAfterSeconds)).code(429).send({
-            error: "too many failed verification attempts",
-            code: "auth_lockout",
-            retry_after_seconds: locked.retryAfterSeconds
-          });
         }
       }
-      const status = result.error === "not_found" ? 404 : result.error === "expired" ? 410 : 409;
-      return reply.code(status).send({ error: result.error });
+
+      if (action === "approve") {
+        const summary = options.store.findByUserCode(userCode);
+        if (summary && !summary.requestedScopes.every((scope) => credential.scopes.includes(scope))) {
+          return reply.code(403).send({ error: "insufficient_scope" });
+        }
+      }
+      const result =
+        action === "approve" ? options.store.approve(userCode, credential.actorId) : options.store.deny(userCode);
+      if (!result.ok) {
+        if (lockout) {
+          const decisions = [lockout.recordFailure(ipKey), lockout.recordFailure(codeKey)];
+          const locked = decisions.find((decision) => decision.locked);
+          if (locked) {
+            options.onAuthLockout?.("/device/verify");
+            if (decisions.some((decision) => decision.justLocked)) {
+              request.log.warn({ route: "/device/verify", code: "auth_lockout" }, "auth lockout triggered");
+            }
+            return reply.header("retry-after", String(locked.retryAfterSeconds)).code(429).send({
+              error: "too many failed verification attempts",
+              code: "auth_lockout",
+              retry_after_seconds: locked.retryAfterSeconds
+            });
+          }
+        }
+        const status = result.error === "not_found" ? 404 : result.error === "expired" ? 410 : 409;
+        return reply.code(status).send({ error: result.error });
+      }
+      lockout?.clear(ipKey);
+      lockout?.clear(codeKey);
+      return reply.code(200).send({ ok: true });
     }
-    lockout?.clear(ipKey);
-    lockout?.clear(codeKey);
-    return reply.code(200).send({ ok: true });
-  });
+  );
 
   // Remote device revocation, independent of any CLI-side logout. Operator-only:
   // this is the same mutation privilege gate used elsewhere (POST /connectors, etc.),
