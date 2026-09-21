@@ -34,6 +34,7 @@ Notes:
 | `acs_http_request_duration_seconds_count` | counter | `method`, `route`           | Request count for latency sum pairing.                                                          |
 | `acs_http_request_duration_seconds_sum`   | counter | `method`, `route`           | Cumulative request duration in seconds.                                                         |
 | `acs_rate_limit_rejected_total`           | counter | `method`, `route`           | In-process limiter rejections (**HTTP 429** / MCP `-32029`). From abuse controls (#88).         |
+| `acs_auth_lockout_total`                  | counter | `route`                     | Failed-attempt lockouts / lockout 429s on `/session/login` and `/device/verify` (#147).         |
 | `acs_audit_events_total`                  | counter | `event_name`                | Appended audit events (work-item, approval, lease, agent lifecycle, etc.).                      |
 | `acs_sse_clients_dropped_total`           | counter | `reason`                    | Live event clients dropped (e.g. `backpressure`).                                               |
 | `acs_sse_connections_rejected_total`      | counter | `reason`                    | New SSE subscriptions refused (`global`, `per_principal`).                                      |
@@ -49,14 +50,14 @@ Use:
 - **Approvals** — `acs_audit_events_total{event_name="work_item.needs_approval"}`,
   `approval.granted`, `approval.consumed`, plus the panel’s pending count /
   oldest wait (`needs_approval` work-item age).
-- **429s** — `acs_rate_limit_rejected_total` and
+- **429s** — `acs_rate_limit_rejected_total`, `acs_auth_lockout_total`, and
   `acs_http_requests_total{...,status="429"}`.
 
 ## Useful local greps
 
 ```sh
 curl -fsS -H "Authorization: Bearer $ACS_GATEWAY_TOKEN" \
-  http://127.0.0.1:3000/metrics | grep -E 'acs_rate_limit_rejected_total|status="429"'
+  http://127.0.0.1:3000/metrics | grep -E 'acs_rate_limit_rejected_total|acs_auth_lockout_total|status="429"'
 
 curl -fsS -H "Authorization: Bearer $ACS_GATEWAY_TOKEN" \
   http://127.0.0.1:3000/metrics | grep 'acs_audit_events_total{event_name="approval'
