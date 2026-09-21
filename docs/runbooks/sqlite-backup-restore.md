@@ -47,13 +47,14 @@ These steps work without a live gateway.
        mkdir -p storage/fixtures
        node scripts/sqlite-backup-restore.mjs create-fixture storage/fixtures/sample-work-items.db
 
-2. Timestamped snapshot:
+2. Timestamped snapshot (updates `backups/latest.db` only after integrity_check):
 
        node scripts/sqlite-backup-restore.mjs snapshot storage/fixtures/sample-work-items.db --destination-dir storage/fixtures/backups
+       readlink storage/fixtures/backups/latest.db
 
 3. Integrity on the snapshot (includes audit-chain verify):
 
-       BACKUP=$(ls -1t storage/fixtures/backups/sample-work-items-*.db | head -1)
+       BACKUP=$(readlink -f storage/fixtures/backups/latest.db)
        node scripts/sqlite-backup-restore.mjs verify "$BACKUP"
 
 4. Restore dry-run (temp dir; never touches ACS_DB_PATH):
@@ -73,12 +74,19 @@ migrations, and auditChain all passed.
 1. Prefer a quiet window; backup does not require stopping writers, but avoid disk-full conditions.
 2. Snapshot with a timestamped name using the sqlite-backup-restore snapshot subcommand
    against ACS_DB_PATH (default storage/local.db) into a secure destination directory.
-3. Confirm the JSON health.ok field is true and store the destination path.
-4. Do not copy -wal / -shm sidecars into the backup set when using this API; the snapshot file is self-contained.
+3. Confirm the JSON `ok` / `health.ok` / `retainHealth.ok` fields are true and store the destination path.
+4. The script only updates `SECURE_BACKUP_DIR/latest.db` (symlink to the new timestamped artifact)
+   **after** the artifact passes `PRAGMA integrity_check` and `PRAGMA foreign_key_check` (via the
+   shared database-health contract). If verification fails, the previous `latest.db` pointer is
+   left untouched, the process exits non-zero, and a clear JSON error is printed — ops must not
+   treat a failed snapshot as the current restore point.
+5. Do not copy -wal / -shm sidecars into the backup set when using this API; the snapshot file is self-contained.
 
 Example snapshot invocation:
 
        node scripts/sqlite-backup-restore.mjs snapshot STORAGE_OR_ACS_DB_PATH --destination-dir SECURE_BACKUP_DIR
+       # On success: SECURE_BACKUP_DIR/latest.db -> <basename>-<stamp>.db
+       readlink SECURE_BACKUP_DIR/latest.db
 
 ## Restore (destructive — stop writers first)
 
@@ -193,4 +201,4 @@ investigate. Do not rewrite hashes in place.
 - [audit-chain-export.md](./audit-chain-export.md) — JSONL export + offline verify
 - scripts/db-ops.mjs — verify / backup / restore primitives
 - scripts/db-backup-policy.mjs — encrypted retention + drill (production)
-- scripts/sqlite-backup-restore.mjs — timestamped snapshot + restore dry-run + fixture + wal-checkpoint + vacuum
+- scripts/sqlite-backup-restore.mjs — timestamped snapshot (latest.db after integrity_check) + restore dry-run + fixture + wal-checkpoint + vacuum
