@@ -1,10 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { JSDOM } from "jsdom";
 import {
+  applyQueueFilterToDom,
   applySseConnectionState,
+  emptyQueueFilter,
+  filterWorkItems,
   nextSseReconnectDelayMs,
+  parseQueueFilter,
   projectAgents,
   renderDashboard,
+  serializeQueueFilter,
   type MissionControlViewModel
 } from "./index.js";
 
@@ -238,11 +243,13 @@ describe("renderDashboard", () => {
       now: new Date("2026-07-05T00:01:00.000Z")
     });
 
-    expect(html).toContain(`<button class="queue-item attention" data-work-item="wrk_test">`);
-    expect(html).toContain(`<button class="queue-item attention" data-work-item="wrk_blocked">`);
-    expect(html).toContain(`<button class="queue-item attention" data-work-item="wrk_quarantined">`);
-    expect(html).toContain(`<button class="queue-item" data-work-item="wrk_running">`);
-    expect(html).toContain(`<button class="queue-item" data-work-item="wrk_succeeded">`);
+    expect(html).toContain(`class="queue-item attention" data-work-item="wrk_test"`);
+    expect(html).toContain(`class="queue-item attention" data-work-item="wrk_blocked"`);
+    expect(html).toContain(`class="queue-item attention" data-work-item="wrk_quarantined"`);
+    expect(html).toContain(`class="queue-item" data-work-item="wrk_running"`);
+    expect(html).toContain(`class="queue-item" data-work-item="wrk_succeeded"`);
+    expect(html).toContain(`data-status="needs_approval"`);
+    expect(html).toContain(`data-status="running"`);
     expect(html).toContain("Needs attention");
     expect(html).toContain(".quarantined");
   });
@@ -369,5 +376,133 @@ describe("renderDashboard", () => {
       health: "unknown",
       capabilities: ["code:implement", "code:test", "repo:inspect"]
     });
+  });
+});
+
+describe("queue filter", () => {
+  const items = [
+    { id: "wrk_a", title: "Deploy gateway", status: "running", agentId: "codex-cli" },
+    { id: "wrk_b", title: "Inspect policy", status: "needs_approval", agentId: "policy-bot" },
+    { id: "wrk_c", title: "Blocked lease", status: "blocked", agentId: "codex-cli" }
+  ];
+
+  it("returns the full queue when the filter is empty", () => {
+    expect(filterWorkItems(items, emptyQueueFilter())).toEqual(items);
+    expect(filterWorkItems(items, { statuses: [], agentId: "  ", text: "" })).toEqual(items);
+  });
+
+  it("filters by status and updates the visible set", () => {
+    const filtered = filterWorkItems(items, { statuses: ["blocked", "running"], agentId: "", text: "" });
+    expect(filtered.map((item) => item.id)).toEqual(["wrk_a", "wrk_c"]);
+  });
+
+  it("filters by free-text on title and id", () => {
+    expect(filterWorkItems(items, { statuses: [], agentId: "", text: "policy" }).map((item) => item.id)).toEqual([
+      "wrk_b"
+    ]);
+    expect(filterWorkItems(items, { statuses: [], agentId: "", text: "wrk_c" }).map((item) => item.id)).toEqual([
+      "wrk_c"
+    ]);
+  });
+
+  it("treats unknown status chips as a no-op", () => {
+    expect(filterWorkItems(items, { statuses: ["not-a-real-status"], agentId: "", text: "" })).toEqual(items);
+    expect(
+      filterWorkItems(items, { statuses: ["not-a-real-status", "blocked"], agentId: "", text: "" }).map(
+        (item) => item.id
+      )
+    ).toEqual(["wrk_c"]);
+  });
+
+  it("parses and serializes filter state from URL search params and hash", () => {
+    expect(parseQueueFilter("?status=running&status=blocked&q=deploy&agent=codex")).toEqual({
+      statuses: ["running", "blocked"],
+      agentId: "codex",
+      text: "deploy"
+    });
+    expect(parseQueueFilter("#queue?status=failed&q=lease")).toEqual({
+      statuses: ["failed"],
+      agentId: "",
+      text: "lease"
+    });
+    expect(serializeQueueFilter({ statuses: ["running"], agentId: "a1", text: "x" }).toString()).toBe(
+      "status=running&agent=a1&q=x"
+    );
+  });
+
+  it("hides non-matching queue items and updates the visible count in the DOM", () => {
+    const html = renderDashboard({
+      workItems: [
+        {
+          id: "wrk_a",
+          title: "Deploy gateway",
+          requester: "user",
+          status: "running",
+          intent: "ship",
+          target: { services: ["codex-cli"] },
+          requestedActions: [],
+          risk: "low",
+          createdAt: "2026-07-05T00:00:00.000Z",
+          updatedAt: "2026-07-05T00:00:00.000Z"
+        },
+        {
+          id: "wrk_b",
+          title: "Inspect policy",
+          requester: "user",
+          status: "needs_approval",
+          intent: "review",
+          target: { services: ["policy-bot"] },
+          requestedActions: [],
+          risk: "medium",
+          createdAt: "2026-07-05T00:00:00.000Z",
+          updatedAt: "2026-07-05T00:00:00.000Z"
+        },
+        {
+          id: "wrk_c",
+          title: "Blocked lease",
+          requester: "user",
+          status: "blocked",
+          intent: "recover",
+          target: { services: ["codex-cli"] },
+          requestedActions: [],
+          risk: "high",
+          createdAt: "2026-07-05T00:00:00.000Z",
+          updatedAt: "2026-07-05T00:00:00.000Z"
+        }
+      ],
+      events: [],
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain('id="queue-filter"');
+    expect(html).toContain('for="queue-filter-text"');
+    expect(html).toContain('for="queue-filter-agent"');
+    expect(html).toContain('aria-live="polite"');
+    expect(html).toContain('data-status="running"');
+    expect(html).toContain('data-agent-id="codex-cli"');
+    expect(html).toContain("bindQueueFilter()");
+
+    const dom = new JSDOM(html);
+    const root = dom.window.document;
+    const visible = applyQueueFilterToDom(root, { statuses: ["blocked"], agentId: "", text: "" });
+    expect(visible).toBe(1);
+    expect((root.querySelector('[data-work-item="wrk_c"]') as HTMLElement | null)?.hidden).toBe(false);
+    expect((root.querySelector('[data-work-item="wrk_a"]') as HTMLElement | null)?.hidden).toBe(true);
+    expect((root.querySelector('[data-work-item="wrk_b"]') as HTMLElement | null)?.hidden).toBe(true);
+    expect(root.querySelector("#queue-filter-count")?.textContent).toBe("1 of 3 items");
+    expect(root.querySelector("#queue-filter-live")?.textContent).toBe("Showing 1 of 3 work items");
+
+    const byText = applyQueueFilterToDom(root, { statuses: [], agentId: "", text: "policy" });
+    expect(byText).toBe(1);
+    expect((root.querySelector('[data-work-item="wrk_b"]') as HTMLElement | null)?.hidden).toBe(false);
+    expect(root.querySelector("#queue-filter-count")?.textContent).toBe("1 of 3 items");
+
+    const cleared = applyQueueFilterToDom(root, emptyQueueFilter());
+    expect(cleared).toBe(3);
+    expect(root.querySelector("#queue-filter-count")?.textContent).toBe("3 items");
+
+    const unknownOnly = applyQueueFilterToDom(root, { statuses: ["totally-unknown"], agentId: "", text: "" });
+    expect(unknownOnly).toBe(3);
+    expect(root.querySelector("#queue-filter-count")?.textContent).toBe("3 items");
   });
 });
