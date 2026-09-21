@@ -298,6 +298,203 @@ export function applySseConnectionState(root: SseConnectionRoot, connected: bool
   }
 }
 
+/** High/critical risk (elevated require_approval) needs a second confirm before POST. */
+export function isElevatedApprovalRisk(risk: string): boolean {
+  const normalized = String(risk ?? "")
+    .trim()
+    .toLowerCase();
+  return normalized === "high" || normalized === "critical";
+}
+
+/** Short prefix of an action hash for confirm dialog copy (full hash stays on the button). */
+export function approvalActionHashPrefix(hash: string, maxLen = 12): string {
+  const text = String(hash ?? "");
+  if (!text) return "";
+  return text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
+}
+
+export type ApprovalConfirmRequest = {
+  workItemId: string;
+  action: "approve" | "reject";
+  actionHash?: string;
+  risk: string;
+};
+
+export type ApprovalConfirmDocument = {
+  body: { appendChild(node: HTMLElement): unknown };
+  createElement(tagName: string): HTMLElement;
+  addEventListener(type: string, listener: (event: KeyboardEvent) => void): void;
+  removeEventListener(type: string, listener: (event: KeyboardEvent) => void): void;
+  getElementById(id: string): HTMLElement | null;
+  activeElement?: { focus?(): void } | null;
+};
+
+/**
+ * Modal confirm for elevated-risk approve/deny.
+ * Esc or Cancel resolves false without side effects; Confirm resolves true.
+ * Initial focus is on Cancel (confirm is never the default focused control).
+ */
+export function requestApprovalConfirm(
+  doc: ApprovalConfirmDocument,
+  request: ApprovalConfirmRequest
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const existing = doc.getElementById("approval-confirm-dialog");
+    if (existing) existing.remove();
+
+    const overlay = doc.createElement("div");
+    overlay.id = "approval-confirm-dialog";
+    overlay.setAttribute("role", "dialog");
+    overlay.setAttribute("aria-modal", "true");
+    overlay.setAttribute("aria-labelledby", "approval-confirm-title");
+    overlay.className = "approval-confirm-overlay";
+
+    const actionLabel = request.action === "approve" ? "Approve" : "Deny";
+    const hashPrefix = approvalActionHashPrefix(request.actionHash ?? "");
+    const hashLine = hashPrefix
+      ? `<p class="approval-confirm-hash">Action hash: <code>${escapeHtml(hashPrefix)}</code></p>`
+      : "";
+
+    overlay.innerHTML = `<div class="approval-confirm-card">
+  <h3 id="approval-confirm-title">${escapeHtml(actionLabel)} high-risk work item?</h3>
+  <p class="approval-confirm-id">Work item: <code>${escapeHtml(request.workItemId)}</code></p>
+  <p class="approval-confirm-risk">Risk: <strong>${escapeHtml(request.risk)}</strong></p>
+  ${hashLine}
+  <div class="approval-confirm-actions">
+    <button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>
+    <button type="button" id="approval-confirm-ok" data-approval-confirm-ok>${escapeHtml(actionLabel)}</button>
+  </div>
+</div>`;
+
+    const finish = (confirmed: boolean) => {
+      doc.removeEventListener("keydown", onKeyDown);
+      overlay.remove();
+      resolve(confirmed);
+    };
+
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        finish(false);
+      }
+    };
+
+    doc.body.appendChild(overlay);
+    doc.addEventListener("keydown", onKeyDown);
+
+    const cancelBtn = overlay.querySelector("#approval-confirm-cancel") as HTMLElement | null;
+    const okBtn = overlay.querySelector("#approval-confirm-ok") as HTMLElement | null;
+    cancelBtn?.addEventListener("click", () => finish(false));
+    okBtn?.addEventListener("click", () => finish(true));
+    // Confirm must not be the initially focused control.
+    cancelBtn?.focus?.();
+  });
+}
+
+export type ApprovalPostResult = {
+  posted: boolean;
+  confirmed?: boolean;
+  cancelled?: boolean;
+  status?: number;
+  error?: string;
+};
+
+export type ApprovalActionClickOptions = {
+  document: ApprovalConfirmDocument & {
+    querySelector(selectors: string): { value?: string; focus?(): void; textContent?: string | null } | null;
+  };
+  button: {
+    dataset: {
+      approve?: string;
+      reject?: string;
+      unblock?: string;
+      actionHash?: string;
+      risk?: string;
+    };
+    getAttribute?(name: string): string | null;
+  };
+  connected: boolean;
+  fetchImpl: (
+    input: string,
+    init: { method: string; headers: Record<string, string>; body: string }
+  ) => Promise<{
+    ok: boolean;
+    status: number;
+    json(): Promise<{ error?: string; code?: string }>;
+  }>;
+  /** Optional override for tests; defaults to requestApprovalConfirm. */
+  requestConfirm?: (doc: ApprovalConfirmDocument, request: ApprovalConfirmRequest) => Promise<boolean>;
+};
+
+/**
+ * Shared approve/deny/unblock click path used by Mission Control (and component tests).
+ * Elevated risk requires a confirm step before POST; Cancel/Esc leaves state unchanged.
+ */
+export async function handleApprovalActionClick(options: ApprovalActionClickOptions): Promise<ApprovalPostResult> {
+  const { button, connected, fetchImpl } = options;
+  const doc = options.document;
+  const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
+  if (!id) return { posted: false, error: "missing work item id" };
+  const action = button.dataset.approve ? "approve" : button.dataset.reject ? "reject" : "unblock";
+  const risk =
+    button.dataset.risk || (typeof button.getAttribute === "function" ? button.getAttribute("data-risk") : null) || "";
+  const output = doc.querySelector("#approval-result-" + id);
+  if (!connected) {
+    if (output) output.textContent = "Disconnected: actions disabled until reconnect";
+    return { posted: false, error: "disconnected" };
+  }
+  const reasonInput = doc.querySelector('[data-reason="' + id + '"]');
+  const reason = reasonInput && typeof reasonInput.value === "string" ? reasonInput.value.trim() : "";
+  if (action !== "unblock" && !reason) {
+    if (output) output.textContent = "Reason required";
+    reasonInput?.focus?.();
+    return { posted: false, error: "reason required" };
+  }
+
+  if ((action === "approve" || action === "reject") && isElevatedApprovalRisk(risk)) {
+    if (doc.getElementById("approval-confirm-dialog")) {
+      // Another confirm is already open — do not POST.
+      return { posted: false, cancelled: true };
+    }
+    const confirmFn = options.requestConfirm ?? requestApprovalConfirm;
+    const confirmed = await confirmFn(doc, {
+      workItemId: id,
+      action,
+      actionHash: button.dataset.actionHash,
+      risk
+    });
+    if (!confirmed) {
+      return { posted: false, cancelled: true, confirmed: false };
+    }
+  }
+
+  const headers = { "content-type": "application/json" };
+  const payload: Record<string, string> = action === "unblock" ? {} : { reason };
+  if (action === "approve") {
+    const actionHash = button.dataset.actionHash;
+    if (!actionHash) {
+      if (output) output.textContent = "Approval action hash unavailable";
+      return { posted: false, error: "action hash unavailable" };
+    }
+    payload.actionHash = actionHash;
+  }
+  const res = await fetchImpl("/work-items/" + id + "/" + action, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload)
+  });
+  const body = await res.json();
+  if (output) {
+    output.textContent = res.ok ? action + " accepted" : "Rejected: " + (body.error || body.code || res.status);
+  }
+  return {
+    posted: true,
+    confirmed: true,
+    status: res.status,
+    error: res.ok ? undefined : body.error || body.code || String(res.status)
+  };
+}
+
 const OPERATOR_ATTENTION_STATUSES: ReadonlySet<WorkItem["status"]> = new Set([
   "blocked",
   "needs_approval",
@@ -658,21 +855,21 @@ function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Recor
       const outcome = `<output id="${resultId}" class="approval-result" aria-live="polite"></output>`;
       const approvalButtons = approvalButtonsFor(item, approvalActionHashesByWorkItem[item.id] ?? [], reasonId);
       if (item.status === "blocked") {
-        return `<article class="approval-item" role="listitem"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+        return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article class="approval-item" role="listitem"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requester)} · Actions: ${escapeHtml(actions)}</small>${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+      return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requester)} · Actions: ${escapeHtml(actions)}</small>${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
 }
 
 function approvalButtonsFor(item: WorkItem, hashes: string[], reasonId: string): string {
   if (!hashes.length) {
-    return `<button type="button" data-approve="${escapeHtml(item.id)}" disabled aria-describedby="${reasonId}">Approval hash unavailable</button>`;
+    return `<button type="button" data-approve="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" disabled aria-describedby="${reasonId}">Approval hash unavailable</button>`;
   }
   return hashes
     .map(
       (hash, index) =>
-        `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(hash)}" aria-describedby="${reasonId}">Approve ${index + 1}</button>`
+        `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(hash)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Approve ${index + 1}</button>`
     )
     .join("");
 }
@@ -1276,10 +1473,74 @@ bindAgentRows();
 refreshAgentRoster();
 connectSse();
 
+function isElevatedApprovalRisk(risk) {
+  const normalized = String(risk || '').trim().toLowerCase();
+  return normalized === 'high' || normalized === 'critical';
+}
+
+function approvalActionHashPrefix(hash, maxLen) {
+  const text = String(hash || '');
+  const limit = typeof maxLen === 'number' ? maxLen : 12;
+  if (!text) return '';
+  return text.length > limit ? text.slice(0, limit) + '\u2026' : text;
+}
+
+function escapeClientHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, function (char) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] || char;
+  });
+}
+
+function requestApprovalConfirm(request) {
+  return new Promise(function (resolve) {
+    const existing = document.getElementById('approval-confirm-dialog');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'approval-confirm-dialog';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'approval-confirm-title');
+    overlay.className = 'approval-confirm-overlay';
+    const actionLabel = request.action === 'approve' ? 'Approve' : 'Deny';
+    const hashPrefix = approvalActionHashPrefix(request.actionHash || '');
+    const hashLine = hashPrefix
+      ? '<p class="approval-confirm-hash">Action hash: <code>' + escapeClientHtml(hashPrefix) + '</code></p>'
+      : '';
+    overlay.innerHTML = '<div class="approval-confirm-card">' +
+      '<h3 id="approval-confirm-title">' + escapeClientHtml(actionLabel) + ' high-risk work item?</h3>' +
+      '<p class="approval-confirm-id">Work item: <code>' + escapeClientHtml(request.workItemId) + '</code></p>' +
+      '<p class="approval-confirm-risk">Risk: <strong>' + escapeClientHtml(request.risk) + '</strong></p>' +
+      hashLine +
+      '<div class="approval-confirm-actions">' +
+        '<button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>' +
+        '<button type="button" id="approval-confirm-ok" data-approval-confirm-ok>' + escapeClientHtml(actionLabel) + '</button>' +
+      '</div></div>';
+    function finish(confirmed) {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(confirmed);
+    }
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        finish(false);
+      }
+    }
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+    const cancelBtn = overlay.querySelector('#approval-confirm-cancel');
+    const okBtn = overlay.querySelector('#approval-confirm-ok');
+    cancelBtn?.addEventListener('click', function () { finish(false); });
+    okBtn?.addEventListener('click', function () { finish(true); });
+    cancelBtn?.focus();
+  });
+}
+
 document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
   button.addEventListener('click', async () => {
     const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
     const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'reject' : 'unblock';
+    const risk = button.dataset.risk || '';
     if (!sseConnected) {
       const output = document.querySelector('#approval-result-' + id);
       if (output) output.textContent = 'Disconnected: actions disabled until reconnect';
@@ -1292,6 +1553,18 @@ document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach
       output.textContent = 'Reason required';
       if (reasonInput) reasonInput.focus();
       return;
+    }
+    if ((action === 'approve' || action === 'reject') && isElevatedApprovalRisk(risk)) {
+      if (document.getElementById('approval-confirm-dialog')) {
+        return;
+      }
+      const confirmed = await requestApprovalConfirm({
+        workItemId: id,
+        action: action,
+        actionHash: button.dataset.actionHash,
+        risk: risk
+      });
+      if (!confirmed) return;
     }
     const headers = { 'content-type': 'application/json' };
     const payload = action === 'unblock' ? {} : { reason };
@@ -1527,6 +1800,16 @@ output { color: var(--accent); min-height: 20px; }
 .reason-label .req { color: var(--red); font-weight: 600; }
 .approval-result { display: block; min-height: 1.25em; }
 .approval-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.approval-confirm-overlay { position: fixed; inset: 0; z-index: 2000; background: rgba(17, 20, 23, .45); display: grid; place-items: center; padding: 16px; }
+.approval-confirm-card { width: min(420px, 100%); background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 40px rgba(23, 32, 42, .22); padding: 18px; display: grid; gap: 10px; color: var(--ink); }
+.approval-confirm-card h3 { margin: 0; font-size: 16px; }
+.approval-confirm-card p { margin: 0; color: var(--muted); font-size: 13px; }
+.approval-confirm-card code { color: var(--ink); font-size: 12px; }
+.approval-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+.approval-confirm-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 40px; }
+.approval-confirm-actions button:hover { background: #f4f8ff; border-color: #9db7d7; }
+#approval-confirm-ok { background: #fff1ef; color: var(--red); border-color: #f0b8b2; font-weight: 700; }
+#approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
 @media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
 @media (max-width: 767px) {
