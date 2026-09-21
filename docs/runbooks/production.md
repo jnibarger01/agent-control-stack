@@ -23,6 +23,27 @@ pass.
 - `ACS_MAX_SSE_CLIENTS_PER_PRINCIPAL` set below `ACS_MAX_SSE_CLIENTS`, so one credential cannot consume every slot and lock other operators out of the live audit channel during an incident. The gateway clamps it to one below the global cap if the two are set inconsistently, and logs a warning when it does.
 - A versioned image tag and a recorded previous image tag.
 
+## Production boot config checklist
+
+When `NODE_ENV=production` (or `ACS_STRICT_CONFIG=1`), the gateway validates
+required configuration **before** it listens. On failure it prints one JSON
+object to stderr (`error: "production_config_invalid"` with an `issues` array of
+`{ key, message }`) and exits non-zero. Local/dev boots remain permissive unless
+`ACS_STRICT_CONFIG=1` is set deliberately.
+
+Confirm before deploy:
+
+| Key                                               | Requirement                                                                                                                                                                                       |
+| ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `ACS_GATEWAY_CREDENTIALS_JSON`                    | Non-empty JSON array; each credential needs `id`, `token` (≥32 chars), `actor`, `actorId`                                                                                                         |
+| `ACS_DB_PATH`                                     | Parent directory must exist or be creatable on a writable ancestor                                                                                                                                |
+| `HOST` (non-loopback)                             | Also requires `ACS_MCP_ALLOWED_ORIGINS` and either complete OAuth (`ACS_OAUTH_ISSUER` + `ACS_OAUTH_AUDIENCE` + `ACS_OAUTH_JWKS_URI`) or `ACS_AUTH_MODE=tunnel_id` with `ACS_TRUSTED_TUNNEL_PROXY` |
+| `ACS_OAUTH_*`                                     | If any OAuth key is set, all three must be set                                                                                                                                                    |
+| `ACS_ENABLE_TEST_AGENT_RUN_FOR_LOCAL_DEVELOPMENT` | Must not be `1`                                                                                                                                                                                   |
+
+`compose.production.yml` already injects the credential, origin, and OAuth
+variables; prefer that file (or the same env contract) over ad-hoc process env.
+
 ## Build and verify
 
 ```sh

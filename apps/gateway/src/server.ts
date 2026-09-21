@@ -84,6 +84,7 @@ import {
   type AuthLockoutOptions
 } from "./auth-lockout.js";
 import { GatewayMetrics } from "./metrics.js";
+import { validateProductionConfig } from "./production-config.js";
 import { gatewayListenConfig } from "./runtime-config.js";
 import { DeviceAuthStore } from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
@@ -1936,6 +1937,7 @@ function isLoopbackHost(value: string | string[] | undefined): boolean {
 }
 
 export async function startGateway(): Promise<FastifyInstance> {
+  validateProductionConfig();
   const listen = gatewayListenConfig();
   const app = buildGateway();
   await app.listen(listen);
