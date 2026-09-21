@@ -555,14 +555,14 @@ ACS can be deployed as a local loopback service or behind an authenticated HTTPS
 
 Use this map first. Team Vercel showing zero gateway projects is expected: the gateway is not a Vercel app.
 
-| Target                                                    | Status                      | Notes                                                                                                                              |
-| --------------------------------------------------------- | --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
-| Local loopback (`npm run start:gateway` / `acs serve`)    | **Supported**               | Default for development and personal operation. Dashboard at `http://127.0.0.1:3000/`.                                             |
-| Docker / Compose (`Dockerfile`, `compose.production.yml`) | **Supported**               | Repeatable production artifact. Follow [`docs/runbooks/production.md`](docs/runbooks/production.md).                               |
-| systemd on a persistent host                              | **Supported**               | Example unit in Option C below. Checked-in units under `deploy/systemd` cover DB backup/restore drills.                            |
-| Authenticated HTTPS reverse proxy / signed tunnel         | **Supported**               | Remote MCP connectors only after OAuth or tunnel-session auth (Options D–E).                                                       |
-| Vercel for `apps/gateway`                                 | **Not supported**           | Needs a long-running Node process and persistent SQLite. See [`apps/gateway/VERCEL_DISABLED.md`](apps/gateway/VERCEL_DISABLED.md). |
-| Vercel for `apps/public-site`                             | **Supported (static only)** | Marketing/demo static site. Not the control-plane gateway or operator dashboard.                                                   |
+| Target                                                    | Status                      | Notes                                                                                                                                                                                                                                                   |
+| --------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local loopback (`npm run start:gateway` / `acs serve`)    | **Supported**               | Default for development and personal operation. Dashboard at `http://127.0.0.1:3000/`.                                                                                                                                                                  |
+| Docker / Compose (`Dockerfile`, `compose.production.yml`) | **Supported**               | Repeatable production artifact. Follow [`docs/runbooks/production.md`](docs/runbooks/production.md). CI `check` boots this compose file on loopback and runs `scripts/ci-compose-production-smoke.sh` (hard-fail on GitHub-hosted runners with Docker). |
+| systemd on a persistent host                              | **Supported**               | Example unit in Option C below. Checked-in units under `deploy/systemd` cover DB backup/restore drills.                                                                                                                                                 |
+| Authenticated HTTPS reverse proxy / signed tunnel         | **Supported**               | Remote MCP connectors only after OAuth or tunnel-session auth (Options D–E).                                                                                                                                                                            |
+| Vercel for `apps/gateway`                                 | **Not supported**           | Needs a long-running Node process and persistent SQLite. See [`apps/gateway/VERCEL_DISABLED.md`](apps/gateway/VERCEL_DISABLED.md).                                                                                                                      |
+| Vercel for `apps/public-site`                             | **Supported (static only)** | Marketing/demo static site. Not the control-plane gateway or operator dashboard.                                                                                                                                                                        |
 
 The mission-control dashboard is served by the gateway itself (`apps/control-ui` hosted by `apps/gateway`), not by Vercel. Do not deploy the gateway to serverless platforms that lack a durable local filesystem and a long-lived process.
 
@@ -571,6 +571,8 @@ Post-deploy smoke (liveness + readiness):
 ```sh
 ./scripts/gateway-post-deploy-healthcheck.sh http://127.0.0.1:3000
 ```
+
+CI covers the same contract without Vercel: after `docker build`, the `check` workflow runs `./scripts/ci-compose-production-smoke.sh` (`compose.production.yml up` on `127.0.0.1`, healthcheck, teardown). That step hard-fails on GitHub-hosted runners that provide Docker; it does not call Vercel APIs or change `ignoreCommand`.
 
 ### Option A: local loopback service
 
