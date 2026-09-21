@@ -36,6 +36,10 @@ ACS_DB_PATH=storage/local.db npm run start:gateway
 
 Open `http://127.0.0.1:3000`.
 
+Optional: set `ACS_READYZ_SANDBOX_PROBE=1` only on Linux hosts that should
+surface missing Bubblewrap/systemd/cgroup v2 on `/readyz`. Leave unset for
+ordinary dry-run local development (see [production.md](./production.md)).
+
 For MCP auth testing in local development, set `ACS_MCP_BEARER_TOKEN` and send it as `Authorization: Bearer <token>` on `/mcp` requests. OAuth and tunnel ID setup are documented in `docs/oauth-authentication.md`.
 
 Optional per-identity tool allowlists use `ACS_MCP_TOOL_ALLOWLIST_JSON`. Local mode keeps a permissive default for identities not listed in the map; see `docs/oauth-authentication.md`.

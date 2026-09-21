@@ -6,6 +6,7 @@ import type { SandboxAuthorityVerifier, SandboxExecutionRequest } from "./contra
 import {
   buildBubblewrapInvocation,
   buildSystemdScopeInvocation,
+  checkSandboxPrerequisites,
   createLinuxSandbox,
   launcherEnvironment,
   verifyAuthorityReceipt
@@ -233,3 +234,68 @@ function matchingAuthority(request: SandboxExecutionRequest): SandboxAuthorityVe
     })
   };
 }
+
+describe("checkSandboxPrerequisites", () => {
+  const cgroupV2 = { type: 0x63677270 } as unknown as import("node:fs").StatsFs;
+  const cgroupV1 = { type: 0x1234 } as unknown as import("node:fs").StatsFs;
+
+  it("reports sandbox_host_unsupported on non-linux platforms", () => {
+    expect(
+      checkSandboxPrerequisites({
+        platform: "darwin",
+        bwrapPath: process.execPath,
+        systemdRunPath: process.execPath,
+        systemctlPath: process.execPath,
+        cgroupStat: cgroupV2
+      })
+    ).toEqual({ ok: false, code: "sandbox_host_unsupported" });
+  });
+
+  it("reports sandbox_backend_missing when bwrap is absent", () => {
+    expect(
+      checkSandboxPrerequisites({
+        platform: "linux",
+        bwrapPath: "/definitely/missing/bwrap",
+        systemdRunPath: process.execPath,
+        systemctlPath: process.execPath,
+        cgroupStat: cgroupV2
+      })
+    ).toEqual({ ok: false, code: "sandbox_backend_missing" });
+  });
+
+  it("reports sandbox_cgroup_launcher_missing when systemd-run is absent", () => {
+    expect(
+      checkSandboxPrerequisites({
+        platform: "linux",
+        bwrapPath: process.execPath,
+        systemdRunPath: "/definitely/missing/systemd-run",
+        systemctlPath: process.execPath,
+        cgroupStat: cgroupV2
+      })
+    ).toEqual({ ok: false, code: "sandbox_cgroup_launcher_missing" });
+  });
+
+  it("reports sandbox_cgroup_unavailable without cgroup v2", () => {
+    expect(
+      checkSandboxPrerequisites({
+        platform: "linux",
+        bwrapPath: process.execPath,
+        systemdRunPath: process.execPath,
+        systemctlPath: process.execPath,
+        cgroupStat: cgroupV1
+      })
+    ).toEqual({ ok: false, code: "sandbox_cgroup_unavailable" });
+  });
+
+  it("passes when binaries exist and cgroup v2 is present", () => {
+    expect(
+      checkSandboxPrerequisites({
+        platform: "linux",
+        bwrapPath: process.execPath,
+        systemdRunPath: process.execPath,
+        systemctlPath: process.execPath,
+        cgroupStat: cgroupV2
+      })
+    ).toEqual({ ok: true });
+  });
+});

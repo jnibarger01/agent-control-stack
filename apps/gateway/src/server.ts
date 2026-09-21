@@ -85,6 +85,11 @@ import {
 } from "./auth-lockout.js";
 import { GatewayMetrics } from "./metrics.js";
 import { validateProductionConfig } from "./production-config.js";
+import {
+  evaluateSandboxReadyzCheck,
+  mergeSandboxReadyzCheck,
+  type SandboxReadinessOptions
+} from "./sandbox-readiness.js";
 import { gatewayListenConfig } from "./runtime-config.js";
 import { DeviceAuthStore } from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
@@ -168,6 +173,11 @@ export interface GatewayOptions {
   maxSseClients?: number;
   maxSseClientsPerPrincipal?: number;
   portfolioClient?: PortfolioClient;
+  /**
+   * Optional /readyz sandbox prerequisite probe (bwrap / systemd-run / cgroup v2).
+   * Default off via ACS_READYZ_SANDBOX_PROBE; enable on real-execution hosts only.
+   */
+  sandboxReadiness?: SandboxReadinessOptions;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -334,7 +344,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/livez", async () => ({ ok: true, status: "alive" }));
 
   const readiness = async (_request: FastifyRequest, reply: FastifyReply) => {
-    const initialHealth = workItems.health();
+    const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
+    const initialHealth = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
     const dependencyChecks = Object.entries(initialHealth.checks)
       .filter(([name]) => name !== "liveness")
       .map(([, check]) => check);
@@ -345,14 +356,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       workItems.reconcileStaleTunnelSessions();
       workItems.reconcileStaleAgents();
     } catch {
-      const health = workItems.health();
+      const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
       return reply.code(503).send({
         ...health,
         ok: false,
         checks: { ...health.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
       });
     }
-    const health = workItems.health();
+    const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
     return reply.code(health.ok ? 200 : 503).send(health);
   };
   app.get("/readyz", readiness);

@@ -12,6 +12,7 @@
     { "path": "../../packages/machine-controller" },
     { "path": "../../packages/moa-orchestrator" },
     { "path": "../../packages/policy-gate" },
+    { "path": "../../packages/sandbox" },
     { "path": "../../packages/shared" },
     { "path": "../../packages/work-items" }
   ]
