@@ -582,6 +582,52 @@ function resolveProfile(
   return { executable, args: ["run", script], runtimeRoot };
 }
 
+export type SandboxPrerequisiteCheck = { ok: true } | { ok: false; code: string };
+
+export interface SandboxPrerequisiteOptions {
+  /** Override process.platform (tests). */
+  platform?: NodeJS.Platform;
+  bwrapPath?: string;
+  systemdRunPath?: string;
+  systemctlPath?: string;
+  /** Inject cgroup filesystem stats (tests); defaults to /sys/fs/cgroup. */
+  cgroupStat?: StatsFs | (() => StatsFs);
+}
+
+/**
+ * Synchronous readiness-style probe for Bubblewrap + systemd-run + cgroup v2.
+ * Reuses requireExecutable / verifyCgroupV2. Does not launch scopes or run
+ * --version probes — suitable for optional /readyz checks.
+ */
+export function checkSandboxPrerequisites(options: SandboxPrerequisiteOptions = {}): SandboxPrerequisiteCheck {
+  const platform = options.platform ?? process.platform;
+  if (platform !== "linux") {
+    return { ok: false, code: "sandbox_host_unsupported" };
+  }
+
+  const bwrapPath = options.bwrapPath ?? "/usr/bin/bwrap";
+  const systemdRunPath = options.systemdRunPath ?? "/usr/bin/systemd-run";
+  const systemctlPath = options.systemctlPath ?? "/usr/bin/systemctl";
+
+  try {
+    requireExecutable(bwrapPath, "sandbox_backend_missing");
+    requireExecutable(systemdRunPath, "sandbox_cgroup_launcher_missing");
+    requireExecutable(systemctlPath, "sandbox_cgroup_launcher_missing");
+    const cgroupStat =
+      typeof options.cgroupStat === "function"
+        ? options.cgroupStat()
+        : (options.cgroupStat ?? (statfsSync("/sys/fs/cgroup") as StatsFs));
+    verifyCgroupV2(cgroupStat);
+  } catch (error) {
+    if (error instanceof ControlStackError) {
+      return { ok: false, code: error.code };
+    }
+    return { ok: false, code: "sandbox_cgroup_unavailable" };
+  }
+
+  return { ok: true };
+}
+
 export function requireExecutable(path: string, code: string): void {
   try {
     const stat = lstatSync(path);

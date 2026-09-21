@@ -44,6 +44,20 @@ Confirm before deploy:
 `compose.production.yml` already injects the credential, origin, and OAuth
 variables; prefer that file (or the same env contract) over ad-hoc process env.
 
+## Optional sandbox readiness probe (`/readyz`)
+
+`/readyz` always checks the SQLite control plane. An **optional** sandbox
+prerequisite probe can also verify Bubblewrap, `systemd-run`/`systemctl`, and
+cgroup v2 on the gateway host.
+
+| Setting                      | Behavior                                                                                                                                                                                                                                                                                                                                                 |
+| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| unset / not `1` (default)    | Probe off. Suitable for **dry-run alpha** and hosts that do not run live sandbox backends. Missing `bwrap` does not fail readiness.                                                                                                                                                                                                                      |
+| `ACS_READYZ_SANDBOX_PROBE=1` | Probe on. Enable on **real-execution hosts** that will claim Bubblewrap/systemd work so misconfigured hosts fail `/readyz` (HTTP 503) with a stable `checks.sandbox.code` (`sandbox_backend_missing`, `sandbox_cgroup_launcher_missing`, `sandbox_cgroup_unavailable`, or `sandbox_host_unsupported`) before traffic is routed. `/livez` stays HTTP 200. |
+
+This flag only adds readiness visibility. It does **not** enable live sandbox
+execution or change the worker dry-run boundary.
+
 ## Build and verify
 
 ```sh
@@ -97,7 +111,7 @@ Keep real secrets in the deployment secret store or process environment. Do not 
 
    Gateway host map (what is supported vs Vercel-disabled): [README Deploy](../../README.md#deploy).
 
-`/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain. Route traffic only when readiness is HTTP 200. Authenticated operators can scrape `/metrics` for request latency/status, rate-limit outcomes (`acs_rate_limit_rejected_total`), audit lifecycle events, and SQLite readiness. Metric names, local scrape examples, and the Mission Control operator metrics panel: [operator-metrics.md](./operator-metrics.md).
+`/livez` proves that the process event loop is serving requests. `/readyz` additionally checks SQLite reads/writes, migration checksums, and the audit chain, and optionally sandbox host prerequisites when `ACS_READYZ_SANDBOX_PROBE=1` (see above). Route traffic only when readiness is HTTP 200. Authenticated operators can scrape `/metrics` for request latency/status, rate-limit outcomes (`acs_rate_limit_rejected_total`), audit lifecycle events, and SQLite readiness. Metric names, local scrape examples, and the Mission Control operator metrics panel: [operator-metrics.md](./operator-metrics.md).
 
 ## Shutdown
 
