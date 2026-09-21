@@ -67,6 +67,198 @@ export interface MissionControlViewModel {
   now?: Date;
 }
 
+/** Canonical work-item statuses used by the queue filter chips. Unknown values are ignored (no-op). */
+export const WORK_ITEM_STATUS_VALUES = [
+  "draft",
+  "pending_policy",
+  "needs_approval",
+  "approved",
+  "running",
+  "cancelling",
+  "succeeded",
+  "failed",
+  "blocked",
+  "cancelled",
+  "rejected",
+  "unknown",
+  "quarantined"
+] as const;
+
+const KNOWN_WORK_ITEM_STATUSES: ReadonlySet<string> = new Set(WORK_ITEM_STATUS_VALUES);
+
+export type QueueFilter = {
+  /** Status chips selected by the operator. Unknown entries are ignored when matching. */
+  statuses: string[];
+  /** Optional agent / worker / target id (case-insensitive substring). */
+  agentId: string;
+  /** Free-text match against work-item title and id (case-insensitive substring). */
+  text: string;
+};
+
+export function emptyQueueFilter(): QueueFilter {
+  return { statuses: [], agentId: "", text: "" };
+}
+
+export function isQueueFilterEmpty(filter: QueueFilter): boolean {
+  return filter.statuses.length === 0 && filter.agentId.trim() === "" && filter.text.trim() === "";
+}
+
+/** Derive the agent/target id shown for queue filtering (target first, else latest worker). */
+export function workItemAgentId(
+  item: Pick<WorkItem, "target">,
+  attempts: ExecutionAttempt[] = [],
+  leases: MissionControlAttemptLease[] = []
+): string {
+  const fromTarget = item.target.services?.[0] ?? item.target.repo ?? item.target.cwd;
+  if (fromTarget) return fromTarget;
+  const attempt = attempts.at(-1);
+  const lease = [...leases].reverse().find((candidate) => attempt && candidate.attemptId === attempt.attemptId);
+  return lease?.workerId ?? attempt?.claimedByWorkerId ?? "";
+}
+
+function collectStatusParams(params: URLSearchParams): string[] {
+  const raw = [...params.getAll("status")];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const entry of raw) {
+    for (const part of entry.split(",")) {
+      const status = part.trim();
+      if (!status || seen.has(status)) continue;
+      seen.add(status);
+      out.push(status);
+    }
+  }
+  return out;
+}
+
+function paramsFromLocationLike(
+  source: string | URLSearchParams | { search?: string; hash?: string }
+): URLSearchParams {
+  if (typeof source === "string") {
+    const trimmed = source.trim();
+    if (!trimmed) return new URLSearchParams();
+    if (trimmed.startsWith("?")) return new URLSearchParams(trimmed.slice(1));
+    if (trimmed.startsWith("#")) {
+      const hash = trimmed.slice(1);
+      const query = hash.includes("?")
+        ? hash.slice(hash.indexOf("?") + 1)
+        : hash.includes("=")
+          ? hash.replace(/^[A-Za-z0-9_-]+&/, "")
+          : "";
+      return new URLSearchParams(query);
+    }
+    return new URLSearchParams(trimmed.includes("=") ? trimmed : "");
+  }
+  if (source instanceof URLSearchParams) {
+    return new URLSearchParams(source.toString());
+  }
+  const search = (source.search ?? "").replace(/^\?/, "");
+  if (search) return new URLSearchParams(search);
+  const hash = (source.hash ?? "").replace(/^#/, "");
+  if (!hash) return new URLSearchParams();
+  if (hash.includes("?")) return new URLSearchParams(hash.slice(hash.indexOf("?") + 1));
+  if (hash.includes("=")) return new URLSearchParams(hash.replace(/^[A-Za-z0-9_-]+&/, ""));
+  return new URLSearchParams();
+}
+
+/** Read queue filter from URL search params or hash (e.g. `?status=running&q=foo` or `#queue?status=running`). */
+export function parseQueueFilter(
+  source: string | URLSearchParams | { search?: string; hash?: string } = ""
+): QueueFilter {
+  const params = paramsFromLocationLike(source);
+  return {
+    statuses: collectStatusParams(params),
+    agentId: (params.get("agent") ?? "").trim(),
+    text: (params.get("q") ?? params.get("text") ?? "").trim()
+  };
+}
+
+export function serializeQueueFilter(filter: QueueFilter): URLSearchParams {
+  const params = new URLSearchParams();
+  for (const status of filter.statuses.map((value) => value.trim()).filter(Boolean)) {
+    params.append("status", status);
+  }
+  if (filter.agentId.trim()) params.set("agent", filter.agentId.trim());
+  if (filter.text.trim()) params.set("q", filter.text.trim());
+  return params;
+}
+
+export type QueueFilterableItem = {
+  id: string;
+  title: string;
+  status: string;
+  agentId?: string;
+};
+
+/** Client-side filter over the in-memory / already-rendered queue model. */
+export function filterWorkItems<T extends QueueFilterableItem>(items: T[], filter: QueueFilter): T[] {
+  const knownStatuses = filter.statuses.filter((status) => KNOWN_WORK_ITEM_STATUSES.has(status));
+  // Unknown status chips are a no-op: they do not narrow (and do not error).
+  const text = filter.text.trim().toLowerCase();
+  const agent = filter.agentId.trim().toLowerCase();
+  if (!knownStatuses.length && !text && !agent) return items;
+
+  return items.filter((item) => {
+    if (knownStatuses.length > 0 && !knownStatuses.includes(item.status)) return false;
+    if (text) {
+      const haystack = `${item.title} ${item.id}`.toLowerCase();
+      if (!haystack.includes(text)) return false;
+    }
+    if (agent) {
+      const itemAgent = (item.agentId ?? "").toLowerCase();
+      if (!itemAgent.includes(agent)) return false;
+    }
+    return true;
+  });
+}
+
+export type QueueFilterDomRoot = {
+  querySelector(selectors: string): QueueFilterDomElement | null;
+  querySelectorAll(selectors: string): ArrayLike<QueueFilterDomElement>;
+};
+
+export type QueueFilterDomElement = {
+  hidden?: boolean;
+  textContent?: string | null;
+  getAttribute(name: string): string | null;
+  classList?: { toggle(token: string, force?: boolean): unknown };
+};
+
+/** Hide non-matching queue buttons and announce the visible count via aria-live. */
+export function applyQueueFilterToDom(root: QueueFilterDomRoot, filter: QueueFilter): number {
+  const nodeList = root.querySelectorAll("[data-work-item]");
+  const queueButtons = Array.from({ length: nodeList.length }, (_, index) => nodeList[index]!);
+  let visible = 0;
+  for (const el of queueButtons) {
+    const id = el.getAttribute("data-work-item") ?? "";
+    const title = el.getAttribute("data-title") ?? "";
+    const status = el.getAttribute("data-status") ?? "";
+    const agentId = el.getAttribute("data-agent-id") ?? "";
+    const show = filterWorkItems([{ id, title, status, agentId }], filter).length > 0;
+    if ("hidden" in el) el.hidden = !show;
+    el.classList?.toggle("queue-item-filtered-out", !show);
+    if (show) visible += 1;
+  }
+  const total = queueButtons.length;
+  // Treat "only unknown statuses" as empty for the count label.
+  const effectivelyEmpty =
+    isQueueFilterEmpty(filter) ||
+    (filter.statuses.every((status) => !KNOWN_WORK_ITEM_STATUSES.has(status)) &&
+      filter.agentId.trim() === "" &&
+      filter.text.trim() === "");
+  const count = root.querySelector("#queue-filter-count");
+  if (count) {
+    count.textContent = effectivelyEmpty ? `${total} items` : `${visible} of ${total} items`;
+  }
+  const live = root.querySelector("#queue-filter-live");
+  if (live) {
+    live.textContent = effectivelyEmpty
+      ? `Showing all ${total} work items`
+      : `Showing ${visible} of ${total} work items`;
+  }
+  return visible;
+}
+
 export type SseConnectionRoot = {
   querySelector(selectors: string): SseConnectionElement | null;
   querySelectorAll(selectors: string): ArrayLike<SseConnectionButton>;
@@ -201,7 +393,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <section id="overview" class="cards">${overviewCards(stats)}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span>${model.workItems.length} items</span></div>${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, executionAttemptsByWorkItem, attemptLeasesByWorkItem)}</article>
+        <article id="queue" class="panel queue-panel"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${model.workItems.length} items</span></div>${queueFilterStrip()}${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, executionAttemptsByWorkItem, attemptLeasesByWorkItem)}</article>
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
@@ -385,6 +577,30 @@ function agentDetailPanel(): string {
   </section>`;
 }
 
+function queueFilterStrip(): string {
+  const chips = WORK_ITEM_STATUS_VALUES.map((status) => {
+    const id = `queue-status-${status}`;
+    return `<label class="queue-filter-chip" for="${id}"><input type="checkbox" id="${id}" name="queue-status" value="${escapeHtml(status)}" data-queue-status="${escapeHtml(status)}" /> <span>${escapeHtml(status)}</span></label>`;
+  }).join("");
+  return `<div class="queue-filter" id="queue-filter" role="search" aria-label="Filter work queue">
+  <div class="queue-filter-row">
+    <fieldset class="queue-filter-statuses">
+      <legend>Status</legend>
+      <div class="queue-filter-chips">${chips}</div>
+    </fieldset>
+  </div>
+  <div class="queue-filter-row queue-filter-fields">
+    <label class="queue-filter-field" for="queue-filter-agent">Agent id
+      <input id="queue-filter-agent" name="queue-agent" type="search" autocomplete="off" spellcheck="false" placeholder="agent / worker / target" />
+    </label>
+    <label class="queue-filter-field" for="queue-filter-text">Search title or id
+      <input id="queue-filter-text" name="queue-text" type="search" autocomplete="off" spellcheck="false" placeholder="title or work item id" />
+    </label>
+  </div>
+  <p id="queue-filter-live" class="queue-filter-live" aria-live="polite">Showing all work items</p>
+</div>`;
+}
+
 function workQueue(
   workItems: WorkItem[],
   executionPlansByWorkItem: Record<string, ExecutionPlanRecord>,
@@ -401,7 +617,8 @@ function workQueue(
       const admission = executionPlanAdmissionsByWorkItem[item.id];
       const attempts = executionAttemptsByWorkItem[item.id] ?? [];
       const leases = attemptLeasesByWorkItem[item.id] ?? [];
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
+      const agentId = workItemAgentId(item, attempts, leases);
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
     .join(
       ""
@@ -924,6 +1141,136 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
     '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
 }
 
+function knownQueueStatuses() {
+  return new Set(['draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'cancelling', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected', 'unknown', 'quarantined']);
+}
+
+function readQueueFilterFromDom() {
+  const statuses = [];
+  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
+    if (input.checked) statuses.push(input.getAttribute('data-queue-status') || input.value || '');
+  });
+  const agentInput = document.querySelector('#queue-filter-agent');
+  const textInput = document.querySelector('#queue-filter-text');
+  return {
+    statuses: statuses.filter(Boolean),
+    agentId: agentInput ? String(agentInput.value || '').trim() : '',
+    text: textInput ? String(textInput.value || '').trim() : ''
+  };
+}
+
+function parseQueueFilterFromLocation() {
+  const params = new URLSearchParams(location.search || '');
+  if (![...params.keys()].some(function (key) { return key === 'status' || key === 'q' || key === 'text' || key === 'agent'; })) {
+    const hash = String(location.hash || '').replace(/^#/, '');
+    const query = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1)
+      : hash.includes('=') ? hash.replace(/^[A-Za-z0-9_-]+&/, '')
+      : '';
+    if (query) {
+      const hashParams = new URLSearchParams(query);
+      hashParams.forEach(function (value, key) { params.append(key, value); });
+    }
+  }
+  const statuses = [];
+  params.getAll('status').forEach(function (entry) {
+    String(entry).split(',').forEach(function (part) {
+      const status = part.trim();
+      if (status) statuses.push(status);
+    });
+  });
+  return {
+    statuses: statuses,
+    agentId: String(params.get('agent') || '').trim(),
+    text: String(params.get('q') || params.get('text') || '').trim()
+  };
+}
+
+function writeQueueFilterToLocation(filter) {
+  const url = new URL(location.href);
+  url.searchParams.delete('status');
+  url.searchParams.delete('q');
+  url.searchParams.delete('text');
+  url.searchParams.delete('agent');
+  filter.statuses.forEach(function (status) {
+    if (status) url.searchParams.append('status', status);
+  });
+  if (filter.agentId) url.searchParams.set('agent', filter.agentId);
+  if (filter.text) url.searchParams.set('q', filter.text);
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+
+function syncQueueFilterControls(filter) {
+  const selected = new Set(filter.statuses);
+  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
+    const status = input.getAttribute('data-queue-status') || input.value || '';
+    input.checked = selected.has(status);
+  });
+  const agentInput = document.querySelector('#queue-filter-agent');
+  const textInput = document.querySelector('#queue-filter-text');
+  if (agentInput) agentInput.value = filter.agentId || '';
+  if (textInput) textInput.value = filter.text || '';
+}
+
+function applyQueueFilterClient(filter) {
+  const known = knownQueueStatuses();
+  const knownStatuses = filter.statuses.filter(function (status) { return known.has(status); });
+  const text = String(filter.text || '').trim().toLowerCase();
+  const agent = String(filter.agentId || '').trim().toLowerCase();
+  const buttons = Array.from(document.querySelectorAll('[data-work-item]'));
+  let visible = 0;
+  buttons.forEach(function (el) {
+    const id = el.getAttribute('data-work-item') || '';
+    const title = el.getAttribute('data-title') || '';
+    const status = el.getAttribute('data-status') || '';
+    const agentId = (el.getAttribute('data-agent-id') || '').toLowerCase();
+    let show = true;
+    if (knownStatuses.length && knownStatuses.indexOf(status) === -1) show = false;
+    if (show && text) {
+      const hay = (title + ' ' + id).toLowerCase();
+      if (hay.indexOf(text) === -1) show = false;
+    }
+    if (show && agent && agentId.indexOf(agent) === -1) show = false;
+    el.hidden = !show;
+    el.classList.toggle('queue-item-filtered-out', !show);
+    if (show) visible += 1;
+  });
+  const effectivelyEmpty = !knownStatuses.length && !text && !agent;
+  const count = document.querySelector('#queue-filter-count');
+  if (count) count.textContent = effectivelyEmpty ? (buttons.length + ' items') : (visible + ' of ' + buttons.length + ' items');
+  const live = document.querySelector('#queue-filter-live');
+  if (live) {
+    live.textContent = effectivelyEmpty
+      ? ('Showing all ' + buttons.length + ' work items')
+      : ('Showing ' + visible + ' of ' + buttons.length + ' work items');
+  }
+  return visible;
+}
+
+function bindQueueFilter() {
+  if (!document.querySelector('#queue-filter')) return;
+  const initial = parseQueueFilterFromLocation();
+  syncQueueFilterControls(initial);
+  applyQueueFilterClient(initial);
+  const applyFromDom = function () {
+    const filter = readQueueFilterFromDom();
+    writeQueueFilterToLocation(filter);
+    applyQueueFilterClient(filter);
+  };
+  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
+    input.addEventListener('change', applyFromDom);
+  });
+  const agentInput = document.querySelector('#queue-filter-agent');
+  const textInput = document.querySelector('#queue-filter-text');
+  if (agentInput) agentInput.addEventListener('input', applyFromDom);
+  if (textInput) textInput.addEventListener('input', applyFromDom);
+  window.addEventListener('popstate', function () {
+    const filter = parseQueueFilterFromLocation();
+    syncQueueFilterControls(filter);
+    applyQueueFilterClient(filter);
+  });
+}
+
+bindQueueFilter();
 bindWorkItems();
 bindAgentRows();
 refreshAgentRoster();
@@ -1089,6 +1436,18 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .plan-pending { color: var(--amber); }
 .plan-admitted { color: var(--green); }
 .execution-status { color: #43536a !important; }
+.queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: #fbfcfd; display: grid; gap: 10px; }
+.queue-filter-row { display: grid; gap: 8px; }
+.queue-filter-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.queue-filter-statuses { margin: 0; padding: 0; border: 0; }
+.queue-filter-statuses legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
+.queue-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #ccd6e2; background: #ffffff; border-radius: 999px; padding: 4px 10px; font-size: 12px; color: #344256; cursor: pointer; }
+.queue-filter-chip:has(input:checked) { border-color: #9db7d7; background: #eef4ff; color: var(--accent); }
+.queue-filter-chip input { width: auto; margin: 0; accent-color: var(--accent); }
+.queue-filter-field { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.queue-filter-live { margin: 0; color: var(--muted); font-size: 12px; }
+.queue-item-filtered-out, .queue-item[hidden] { display: none !important; }
 .queue { display: grid; }
 .queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid #edf1f5; padding: 12px 14px; cursor: pointer; }
 .queue-item:hover, .queue-item.selected { background: #f4f8ff; }
@@ -1186,6 +1545,8 @@ output { color: var(--accent); min-height: 20px; }
   .approval-actions button { width: 100%; min-height: 44px; font-size: 15px; }
   .table-wrap { max-height: none; }
   .agent-table th:nth-child(n+5), .agent-table td:nth-child(n+5) { display: none; }
+  .queue-filter-fields { grid-template-columns: 1fr; }
+  .queue-filter-chip { min-height: 44px; }
   .queue-item { padding: 14px 12px; min-height: 44px; }
   .detail-panel { margin: 8px; max-height: none; }
   .live { justify-self: start; }
