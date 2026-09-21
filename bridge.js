@@ -26,15 +26,21 @@ const PORT = parseInt(process.env.BRIDGE_PORT || '8002', 10);
 // can exist on the managed lane.
 const MANAGED = process.env.ACS_MANAGED_MODE === '1';
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
-const DC_ARGS = (process.env.DC_ARGS || '/home/jacen/projects/desktop-commander/dist/index.js').split(' ');
+const DEFAULT_DC_ARGS = MANAGED
+  ? '/home/jacen/projects/desktop-commander/dist/index.js'
+  : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
+const DC_ARGS = (process.env.DC_ARGS || DEFAULT_DC_ARGS).split(' ');
 if (MANAGED && DC_ARGS.includes('--standalone')) {
   console.error('bridge: managed mode refuses a --standalone executor; fix DC_ARGS');
   process.exit(1);
 }
 const DC_CWD = process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || '';
-// ACS capability verification material for the managed child. The child gets
-// PUBLIC verification keys only; the ACS signing key never leaves ACS.
+const GATEWAY_ATTESTATION_KEY = process.env.DC_GATEWAY_ATTESTATION_KEY || '';
+const PIPELINE_ACS_PUBLIC_KEY = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY || '';
+const PIPELINE_ACS_KEY_ID = process.env.DC_ACS_CAPABILITY_KEY_ID || '';
+// ACS capability verification material for the native managed child. The child
+// gets PUBLIC verification keys only; the ACS signing key never leaves ACS.
 const ACS_DC_PUBLIC_KEY = process.env.ACS_DC_PUBLIC_KEY || '';
 const ACS_DC_KEY_ID = process.env.ACS_DC_KEY_ID || '';
 const ACS_DC_SCOPES = process.env.ACS_DC_RUNTIME_SCOPES || 'fs.read,fs.write,process.exec,process.spawn';
@@ -44,7 +50,15 @@ const CHILD_ENV = {
   LANG: process.env.LANG || 'C.UTF-8',
   TMPDIR: process.env.TMPDIR || '/tmp',
   NODE_ENV: process.env.NODE_ENV || 'production',
+  ...(GATEWAY_ATTESTATION_KEY ? { DC_GATEWAY_ATTESTATION_KEY: GATEWAY_ATTESTATION_KEY } : {}),
+  ...(PIPELINE_ACS_PUBLIC_KEY
+    ? {
+        DC_ACS_CAPABILITY_PUBLIC_KEY: PIPELINE_ACS_PUBLIC_KEY,
+        ...(PIPELINE_ACS_KEY_ID ? { DC_ACS_CAPABILITY_KEY_ID: PIPELINE_ACS_KEY_ID } : {}),
+      }
+    : {}),
   ...(process.env.DESKTOP_COMMANDER_STATE_DIR ? { DESKTOP_COMMANDER_STATE_DIR: process.env.DESKTOP_COMMANDER_STATE_DIR } : {}),
+  ...(process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR ? { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR } : {}),
   ...(MANAGED && ACS_DC_PUBLIC_KEY && ACS_DC_KEY_ID
     ? {
         DESKTOP_COMMANDER_ACS_PUBLIC_KEY: ACS_DC_PUBLIC_KEY,

@@ -68,11 +68,14 @@ export function dcRuntimeIdentityFromState(env = process.env) {
   try {
     const stateDir = env.DESKTOP_COMMANDER_STATE_DIR || path.join(os.homedir(), '.desktop-commander');
     const identity = JSON.parse(fs.readFileSync(path.join(stateDir, 'runtime-identity.json'), 'utf8'));
-    if (typeof identity.runtime_id !== 'string' || !identity.runtime_id) return null;
+    // The persisted file uses camelCase (runtimeId); accept the snake_case
+    // RuntimeIdentityState projection as well.
+    const runtimeId = typeof identity.runtimeId === 'string' ? identity.runtimeId : identity.runtime_id;
+    if (typeof runtimeId !== 'string' || !runtimeId) return null;
     const entrypoint = env.ACS_DC_ENTRYPOINT || '/home/jacen/projects/desktop-commander/dist/index.js';
     const identityConfigFingerprint = crypto.createHash('sha256').update(fs.readFileSync(entrypoint)).digest('hex');
     return {
-      runtimeId: identity.runtime_id,
+      runtimeId,
       identityConfigFingerprint,
       scopes: sortedScopes(env.ACS_DC_RUNTIME_SCOPES),
     };
@@ -198,8 +201,11 @@ export function capabilityTransport(managed, { identity, requestId }) {
   return async function rewriteForAcs(parsed) {
     const params = parsed && typeof parsed === 'object' ? parsed.params : undefined;
     const toolName = params && typeof params.name === 'string' ? params.name : null;
-    if (!toolName || !params || typeof params !== 'object' || typeof parsed.method !== 'string' || !parsed.method.startsWith('tools/')) {
-      throw Object.assign(new Error('managed mode requires a tools/ call'), { acsCode: 'managed_not_a_tool_call' });
+    if (
+      !toolName || !params || typeof params !== 'object' ||
+      typeof parsed.method !== 'string' || parsed.method !== 'tools/call'
+    ) {
+      throw Object.assign(new Error('managed mode requires a tools/call'), { acsCode: 'managed_not_a_tool_call' });
     }
     // Anti-spoof: drop every client-supplied ACS authority field.
     const clientMeta = typeof params._meta === 'object' && params._meta !== null ? params._meta : {};
