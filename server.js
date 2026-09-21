@@ -39,6 +39,7 @@ const MAX_BODY = 2 * 1024 * 1024; // 2 MB
 for (const [k, v] of Object.entries({ PUBLIC_ORIGIN, CONSENT_PASSPHRASE, SIGNING_KEY })) {
   if (!v) { console.error(`gateway: missing required env ${k}; refusing to start`); process.exit(1); }
 }
+const NATIVE_RUNTIME_BOOTSTRAP = process.env.ACS_NATIVE_RUNTIME_BOOTSTRAP === '1';
 let MANAGED = { enabled: false };
 try {
   MANAGED = managedModeFromEnv();
@@ -462,7 +463,7 @@ const server = http.createServer(async (req, res) => {
             log(req.method, '/mcp', 503, `managed fail-closed: ${code}`);
             return send(res, 503, { error: 'managed_authorization_unavailable', code });
           }
-        } else if (parsed && parsed.method === 'initialize') {
+        } else if (parsed && parsed.method === 'initialize' && NATIVE_RUNTIME_BOOTSTRAP) {
           // Managed initialize: fetch an ACS runtime bootstrap challenge and
           // transport it to the child in _meta.acsRuntimeBootstrap. The child
           // structurally validates it during initialize; the challenge is then

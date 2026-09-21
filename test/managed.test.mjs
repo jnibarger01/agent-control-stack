@@ -20,6 +20,7 @@ import http from 'node:http';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { recycleDecision } from '../recycle-policy.js';
+import { isToolsCall } from '../managed.js';
 
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const now = () => Math.floor(Date.now() / 1000);
@@ -255,6 +256,11 @@ test('managed mode injects a FRESH capability per call (no replay/cache path)', 
   } finally {
     child.kill('SIGKILL'); acs.close(); upstream.close();
   }
+});
+
+test('managed authorization applies only to tools/call, not discovery methods', () => {
+  assert.equal(isToolsCall(Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'get_config', arguments: {} } }))).isCall, true);
+  assert.equal(isToolsCall(Buffer.from(JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }))).isCall, false);
 });
 
 test('lease-safe recycling: defer while a tools/call is in flight, refuse when the wait expires', () => {
