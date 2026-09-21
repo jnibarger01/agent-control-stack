@@ -18,7 +18,7 @@ pass.
 - `ACS_MCP_ALLOWED_ORIGINS` containing the explicit browser origins permitted to call MCP; non-browser clients without an `Origin` header remain supported.
 - Optional `ACS_MCP_TOOL_ALLOWLIST_JSON` mapping each MCP identity to allowed tool names. When set, unknown identities are default-denied in production.
 - `ACS_MAX_PENDING_WORK_ITEMS` set to an operationally safe queue ceiling.
-- Rate-limit / auth defaults and local-vs-deployed knobs: [gateway-abuse-controls.md](./gateway-abuse-controls.md).
+- Rate-limit / auth / JSON body-limit defaults and local-vs-deployed knobs: [gateway-abuse-controls.md](./gateway-abuse-controls.md).
 - `ACS_MAX_SSE_CLIENTS` set to the number of dashboard/event subscribers the host can hold concurrently; each stream pins a socket for its lifetime.
 - `ACS_MAX_SSE_CLIENTS_PER_PRINCIPAL` set below `ACS_MAX_SSE_CLIENTS`, so one credential cannot consume every slot and lock other operators out of the live audit channel during an incident. The gateway clamps it to one below the global cap if the two are set inconsistently, and logs a warning when it does.
 - A versioned image tag and a recorded previous image tag.

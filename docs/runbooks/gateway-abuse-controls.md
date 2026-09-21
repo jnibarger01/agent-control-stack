@@ -1,8 +1,9 @@
 # Gateway abuse controls (rate limit + intake ceilings)
 
-Default auth and rate-limit knobs that keep one client from unbounded-writing
-work items over HTTP or MCP. Pair with [local-dev.md](./local-dev.md) for
-loopback setup and [production.md](./production.md) for remote binding.
+Default auth, rate-limit, and JSON body-size knobs that keep one client from
+unbounded-writing work items over HTTP or MCP. Pair with
+[local-dev.md](./local-dev.md) for loopback setup and
+[production.md](./production.md) for remote binding.
 
 ## What is bounded by default
 
@@ -10,10 +11,12 @@ loopback setup and [production.md](./production.md) for remote binding.
 | -------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------- |
 | Per-principal request rate | 120 requests / 60s                     | Sliding window on mutation, MCP, session login, and webhook routes.                                   |
 | Pending work-item ceiling  | 1000                                   | Rejects new intake when draft/pending_policy/needs_approval/approved/running count is at the ceiling. |
+| Default JSON body limit    | 256 KiB                                | Global Fastify `bodyLimit` on the gateway; oversize bodies return `413 body_too_large`.               |
 | Auth                       | Local bearer / credentials (see below) | Mutations and protected MCP tools require a configured principal.                                     |
 
 A burst from one principal therefore hits either `429 rate_limited` or
-`429 work_queue_full` instead of growing the queue without bound.
+`429 work_queue_full` instead of growing the queue without bound. Oversize JSON
+payloads are rejected with `413 body_too_large` before work-item storage writes.
 
 ## Principal key (rate limit)
 
@@ -37,6 +40,25 @@ HTTP and MCP rate-limit replies also set `Retry-After` and
 `x-ratelimit-remaining`. Rejected rate limits increment
 `acs_rate_limit_rejected_total{method,route}` on `/metrics` (alongside the
 usual `acs_http_requests_total` status series).
+
+## JSON body size limit
+
+The gateway sets a global Fastify `bodyLimit` of **256 KiB**. Oversize bodies
+are rejected with HTTP 413 and a stable ACS error code:
+
+```json
+{ "error": "request body is too large", "code": "body_too_large" }
+```
+
+### Route overrides (explicit limits)
+
+| Route                            | Limit                                                            | Why                                                                 |
+| -------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------- |
+| `POST /work-items/:id/results`   | 256 KiB (`MAX_RESULT_BODY_BYTES`)                                | Worker result payloads; explicit route limit (matches the default). |
+| `POST /v1/responses` (inference) | 16 MiB default (up to 64 MiB via `ACS_INFERENCE_MAX_BODY_BYTES`) | OpenAI-compatible proxy; raised only when inference is enabled.     |
+
+Do not raise the global default to accommodate a single route—set a per-route
+`bodyLimit` instead.
 
 ## Environment knobs
 
@@ -97,6 +119,7 @@ GET health/metrics/read routes are not rate-limited by this hook.
 
 ```sh
 npx vitest run apps/gateway/src/server.test.ts -t 'gateway abuse controls'
+npx vitest run apps/gateway/src/result-submission.test.ts -t 'HTTP request body limit'
 ```
 
 ## See also
