@@ -105,7 +105,7 @@ describe("gateway process lifecycle", () => {
     const controller = new ShutdownController();
     const onDrainStart = vi.fn();
     const onDrainFinish = vi.fn();
-    let activeLeases = 1;
+    const activeLeases = 1;
     let now = 0;
 
     installGracefulShutdown({ close, log } as never, {
