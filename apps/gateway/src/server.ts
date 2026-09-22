@@ -1823,11 +1823,7 @@ function parseDcArgsSummary(argsSummary: string): Record<string, unknown> {
   return parsed as Record<string, unknown>;
 }
 
-function dcApprovalSummary(
-  toolName: string,
-  args: Record<string, unknown>,
-  invocationHash: string
-): string {
+function dcApprovalSummary(toolName: string, args: Record<string, unknown>, invocationHash: string): string {
   const paths = ["path", "file_path", "source", "destination", "cwd"]
     .map((key) => (typeof args[key] === "string" ? `${key}=${String(args[key])}` : undefined))
     .filter((value): value is string => Boolean(value));
