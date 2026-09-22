@@ -34,7 +34,7 @@ export interface DesktopCommanderToolPolicy {
 }
 
 const MAX_PATH_LEN = 4096;
-const MAX_TEXT_LEN = 1_000_000;
+const MAX_TEXT_LEN = 100_000;
 const MAX_SMALL_TEXT_LEN = 8_192;
 
 const pathString = z
@@ -319,10 +319,10 @@ const policies: readonly DesktopCommanderToolPolicy[] = [
   },
   {
     name: "move_file",
-    riskClass: "destructive",
+    riskClass: "requires_approval",
     mutating: true,
     network: false,
-    destructive: true,
+    destructive: false,
     requiresApproval: true,
     argsSchema: moveFileArgs,
     pathArgs: ["source", "destination"],
