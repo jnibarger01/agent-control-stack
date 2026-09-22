@@ -853,6 +853,10 @@ function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Recor
   return `<div class="approvals-list" role="list">${items
     .map((item) => {
       const actions = item.requestedActions.map((action) => action.kind).join(", ") || "none";
+      const approvalSummary =
+        typeof item.requestedActions[0]?.params?.approvalSummary === "string"
+          ? item.requestedActions[0].params.approvalSummary
+          : undefined;
       const error = workItemResultError(item);
       const reasonId = `reason-${escapeHtml(item.id)}`;
       const resultId = `approval-result-${escapeHtml(item.id)}`;
@@ -862,7 +866,7 @@ function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Recor
       if (item.status === "blocked") {
         return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requester)} · Actions: ${escapeHtml(actions)}</small>${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+      return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(approvalSummary)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
 }
@@ -1642,22 +1646,7 @@ const viewAliases = {
   system: 'system',
   dispatch: 'overview'
 };
-function showView(name) {
-  const view = viewAliases[name] || 'overview';
-  document.body.dataset.activeView = view;
-  document.querySelectorAll('nav a[data-nav]').forEach((link) => {
-    link.classList.toggle('active', link.dataset.nav === view);
-  });
-}
-document.querySelector('aside nav')?.addEventListener('click', (event) => {
-  const link = event.target.closest('a[data-nav]');
-  if (!link) return;
-  event.preventDefault();
-  showView(link.dataset.nav);
-  const href = link.getAttribute('href') || '#overview';
-  history.replaceState(null, '', href);
-});
-showView((location.hash || '#overview').replace('#', ''));
+let systemProbeLoaded = false;
 async function probePath(path) {
   const started = performance.now();
   try {
@@ -1667,23 +1656,40 @@ async function probePath(path) {
     return { path, status: 0, ms: Math.round(performance.now() - started) };
   }
 }
-const probeRoot = document.querySelector('#system-probes');
-if (probeRoot) {
-  Promise.all(['/livez', '/readyz', '/health'].map(probePath)).then((rows) => {
-    probeRoot.replaceChildren();
-    const list = document.createElement('dl');
-    for (const row of rows) {
-      const item = document.createElement('div');
-      const term = document.createElement('dt');
-      const value = document.createElement('dd');
-      term.textContent = row.path;
-      value.textContent = (row.status || 'down') + ' · ' + row.ms + 'ms';
-      item.append(term, value);
-      list.append(item);
-    }
-    probeRoot.append(list);
+async function loadSystemProbe() {
+  if (systemProbeLoaded) return;
+  const probeRoot = document.querySelector('#system-probes');
+  if (!probeRoot) return;
+  systemProbeLoaded = true;
+  const row = await probePath('/readyz');
+  probeRoot.replaceChildren();
+  const list = document.createElement('dl');
+  const item = document.createElement('div');
+  const term = document.createElement('dt');
+  const value = document.createElement('dd');
+  term.textContent = row.path;
+  value.textContent = (row.status || 'down') + ' · ' + row.ms + 'ms';
+  item.append(term, value);
+  list.append(item);
+  probeRoot.append(list);
+}
+function showView(name) {
+  const view = viewAliases[name] || 'overview';
+  document.body.dataset.activeView = view;
+  document.querySelectorAll('nav a[data-nav]').forEach((link) => {
+    link.classList.toggle('active', link.dataset.nav === view);
   });
-}`;
+  if (view === 'system') void loadSystemProbe();
+}
+document.querySelector('aside nav')?.addEventListener('click', (event) => {
+  const link = event.target.closest('a[data-nav]');
+  if (!link) return;
+  event.preventDefault();
+  showView(link.dataset.nav);
+  const href = link.getAttribute('href') || '#overview';
+  history.replaceState(null, '', href);
+});
+showView((location.hash || '#overview').replace('#', ''));`;
 }
 
 function pill(value: string): string {
