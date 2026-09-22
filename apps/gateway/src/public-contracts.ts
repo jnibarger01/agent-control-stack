@@ -139,18 +139,36 @@ export const dcCapabilityIssueSchema = z
   })
   .strict();
 
+const dcRuntimeIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
+const dcRuntimeChallengeSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
+const dcRuntimeScopesSchema = z
+  .array(z.enum(["fs.read", "fs.write", "process.exec", "process.spawn", "network.read", "network.write"]))
+  .min(1)
+  .max(6);
+
 /** Managed-runtime bootstrap request: an ACS-issued identity challenge. */
 export const dcRuntimeBootstrapSchema = z
   .object({
-    runtimeId: z.string().min(1).max(128),
+    runtimeId: dcRuntimeIdSchema,
     identityConfigFingerprint: z.string().regex(/^[a-f0-9]{64}$/u),
-    scopes: z.array(z.enum(["fs.read", "fs.write", "process.exec", "process.spawn", "network.read", "network.write"]))
+    scopes: dcRuntimeScopesSchema
+  })
+  .strict();
+
+/** Exact identity proof echoed by the managed DC child in initialize result metadata. */
+export const dcRuntimeIdentityProofSchema = z
+  .object({
+    schemaVersion: z.literal(1),
+    runtimeId: dcRuntimeIdSchema,
+    challenge: dcRuntimeChallengeSchema,
+    scopes: dcRuntimeScopesSchema
   })
   .strict();
 
 export const dcRuntimeBootstrapCompleteSchema = dcRuntimeBootstrapSchema
   .extend({
-    challenge: z.string().min(1).max(128)
+    challenge: dcRuntimeChallengeSchema,
+    runtimeIdentity: dcRuntimeIdentityProofSchema
   })
   .strict();
 
