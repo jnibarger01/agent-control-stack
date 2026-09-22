@@ -1045,12 +1045,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return;
       }
       if (workerId !== DC_BRIDGE_WORKER_ID) {
-        return reply
-          .code(403)
-          .send({
-            error: "dedicated Desktop Commander bridge identity is required",
-            code: "dc_bridge_identity_required"
-          });
+        return reply.code(403).send({
+          error: "dedicated Desktop Commander bridge identity is required",
+          code: "dc_bridge_identity_required"
+        });
       }
       const dcActor = firstHeader(request.headers["x-dc-actor"]);
       if (!dcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(dcActor)) {
@@ -1327,8 +1325,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           );
         }
       } catch (error) {
-        const code =
-          error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
+        const code = error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
         try {
           recordLeaseAuthorizedExecutionEvent(
             authorization,
@@ -1389,12 +1386,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return;
       }
       if (workerId !== DC_BRIDGE_WORKER_ID) {
-        return reply
-          .code(403)
-          .send({
-            error: "dedicated Desktop Commander bridge identity is required",
-            code: "dc_bridge_identity_required"
-          });
+        return reply.code(403).send({
+          error: "dedicated Desktop Commander bridge identity is required",
+          code: "dc_bridge_identity_required"
+        });
       }
       const body = dcRuntimeBootstrapSchema.parse(requestObject(request.body));
       const challenge = capabilityIssuanceRegistry.issueBootstrap(
@@ -1423,12 +1418,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return;
       }
       if (workerId !== DC_BRIDGE_WORKER_ID) {
-        return reply
-          .code(403)
-          .send({
-            error: "dedicated Desktop Commander bridge identity is required",
-            code: "dc_bridge_identity_required"
-          });
+        return reply.code(403).send({
+          error: "dedicated Desktop Commander bridge identity is required",
+          code: "dc_bridge_identity_required"
+        });
       }
       const body = dcRuntimeBootstrapCompleteSchema.parse(requestObject(request.body));
       const proof = body.runtimeIdentity;
@@ -1815,9 +1808,7 @@ function containmentRootForPaths(containment: ContainmentConfig, paths: readonly
   if (paths.length === 0) {
     return containment.allowedRoots[0];
   }
-  return containment.allowedRoots.find((root) =>
-    paths.every((path) => path === root || path.startsWith(`${root}/`))
-  );
+  return containment.allowedRoots.find((root) => paths.every((path) => path === root || path.startsWith(`${root}/`)));
 }
 
 function dcWorkItemActionKind(
