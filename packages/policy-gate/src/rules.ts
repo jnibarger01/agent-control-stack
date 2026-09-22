@@ -92,9 +92,14 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     return risk("read_only", "git inspection is allowed", ["allow:git-read"], { maxRuntimeMs: 30_000 });
   }
   if (isPackageLifecycleCommand(command)) {
-    return risk("requires_approval", "package lifecycle scripts can execute arbitrary code", ["approval:package-script"], {
-      maxRuntimeMs: 120_000
-    });
+    return risk(
+      "requires_approval",
+      "package lifecycle scripts can execute arbitrary code",
+      ["approval:package-script"],
+      {
+        maxRuntimeMs: 120_000
+      }
+    );
   }
   if (isReadOnlyInsideCwd(context)) {
     return risk("read_only", "read-only repo inspection is allowed", ["allow:read-only"], {

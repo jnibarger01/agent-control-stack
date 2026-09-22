@@ -6,7 +6,11 @@ import {
   type ClaimedWorkItem,
   type WorkItem
 } from "@agent-control-stack/work-items";
-import { reconstructDesktopCommanderInvocation, desktopCommanderInvocationFingerprint } from "./arguments.js";
+import {
+  reconstructDesktopCommanderInvocation,
+  desktopCommanderInvocationFingerprint,
+  type NormalizedInvocation
+} from "./arguments.js";
 import type { ContainmentConfig } from "./containment.js";
 import type { DesktopCommanderRiskClass } from "./tool-policy.js";
 
@@ -43,6 +47,13 @@ export interface ExecutionAuthorization {
   readonly risk: DesktopCommanderRiskClass;
   readonly requiresApproval: boolean;
   readonly approvalId?: string;
+  /**
+   * The approval-bound action fingerprint (execution_plan_approvals.action_hash)
+   * when this authorization rides a consumed approval. Capability issuance
+   * binds this value into the payload so the durable issuance gate can
+   * re-derive the approval binding; absent means bind authorization.actionHash.
+   */
+  readonly approvalActionHash?: string;
   readonly policyVersion: string;
   readonly policyDecisionHash: string;
   readonly authorizedAt: string;
@@ -58,6 +69,11 @@ export interface AuthorizeExecutionInput {
   workerId: string;
   containment: ContainmentConfig;
   requestId: string;
+  /**
+   * Prevalidated current request. Capability issuance supplies this so raw
+   * arguments never need to be persisted in the work item.
+   */
+  invocation?: NormalizedInvocation;
   now?: Date;
 }
 
@@ -126,9 +142,23 @@ export function authorizeDesktopCommanderExecution(input: AuthorizeExecutionInpu
     throw new ControlStackError("desktop_commander_plan_hash_mismatch", "lease plan hash does not match the claim");
   }
 
-  // --- Phases 3-5: reconstruct + validate the exact tool call ----------------
-  const invocation = reconstructDesktopCommanderInvocation(trustedWorkItem, input.containment);
+  // --- Phases 3-5: reconstruct or consume a prevalidated exact tool call ------
+  const invocation = input.invocation ?? reconstructDesktopCommanderInvocation(trustedWorkItem, input.containment);
   const invocationFingerprint = desktopCommanderInvocationFingerprint(invocation);
+  if (input.invocation) {
+    const actions = trustedWorkItem.requestedActions ?? [];
+    const params = (actions[0]?.params ?? {}) as Record<string, unknown>;
+    if (
+      actions.length !== 1 ||
+      params.tool !== invocation.toolName ||
+      params.invocationHash !== invocationFingerprint
+    ) {
+      throw new ControlStackError(
+        "desktop_commander_invocation_binding_mismatch",
+        "prevalidated invocation does not match the trusted work-item binding"
+      );
+    }
+  }
 
   // --- Phase 7: approval must have been granted for a requires-approval tool --
   if (invocation.policy.requiresApproval && lease.approvalId === undefined) {
