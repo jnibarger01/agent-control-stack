@@ -1047,7 +1047,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (workerId !== DC_BRIDGE_WORKER_ID) {
         return reply
           .code(403)
-          .send({ error: "dedicated Desktop Commander bridge identity is required", code: "dc_bridge_identity_required" });
+          .send({
+            error: "dedicated Desktop Commander bridge identity is required",
+            code: "dc_bridge_identity_required"
+          });
       }
       const dcActor = firstHeader(request.headers["x-dc-actor"]);
       if (!dcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(dcActor)) {
@@ -1388,7 +1391,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (workerId !== DC_BRIDGE_WORKER_ID) {
         return reply
           .code(403)
-          .send({ error: "dedicated Desktop Commander bridge identity is required", code: "dc_bridge_identity_required" });
+          .send({
+            error: "dedicated Desktop Commander bridge identity is required",
+            code: "dc_bridge_identity_required"
+          });
       }
       const body = dcRuntimeBootstrapSchema.parse(requestObject(request.body));
       const challenge = capabilityIssuanceRegistry.issueBootstrap(
@@ -1419,7 +1425,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (workerId !== DC_BRIDGE_WORKER_ID) {
         return reply
           .code(403)
-          .send({ error: "dedicated Desktop Commander bridge identity is required", code: "dc_bridge_identity_required" });
+          .send({
+            error: "dedicated Desktop Commander bridge identity is required",
+            code: "dc_bridge_identity_required"
+          });
       }
       const body = dcRuntimeBootstrapCompleteSchema.parse(requestObject(request.body));
       const proof = body.runtimeIdentity;
@@ -1821,6 +1830,57 @@ function dcWorkItemActionKind(
   if (policy.name === "move_file") return "fs.move";
   if (policy.mutating) return "fs.write";
   return "fs.read";
+}
+
+/** Signing material plus the durable-issuance runtime identity binding. */
+type DcCapabilitySigningConfig = CapabilitySigningConfig & {
+  identityConfigFingerprint: string;
+  runtimeScopes: readonly string[];
+};
+
+function resolveCapabilitySigningConfig(
+  override: GatewayOptions["desktopCommanderCapability"],
+  dbPath: string
+): DcCapabilitySigningConfig | undefined {
+  if (override) {
+    if (!override.identityConfigFingerprint || !override.runtimeScopes) return undefined;
+    return {
+      runtimeId: override.runtimeId,
+      keyId: override.keyId,
+      privateKey: override.privateKey,
+      ttlMs: override.ttlMs ?? 29_000,
+      identityConfigFingerprint: override.identityConfigFingerprint,
+      runtimeScopes: override.runtimeScopes
+    };
+  }
+  try {
+    const config = desktopCommanderAdapterConfigFromEnv(process.env, dbPath);
+    return config?.capability
+      ? {
+          runtimeId: config.capability.runtimeId,
+          keyId: config.capability.keyId,
+          privateKey: config.capability.privateKey,
+          ttlMs: 29_000,
+          identityConfigFingerprint: config.capability.runtimeIdentityConfigFingerprint,
+          runtimeScopes: config.capability.runtimeScopes
+        }
+      : undefined;
+  } catch {
+    // Partially/incorrectly configured Desktop Commander capability env must
+    // not crash gateway startup; the endpoint fails closed with 503 instead.
+    return undefined;
+  }
+}
+
+function resolveDcContainment(override: ContainmentConfig | undefined): ContainmentConfig | undefined {
+  if (override) return override;
+  try {
+    return desktopCommanderContainmentFromEnv();
+  } catch {
+    // Fail closed at request time: without containment roots the gateway
+    // cannot run the Phase 6-8 re-authorization, so no capability is issued.
+    return undefined;
+  }
 }
 
 function requireApprovalActionHash(input: Record<string, unknown>): void {
