@@ -1038,7 +1038,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // the exact current tool arguments, which are validated and canonicalized in
   // memory before ACS creates policy, approval, attempt, or lease state. Raw
   // arguments are never persisted in work-item or audit-visible fields.
-  app.post("/dc/capability/issue", async (request, reply) => {
+  app.post(
+    "/dc/capability/issue",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     try {
       const workerId = requireWorkerIdentity(request, reply, auth);
       if (!workerId) {
@@ -1374,12 +1377,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     } catch (error) {
       return sendError(reply, error);
     }
-  });
+  );
 
   // Managed-runtime bootstrap: only the dedicated bridge can issue or
   // complete a challenge. Completion must include the exact identity metadata
   // echoed by the managed Desktop Commander child during MCP initialize.
-  app.post("/dc/runtime/bootstrap", async (request, reply) => {
+  app.post(
+    "/dc/runtime/bootstrap",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     try {
       const workerId = requireWorkerIdentity(request, reply, auth);
       if (!workerId) {
@@ -1409,9 +1415,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     } catch (error) {
       return sendError(reply, error);
     }
-  });
+  );
 
-  app.post("/dc/runtime/bootstrap/complete", async (request, reply) => {
+  app.post(
+    "/dc/runtime/bootstrap/complete",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     try {
       const workerId = requireWorkerIdentity(request, reply, auth);
       if (!workerId) {
@@ -1449,7 +1458,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     } catch (error) {
       return sendError(reply, error);
     }
-  });
+  );
 
   app.post<{ Params: { id: string } }>("/work-items/:id/approve", async (request, reply) => {
     try {
