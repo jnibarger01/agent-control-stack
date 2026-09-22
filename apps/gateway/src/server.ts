@@ -1042,341 +1042,341 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     "/dc/capability/issue",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
-    try {
-      const workerId = requireWorkerIdentity(request, reply, auth);
-      if (!workerId) {
-        return;
-      }
-      if (workerId !== DC_BRIDGE_WORKER_ID) {
-        return reply.code(403).send({
-          error: "dedicated Desktop Commander bridge identity is required",
-          code: "dc_bridge_identity_required"
-        });
-      }
-      const dcActor = firstHeader(request.headers["x-dc-actor"]);
-      if (!dcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(dcActor)) {
-        return reply.code(400).send({ error: "x-dc-actor header is required", code: "dc_actor_invalid" });
-      }
-      const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
-      if (!capabilitySigningConfig || !dcContainment) {
-        return reply
-          .code(503)
-          .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
-      }
       try {
-        validateCapabilitySigningConfig(capabilitySigningConfig);
-      } catch {
-        return reply
-          .code(503)
-          .send({ error: "capability signing key is invalid", code: "capability_signing_key_invalid" });
-      }
-
-      const dcPolicy = desktopCommanderToolPolicy(body.tool);
-      if (!dcPolicy) {
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
-        return reply.code(403).send({ decision: "deny", reason: "unknown_tool" });
-      }
-
-      let requestArguments: Record<string, unknown>;
-      let invocation;
-      try {
-        requestArguments = parseDcArgsSummary(body.argsSummary);
-        invocation = normalizeInvocation(body.tool, requestArguments, dcContainment);
-      } catch (error) {
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
-        return reply.code(400).send({
-          decision: "deny",
-          reason: "invalid_arguments",
-          code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid"
-        });
-      }
-
-      if (strictCanonicalJsonV1(invocation.validatedArguments) !== strictCanonicalJsonV1(requestArguments)) {
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
-        return reply.code(400).send({
-          decision: "deny",
-          reason: "invalid_arguments",
-          code: "desktop_commander_argument_invalid",
-          detail: "resend the exact canonical arguments returned by the managed bridge normalizer"
-        });
-      }
-
-      if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
-        return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
-      }
-
-      const invocationHash = desktopCommanderInvocationFingerprint(invocation);
-      const requiredScopes = desktopCommanderRequiredScopes(body.tool);
-      const targetCwd =
-        typeof invocation.validatedArguments.cwd === "string"
-          ? invocation.validatedArguments.cwd
-          : (containmentRootForPaths(dcContainment, invocation.canonicalPaths) ?? process.cwd());
-      const policyPaths = invocation.canonicalPaths.length > 0 ? invocation.canonicalPaths : [targetCwd];
-      const riskByClass: Record<typeof dcPolicy.riskClass, "low" | "medium" | "high" | "critical"> = {
-        read_only: "low",
-        safe_mutation: "medium",
-        requires_approval: "high",
-        destructive: "critical"
-      };
-      const bindingHash = stableHash({
-        tool: body.tool,
-        invocationHash,
-        runtimeId: capabilitySigningConfig.runtimeId,
-        identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
-        requiredScopes,
-        requesterSubject: dcActor
-      });
-
-      const existing = workItems
-        .list()
-        .filter((candidate) => {
-          const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
-          return (
-            candidate.requesterSubject === dcActor &&
-            params?.tool === body.tool &&
-            params?.bindingHash === bindingHash &&
-            ["needs_approval", "approved"].includes(candidate.status)
-          );
-        })
-        .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-
-      const workItem =
-        existing ??
-        tools.create_work_item(
-          createWorkItemSchema.parse({
-            title: `Desktop Commander capability: ${body.tool}`,
-            intent: `ACS-issued capability for Desktop Commander tool ${body.tool} requested by ${dcActor}`,
-            requester: "agent",
-            requesterSubject: dcActor,
-            target: {
-              cwd: targetCwd,
-              files: policyPaths
-            },
-            requestedActions: [
-              {
-                kind: dcWorkItemActionKind(dcPolicy),
-                description: `Desktop Commander tool ${body.tool}`,
-                params: {
-                  tool: body.tool,
-                  invocationHash,
-                  bindingHash,
-                  runtimeId: capabilitySigningConfig.runtimeId,
-                  identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
-                  requiredScopes,
-                  requesterSubject: dcActor,
-                  write: dcPolicy.mutating,
-                  network: dcPolicy.network,
-                  destructive: dcPolicy.destructive,
-                  cwd: targetCwd,
-                  paths: policyPaths
-                }
-              }
-            ],
-            risk: riskByClass[dcPolicy.riskClass],
-            ...(body.correlationId ? { metadata: { correlationId: body.correlationId } } : {})
-          })
-        );
-
-      const evaluations = policy.evaluateWorkItem(workItem, workerId, "approve");
-      const required = evaluations.filter((evaluation) => evaluation.decision.decision === "require_approval");
-      const actionHash = required[0]?.actionHash ?? executionActionHash(workItem);
-
-      if (workItem.status === "blocked") {
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-        return reply.code(403).send({
-          decision: "deny",
-          reason: "policy_denied",
-          workItemId: workItem.id,
-          detail: policy.summarize(evaluations).reason
-        });
-      }
-      if (workItem.status !== "approved" || (dcPolicy.requiresApproval && required.length === 0)) {
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-        return reply.code(409).send({
-          decision: "require_approval",
-          workItemId: workItem.id,
-          actionHash,
-          approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
-        });
-      }
-
-      const claimed = tools.claim_approved_work_item_by_id({
-        id: workItem.id,
-        workerId,
-        leaseMs: DC_BRIDGE_LEASE_MS
-      });
-      if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-        return reply.code(409).send({
-          decision: "require_approval",
-          workItemId: workItem.id,
-          actionHash,
-          approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
-        });
-      }
-
-      const trustedWorkItem = workItems.get(workItem.id);
-      const lease = trustedWorkItem ? workItems.getActiveLeaseForAttempt(claimed.attemptId) : undefined;
-      if (!trustedWorkItem || !lease) {
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-        return reply
-          .code(503)
-          .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
-      }
-
-      let authorization: ExecutionAuthorization;
-      try {
-        authorization = authorizeDesktopCommanderExecution({
-          claimed,
-          trustedWorkItem,
-          lease,
-          workerId,
-          containment: dcContainment,
-          requestId: request.id,
-          invocation
-        });
-      } catch (error) {
-        const code = error instanceof ControlStackError ? error.code : "authorization_failed";
-        try {
-          recordLeaseAuthorizedExecutionEvent(
-            {
-              workItemId: claimed.id,
-              attemptId: claimed.attemptId,
-              leaseId: claimed.leaseId,
-              workerId,
-              fencingEpoch: claimed.fencingEpoch
-            },
-            authorizationDeniedEvent({
-              workItemId: workItem.id,
-              workerId,
-              requestId: request.id,
-              toolName: body.tool,
-              attemptId: claimed.attemptId,
-              leaseId: claimed.leaseId,
-              fencingEpoch: claimed.fencingEpoch,
-              code,
-              reason: error instanceof Error ? error.message : String(error)
-            })
-          );
-        } catch {
-          // Lease authority may already have lapsed.
+        const workerId = requireWorkerIdentity(request, reply, auth);
+        if (!workerId) {
+          return;
         }
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-        return reply
-          .code(403)
-          .send({ decision: "deny", reason: "authorization_failed", code, workItemId: workItem.id });
-      }
+        if (workerId !== DC_BRIDGE_WORKER_ID) {
+          return reply.code(403).send({
+            error: "dedicated Desktop Commander bridge identity is required",
+            code: "dc_bridge_identity_required"
+          });
+        }
+        const dcActor = firstHeader(request.headers["x-dc-actor"]);
+        if (!dcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(dcActor)) {
+          return reply.code(400).send({ error: "x-dc-actor header is required", code: "dc_actor_invalid" });
+        }
+        const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
+        if (!capabilitySigningConfig || !dcContainment) {
+          return reply
+            .code(503)
+            .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
+        }
+        try {
+          validateCapabilitySigningConfig(capabilitySigningConfig);
+        } catch {
+          return reply
+            .code(503)
+            .send({ error: "capability signing key is invalid", code: "capability_signing_key_invalid" });
+        }
 
-      let approvalActionHash: string | undefined;
-      if (dcPolicy.requiresApproval) {
-        const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
-        if (!approval) {
-          recordLeaseAuthorizedExecutionEvent(
-            authorization,
-            capabilityDeniedEvent({
-              auth: authorization,
-              runtimeId: capabilitySigningConfig.runtimeId,
-              code: "desktop_commander_approval_rejected"
+        const dcPolicy = desktopCommanderToolPolicy(body.tool);
+        if (!dcPolicy) {
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
+          return reply.code(403).send({ decision: "deny", reason: "unknown_tool" });
+        }
+
+        let requestArguments: Record<string, unknown>;
+        let invocation;
+        try {
+          requestArguments = parseDcArgsSummary(body.argsSummary);
+          invocation = normalizeInvocation(body.tool, requestArguments, dcContainment);
+        } catch (error) {
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
+          return reply.code(400).send({
+            decision: "deny",
+            reason: "invalid_arguments",
+            code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid"
+          });
+        }
+
+        if (strictCanonicalJsonV1(invocation.validatedArguments) !== strictCanonicalJsonV1(requestArguments)) {
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
+          return reply.code(400).send({
+            decision: "deny",
+            reason: "invalid_arguments",
+            code: "desktop_commander_argument_invalid",
+            detail: "resend the exact canonical arguments returned by the managed bridge normalizer"
+          });
+        }
+
+        if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+          return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+        }
+
+        const invocationHash = desktopCommanderInvocationFingerprint(invocation);
+        const requiredScopes = desktopCommanderRequiredScopes(body.tool);
+        const targetCwd =
+          typeof invocation.validatedArguments.cwd === "string"
+            ? invocation.validatedArguments.cwd
+            : (containmentRootForPaths(dcContainment, invocation.canonicalPaths) ?? process.cwd());
+        const policyPaths = invocation.canonicalPaths.length > 0 ? invocation.canonicalPaths : [targetCwd];
+        const riskByClass: Record<typeof dcPolicy.riskClass, "low" | "medium" | "high" | "critical"> = {
+          read_only: "low",
+          safe_mutation: "medium",
+          requires_approval: "high",
+          destructive: "critical"
+        };
+        const bindingHash = stableHash({
+          tool: body.tool,
+          invocationHash,
+          runtimeId: capabilitySigningConfig.runtimeId,
+          identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+          requiredScopes,
+          requesterSubject: dcActor
+        });
+
+        const existing = workItems
+          .list()
+          .filter((candidate) => {
+            const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
+            return (
+              candidate.requesterSubject === dcActor &&
+              params?.tool === body.tool &&
+              params?.bindingHash === bindingHash &&
+              ["needs_approval", "approved"].includes(candidate.status)
+            );
+          })
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+
+        const workItem =
+          existing ??
+          tools.create_work_item(
+            createWorkItemSchema.parse({
+              title: `Desktop Commander capability: ${body.tool}`,
+              intent: `ACS-issued capability for Desktop Commander tool ${body.tool} requested by ${dcActor}`,
+              requester: "agent",
+              requesterSubject: dcActor,
+              target: {
+                cwd: targetCwd,
+                files: policyPaths
+              },
+              requestedActions: [
+                {
+                  kind: dcWorkItemActionKind(dcPolicy),
+                  description: `Desktop Commander tool ${body.tool}`,
+                  params: {
+                    tool: body.tool,
+                    invocationHash,
+                    bindingHash,
+                    runtimeId: capabilitySigningConfig.runtimeId,
+                    identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+                    requiredScopes,
+                    requesterSubject: dcActor,
+                    write: dcPolicy.mutating,
+                    network: dcPolicy.network,
+                    destructive: dcPolicy.destructive,
+                    cwd: targetCwd,
+                    paths: policyPaths
+                  }
+                }
+              ],
+              risk: riskByClass[dcPolicy.riskClass],
+              ...(body.correlationId ? { metadata: { correlationId: body.correlationId } } : {})
             })
           );
+
+        const evaluations = policy.evaluateWorkItem(workItem, workerId, "approve");
+        const required = evaluations.filter((evaluation) => evaluation.decision.decision === "require_approval");
+        const actionHash = required[0]?.actionHash ?? executionActionHash(workItem);
+
+        if (workItem.status === "blocked") {
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
           return reply.code(403).send({
             decision: "deny",
-            reason: "issuance_rejected",
-            code: "approval_binding_missing",
-            workItemId: workItem.id
+            reason: "policy_denied",
+            workItemId: workItem.id,
+            detail: policy.summarize(evaluations).reason
           });
         }
-        approvalActionHash = approval.actionHash;
-      }
-      if (approvalActionHash !== undefined) {
-        authorization = { ...authorization, approvalActionHash } as ExecutionAuthorization;
-      }
+        if (workItem.status !== "approved" || (dcPolicy.requiresApproval && required.length === 0)) {
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply.code(409).send({
+            decision: "require_approval",
+            workItemId: workItem.id,
+            actionHash,
+            approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
+          });
+        }
 
-      const payloadActionHash = approvalActionHash ?? claimed.actionHash;
-      const requestHash = executionPlanApprovalRequestHash({
-        workItemId: workItem.id,
-        planHash: claimed.planHash,
-        actionHash: payloadActionHash
-      });
-      const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
-
-      try {
-        const recorded = capabilityIssuanceRegistry.recordIssuance({
-          runtimeId: payload.runtimeId,
-          identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
-          leaseId: payload.leaseId,
-          attemptId: payload.attemptId,
-          workItemId: payload.workItemId,
+        const claimed = tools.claim_approved_work_item_by_id({
+          id: workItem.id,
           workerId,
-          fencingEpoch: payload.leaseEpoch,
+          leaseMs: DC_BRIDGE_LEASE_MS
+        });
+        if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply.code(409).send({
+            decision: "require_approval",
+            workItemId: workItem.id,
+            actionHash,
+            approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
+          });
+        }
+
+        const trustedWorkItem = workItems.get(workItem.id);
+        const lease = trustedWorkItem ? workItems.getActiveLeaseForAttempt(claimed.attemptId) : undefined;
+        if (!trustedWorkItem || !lease) {
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply
+            .code(503)
+            .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
+        }
+
+        let authorization: ExecutionAuthorization;
+        try {
+          authorization = authorizeDesktopCommanderExecution({
+            claimed,
+            trustedWorkItem,
+            lease,
+            workerId,
+            containment: dcContainment,
+            requestId: request.id,
+            invocation
+          });
+        } catch (error) {
+          const code = error instanceof ControlStackError ? error.code : "authorization_failed";
+          try {
+            recordLeaseAuthorizedExecutionEvent(
+              {
+                workItemId: claimed.id,
+                attemptId: claimed.attemptId,
+                leaseId: claimed.leaseId,
+                workerId,
+                fencingEpoch: claimed.fencingEpoch
+              },
+              authorizationDeniedEvent({
+                workItemId: workItem.id,
+                workerId,
+                requestId: request.id,
+                toolName: body.tool,
+                attemptId: claimed.attemptId,
+                leaseId: claimed.leaseId,
+                fencingEpoch: claimed.fencingEpoch,
+                code,
+                reason: error instanceof Error ? error.message : String(error)
+              })
+            );
+          } catch {
+            // Lease authority may already have lapsed.
+          }
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply
+            .code(403)
+            .send({ decision: "deny", reason: "authorization_failed", code, workItemId: workItem.id });
+        }
+
+        let approvalActionHash: string | undefined;
+        if (dcPolicy.requiresApproval) {
+          const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
+          if (!approval) {
+            recordLeaseAuthorizedExecutionEvent(
+              authorization,
+              capabilityDeniedEvent({
+                auth: authorization,
+                runtimeId: capabilitySigningConfig.runtimeId,
+                code: "desktop_commander_approval_rejected"
+              })
+            );
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply.code(403).send({
+              decision: "deny",
+              reason: "issuance_rejected",
+              code: "approval_binding_missing",
+              workItemId: workItem.id
+            });
+          }
+          approvalActionHash = approval.actionHash;
+        }
+        if (approvalActionHash !== undefined) {
+          authorization = { ...authorization, approvalActionHash } as ExecutionAuthorization;
+        }
+
+        const payloadActionHash = approvalActionHash ?? claimed.actionHash;
+        const requestHash = executionPlanApprovalRequestHash({
+          workItemId: workItem.id,
+          planHash: claimed.planHash,
+          actionHash: payloadActionHash
+        });
+        const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
+
+        try {
+          const recorded = capabilityIssuanceRegistry.recordIssuance({
+            runtimeId: payload.runtimeId,
+            identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+            leaseId: payload.leaseId,
+            attemptId: payload.attemptId,
+            workItemId: payload.workItemId,
+            workerId,
+            fencingEpoch: payload.leaseEpoch,
+            planHash: payload.planHash,
+            actionHash: payload.actionHash,
+            invocationHash: payload.invocationHash,
+            requiredScopes: payload.scopes,
+            approvalRequired: dcPolicy.requiresApproval,
+            approvalId: payload.approvalId,
+            keyId: capabilitySigningConfig.keyId,
+            nonce: payload.nonce,
+            issuedAt: payload.issuedAt,
+            expiresAt: payload.expiresAt
+          });
+          if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
+            throw new ControlStackError(
+              "desktop_commander_capability_issuance_rejected",
+              "issuance binding does not match capability payload"
+            );
+          }
+        } catch (error) {
+          const code = error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
+          try {
+            recordLeaseAuthorizedExecutionEvent(
+              authorization,
+              capabilityDeniedEvent({ auth: authorization, runtimeId: payload.runtimeId, code })
+            );
+          } catch {
+            // Lease authority may already have lapsed.
+          }
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply.code(403).send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
+        }
+
+        try {
+          const issuanceEvent = capabilityIssuedEvent({
+            auth: authorization,
+            runtimeId: payload.runtimeId,
+            keyId: capabilitySigningConfig.keyId,
+            requestHash: payload.requestHash,
+            expiresAt: payload.expiresAt
+          });
+          recordLeaseAuthorizedExecutionEvent(authorization, issuanceEvent);
+        } catch (error) {
+          return reply.code(503).send({
+            error: "capability evidence could not be committed",
+            code: "capability_evidence_unavailable",
+            detail: error instanceof Error ? error.message : String(error)
+          });
+        }
+
+        const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
+        return {
+          decision: "allow",
+          capability,
+          workItemId: workItem.id,
+          attemptId: payload.attemptId,
+          leaseId: payload.leaseId,
+          leaseEpoch: payload.leaseEpoch,
           planHash: payload.planHash,
           actionHash: payload.actionHash,
+          claimActionHash: claimed.actionHash,
+          inputHash: claimed.inputHash,
           invocationHash: payload.invocationHash,
-          requiredScopes: payload.scopes,
-          approvalRequired: dcPolicy.requiresApproval,
-          approvalId: payload.approvalId,
-          keyId: capabilitySigningConfig.keyId,
-          nonce: payload.nonce,
-          issuedAt: payload.issuedAt,
-          expiresAt: payload.expiresAt
-        });
-        if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
-          throw new ControlStackError(
-            "desktop_commander_capability_issuance_rejected",
-            "issuance binding does not match capability payload"
-          );
-        }
+          workerId
+        };
       } catch (error) {
-        const code = error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
-        try {
-          recordLeaseAuthorizedExecutionEvent(
-            authorization,
-            capabilityDeniedEvent({ auth: authorization, runtimeId: payload.runtimeId, code })
-          );
-        } catch {
-          // Lease authority may already have lapsed.
-        }
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-        return reply.code(403).send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
+        return sendError(reply, error);
       }
-
-      try {
-        const issuanceEvent = capabilityIssuedEvent({
-          auth: authorization,
-          runtimeId: payload.runtimeId,
-          keyId: capabilitySigningConfig.keyId,
-          requestHash: payload.requestHash,
-          expiresAt: payload.expiresAt
-        });
-        recordLeaseAuthorizedExecutionEvent(authorization, issuanceEvent);
-      } catch (error) {
-        return reply.code(503).send({
-          error: "capability evidence could not be committed",
-          code: "capability_evidence_unavailable",
-          detail: error instanceof Error ? error.message : String(error)
-        });
-      }
-
-      const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
-      recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
-      return {
-        decision: "allow",
-        capability,
-        workItemId: workItem.id,
-        attemptId: payload.attemptId,
-        leaseId: payload.leaseId,
-        leaseEpoch: payload.leaseEpoch,
-        planHash: payload.planHash,
-        actionHash: payload.actionHash,
-        claimActionHash: claimed.actionHash,
-        inputHash: claimed.inputHash,
-        invocationHash: payload.invocationHash,
-        workerId
-      };
-    } catch (error) {
-      return sendError(reply, error);
-    }
   );
 
   // Managed-runtime bootstrap: only the dedicated bridge can issue or
@@ -1386,78 +1386,78 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     "/dc/runtime/bootstrap",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
-    try {
-      const workerId = requireWorkerIdentity(request, reply, auth);
-      if (!workerId) {
-        return;
-      }
-      if (workerId !== DC_BRIDGE_WORKER_ID) {
-        return reply.code(403).send({
-          error: "dedicated Desktop Commander bridge identity is required",
-          code: "dc_bridge_identity_required"
+      try {
+        const workerId = requireWorkerIdentity(request, reply, auth);
+        if (!workerId) {
+          return;
+        }
+        if (workerId !== DC_BRIDGE_WORKER_ID) {
+          return reply.code(403).send({
+            error: "dedicated Desktop Commander bridge identity is required",
+            code: "dc_bridge_identity_required"
+          });
+        }
+        const body = dcRuntimeBootstrapSchema.parse(requestObject(request.body));
+        const challenge = capabilityIssuanceRegistry.issueBootstrap(
+          {
+            runtimeId: body.runtimeId,
+            identityConfigFingerprint: body.identityConfigFingerprint,
+            scopes: [...body.scopes]
+          },
+          new Date()
+        );
+        return reply.code(201).send({
+          runtimeId: challenge.runtimeId,
+          challenge: challenge.challenge,
+          scopes: challenge.scopes,
+          expiresAt: challenge.expiresAt
         });
+      } catch (error) {
+        return sendError(reply, error);
       }
-      const body = dcRuntimeBootstrapSchema.parse(requestObject(request.body));
-      const challenge = capabilityIssuanceRegistry.issueBootstrap(
-        {
-          runtimeId: body.runtimeId,
-          identityConfigFingerprint: body.identityConfigFingerprint,
-          scopes: [...body.scopes]
-        },
-        new Date()
-      );
-      return reply.code(201).send({
-        runtimeId: challenge.runtimeId,
-        challenge: challenge.challenge,
-        scopes: challenge.scopes,
-        expiresAt: challenge.expiresAt
-      });
-    } catch (error) {
-      return sendError(reply, error);
-    }
   );
 
   app.post(
     "/dc/runtime/bootstrap/complete",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
-    try {
-      const workerId = requireWorkerIdentity(request, reply, auth);
-      if (!workerId) {
-        return;
+      try {
+        const workerId = requireWorkerIdentity(request, reply, auth);
+        if (!workerId) {
+          return;
+        }
+        if (workerId !== DC_BRIDGE_WORKER_ID) {
+          return reply.code(403).send({
+            error: "dedicated Desktop Commander bridge identity is required",
+            code: "dc_bridge_identity_required"
+          });
+        }
+        const body = dcRuntimeBootstrapCompleteSchema.parse(requestObject(request.body));
+        const proof = body.runtimeIdentity;
+        const proofMatches =
+          proof.runtimeId === body.runtimeId &&
+          proof.challenge === body.challenge &&
+          proof.scopes.length === body.scopes.length &&
+          proof.scopes.every((scope, index) => scope === body.scopes[index]);
+        if (!proofMatches) {
+          return reply.code(403).send({
+            error: "managed runtime identity proof does not match the ACS challenge",
+            code: "desktop_commander_runtime_attestation_rejected"
+          });
+        }
+        capabilityIssuanceRegistry.completeBootstrap(
+          {
+            runtimeId: body.runtimeId,
+            identityConfigFingerprint: body.identityConfigFingerprint,
+            scopes: [...body.scopes],
+            challenge: proof.challenge
+          },
+          new Date()
+        );
+        return reply.code(204).send();
+      } catch (error) {
+        return sendError(reply, error);
       }
-      if (workerId !== DC_BRIDGE_WORKER_ID) {
-        return reply.code(403).send({
-          error: "dedicated Desktop Commander bridge identity is required",
-          code: "dc_bridge_identity_required"
-        });
-      }
-      const body = dcRuntimeBootstrapCompleteSchema.parse(requestObject(request.body));
-      const proof = body.runtimeIdentity;
-      const proofMatches =
-        proof.runtimeId === body.runtimeId &&
-        proof.challenge === body.challenge &&
-        proof.scopes.length === body.scopes.length &&
-        proof.scopes.every((scope, index) => scope === body.scopes[index]);
-      if (!proofMatches) {
-        return reply.code(403).send({
-          error: "managed runtime identity proof does not match the ACS challenge",
-          code: "desktop_commander_runtime_attestation_rejected"
-        });
-      }
-      capabilityIssuanceRegistry.completeBootstrap(
-        {
-          runtimeId: body.runtimeId,
-          identityConfigFingerprint: body.identityConfigFingerprint,
-          scopes: [...body.scopes],
-          challenge: proof.challenge
-        },
-        new Date()
-      );
-      return reply.code(204).send();
-    } catch (error) {
-      return sendError(reply, error);
-    }
   );
 
   app.post<{ Params: { id: string } }>("/work-items/:id/approve", async (request, reply) => {
