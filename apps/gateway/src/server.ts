@@ -1377,6 +1377,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       } catch (error) {
         return sendError(reply, error);
       }
+    }
   );
 
   // Managed-runtime bootstrap: only the dedicated bridge can issue or
@@ -1415,6 +1416,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       } catch (error) {
         return sendError(reply, error);
       }
+    }
   );
 
   app.post(
@@ -1458,6 +1460,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       } catch (error) {
         return sendError(reply, error);
       }
+    }
   );
 
   app.post<{ Params: { id: string } }>("/work-items/:id/approve", async (request, reply) => {
