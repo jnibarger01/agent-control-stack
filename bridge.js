@@ -13,6 +13,9 @@ import { randomUUID, webcrypto, createHmac, timingSafeEqual } from 'node:crypto'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createHash } from 'node:crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const ACS_CAPABILITY_META_KEY = 'capability';
 
@@ -350,9 +353,67 @@ function createSession(headers) {
 spawnPair();
 console.log(`bridge: executor mode: ${MANAGED ? 'managed (ACS-authorized capabilities only)' : 'standalone'}`);
 
+// --- /health, /ready, /authority (hardening item #2) -----------------------
+// Non-secret introspection only: no capability payloads, HMAC/Ed25519 key
+// material, tokens, or credentials are ever included in these responses.
+function dcStateDir() {
+  const override = process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR;
+  return override && override.trim() ? path.resolve(override.trim()) : path.join(os.homedir(), '.desktop-commander');
+}
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; } catch (err) { return !!(err && err.code === 'EPERM'); }
+}
+function readJsonLease(file) {
+  try { return JSON.parse(fs.readFileSync(file, 'utf8')); } catch { return null; }
+}
+/** Fail closed: a present-but-unparsable lease/marker reports active+ambiguous, never inactive. */
+function leaseStatus(file, label) {
+  if (!fs.existsSync(file)) return { active: false, ambiguous: false, detail: `no ${label} file` };
+  const info = readJsonLease(file);
+  if (!info || typeof info.pid !== 'number') return { active: true, ambiguous: true, detail: `${label} file present but unreadable/malformed: ${file}` };
+  if (!isPidAlive(info.pid)) return { active: false, ambiguous: false, detail: `${label} stale (pid ${info.pid} not alive)` };
+  return { active: true, ambiguous: false, pid: info.pid, detail: `${label} held by pid ${info.pid}` };
+}
+function computeAuthority() {
+  const executorLease = leaseStatus(path.join(dcStateDir(), 'executor.lock'), 'executor lease');
+  const breakGlass = leaseStatus(path.join(dcStateDir(), 'break-glass.lock'), 'break-glass marker');
+  const initialized = !!(pair && pair.initResponse);
+  let observedMode;
+  if (breakGlass.active && executorLease.active) observedMode = 'ambiguous_conflict';
+  else if (breakGlass.active) observedMode = 'break_glass';
+  else if (executorLease.active) observedMode = 'managed';
+  else observedMode = 'none_active';
+  const authoritative = observedMode === 'managed' && !!pair && initialized && !executorLease.ambiguous;
+  return {
+    configuredExecutionMode: MANAGED ? 'managed' : 'standalone_config',
+    observedMode,
+    authorityOwner: executorLease.active ? `managed:pid:${executorLease.pid}`
+      : breakGlass.active ? `break_glass:pid:${breakGlass.pid}` : 'none',
+    executor: { lease: executorLease, breakGlass },
+    bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    enforcement: {
+      gatewayAttestationActive: !!GATEWAY_ATTESTATION_KEY,
+      capabilityVerificationActive: !!PIPELINE_ACS_PUBLIC_KEY,
+      executionTokenConfigured: !!EXECUTION_TOKEN,
+      leaseAndFencingEnforced: executorLease.active && !executorLease.ambiguous,
+    },
+    authoritative,
+  };
+}
+
 const httpServer = http.createServer(async (req, res) => {
   const path = req.url ? req.url.split('?')[0] : '/';
   if (path === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok'); return; }
+  if (path === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, pid: process.pid, service: 'desktop-commander-mcp-bridge' })); return; }
+  if (path === '/authority') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(computeAuthority())); return; }
+  if (path === '/ready') {
+    const authority = computeAuthority();
+    const ready = !!pair && authority.observedMode !== 'ambiguous_conflict' && !authority.executor.lease.ambiguous && !authority.executor.breakGlass.ambiguous;
+    res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ready, observedMode: authority.observedMode, hasUpstreamPair: !!pair }));
+    return;
+  }
   if (path === '/debug/last-headers') {
     const pendingCount = pair ? [...pair.sessions.values()].reduce((count, session) => count + session.pending.size, 0) : 0;
     res.writeHead(200, { 'Content-Type': 'application/json' });

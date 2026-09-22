@@ -226,7 +226,7 @@ function denyPage(msg) {
   return `<!doctype html><html><body style="font-family:system-ui;background:#111;color:#eee;display:flex;align-items:center;justify-content:center;height:100vh"><p>${esc(msg)}</p></body></html>`;
 }
 
-function parseQuery(url) { return Object.fromEntries(new URL(url).searchParams.entries()); }
+function parseQuery(url) { return Object.fromEntries(new URL(url, 'http://localhost').searchParams.entries()); }
 
 async function handleAuthorize(req, res, q) {
   const { client_id, redirect_uri, response_type, code_challenge, code_challenge_method, scope, state, resource } = q;
@@ -406,6 +406,30 @@ function proxyMcp(req, res, bodyBuf, auth) {
 }
 
 // ---------------------------------------------------------------------------
+// /ready + /authority support (hardening item #2)
+// ---------------------------------------------------------------------------
+async function checkAcsIssuanceReady() {
+  if (!MANAGED.enabled || !MANAGED.acsGatewayUrl) return { reachable: false, detail: 'ACS managed issuance not configured' };
+  try {
+    const url = new URL('/readyz', MANAGED.acsGatewayUrl);
+    const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    return { reachable: r.ok, httpStatus: r.status };
+  } catch (e) {
+    return { reachable: false, detail: `ACS gateway unreachable: ${e?.message || 'error'}` };
+  }
+}
+async function fetchBridgeAuthority() {
+  try {
+    const url = new URL('/authority', UPSTREAM);
+    const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return { ok: false, error: `bridge /authority HTTP ${r.status}` };
+    return { ok: true, data: await r.json() };
+  } catch (e) {
+    return { ok: false, error: e?.message || 'bridge unreachable' };
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
 const server = http.createServer(async (req, res) => {
@@ -414,6 +438,27 @@ const server = http.createServer(async (req, res) => {
   try {
     // local health (no auth; contains no data)
     if (pathName === '/healthz') { log('GET', '/healthz', 200); return send(res, 200, { ok: true, service: 'desktop-commander-mcp-gateway' }); }
+    if (pathName === '/health') { log('GET', '/health', 200); return send(res, 200, { ok: true, pid: process.pid, service: 'desktop-commander-mcp-gateway' }); }
+
+    // /ready and /authority (hardening item #2): non-secret structured state
+    // only — never capability payloads, keys, tokens, or credentials.
+    if (pathName === '/ready' || pathName === '/authority') {
+      const acsIssuance = await checkAcsIssuanceReady();
+      const bridgeAuthority = await fetchBridgeAuthority();
+      if (pathName === '/authority') {
+        const body = {
+          managedIssuance: { configured: MANAGED.enabled, ...acsIssuance },
+          bridge: bridgeAuthority.ok ? bridgeAuthority.data : { reachable: false, error: bridgeAuthority.error },
+        };
+        log('GET', '/authority', 200);
+        return send(res, 200, body);
+      }
+      const bridgeReady = bridgeAuthority.ok && bridgeAuthority.data && bridgeAuthority.data.observedMode !== 'ambiguous_conflict' && bridgeAuthority.data.bridge?.hasUpstreamPair;
+      const issuanceReady = !MANAGED.enabled || acsIssuance.reachable;
+      const ready = !!bridgeReady && !!issuanceReady;
+      log('GET', '/ready', ready ? 200 : 503);
+      return send(res, ready ? 200 : 503, { ready, bridgeReady: !!bridgeReady, issuanceReady });
+    }
 
     // ---- discovery (public, no secrets) ----
     if (pathName === '/.well-known/oauth-protected-resource' || pathName === '/.well-known/oauth-protected-resource/mcp') {
