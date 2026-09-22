@@ -1483,6 +1483,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!workItem) {
         return reply.code(404).send({ error: "work item not found" });
       }
+      const dcTool =
+        typeof workItem.requestedActions[0]?.params?.tool === "string"
+          ? workItem.requestedActions[0].params.tool
+          : undefined;
+      if (
+        workItem.requesterSubject === actor &&
+        dcTool &&
+        desktopCommanderToolPolicy(dcTool)?.requiresApproval === true
+      ) {
+        return reply.code(403).send({
+          error: "requester cannot approve its own Desktop Commander operation",
+          code: "approval_self_denied"
+        });
+      }
       const result = tools.approve_work_item({ ...body, id: request.params.id, approvedBy: actor });
       return reply.code(result.decision.decision === "deny" ? 403 : 200).send(result);
     } catch (error) {
