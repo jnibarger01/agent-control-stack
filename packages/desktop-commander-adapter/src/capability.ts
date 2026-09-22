@@ -1,7 +1,16 @@
 import { createHash, createPrivateKey, randomBytes, sign } from "node:crypto";
 import { ControlStackError, strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import type { ExecutionAuthorization } from "./execution-authorization.js";
-import { desktopCommanderToolPolicy } from "./tool-policy.js";
+import { desktopCommanderToolPolicy, isReadOnlyDesktopCommanderTool } from "./tool-policy.js";
+
+/**
+ * Desktop Commander capability-mint profile (hardening item #3). "read-only"
+ * is the formalized read-only execution profile: a signing config scoped to
+ * it can never mint a capability for a mutating tool, checked against the
+ * SAME canonical policy registry every other gate uses (tool-policy.ts).
+ * Default "full" preserves existing behavior exactly - this is additive.
+ */
+export type DesktopCommanderCapabilityProfile = "read-only" | "full";
 
 export const DESKTOP_COMMANDER_CAPABILITY_VERSION = "acs.dc.v1" as const;
 const ID_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/u;
@@ -62,6 +71,15 @@ export interface CapabilitySigningConfig {
   /** Base64url PKCS#8 DER. Kept only in ACS process memory. */
   readonly privateKey: string;
   readonly ttlMs?: number;
+  /**
+   * Mint-time profile gate. "read-only" (hardening item #3) refuses to
+   * prepare a capability for any tool whose canonical policy is mutating,
+   * regardless of what the caller's authorization otherwise claims. Not yet
+   * wired to a live per-session/actor issuance surface - see AGENTS report -
+   * this is the enforcement primitive a future read-only actor/session type
+   * would set here. Default "full": no additional restriction (unchanged).
+   */
+  readonly profile?: DesktopCommanderCapabilityProfile;
 }
 
 function base64url(bytes: Buffer): string {
@@ -126,6 +144,12 @@ export function prepareDesktopCommanderCapability(
   const policy = desktopCommanderToolPolicy(authorization.toolName);
   if (!policy)
     throw new ControlStackError("desktop_commander_tool_not_allowlisted", "capability tool is not allowlisted");
+  if (config.profile === "read-only" && !isReadOnlyDesktopCommanderTool(authorization.toolName)) {
+    throw new ControlStackError(
+      "desktop_commander_profile_denied",
+      `read-only profile cannot mint a capability for mutating tool "${authorization.toolName}"`
+    );
+  }
   if (policy.requiresApproval !== authorization.requiresApproval) {
     throw new ControlStackError("desktop_commander_capability_invalid", "capability approval policy drift");
   }

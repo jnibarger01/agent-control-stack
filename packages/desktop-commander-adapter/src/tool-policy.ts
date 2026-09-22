@@ -364,3 +364,19 @@ export function isAllowlistedDesktopCommanderTool(name: string): boolean {
 export function allowlistedDesktopCommanderToolNames(): string[] {
   return [...registry.keys()].sort();
 }
+
+/**
+ * The read-only execution profile (Phase 5, hardening item #3): every
+ * allowlisted tool whose policy declares `mutating: false`. Derived directly
+ * from the same registry every other check uses, so it cannot drift from the
+ * per-tool policy above - there is exactly one place tool risk is declared.
+ */
+export function readOnlyDesktopCommanderToolNames(): string[] {
+  return policies.filter((policy) => !policy.mutating).map((policy) => policy.name).sort();
+}
+
+/** Fail-closed: an unlisted tool is never read-only-eligible. */
+export function isReadOnlyDesktopCommanderTool(name: string): boolean {
+  const policy = registry.get(name);
+  return policy !== undefined && !policy.mutating;
+}
