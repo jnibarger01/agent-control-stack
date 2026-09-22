@@ -1328,7 +1328,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             );
           }
         } catch (error) {
-          const code = error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
+          const code =
+            error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
           try {
             recordLeaseAuthorizedExecutionEvent(
               authorization,
