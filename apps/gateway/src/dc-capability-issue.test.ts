@@ -71,12 +71,13 @@ async function buildTestGateway(dbName = "control.db"): Promise<TestContext> {
 }
 
 const AUTH = { authorization: `Bearer ${testAuth.token}` };
+const BRIDGE_AUTH = { authorization: `Bearer ${WORKER_TOKEN}` };
 
 async function attestRuntime(ctx: TestContext): Promise<void> {
   const bootstrap = await ctx.app.inject({
     method: "POST",
     url: "/dc/runtime/bootstrap",
-    headers: AUTH,
+    headers: BRIDGE_AUTH,
     payload: {
       runtimeId: RUNTIME_ID,
       identityConfigFingerprint: IDENTITY_FINGERPRINT,
@@ -88,12 +89,18 @@ async function attestRuntime(ctx: TestContext): Promise<void> {
   const completed = await ctx.app.inject({
     method: "POST",
     url: "/dc/runtime/bootstrap/complete",
-    headers: AUTH,
+    headers: BRIDGE_AUTH,
     payload: {
       runtimeId: RUNTIME_ID,
       identityConfigFingerprint: IDENTITY_FINGERPRINT,
       scopes: RUNTIME_SCOPES,
-      challenge
+      challenge,
+      runtimeIdentity: {
+        schemaVersion: 1,
+        runtimeId: RUNTIME_ID,
+        challenge,
+        scopes: RUNTIME_SCOPES
+      }
     }
   });
   expect(completed.statusCode).toBe(204);
@@ -103,7 +110,7 @@ function issuePayload(app: TestContext["app"], tool: string, args: Record<string
   return app.inject({
     method: "POST",
     url: "/dc/capability/issue",
-    headers: { ...AUTH, "x-dc-actor": "chatgpt:jacen" },
+    headers: { ...BRIDGE_AUTH, "x-dc-actor": "chatgpt:jacen" },
     payload: {
       client_id: "chatgpt-desktop",
       tool,
@@ -132,6 +139,65 @@ function attemptResultIdempotencyKey(attemptId: string): string {
 }
 
 describe("POST /dc/capability/issue (lease-bound)", () => {
+  it("requires the dedicated bridge identity for runtime bootstrap", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/dc/runtime/bootstrap",
+        headers: AUTH,
+        payload: {
+          runtimeId: RUNTIME_ID,
+          identityConfigFingerprint: IDENTITY_FINGERPRINT,
+          scopes: RUNTIME_SCOPES
+        }
+      });
+      expect(response.statusCode).toBe(403);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a bootstrap completion without matching managed-child identity proof", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      const bootstrap = await ctx.app.inject({
+        method: "POST",
+        url: "/dc/runtime/bootstrap",
+        headers: BRIDGE_AUTH,
+        payload: {
+          runtimeId: RUNTIME_ID,
+          identityConfigFingerprint: IDENTITY_FINGERPRINT,
+          scopes: RUNTIME_SCOPES
+        }
+      });
+      const { challenge } = bootstrap.json();
+      const response = await ctx.app.inject({
+        method: "POST",
+        url: "/dc/runtime/bootstrap/complete",
+        headers: BRIDGE_AUTH,
+        payload: {
+          runtimeId: RUNTIME_ID,
+          identityConfigFingerprint: IDENTITY_FINGERPRINT,
+          scopes: RUNTIME_SCOPES,
+          challenge,
+          runtimeIdentity: {
+            schemaVersion: 1,
+            runtimeId: RUNTIME_ID,
+            challenge: "b".repeat(43),
+            scopes: RUNTIME_SCOPES
+          }
+        }
+      });
+      expect(response.statusCode).toBe(403);
+      expect(response.json()).toMatchObject({ code: "desktop_commander_runtime_attestation_rejected" });
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects unauthenticated callers with 401", async () => {
     const ctx = await buildTestGateway();
     try {
@@ -270,6 +336,16 @@ describe("POST /dc/capability/issue (lease-bound)", () => {
       const firstBody = requested.json();
       expect(firstBody.decision).toBe("require_approval");
       expect(firstBody.approvalInstructions).toContain(`POST /work-items/${firstBody.workItemId}/approve`);
+
+      const pendingDetail = await ctx.app.inject({
+        method: "GET",
+        url: `/work-items/${firstBody.workItemId}`,
+        headers: AUTH
+      });
+      const persisted = JSON.stringify(pendingDetail.json().workItem);
+      expect(persisted).not.toContain("hello");
+      expect(persisted).not.toContain("argsSummary");
+      expect(persisted).not.toContain('"arguments"');
 
       const approval = await ctx.app.inject({
         method: "POST",
