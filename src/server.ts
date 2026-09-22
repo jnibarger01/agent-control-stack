@@ -21,6 +21,7 @@ import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentF
 const approvalStore = getApprovalStore();
 import { runRecoveryCheckup } from './cancellation/executor-recovery.js';
 import { claimCanonicalExecutor, renewLease, releaseLease } from './executor-lock.js';
+import { checkBreakGlassStatus } from './break-glass.js';
 import { getSystemInfo, getOSSpecificGuidance, getPathGuidance, getDevelopmentToolGuidance } from './utils/system-info.js';
 
 // Get system information once at startup
@@ -39,6 +40,16 @@ let EXECUTOR_LEASE_CLAIMED = false;
 export function ensureCanonicalExecutorLease(): void {
     if (process.env.DC_DISABLE_EXECUTOR_LEASE === '1') return;
     if (EXECUTOR_LEASE_CLAIMED) return;
+
+    // Item #1: mutual exclusion with the UNMANAGED/BREAK_GLASS fallback. Fail
+    // closed on ambiguous state — an unreadable/malformed marker refuses
+    // startup exactly like a live one, since we cannot prove it is safe.
+    const breakGlass = checkBreakGlassStatus();
+    if (breakGlass.active) {
+        console.error(`[executor-lease] REFUSED to start: ${breakGlass.detail}. The managed executor will not start while the UNMANAGED/BREAK_GLASS fallback may be active. Stop it first (systemctl --user stop desktop-commander-remote.service) before starting the managed executor.`);
+        process.exit(1);
+    }
+
     let claim;
     try {
         claim = claimCanonicalExecutor();
