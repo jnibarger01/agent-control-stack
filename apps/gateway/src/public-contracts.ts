@@ -139,12 +139,14 @@ export const dcCapabilityIssueSchema = z
   })
   .strict();
 
-const dcRuntimeIdSchema = z.string().min(1).max(128).regex(/^[A-Za-z0-9._:-]+$/u);
+const dcRuntimeIdSchema = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/u);
 const dcRuntimeChallengeSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/u);
 const dcRuntimeScopesSchema = z
-  .array(
-    z.enum(["fs.read", "fs.write", "process.exec", "process.spawn", "network.read", "network.write"])
-  )
+  .array(z.enum(["fs.read", "fs.write", "process.exec", "process.spawn", "network.read", "network.write"]))
   .min(1)
   .max(6);
 
