@@ -25,12 +25,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Prettier diagnostics
-        run: |
-          npx prettier --write apps/gateway/src/public-contracts.ts apps/gateway/src/server.ts
-          git diff -- apps/gateway/src/public-contracts.ts apps/gateway/src/server.ts
-          exit 1
-
       - name: Build and test
         run: npm run check
 
