@@ -134,7 +134,7 @@ export const dcCapabilityIssueSchema = z
   .object({
     client_id: z.string().min(1).max(256),
     tool: z.string().min(1).max(128),
-    argsSummary: z.string().min(1).max(64_000),
+    argsSummary: z.string().min(1).max(240_000),
     correlationId: z.string().min(1).max(256).optional()
   })
   .strict();
