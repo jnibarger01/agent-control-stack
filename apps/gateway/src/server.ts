@@ -501,7 +501,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const workItemList = workItems.list();
       const events = workItems.readEvents(eventReadOptions(request.query));
-      const visibleWorkItems = workItemList.slice(0, 12);
       reply.type("text/html").send(
         renderDashboard({
           workItems: workItemList,
@@ -513,14 +512,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             gatewayCredentialForRequest(request, auth)?.actor
           ),
           executionAttemptsByWorkItem: Object.fromEntries(
-            visibleWorkItems.map((workItem) => [workItem.id, executionReads.listExecutionAttempts(workItem.id)])
+            workItemList.map((workItem) => [workItem.id, executionReads.listExecutionAttempts(workItem.id)])
           ),
           attemptLeasesByWorkItem: Object.fromEntries(
-            visibleWorkItems.map((workItem) => [
+            workItemList.map((workItem) => [
               workItem.id,
               executionReads.listAttemptLeases(workItem.id).map(toMissionControlAttemptLease)
             ])
-          )
+          ),
+          executionBackend: reportedExecutionBackend()
         })
       );
     } catch (error) {
@@ -1853,6 +1853,13 @@ function approvalActionHashesByWorkItem(
       ])
       .filter(([, hashes]) => hashes.length > 0)
   );
+}
+
+function reportedExecutionBackend(): "dry_run" | "desktop_commander" | undefined {
+  const raw = process.env.ACS_EXECUTION_BACKEND?.trim();
+  if (raw === undefined || raw === "" || raw === "dry_run") return "dry_run";
+  if (raw === "desktop_commander") return "desktop_commander";
+  return undefined;
 }
 
 function eventReadOptions(
