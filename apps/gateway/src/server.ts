@@ -1091,20 +1091,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
-        if (strictCanonicalJsonV1(invocation.validatedArguments) !== strictCanonicalJsonV1(requestArguments)) {
-          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
-          return reply.code(400).send({
-            decision: "deny",
-            reason: "invalid_arguments",
-            code: "desktop_commander_argument_invalid",
-            detail: "resend the exact canonical arguments returned by the managed bridge normalizer"
-          });
-        }
-
-        if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
-          return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
-        }
-
         const invocationHash = desktopCommanderInvocationFingerprint(invocation);
         const requiredScopes = desktopCommanderRequiredScopes(body.tool);
         const targetCwd =
@@ -1140,6 +1126,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           })
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
 
+        if (!existing && !hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+          return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+        }
+
+        const approvalSummary = dcApprovalSummary(body.tool, invocation.validatedArguments, invocationHash);
+
         const workItem =
           existing ??
           tools.create_work_item(
@@ -1164,6 +1156,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                     identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
                     requiredScopes,
                     requesterSubject: dcActor,
+                    approvalSummary,
                     write: dcPolicy.mutating,
                     network: dcPolicy.network,
                     destructive: dcPolicy.destructive,
@@ -1457,6 +1450,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           },
           new Date()
         );
+        workItems.recordSystemEvent({
+          name: "desktop_commander.runtime_activated",
+          body: {
+            runtimeId: body.runtimeId,
+            identityConfigFingerprint: body.identityConfigFingerprint,
+            scopes: [...body.scopes],
+            workerId
+          },
+          attributes: {
+            "desktop_commander.runtime_id": body.runtimeId,
+            "desktop_commander.worker_id": workerId
+          }
+        });
         return reply.code(204).send();
       } catch (error) {
         return sendError(reply, error);
@@ -1815,6 +1821,32 @@ function parseDcArgsSummary(argsSummary: string): Record<string, unknown> {
     throw new ControlStackError("desktop_commander_argument_invalid", "Desktop Commander arguments must be an object");
   }
   return parsed as Record<string, unknown>;
+}
+
+function dcApprovalSummary(
+  toolName: string,
+  args: Record<string, unknown>,
+  invocationHash: string
+): string {
+  const paths = ["path", "file_path", "source", "destination", "cwd"]
+    .map((key) => (typeof args[key] === "string" ? `${key}=${String(args[key])}` : undefined))
+    .filter((value): value is string => Boolean(value));
+  const details: string[] = [...paths];
+  if (typeof args.content === "string") {
+    details.push(`content_bytes=${Buffer.byteLength(args.content, "utf8")}`);
+  }
+  if (typeof args.old_string === "string") {
+    details.push(`old_bytes=${Buffer.byteLength(args.old_string, "utf8")}`);
+  }
+  if (typeof args.new_string === "string") {
+    details.push(`new_bytes=${Buffer.byteLength(args.new_string, "utf8")}`);
+  }
+  if (typeof args.command === "string") {
+    const executable = args.command.trim().split(/\s+/u)[0] ?? "<unknown>";
+    details.push(`command_executable=${executable}`);
+  }
+  details.push(`invocation_sha256=${invocationHash}`);
+  return `${toolName}: ${details.join(" · ")}`;
 }
 
 function containmentRootForPaths(containment: ContainmentConfig, paths: readonly string[]): string | undefined {
