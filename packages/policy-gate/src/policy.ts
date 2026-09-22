@@ -80,7 +80,7 @@ export function policyContextFromAction(
     workItemId: workItem.id,
     actor,
     operation,
-    requester: workItem.requester,
+    requester: workItem.requesterSubject ?? workItem.requester,
     risk: workItem.risk,
     action: canonicalAction(action),
     ...normalizeAction(workItem, action)
