@@ -68,7 +68,7 @@ function base64url(bytes: Buffer): string {
   return bytes.toString("base64url");
 }
 
-function requiredScopes(toolName: string): string[] {
+export function desktopCommanderRequiredScopes(toolName: string): string[] {
   const policy = desktopCommanderToolPolicy(toolName);
   if (!policy)
     throw new ControlStackError("desktop_commander_tool_not_allowlisted", "capability tool is not allowlisted");
@@ -162,7 +162,7 @@ export function prepareDesktopCommanderCapability(
     actionHash: payloadActionHash,
     requestHash,
     planHash: authorization.planHash,
-    scopes: requiredScopes(authorization.toolName),
+    scopes: desktopCommanderRequiredScopes(authorization.toolName),
     ...(authorization.approvalId ? { approvalId: authorization.approvalId } : {}),
     issuedAt,
     expiresAt,
@@ -175,17 +175,39 @@ export function prepareDesktopCommanderCapability(
   return Object.freeze(payload);
 }
 
+function capabilityPrivateKey(config: Pick<CapabilitySigningConfig, "keyId" | "privateKey">) {
+  requireId("keyId", config.keyId, KEY_ID_PATTERN);
+  try {
+    const privateKey = createPrivateKey({
+      key: Buffer.from(config.privateKey, "base64url"),
+      format: "der",
+      type: "pkcs8"
+    });
+    if (privateKey.asymmetricKeyType !== "ed25519") {
+      throw new Error("not ed25519");
+    }
+    return privateKey;
+  } catch {
+    throw new ControlStackError(
+      "desktop_commander_capability_invalid",
+      "capability signing key is not a valid Ed25519 PKCS#8 key"
+    );
+  }
+}
+
+/** Validate signing material before any authoritative lifecycle mutation. */
+export function validateCapabilitySigningConfig(
+  config: Pick<CapabilitySigningConfig, "keyId" | "privateKey">
+): void {
+  void capabilityPrivateKey(config);
+}
+
 /** Signs a payload only after the caller's durable issuance boundary commits. */
 export function signPreparedDesktopCommanderCapability(
   payload: DesktopCommanderCapabilityPayload,
   config: Pick<CapabilitySigningConfig, "keyId" | "privateKey">
 ): DesktopCommanderCapability {
-  requireId("keyId", config.keyId, KEY_ID_PATTERN);
-  const privateKey = createPrivateKey({
-    key: Buffer.from(config.privateKey, "base64url"),
-    format: "der",
-    type: "pkcs8"
-  });
+  const privateKey = capabilityPrivateKey(config);
   const signature = sign(null, Buffer.from(strictCanonicalJsonV1(payload), "utf8"), privateKey);
   return Object.freeze({ payload, signature: base64url(signature), keyId: config.keyId });
 }
