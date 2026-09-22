@@ -1036,6 +1036,14 @@ export interface WorkItemStore {
     options?: ClaimOptions
   ): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
+  /** Count attempt leases that are still active and not yet past expires_at. */
+  countActiveAttemptLeases(now?: Date): number;
+  /** Append a gateway/system lifecycle event to the canonical audit chain. */
+  recordSystemEvent(input: {
+    name: string;
+    body?: Record<string, unknown>;
+    attributes?: Record<string, string | number | boolean>;
+  }): StoredAuditEvent;
   submitWorkResult(input: unknown): WorkItem;
   recordDerivedWorkResult(input: unknown): WorkItem;
   getExecutionResult(resultId: string): StoredExecutionResult | undefined;
@@ -4642,6 +4650,40 @@ export class SqliteWorkItemStore implements WorkItemStore {
           )
         ]
       };
+    });
+  }
+
+  countActiveAttemptLeases(now = new Date()): number {
+    const nowIso = now.toISOString();
+    // Prefer authoritative attempt_leases, but also count legacy `leases` rows that
+    // have no active attempt_leases twin (test-only legacy claims / dual projection).
+    const row = this.db
+      .prepare(
+        `SELECT
+           (
+             SELECT COUNT(*) FROM attempt_leases
+             WHERE status = 'active' AND expires_at > ?
+           ) + (
+             SELECT COUNT(*) FROM leases
+             WHERE status = 'active' AND expires_at > ?
+               AND lease_id NOT IN (
+                 SELECT lease_id FROM attempt_leases WHERE status = 'active'
+               )
+           ) AS count`
+      )
+      .get(nowIso, nowIso) as { count: number };
+    return Number(row?.count ?? 0);
+  }
+
+  recordSystemEvent(input: {
+    name: string;
+    body?: Record<string, unknown>;
+    attributes?: Record<string, string | number | boolean>;
+  }): StoredAuditEvent {
+    return this.write(() => {
+      const name = requiredString(input.name, "name");
+      const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, input.attributes ?? {}));
+      return { value: event, events: [event] };
     });
   }
 

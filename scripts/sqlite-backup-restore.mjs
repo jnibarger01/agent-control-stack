@@ -1,18 +1,31 @@
 #!/usr/bin/env node
-// Timestamped snapshot + restore dry-run + sample fixture + WAL checkpoint / VACUUM
-// for docs/runbooks/sqlite-backup-restore.md
+// Timestamped snapshot (latest.db only after integrity_check) + restore dry-run +
+// sample fixture + WAL checkpoint / VACUUM for docs/runbooks/sqlite-backup-restore.md
 import {
   applyControlPlaneMigrations,
   backupControlPlaneDatabase,
   restoreControlPlaneDatabase,
   verifyControlPlaneDatabaseFile
 } from "@agent-control-stack/shared";
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  unlinkSync
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const WAL_CHECKPOINT_MODES = new Set(["PASSIVE", "FULL", "RESTART", "TRUNCATE"]);
+const LATEST_NAME = "latest.db";
 
 const [command, primaryArg, ...rest] = process.argv.slice(2);
 
@@ -39,8 +52,43 @@ try {
     mkdirSync(destinationDir, { recursive: true });
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
     const destination = join(destinationDir, `${basename(source, ".db")}-${stamp}.db`);
-    const result = await backupControlPlaneDatabase(source, destination);
-    report({ ok: true, operation: "snapshot", ...result, destinationDir });
+    const latestPath = join(destinationDir, LATEST_NAME);
+    const previousLatest = readLatestPointer(latestPath);
+    try {
+      const result = await backupControlPlaneDatabase(source, destination);
+      // Retain gate: refuse to replace latest unless the artifact passes integrity_check
+      // (and foreign_key_check via the shared health contract) after the snapshot copy.
+      let retainHealth;
+      try {
+        retainHealth = verifyControlPlaneDatabaseFile(destination);
+      } catch (verifyError) {
+        removeFileQuiet(destination);
+        const detail = verifyError instanceof Error ? verifyError.message : String(verifyError);
+        throw new Error(`backup retain refused after integrity_check: ${detail}`, { cause: verifyError });
+      }
+      publishLatestPointer(destinationDir, destination);
+      report({
+        ok: true,
+        operation: "snapshot",
+        ...result,
+        destinationDir,
+        latest: latestPath,
+        previousLatest,
+        retainHealth
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      report({
+        ok: false,
+        operation: "snapshot",
+        error: message,
+        destinationDir,
+        latest: latestPointerPresent(latestPath) ? latestPath : null,
+        previousLatest,
+        note: "Previous good latest pointer left in place; corrupt or unverified artifact was not retained as latest."
+      });
+      process.exitCode = 1;
+    }
   } else if (command === "restore-dry-run" && primaryArg) {
     const backupPath = resolve(primaryArg);
     const into = optionalFlag(rest, "--into");
@@ -184,6 +232,56 @@ function assertNoActiveWriter(destination) {
   }
 }
 
+
+function readLatestPointer(latestPath) {
+  try {
+    if (!existsSync(latestPath) && !isSymlink(latestPath)) return null;
+    if (isSymlink(latestPath)) {
+      return resolve(dirname(latestPath), readlinkSync(latestPath));
+    }
+    return resolve(latestPath);
+  } catch {
+    return null;
+  }
+}
+
+function isSymlink(path) {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+
+function latestPointerPresent(latestPath) {
+  return existsSync(latestPath) || isSymlink(latestPath);
+}
+
+function publishLatestPointer(destinationDir, artifactPath) {
+  const latestPath = join(destinationDir, LATEST_NAME);
+  const targetName = basename(artifactPath);
+  if (dirname(resolve(artifactPath)) !== resolve(destinationDir)) {
+    throw new Error(`backup artifact must live in destination dir to publish latest: ${artifactPath}`);
+  }
+  const temporary = join(destinationDir, `.${LATEST_NAME}.${process.pid}.tmp`);
+  removeFileQuiet(temporary);
+  try {
+    symlinkSync(targetName, temporary);
+    renameSync(temporary, latestPath);
+  } catch (error) {
+    removeFileQuiet(temporary);
+    throw new Error(`failed to publish latest backup pointer: ${latestPath}`, { cause: error });
+  }
+}
+
+function removeFileQuiet(path) {
+  try {
+    unlinkSync(path);
+  } catch {
+    // Best-effort cleanup must not mask the primary failure.
+  }
+}
+
 function report(value) {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
@@ -191,7 +289,7 @@ function report(value) {
 function usage() {
   process.stderr.write(
     "usage: sqlite-backup-restore.mjs create-fixture <path> | " +
-      "snapshot <db> [--destination-dir <dir>] | " +
+      "snapshot <db> [--destination-dir <dir>] (updates latest.db only after integrity_check) | " +
       "restore-dry-run <backup> [--into <path>] | " +
       "verify <db> | " +
       "wal-checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE] | " +

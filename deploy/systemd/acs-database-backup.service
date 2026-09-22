@@ -1,6 +1,11 @@
 [Unit]
 Description=Agent Control Stack encrypted database backup
 After=local-fs.target
+# Retain/latest semantics: createManagedDatabaseBackup verifies the plaintext snapshot with
+# PRAGMA integrity_check + foreign_key_check (full control-plane health) before encrypting and
+# publishing a manifest. Older artifacts are pruned only after that gate. Plaintext alpha
+# snapshots via scripts/sqlite-backup-restore.mjs snapshot similarly update destination-dir/latest.db
+# only after the same integrity gate; a failed check leaves the previous good latest pointer in place.
 
 [Service]
 Type=oneshot
