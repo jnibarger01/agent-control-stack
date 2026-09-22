@@ -36,7 +36,7 @@ import {
   explainPolicy,
   workItemToolNames
 } from "@agent-control-stack/policy-gate";
-import { ControlStackError, stableHash, strictCanonicalJsonV1 } from "@agent-control-stack/shared";
+import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
   executionActionHash,
   executionPlanApprovalRequestHash,
