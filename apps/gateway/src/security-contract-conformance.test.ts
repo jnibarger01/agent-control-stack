@@ -47,6 +47,29 @@ describe("security-contract protocol conformance", () => {
     }
   });
 
+  it("rejects malformed MCP JSON before it can create a work item or audit receipt", async () => {
+    const fixture = createGatewayFixture();
+    try {
+      const before = readStoreSnapshot(fixture.dbPath);
+      const response = await fixture.app.inject({
+        method: "POST",
+        url: "/mcp",
+        headers: { ...mcpHeaders, "content-type": "application/json" },
+        payload: '{"jsonrpc":"2.0","id":"malformed","method":"tools/call",'
+      });
+
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({
+        jsonrpc: "2.0",
+        id: null,
+        error: { code: -32700, message: "parse error" }
+      });
+      expect(readStoreSnapshot(fixture.dbPath)).toEqual(before);
+    } finally {
+      await fixture.app.close();
+    }
+  });
+
   it("returns the approval-required state for an unapproved mutation and audits the policy decision", async () => {
     const fixture = createGatewayFixture();
     try {

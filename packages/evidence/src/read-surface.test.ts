@@ -1,4 +1,4 @@
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
@@ -96,6 +96,16 @@ describe("EvidenceReader — instance exposes exactly the read capabilities", ()
     expect(ok.content).toContain("export const x");
     await expect(reader.read_file({ path: "../../../etc/passwd" })).rejects.toThrow(/escape|outside/);
     await expect(reader.read_file({ path: "/etc/passwd" })).rejects.toThrow(/outside/);
+  });
+
+  it("denies traversal before filesystem mutation or credential disclosure", async () => {
+    const protectedPath = join(dir, ".env");
+    writeFileSync(protectedPath, "TOKEN=must-not-leak\n");
+    const before = readFileSync(protectedPath, "utf8");
+
+    await expect(reader.read_file({ path: "../.env" })).rejects.toThrow(/escape|outside/);
+
+    expect(readFileSync(protectedPath, "utf8")).toBe(before);
   });
 
   it("search_workspace and list_directory only observe", async () => {
