@@ -1,6 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
-import { dirname, resolve } from "node:path";
 import {
   acpAdapterConfigFromEnv,
   ReadonlyAcpAdapter,
@@ -13,10 +12,14 @@ import {
   capabilityIssuedEvent,
   desktopCommanderAdapterConfigFromEnv,
   desktopCommanderContainmentFromEnv,
+  desktopCommanderInvocationFingerprint,
+  desktopCommanderRequiredScopes,
   desktopCommanderToolPolicy,
+  normalizeInvocation,
   prepareDesktopCommanderCapability,
   signPreparedDesktopCommanderCapability,
   SqliteDesktopCommanderRuntimeRegistry,
+  validateCapabilitySigningConfig,
   type CapabilitySigningConfig,
   type ContainmentConfig,
   type ExecutionAuthorization
@@ -130,6 +133,7 @@ const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
 const DEFAULT_JSON_BODY_LIMIT_BYTES = 256 * 1024;
 /** Attempt lease TTL for gateway-claimed Desktop Commander bridge executions. */
 const DC_BRIDGE_LEASE_MS = 300_000;
+const DC_BRIDGE_WORKER_ID = "acs-dc-bridge";
 /** Result submission keeps an explicit route bodyLimit; currently matches the default. */
 const MAX_RESULT_BODY_BYTES = DEFAULT_JSON_BODY_LIMIT_BYTES;
 // Well above the socket's 16 KB high-water mark, so ordinary bursts ride
@@ -1030,99 +1034,137 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   // ACS-issued Desktop Commander capability issuance (lease-bound, per call).
   //
-  // A trusted bridge asks ACS for a short-lived acs.dc.v1 capability for
-  // exactly ONE MCP tool call. ACS remains the sole authority: the request
-  // flows through the normal work-item + policy-gate state machine (draft ->
-  // pending_policy -> approved | needs_approval), approvals use the existing
-  // approve/recordApproval/grantExecutionPlanApproval flow, the attempt and
-  // attempt lease are minted by the canonical claim machinery
-  // (claim_approved_work_item_by_id -> attempt_authority), and the envelope is
-  // produced by the existing prepare/sign capability functions only AFTER the
-  // durable issuance registry (recordIssuance) re-derives and accepts the
-  // lease, plan-head, runtime-identity, scope, and approval bindings from the
-  // authoritative store. There is no synthetic attemptId/leaseId/leaseEpoch,
-  // no parallel approval store, and no direct-to-Desktop-Commander path: a
-  // capability that cannot be bound to a live fenced attempt is never signed.
+  // Only the dedicated managed bridge may mint capabilities. The bridge sends
+  // the exact current tool arguments, which are validated and canonicalized in
+  // memory before ACS creates policy, approval, attempt, or lease state. Raw
+  // arguments are never persisted in work-item or audit-visible fields.
   app.post("/dc/capability/issue", async (request, reply) => {
     try {
-      const actor = requireMutationActor(request, reply, auth);
-      if (!actor) {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) {
         return;
+      }
+      if (workerId !== DC_BRIDGE_WORKER_ID) {
+        return reply
+          .code(403)
+          .send({ error: "dedicated Desktop Commander bridge identity is required", code: "dc_bridge_identity_required" });
       }
       const dcActor = firstHeader(request.headers["x-dc-actor"]);
       if (!dcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(dcActor)) {
         return reply.code(400).send({ error: "x-dc-actor header is required", code: "dc_actor_invalid" });
       }
       const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
-      if (!capabilitySigningConfig) {
-        // Fail closed: without the ACS capability signing env there is no
-        // issuer. Never fall back to an unsigned or third-party capability.
+      if (!capabilitySigningConfig || !dcContainment) {
         return reply
           .code(503)
           .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
       }
+      try {
+        validateCapabilitySigningConfig(capabilitySigningConfig);
+      } catch {
+        return reply
+          .code(503)
+          .send({ error: "capability signing key is invalid", code: "capability_signing_key_invalid" });
+      }
+
       const dcPolicy = desktopCommanderToolPolicy(body.tool);
       if (!dcPolicy) {
-        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied");
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
         return reply.code(403).send({ decision: "deny", reason: "unknown_tool" });
       }
+
+      let requestArguments: Record<string, unknown>;
+      let invocation;
+      try {
+        requestArguments = parseDcArgsSummary(body.argsSummary);
+        invocation = normalizeInvocation(body.tool, requestArguments, dcContainment);
+      } catch (error) {
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
+        return reply.code(400).send({
+          decision: "deny",
+          reason: "invalid_arguments",
+          code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid"
+        });
+      }
+
+      if (strictCanonicalJsonV1(invocation.validatedArguments) !== strictCanonicalJsonV1(requestArguments)) {
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
+        return reply.code(400).send({
+          decision: "deny",
+          reason: "invalid_arguments",
+          code: "desktop_commander_argument_invalid",
+          detail: "resend the exact canonical arguments returned by the managed bridge normalizer"
+        });
+      }
+
       if (!hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
         return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
       }
 
-      const normalizedArguments = parseDcArgsSummary(body.argsSummary);
-      const paths = collectDcArgumentPaths(dcPolicy, normalizedArguments);
+      const invocationHash = desktopCommanderInvocationFingerprint(invocation);
+      const requiredScopes = desktopCommanderRequiredScopes(body.tool);
+      const targetCwd =
+        typeof invocation.validatedArguments.cwd === "string"
+          ? invocation.validatedArguments.cwd
+          : (containmentRootForPaths(dcContainment, invocation.canonicalPaths) ?? process.cwd());
+      const policyPaths = invocation.canonicalPaths.length > 0 ? invocation.canonicalPaths : [targetCwd];
       const riskByClass: Record<typeof dcPolicy.riskClass, "low" | "medium" | "high" | "critical"> = {
         read_only: "low",
         safe_mutation: "medium",
         requires_approval: "high",
         destructive: "critical"
       };
-      // Idempotent per (actor, tool, argsSummary): a repeat request for the same
-      // call continues the SAME work item (e.g. after an approval) instead of
-      // minting a second authorization. Still entirely within the existing
-      // work-item store - no parallel approval bookkeeping.
-      const argsSummaryFingerprint = stableHash({ tool: body.tool, argsSummary: body.argsSummary });
+      const bindingHash = stableHash({
+        tool: body.tool,
+        invocationHash,
+        runtimeId: capabilitySigningConfig.runtimeId,
+        identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+        requiredScopes,
+        requesterSubject: dcActor
+      });
+
       const existing = workItems
         .list()
-        .filter(
-          (candidate) =>
+        .filter((candidate) => {
+          const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
+          return (
             candidate.requesterSubject === dcActor &&
-            candidate.requestedActions[0]?.kind === "agent.tool" &&
-            (candidate.requestedActions[0]?.params as Record<string, unknown> | undefined)?.tool === body.tool &&
-            (candidate.requestedActions[0]?.params as Record<string, unknown> | undefined)?.argsSummaryFingerprint ===
-              argsSummaryFingerprint &&
+            params?.tool === body.tool &&
+            params?.bindingHash === bindingHash &&
             ["needs_approval", "approved"].includes(candidate.status)
-        )
+          );
+        })
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+
       const workItem =
         existing ??
         tools.create_work_item(
           createWorkItemSchema.parse({
             title: `Desktop Commander capability: ${body.tool}`,
-            intent: `ACS-issued capability for Desktop Commander tool ${body.tool} requested by ${dcActor} (client ${body.client_id}): ${body.argsSummary.slice(0, 512)}`,
+            intent: `ACS-issued capability for Desktop Commander tool ${body.tool} requested by ${dcActor}`,
             requester: "agent",
             requesterSubject: dcActor,
             target: {
-              cwd:
-                typeof normalizedArguments.cwd === "string"
-                  ? normalizedArguments.cwd
-                  : (commonDirectoryOf(paths) ?? process.cwd()),
-              ...(paths.length > 0 ? { files: paths } : {})
+              cwd: targetCwd,
+              files: policyPaths
             },
             requestedActions: [
               {
-                kind: "agent.tool",
+                kind: dcWorkItemActionKind(dcPolicy),
                 description: `Desktop Commander tool ${body.tool}`,
                 params: {
                   tool: body.tool,
-                  arguments: normalizedArguments,
-                  argsSummary: body.argsSummary,
-                  argsSummaryFingerprint,
+                  invocationHash,
+                  bindingHash,
+                  runtimeId: capabilitySigningConfig.runtimeId,
+                  identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+                  requiredScopes,
+                  requesterSubject: dcActor,
                   write: dcPolicy.mutating,
                   network: dcPolicy.network,
                   destructive: dcPolicy.destructive,
-                  ...(paths.length > 0 ? { paths } : {})
+                  cwd: targetCwd,
+                  paths: policyPaths
                 }
               }
             ],
@@ -1131,12 +1173,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           })
         );
 
-      const evaluations = policy.evaluateWorkItem(workItem, actor, "approve");
+      const evaluations = policy.evaluateWorkItem(workItem, workerId, "approve");
       const required = evaluations.filter((evaluation) => evaluation.decision.decision === "require_approval");
       const actionHash = required[0]?.actionHash ?? executionActionHash(workItem);
 
       if (workItem.status === "blocked") {
-        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
         return reply.code(403).send({
           decision: "deny",
           reason: "policy_denied",
@@ -1145,9 +1187,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
       }
       if (workItem.status !== "approved" || (dcPolicy.requiresApproval && required.length === 0)) {
-        // Policy requires an approval that does not exist yet. Do NOT issue a
-        // capability: the bridge must drive the existing approval flow first.
-        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
         return reply.code(409).send({
           decision: "require_approval",
           workItemId: workItem.id,
@@ -1156,22 +1196,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
       }
 
-      // ---- Canonical ACS authority: claim the attempt -------------------------
-      // The capability carries REAL attempt/lease/fencing values minted by the
-      // ACS claim machinery (execution_attempts + attempt_leases rows). There
-      // is no synthetic issuance identity anywhere in this lane:
-      // recordIssuance re-derives the lease binding, execution-plan head, and
-      // approval consumption from the authoritative store and fails closed on
-      // any drift, and all execution evidence flows through the
-      // lease-authorized recordExecutionEvent path.
-      const workerId = "acs-dc-bridge";
       const claimed = tools.claim_approved_work_item_by_id({
         id: workItem.id,
         workerId,
         leaseMs: DC_BRIDGE_LEASE_MS
       });
       if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
-        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
         return reply.code(409).send({
           decision: "require_approval",
           workItemId: workItem.id,
@@ -1182,8 +1213,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
       const trustedWorkItem = workItems.get(workItem.id);
       const lease = trustedWorkItem ? workItems.getActiveLeaseForAttempt(claimed.attemptId) : undefined;
-      if (!trustedWorkItem || !lease || !dcContainment) {
-        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+      if (!trustedWorkItem || !lease) {
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
         return reply
           .code(503)
           .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
@@ -1197,7 +1228,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           lease,
           workerId,
           containment: dcContainment,
-          requestId: request.id
+          requestId: request.id,
+          invocation
         });
       } catch (error) {
         const code = error instanceof ControlStackError ? error.code : "authorization_failed";
@@ -1223,18 +1255,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             })
           );
         } catch {
-          // Attempt/lease authority already lapsed; the connector.requested
-          // event below still carries hash-chained evidence of the denial.
+          // Lease authority may already have lapsed.
         }
-        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
         return reply
           .code(403)
           .send({ decision: "deny", reason: "authorization_failed", code, workItemId: workItem.id });
       }
 
-      // Approval binding: the payload must carry the EXACT action hash the
-      // execution-plan approval was granted and consumed under, so the durable
-      // issuance gate can re-derive the binding from the lease.
       let approvalActionHash: string | undefined;
       if (dcPolicy.requiresApproval) {
         const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
@@ -1247,46 +1275,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               code: "desktop_commander_approval_rejected"
             })
           );
-          recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply
-            .code(403)
-            .send({
-              decision: "deny",
-              reason: "issuance_rejected",
-              code: "approval_binding_missing",
-              workItemId: workItem.id
-            });
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply.code(403).send({
+            decision: "deny",
+            reason: "issuance_rejected",
+            code: "approval_binding_missing",
+            workItemId: workItem.id
+          });
         }
         approvalActionHash = approval.actionHash;
       }
       if (approvalActionHash !== undefined) {
-        // Spread keeps the authorization brand: the object is still only the
-        // branded authority produced by authorizeDesktopCommanderExecution.
         authorization = { ...authorization, approvalActionHash } as ExecutionAuthorization;
-      }
-
-      // Fail closed on canonicalization drift: the capability's arguments are
-      // compared STRUCTURALLY by Desktop Commander against the exact request
-      // arguments, so ACS must bind what the caller will actually send. If
-      // containment canonicalization would rewrite any argument, refuse rather
-      // than silently authorize a different invocation.
-      if (strictCanonicalJsonV1(authorization.normalizedArguments) !== strictCanonicalJsonV1(normalizedArguments)) {
-        recordLeaseAuthorizedExecutionEvent(
-          authorization,
-          capabilityDeniedEvent({
-            auth: authorization,
-            runtimeId: capabilitySigningConfig.runtimeId,
-            code: "desktop_commander_argument_invalid"
-          })
-        );
-        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
-        return reply.code(403).send({
-          decision: "deny",
-          reason: "issuance_rejected",
-          code: "desktop_commander_argument_invalid",
-          workItemId: workItem.id,
-          detail: "arguments require canonicalization drift; resend exact canonical absolute paths"
-        });
       }
 
       const payloadActionHash = approvalActionHash ?? claimed.actionHash;
@@ -1296,11 +1296,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         actionHash: payloadActionHash
       });
       const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
-      if (!capabilitySigningConfig.identityConfigFingerprint || !capabilitySigningConfig.runtimeScopes) {
-        return reply
-          .code(503)
-          .send({ error: "capability issuance not configured", code: "capability_issuance_unconfigured" });
-      }
+
       try {
         const recorded = capabilityIssuanceRegistry.recordIssuance({
           runtimeId: payload.runtimeId,
@@ -1328,22 +1324,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           );
         }
       } catch (error) {
-        const code = error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
+        const code =
+          error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
         try {
           recordLeaseAuthorizedExecutionEvent(
             authorization,
             capabilityDeniedEvent({ auth: authorization, runtimeId: payload.runtimeId, code })
           );
         } catch {
-          // Lease authority may already have lapsed; connector.requested below
-          // still records the denial on the hash chain.
+          // Lease authority may already have lapsed.
         }
-        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
         return reply.code(403).send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
       }
 
-      // Canonical execution evidence: lease-authorized recordExecutionEvent. A
-      // capability is NEVER returned without its audit evidence committing.
       try {
         const issuanceEvent = capabilityIssuedEvent({
           auth: authorization,
@@ -1360,8 +1354,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           detail: error instanceof Error ? error.message : String(error)
         });
       }
+
       const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
-      recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "issued", workItem.id);
+      recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
       return {
         decision: "allow",
         capability,
@@ -1370,8 +1365,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         leaseId: payload.leaseId,
         leaseEpoch: payload.leaseEpoch,
         planHash: payload.planHash,
-        // The approval-bound hash inside the payload AND the claim's execution
-        // action hash (the one the lease/result contract is bound to).
         actionHash: payload.actionHash,
         claimActionHash: claimed.actionHash,
         inputHash: claimed.inputHash,
@@ -1383,16 +1376,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
-  // Managed-runtime bootstrap: the bridge fetches an ACS-issued runtime
-  // identity challenge and presents it to the managed Desktop Commander child
-  // during MCP initialize; on the child's acceptance the bridge completes the
-  // challenge so the runtime becomes an active attested identity in the
-  // authoritative registry. Without an attested runtime, recordIssuance fails
-  // closed — no capability can be minted for an unregistered runtime.
+  // Managed-runtime bootstrap: only the dedicated bridge can issue or
+  // complete a challenge. Completion must include the exact identity metadata
+  // echoed by the managed Desktop Commander child during MCP initialize.
   app.post("/dc/runtime/bootstrap", async (request, reply) => {
     try {
-      if (!requireMutationActor(request, reply, auth)) {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) {
         return;
+      }
+      if (workerId !== DC_BRIDGE_WORKER_ID) {
+        return reply
+          .code(403)
+          .send({ error: "dedicated Desktop Commander bridge identity is required", code: "dc_bridge_identity_required" });
       }
       const body = dcRuntimeBootstrapSchema.parse(requestObject(request.body));
       const challenge = capabilityIssuanceRegistry.issueBootstrap(
@@ -1416,16 +1412,34 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.post("/dc/runtime/bootstrap/complete", async (request, reply) => {
     try {
-      if (!requireMutationActor(request, reply, auth)) {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) {
         return;
       }
+      if (workerId !== DC_BRIDGE_WORKER_ID) {
+        return reply
+          .code(403)
+          .send({ error: "dedicated Desktop Commander bridge identity is required", code: "dc_bridge_identity_required" });
+      }
       const body = dcRuntimeBootstrapCompleteSchema.parse(requestObject(request.body));
+      const proof = body.runtimeIdentity;
+      const proofMatches =
+        proof.runtimeId === body.runtimeId &&
+        proof.challenge === body.challenge &&
+        proof.scopes.length === body.scopes.length &&
+        proof.scopes.every((scope, index) => scope === body.scopes[index]);
+      if (!proofMatches) {
+        return reply.code(403).send({
+          error: "managed runtime identity proof does not match the ACS challenge",
+          code: "desktop_commander_runtime_attestation_rejected"
+        });
+      }
       capabilityIssuanceRegistry.completeBootstrap(
         {
           runtimeId: body.runtimeId,
           identityConfigFingerprint: body.identityConfigFingerprint,
           scopes: [...body.scopes],
-          challenge: body.challenge
+          challenge: proof.challenge
         },
         new Date()
       );
@@ -1774,96 +1788,39 @@ function requestObject(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
 }
 
-/** Parses the truncated/normalized arguments JSON; unparseable stays opaque. */
+/** Parse a bridge argument summary without persisting it. Invalid JSON fails closed. */
 function parseDcArgsSummary(argsSummary: string): Record<string, unknown> {
+  let parsed: unknown;
   try {
-    const parsed: unknown = JSON.parse(argsSummary);
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    parsed = JSON.parse(argsSummary);
   } catch {
-    return { argsSummary };
+    throw new ControlStackError("desktop_commander_argument_invalid", "Desktop Commander arguments must be valid JSON");
   }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ControlStackError("desktop_commander_argument_invalid", "Desktop Commander arguments must be an object");
+  }
+  return parsed as Record<string, unknown>;
 }
 
-/**
- * The work-item target scope for a capability request: the deepest directory
- * containing every path-bearing argument, so the generic path-escape /
- * credential-path policy rules evaluate the call against its own directory
- * scope instead of the gateway's process cwd.
- */
-function commonDirectoryOf(paths: string[]): string | undefined {
-  if (paths.length === 0) return undefined;
-  const resolved = paths.map((path) => resolve(path));
-  let prefix = dirname(resolved[0]);
-  for (const path of resolved.slice(1)) {
-    while (prefix.length > 0 && !path.startsWith(`${prefix}/`)) {
-      const parent = dirname(prefix);
-      if (parent === prefix) return undefined;
-      prefix = parent;
-    }
+function containmentRootForPaths(containment: ContainmentConfig, paths: readonly string[]): string | undefined {
+  if (paths.length === 0) {
+    return containment.allowedRoots[0];
   }
-  return prefix.length > 0 ? prefix : undefined;
+  return containment.allowedRoots.find((root) =>
+    paths.every((path) => path === root || path.startsWith(`${root}/`))
+  );
 }
 
-function collectDcArgumentPaths(
-  dcPolicy: NonNullable<ReturnType<typeof desktopCommanderToolPolicy>>,
-  args: Record<string, unknown>
-): string[] {
-  const single = [...dcPolicy.pathArgs, ...dcPolicy.cwdArgs].map((key) => args[key]);
-  const multi = dcPolicy.multiPathArgs.flatMap((key) => (Array.isArray(args[key]) ? args[key] : []));
-  return [
-    ...new Set([...single, ...multi].filter((value): value is string => typeof value === "string" && value.length > 0))
-  ];
-}
-
-/** Signing material plus the durable-issuance runtime identity binding. */
-type DcCapabilitySigningConfig = CapabilitySigningConfig & {
-  identityConfigFingerprint: string;
-  runtimeScopes: readonly string[];
-};
-
-function resolveCapabilitySigningConfig(
-  override: GatewayOptions["desktopCommanderCapability"],
-  dbPath: string
-): DcCapabilitySigningConfig | undefined {
-  if (override) {
-    if (!override.identityConfigFingerprint || !override.runtimeScopes) return undefined;
-    return {
-      runtimeId: override.runtimeId,
-      keyId: override.keyId,
-      privateKey: override.privateKey,
-      ttlMs: override.ttlMs ?? 29_000,
-      identityConfigFingerprint: override.identityConfigFingerprint,
-      runtimeScopes: override.runtimeScopes
-    };
-  }
-  try {
-    const config = desktopCommanderAdapterConfigFromEnv(process.env, dbPath);
-    return config?.capability
-      ? {
-          runtimeId: config.capability.runtimeId,
-          keyId: config.capability.keyId,
-          privateKey: config.capability.privateKey,
-          ttlMs: 29_000,
-          identityConfigFingerprint: config.capability.runtimeIdentityConfigFingerprint,
-          runtimeScopes: config.capability.runtimeScopes
-        }
-      : undefined;
-  } catch {
-    // Partially/incorrectly configured Desktop Commander capability env must
-    // not crash gateway startup; the endpoint fails closed with 503 instead.
-    return undefined;
-  }
-}
-
-function resolveDcContainment(override: ContainmentConfig | undefined): ContainmentConfig | undefined {
-  if (override) return override;
-  try {
-    return desktopCommanderContainmentFromEnv();
-  } catch {
-    // Fail closed at request time: without containment roots the gateway
-    // cannot run the Phase 6-8 re-authorization, so no capability is issued.
-    return undefined;
-  }
+function dcWorkItemActionKind(
+  policy: NonNullable<ReturnType<typeof desktopCommanderToolPolicy>>
+): "fs.read" | "fs.list" | "fs.stat" | "fs.write" | "fs.patch" | "fs.move" | "cmd.run" {
+  if (policy.commandArgs.length > 0) return "cmd.run";
+  if (policy.name === "list_directory") return "fs.list";
+  if (policy.name === "get_file_info") return "fs.stat";
+  if (policy.name === "edit_block") return "fs.patch";
+  if (policy.name === "move_file") return "fs.move";
+  if (policy.mutating) return "fs.write";
+  return "fs.read";
 }
 
 function requireApprovalActionHash(input: Record<string, unknown>): void {
