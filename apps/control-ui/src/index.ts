@@ -12,6 +12,7 @@ import {
 import { escapeHtml } from "./html.js";
 import { redactSecrets, redactedAttributesJson, redactionClientSource } from "./redaction.js";
 import { workItemControlsClientSource, workItemControlsHtml } from "./work-item-controls.js";
+import { liveDashboardClientSource, type DashboardFragments } from "./live-dashboard.js";
 
 export {
   isSecretAttributeKey,
@@ -29,6 +30,14 @@ export {
   workItemControlsHtml,
   type WorkItemControl
 } from "./work-item-controls.js";
+export {
+  AGENT_REFRESH_DEBOUNCE_MS,
+  DASHBOARD_FRAGMENT_TARGETS,
+  MIN_REFRESH_INTERVAL_MS,
+  WORK_ITEM_REFRESH_DEBOUNCE_MS,
+  type DashboardFragmentName,
+  type DashboardFragments
+} from "./live-dashboard.js";
 
 export interface MissionControlAgent {
   id: string;
@@ -597,17 +606,53 @@ export function renderWorkItemDetailHtml(
   return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div>${workItemControlsHtml(workItem)}<div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
 }
 
-export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
-  const model = Array.isArray(input) ? { workItems: input, events: [] } : input;
-  const events = model.events ?? [];
-  const agents =
-    model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date(), model.registeredAgents ?? []);
+function dashboardModel(input: WorkItem[] | MissionControlViewModel): MissionControlViewModel {
+  return Array.isArray(input) ? { workItems: input, events: [] } : input;
+}
+
+function dashboardAgents(model: MissionControlViewModel): MissionControlAgent[] {
+  return (
+    model.agents ??
+    projectAgents(model.workItems, model.events ?? [], model.now ?? new Date(), model.registeredAgents ?? [])
+  );
+}
+
+/**
+ * Markup for every live-updated dashboard section. The page embeds these at
+ * render time and `GET /dashboard/fragments` returns them for in-place patches,
+ * so there is exactly one renderer for each section.
+ */
+export function renderDashboardFragments(
+  input: WorkItem[] | MissionControlViewModel,
+  agents: MissionControlAgent[] = dashboardAgents(dashboardModel(input))
+): DashboardFragments {
+  const model = dashboardModel(input);
+  const now = model.now ?? new Date();
   const stats = summarize(model.workItems, agents);
   const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
-  const executionPlansByWorkItem = model.executionPlansByWorkItem ?? {};
-  const executionPlanAdmissionsByWorkItem = model.executionPlanAdmissionsByWorkItem ?? {};
-  const executionAttemptsByWorkItem = model.executionAttemptsByWorkItem ?? {};
   const attemptLeasesByWorkItem = model.attemptLeasesByWorkItem ?? {};
+  return {
+    cards: overviewCards(stats),
+    queueList: workQueueItems(
+      model.workItems,
+      model.executionPlansByWorkItem ?? {},
+      model.executionPlanAdmissionsByWorkItem ?? {},
+      model.executionAttemptsByWorkItem ?? {},
+      attemptLeasesByWorkItem
+    ),
+    approvalsList: approvalsPanel(approvalItems, approvalOptionsByWorkItem(model)),
+    approvalsCount: `${approvalItems.length} waiting`,
+    metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
+    systemStats: systemStats(stats, model.executionBackend),
+    generatedAt: now.toISOString()
+  };
+}
+
+export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
+  const model = dashboardModel(input);
+  const events = model.events ?? [];
+  const agents = dashboardAgents(model);
+  const fragments = renderDashboardFragments(model, agents);
 
   return `<!doctype html>
 <html lang="en">
@@ -638,21 +683,22 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <main id="main-content" tabindex="-1">
       <header>
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
-        <div class="live" aria-live="polite"><span aria-hidden="true"></span> SSE ready</div>
+        <div class="header-status"><div class="live connecting" data-state="connecting"><span aria-hidden="true"></span> <span data-live-label>Connecting…</span></div><small id="dashboard-updated" class="dashboard-updated"></small></div>
       </header>
-      <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve and deny are disabled until the live stream reconnects.</div>
-      <section id="overview" class="cards" data-view-panel="overview">${overviewCards(stats)}</section>
+      <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
+      <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
+      <section id="overview" class="cards" data-view-panel="overview">${fragments.cards}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, executionAttemptsByWorkItem, attemptLeasesByWorkItem)}</article>
+        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}<div class="queue" id="queue-list">${fragments.queueList}</div>${workDetailPanel()}</article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, approvalOptionsByWorkItem(model))}</article>
+        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
       </section>
       <section class="grid lower">
-        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div>${operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, model.now ?? new Date())}</article>
+        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div><div id="operator-metrics-body">${fragments.metrics}</div></article>
         <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline([...events].reverse())}</article>
-        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div>${systemPanel(stats, model.executionBackend)}</article>
+        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div><div class="system-panel"><div id="system-stats">${fragments.systemStats}</div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
         <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
@@ -854,7 +900,7 @@ function queueFilterStrip(): string {
 </div>`;
 }
 
-function workQueue(
+function workQueueItems(
   workItems: WorkItem[],
   executionPlansByWorkItem: Record<string, ExecutionPlanRecord>,
   executionPlanAdmissionsByWorkItem: Record<string, ExecutionPlanAdmission>,
@@ -862,7 +908,7 @@ function workQueue(
   attemptLeasesByWorkItem: Record<string, MissionControlAttemptLease[]>
 ): string {
   if (!workItems.length) return `<p class="empty">No work items.</p>`;
-  return `<div class="queue">${workItems
+  return workItems
     .map((item) => {
       const attention = needsOperatorAttention(item.status);
       const plan = executionPlansByWorkItem[item.id];
@@ -872,9 +918,11 @@ function workQueue(
       const agentId = workItemAgentId(item, attempts, leases);
       return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
-    .join(
-      ""
-    )}</div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section>`;
+    .join("");
+}
+
+function workDetailPanel(): string {
+  return `<section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section>`;
 }
 
 function attentionBadge(): string {
@@ -1004,9 +1052,9 @@ function formatDuration(ageMs: number | undefined): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-function systemPanel(stats: ReturnType<typeof summarize>, executionBackend?: string): string {
+function systemStats(stats: ReturnType<typeof summarize>, executionBackend?: string): string {
   const backend = executionBackend ? escapeHtml(executionBackend) : "unset";
-  return `<div class="system-panel"><dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl><div id="system-probes" class="system-probes"></div></div>`;
+  return `<dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl>`;
 }
 
 function connectorsPanel(agents: MissionControlAgent[], executionBackend?: string): string {
@@ -1057,8 +1105,10 @@ let sseReconnectAttempt = 0;
 let sseReconnectTimer = null;
 let sseEverOpened = false;
 let sseConnected = false;
+let sseReconnectAt = 0;
 const sseEventNames = [
   'work_item.created',
+  'work_item.pending_policy',
   'work_item.needs_approval',
   'work_item.approved',
   'work_item.running',
@@ -1067,6 +1117,11 @@ const sseEventNames = [
   'work_item.succeeded',
   'work_item.cancelled',
   'work_item.rejected',
+  'work_item.cancelling',
+  'work_item.unknown',
+  'work_item.quarantined',
+  'work_item.retried',
+  'work_item.cloned',
   'agent.created',
   'agent.updated',
   'agent.heartbeat',
@@ -1097,6 +1152,7 @@ function applySseConnectionState(root, connected) {
     const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
     button.disabled = !connected || approveWithoutHash;
   });
+  renderLiveStatus();
 }
 
 function connectSse() {
@@ -1110,25 +1166,34 @@ function connectSse() {
   }
   sseSource = new EventSource('/events');
   sseSource.addEventListener('open', function () {
-    const shouldRefresh = sseEverOpened && !sseConnected;
+    const reconnected = sseEverOpened && !sseConnected;
     sseReconnectAttempt = 0;
-    applySseConnectionState(document, true);
+    sseReconnectAt = 0;
     sseEverOpened = true;
-    if (shouldRefresh) location.assign(location.href);
+    applySseConnectionState(document, true);
+    // Events may have been missed while the stream was down (or before it
+    // first opened): catch up by re-fetching sections instead of reloading.
+    scheduleDashboardRefresh(0);
+    if (reconnected) {
+      announce('Live stream reconnected');
+      if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+    }
   });
   sseSource.addEventListener('error', function () {
-    applySseConnectionState(document, false);
     if (sseSource) {
       sseSource.close();
       sseSource = null;
     }
-    if (sseReconnectTimer) return;
-    const delay = nextSseReconnectDelayMs(sseReconnectAttempt);
-    sseReconnectAttempt += 1;
-    sseReconnectTimer = setTimeout(function () {
-      sseReconnectTimer = null;
-      connectSse();
-    }, delay);
+    if (!sseReconnectTimer) {
+      const delay = nextSseReconnectDelayMs(sseReconnectAttempt);
+      sseReconnectAttempt += 1;
+      sseReconnectAt = Date.now() + delay;
+      sseReconnectTimer = setTimeout(function () {
+        sseReconnectTimer = null;
+        connectSse();
+      }, delay);
+    }
+    applySseConnectionState(document, false);
   });
   sseEventNames.forEach(function (name) {
     sseSource.addEventListener(name, appendAuditEvent);
@@ -1163,6 +1228,7 @@ function appendAuditEvent(event) {
   list.prepend(item);
   while (list.children.length > 10) list.lastElementChild?.remove();
   const eventName = String(data.name || event.type || '');
+  onLiveAuditEvent(eventName, data);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
@@ -1179,8 +1245,12 @@ function escapeClient(value) {
 
 ${redactionClientSource()}
 ${workItemControlsClientSource()}
-function onWorkItemControlSucceeded() {
-  setTimeout(function () { location.assign(location.href); }, 500);
+${liveDashboardClientSource()}
+function onWorkItemControlSucceeded(control, id, body) {
+  const created = body && body.workItem && body.workItem.id;
+  announce(control === 'cancel' ? 'Cancel accepted for ' + id : control + ' created ' + (created || 'a new work item'));
+  scheduleDashboardRefresh(0);
+  if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
 }
 
 function formatClientTime(value) {
@@ -1205,24 +1275,48 @@ function fetchJson(url) {
 }
 
 function bindWorkItems() {
-  document.querySelectorAll('[data-work-item]').forEach(function (button) {
-    button.addEventListener('click', async function () {
-      const target = document.querySelector('#work-detail');
-      if (!target) return;
-      document.querySelectorAll('[data-work-item]').forEach(function (candidate) { candidate.classList.remove('selected'); candidate.removeAttribute('aria-current'); });
-      button.classList.add('selected');
-      button.setAttribute('aria-current', 'true');
-      target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
-      try {
-        const body = await fetchJson('/work-items/' + encodeURIComponent(button.dataset.workItem));
-        renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
-        target.focus({ preventScroll: false });
-      } catch (error) {
-        target.innerHTML = '<div class="detail-error" role="alert">' + escapeClient(error.message) + '</div>';
-        target.focus({ preventScroll: false });
-      }
-    });
+  // Delegated: queue items are replaced by live fragment patches.
+  document.addEventListener('click', function (event) {
+    const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
+    if (!button) return;
+    document.querySelectorAll('[data-work-item]').forEach(function (candidate) { candidate.classList.remove('selected'); candidate.removeAttribute('aria-current'); });
+    button.classList.add('selected');
+    button.setAttribute('aria-current', 'true');
+    selectedWorkItemId = button.dataset.workItem;
+    void loadWorkDetail(selectedWorkItemId, { preserve: false });
   });
+}
+
+async function loadWorkDetail(id, options) {
+  const target = document.querySelector('#work-detail');
+  if (!target || !id) return;
+  const preserve = Boolean(options && options.preserve);
+  const reasonInput = preserve ? target.querySelector('[data-control-reason]') : null;
+  const reason = reasonInput ? reasonInput.value : '';
+  const output = preserve ? target.querySelector('.approval-result') : null;
+  const outputText = output ? output.textContent : '';
+  const active = document.activeElement;
+  const activeId = preserve && active && active.id && target.contains(active) ? active.id : null;
+  if (!preserve) target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
+  try {
+    const body = await fetchJson('/work-items/' + encodeURIComponent(id));
+    if (selectedWorkItemId !== id) return;
+    renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
+    if (!preserve) {
+      target.focus({ preventScroll: false });
+      return;
+    }
+    const nextReason = target.querySelector('[data-control-reason]');
+    if (nextReason && reason) nextReason.value = reason;
+    const nextOutput = target.querySelector('.approval-result');
+    if (nextOutput && outputText) nextOutput.textContent = outputText;
+    const nextActive = activeId ? document.getElementById(activeId) : null;
+    if (nextActive) nextActive.focus({ preventScroll: true });
+  } catch (error) {
+    if (preserve) return;
+    target.innerHTML = '<div class="detail-error" role="alert">' + escapeClient(error.message) + '</div>';
+    target.focus({ preventScroll: false });
+  }
 }
 
 function agentRowsMarkup(agents) {
@@ -1629,8 +1723,10 @@ function requestApprovalConfirm(request) {
   });
 }
 
-document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
-  button.addEventListener('click', async () => {
+// Delegated: approval cards are replaced by live fragment patches.
+document.addEventListener('click', async (event) => {
+    const button = event.target && event.target.closest ? event.target.closest('[data-approve],[data-reject],[data-unblock]') : null;
+    if (!button || button.disabled) return;
     const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
     const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'reject' : 'unblock';
     const risk = button.dataset.risk || '';
@@ -1669,17 +1765,20 @@ document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach
       }
       payload.actionHash = button.dataset.actionHash;
     }
-    const res = await fetch('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
-    const body = await res.json();
+    const res = await fetch('/work-items/' + encodeURIComponent(id) + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
+    const body = await res.json().catch(() => ({}));
     output.textContent = res.ok ? action + ' accepted' : 'Rejected: ' + (body.error || body.code || res.status);
-    if (res.ok) setTimeout(() => location.assign(location.href), 500);
-  });
+    if (res.ok) {
+      announce(action + ' accepted for ' + id);
+      scheduleDashboardRefresh(0);
+    }
 });
 
 
 document.querySelector('#task-form')?.addEventListener('submit', async (event) => {
   event.preventDefault();
-  const form = new FormData(event.currentTarget);
+  const formElement = event.currentTarget;
+  const form = new FormData(formElement);
   const actionKind = String(form.get('actionKind') || '').trim();
   const actionDescription = String(form.get('actionDescription') || '').trim();
   const service = String(form.get('service') || '').trim();
@@ -1696,9 +1795,14 @@ document.querySelector('#task-form')?.addEventListener('submit', async (event) =
   };
   const headers = { 'content-type': 'application/json' };
   const res = await fetch('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
-  const body = await res.json();
-  document.querySelector('#task-result').textContent = res.ok ? 'Created ' + body.id : 'Rejected: ' + (body.error || res.status);
-  if (res.ok) setTimeout(() => location.assign(location.href), 500);
+  const body = await res.json().catch(() => ({}));
+  const createdId = body.id || (body.workItem && body.workItem.id) || '';
+  document.querySelector('#task-result').textContent = res.ok ? 'Created ' + createdId : 'Rejected: ' + (body.error || res.status);
+  if (res.ok) {
+    formElement.reset();
+    announce('Created ' + createdId);
+    scheduleDashboardRefresh(0);
+  }
 });
 
 const viewAliases = {
@@ -1829,8 +1933,12 @@ header { display: flex; justify-content: space-between; align-items: start; gap:
 h1 { margin: 0; font-size: 26px; color: var(--ink); }
 p { color: var(--muted); margin: 6px 0 0; }
 .live { border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: var(--surface); white-space: nowrap; }
-.live span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
-.live.disconnected span { background: var(--red); }
+.live > span[aria-hidden="true"] { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
+.live.disconnected > span[aria-hidden="true"] { background: var(--red); }
+.live.connecting > span[aria-hidden="true"] { background: var(--muted); }
+.header-status { display: grid; justify-items: end; gap: 4px; }
+.dashboard-updated { color: var(--muted); font-size: 11px; min-height: 1em; }
+.action-status { margin: 0 0 10px; min-height: 1.25em; color: var(--muted); font-size: 13px; }
 .stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid #f1d18a; background: #fff8e6; color: var(--amber); border-radius: 8px; font-weight: 600; }
 .stale-banner[hidden] { display: none; }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
@@ -1987,7 +2095,8 @@ output { color: var(--accent); min-height: 20px; }
   .queue-filter-chip { min-height: 44px; }
   .queue-item { padding: 14px 12px; min-height: 44px; }
   .detail-panel { margin: 8px; max-height: none; }
-  .live { justify-self: start; }
+  .live { justify-self: start; white-space: normal; max-width: 100%; }
+  .header-status { justify-items: start; }
 }
 body[data-active-view] [data-view-panel] { display: none; }
 body[data-active-view="overview"] [data-view-panel~="overview"],
@@ -2000,6 +2109,8 @@ body[data-active-view="metrics"] [data-view-panel~="metrics"],
 body[data-active-view="audit"] [data-view-panel~="audit"],
 body[data-active-view="policy"] [data-view-panel~="policy"],
 body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
+/* The view rule above must not flatten the overview card grid. */
+body[data-active-view="overview"] #overview.cards { display: grid; }
 .panel-head, th, .queue-filter, .detail-panel, .execution-card, .approval-item, .approval-actions button, .queue-filter-chip, input, textarea, select, .approval-confirm-card, .chip, .action-list li { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .stale-banner { background: #2a2416; color: var(--amber); border-color: #6b5420; }
 .agent-row:hover, .agent-row.selected, .queue-item:hover, .queue-item.selected { background: #243044; }

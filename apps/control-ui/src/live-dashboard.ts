@@ -1,0 +1,208 @@
+/**
+ * Live dashboard updates.
+ *
+ * The server stays the only renderer: `GET /dashboard/fragments` returns the
+ * same section markup the page was rendered with (see
+ * `renderDashboardFragments`). The client re-fetches those fragments when SSE
+ * events arrive, after its own actions, and after a reconnect, then patches
+ * each section in place. It keeps typed reasons, focus, the selected work
+ * item, and the queue filter, so a patch never costs the operator their place.
+ */
+
+/** Section id → element that receives the fragment markup. */
+export const DASHBOARD_FRAGMENT_TARGETS = {
+  cards: "#overview",
+  queueList: "#queue-list",
+  approvalsList: "#approvals-list",
+  approvalsCount: "#approvals-count",
+  metrics: "#operator-metrics-body",
+  systemStats: "#system-stats"
+} as const;
+
+export type DashboardFragmentName = keyof typeof DASHBOARD_FRAGMENT_TARGETS;
+export type DashboardFragments = Record<DashboardFragmentName, string> & { generatedAt: string };
+
+/** Debounce for work-item events, so a burst of transitions costs one fetch. */
+export const WORK_ITEM_REFRESH_DEBOUNCE_MS = 250;
+/** Agent heartbeats only move counters; refresh for them lazily. */
+export const AGENT_REFRESH_DEBOUNCE_MS = 5_000;
+/** Never fetch fragments more often than this. */
+export const MIN_REFRESH_INTERVAL_MS = 1_000;
+
+function scriptSafeJson(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
+}
+
+/**
+ * Relies on the dashboard client's `fetchJson`, `sseConnected`,
+ * `sseReconnectAt`, `sseReconnectAttempt`, `readQueueFilterFromDom`,
+ * `applyQueueFilterClient`, and `loadWorkDetail`.
+ */
+export function liveDashboardClientSource(): string {
+  return `
+const dashboardFragmentTargets = ${scriptSafeJson(DASHBOARD_FRAGMENT_TARGETS)};
+const appliedFragments = {};
+let dashboardRefreshTimer = null;
+let dashboardRefreshDueAt = 0;
+let dashboardRefreshInFlight = false;
+let dashboardRefreshQueued = false;
+let lastDashboardRefreshAt = 0;
+let lastSseEventAt = 0;
+let dashboardRefreshError = '';
+let selectedWorkItemId = null;
+
+function cssAttr(value) {
+  return String(value).replace(/["\\\\]/g, '\\\\$&');
+}
+
+function scheduleDashboardRefresh(delayMs) {
+  const earliest = lastDashboardRefreshAt + ${MIN_REFRESH_INTERVAL_MS};
+  const due = Math.max(Date.now() + Math.max(0, delayMs || 0), earliest);
+  if (dashboardRefreshTimer && dashboardRefreshDueAt <= due) return;
+  if (dashboardRefreshTimer) clearTimeout(dashboardRefreshTimer);
+  dashboardRefreshDueAt = due;
+  dashboardRefreshTimer = setTimeout(function () {
+    dashboardRefreshTimer = null;
+    void refreshDashboard();
+  }, Math.max(0, due - Date.now()));
+}
+
+async function refreshDashboard() {
+  if (dashboardRefreshInFlight) {
+    dashboardRefreshQueued = true;
+    return;
+  }
+  dashboardRefreshInFlight = true;
+  try {
+    const body = await fetchJson('/dashboard/fragments');
+    applyDashboardFragments((body && body.fragments) || {});
+    dashboardRefreshError = '';
+  } catch (error) {
+    dashboardRefreshError = 'refresh failed';
+  } finally {
+    lastDashboardRefreshAt = Date.now();
+    dashboardRefreshInFlight = false;
+    renderLiveStatus();
+    if (dashboardRefreshQueued) {
+      dashboardRefreshQueued = false;
+      scheduleDashboardRefresh(${WORK_ITEM_REFRESH_DEBOUNCE_MS});
+    }
+  }
+}
+
+function captureOperatorState() {
+  const active = document.activeElement;
+  const reasons = {};
+  document.querySelectorAll('[data-reason]').forEach(function (input) {
+    if (input.value) reasons[input.dataset.reason] = input.value;
+  });
+  const outputs = {};
+  document.querySelectorAll('.approval-result[id]').forEach(function (output) {
+    if (output.textContent) outputs[output.id] = output.textContent;
+  });
+  return {
+    activeId: active && active.id ? active.id : null,
+    activeSelector: active && active.dataset && active.dataset.workItem ? '[data-work-item="' + cssAttr(active.dataset.workItem) + '"]' : null,
+    reasons: reasons,
+    outputs: outputs
+  };
+}
+
+function restoreOperatorState(state) {
+  Object.keys(state.reasons).forEach(function (id) {
+    const input = document.querySelector('[data-reason="' + cssAttr(id) + '"]');
+    if (input && !input.value) input.value = state.reasons[id];
+  });
+  Object.keys(state.outputs).forEach(function (id) {
+    const output = document.getElementById(id);
+    if (output && !output.textContent) output.textContent = state.outputs[id];
+  });
+  if (selectedWorkItemId) {
+    const selected = document.querySelector('[data-work-item="' + cssAttr(selectedWorkItemId) + '"]');
+    if (selected) {
+      selected.classList.add('selected');
+      selected.setAttribute('aria-current', 'true');
+    }
+  }
+  const target = (state.activeId && document.getElementById(state.activeId)) ||
+    (state.activeSelector && document.querySelector(state.activeSelector));
+  if (target && document.activeElement !== target && typeof target.focus === 'function') {
+    target.focus({ preventScroll: true });
+  }
+}
+
+function applyDashboardFragments(fragments) {
+  const changed = Object.keys(dashboardFragmentTargets).filter(function (name) {
+    return typeof fragments[name] === 'string' && appliedFragments[name] !== fragments[name];
+  });
+  if (!changed.length) return false;
+  const state = captureOperatorState();
+  changed.forEach(function (name) {
+    const target = document.querySelector(dashboardFragmentTargets[name]);
+    if (!target) return;
+    target.innerHTML = fragments[name];
+    appliedFragments[name] = fragments[name];
+  });
+  if (changed.indexOf('queueList') !== -1) applyQueueFilterClient(readQueueFilterFromDom());
+  if (changed.indexOf('approvalsList') !== -1) applySseConnectionState(document, sseConnected);
+  restoreOperatorState(state);
+  return true;
+}
+
+function announce(message) {
+  const region = document.getElementById('action-status');
+  if (region) region.textContent = message;
+}
+
+function eventWorkItemId(data) {
+  const attrs = (data && data.attributes) || {};
+  return attrs['work_item.id'] || attrs['work_item.source_id'] || '';
+}
+
+function onLiveAuditEvent(name, data) {
+  lastSseEventAt = Date.now();
+  renderLiveStatus();
+  if (name.indexOf('work_item.') === 0) {
+    scheduleDashboardRefresh(${WORK_ITEM_REFRESH_DEBOUNCE_MS});
+    const id = eventWorkItemId(data);
+    if (selectedWorkItemId && id === selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+  } else if (name.indexOf('agent.') === 0 || name.indexOf('acp.') === 0 || name === 'tunnel_session.heartbeat') {
+    scheduleDashboardRefresh(${AGENT_REFRESH_DEBOUNCE_MS});
+  }
+}
+
+function secondsSince(timestamp) {
+  return Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+}
+
+function renderLiveStatus() {
+  const live = document.querySelector('.live');
+  if (!live) return;
+  let state;
+  let text;
+  if (sseConnected) {
+    state = 'live';
+    text = 'Live';
+    if (lastSseEventAt) text += ' · last event ' + secondsSince(lastSseEventAt) + 's ago';
+  } else if (!sseEverOpened && !sseReconnectAt) {
+    state = 'connecting';
+    text = 'Connecting…';
+  } else {
+    state = 'disconnected';
+    const wait = sseReconnectAt ? Math.max(0, Math.ceil((sseReconnectAt - Date.now()) / 1000)) : 0;
+    text = 'Disconnected · ' + (wait > 0 ? 'reconnecting in ' + wait + 's' : 'reconnecting…') + ' (attempt ' + Math.max(1, sseReconnectAttempt) + ')';
+  }
+  if (dashboardRefreshError) text += ' · ' + dashboardRefreshError;
+  live.dataset.state = state;
+  live.classList.toggle('disconnected', state === 'disconnected');
+  live.classList.toggle('connecting', state === 'connecting');
+  const label = live.querySelector('[data-live-label]');
+  if (label) label.textContent = text;
+  else live.innerHTML = '<span aria-hidden="true"></span> <span data-live-label>' + escapeClient(text) + '</span>';
+  const updated = document.getElementById('dashboard-updated');
+  if (updated) updated.textContent = lastDashboardRefreshAt ? 'Updated ' + new Date(lastDashboardRefreshAt).toLocaleTimeString() : '';
+}
+
+setInterval(renderLiveStatus, 1000);
+`;
+}

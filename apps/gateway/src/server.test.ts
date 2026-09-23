@@ -107,6 +107,36 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("serves live dashboard fragments from the same view model as the page", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-fragments-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const before = await app.inject({ method: "GET", url: "/dashboard/fragments" });
+      expect(before.statusCode).toBe(200);
+      expect(before.headers["cache-control"]).toBe("no-store");
+      expect(before.json().fragments.queueList).toContain("No work items.");
+
+      await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { title: "Fragment route", intent: "verify live fragments", risk: "high" }
+      });
+      const after = await app.inject({ method: "GET", url: "/dashboard/fragments" });
+      const fragments = after.json().fragments;
+
+      expect(Object.keys(fragments).sort()).toEqual(
+        ["approvalsCount", "approvalsList", "cards", "generatedAt", "metrics", "queueList", "systemStats"].sort()
+      );
+      expect(fragments.queueList).toContain("Fragment route");
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.body).toContain(`<div class="queue" id="queue-list">${fragments.queueList}</div>`);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("bounds work-item and agent detail audit events", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-detail-event-limit-"));
     const dbPath = join(dir, "control.db");
@@ -4329,6 +4359,7 @@ describe("gateway work-item routes", () => {
       "/agents/codex-cli",
       "/api/agents",
       "/api/agents/codex-cli",
+      "/dashboard/fragments",
       "/events"
     ];
 

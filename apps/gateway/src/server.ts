@@ -27,8 +27,10 @@ import {
 import {
   projectAgents,
   renderDashboard,
+  renderDashboardFragments,
   toMissionControlAttemptLease,
-  type ApprovalActionOption
+  type ApprovalActionOption,
+  type MissionControlViewModel
 } from "@agent-control-stack/control-ui";
 import {
   MachineController,
@@ -517,32 +519,44 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   }
 
+  function missionControlViewModel(request: FastifyRequest): MissionControlViewModel {
+    const workItemList = workItems.list();
+    return {
+      workItems: workItemList,
+      events: workItems.readEvents(eventReadOptions(request.query)),
+      registeredAgents: workItems.listRegistryAgents(),
+      approvalActionsByWorkItem: approvalActionsByWorkItem(
+        policy,
+        workItemList,
+        gatewayCredentialForRequest(request, auth)?.actor
+      ),
+      executionAttemptsByWorkItem: Object.fromEntries(
+        workItemList.map((workItem) => [workItem.id, executionReads.listExecutionAttempts(workItem.id)])
+      ),
+      attemptLeasesByWorkItem: Object.fromEntries(
+        workItemList.map((workItem) => [
+          workItem.id,
+          executionReads.listAttemptLeases(workItem.id).map(toMissionControlAttemptLease)
+        ])
+      ),
+      executionBackend: reportedExecutionBackend()
+    };
+  }
+
   app.get("/", { preHandler: requireRead }, async (request, reply) => {
     try {
-      const workItemList = workItems.list();
-      const events = workItems.readEvents(eventReadOptions(request.query));
-      reply.type("text/html").send(
-        renderDashboard({
-          workItems: workItemList,
-          events,
-          registeredAgents: workItems.listRegistryAgents(),
-          approvalActionsByWorkItem: approvalActionsByWorkItem(
-            policy,
-            workItemList,
-            gatewayCredentialForRequest(request, auth)?.actor
-          ),
-          executionAttemptsByWorkItem: Object.fromEntries(
-            workItemList.map((workItem) => [workItem.id, executionReads.listExecutionAttempts(workItem.id)])
-          ),
-          attemptLeasesByWorkItem: Object.fromEntries(
-            workItemList.map((workItem) => [
-              workItem.id,
-              executionReads.listAttemptLeases(workItem.id).map(toMissionControlAttemptLease)
-            ])
-          ),
-          executionBackend: reportedExecutionBackend()
-        })
-      );
+      reply.type("text/html").send(renderDashboard(missionControlViewModel(request)));
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  // Dashboard-internal: server-rendered section markup for Mission Control's
+  // in-place live updates. Same read guard and data as GET /; not a public API.
+  app.get("/dashboard/fragments", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      reply.header("cache-control", "no-store");
+      return { fragments: renderDashboardFragments(missionControlViewModel(request)) };
     } catch (error) {
       return sendError(reply, error);
     }
