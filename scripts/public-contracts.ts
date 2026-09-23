@@ -69,7 +69,14 @@ const openapi = {
             }
           : {}),
         responses: {
-          [String(operation.successStatus ?? 200)]: { description: "Successful response." },
+          [String(operation.successStatus ?? 200)]: {
+            description: "Successful response.",
+            ...(operation.responseSchema
+              ? {
+                  content: { "application/json": { schema: jsonSchema(operation.responseSchema) } }
+                }
+              : {})
+          },
           "400": { description: "Boundary validation failed." },
           "401": { description: "Authentication is required." },
           "403": { description: "The authenticated principal is not authorized." },

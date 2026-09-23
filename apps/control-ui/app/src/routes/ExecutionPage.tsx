@@ -169,6 +169,7 @@ export function ExecutionPage() {
                 {tab === "execution" ? (
                   detail ? (
                     <ExecutionDetailView
+                      executionPlan={detail.executionPlan}
                       workItemId={selected}
                       attempts={detail.executionAttempts}
                       leases={detail.attemptLeases}

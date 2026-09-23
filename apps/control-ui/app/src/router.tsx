@@ -18,6 +18,7 @@ export type RouteId =
   | "execution"
   | "approvals"
   | "agents"
+  | "runtimes"
   | "connectors"
   | "policy"
   | "audit"
@@ -38,6 +39,7 @@ export const ROUTES: readonly RouteDef[] = [
   { id: "execution", path: "/execution", label: "Execution" },
   { id: "approvals", path: "/approvals", label: "Approvals" },
   { id: "agents", path: "/agents", label: "Agents" },
+  { id: "runtimes", path: "/runtimes", label: "Runtime Map" },
   { id: "connectors", path: "/connectors", label: "Connectors" },
   { id: "policy", path: "/policy", label: "Policy" },
   { id: "audit", path: "/audit", label: "Audit" },

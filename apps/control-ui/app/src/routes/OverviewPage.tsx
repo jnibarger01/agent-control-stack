@@ -26,6 +26,7 @@ import {
   StatusBadge
 } from "../components/ui";
 import { DataTable } from "../components/DataTable";
+import { IconBlocked, IconFailed, IconLease, IconOnline, IconPending, IconRunning } from "../components/Icons";
 
 export function OverviewPage() {
   const work = useWorkItems();
@@ -53,7 +54,7 @@ export function OverviewPage() {
     const workAttention = items
       .filter((item) => needsAttention(item.status))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
-      .slice(0, 8);
+      .slice(0, 6);
     const agentAttention = (agents.data ?? []).filter(
       (agent) =>
         agent.effectiveStatus === "ERROR" ||
@@ -67,18 +68,18 @@ export function OverviewPage() {
     const merged = new Map<string, (typeof stream.events)[number]>();
     for (const event of backfill.data ?? []) merged.set(event.id, event);
     for (const event of stream.events) merged.set(event.id, event);
-    return [...merged.values()].sort((a, b) => b.sequence - a.sequence).slice(0, 8);
+    return [...merged.values()].sort((a, b) => b.sequence - a.sequence).slice(0, 6);
   }, [backfill.data, stream.events]);
 
   const active = (executions.data?.rows ?? [])
     .filter((row) => row.attempt && ["leased", "running", "cancellation_requested"].includes(row.attempt.status))
-    .slice(0, 8);
+    .slice(0, 6);
 
   if (work.error && !work.hasData) return <ErrorState error={work.error} onRetry={work.refetch} what="work items" />;
 
   return (
     <div className="page" data-testid="page-overview">
-      <PageHead title="Overview" description="Live state of the ACS control plane." />
+      <PageHead title="Overview" description="Real-time status of your agents, executions, and control plane." />
 
       <div className="stat-grid" aria-label="Summary">
         <Stat
@@ -87,12 +88,16 @@ export function OverviewPage() {
           note="Fresh heartbeat within the ACS TTL"
           to="/agents"
           tone={online > 0 ? "success" : undefined}
+          icon={<IconOnline />}
+          pill={agents.hasData && online === (agents.data?.length ?? 0) ? { label: "Healthy", tone: "success" } : undefined}
         />
         <Stat
           label="Running"
           value={work.hasData ? counts.running : "—"}
           note="Work items executing"
           to="/work?status=running"
+          icon={<IconRunning />}
+          pill={counts.running > 0 ? { label: "Healthy", tone: "success" } : undefined}
         />
         <Stat
           label="Pending approvals"
@@ -100,6 +105,8 @@ export function OverviewPage() {
           note="Waiting on a human"
           to="/approvals"
           tone={counts.approvals > 0 ? "warning" : undefined}
+          icon={<IconPending />}
+          pill={counts.approvals > 0 ? { label: "Attention", tone: "warning" } : undefined}
         />
         <Stat
           label="Blocked"
@@ -107,6 +114,8 @@ export function OverviewPage() {
           note="Denied or held by policy"
           to="/work?status=blocked"
           tone={counts.blocked > 0 ? "danger" : undefined}
+          icon={<IconBlocked />}
+          pill={counts.blocked > 0 ? { label: "Blocked", tone: "danger" } : undefined}
         />
         <Stat
           label="Failed / quarantined"
@@ -114,6 +123,8 @@ export function OverviewPage() {
           note="Need investigation"
           to="/work?attention=1"
           tone={counts.failed > 0 ? "danger" : undefined}
+          icon={<IconFailed />}
+          pill={counts.failed > 0 ? { label: "High risk", tone: "danger" } : undefined}
         />
         <Stat
           label="Active leases"
@@ -124,279 +135,210 @@ export function OverviewPage() {
               : "Worker-owned attempts"
           }
           to="/execution"
+          icon={<IconLease />}
+          pill={execSummary?.activeLeases ? { label: "Healthy", tone: "success" } : undefined}
         />
       </div>
 
-      <div className="layout-grid">
-        <div className="span-7">
-          <Card
-            title="Needs attention"
-            action={<Link to="/work?attention=1">View all</Link>}
-            labelledBy="h-attention"
-            flush
-          >
-            {work.hasData && attention.workAttention.length === 0 && attention.agentAttention.length === 0 ? (
-              <EmptyState title="Nothing needs attention">
-                No approvals, blocked, failed or quarantined work, and no unhealthy agents.
-              </EmptyState>
-            ) : !work.hasData ? (
-              <LoadingState />
-            ) : (
-              <DataTable
-                caption="Items needing operator attention"
-                rows={[
-                  ...attention.workAttention.map((item) => ({
-                    kind: "work" as const,
-                    id: item.id,
-                    title: item.title,
-                    status: item.status,
-                    risk: item.risk,
-                    at: item.updatedAt
-                  })),
-                  ...attention.agentAttention.map((agent) => ({
-                    kind: "agent" as const,
-                    id: agent.id,
-                    title: agent.name,
-                    status: agent.effectiveStatus,
-                    risk: "",
-                    at: agent.updatedAt
-                  }))
-                ]}
-                rowKey={(row) => `${row.kind}:${row.id}`}
-                columns={[
-                  {
-                    id: "id",
-                    header: "Item",
-                    cell: (row) => (
-                      <>
-                        <span className="cell-primary truncate">{row.title}</span>
-                        <span className="cell-sub mono">{row.id}</span>
-                      </>
-                    )
-                  },
-                  {
-                    id: "state",
-                    header: "State",
-                    cell: (row) =>
-                      row.kind === "work" ? (
-                        <StatusBadge status={row.status} />
-                      ) : (
-                        <Badge
-                          meta={{
-                            label: `Agent ${row.status.toLowerCase()}`,
-                            tone: row.status === "ERROR" ? "danger" : "warning"
-                          }}
-                        />
-                      )
-                  },
-                  { id: "risk", header: "Risk", cell: (row) => (row.risk ? <RiskBadge risk={row.risk} /> : "—") },
-                  { id: "age", header: "Updated", cell: (row) => `${relativeAge(row.at, now)} ago` },
-                  {
-                    id: "act",
-                    header: "",
-                    cell: (row) =>
-                      row.kind === "work" ? (
-                        <Link
-                          className="btn"
-                          data-size="sm"
-                          to={
-                            row.status === "needs_approval"
-                              ? `/approvals/${encodeURIComponent(row.id)}`
-                              : `/work/${encodeURIComponent(row.id)}`
-                          }
-                        >
-                          {row.status === "needs_approval" ? "Review" : "Investigate"}
-                        </Link>
-                      ) : (
-                        <Link className="btn" data-size="sm" to={`/agents/${encodeURIComponent(row.id)}`}>
-                          Investigate
-                        </Link>
-                      )
-                  }
-                ]}
-              />
-            )}
-          </Card>
-        </div>
-        <div className="span-5">
-          <Card title="System status" action={<Link to="/system">Details</Link>} labelledBy="h-system">
-            {health.data ? (
-              <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "var(--space-2)" }}>
-                <li className="row-between">
-                  <span>Live (process)</span>
-                  {"error" in health.data.livez ? (
-                    <Badge meta={{ label: "Unreachable", tone: "danger" }} />
-                  ) : (
-                    <Badge
-                      meta={{
-                        label: health.data.livez.ok ? "Live" : "Not live",
-                        tone: health.data.livez.ok ? "success" : "danger"
-                      }}
-                    />
-                  )}
+      <div className="overview-panels">
+        <Card
+          title="Needs attention"
+          action={<Link to="/work?attention=1">View all</Link>}
+          labelledBy="h-attention"
+          flush
+        >
+          {work.hasData && attention.workAttention.length === 0 && attention.agentAttention.length === 0 ? (
+            <EmptyState title="Nothing needs attention">
+              No approvals, blocked, failed or quarantined work, and no unhealthy agents.
+            </EmptyState>
+          ) : !work.hasData ? (
+            <LoadingState />
+          ) : (
+            <ul className="attention-list">
+              {attention.workAttention.slice(0, 3).map((item) => (
+                <li key={item.id}>
+                  <div>
+                    <RiskBadge risk={item.risk} />
+                    <span className="cell-primary">{item.title}</span>
+                    <span className="cell-sub">
+                      {item.id} · {relativeAge(item.updatedAt, now)} ago
+                    </span>
+                  </div>
+                  <Link
+                    className="btn"
+                    data-size="sm"
+                    to={`/${item.status === "needs_approval" ? "approvals" : "work"}/${encodeURIComponent(item.id)}`}
+                  >
+                    Review
+                  </Link>
                 </li>
-                <li className="row-between">
-                  <span>Ready (dependencies)</span>
-                  {"error" in health.data.readyz ? (
-                    <Badge meta={{ label: "Unknown", tone: "neutral" }} />
-                  ) : (
-                    <Badge
-                      meta={{
-                        label: health.data.readyz.httpStatus === 200 ? "Ready" : "Not ready",
-                        tone: health.data.readyz.httpStatus === 200 ? "success" : "danger"
-                      }}
-                    />
-                  )}
+              ))}
+              {attention.agentAttention.slice(0, 3).map((agent) => (
+                <li key={agent.id}>
+                  <span>
+                    {agent.name} · {agent.effectiveStatus.toLowerCase()}
+                  </span>
+                  <Link to={`/agents/${encodeURIComponent(agent.id)}`}>Investigate</Link>
                 </li>
-                <li className="row-between">
-                  <span>Event stream</span>
-                  <Badge
-                    meta={{
-                      label: stream.status === "live" ? "Live" : stream.status,
-                      tone: stream.status === "live" ? "success" : "warning"
-                    }}
-                  />
-                </li>
-                <li className="row-between">
-                  <span>Checked</span>
-                  <span className="muted">{formatTime(health.data.checkedAt, { seconds: true })}</span>
-                </li>
-              </ul>
-            ) : health.error ? (
-              <ErrorState error={health.error} onRetry={health.refetch} />
-            ) : (
-              <LoadingState />
-            )}
-          </Card>
-        </div>
-      </div>
-
-      <Card title="Active executions" action={<Link to="/execution">All executions</Link>} labelledBy="h-active" flush>
-        {executions.error && !executions.hasData ? (
-          <ErrorState error={executions.error} onRetry={executions.refetch} what="executions" />
-        ) : !executions.hasData ? (
-          <LoadingState />
-        ) : active.length === 0 ? (
-          <EmptyState title="No active executions">Nothing is leased or running right now.</EmptyState>
-        ) : (
-          <DataTable
-            caption="Active executions"
-            rows={active}
-            rowKey={(row) => row.key}
-            columns={[
-              {
-                id: "wi",
-                header: "Work item",
-                cell: (row) => (
-                  <>
+              ))}
+            </ul>
+          )}
+        </Card>
+        <Card
+          title="Active executions"
+          action={<Link to="/execution">All executions</Link>}
+          labelledBy="h-active"
+          flush
+        >
+          {executions.error && !executions.hasData ? (
+            <ErrorState error={executions.error} onRetry={executions.refetch} what="executions" />
+          ) : !executions.hasData ? (
+            <LoadingState />
+          ) : active.length === 0 ? (
+            <EmptyState title="No active executions">Nothing is leased or running right now.</EmptyState>
+          ) : (
+            <ul className="attention-list">
+              {active.map((row) => (
+                <li key={row.key}>
+                  <div>
                     <Link to={`/execution/${encodeURIComponent(row.workItem.id)}`} className="cell-primary">
                       {row.workItem.title}
                     </Link>
-                    <span className="cell-sub mono">{row.workItem.id}</span>
-                  </>
-                )
-              },
-              { id: "agent", header: "Worker", cell: (row) => row.attempt?.claimedByWorkerId ?? "—" },
-              {
-                id: "progress",
-                header: "Progress",
-                cell: () => (
-                  <span className="muted" title="The gateway records attempt state, not percent complete">
-                    n/a
-                  </span>
-                )
-              },
-              { id: "state", header: "State", cell: (row) => <StatusBadge status={row.workItem.status} /> },
-              {
-                id: "dur",
-                header: "Duration",
-                cell: (row) => (row.attempt?.startedAt ? formatDuration(now - Date.parse(row.attempt.startedAt)) : "—")
-              }
-            ]}
-          />
-        )}
-      </Card>
-
-      <div className="layout-grid">
-        <div className="span-5">
-          <Card title="Agent roster" action={<Link to="/agents">All agents</Link>} labelledBy="h-roster" flush>
-            {!agents.hasData ? (
-              agents.error ? (
-                <ErrorState error={agents.error} onRetry={agents.refetch} />
-              ) : (
-                <LoadingState />
-              )
-            ) : (agents.data ?? []).length === 0 ? (
-              <EmptyState title="No agents registered" />
+                    <span className="cell-sub">
+                      {row.attempt?.claimedByWorkerId ?? "Worker unavailable"} ·{" "}
+                      {row.attempt?.startedAt ? formatDuration(now - Date.parse(row.attempt.startedAt)) : "Not started"}
+                    </span>
+                  </div>
+                  <StatusBadge status={row.workItem.status} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </Card>
+        <Card title="Agent roster" action={<Link to="/agents">All agents</Link>} labelledBy="h-roster" flush>
+          {!agents.hasData ? (
+            agents.error ? (
+              <ErrorState error={agents.error} onRetry={agents.refetch} />
             ) : (
-              <DataTable
-                caption="Agent roster"
-                rows={(agents.data ?? []).slice(0, 8)}
-                rowKey={(agent) => agent.id}
-                columns={[
-                  {
-                    id: "n",
-                    header: "Agent",
-                    cell: (agent) => <Link to={`/agents/${encodeURIComponent(agent.id)}`}>{agent.name}</Link>
-                  },
-                  { id: "s", header: "Status", cell: (agent) => <Badge meta={livenessMeta(agentLiveness(agent))} /> },
-                  { id: "h", header: "Health", cell: (agent) => <Badge meta={agentHealthMeta(agent)} /> }
-                ]}
-              />
-            )}
-          </Card>
-        </div>
-        <div className="span-7">
-          <Card title="Recent audit events" action={<Link to="/audit">Open audit</Link>} labelledBy="h-audit" flush>
-            {recent.length === 0 ? (
-              backfill.error ? (
-                <ErrorState error={backfill.error} onRetry={backfill.refetch} />
-              ) : backfill.hasData ? (
-                <EmptyState title="No audit events yet" />
-              ) : (
-                <LoadingState />
-              )
+              <LoadingState />
+            )
+          ) : (agents.data ?? []).length === 0 ? (
+            <EmptyState title="No agents registered" />
+          ) : (
+            <DataTable
+              caption="Agent roster"
+              rows={(agents.data ?? []).slice(0, 5)}
+              rowKey={(agent) => agent.id}
+              columns={[
+                {
+                  id: "n",
+                  header: "Agent",
+                  cell: (agent) => <Link to={`/agents/${encodeURIComponent(agent.id)}`}>{agent.name}</Link>
+                },
+                { id: "s", header: "Status", cell: (agent) => <Badge meta={livenessMeta(agentLiveness(agent))} /> },
+                { id: "h", header: "Health", cell: (agent) => <Badge meta={agentHealthMeta(agent)} /> }
+              ]}
+            />
+          )}
+        </Card>
+        <Card title="Recent audit events" action={<Link to="/audit">Open audit</Link>} labelledBy="h-audit" flush>
+          {recent.length === 0 ? (
+            backfill.error ? (
+              <ErrorState error={backfill.error} onRetry={backfill.refetch} />
+            ) : backfill.hasData ? (
+              <EmptyState title="No audit events yet" />
             ) : (
-              <DataTable
-                caption="Recent audit events"
-                rows={recent}
-                rowKey={(event) => event.id}
-                columns={[
-                  { id: "t", header: "Time", cell: (event) => formatTime(eventTimeMs(event), { seconds: true }) },
-                  {
-                    id: "e",
-                    header: "Event",
-                    cell: (event) => (
-                      <Link to={`/audit/${encodeURIComponent(event.id)}`} className="mono">
-                        {event.name}
-                      </Link>
-                    )
-                  },
-                  { id: "a", header: "Actor", cell: (event) => eventActor(event) },
-                  {
-                    id: "s",
-                    header: "Severity",
-                    cell: (event) => (
-                      <Badge
-                        meta={{
-                          label: severityFor(event),
-                          tone: ({ info: "neutral", notice: "success", warning: "warning", error: "danger" } as const)[
-                            severityFor(event)
-                          ]
-                        }}
-                      />
-                    )
-                  },
-                  {
-                    id: "m",
-                    header: "Summary",
-                    cell: (event) => <span className="truncate">{eventSummary(event)}</span>
-                  }
-                ]}
-              />
-            )}
-          </Card>
-        </div>
+              <LoadingState />
+            )
+          ) : (
+            <DataTable
+              caption="Recent audit events"
+              rows={recent}
+              rowKey={(event) => event.id}
+              columns={[
+                { id: "t", header: "Time", cell: (event) => formatTime(eventTimeMs(event), { seconds: true }) },
+                {
+                  id: "e",
+                  header: "Event",
+                  cell: (event) => (
+                    <Link to={`/audit/${encodeURIComponent(event.id)}`} className="mono">
+                      {event.name}
+                    </Link>
+                  )
+                },
+                { id: "a", header: "Actor", cell: (event) => eventActor(event) },
+                {
+                  id: "s",
+                  header: "Severity",
+                  cell: (event) => (
+                    <Badge
+                      meta={{
+                        label: severityFor(event),
+                        tone: ({ info: "neutral", notice: "success", warning: "warning", error: "danger" } as const)[
+                          severityFor(event)
+                        ]
+                      }}
+                    />
+                  )
+                },
+                {
+                  id: "m",
+                  header: "Summary",
+                  cell: (event) => <span className="truncate">{eventSummary(event)}</span>
+                }
+              ]}
+            />
+          )}
+        </Card>
+        <Card title="System status" action={<Link to="/system">Details</Link>} labelledBy="h-system">
+          {health.data ? (
+            <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gap: "var(--space-2)" }}>
+              <li className="row-between">
+                <span>Live (process)</span>
+                {"error" in health.data.livez ? (
+                  <Badge meta={{ label: "Unreachable", tone: "danger" }} />
+                ) : (
+                  <Badge
+                    meta={{
+                      label: health.data.livez.ok ? "Live" : "Not live",
+                      tone: health.data.livez.ok ? "success" : "danger"
+                    }}
+                  />
+                )}
+              </li>
+              <li className="row-between">
+                <span>Ready (dependencies)</span>
+                {"error" in health.data.readyz ? (
+                  <Badge meta={{ label: "Unknown", tone: "neutral" }} />
+                ) : (
+                  <Badge
+                    meta={{
+                      label: health.data.readyz.httpStatus === 200 ? "Ready" : "Not ready",
+                      tone: health.data.readyz.httpStatus === 200 ? "success" : "danger"
+                    }}
+                  />
+                )}
+              </li>
+              <li className="row-between">
+                <span>Event stream</span>
+                <Badge
+                  meta={{
+                    label: stream.status === "live" ? "Live" : stream.status,
+                    tone: stream.status === "live" ? "success" : "warning"
+                  }}
+                />
+              </li>
+              <li className="row-between">
+                <span>Checked</span>
+                <span className="muted">{formatTime(health.data.checkedAt, { seconds: true })}</span>
+              </li>
+            </ul>
+          ) : health.error ? (
+            <ErrorState error={health.error} onRetry={health.refetch} />
+          ) : (
+            <LoadingState />
+          )}
+        </Card>
       </div>
     </div>
   );

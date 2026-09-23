@@ -5,6 +5,7 @@ export const keys = {
   workItems: "work-items",
   workItem: (id: string) => `work-item:${id}`,
   agents: "agents",
+  runtimes: "runtimes",
   agent: (id: string) => `agent:${id}`,
   actors: "actors",
   connectors: "connectors",

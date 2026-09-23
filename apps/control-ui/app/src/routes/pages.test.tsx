@@ -114,9 +114,13 @@ describe("Overview shows real state only", () => {
   it("derives every count from the API, with no baked-in fixture values", async () => {
     const { container } = await render(<OverviewPage />);
     const text = container.textContent ?? "";
-    expect(text).toMatch(/Pending approvals\s*1/);
-    expect(text).toMatch(/Blocked\s*1/);
-    expect(text).toMatch(/Running\s*1/);
+    const statValue = (label: string) =>
+      [...container.querySelectorAll(".stat")].find(
+        (card) => card.querySelector(".stat-label")?.textContent === label
+      )?.querySelector(".stat-value")?.textContent;
+    expect(statValue("Pending approvals")).toBe("1");
+    expect(statValue("Blocked")).toBe("1");
+    expect(statValue("Running")).toBe("1");
     expect(text).toContain("Update deploy config");
     expect(text).not.toMatch(/analyst|corp-dc|T-33721|WI-1837/i);
   });

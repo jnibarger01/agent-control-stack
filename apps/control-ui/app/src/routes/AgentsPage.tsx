@@ -105,8 +105,8 @@ export function AgentsPage() {
               onRowActivate={(agent) => go(`/agents/${encodeURIComponent(agent.id)}`)}
               empty={
                 <EmptyState title="No agents registered">
-                  Agents are registered through POST /api/agents. This console does not register agents: the request
-                  needs an ACS actor and ACP role that must be chosen deliberately.
+                  Use Register agent to add an agent with its ID and ACP role. A fresh heartbeat is required before it
+                  appears online.
                 </EmptyState>
               }
               columns={[

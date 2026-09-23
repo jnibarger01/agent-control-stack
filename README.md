@@ -95,7 +95,7 @@ immutable result + audit evidence
 | Component                     | Purpose                                                                                                                                       |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
 | `apps/gateway`                | Fastify HTTP gateway, dashboard host, MCP-over-HTTP endpoint, auth handling, SSE events.                                                      |
-| `apps/control-ui`             | Server-rendered mission-control dashboard HTML.                                                                                               |
+| `apps/control-ui`             | Compatibility SSR dashboard at `/` and React + Vite Mission Control SPA at `/console/overview`.                                               |
 | `apps/mcp`                    | stdio MCP server backed by the machine-controller package.                                                                                    |
 | `apps/worker`                 | One-shot local worker that claims the next approved work item and records a dry-run result.                                                   |
 | `packages/work-items`         | Work-item state machine, SQLite store, approvals, leases, immutable results, retry/clone lineage, audit events, registry, audit-chain health. |
@@ -112,7 +112,7 @@ immutable result + audit evidence
 
 ```text
 apps/
-  control-ui/       Server-rendered dashboard UI
+  control-ui/       SSR dashboard and React Mission Control SPA
   gateway/          Fastify HTTP/SSE/MCP gateway
   mcp/              stdio MCP server entrypoint
   worker/           One-shot local worker
@@ -530,6 +530,15 @@ For stdio MCP machine-controller mode:
 ```sh
 ACS_MCP_CONFIG=config.example.yml npm run start:mcp
 ```
+
+## Mission Control console
+
+The React + Vite operator console is served by the gateway at
+`/console/overview`. All ten views share the gateway's authenticated session,
+real ACS state, and live audit stream. The existing dashboard at `/` remains
+available. Build with `npm run build`; no separate frontend server is needed.
+See [Mission Control](docs/runbooks/mission-control.md) for routes, API contracts,
+authentication, unavailable capabilities, and local browser verification.
 
 ## Run the worker
 

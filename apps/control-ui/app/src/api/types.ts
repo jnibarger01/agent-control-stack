@@ -2,13 +2,21 @@ import type {
   AttemptLease,
   ConnectorSummary,
   ExecutionAttempt,
+  ExecutionPlanRecord,
   RegistryAgentDetail,
   StoredAuditEvent,
   WorkItem
 } from "@agent-control-stack/work-items";
 
 /** Contract types come from the ACS packages; nothing is redeclared here. */
-export type { ConnectorSummary, ExecutionAttempt, RegistryAgentDetail, StoredAuditEvent, WorkItem };
+export type {
+  ExecutionPlanRecord,
+  ConnectorSummary,
+  ExecutionAttempt,
+  RegistryAgentDetail,
+  StoredAuditEvent,
+  WorkItem
+};
 export type WorkItemStatus = WorkItem["status"];
 export type WorkItemRisk = WorkItem["risk"];
 
@@ -16,6 +24,7 @@ export type WorkItemRisk = WorkItem["risk"];
 export type SafeLease = Omit<AttemptLease, "tokenHash">;
 
 export interface WorkItemDetailResponse {
+  executionPlan?: ExecutionPlanRecord | null;
   workItem: WorkItem;
   events: StoredAuditEvent[];
   executionAttempts: ExecutionAttempt[];
@@ -128,4 +137,14 @@ export interface SessionInfo {
   actor: string;
   actorId: string | null;
   roles: string[];
+}
+export interface RuntimeObservabilityRuntime {
+  kind: "codex" | "hermes" | "openclaw" | "opencode" | "claude" | "pi";
+  displayName: string; version: string | null; available: boolean; health: string; readiness: string;
+  latencyMs: number | null; inventoryStatus: string;
+  agents: Array<{ id: string; name: string; status: string }>;
+  capabilities: string[]; approvalGatedCapabilities: number; reason: string;
+}
+export interface RuntimeObservabilitySnapshot {
+  generatedAt: string; source: "visualizer"; runtimes: RuntimeObservabilityRuntime[];
 }

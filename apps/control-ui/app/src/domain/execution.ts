@@ -2,9 +2,8 @@ import type { ExecutionAttempt, SafeLease, StoredAuditEvent, WorkItem } from "..
 
 /**
  * Plan and admission identity, reconstructed from `execution_plan.created` /
- * `execution_plan.admitted` audit events. The gateway exposes no HTTP route
- * for plan definitions (steps, constraints), so those are reported as
- * unavailable rather than invented.
+ * `execution_plan.admitted` audit events. Current plan definitions are read
+ * separately from the authenticated execution-plan projection.
  */
 export interface PlanSummary {
   planId: string;

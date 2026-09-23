@@ -41,7 +41,7 @@ export function DataTable<T>({
     }
   };
   return (
-    <div className="table-wrap">
+    <div className="table-wrap" tabIndex={0} role="region" aria-label={`${caption} table`}>
       <table className="table" data-stack="true">
         <caption className="visually-hidden">{caption}</caption>
         <thead>

@@ -1,18 +1,19 @@
-import type { ExecutionAttempt, SafeLease, StoredAuditEvent } from "../api/types";
+import type { ExecutionAttempt, ExecutionPlanRecord, SafeLease, StoredAuditEvent } from "../api/types";
 import { admissionFor, currentPlan, leaseRemainingMs } from "../domain/execution";
 import { attemptStatusMeta, leaseStatusMeta } from "../domain/status";
 import { formatDuration, formatTime, shortHash, shortId } from "../domain/format";
-import { Badge, CopyButton, KV, MissingContract } from "./ui";
+import { Badge, CopyButton, KV } from "./ui";
 import { DataTable } from "./DataTable";
 import { EventTimeline } from "./EventTimeline";
 
 /**
- * Plans, admissions, attempts and leases for one work item. Plan and admission
- * are audit-derived (no HTTP route serves them); lease rows are the gateway's
+ * Plans, admissions, attempts and leases for one work item. The current plan
+ * comes from its authenticated projection; admission remains audit-derived. Lease rows are the gateway's
  * sanitized projection and never contain a token or token hash.
  */
 export function ExecutionDetailView({
   workItemId,
+  executionPlan,
   attempts,
   leases,
   events,
@@ -20,6 +21,7 @@ export function ExecutionDetailView({
   now
 }: {
   workItemId: string;
+  executionPlan?: ExecutionPlanRecord | null | undefined;
   attempts: readonly ExecutionAttempt[];
   leases: readonly SafeLease[];
   events: readonly StoredAuditEvent[];
@@ -27,7 +29,7 @@ export function ExecutionDetailView({
   result?: Record<string, unknown> | undefined;
   now: number;
 }) {
-  const plan = currentPlan(events);
+  const plan = executionPlan ?? currentPlan(events);
   const admission = admissionFor(events, plan);
   const artifacts = Array.isArray(result?.artifacts) ? (result.artifacts as Array<Record<string, unknown>>) : [];
   const executionEvents = events.filter((event) =>
@@ -69,10 +71,25 @@ export function ExecutionDetailView({
         ) : (
           <p className="muted">No execution plan has been drafted for {workItemId}.</p>
         )}
-        <MissingContract
-          what="Plan definition"
-          detail="Objective, steps and constraints are not served over HTTP by the gateway; only plan identity is recorded in the audit log."
-        />
+        {executionPlan && (
+          <div className="section">
+            <p>{executionPlan.definition.objective}</p>
+            <ol>
+              {executionPlan.definition.steps.map((step) => (
+                <li key={step.stepId}>
+                  <strong>{step.action.kind}</strong> · {step.action.description}
+                </li>
+              ))}
+            </ol>
+            <KV
+              items={[
+                ["Execution mode", executionPlan.definition.constraints.executionMode],
+                ["Network", executionPlan.definition.constraints.network],
+                ["Runtime limit", formatDuration(executionPlan.definition.constraints.maxRuntimeMs)]
+              ]}
+            />
+          </div>
+        )}
       </div>
 
       <div className="section">

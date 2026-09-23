@@ -1,41 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { Link, ROUTES, useRouter, type RouteId } from "../router";
-import { useHealth, useSession, useWorkItems, eventStream } from "../state/data";
-
-/** Minimal inline icon set: no icon-font or third-party asset, so it stays inside a strict script-src 'self' CSP. */
-const NAV_ICON_PATHS: Record<Exclude<RouteId, "not-found">, string> = {
-  overview: "M3 12h4l2-7 4 14 2-7h4",
-  work: "M4 6h16M4 12h16M4 18h10",
-  execution: "M6 4l12 8-12 8V4z",
-  approvals: "M5 12l4 4 10-10",
-  agents: "M8 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM3 20c0-3.3 2.7-6 5-6s5 2.7 5 6M16 8a2.6 2.6 0 1 0 0-5.2M17 14.2c2 .4 3.5 2.3 3.5 5.8",
-  connectors: "M9 2v4M15 2v4M6 8h12l-1 5a5 5 0 0 1-10 0L6 8zM12 17v5",
-  policy: "M12 2l8 3v6c0 5-3.4 8.4-8 11-4.6-2.6-8-6-8-11V5l8-3z",
-  audit: "M6 3h9l4 4v14H6zM15 3v4h4M9 12h6M9 16h6",
-  metrics: "M4 20V10M11 20V4M18 20v-7",
-  system: "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zM12 2v3M12 19v3M4.2 4.2l2.1 2.1M17.7 17.7l2.1 2.1M2 12h3M19 12h3M4.2 19.8l2.1-2.1M17.7 6.3l2.1-2.1"
-};
-
-function NavIcon({ id }: { id: Exclude<RouteId, "not-found"> }) {
-  return (
-    <svg
-      className="nav-link-icon"
-      viewBox="0 0 24 24"
-      width="16"
-      height="16"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.8"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-    >
-      <path d={NAV_ICON_PATHS[id]} />
-    </svg>
-  );
-}
+import { Link, ROUTES, useRouter } from "../router";
+import { useHealth, useMetrics, useWorkItems, eventStream } from "../state/data";
 import { useEventStream, isStreamTrustworthy, type StreamStatus } from "../state/events";
 import { SearchPalette } from "./SearchPalette";
+import { BrandMark, NavIcon } from "./Icons";
 
 export function useStreamTrust(): { status: StreamStatus; trustworthy: boolean } {
   const snapshot = useEventStream(eventStream);
@@ -50,6 +18,7 @@ function environmentLabel(): { label: string; remote: boolean } {
 
 function GatewayIndicator() {
   const health = useHealth();
+  const metrics = useMetrics();
   let tone: "success" | "danger" | "warning" | "" = "";
   let text = "Checking";
   if (health.hasData && health.data) {
@@ -59,10 +28,10 @@ function GatewayIndicator() {
       text = "Unreachable";
     } else if ("error" in readyz) {
       tone = "warning";
-      text = "Live · readiness unknown";
+      text = "Live · not ready";
     } else if (readyz.httpStatus === 200 && readyz.ok) {
       tone = "success";
-      text = "Ready";
+      text = "Online";
     } else {
       tone = "danger";
       text = "Not ready";
@@ -71,31 +40,20 @@ function GatewayIndicator() {
     tone = "danger";
     text = "Unreachable";
   }
+  const latencyMs = metrics.data?.summary.avgLatencySeconds;
+  const latency =
+    latencyMs !== undefined && Number.isFinite(latencyMs) ? `${Math.round(latencyMs * 1000)} ms` : undefined;
   return (
     <Link
       to="/system"
-      className="chip"
+      className="chip chip-gateway"
       data-tone={tone || undefined}
-      aria-label={`Gateway ${text}. Open system status.`}
+      aria-label={`Gateway ${text}${latency ? `, average ${latency}` : ""}. Open system status.`}
     >
       <span className="dot" data-tone={tone || undefined} aria-hidden="true" />
       <span className="hide-narrow">Gateway</span> {text}
+      {latency ? <span className="chip-meta hide-narrow">{latency}</span> : null}
     </Link>
-  );
-}
-
-function OperatorIdentity() {
-  const session = useSession();
-  const identity = session.data;
-  const label = identity ? (identity.actorId ?? identity.actor) : undefined;
-  const role = identity?.roles[0];
-  return (
-    <span
-      className="chip hide-narrow"
-      title={identity ? `Signed in as ${label}${role ? ` (${role})` : ""}` : "Operator session"}
-    >
-      {label ?? "Operator session"}
-    </span>
   );
 }
 
@@ -128,9 +86,45 @@ function StreamIndicator() {
       aria-label={`Event stream ${text}${retry !== undefined ? `, retrying in ${retry} seconds` : ""}`}
     >
       <span className="dot" data-tone={tone || undefined} aria-hidden="true" />
-      <span className="hide-narrow">Events</span> {text}
+      <span className="hide-narrow">Event Stream</span> {text}
       {retry !== undefined && <span className="hide-narrow"> · {retry}s</span>}
     </span>
+  );
+}
+
+function GatewayRailCard() {
+  const health = useHealth();
+  const env = environmentLabel();
+  let status = "Checking";
+  let tone: "success" | "danger" | "warning" | "" = "";
+  if (health.hasData && health.data) {
+    const { livez, readyz } = health.data;
+    if ("error" in livez) {
+      status = "Unreachable";
+      tone = "danger";
+    } else if ("error" in readyz || readyz.httpStatus !== 200 || !readyz.ok) {
+      status = "Degraded";
+      tone = "warning";
+    } else {
+      status = "All systems nominal";
+      tone = "success";
+    }
+  } else if (health.error) {
+    status = "Unreachable";
+    tone = "danger";
+  }
+  return (
+    <Link to="/system" className="gateway-rail" aria-label={`Gateway ${status}. Open system status.`}>
+      <span className="row" style={{ gap: 8 }}>
+        <span className="dot" data-tone={tone || undefined} aria-hidden="true" />
+        <strong>Gateway {tone === "success" ? "Online" : status}</strong>
+      </span>
+      <span className="gateway-rail-meta">
+        {env.label}
+        <br />
+        {status}
+      </span>
+    </Link>
   );
 }
 
@@ -146,10 +140,8 @@ export function Shell({ children }: { children: ReactNode }) {
     [work.data]
   );
 
-  // Close the mobile nav after navigating.
   useEffect(() => setNavOpen(false), [location.path]);
 
-  // Ctrl/⌘+K and "/" open search; ignored while typing in a field.
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -180,41 +172,6 @@ export function Shell({ children }: { children: ReactNode }) {
       <a className="skip-link" href="#main-content">
         Skip to main content
       </a>
-      <aside className="sidebar" data-open={navOpen} aria-label="Mission Control">
-        <div className="brand">
-          <span className="brand-mark" aria-hidden="true">
-            ACS
-          </span>
-          <div>
-            ACS Mission Control
-            <small>Agents. Policy. Audit.</small>
-          </div>
-        </div>
-        <nav className="nav" aria-label="Primary">
-          {ROUTES.map((item) => (
-            <Link
-              key={item.id}
-              to={item.path}
-              className="nav-link"
-              aria-current={route.id === item.id ? "page" : undefined}
-            >
-              <NavIcon id={item.id} />
-              <span className="nav-link-label">{item.label}</span>
-              {item.id === "approvals" && pending > 0 && (
-                <span className="nav-count" aria-label={`${pending} awaiting approval`}>
-                  {pending}
-                </span>
-              )}
-            </Link>
-          ))}
-        </nav>
-        <div className="sidebar-foot">
-          Local-first control plane.
-          <br />
-          State is read from the ACS gateway; this UI holds no authority.
-        </div>
-      </aside>
-      {navOpen && <div className="nav-backdrop" onClick={() => setNavOpen(false)} aria-hidden="true" />}
       <header className="topbar" role="banner">
         <button
           type="button"
@@ -225,6 +182,15 @@ export function Shell({ children }: { children: ReactNode }) {
         >
           ☰
         </button>
+        <div className="brand">
+          <span className="brand-mark">
+            <BrandMark />
+          </span>
+          <div>
+            ACS Mission Control
+            <small>Agents. Governance. Real Outcomes.</small>
+          </div>
+        </div>
         <button
           type="button"
           className="search-trigger"
@@ -233,7 +199,7 @@ export function Shell({ children }: { children: ReactNode }) {
           aria-keyshortcuts="Control+K Meta+K /"
         >
           <span aria-hidden="true">⌕</span>
-          <span className="label-long">Search work, agents, connectors…</span>
+          <span className="label-long">Search agents, tasks, work items, or run IDs…</span>
           <kbd aria-hidden="true">{isMac ? "⌘K" : "Ctrl K"}</kbd>
         </button>
         <div className="topbar-spacer" />
@@ -242,14 +208,49 @@ export function Shell({ children }: { children: ReactNode }) {
           <span
             className="chip hide-narrow"
             data-tone={env.remote ? "warning" : undefined}
-            title="Environment derived from the address this console is served from"
+            title="Environment is the host this console is served from. ACS has no environment-switch contract."
           >
-            Env: {env.label}
+            {env.remote ? env.label : "local"}
           </span>
           <StreamIndicator />
-          <OperatorIdentity />
+          <span
+            className="operator-chip hide-narrow"
+            title="The gateway exposes no identity endpoint. The session cookie is HttpOnly, so the operator name cannot be shown."
+          >
+            <span className="operator-avatar" aria-hidden="true">
+              OP
+            </span>
+            <span>
+              Operator
+              <small>Session</small>
+            </span>
+          </span>
         </div>
       </header>
+      <aside className="sidebar" data-open={navOpen} aria-label="Mission Control">
+        <nav className="nav" aria-label="Primary">
+          {ROUTES.map((item) => (
+            <Link
+              key={item.id}
+              to={item.path}
+              className="nav-link"
+              aria-current={route.id === item.id ? "page" : undefined}
+            >
+              <span className="nav-link-main">
+                <NavIcon id={item.id} />
+                {item.label}
+              </span>
+              {item.id === "approvals" && pending > 0 && (
+                <span className="nav-count" aria-label={`${pending} awaiting approval`}>
+                  {pending}
+                </span>
+              )}
+            </Link>
+          ))}
+        </nav>
+        <GatewayRailCard />
+      </aside>
+      {navOpen && <div className="nav-backdrop" onClick={() => setNavOpen(false)} aria-hidden="true" />}
       <main className="main" id="main-content" tabIndex={-1}>
         {!trustworthy && status !== "stopped" && (
           <div

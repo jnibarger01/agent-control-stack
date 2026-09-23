@@ -1,6 +1,7 @@
 import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { explainPolicyInputSchema, workItemToolNames } from "@agent-control-stack/policy-gate";
 import {
+  executionPlanRecordSchema,
   acpRoles,
   actionRequestSchema,
   actorTypes,
@@ -96,6 +97,53 @@ export const eventQuerySchema = z
   })
   .passthrough();
 export const sessionLoginBodySchema = z.object({ token: z.string().min(1) });
+// Allowlisted projection contracts: raw credentials and connector key material
+// cannot be added to these responses by spreading a persistence record.
+export const executionPlanProjectionSchema = z
+  .object({
+    plan: executionPlanRecordSchema.nullable()
+  })
+  .strict();
+export const sessionInfoSchema = z
+  .object({
+    actor: z.string().min(1),
+    actorId: z.string().min(1).nullable(),
+    roles: z.array(z.string().min(1))
+  })
+  .strict();
+export const connectorListSchema = z
+  .object({
+    connectors: z.array(
+      z
+        .object({
+          id: z.string().min(1),
+          displayName: z.string(),
+          allowedScopes: z.array(mcpScopeSchema),
+          publicKeyFingerprint: z.string().regex(/^[A-Za-z0-9_-]{43}$/u),
+          status: z.enum(["active", "revoked"]),
+          createdAt: z.string().datetime(),
+          updatedAt: z.string().datetime(),
+          tunnelSessions: z.array(
+            z
+              .object({
+                connectorId: z.string().min(1),
+                tunnelId: z.string().min(1),
+                sessionId: z.string().min(1),
+                status: z.enum(["active", "revoked"]),
+                issuedAt: z.string().datetime(),
+                expiresAt: z.string().datetime(),
+                lastHeartbeatAt: z.string().datetime().optional(),
+                createdAt: z.string().datetime(),
+                updatedAt: z.string().datetime()
+              })
+              .strict()
+          )
+        })
+        .strict()
+    )
+  })
+  .strict();
+
 export const retryBodySchema = z.object({ reason: z.string().min(1).max(2_000) });
 export const cloneBodySchema = z.object({
   title: z.string().min(1).max(512).optional(),
@@ -287,6 +335,7 @@ export type PublicHttpOperation = {
   operationId: string;
   summary: string;
   requestSchema?: z.ZodType;
+  responseSchema?: z.ZodType;
   /**
    * The status code the gateway actually sends on success. Defaults to 200
    * when omitted - only set this when the runtime handler in server.ts
@@ -304,6 +353,17 @@ export type PublicHttpOperation = {
 };
 
 export const publicHttpOperations: readonly PublicHttpOperation[] = [
+  {
+    method: "get",
+    path: "/work-items/{id}/execution-plan",
+    operationId: "getCurrentExecutionPlan",
+    summary: "Read the sanitized current execution plan from the authoritative store.",
+    responseSchema: executionPlanProjectionSchema,
+    additionalResponses: {
+      "404": { description: "Work item not found." },
+      "503": { description: "Authentication is not configured." }
+    }
+  },
   { method: "get", path: "/livez", operationId: "getLiveness", summary: "Read process liveness." },
   { method: "get", path: "/readyz", operationId: "getReadiness", summary: "Read control-plane readiness." },
   { method: "get", path: "/health", operationId: "getHealth", summary: "Read control-plane health." },
@@ -318,14 +378,18 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     method: "get",
     path: "/session",
     operationId: "getSession",
-    summary: "Read the sanitized identity of the authenticated caller."
+    summary: "Read the sanitized identity of the authenticated caller.",
+    responseSchema: sessionInfoSchema,
+    additionalResponses: { "503": { description: "Authentication is not configured." } }
   },
   { method: "get", path: "/mcp/tools", operationId: "listMcpTools", summary: "List gateway MCP tools." },
   {
     method: "get",
     path: "/connectors",
     operationId: "listConnectors",
-    summary: "List registered connectors and their tunnel sessions. Never includes key material."
+    summary: "List registered connectors and their tunnel sessions. Never includes key material.",
+    responseSchema: connectorListSchema,
+    additionalResponses: { "503": { description: "Authentication is not configured." } }
   },
   {
     method: "post",

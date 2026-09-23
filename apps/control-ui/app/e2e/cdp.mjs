@@ -206,11 +206,13 @@ export class Page {
   }
 
   async screenshot(path) {
+    await this.send("Page.bringToFront");
     const { data } = await this.send("Page.captureScreenshot", { format: "png" });
     await writeFile(path, Buffer.from(data, "base64"));
   }
 
   async close() {
+    await this.send("Page.close");
     this.ws.close();
   }
 }

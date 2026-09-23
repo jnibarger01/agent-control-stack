@@ -4,6 +4,7 @@ import type {
   ApprovalResult,
   ConnectorRegistrationBody,
   ConnectorSummary,
+  ExecutionPlanRecord,
   HealthResponse,
   LivezResponse,
   PolicyExplainInput,
@@ -11,6 +12,7 @@ import type {
   ProjectedActor,
   RegistryAgentView,
   RegistryCapability,
+  RuntimeObservabilitySnapshot,
   SessionInfo,
   StoredAuditEvent,
   TunnelSessionBody,
@@ -48,11 +50,19 @@ export function createEndpoints(client: AcsClient = defaultClient) {
           ...(signal ? { signal } : {})
         })
       ).workItems,
-    getWorkItem: (id: string, signal?: AbortSignal) =>
-      client.request<WorkItemDetailResponse>(`/work-items/${enc(id)}`, {
-        query: { limit: 500 },
-        ...(signal ? { signal } : {})
-      }),
+    getWorkItem: async (id: string, signal?: AbortSignal): Promise<WorkItemDetailResponse> => {
+      const [detail, projection] = await Promise.all([
+        client.request<WorkItemDetailResponse>(`/work-items/${enc(id)}`, {
+          query: { limit: 500 },
+          ...(signal ? { signal } : {})
+        }),
+        client.request<{ plan: ExecutionPlanRecord | null }>(
+          `/work-items/${enc(id)}/execution-plan`,
+          signal ? { signal } : {}
+        )
+      ]);
+      return { ...detail, executionPlan: projection.plan };
+    },
     createWorkItem: (body: Record<string, unknown>) =>
       client.request<WorkItem>("/work-items", { method: "POST", body }),
     approveWorkItem: (id: string, body: { reason: string; actionHash: string }) =>
@@ -96,6 +106,8 @@ export function createEndpoints(client: AcsClient = defaultClient) {
       model?: string;
     }) => client.request<{ agent: RegistryAgentView }>("/api/agents", { method: "POST", body }),
     /** Audit-derived actor projection (registry + connector/tunnel/worker evidence). */
+    runtimeObservability: (signal?: AbortSignal) =>
+      client.request<RuntimeObservabilitySnapshot>("/api/runtime-observability", signal ? { signal } : {}),
     listProjectedActors: async (signal?: AbortSignal) =>
       (
         await client.request<{ agents: ProjectedActor[] }>("/agents", {

@@ -6,6 +6,7 @@ import type {
   LivezResponse,
   ProjectedActor,
   RegistryAgentView,
+  RuntimeObservabilitySnapshot,
   SafeLease,
   SessionInfo,
   StoredAuditEvent,
@@ -49,6 +50,10 @@ export function useWorkItem(id: string | undefined): UseQueryResult<WorkItemDeta
 
 export function useRegistryAgents(): UseQueryResult<RegistryAgentView[]> {
   return useQuery(keys.agents, (signal) => endpoints.listRegistryAgents(signal), { staleMs: READ_STALE_MS });
+}
+
+export function useRuntimeObservability(): UseQueryResult<RuntimeObservabilitySnapshot> {
+  return useQuery(keys.runtimes, (signal) => endpoints.runtimeObservability(signal), { staleMs: 10_000 });
 }
 
 export function useProjectedActors(): UseQueryResult<ProjectedActor[]> {

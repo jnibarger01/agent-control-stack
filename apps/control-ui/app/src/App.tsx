@@ -16,6 +16,7 @@ const WorkPage = lazy(() => import("./routes/WorkPage").then((m) => ({ default: 
 const ExecutionPage = lazy(() => import("./routes/ExecutionPage").then((m) => ({ default: m.ExecutionPage })));
 const ApprovalsPage = lazy(() => import("./routes/ApprovalsPage").then((m) => ({ default: m.ApprovalsPage })));
 const AgentsPage = lazy(() => import("./routes/AgentsPage").then((m) => ({ default: m.AgentsPage })));
+const RuntimesPage = lazy(() => import("./routes/RuntimesPage").then((m) => ({ default: m.RuntimesPage })));
 const ConnectorsPage = lazy(() => import("./routes/ConnectorsPage").then((m) => ({ default: m.ConnectorsPage })));
 const PolicyPage = lazy(() => import("./routes/PolicyPage").then((m) => ({ default: m.PolicyPage })));
 const AuditPage = lazy(() => import("./routes/AuditPage").then((m) => ({ default: m.AuditPage })));
@@ -35,6 +36,8 @@ function RouteView(): ReactElement {
       return <ApprovalsPage />;
     case "agents":
       return <AgentsPage />;
+    case "runtimes":
+      return <RuntimesPage />;
     case "connectors":
       return <ConnectorsPage />;
     case "policy":
@@ -81,7 +84,7 @@ function Authenticated() {
 function SessionGate() {
   const status = useSessionStatus();
   // A cheap authenticated read decides whether the cookie is still valid on first load and after refresh.
-  const probe = useQuery("session-probe", (signal) => endpoints.listEvents({ limit: 1 }, signal), {
+  const probe = useQuery("session-probe", (signal) => endpoints.getSession(signal), {
     enabled: status === "unknown"
   });
   if (status === "unauthenticated") return <Login />;

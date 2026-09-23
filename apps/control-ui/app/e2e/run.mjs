@@ -8,7 +8,7 @@
 // on both the UI and the authoritative backend state.
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { launchBrowser } from "./cdp.mjs";
@@ -43,6 +43,23 @@ const { SqliteWorkItemStore } = await import(resolve(root, "packages/work-items/
 const dbPath = join(work, "e2e.db");
 const store = new SqliteWorkItemStore(dbPath);
 store.registerActor({ id: "operator-e2e", actorType: "HUMAN", displayName: "E2E Operator" });
+// Exercise the existing policy/worker claim boundary in this disposable store.
+// No engine executes and no production database is accessed.
+const { createWorkItemTools, createPolicyEngine } = await import(resolve(root, "packages/policy-gate/dist/index.js"));
+const fixtureTools = createWorkItemTools(store, createPolicyEngine());
+const executing = fixtureTools.create_work_item({
+  title: "E2E inspect workspace",
+  requester: "user",
+  intent: "Read the workspace manifest",
+  target: { cwd: "/tmp" },
+  risk: "low",
+  requestedActions: [{ kind: "fs.read", description: "Read manifest", params: { paths: ["/tmp/manifest.json"] } }]
+});
+const claimed = fixtureTools.claim_next_approved_work_item({ workerId: "worker-e2e", leaseMs: 600000 });
+check(
+  "execution fixture passes policy and receives a worker lease",
+  claimed?.id === executing.id && claimed?.status === "running"
+);
 store.close();
 const gateway = spawn("node", [resolve(root, "apps/gateway/dist/cli.js")], {
   env: {
@@ -146,11 +163,17 @@ try {
       () => !document.cookie.includes("acs_session") && localStorage.length === 0 && sessionStorage.length === 0
     )
   );
-  await page.waitFor(() => /Events\s+Live/.test(document.body.innerText), 10000);
+  await page.waitFor(() => /Event\s+Stream\s+Live/.test(document.body.innerText), 10000);
   check("event stream reports Live", true);
   check(
     "Overview shows real pending-approval count",
-    await page.eval(() => /Pending approvals\s*\n?\s*[1-9]/.test(document.body.innerText))
+    await page.eval(() =>
+      [...document.querySelectorAll("[data-testid=page-overview] .stat")].some(
+        (card) =>
+          card.querySelector(".stat-label")?.textContent?.trim() === "Pending approvals" &&
+          /^[1-9]/.test(card.querySelector(".stat-value")?.textContent?.trim() ?? "")
+      )
+    )
   );
 
   // 2. every route renders ----------------------------------------------------------
@@ -545,7 +568,18 @@ try {
     [390, 844, "mobile"]
   ]) {
     await page.setViewport(w, h, w < 720);
-    for (const r of ["overview", "work", "approvals", "audit"]) {
+    for (const r of [
+      "overview",
+      "work",
+      "execution",
+      "approvals",
+      "agents",
+      "connectors",
+      "policy",
+      "audit",
+      "metrics",
+      "system"
+    ]) {
       await page.goto(`${base}/console/${r}`);
       await page.waitFor((id) => !!document.querySelector(`[data-testid=page-${id}]`), 15000, r);
       await sleep(400);
@@ -561,6 +595,60 @@ try {
     "mobile: navigation collapses behind a toggle",
     await page.eval(() => getComputedStyle(document.querySelector(".nav-toggle")).display !== "none")
   );
+
+  // Inspect populated detail panels and run WCAG checks on every route. All
+  // records here live only in the disposable gateway, never production state.
+  await page.setViewport(1280, 800);
+  const eventsForQa = (await api("/api/events?limit=500")).body.events;
+  const detailPaths = {
+    execution: `/execution/${executing.id}`,
+    work: `/work/${approveMe.id}`,
+    approvals: `/approvals/${xss.id}`,
+    agents: "/agents/analyst-1",
+    connectors: "/connectors/corp-dc-1",
+    audit: `/audit/${eventsForQa.at(-1).id}`
+  };
+  const axeSource = readFileSync(resolve(root, "node_modules/axe-core/axe.min.js"), "utf8");
+  for (const route of [
+    "overview",
+    "work",
+    "execution",
+    "approvals",
+    "agents",
+    "connectors",
+    "policy",
+    "audit",
+    "metrics",
+    "system"
+  ]) {
+    await page.goto(`${base}/console${detailPaths[route] ?? `/${route}`}`);
+    await page.waitFor((id) => !!document.querySelector(`[data-testid=page-${id}]`), 15000, route);
+    await sleep(500);
+    if (route === "execution") {
+      await page.waitFor(() => !!document.querySelector("[data-testid=execution-detail]"));
+      check(
+        "execution detail shows stored plan objective and fenced worker",
+        await page.eval(
+          () =>
+            document.body.innerText.includes("Read the workspace manifest") &&
+            document.body.innerText.includes("worker-e2e")
+        )
+      );
+    }
+    await page.send("Runtime.evaluate", { expression: axeSource });
+    const violations = await page.eval(async () => {
+      const result = await window.axe.run(document, {
+        runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "wcag21aa"] }
+      });
+      return result.violations.map((v) => ({ id: v.id, targets: v.nodes.map((n) => n.target) }));
+    });
+    check(`WCAG automated checks: ${route}`, violations.length === 0, JSON.stringify(violations));
+    const detailOverflow = await page.eval(() =>
+      [...document.querySelectorAll(".detail")].some((el) => el.scrollWidth > el.clientWidth + 1)
+    );
+    check(`no horizontal overflow inside detail: ${route}`, !detailOverflow);
+    if (shots) await page.screenshot(join(shots, `${route}-detail-1280.png`));
+  }
 
   // 18. console hygiene ----------------------------------------------------------------------------------
   const noisy = [...page.consoleErrors, ...page.pageErrors].filter((e) => !/status of (401|403|409|400)/.test(e));

@@ -8,7 +8,7 @@ import {
   workItemTargetLabel,
   type WorkFilters
 } from "../domain/filters";
-import { formatTime, relativeAge } from "../domain/format";
+import { formatTime, relativeAge, shortId } from "../domain/format";
 import { needsAttention } from "../domain/status";
 import { useRouter } from "../router";
 import { useExecutions, useWorkItems } from "../state/data";
@@ -211,7 +211,15 @@ export function WorkPage() {
                   <EmptyState title={items.length === 0 ? "No work items" : "No work items match these filters"} />
                 }
                 columns={[
-                  { id: "id", header: "ID", cell: (item) => <span className="mono">{item.id}</span> },
+                  {
+                    id: "id",
+                    header: "ID",
+                    cell: (item) => (
+                      <span className="mono" title={item.id}>
+                        {shortId(item.id)}
+                      </span>
+                    )
+                  },
                   {
                     id: "title",
                     header: "Title",

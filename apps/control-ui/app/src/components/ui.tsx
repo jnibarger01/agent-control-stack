@@ -60,17 +60,31 @@ export function Stat({
   value,
   note,
   tone,
-  to
+  to,
+  icon,
+  pill
 }: {
   label: string;
   value: ReactNode;
   note?: string;
   tone?: Tone;
   to?: string;
+  icon?: ReactNode;
+  pill?: StatusMeta;
 }) {
   const body = (
     <>
-      <span className="stat-label">{label}</span>
+      <span className="stat-head">
+        <span className="stat-label-row">
+          {icon ? (
+            <span className="stat-icon" data-tone={tone} aria-hidden="true">
+              {icon}
+            </span>
+          ) : null}
+          <span className="stat-label">{label}</span>
+        </span>
+        {pill ? <Badge meta={pill} /> : null}
+      </span>
       <span className="stat-value" data-tone={tone}>
         {value}
       </span>
@@ -253,6 +267,38 @@ export function JsonView({ value, label }: { value: unknown; label: string }) {
   );
 }
 
+function formatUtcClock(now: number): string {
+  const date = new Date(now);
+  const day = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    year: "numeric"
+  }).format(date);
+  const time = new Intl.DateTimeFormat("en-US", {
+    timeZone: "UTC",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false
+  }).format(date);
+  return `${day} · ${time} UTC`;
+}
+
+export function Clock() {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return (
+    <time className="page-clock" dateTime={new Date(now).toISOString()}>
+      {formatUtcClock(now)}
+    </time>
+  );
+}
+
 export function PageHead({
   title,
   description,
@@ -268,7 +314,13 @@ export function PageHead({
         <h1>{title}</h1>
         {description && <p>{description}</p>}
       </div>
-      {actions && <div className="row">{actions}</div>}
+      <div className="page-head-aside">
+        {actions ? <div className="row">{actions}</div> : null}
+        <div className="page-head-meta">
+          <Clock />
+          <span>Authenticated operator session</span>
+        </div>
+      </div>
     </div>
   );
 }

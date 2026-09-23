@@ -149,6 +149,7 @@ export function WorkDetail({
         {tab === "approval" && <WorkActions workItem={workItem} events={events} trustworthy={trustworthy} />}
         {tab === "execution" && (
           <ExecutionDetailView
+            executionPlan={query.data.executionPlan}
             workItemId={workItem.id}
             attempts={executionAttempts}
             leases={attemptLeases}
