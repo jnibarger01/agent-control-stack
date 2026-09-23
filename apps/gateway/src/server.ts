@@ -10,7 +10,11 @@ import {
   authorizationDeniedEvent,
   capabilityDeniedEvent,
   capabilityIssuedEvent,
+  classifyDesktopCommanderExecution,
   desktopCommanderAdapterConfigFromEnv,
+  desktopCommanderSchedulerConfigFromEnv,
+  ExecutionScheduler,
+  ExecutionSchedulerError,
   desktopCommanderContainmentFromEnv,
   desktopCommanderInvocationFingerprint,
   desktopCommanderRequiredScopes,
@@ -22,6 +26,7 @@ import {
   validateCapabilitySigningConfig,
   type CapabilitySigningConfig,
   type ContainmentConfig,
+  type ExecutionAdmission,
   type ExecutionAuthorization
 } from "@agent-control-stack/desktop-commander-adapter";
 import {
@@ -239,6 +244,8 @@ export interface GatewayOptions {
   };
   /** Containment roots for the gateway-side Phase 6-8 re-authorization. */
   desktopCommanderContainment?: ContainmentConfig;
+  /** Shared ACS-side concurrency scheduler for managed Desktop Commander calls. */
+  desktopCommanderScheduler?: ExecutionScheduler;
   /**
    * Canonical managed-authority observation. Tests inject this. Production
    * reads the executor lease and break-glass marker. It is not a second
@@ -298,7 +305,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
+  let dcSchedulerNeedsRuntimeReconciliation =
+    workItems.countActiveAttemptLeases() > 0 ||
+    (capabilitySigningConfig !== undefined &&
+      capabilityIssuanceRegistry.hasActiveRuntime(capabilitySigningConfig.runtimeId));
+  let dcSchedulerRuntimeReattestedSinceStart = false;
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
+  const ownsDcScheduler = options.desktopCommanderScheduler === undefined;
+  const dcScheduler =
+    options.desktopCommanderScheduler ?? new ExecutionScheduler(desktopCommanderSchedulerConfigFromEnv());
   /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
   function recordLeaseAuthorizedExecutionEvent(
     authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch?: number },
@@ -315,6 +330,25 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       attributes: draft.attributes
     });
   }
+
+  function maybeCompleteDcSchedulerReconciliation(source: "runtime_attested" | "terminal_result"): boolean {
+    if (!dcSchedulerNeedsRuntimeReconciliation || !dcSchedulerRuntimeReattestedSinceStart) {
+      return !dcSchedulerNeedsRuntimeReconciliation;
+    }
+    const activeLeases = workItems.countActiveAttemptLeases();
+    if (activeLeases > 0) return false;
+    workItems.recordSystemEvent({
+      name: "desktop_commander.scheduler_reconciled",
+      body: { source, activeLeases },
+      attributes: {
+        "scheduler.reconciliation_source": source,
+        "scheduler.active_attempt_leases": activeLeases
+      }
+    });
+    dcSchedulerNeedsRuntimeReconciliation = false;
+    return true;
+  }
+
   const requestStartTimes = new WeakMap<object, number>();
   const acpAdapterConfig = options.acpAdapter === undefined ? acpAdapterConfigFromEnv() : options.acpAdapter;
   const acpAdapter =
@@ -504,8 +538,42 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
     const health = workItems.health();
     metrics.setSqliteReady(health.ok);
+    const schedulerMetrics = dcScheduler.metrics();
+    metrics.setGauge("scheduler_queue_depth", schedulerMetrics.queueDepth);
+    metrics.setGauge("scheduler_active_requests", schedulerMetrics.activeRequests);
+    metrics.setGauge("scheduler_completed_total", schedulerMetrics.completedTotal);
+    metrics.setGauge("scheduler_failed_total", schedulerMetrics.failedTotal);
+    metrics.setGauge("scheduler_cancelled_total", schedulerMetrics.cancelledTotal);
+    metrics.setGauge("scheduler_timeout_total", schedulerMetrics.queueTimeoutTotal, { phase: "queue" });
+    metrics.setGauge("scheduler_timeout_total", schedulerMetrics.lockTimeoutTotal, { phase: "lock" });
+    metrics.setGauge("scheduler_timeout_total", schedulerMetrics.executionTimeoutTotal, { phase: "execution" });
+    metrics.setGauge("scheduler_lock_contention_total", schedulerMetrics.lockContentionTotal);
+    metrics.setGauge("scheduler_overload_rejected_total", schedulerMetrics.overloadRejectedTotal);
+    for (const lane of ["read", "search", "process", "mutation"] as const) {
+      metrics.setGauge("scheduler_lane_active", schedulerMetrics.laneActive[lane], { lane });
+      metrics.setGauge("scheduler_lane_limit", schedulerMetrics.laneLimit[lane], { lane });
+    }
+    metrics.clearGauges("scheduler_agent_active");
+    metrics.clearGauges("scheduler_agent_queued");
+    for (const [agent, value] of Object.entries(schedulerMetrics.agentActive)) {
+      metrics.setGauge("scheduler_agent_active", value, { agent });
+    }
+    for (const [agent, value] of Object.entries(schedulerMetrics.agentQueued)) {
+      metrics.setGauge("scheduler_agent_queued", value, { agent });
+    }
+    metrics.setGauge("scheduler_queue_wait_ms", schedulerMetrics.queueWaitMs.p50, { quantile: "0.50" });
+    metrics.setGauge("scheduler_queue_wait_ms", schedulerMetrics.queueWaitMs.p95, { quantile: "0.95" });
+    metrics.setGauge("scheduler_queue_wait_ms", schedulerMetrics.queueWaitMs.p99, { quantile: "0.99" });
+    metrics.clearGauges("scheduler_lock_wait_ms");
+    for (const [resourceType, values] of Object.entries(schedulerMetrics.lockWaitMs)) {
+      metrics.setGauge("scheduler_lock_wait_ms", values.p50, { resource_type: resourceType, quantile: "0.50" });
+      metrics.setGauge("scheduler_lock_wait_ms", values.p95, { resource_type: resourceType, quantile: "0.95" });
+      metrics.setGauge("scheduler_lock_wait_ms", values.p99, { resource_type: resourceType, quantile: "0.99" });
+    }
     return reply.type("text/plain; version=0.0.4").send(metrics.render());
   });
+
+  app.get("/api/dc/scheduler", { preHandler: requireRead }, async () => dcScheduler.snapshot());
 
   app.post("/session/login", async (request, reply) => {
     try {
@@ -1138,6 +1206,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             .code(503)
             .send({ error: "capability signing key is invalid", code: "capability_signing_key_invalid" });
         }
+        if (dcSchedulerNeedsRuntimeReconciliation) {
+          return reply.code(503).send({
+            error: "managed Desktop Commander runtime must re-attest after gateway restart before scheduling resumes",
+            code: "scheduler_runtime_reconciliation_required",
+            retryable: true
+          });
+        }
 
         const dcPolicy = desktopCommanderToolPolicy(body.tool);
         if (!dcPolicy) {
@@ -1347,181 +1422,313 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
-        const claimed = tools.claim_approved_work_item_by_id({
-          id: workItem.id,
-          workerId,
-          leaseMs: DC_BRIDGE_LEASE_MS
-        });
-        if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
+        if (dcSchedulerNeedsRuntimeReconciliation) {
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply.code(409).send({
-            decision: "require_approval",
-            workItemId: workItem.id,
-            actionHash,
-            approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
+          return reply.code(503).send({
+            error: "Desktop Commander scheduler requires fresh managed-runtime reconciliation",
+            code: "scheduler_runtime_reconciliation_required",
+            retryable: true,
+            workItemId: workItem.id
           });
         }
 
-        const trustedWorkItem = workItems.get(workItem.id);
-        const lease = trustedWorkItem ? workItems.getActiveLeaseForAttempt(claimed.attemptId) : undefined;
-        if (!trustedWorkItem || !lease) {
-          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply
-            .code(503)
-            .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
-        }
-
-        let authorization: ExecutionAuthorization;
-        try {
-          authorization = authorizeDesktopCommanderExecution({
-            claimed,
-            trustedWorkItem,
-            lease,
-            workerId,
-            containment: dcContainment,
+        const schedulerIntent = classifyDesktopCommanderExecution({
+          requestId: workItem.id,
+          agentId: dcActor,
+          sessionId: body.client_id,
+          invocation,
+          containment: dcContainment,
+          priority: "normal"
+        });
+        workItems.recordSystemEvent({
+          name: "desktop_commander.scheduler_queued",
+          body: {
+            workItemId: workItem.id,
             requestId: request.id,
-            invocation
+            agentId: dcActor,
+            lane: schedulerIntent.lane,
+            priority: schedulerIntent.priority,
+            resourceCount: schedulerIntent.resources.length
+          },
+          attributes: {
+            "work_item.id": workItem.id,
+            "scheduler.request_id": schedulerIntent.requestId,
+            "scheduler.agent_id": schedulerIntent.agentId,
+            "scheduler.lane": schedulerIntent.lane
+          }
+        });
+
+        let schedulerAdmission: ExecutionAdmission;
+        const queueAbort = new AbortController();
+        const abortQueuedRequest = () => queueAbort.abort();
+        request.raw.once("aborted", abortQueuedRequest);
+        try {
+          schedulerAdmission = await dcScheduler.enqueue(schedulerIntent, {
+            signal: queueAbort.signal
           });
         } catch (error) {
-          const code = error instanceof ControlStackError ? error.code : "authorization_failed";
+          const code = error instanceof ControlStackError ? error.code : "scheduler_unavailable";
           try {
-            recordLeaseAuthorizedExecutionEvent(
-              {
-                workItemId: claimed.id,
-                attemptId: claimed.attemptId,
-                leaseId: claimed.leaseId,
-                workerId,
-                fencingEpoch: claimed.fencingEpoch
-              },
-              authorizationDeniedEvent({
-                workItemId: workItem.id,
-                workerId,
-                requestId: request.id,
-                toolName: body.tool,
-                attemptId: claimed.attemptId,
-                leaseId: claimed.leaseId,
-                fencingEpoch: claimed.fencingEpoch,
-                code,
-                reason: error instanceof Error ? error.message : String(error)
-              })
-            );
+            workItems.recordSystemEvent({
+              name: "desktop_commander.scheduler_denied",
+              body: { workItemId: workItem.id, requestId: request.id, code },
+              attributes: {
+                "work_item.id": workItem.id,
+                "scheduler.request_id": schedulerIntent.requestId,
+                "scheduler.agent_id": schedulerIntent.agentId,
+                "scheduler.lane": schedulerIntent.lane,
+                "scheduler.deny_code": code
+              }
+            });
           } catch {
-            // Lease authority may already have lapsed.
+            // Scheduling remains denied even if secondary observability is unavailable.
           }
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply
-            .code(403)
-            .send({ decision: "deny", reason: "authorization_failed", code, workItemId: workItem.id });
+          const retryAfterMs = error instanceof ExecutionSchedulerError ? error.retryAfterMs : undefined;
+          if (retryAfterMs) {
+            reply.header("retry-after", String(Math.max(1, Math.ceil(retryAfterMs / 1_000))));
+          }
+          return reply.code(503).send({
+            error: "Desktop Commander execution scheduler did not admit the request",
+            code,
+            retryable: error instanceof ExecutionSchedulerError ? error.retryable : true,
+            ...(retryAfterMs ? { retryAfterMs } : {}),
+            workItemId: workItem.id
+          });
+        } finally {
+          request.raw.off("aborted", abortQueuedRequest);
         }
 
-        let approvalActionHash: string | undefined;
-        if (dcPolicy.requiresApproval) {
-          const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
-          if (!approval) {
-            recordLeaseAuthorizedExecutionEvent(
-              authorization,
-              capabilityDeniedEvent({
-                auth: authorization,
-                runtimeId: capabilitySigningConfig.runtimeId,
-                code: "desktop_commander_approval_rejected"
-              })
-            );
-            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-            return reply.code(403).send({
+        let keepSchedulerAdmission = false;
+        try {
+          const modeAfterAdmission = readExecutionModeValue(workItems.getExecutionMode().raw);
+          if (modeAfterAdmission.state !== "ok" || modeAfterAdmission.mode !== mode.mode) {
+            return reply.code(409).send({
               decision: "deny",
-              reason: "issuance_rejected",
-              code: "approval_binding_missing",
+              code: "execution_mode_changed",
+              reason: "execution mode changed while waiting for scheduler admission",
               workItemId: workItem.id
             });
           }
-          approvalActionHash = approval.actionHash;
-        }
-        if (approvalActionHash !== undefined) {
-          authorization = { ...authorization, approvalActionHash } as ExecutionAuthorization;
-        }
+          if (modeAfterAdmission.mode === "admin") {
+            const gateAfterAdmission = adminExecutionGate(readAuthority(), true);
+            if (!gateAfterAdmission.ok) {
+              return reply.code(403).send({
+                decision: "deny",
+                code: gateAfterAdmission.code,
+                reason: gateAfterAdmission.detail,
+                workItemId: workItem.id
+              });
+            }
+          }
 
-        const payloadActionHash = approvalActionHash ?? claimed.actionHash;
-        const requestHash = executionPlanApprovalRequestHash({
-          workItemId: workItem.id,
-          planHash: claimed.planHash,
-          actionHash: payloadActionHash
-        });
-        const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
-
-        try {
-          const recorded = capabilityIssuanceRegistry.recordIssuance({
-            runtimeId: payload.runtimeId,
-            identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
-            leaseId: payload.leaseId,
-            attemptId: payload.attemptId,
-            workItemId: payload.workItemId,
+          const claimed = tools.claim_approved_work_item_by_id({
+            id: workItem.id,
             workerId,
-            fencingEpoch: payload.leaseEpoch,
+            leaseMs: DC_BRIDGE_LEASE_MS
+          });
+          if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply.code(409).send({
+              decision: "require_approval",
+              workItemId: workItem.id,
+              actionHash,
+              approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
+            });
+          }
+
+          const trustedWorkItem = workItems.get(workItem.id);
+          const lease = trustedWorkItem ? workItems.getActiveLeaseForAttempt(claimed.attemptId) : undefined;
+          if (!trustedWorkItem || !lease) {
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply
+              .code(503)
+              .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
+          }
+
+          let authorization: ExecutionAuthorization;
+          try {
+            authorization = authorizeDesktopCommanderExecution({
+              claimed,
+              trustedWorkItem,
+              lease,
+              workerId,
+              containment: dcContainment,
+              requestId: request.id,
+              invocation
+            });
+          } catch (error) {
+            const code = error instanceof ControlStackError ? error.code : "authorization_failed";
+            try {
+              recordLeaseAuthorizedExecutionEvent(
+                {
+                  workItemId: claimed.id,
+                  attemptId: claimed.attemptId,
+                  leaseId: claimed.leaseId,
+                  workerId,
+                  fencingEpoch: claimed.fencingEpoch
+                },
+                authorizationDeniedEvent({
+                  workItemId: workItem.id,
+                  workerId,
+                  requestId: request.id,
+                  toolName: body.tool,
+                  attemptId: claimed.attemptId,
+                  leaseId: claimed.leaseId,
+                  fencingEpoch: claimed.fencingEpoch,
+                  code,
+                  reason: error instanceof Error ? error.message : String(error)
+                })
+              );
+            } catch {
+              // Lease authority may already have lapsed.
+            }
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply
+              .code(403)
+              .send({ decision: "deny", reason: "authorization_failed", code, workItemId: workItem.id });
+          }
+
+          let approvalActionHash: string | undefined;
+          if (dcPolicy.requiresApproval) {
+            const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
+            if (!approval) {
+              recordLeaseAuthorizedExecutionEvent(
+                authorization,
+                capabilityDeniedEvent({
+                  auth: authorization,
+                  runtimeId: capabilitySigningConfig.runtimeId,
+                  code: "desktop_commander_approval_rejected"
+                })
+              );
+              recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                reason: "issuance_rejected",
+                code: "approval_binding_missing",
+                workItemId: workItem.id
+              });
+            }
+            approvalActionHash = approval.actionHash;
+          }
+          if (approvalActionHash !== undefined) {
+            authorization = { ...authorization, approvalActionHash } as ExecutionAuthorization;
+          }
+
+          recordLeaseAuthorizedExecutionEvent(authorization, {
+            name: "desktop_commander.scheduler_admitted",
+            body: {
+              workItemId: workItem.id,
+              requestId: request.id,
+              admissionId: schedulerAdmission.admissionId,
+              lane: schedulerIntent.lane,
+              waitMs: schedulerAdmission.waitMs,
+              resources: schedulerIntent.resources
+            },
+            attributes: {
+              "scheduler.request_id": schedulerIntent.requestId,
+              "scheduler.admission_id": schedulerAdmission.admissionId,
+              "scheduler.agent_id": schedulerIntent.agentId,
+              "scheduler.lane": schedulerIntent.lane,
+              "scheduler.wait_ms": schedulerAdmission.waitMs
+            }
+          });
+          if (!dcScheduler.armExecutionTimeout(workItem.id)) {
+            return reply.code(503).send({
+              error: "scheduler admission disappeared before capability issuance",
+              code: "scheduler_admission_lost",
+              workItemId: workItem.id
+            });
+          }
+
+          const payloadActionHash = approvalActionHash ?? claimed.actionHash;
+          const requestHash = executionPlanApprovalRequestHash({
+            workItemId: workItem.id,
+            planHash: claimed.planHash,
+            actionHash: payloadActionHash
+          });
+          const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
+
+          try {
+            const recorded = capabilityIssuanceRegistry.recordIssuance({
+              runtimeId: payload.runtimeId,
+              identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+              leaseId: payload.leaseId,
+              attemptId: payload.attemptId,
+              workItemId: payload.workItemId,
+              workerId,
+              fencingEpoch: payload.leaseEpoch,
+              planHash: payload.planHash,
+              actionHash: payload.actionHash,
+              invocationHash: payload.invocationHash,
+              requiredScopes: payload.scopes,
+              approvalRequired: dcPolicy.requiresApproval,
+              approvalId: payload.approvalId,
+              keyId: capabilitySigningConfig.keyId,
+              nonce: payload.nonce,
+              issuedAt: payload.issuedAt,
+              expiresAt: payload.expiresAt
+            });
+            if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
+              throw new ControlStackError(
+                "desktop_commander_capability_issuance_rejected",
+                "issuance binding does not match capability payload"
+              );
+            }
+          } catch (error) {
+            const code =
+              error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
+            try {
+              recordLeaseAuthorizedExecutionEvent(
+                authorization,
+                capabilityDeniedEvent({ auth: authorization, runtimeId: payload.runtimeId, code })
+              );
+            } catch {
+              // Lease authority may already have lapsed.
+            }
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply
+              .code(403)
+              .send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
+          }
+
+          try {
+            const issuanceEvent = capabilityIssuedEvent({
+              auth: authorization,
+              runtimeId: payload.runtimeId,
+              keyId: capabilitySigningConfig.keyId,
+              requestHash: payload.requestHash,
+              expiresAt: payload.expiresAt
+            });
+            recordLeaseAuthorizedExecutionEvent(authorization, issuanceEvent);
+          } catch (error) {
+            return reply.code(503).send({
+              error: "capability evidence could not be committed",
+              code: "capability_evidence_unavailable",
+              detail: error instanceof Error ? error.message : String(error)
+            });
+          }
+
+          const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
+          keepSchedulerAdmission = true;
+          return {
+            decision: "allow",
+            capability,
+            workItemId: workItem.id,
+            attemptId: payload.attemptId,
+            leaseId: payload.leaseId,
+            leaseEpoch: payload.leaseEpoch,
             planHash: payload.planHash,
             actionHash: payload.actionHash,
+            claimActionHash: claimed.actionHash,
+            inputHash: claimed.inputHash,
             invocationHash: payload.invocationHash,
-            requiredScopes: payload.scopes,
-            approvalRequired: dcPolicy.requiresApproval,
-            approvalId: payload.approvalId,
-            keyId: capabilitySigningConfig.keyId,
-            nonce: payload.nonce,
-            issuedAt: payload.issuedAt,
-            expiresAt: payload.expiresAt
-          });
-          if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
-            throw new ControlStackError(
-              "desktop_commander_capability_issuance_rejected",
-              "issuance binding does not match capability payload"
-            );
-          }
-        } catch (error) {
-          const code =
-            error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
-          try {
-            recordLeaseAuthorizedExecutionEvent(
-              authorization,
-              capabilityDeniedEvent({ auth: authorization, runtimeId: payload.runtimeId, code })
-            );
-          } catch {
-            // Lease authority may already have lapsed.
-          }
-          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply.code(403).send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
+            workerId
+          };
+        } finally {
+          if (!keepSchedulerAdmission) schedulerAdmission.release("abandoned");
         }
-
-        try {
-          const issuanceEvent = capabilityIssuedEvent({
-            auth: authorization,
-            runtimeId: payload.runtimeId,
-            keyId: capabilitySigningConfig.keyId,
-            requestHash: payload.requestHash,
-            expiresAt: payload.expiresAt
-          });
-          recordLeaseAuthorizedExecutionEvent(authorization, issuanceEvent);
-        } catch (error) {
-          return reply.code(503).send({
-            error: "capability evidence could not be committed",
-            code: "capability_evidence_unavailable",
-            detail: error instanceof Error ? error.message : String(error)
-          });
-        }
-
-        const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
-        return {
-          decision: "allow",
-          capability,
-          workItemId: workItem.id,
-          attemptId: payload.attemptId,
-          leaseId: payload.leaseId,
-          leaseEpoch: payload.leaseEpoch,
-          planHash: payload.planHash,
-          actionHash: payload.actionHash,
-          claimActionHash: claimed.actionHash,
-          inputHash: claimed.inputHash,
-          invocationHash: payload.invocationHash,
-          workerId
-        };
       } catch (error) {
         return sendError(reply, error);
       }
@@ -1604,6 +1811,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           },
           new Date()
         );
+        if (
+          capabilitySigningConfig &&
+          body.runtimeId === capabilitySigningConfig.runtimeId &&
+          body.identityConfigFingerprint === capabilitySigningConfig.identityConfigFingerprint
+        ) {
+          dcSchedulerRuntimeReattestedSinceStart = true;
+          maybeCompleteDcSchedulerReconciliation("runtime_attested");
+        }
         workItems.recordSystemEvent({
           name: "desktop_commander.runtime_activated",
           body: {
@@ -1665,6 +1880,28 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return;
       }
       const body = cancelBodySchema.parse(requestObject(request.body));
+      const schedulerState = dcScheduler.cancel(request.params.id);
+      if (schedulerState !== "missing") {
+        try {
+          workItems.recordSystemEvent({
+            name: "desktop_commander.scheduler_cancel_requested",
+            body: { workItemId: request.params.id, schedulerState },
+            attributes: {
+              "work_item.id": request.params.id,
+              "scheduler.cancel_state": schedulerState
+            }
+          });
+        } catch (error) {
+          request.log.warn({ error, workItemId: request.params.id }, "scheduler cancel audit failed");
+        }
+      }
+      if (schedulerState === "active") {
+        return reply.code(409).send({
+          error: "active Desktop Commander execution requires executor stop confirmation before cancellation",
+          code: "scheduler_active_cancellation_unconfirmed",
+          workItemId: request.params.id
+        });
+      }
       const cancelled = tools.cancel_work_item({ ...body, id: request.params.id, actor });
       return { workItem: cancelled };
     } catch (error) {
@@ -1728,6 +1965,36 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         const result = resultId ? workItems.getExecutionResult(resultId) : undefined;
         if (!result) {
           throw new ControlStackError("result_persistence_failed", "accepted result could not be read back");
+        }
+        const schedulerReleased = dcScheduler.releaseRequest(
+          body.workItemId,
+          body.outcome === "succeeded" ? "completed" : "failed"
+        );
+        if (schedulerReleased) {
+          try {
+            workItems.recordSystemEvent({
+              name: "desktop_commander.scheduler_released",
+              body: {
+                workItemId: body.workItemId,
+                attemptId: body.attemptId,
+                outcome: body.outcome
+              },
+              attributes: {
+                "work_item.id": body.workItemId,
+                ...(body.attemptId === undefined ? {} : { "attempt.id": body.attemptId }),
+                "scheduler.release_reason": "terminal_result"
+              }
+            });
+          } catch (error) {
+            request.log.warn({ error, workItemId: body.workItemId }, "scheduler release audit failed");
+          }
+        }
+        if (dcSchedulerNeedsRuntimeReconciliation && dcSchedulerRuntimeReattestedSinceStart) {
+          try {
+            maybeCompleteDcSchedulerReconciliation("terminal_result");
+          } catch (error) {
+            request.log.warn({ error, workItemId: body.workItemId }, "scheduler reconciliation audit failed");
+          }
         }
         request.log.info(
           { requestId: request.id, workItemId: body.workItemId, workerId: body.workerId, resultId: result.resultId },
@@ -1837,6 +2104,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.addHook("onClose", async () => {
     await acpAdapter?.stop();
+    if (ownsDcScheduler) dcScheduler.close();
     executionReads.close();
     deviceAuthStore.close();
     capabilityIssuanceRegistry.close();

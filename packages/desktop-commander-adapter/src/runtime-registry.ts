@@ -115,6 +115,14 @@ export class SqliteDesktopCommanderRuntimeRegistry {
     this.db.close();
   }
 
+  hasActiveRuntime(runtimeId: string): boolean {
+    requireId(runtimeId, "runtimeId");
+    const row = this.db
+      .prepare("SELECT 1 AS present FROM desktop_commander_runtimes WHERE runtime_id = ? AND status = 'active'")
+      .get(runtimeId) as { present: number } | undefined;
+    return row?.present === 1;
+  }
+
   issueBootstrap(
     input: Omit<RuntimeAttestation, "scopes"> & { scopes: readonly string[]; ttlMs?: number },
     now = new Date()

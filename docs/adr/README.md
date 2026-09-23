@@ -31,6 +31,8 @@ ADR status values:
 | [0016](0016-public-oauth-device-authorization.md)                        | Public HTTPS OAuth resource + RFC 8628 CLI device authorization                           | Accepted                          |
 | [0017](0017-codex-swarm-subordinate-execution-engine.md)                 | Codex Swarm is a subordinate execution engine, not a peer control plane                   | Proposed                          |
 | [0018](0018-archive-hourly-pr-workflow.md)                               | Archive the disabled Hourly Pull Request Cycle workflow                                   | Accepted                          |
+| [0019](0019-desktop-commander-concurrency-scheduler.md)                  | Centralize Desktop Commander concurrency scheduling in ACS                                | Accepted                          |
+| [0019](0019-desktop-commander-concurrency-scheduler.md)                   | Centralize Desktop Commander concurrency scheduling in ACS                                | Accepted                          |
 
 ## Decision rules
 

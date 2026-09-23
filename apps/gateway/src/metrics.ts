@@ -5,6 +5,7 @@ function label(value: string): string {
 export class GatewayMetrics {
   private readonly counters = new Map<string, number>();
   private readonly durations = new Map<string, { count: number; sumSeconds: number }>();
+  private readonly gauges = new Map<string, number>();
   private sqliteReady = 0;
 
   increment(name: string, labels: Record<string, string> = {}): void {
@@ -25,6 +26,16 @@ export class GatewayMetrics {
     this.sqliteReady = ready ? 1 : 0;
   }
 
+  setGauge(name: string, value: number, labels: Record<string, string> = {}): void {
+    this.gauges.set(metricKey(name, labels), value);
+  }
+
+  clearGauges(name: string): void {
+    for (const key of this.gauges.keys()) {
+      if (key === name || key.startsWith(`${name}{`)) this.gauges.delete(key);
+    }
+  }
+
   render(): string {
     const lines = [
       "# HELP acs_sqlite_ready Whether the SQLite control plane passed its latest health check.",
@@ -32,6 +43,7 @@ export class GatewayMetrics {
       `acs_sqlite_ready ${this.sqliteReady}`
     ];
     for (const [key, value] of this.counters) lines.push(`${key} ${value}`);
+    for (const [key, value] of this.gauges) lines.push(`${key} ${value}`);
     for (const [key, value] of this.durations) {
       lines.push(`${metricSuffix(key, "_count")} ${value.count}`);
       lines.push(`${metricSuffix(key, "_sum")} ${value.sumSeconds}`);

@@ -4,6 +4,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
+import { ExecutionScheduler } from "@agent-control-stack/desktop-commander-adapter";
 import { describe, expect, it } from "vitest";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
@@ -57,15 +58,20 @@ function signingConfig(keys: TestContext["keys"]) {
   };
 }
 
-async function buildTestGateway(dbName = "control.db"): Promise<TestContext> {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-dc-capability-")));
-  const keys = generateKeys();
+async function buildTestGateway(
+  dbName = "control.db",
+  desktopCommanderScheduler?: ExecutionScheduler,
+  existing?: Pick<TestContext, "root" | "keys">
+): Promise<TestContext> {
+  const root = existing?.root ?? realpathSync(mkdtempSync(join(tmpdir(), "acs-dc-capability-")));
+  const keys = existing?.keys ?? generateKeys();
   const app = buildGateway({
     dbPath: join(root, dbName),
     logger: false,
     auth: { token: "", actor: "user", actorId: testAuth.actorId, credentials },
     desktopCommanderCapability: signingConfig(keys),
-    desktopCommanderContainment: { allowedRoots: [root], deniedRoots: [] }
+    desktopCommanderContainment: { allowedRoots: [root], deniedRoots: [] },
+    ...(desktopCommanderScheduler ? { desktopCommanderScheduler } : {})
   });
   return { root, keys, app };
 }
@@ -405,6 +411,270 @@ describe("POST /dc/capability/issue (lease-bound)", () => {
       });
       expect(detail.json().workItem.status).toBe("succeeded");
     } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed after gateway restart until runtime re-attests and prior active leases reach a terminal result", async () => {
+    const first = await buildTestGateway("scheduler-restart.db");
+    let restarted: TestContext | undefined;
+    try {
+      await attestRuntime(first);
+      const issued = await issuePayload(first.app, "read_file", {
+        path: join(first.root, "restart-active.txt")
+      });
+      expect(issued.statusCode).toBe(200);
+      const body = issued.json();
+
+      await first.app.close();
+      restarted = await buildTestGateway("scheduler-restart.db", undefined, first);
+
+      const beforeAttestation = await issuePayload(restarted.app, "read_file", {
+        path: join(first.root, "blocked-before-attestation.txt")
+      });
+      expect(beforeAttestation.statusCode).toBe(503);
+      expect(beforeAttestation.json()).toMatchObject({
+        code: "scheduler_runtime_reconciliation_required",
+        retryable: true
+      });
+
+      await attestRuntime(restarted);
+      const whileLeaseActive = await issuePayload(restarted.app, "read_file", {
+        path: join(first.root, "blocked-with-active-lease.txt")
+      });
+      expect(whileLeaseActive.statusCode).toBe(503);
+      expect(whileLeaseActive.json()).toMatchObject({
+        code: "scheduler_runtime_reconciliation_required"
+      });
+
+      const now = new Date().toISOString();
+      const terminal = await restarted.app.inject({
+        method: "POST",
+        url: `/work-items/${body.workItemId}/results`,
+        headers: BRIDGE_AUTH,
+        payload: {
+          workItemId: body.workItemId,
+          attemptId: body.attemptId,
+          leaseId: body.leaseId,
+          workerId: body.workerId,
+          actionHash: body.claimActionHash,
+          planHash: body.planHash,
+          inputHash: body.inputHash,
+          fencingEpoch: body.leaseEpoch,
+          idempotencyKey: attemptResultIdempotencyKey(body.attemptId),
+          outcome: "succeeded",
+          startedAt: now,
+          finishedAt: now,
+          summary: "pre-restart execution reached a terminal result",
+          simulationMetadata: {
+            executionMode: "desktop_commander",
+            simulated: false,
+            backend: "desktop-commander-mcp",
+            toolName: "read_file",
+            invocationFingerprint: body.invocationHash,
+            requestId: body.attemptId
+          }
+        }
+      });
+      expect(terminal.statusCode).toBe(201);
+
+      const afterReconciliation = await issuePayload(restarted.app, "read_file", {
+        path: join(first.root, "allowed-after-reconciliation.txt")
+      });
+      expect(afterReconciliation.statusCode).toBe(200);
+    } finally {
+      if (restarted) await restarted.app.close();
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
+  it("queues before lease claim and releases capacity only after an accepted terminal result", async () => {
+    const scheduler = new ExecutionScheduler({
+      queueTimeoutMs: 25,
+      laneLimits: { read: 1, search: 1, process: 1, mutation: 1 }
+    });
+    const ctx = await buildTestGateway("scheduler-control.db", scheduler);
+    try {
+      await attestRuntime(ctx);
+
+      const first = await issuePayload(ctx.app, "read_file", {
+        path: join(ctx.root, "first.txt")
+      });
+      expect(first.statusCode).toBe(200);
+      const firstBody = first.json();
+      expect(scheduler.snapshot().active).toHaveLength(1);
+
+      const schedulerApi = await ctx.app.inject({
+        method: "GET",
+        url: "/api/dc/scheduler",
+        headers: AUTH
+      });
+      expect(schedulerApi.statusCode).toBe(200);
+      expect(schedulerApi.json()).toMatchObject({
+        metrics: { activeRequests: 1, queueDepth: 0 }
+      });
+
+      const blocked = await issuePayload(ctx.app, "read_file", {
+        path: join(ctx.root, "second.txt")
+      });
+      expect(blocked.statusCode).toBe(503);
+      expect(blocked.json()).toMatchObject({
+        code: "scheduler_queue_timeout",
+        retryable: true
+      });
+      expect(scheduler.snapshot().active).toHaveLength(1);
+      expect(scheduler.snapshot().queued).toHaveLength(0);
+
+      const blockedDetail = await ctx.app.inject({
+        method: "GET",
+        url: `/work-items/${blocked.json().workItemId}`,
+        headers: AUTH
+      });
+      expect(blockedDetail.json().workItem.status).toBe("approved");
+
+      const now = new Date().toISOString();
+      const completed = await ctx.app.inject({
+        method: "POST",
+        url: `/work-items/${firstBody.workItemId}/results`,
+        headers: BRIDGE_AUTH,
+        payload: {
+          workItemId: firstBody.workItemId,
+          attemptId: firstBody.attemptId,
+          leaseId: firstBody.leaseId,
+          workerId: firstBody.workerId,
+          actionHash: firstBody.claimActionHash,
+          planHash: firstBody.planHash,
+          inputHash: firstBody.inputHash,
+          fencingEpoch: firstBody.leaseEpoch,
+          idempotencyKey: attemptResultIdempotencyKey(firstBody.attemptId),
+          outcome: "succeeded",
+          startedAt: now,
+          finishedAt: now,
+          summary: "read_file completed under scheduler admission",
+          simulationMetadata: {
+            executionMode: "desktop_commander",
+            simulated: false,
+            backend: "desktop-commander-mcp",
+            toolName: "read_file",
+            invocationFingerprint: firstBody.invocationHash,
+            requestId: firstBody.attemptId
+          }
+        }
+      });
+      expect(completed.statusCode).toBe(201);
+      expect(scheduler.snapshot().active).toHaveLength(0);
+
+      const next = await issuePayload(ctx.app, "read_file", {
+        path: join(ctx.root, "third.txt")
+      });
+      expect(next.statusCode).toBe(200);
+      expect(scheduler.snapshot().active).toHaveLength(1);
+      scheduler.releaseRequest(next.json().workItemId);
+    } finally {
+      scheduler.close();
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("requires fresh runtime reconciliation after a gateway restart before new scheduler admission", async () => {
+    const first = await buildTestGateway("scheduler-restart.db");
+    try {
+      await attestRuntime(first);
+      await first.app.close();
+
+      const second = await buildTestGateway(
+        "scheduler-restart.db",
+        undefined,
+        { root: first.root, keys: first.keys }
+      );
+      try {
+        const blocked = await issuePayload(second.app, "read_file", {
+          path: join(second.root, "restart.txt")
+        });
+        expect(blocked.statusCode).toBe(503);
+        expect(blocked.json()).toMatchObject({
+          code: "scheduler_runtime_reconciliation_required",
+          retryable: true
+        });
+
+        await attestRuntime(second);
+        const issued = await issuePayload(second.app, "read_file", {
+          path: join(second.root, "restart.txt")
+        });
+        expect(issued.statusCode).toBe(200);
+      } finally {
+        await second.app.close();
+      }
+    } finally {
+      rmSync(first.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses to cancel active machine work until executor-stop evidence exists", async () => {
+    const scheduler = new ExecutionScheduler();
+    const ctx = await buildTestGateway("scheduler-cancel.db", scheduler);
+    try {
+      await attestRuntime(ctx);
+      const issued = await issuePayload(ctx.app, "read_file", {
+        path: join(ctx.root, "active.txt")
+      });
+      expect(issued.statusCode).toBe(200);
+      const body = issued.json();
+
+      const cancel = await ctx.app.inject({
+        method: "POST",
+        url: `/work-items/${body.workItemId}/cancel`,
+        headers: AUTH,
+        payload: { reason: "operator requested cancellation" }
+      });
+      expect(cancel.statusCode).toBe(409);
+      expect(cancel.json()).toMatchObject({
+        code: "scheduler_active_cancellation_unconfirmed"
+      });
+      expect(scheduler.snapshot().active).toHaveLength(1);
+
+      const detail = await ctx.app.inject({
+        method: "GET",
+        url: `/work-items/${body.workItemId}`,
+        headers: AUTH
+      });
+      expect(detail.json().workItem.status).toBe("running");
+
+      const now = new Date().toISOString();
+      const completed = await ctx.app.inject({
+        method: "POST",
+        url: `/work-items/${body.workItemId}/results`,
+        headers: BRIDGE_AUTH,
+        payload: {
+          workItemId: body.workItemId,
+          attemptId: body.attemptId,
+          leaseId: body.leaseId,
+          workerId: body.workerId,
+          actionHash: body.claimActionHash,
+          planHash: body.planHash,
+          inputHash: body.inputHash,
+          fencingEpoch: body.leaseEpoch,
+          idempotencyKey: attemptResultIdempotencyKey(body.attemptId),
+          outcome: "succeeded",
+          startedAt: now,
+          finishedAt: now,
+          summary: "active call reached a terminal result",
+          simulationMetadata: {
+            executionMode: "desktop_commander",
+            simulated: false,
+            backend: "desktop-commander-mcp",
+            toolName: "read_file",
+            invocationFingerprint: body.invocationHash,
+            requestId: body.attemptId
+          }
+        }
+      });
+      expect(completed.statusCode).toBe(201);
+      expect(scheduler.snapshot().active).toHaveLength(0);
+    } finally {
+      scheduler.close();
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
     }
