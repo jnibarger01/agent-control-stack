@@ -9,7 +9,30 @@ import {
   type StoredAuditEvent,
   type WorkItem
 } from "@agent-control-stack/work-items";
+import { escapeHtml } from "./html.js";
 import { redactSecrets, redactedAttributesJson, redactionClientSource } from "./redaction.js";
+import { workItemControlsClientSource, workItemControlsHtml } from "./work-item-controls.js";
+import { liveDashboardClientSource, type DashboardFragments } from "./live-dashboard.js";
+import { auditTimelineClientSource } from "./audit-timeline.js";
+import { composerClientSource, composerHtml } from "./composer.js";
+import {
+  auditAttributesHtml,
+  auditRowsClientSource,
+  metricsClientSource,
+  policyPanelHtml,
+  summarizePolicyDecisions,
+  themeBootScript,
+  themeClientSource
+} from "./visibility.js";
+import { systemProbesClientSource } from "./system-probes.js";
+import {
+  approvalWaitMs,
+  approvalWaitStart,
+  DEFAULT_APPROVAL_SLA_MS,
+  formatWait,
+  operatorWorkflowClientSource,
+  sortApprovalItems
+} from "./operator-workflow.js";
 
 export {
   isSecretAttributeKey,
@@ -19,6 +42,49 @@ export {
   SECRET_KEY_PATTERN,
   SECRET_VALUE_PATTERNS
 } from "./redaction.js";
+export {
+  REASON_REQUIRED_CONTROLS,
+  WORK_ITEM_CONTROL_STATUSES,
+  WORK_ITEM_CONTROLS,
+  workItemControlsFor,
+  workItemControlsHtml,
+  type WorkItemControl
+} from "./work-item-controls.js";
+export {
+  AGENT_REFRESH_DEBOUNCE_MS,
+  DASHBOARD_CATCH_UP_TARGETS,
+  DASHBOARD_FRAGMENT_TARGETS,
+  MAX_REFRESH_RETRY_MS,
+  MIN_REFRESH_INTERVAL_MS,
+  PERIODIC_REFRESH_MS,
+  WORK_EVENT_PREFIXES,
+  WORK_ITEM_REFRESH_DEBOUNCE_MS,
+  type DashboardFragmentName,
+  type DashboardFragments
+} from "./live-dashboard.js";
+export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE } from "./audit-timeline.js";
+export { COMPOSER_PREVIEW_DEBOUNCE_MS, composerHtml, DEFAULT_ACTION_KIND } from "./composer.js";
+export {
+  AUDIT_SUMMARY_KEYS,
+  auditAttributesHtml,
+  METRIC_ROWS,
+  METRICS_HISTORY,
+  METRICS_POLL_MS,
+  policyPanelHtml,
+  summarizePolicyDecisions,
+  THEME_CHOICES,
+  THEME_STORAGE_KEY,
+  type PolicyDecisionSummary
+} from "./visibility.js";
+export { PROBE_HISTORY, PROBE_INTERVAL_MS, PROBE_PATH, PROBE_SLOW_MS } from "./system-probes.js";
+export {
+  approvalWaitMs,
+  approvalWaitStart,
+  DEFAULT_APPROVAL_SLA_MS,
+  formatWait,
+  KEYBOARD_SHORTCUTS,
+  sortApprovalItems
+} from "./operator-workflow.js";
 
 export interface MissionControlAgent {
   id: string;
@@ -79,6 +145,16 @@ export interface MissionControlViewModel {
   attemptLeasesByWorkItem?: Record<string, MissionControlAttemptLease[]>;
   /** Explicit worker backend label, when the gateway knows it. Never a secret. */
   executionBackend?: string;
+  /** Exact per-status counts across the store. When present, cards use these instead of counting `workItems`. */
+  statusCounts?: Record<string, number>;
+  /** Recent `policy.decided` events for the Policy panel. Falls back to `events` when absent. */
+  policyDecisionEvents?: StoredAuditEvent[];
+  /** Action kinds the composer suggests (the policy's supported kinds). */
+  composerActionKinds?: string[];
+  /** How long an approval may wait before it is flagged as over SLA. Defaults to 30 minutes. */
+  approvalSlaMs?: number;
+  /** Present when `workItems` carries only a window of finished items. */
+  finishedWorkItems?: { shown: number; total: number; limit: number };
   now?: Date;
 }
 
@@ -303,7 +379,7 @@ export function nextSseReconnectDelayMs(attempt: number): number {
   return Math.min(30_000, 1_000 * 2 ** Math.min(n, 5));
 }
 
-/** Show/hide the stale-stream banner and disable approve/deny/unblock while disconnected. */
+/** Show/hide the stale-stream banner and disable approve/deny/unblock and work-item controls while disconnected. */
 export function applySseConnectionState(root: SseConnectionRoot, connected: boolean): void {
   const banner = root.querySelector("#sse-stale-banner");
   if (banner) banner.hidden = connected;
@@ -314,7 +390,9 @@ export function applySseConnectionState(root: SseConnectionRoot, connected: bool
       ? `<span aria-hidden="true"></span> Live`
       : `<span aria-hidden="true"></span> Disconnected`;
   }
-  for (const button of Array.from(root.querySelectorAll("[data-approve],[data-reject],[data-unblock]"))) {
+  for (const button of Array.from(
+    root.querySelectorAll("[data-approve],[data-reject],[data-unblock],[data-work-control]")
+  )) {
     const approveWithoutHash = button.getAttribute("data-approve") !== null && !button.getAttribute("data-action-hash");
     button.disabled = !connected || approveWithoutHash;
   }
@@ -337,7 +415,7 @@ export function approvalActionHashPrefix(hash: string, maxLen = 12): string {
 
 export type ApprovalConfirmRequest = {
   workItemId: string;
-  action: "approve" | "reject";
+  action: "approve" | "reject" | "cancel" | "retry" | "clone";
   actionHash?: string;
   /** Requested action kind the hash approves, when known. */
   actionKind?: string;
@@ -353,8 +431,17 @@ export type ApprovalConfirmDocument = {
   activeElement?: { focus?(): void } | null;
 };
 
+/** Confirm dialog copy. Cancel's dismiss button must not read "Cancel". */
+const CONFIRM_COPY: Record<ApprovalConfirmRequest["action"], { label: string; heading: string; dismiss: string }> = {
+  approve: { label: "Approve", heading: "Approve high-risk work item?", dismiss: "Cancel" },
+  reject: { label: "Deny", heading: "Deny high-risk work item?", dismiss: "Cancel" },
+  cancel: { label: "Cancel work item", heading: "Cancel this work item?", dismiss: "Keep work item" },
+  retry: { label: "Retry", heading: "Retry this work item as a new item?", dismiss: "Go back" },
+  clone: { label: "Clone", heading: "Clone this work item as a new item?", dismiss: "Go back" }
+};
+
 /**
- * Modal confirm for elevated-risk approve/deny.
+ * Modal confirm for elevated-risk approve/deny and for work-item controls.
  * Esc or Cancel resolves false without side effects; Confirm resolves true.
  * Initial focus is on Cancel (confirm is never the default focused control).
  */
@@ -373,7 +460,8 @@ export function requestApprovalConfirm(
     overlay.setAttribute("aria-labelledby", "approval-confirm-title");
     overlay.className = "approval-confirm-overlay";
 
-    const actionLabel = request.action === "approve" ? "Approve" : "Deny";
+    const copy = CONFIRM_COPY[request.action];
+    const actionLabel = copy.label;
     const hashPrefix = approvalActionHashPrefix(request.actionHash ?? "");
     const hashLine = hashPrefix
       ? `<p class="approval-confirm-hash">Action hash: <code>${escapeHtml(hashPrefix)}</code></p>`
@@ -383,13 +471,13 @@ export function requestApprovalConfirm(
       : "";
 
     overlay.innerHTML = `<div class="approval-confirm-card">
-  <h3 id="approval-confirm-title">${escapeHtml(actionLabel)} high-risk work item?</h3>
+  <h3 id="approval-confirm-title">${escapeHtml(copy.heading)}</h3>
   <p class="approval-confirm-id">Work item: <code>${escapeHtml(request.workItemId)}</code></p>
   <p class="approval-confirm-risk">Risk: <strong>${escapeHtml(request.risk)}</strong></p>
   ${kindLine}
   ${hashLine}
   <div class="approval-confirm-actions">
-    <button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>
+    <button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>${escapeHtml(copy.dismiss)}</button>
     <button type="button" id="approval-confirm-ok" data-approval-confirm-ok>${escapeHtml(actionLabel)}</button>
   </div>
 </div>`;
@@ -572,20 +660,69 @@ export function renderWorkItemDetailHtml(
         })
         .join("")}</ol>`
     : `<p class="muted">No matching events.</p>`;
-  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div><div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
+  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)} · <a class="permalink" href="?item=${escapeHtml(encodeURIComponent(workItem.id))}#queue">Permalink</a></small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div>${workItemControlsHtml(workItem)}<div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
+}
+
+function dashboardModel(input: WorkItem[] | MissionControlViewModel): MissionControlViewModel {
+  return Array.isArray(input) ? { workItems: input, events: [] } : input;
+}
+
+function dashboardAgents(model: MissionControlViewModel): MissionControlAgent[] {
+  return (
+    model.agents ??
+    projectAgents(model.workItems, model.events ?? [], model.now ?? new Date(), model.registeredAgents ?? [])
+  );
+}
+
+/**
+ * Markup for every live-updated dashboard section. The page embeds these at
+ * render time and `GET /dashboard/fragments` returns them for in-place patches,
+ * so there is exactly one renderer for each section.
+ */
+export function renderDashboardFragments(
+  input: WorkItem[] | MissionControlViewModel,
+  agents: MissionControlAgent[] = dashboardAgents(dashboardModel(input))
+): DashboardFragments {
+  const model = dashboardModel(input);
+  const now = model.now ?? new Date();
+  const stats = summarize(model.workItems, agents, model.statusCounts);
+  const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
+  const attemptLeasesByWorkItem = model.attemptLeasesByWorkItem ?? {};
+  return {
+    cards: overviewCards(stats),
+    queueList: workQueueItems(
+      model.workItems,
+      model.executionPlansByWorkItem ?? {},
+      model.executionPlanAdmissionsByWorkItem ?? {},
+      model.executionAttemptsByWorkItem ?? {},
+      attemptLeasesByWorkItem
+    ),
+    queueFooter: queueFooter(model.finishedWorkItems),
+    approvalsList: approvalsPanel(
+      sortApprovalItems(approvalItems, now),
+      approvalOptionsByWorkItem(model),
+      now,
+      model.approvalSlaMs === undefined ? DEFAULT_APPROVAL_SLA_MS : toCount(model.approvalSlaMs)
+    ),
+    approvalsCount: `${approvalItems.length} waiting`,
+    metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
+    systemStats: systemStats(stats, model.executionBackend),
+    policy: policyPanelHtml(
+      summarizePolicyDecisions(model.policyDecisionEvents ?? model.events ?? []),
+      model.composerActionKinds ?? [],
+      (timeUnixNano) => time(nanoToIso(timeUnixNano))
+    ),
+    eventsTimeline: eventTimeline([...(model.events ?? [])].reverse()),
+    connectors: connectorsPanel(agents, model.executionBackend),
+    generatedAt: now.toISOString()
+  };
 }
 
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
-  const model = Array.isArray(input) ? { workItems: input, events: [] } : input;
+  const model = dashboardModel(input);
   const events = model.events ?? [];
-  const agents =
-    model.agents ?? projectAgents(model.workItems, events, model.now ?? new Date(), model.registeredAgents ?? []);
-  const stats = summarize(model.workItems, agents);
-  const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
-  const executionPlansByWorkItem = model.executionPlansByWorkItem ?? {};
-  const executionPlanAdmissionsByWorkItem = model.executionPlanAdmissionsByWorkItem ?? {};
-  const executionAttemptsByWorkItem = model.executionAttemptsByWorkItem ?? {};
-  const attemptLeasesByWorkItem = model.attemptLeasesByWorkItem ?? {};
+  const agents = dashboardAgents(model);
+  const fragments = renderDashboardFragments(model, agents);
 
   return `<!doctype html>
 <html lang="en">
@@ -593,6 +730,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ACS Mission Control</title>
+    <script>${themeBootScript()}</script>
     <style>${styles()}</style>
   </head>
   <body data-active-view="overview">
@@ -611,32 +749,33 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <a href="#policy" data-nav="policy">Policy</a>
         <a href="#system" data-nav="system">System</a>
       </nav>
-      <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream.</p>
+      <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream. Press <kbd>?</kbd> for keyboard shortcuts.</p>
     </aside>
     <main id="main-content" tabindex="-1">
       <header>
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
-        <div class="live" aria-live="polite"><span aria-hidden="true"></span> SSE ready</div>
+        <div class="header-status"><div class="live connecting" data-state="connecting"><span aria-hidden="true"></span> <span data-live-label>Connecting…</span></div><small id="dashboard-updated" class="dashboard-updated"></small><div class="header-tools"><button type="button" id="notifications-toggle" class="tool-button" aria-pressed="false">Notify me</button><button type="button" id="theme-toggle" class="tool-button">Theme: auto</button></div></div>
       </header>
-      <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve and deny are disabled until the live stream reconnects.</div>
-      <section id="overview" class="cards" data-view-panel="overview">${overviewCards(stats)}</section>
+      <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
+      <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
+      <section id="overview" class="cards" data-view-panel="overview">${fragments.cards}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, executionAttemptsByWorkItem, attemptLeasesByWorkItem)}</article>
+        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}<div class="queue" id="queue-list">${fragments.queueList}</div><div id="queue-footer" class="queue-footer">${fragments.queueFooter}</div>${workDetailPanel()}</article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, approvalOptionsByWorkItem(model))}</article>
+        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
       </section>
       <section class="grid lower">
-        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div>${operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, model.now ?? new Date())}</article>
-        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline([...events].reverse())}</article>
-        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div>${systemPanel(stats, model.executionBackend)}</article>
+        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body">${fragments.metrics}</div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>
+        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline">${fragments.eventsTimeline}</div><button type="button" id="events-load-older" class="load-more"${events.length ? "" : " disabled"}>Load older</button></article>
+        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div><div class="system-panel"><div id="system-stats">${fragments.systemStats}</div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
-        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
-        <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div>${connectorsPanel(agents, model.executionBackend)}</article>
-        <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>audit</span></div>${policyPanel(events)}</article>
-        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone are not exposed here. Bulk approval is not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
+        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composerHtml(model.composerActionKinds ?? [])}</article>
+        <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div><div id="connectors-body">${fragments.connectors}</div></article>
+        <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>recent decisions</span></div><div id="policy-body" class="policy-body">${fragments.policy}</div></article>
+        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
       </section>
     </main>
     <script>${clientScript()}</script>
@@ -766,15 +905,39 @@ function finalizeAgent(agent: MissionControlAgent, now: Date): MissionControlAge
   return { ...agent, status, health };
 }
 
-function summarize(workItems: WorkItem[], agents: MissionControlAgent[]) {
+function summarize(workItems: WorkItem[], agents: MissionControlAgent[], statusCounts?: Record<string, number>) {
+  const count = (status: WorkItem["status"]) =>
+    statusCounts ? toCount(statusCounts[status]) : workItems.filter((item) => item.status === status).length;
   return {
     totalAgents: agents.length,
     onlineAgents: agents.filter((agent) => agent.status === "online").length,
-    running: workItems.filter((item) => item.status === "running").length,
-    approvals: workItems.filter((item) => item.status === "needs_approval").length,
-    failed: workItems.filter((item) => item.status === "failed" || item.status === "blocked").length
+    running: count("running"),
+    approvals: count("needs_approval"),
+    failed: count("failed") + count("blocked")
   };
 }
+
+/**
+ * View-model numbers are interpolated into HTML unescaped, so coerce them to
+ * non-negative integers: a JS caller can hand the library anything.
+ */
+function toCount(value: unknown): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+}
+
+function queueFooter(input: MissionControlViewModel["finishedWorkItems"]): string {
+  if (!input) return "";
+  const finished = { shown: toCount(input.shown), total: toCount(input.total) };
+  if (finished.total === 0) return "";
+  if (finished.shown >= finished.total) {
+    return `<p class="queue-footer-note">All ${finished.total} finished items shown.</p>`;
+  }
+  const step = Math.min(FINISHED_PAGE_STEP, finished.total - finished.shown);
+  return `<p class="queue-footer-note">Showing the ${finished.shown} most recent of ${finished.total} finished items. Active items are always shown.</p><button type="button" class="load-more" data-load-more-finished data-shown="${finished.shown}" data-step="${FINISHED_PAGE_STEP}">Show ${step} more finished</button>`;
+}
+
+const FINISHED_PAGE_STEP = 50;
 
 function overviewCards(stats: ReturnType<typeof summarize>): string {
   const cards = [
@@ -832,7 +995,7 @@ function queueFilterStrip(): string {
 </div>`;
 }
 
-function workQueue(
+function workQueueItems(
   workItems: WorkItem[],
   executionPlansByWorkItem: Record<string, ExecutionPlanRecord>,
   executionPlanAdmissionsByWorkItem: Record<string, ExecutionPlanAdmission>,
@@ -840,7 +1003,7 @@ function workQueue(
   attemptLeasesByWorkItem: Record<string, MissionControlAttemptLease[]>
 ): string {
   if (!workItems.length) return `<p class="empty">No work items.</p>`;
-  return `<div class="queue">${workItems
+  return workItems
     .map((item) => {
       const attention = needsOperatorAttention(item.status);
       const plan = executionPlansByWorkItem[item.id];
@@ -850,9 +1013,11 @@ function workQueue(
       const agentId = workItemAgentId(item, attempts, leases);
       return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
-    .join(
-      ""
-    )}</div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section>`;
+    .join("");
+}
+
+function workDetailPanel(): string {
+  return `<section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section>`;
 }
 
 function attentionBadge(): string {
@@ -886,7 +1051,22 @@ function approvalOptionsByWorkItem(model: MissionControlViewModel): Record<strin
   return out;
 }
 
-function approvalsPanel(items: WorkItem[], approvalActionsByWorkItem: Record<string, ApprovalActionOption[]>): string {
+function waitBadge(item: WorkItem, now: Date, slaMs: number): { html: string; overdue: boolean } {
+  const wait = approvalWaitMs(item, now);
+  if (wait === undefined) return { html: "", overdue: false };
+  const overdue = slaMs > 0 && wait >= slaMs;
+  return {
+    overdue,
+    html: `<small class="wait-badge" data-waiting-since="${escapeHtml(approvalWaitStart(item))}" data-sla-ms="${slaMs}">waiting ${formatWait(wait)}${overdue ? " · over SLA" : ""}</small>`
+  };
+}
+
+function approvalsPanel(
+  items: WorkItem[],
+  approvalActionsByWorkItem: Record<string, ApprovalActionOption[]>,
+  now: Date,
+  slaMs: number
+): string {
   if (!items.length) return `<p class="empty">No approvals or blocked work.</p>`;
   return `<div class="approvals-list" role="list">${items
     .map((item) => {
@@ -901,10 +1081,12 @@ function approvalsPanel(items: WorkItem[], approvalActionsByWorkItem: Record<str
       const reason = `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="${reasonId}" data-reason="${escapeHtml(item.id)}" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label>`;
       const outcome = `<output id="${resultId}" class="approval-result" aria-live="polite"></output>`;
       const approvalButtons = approvalButtonsFor(item, approvalActionsByWorkItem[item.id] ?? [], reasonId);
+      const wait = waitBadge(item, now, slaMs);
+      const cardAttrs = `class="approval-item${wait.overdue ? " overdue" : ""}" role="listitem" data-risk="${escapeHtml(item.risk)}" data-status="${escapeHtml(item.status)}" data-work-item-ref="${escapeHtml(item.id)}"`;
       if (item.status === "blocked") {
-        return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+        return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(redactSecrets(approvalSummary))}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+      return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(redactSecrets(approvalSummary))}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
 }
@@ -947,17 +1129,13 @@ function operatorMetricsPanel(
     activeLeases.map((lease) => lease.issuedAt),
     now
   );
-  const oldestApprovalWait = maxAgeMs(
-    pendingApprovals.map((item) => item.createdAt),
-    now
-  );
+  const oldestApprovalWait = maxAgeMs(pendingApprovals.map(approvalWaitStart), now);
   return `<div class="operator-metrics"><dl>
     <div><dt>Active leases</dt><dd>${activeLeases.length}</dd></div>
     <div><dt>Oldest lease age</dt><dd>${formatDuration(oldestLeaseAge)}</dd></div>
     <div><dt>Pending approvals</dt><dd>${pendingApprovals.length}</dd></div>
     <div><dt>Oldest approval wait</dt><dd>${formatDuration(oldestApprovalWait)}</dd></div>
   </dl>
-  <p class="metrics-scrape">429s / rate limits: scrape authenticated <a href="/metrics"><code>GET /metrics</code></a> for <code>acs_rate_limit_rejected_total</code> and <code>acs_http_requests_total{status="429"}</code>. Full names: <code>docs/runbooks/operator-metrics.md</code>.</p>
   </div>`;
 }
 
@@ -982,9 +1160,9 @@ function formatDuration(ageMs: number | undefined): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-function systemPanel(stats: ReturnType<typeof summarize>, executionBackend?: string): string {
+function systemStats(stats: ReturnType<typeof summarize>, executionBackend?: string): string {
   const backend = executionBackend ? escapeHtml(executionBackend) : "unset";
-  return `<div class="system-panel"><dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl><div id="system-probes" class="system-probes"></div></div>`;
+  return `<dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl>`;
 }
 
 function connectorsPanel(agents: MissionControlAgent[], executionBackend?: string): string {
@@ -1001,31 +1179,14 @@ function connectorsPanel(agents: MissionControlAgent[], executionBackend?: strin
   return `${rows}<p class="empty">Execution backend: ${backend}</p>`;
 }
 
-function policyPanel(events: StoredAuditEvent[]): string {
-  const policyEvents = events.filter((event) => /policy/i.test(event.name));
-  if (!policyEvents.length) return `<p class="empty">No policy events in the current audit window.</p>`;
-  return eventTimeline([...policyEvents].reverse());
-}
-
 function eventTimeline(events: StoredAuditEvent[]): string {
   if (!events.length) return `<p class="empty">No audit events recorded.</p>`;
   return `<ol class="timeline">${events
     .map(
       (event) =>
-        `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(redactedAttributesJson(event.attributes))}</small></li>`
+        `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong>${auditAttributesHtml(event.attributes)}</li>`
     )
     .join("")}</ol>`;
-}
-
-function composer(): string {
-  return `<form id="task-form">
-    <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
-    <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
-    <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
-    <label>Requested action kind<input name="actionKind" placeholder="agent.prompt, fs.read, fs.write, shell" /></label>
-    <label>Requested action description<input name="actionDescription" placeholder="Defaults to prompt dispatch when blank" /></label>
-    <button type="submit">Create Work Item</button><output id="task-result"></output>
-  </form>`;
 }
 
 function clientScript(): string {
@@ -1035,8 +1196,10 @@ let sseReconnectAttempt = 0;
 let sseReconnectTimer = null;
 let sseEverOpened = false;
 let sseConnected = false;
+let sseReconnectAt = 0;
 const sseEventNames = [
   'work_item.created',
+  'work_item.pending_policy',
   'work_item.needs_approval',
   'work_item.approved',
   'work_item.running',
@@ -1045,6 +1208,11 @@ const sseEventNames = [
   'work_item.succeeded',
   'work_item.cancelled',
   'work_item.rejected',
+  'work_item.cancelling',
+  'work_item.unknown',
+  'work_item.quarantined',
+  'work_item.retried',
+  'work_item.cloned',
   'agent.created',
   'agent.updated',
   'agent.heartbeat',
@@ -1052,7 +1220,14 @@ const sseEventNames = [
   'acp.initialized',
   'acp.disconnected',
   'acp.error',
-  'tunnel_session.heartbeat'
+  'tunnel_session.heartbeat',
+  'execution_attempt.created',
+  'execution_attempt.transitioned',
+  'execution_attempt.result_accepted',
+  'attempt_lease.issued',
+  'attempt_lease.renewed',
+  'attempt_lease.stolen',
+  'attempt_lease.expired'
 ];
 
 function nextSseReconnectDelayMs(attempt) {
@@ -1071,10 +1246,11 @@ function applySseConnectionState(root, connected) {
       ? '<span aria-hidden="true"></span> Live'
       : '<span aria-hidden="true"></span> Disconnected';
   }
-  root.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach(function (button) {
+  root.querySelectorAll('[data-approve],[data-reject],[data-unblock],[data-work-control]').forEach(function (button) {
     const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
     button.disabled = !connected || approveWithoutHash;
   });
+  renderLiveStatus();
 }
 
 function connectSse() {
@@ -1088,25 +1264,36 @@ function connectSse() {
   }
   sseSource = new EventSource('/events');
   sseSource.addEventListener('open', function () {
-    const shouldRefresh = sseEverOpened && !sseConnected;
+    const reconnected = sseEverOpened && !sseConnected;
     sseReconnectAttempt = 0;
-    applySseConnectionState(document, true);
+    sseReconnectAt = 0;
     sseEverOpened = true;
-    if (shouldRefresh) location.assign(location.href);
+    applySseConnectionState(document, true);
+    // Events may have been missed while the stream was down (or before it
+    // first opened): catch up by re-fetching sections instead of reloading.
+    scheduleDashboardRefresh(0, { catchUp: reconnected });
+    if (reconnected) {
+      refreshAgentRoster();
+      if (selectedAgentId) loadAgentDetail(selectedAgentId);
+      announce('Live stream reconnected');
+      if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+    }
   });
   sseSource.addEventListener('error', function () {
-    applySseConnectionState(document, false);
     if (sseSource) {
       sseSource.close();
       sseSource = null;
     }
-    if (sseReconnectTimer) return;
-    const delay = nextSseReconnectDelayMs(sseReconnectAttempt);
-    sseReconnectAttempt += 1;
-    sseReconnectTimer = setTimeout(function () {
-      sseReconnectTimer = null;
-      connectSse();
-    }, delay);
+    if (!sseReconnectTimer) {
+      const delay = nextSseReconnectDelayMs(sseReconnectAttempt);
+      sseReconnectAttempt += 1;
+      sseReconnectAt = Date.now() + delay;
+      sseReconnectTimer = setTimeout(function () {
+        sseReconnectTimer = null;
+        connectSse();
+      }, delay);
+    }
+    applySseConnectionState(document, false);
   });
   sseEventNames.forEach(function (name) {
     sseSource.addEventListener(name, appendAuditEvent);
@@ -1120,27 +1307,11 @@ function appendAuditEvent(event) {
   } catch {
     return;
   }
-  const panel = document.querySelector('#events');
-  if (!panel) return;
-  panel.querySelector('.empty')?.remove();
-  let list = panel.querySelector('.timeline');
-  if (!list) {
-    list = document.createElement('ol');
-    list.className = 'timeline';
-    panel.appendChild(list);
-  }
-  const item = document.createElement('li');
-  const time = document.createElement('time');
-  const name = document.createElement('strong');
-  const attrs = document.createElement('small');
-  const nanos = Number(data.timeUnixNano);
-  time.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
-  name.textContent = data.name || event.type;
-  attrs.textContent = redactedAttributesJsonClient(data.attributes || {});
-  item.append(time, name, attrs);
-  list.prepend(item);
-  while (list.children.length > 10) list.lastElementChild?.remove();
+  if (!data.name) data.name = event.type;
+  insertLiveTimelineEvent(data);
+  if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
+  onLiveAuditEvent(eventName, data);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
@@ -1156,6 +1327,25 @@ function escapeClient(value) {
 }
 
 ${redactionClientSource()}
+${workItemControlsClientSource()}
+${liveDashboardClientSource()}
+${auditTimelineClientSource()}
+${systemProbesClientSource()}
+${operatorWorkflowClientSource()}
+${auditRowsClientSource()}
+${metricsClientSource()}
+${themeClientSource()}
+function onDashboardFragmentsApplied() {
+  updateTitleBadge();
+  refreshWaitBadges();
+}
+function onWorkItemControlSucceeded(control, id, body) {
+  const created = body && body.workItem && body.workItem.id;
+  announce(control === 'cancel' ? 'Cancel accepted for ' + id : control + ' created ' + (created || 'a new work item'));
+  scheduleDashboardRefresh(0);
+  if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+}
+
 function formatClientTime(value) {
   if (!value) return '—';
   const date = new Date(value);
@@ -1178,24 +1368,47 @@ function fetchJson(url) {
 }
 
 function bindWorkItems() {
-  document.querySelectorAll('[data-work-item]').forEach(function (button) {
-    button.addEventListener('click', async function () {
-      const target = document.querySelector('#work-detail');
-      if (!target) return;
-      document.querySelectorAll('[data-work-item]').forEach(function (candidate) { candidate.classList.remove('selected'); candidate.removeAttribute('aria-current'); });
-      button.classList.add('selected');
-      button.setAttribute('aria-current', 'true');
-      target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
-      try {
-        const body = await fetchJson('/work-items/' + encodeURIComponent(button.dataset.workItem));
-        renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
-        target.focus({ preventScroll: false });
-      } catch (error) {
-        target.innerHTML = '<div class="detail-error" role="alert">' + escapeClient(error.message) + '</div>';
-        target.focus({ preventScroll: false });
-      }
-    });
+  // Delegated: queue items are replaced by live fragment patches.
+  document.addEventListener('click', function (event) {
+    const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
+    if (!button) return;
+    selectWorkItem(button.dataset.workItem);
   });
+}
+
+let workDetailGeneration = 0;
+async function loadWorkDetail(id, options) {
+  const target = document.querySelector('#work-detail');
+  if (!target || !id) return;
+  const generation = ++workDetailGeneration;
+  const preserve = Boolean(options && options.preserve);
+  const reasonInput = preserve ? target.querySelector('[data-control-reason]') : null;
+  const reason = reasonInput ? reasonInput.value : '';
+  const output = preserve ? target.querySelector('.approval-result') : null;
+  const outputText = output ? output.textContent : '';
+  const active = document.activeElement;
+  const activeId = preserve && active && active.id && target.contains(active) ? active.id : null;
+  if (!preserve) target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
+  try {
+    const body = await fetchJson('/work-items/' + encodeURIComponent(id));
+    // Drop responses superseded by a newer load, even for the same item.
+    if (generation !== workDetailGeneration || selectedWorkItemId !== id) return;
+    renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
+    if (!preserve) {
+      if (!options || options.focusDetail !== false) target.focus({ preventScroll: false });
+      return;
+    }
+    const nextReason = target.querySelector('[data-control-reason]');
+    if (nextReason && reason) nextReason.value = reason;
+    const nextOutput = target.querySelector('.approval-result');
+    if (nextOutput && outputText) nextOutput.textContent = outputText;
+    const nextActive = activeId ? document.getElementById(activeId) : null;
+    if (nextActive) nextActive.focus({ preventScroll: true });
+  } catch (error) {
+    if (preserve || generation !== workDetailGeneration) return;
+    target.innerHTML = '<div class="detail-error" role="alert">' + escapeClient(error.message) + '</div>';
+    target.focus({ preventScroll: false });
+  }
 }
 
 function agentRowsMarkup(agents) {
@@ -1385,7 +1598,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
   }
   const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
   target.setAttribute('aria-labelledby', 'work-detail-title');
-  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + '</small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
+  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +
@@ -1394,6 +1607,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
     '</dl>' +
     '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(redactClient(action.description)) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
     renderExecutionAuthority(executionAttempts, attemptLeases) +
+    workItemControlsMarkup(workItem, sseConnected) +
     '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
 }
 
@@ -1531,6 +1745,8 @@ bindWorkItems();
 bindAgentRows();
 refreshAgentRoster();
 connectSse();
+renderNotificationToggle();
+updateTitleBadge();
 
 function isElevatedApprovalRisk(risk) {
   const normalized = String(risk || '').trim().toLowerCase();
@@ -1550,6 +1766,7 @@ function escapeClientHtml(value) {
   });
 }
 
+const confirmCopy = ${JSON.stringify(CONFIRM_COPY)};
 function requestApprovalConfirm(request) {
   return new Promise(function (resolve) {
     const existing = document.getElementById('approval-confirm-dialog');
@@ -1560,7 +1777,8 @@ function requestApprovalConfirm(request) {
     overlay.setAttribute('aria-modal', 'true');
     overlay.setAttribute('aria-labelledby', 'approval-confirm-title');
     overlay.className = 'approval-confirm-overlay';
-    const actionLabel = request.action === 'approve' ? 'Approve' : 'Deny';
+    const copy = confirmCopy[request.action] || confirmCopy.approve;
+    const actionLabel = copy.label;
     const hashPrefix = approvalActionHashPrefix(request.actionHash || '');
     const hashLine = hashPrefix
       ? '<p class="approval-confirm-hash">Action hash: <code>' + escapeClientHtml(hashPrefix) + '</code></p>'
@@ -1569,13 +1787,13 @@ function requestApprovalConfirm(request) {
       ? '<p class="approval-confirm-kind">Action: <code>' + escapeClientHtml(request.actionKind) + '</code></p>'
       : '';
     overlay.innerHTML = '<div class="approval-confirm-card">' +
-      '<h3 id="approval-confirm-title">' + escapeClientHtml(actionLabel) + ' high-risk work item?</h3>' +
+      '<h3 id="approval-confirm-title">' + escapeClientHtml(copy.heading) + '</h3>' +
       '<p class="approval-confirm-id">Work item: <code>' + escapeClientHtml(request.workItemId) + '</code></p>' +
       '<p class="approval-confirm-risk">Risk: <strong>' + escapeClientHtml(request.risk) + '</strong></p>' +
       kindLine +
       hashLine +
       '<div class="approval-confirm-actions">' +
-        '<button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>' +
+        '<button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>' + escapeClientHtml(copy.dismiss) + '</button>' +
         '<button type="button" id="approval-confirm-ok" data-approval-confirm-ok>' + escapeClientHtml(actionLabel) + '</button>' +
       '</div></div>';
     function finish(confirmed) {
@@ -1599,8 +1817,10 @@ function requestApprovalConfirm(request) {
   });
 }
 
-document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
-  button.addEventListener('click', async () => {
+// Delegated: approval cards are replaced by live fragment patches.
+document.addEventListener('click', async (event) => {
+    const button = event.target && event.target.closest ? event.target.closest('[data-approve],[data-reject],[data-unblock]') : null;
+    if (!button || button.disabled) return;
     const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
     const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'reject' : 'unblock';
     const risk = button.dataset.risk || '';
@@ -1639,37 +1859,17 @@ document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach
       }
       payload.actionHash = button.dataset.actionHash;
     }
-    const res = await fetch('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
-    const body = await res.json();
+    const res = await fetch('/work-items/' + encodeURIComponent(id) + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
+    const body = await res.json().catch(() => ({}));
     output.textContent = res.ok ? action + ' accepted' : 'Rejected: ' + (body.error || body.code || res.status);
-    if (res.ok) setTimeout(() => location.assign(location.href), 500);
-  });
+    if (res.ok) {
+      announce(action + ' accepted for ' + id);
+      scheduleDashboardRefresh(0);
+    }
 });
 
 
-document.querySelector('#task-form')?.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  const actionKind = String(form.get('actionKind') || '').trim();
-  const actionDescription = String(form.get('actionDescription') || '').trim();
-  const service = String(form.get('service') || '').trim();
-  const payload = {
-    title: String(form.get('title') || ''),
-    intent: String(form.get('intent') || ''),
-    risk: String(form.get('risk') || 'medium'),
-    target: service ? { services: [service] } : {},
-    requestedActions: [{
-      kind: actionKind || 'agent.prompt',
-      description: actionDescription || 'Dispatch prompt to selected agent',
-      params: {}
-    }]
-  };
-  const headers = { 'content-type': 'application/json' };
-  const res = await fetch('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
-  const body = await res.json();
-  document.querySelector('#task-result').textContent = res.ok ? 'Created ' + body.id : 'Rejected: ' + (body.error || res.status);
-  if (res.ok) setTimeout(() => location.assign(location.href), 500);
-});
+${composerClientSource()}
 
 const viewAliases = {
   overview: 'overview',
@@ -1686,40 +1886,14 @@ const viewAliases = {
   system: 'system',
   dispatch: 'overview'
 };
-let systemProbeLoaded = false;
-async function probePath(path) {
-  const started = performance.now();
-  try {
-    const res = await fetch(path, { headers: { accept: 'application/json' } });
-    return { path, status: res.status, ms: Math.round(performance.now() - started) };
-  } catch {
-    return { path, status: 0, ms: Math.round(performance.now() - started) };
-  }
-}
-async function loadSystemProbe() {
-  if (systemProbeLoaded) return;
-  const probeRoot = document.querySelector('#system-probes');
-  if (!probeRoot) return;
-  systemProbeLoaded = true;
-  const row = await probePath('/readyz');
-  probeRoot.replaceChildren();
-  const list = document.createElement('dl');
-  const item = document.createElement('div');
-  const term = document.createElement('dt');
-  const value = document.createElement('dd');
-  term.textContent = row.path;
-  value.textContent = (row.status || 'down') + ' · ' + row.ms + 'ms';
-  item.append(term, value);
-  list.append(item);
-  probeRoot.append(list);
-}
 function showView(name) {
   const view = viewAliases[name] || 'overview';
   document.body.dataset.activeView = view;
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
-  if (view === 'system') void loadSystemProbe();
+  syncSystemProbes();
+  syncMetricsPolling();
 }
 document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');
@@ -1729,7 +1903,8 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const href = link.getAttribute('href') || '#overview';
   history.replaceState(null, '', href);
 });
-showView((location.hash || '#overview').replace('#', ''));`;
+showView((location.hash || '#overview').replace('#', ''));
+openWorkItemFromLocation();`;
 }
 
 function pill(value: string): string {
@@ -1770,41 +1945,200 @@ function styles(): string {
 :root {
   color-scheme: dark;
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  background: #0e1116;
-  color: #e8edf4;
   --bg: #0e1116;
   --surface: #171b22;
   --surface-2: #1e242e;
   --ink: #e8edf4;
   --muted: #8b97a8;
+  --muted-strong: #a9b6c7;
   --line: #2a3342;
+  --soft-line: #222a36;
   --side: #10141a;
+  --side-line: #252a30;
   --side-muted: #8b97a8;
+  --brand: #f8fafc;
+  --nav-ink: #c1c8d0;
+  --nav-active: #243044;
+  --nav-active-ink: #ffffff;
   --accent: #3b82f6;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
   --green: #3ddc97;
   --amber: #f5b942;
   --red: #ff6b6b;
+  --hover: #243044;
+  --control-bg: #171b22;
+  --control-line: #334052;
+  --control-hover-line: #4b6180;
+  --banner-bg: #2a2416;
+  --banner-line: #6b5420;
+  --attention-bg: #2a1c1c;
+  --pill-bg: #1e242e;
+  --pill-ink: #b4bfcd;
+  --pill-line: #334052;
+  --ok-bg: #13261e;
+  --ok-line: #24553f;
+  --warn-bg: #2a2416;
+  --warn-line: #6b5420;
+  --bad-bg: #2c1a1a;
+  --bad-line: #6b2f2f;
+  --overlay: rgba(4, 6, 9, .6);
+  --shadow: rgba(0, 0, 0, .25);
+  background: var(--bg);
+  color: var(--ink);
+}
+/* Light theme: follows the OS unless the operator picked a theme. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #f1f4f8;
+  --ink: #17202a;
+  --muted: #5b6778;
+  --muted-strong: #43536a;
+  --line: #d9e1ea;
+  --soft-line: #edf1f5;
+  --side: #eef2f6;
+  --side-line: #d9e1ea;
+  --side-muted: #5b6778;
+  --brand: #0f172a;
+  --nav-ink: #334155;
+  --nav-active: #dde6f2;
+  --nav-active-ink: #0f172a;
+  --accent: #2563eb;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
+  --green: #15803d;
+  --amber: #b45309;
+  --red: #b91c1c;
+  --hover: #f4f8ff;
+  --control-bg: #ffffff;
+  --control-line: #cbd5e1;
+  --control-hover-line: #9db7d7;
+  --banner-bg: #fff8e6;
+  --banner-line: #f1d18a;
+  --attention-bg: #fff8f7;
+  --pill-bg: #eef2f6;
+  --pill-ink: #45515f;
+  --pill-line: #d7dfe8;
+  --ok-bg: #eef9f2;
+  --ok-line: #a8d8bd;
+  --warn-bg: #fff8e6;
+  --warn-line: #f1d18a;
+  --bad-bg: #fff1ef;
+  --bad-line: #f0b8b2;
+  --overlay: rgba(17, 20, 23, .45);
+  --shadow: rgba(23, 32, 42, .08);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #f1f4f8;
+  --ink: #17202a;
+  --muted: #5b6778;
+  --muted-strong: #43536a;
+  --line: #d9e1ea;
+  --soft-line: #edf1f5;
+  --side: #eef2f6;
+  --side-line: #d9e1ea;
+  --side-muted: #5b6778;
+  --brand: #0f172a;
+  --nav-ink: #334155;
+  --nav-active: #dde6f2;
+  --nav-active-ink: #0f172a;
+  --accent: #2563eb;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
+  --green: #15803d;
+  --amber: #b45309;
+  --red: #b91c1c;
+  --hover: #f4f8ff;
+  --control-bg: #ffffff;
+  --control-line: #cbd5e1;
+  --control-hover-line: #9db7d7;
+  --banner-bg: #fff8e6;
+  --banner-line: #f1d18a;
+  --attention-bg: #fff8f7;
+  --pill-bg: #eef2f6;
+  --pill-ink: #45515f;
+  --pill-line: #d7dfe8;
+  --ok-bg: #eef9f2;
+  --ok-line: #a8d8bd;
+  --warn-bg: #fff8e6;
+  --warn-line: #f1d18a;
+  --bad-bg: #fff1ef;
+  --bad-line: #f0b8b2;
+  --overlay: rgba(17, 20, 23, .45);
+  --shadow: rgba(23, 32, 42, .08);
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; background: var(--bg); display: grid; grid-template-columns: 216px minmax(0, 1fr); }
-aside { border-right: 1px solid #252a30; padding: 22px 16px; background: var(--side); position: sticky; top: 0; height: 100vh; }
-.brand { color: #f8fafc; font-size: 20px; font-weight: 800; }
+aside { border-right: 1px solid var(--side-line); padding: 22px 16px; background: var(--side); position: sticky; top: 0; height: 100vh; }
+.brand { color: var(--brand); font-size: 20px; font-weight: 800; }
 .brand span { display: block; color: var(--side-muted); font-size: 11px; margin-top: 4px; font-weight: 700; }
 nav { display: grid; gap: 4px; margin-top: 30px; }
-nav a { color: #c1c8d0; text-decoration: none; padding: 10px 12px; border-radius: 8px; }
-nav a.active, nav a:hover { background: #27313b; color: #ffffff; }
+nav a { color: var(--nav-ink); text-decoration: none; padding: 10px 12px; border-radius: 8px; }
+nav a.active, nav a:hover { background: var(--nav-active); color: var(--nav-active-ink); }
 .rail-note { color: var(--side-muted); font-size: 12px; line-height: 1.45; position: absolute; bottom: 24px; left: 16px; right: 16px; }
 main { padding: 22px 24px 40px; min-width: 0; }
 header { display: flex; justify-content: space-between; align-items: start; gap: 16px; margin-bottom: 18px; }
 h1 { margin: 0; font-size: 26px; color: var(--ink); }
 p { color: var(--muted); margin: 6px 0 0; }
 .live { border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: var(--surface); white-space: nowrap; }
-.live span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
-.live.disconnected span { background: var(--red); }
-.stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid #f1d18a; background: #fff8e6; color: var(--amber); border-radius: 8px; font-weight: 600; }
+.live > span[aria-hidden="true"] { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
+.live.disconnected > span[aria-hidden="true"] { background: var(--red); }
+.live.connecting > span[aria-hidden="true"] { background: var(--muted); }
+.header-status { display: grid; justify-items: end; gap: 4px; }
+.dashboard-updated { color: var(--muted); font-size: 11px; min-height: 1em; }
+.wait-badge { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.approval-item.overdue { border-color: var(--amber); box-shadow: inset 3px 0 0 var(--amber); }
+.approval-item.overdue .wait-badge { color: var(--amber); font-weight: 600; }
+.approval-item[data-risk="critical"] { box-shadow: inset 3px 0 0 var(--red); }
+.approval-item[data-risk="critical"].overdue { box-shadow: inset 3px 0 0 var(--red), inset 6px 0 0 var(--amber); }
+kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; background: var(--surface); color: var(--ink); }
+.shortcut-list { display: grid; gap: 6px; margin: 12px 0; }
+.shortcut-list div { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: center; }
+.shortcut-list dt, .shortcut-list dd { margin: 0; }
+#shortcut-help[hidden] { display: none; }
+.permalink { color: var(--accent); }
+.header-tools { display: flex; gap: 6px; }
+.event-summary { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.event-attrs summary { cursor: pointer; color: var(--accent); font-size: 11px; margin-top: 2px; }
+.event-attrs dl { display: grid; gap: 2px; margin: 4px 0 0; font-size: 12px; }
+.event-attrs dl div { display: grid; grid-template-columns: minmax(90px, 38%) 1fr; gap: 8px; }
+.event-attrs dt { color: var(--muted); overflow-wrap: anywhere; }
+.event-attrs dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.policy-body { padding: 12px 16px 16px; display: grid; gap: 10px; }
+.policy-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+.policy-counts div { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.policy-counts dt { color: var(--muted); font-size: 11px; }
+.policy-counts dd { margin: 2px 0 0; font-size: 20px; font-weight: 700; }
+.policy-counts .decision-allow dd { color: var(--green); }
+.policy-counts .decision-require_approval dd { color: var(--amber); }
+.policy-counts .decision-deny dd { color: var(--red); }
+.rule-list { margin: 0; padding-left: 18px; font-size: 12px; }
+.live-metrics { padding: 0 16px; }
+.metrics-table th[scope="row"] { font-weight: 500; color: var(--ink); text-transform: none; font-size: 13px; }
+.metrics-table tr.metric-hot th, .metrics-table tr.metric-hot td { color: var(--amber); }
+.metric-trend { letter-spacing: 1px; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.queue-footer { display: grid; gap: 6px; margin-top: 8px; }
+.queue-footer-note { margin: 0; color: var(--muted); font-size: 12px; }
+.load-more, .tool-button { justify-self: start; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+.load-more:disabled, .tool-button:disabled { opacity: .55; cursor: not-allowed; }
+.tool-button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+.panel-tools { display: inline-flex; gap: 8px; align-items: center; }
+#events-load-older { margin-top: 10px; }
+.probe-trend { margin: 6px 0 0; letter-spacing: 2px; color: var(--green); }
+#system-probes[data-state="slow"] dd, #system-probes[data-state="failing"] dd, #system-probes[data-state="down"] dd { color: var(--amber); }
+#system-probes[data-state="down"] .probe-trend, #system-probes[data-state="failing"] .probe-trend { color: var(--red); }
+.action-status { margin: 0 0 10px; min-height: 1.25em; color: var(--muted); font-size: 13px; }
+.stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid var(--banner-line); background: var(--banner-bg); color: var(--amber); border-radius: 8px; font-weight: 600; }
 .stale-banner[hidden] { display: none; }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
-.card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px rgba(23, 32, 42, .06); }
+.card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px var(--shadow); }
 .card { padding: 15px; min-height: 108px; }
 .card span, .panel-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; }
 .card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
@@ -1812,58 +2146,58 @@ p { color: var(--muted); margin: 6px 0 0; }
 .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
 .lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .panel { min-width: 0; overflow: hidden; }
-.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: #fbfcfd; }
+.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .panel-head p { font-size: 12px; margin-top: 3px; }
 h2 { margin: 0; font-size: 16px; color: var(--ink); }
 table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid #edf1f5; vertical-align: top; font-size: 13px; }
-th { color: var(--muted); font-size: 11px; text-transform: uppercase; background: #fbfcfd; position: sticky; top: 0; z-index: 1; }
+th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--soft-line); vertical-align: top; font-size: 13px; }
+th { color: var(--muted); font-size: 11px; text-transform: uppercase; background: var(--surface); position: sticky; top: 0; z-index: 1; }
 td small { display: block; color: var(--muted); margin-top: 2px; }
 .table-wrap { overflow: auto; max-height: 430px; }
 .agent-row { cursor: pointer; }
-.agent-row:hover, .agent-row.selected { background: #eef4ff; }
+.agent-row:hover, .agent-row.selected { background: var(--hover); }
 .empty { padding: 18px; color: var(--muted); }
-.pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: #eef2f6; color: #45515f; border: 1px solid #d7dfe8; white-space: nowrap; }
-.online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: #a8d8bd; background: #eef9f2; }
-.stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: #f1d18a; background: #fff8e6; }
-.offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: #f0b8b2; background: #fff1ef; }
-.queue-item.attention { border-left: 3px solid var(--red); background: #fff8f7; }
+.pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: var(--pill-bg); color: var(--pill-ink); border: 1px solid var(--pill-line); white-space: nowrap; }
+.online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: var(--ok-line); background: var(--ok-bg); }
+.stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: var(--warn-line); background: var(--warn-bg); }
+.offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: var(--bad-line); background: var(--bad-bg); }
+.queue-item.attention { border-left: 3px solid var(--red); background: var(--attention-bg); }
 .attention-badge { color: var(--red); font-weight: 700; margin-left: 6px; font-size: 11px; }
 .plan-status, .execution-status { display: block; margin-top: 4px; }
 .plan-pending { color: var(--amber); }
 .plan-admitted { color: var(--green); }
-.execution-status { color: #43536a !important; }
-.queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: #fbfcfd; display: grid; gap: 10px; }
+.execution-status { color: var(--muted-strong) !important; }
+.queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); display: grid; gap: 10px; }
 .queue-filter-row { display: grid; gap: 8px; }
 .queue-filter-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .queue-filter-statuses { margin: 0; padding: 0; border: 0; }
 .queue-filter-statuses legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
 .queue-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #ccd6e2; background: #ffffff; border-radius: 999px; padding: 4px 10px; font-size: 12px; color: #344256; cursor: pointer; }
-.queue-filter-chip:has(input:checked) { border-color: #9db7d7; background: #eef4ff; color: var(--accent); }
+.queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--control-line); background: var(--control-bg); border-radius: 999px; padding: 4px 10px; font-size: 12px; color: var(--ink); cursor: pointer; }
+.queue-filter-chip:has(input:checked) { border-color: var(--control-hover-line); background: var(--hover); color: var(--accent); }
 .queue-filter-chip input { width: auto; margin: 0; accent-color: var(--accent); }
 .queue-filter-field { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
 .queue-filter-live { margin: 0; color: var(--muted); font-size: 12px; }
 .queue-item-filtered-out, .queue-item[hidden] { display: none !important; }
 .queue { display: grid; }
-.queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid #edf1f5; padding: 12px 14px; cursor: pointer; }
-.queue-item:hover, .queue-item.selected { background: #f4f8ff; }
+.queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid var(--soft-line); padding: 12px 14px; cursor: pointer; }
+.queue-item:hover, .queue-item.selected { background: var(--hover); }
 .queue-item.selected { box-shadow: inset 3px 0 0 var(--accent); }
 .approval-item > button { text-align: left; background: transparent; color: inherit; border: 0; cursor: pointer; }
 .approval-actions { display: flex; gap: 8px; }
-.approval-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
-.approval-actions button:hover { background: #f4f8ff; border-color: #9db7d7; }
-.approval-actions button:last-child { color: var(--red); border-color: #f0b8b2; }
+.approval-actions button { border: 1px solid var(--control-line); background: var(--control-bg); color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+.approval-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
+.approval-actions button:last-child { color: var(--red); border-color: var(--bad-line); }
 .system-panel { padding: 18px; display: grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: start; }
 .system-panel strong { font-size: 44px; color: var(--green); }
 .system-panel span { color: var(--muted); margin-top: 52px; margin-left: -130px; }
 .system-panel dl { margin: 0; display: grid; gap: 8px; }
-.system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
+.system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
 .system-panel dt { color: var(--muted); }
 .system-panel dd { margin: 0; color: var(--ink); }
 .operator-metrics { padding: 18px; display: grid; gap: 14px; }
 .operator-metrics dl { margin: 0; display: grid; gap: 8px; }
-.operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
+.operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
 .operator-metrics dt { color: var(--muted); }
 .operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
 .metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
@@ -1877,10 +2211,10 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .approval-item { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 12px; display: grid; gap: 9px; }
 .approval-item strong, .approval-item small { display: block; }
 .agent-layout { display: grid; }
-.detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: #fbfcfd; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
+.detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
 .detail-empty, .detail-loading, .detail-error { color: var(--muted); }
 .detail-error { color: var(--red); }
-.detail-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; border-bottom: 1px solid #e6ecf2; padding-bottom: 12px; margin-bottom: 12px; }
+.detail-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; border-bottom: 1px solid var(--soft-line); padding-bottom: 12px; margin-bottom: 12px; }
 .detail-head h3 { margin: 0; font-size: 16px; }
 .detail-head small { color: var(--muted); }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; margin: 0; }
@@ -1891,30 +2225,41 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .detail-section { margin-top: 14px; }
 .detail-section h4 { margin: 0 0 8px; font-size: 13px; color: var(--ink); }
 .execution-stack { display: grid; gap: 10px; }
-.execution-card { border: 1px solid #dbe4ee; background: #ffffff; border-radius: 8px; padding: 10px; }
+.execution-card { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 10px; }
 .execution-head, .lease-head { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
 .execution-head small { display: block; color: var(--muted); margin-top: 2px; }
-.lease-block { border-top: 1px solid #e6ecf2; margin-top: 10px; padding-top: 10px; }
+.lease-block { border-top: 1px solid var(--soft-line); margin-top: 10px; padding-top: 10px; }
 .lease-head strong { font-size: 12px; }
 .chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { border: 1px solid #ccd6e2; background: #ffffff; border-radius: 999px; padding: 4px 8px; font-size: 12px; color: #344256; }
+.chip { border: 1px solid var(--control-line); background: var(--control-bg); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: var(--ink); }
 .detail-events { list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }
 .detail-events li { border-left: 2px solid var(--accent); padding-left: 10px; }
 .detail-events time, .detail-events small { display: block; color: var(--muted); font-size: 11px; }
 .action-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.action-list li { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; background: #ffffff; }
+.action-list li { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--surface); }
 .action-list small { display: block; color: var(--muted); margin-top: 2px; }
 .muted { color: var(--muted); font-size: 13px; }
 form { display: grid; gap: 11px; padding: 14px; }
 label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
-input, textarea, select { width: 100%; background: #ffffff; color: var(--ink); border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+input, textarea, select { width: 100%; background: var(--control-bg); color: var(--ink); border: 1px solid var(--control-line); border-radius: 8px; padding: 10px; }
+.field-hint { color: var(--muted); font-size: 11px; margin-top: -4px; }
+.field-error { color: var(--red); font-size: 12px; min-height: 0; }
+.field-hint.field-error { color: var(--amber); }
+textarea[aria-invalid="true"] { border-color: var(--red); }
+.composer-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.composer-preview { border: 1px dashed var(--line); border-radius: 6px; padding: 8px 10px; font-size: 12px; }
+.composer-preview p { margin: 0 0 4px; }
+.composer-preview[data-outcome="auto_admitted"] { border-color: var(--green); }
+.composer-preview[data-outcome="needs_approval"] { border-color: var(--amber); }
+.composer-preview[data-outcome="blocked"], .composer-preview[data-outcome="rejected"] { border-color: var(--red); }
+.preview-actions { margin: 4px 0; padding-left: 16px; }
 .form-row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; }
-button[type=submit] { background: #2563eb; color: white; border: 0; border-radius: 9px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
+button[type=submit] { background: var(--primary); color: var(--primary-ink); border: 0; border-radius: 9px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
 output { color: var(--accent); min-height: 20px; }
 .timeline { list-style: none; margin: 0; padding: 10px 14px 14px; display: grid; gap: 10px; }
-.timeline li { border-left: 2px solid #2563eb; padding-left: 10px; }
+.timeline li { border-left: 2px solid var(--primary); padding-left: 10px; }
 .timeline time, .timeline small { display: block; color: var(--muted); font-size: 11px; word-break: break-word; }
-.skip-link { position: absolute; left: -9999px; top: 0; z-index: 1000; background: #2563eb; color: #fff; padding: 10px 14px; border-radius: 8px; font-weight: 700; }
+.skip-link { position: absolute; left: -9999px; top: 0; z-index: 1000; background: var(--primary); color: var(--primary-ink); padding: 10px 14px; border-radius: 8px; font-weight: 700; }
 .skip-link:focus { left: 12px; top: 12px; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -1925,15 +2270,15 @@ output { color: var(--accent); min-height: 20px; }
 .approval-result { display: block; min-height: 1.25em; }
 .approval-actions button:disabled { opacity: .55; cursor: not-allowed; }
 .approval-actions button .hash-prefix { font-size: 11px; opacity: .8; margin-left: 4px; }
-.approval-confirm-overlay { position: fixed; inset: 0; z-index: 2000; background: rgba(17, 20, 23, .45); display: grid; place-items: center; padding: 16px; }
-.approval-confirm-card { width: min(420px, 100%); background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 40px rgba(23, 32, 42, .22); padding: 18px; display: grid; gap: 10px; color: var(--ink); }
+.approval-confirm-overlay { position: fixed; inset: 0; z-index: 2000; background: var(--overlay); display: grid; place-items: center; padding: 16px; }
+.approval-confirm-card { width: min(420px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 40px var(--shadow); padding: 18px; display: grid; gap: 10px; color: var(--ink); }
 .approval-confirm-card h3 { margin: 0; font-size: 16px; }
 .approval-confirm-card p { margin: 0; color: var(--muted); font-size: 13px; }
 .approval-confirm-card code { color: var(--ink); font-size: 12px; }
 .approval-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
-.approval-confirm-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 40px; }
-.approval-confirm-actions button:hover { background: #f4f8ff; border-color: #9db7d7; }
-#approval-confirm-ok { background: #fff1ef; color: var(--red); border-color: #f0b8b2; font-weight: 700; }
+.approval-confirm-actions button { border: 1px solid var(--control-line); background: var(--control-bg); color: var(--ink); border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 40px; }
+.approval-confirm-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
+#approval-confirm-ok { background: var(--bad-bg); color: var(--red); border-color: var(--bad-line); font-weight: 700; }
 #approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
 @media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
@@ -1957,7 +2302,8 @@ output { color: var(--accent); min-height: 20px; }
   .queue-filter-chip { min-height: 44px; }
   .queue-item { padding: 14px 12px; min-height: 44px; }
   .detail-panel { margin: 8px; max-height: none; }
-  .live { justify-self: start; }
+  .live { justify-self: start; white-space: normal; max-width: 100%; }
+  .header-status { justify-items: start; }
 }
 body[data-active-view] [data-view-panel] { display: none; }
 body[data-active-view="overview"] [data-view-panel~="overview"],
@@ -1970,22 +2316,13 @@ body[data-active-view="metrics"] [data-view-panel~="metrics"],
 body[data-active-view="audit"] [data-view-panel~="audit"],
 body[data-active-view="policy"] [data-view-panel~="policy"],
 body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
-.panel-head, th, .queue-filter, .detail-panel, .execution-card, .approval-item, .approval-actions button, .queue-filter-chip, input, textarea, select, .approval-confirm-card, .chip, .action-list li { background: var(--surface); color: var(--ink); border-color: var(--line); }
-.stale-banner { background: #2a2416; color: var(--amber); border-color: #6b5420; }
-.agent-row:hover, .agent-row.selected, .queue-item:hover, .queue-item.selected { background: #243044; }
-.queue-item.attention { background: #2a1c1c; }
-nav a.active, nav a:hover { background: #243044; color: #ffffff; }
+/* The view rule above must not flatten the overview card grid. */
+body[data-active-view="overview"] #overview.cards { display: grid; }
+.approval-item { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .system-probes { padding: 0 18px 16px; }
 .system-probes dl { margin: 0; display: grid; gap: 8px; }
 .system-probes div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
 .system-probes dt { color: var(--muted); }
 .system-probes dd { margin: 0; }
 `;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => {
-    const escapes: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-    return escapes[char] ?? char;
-  });
 }

@@ -107,6 +107,179 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("previews composer policy without creating or auditing anything", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-preview-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const before = (await app.inject({ method: "GET", url: "/api/events?limit=500" })).json().events.length;
+      const write = await app.inject({
+        method: "POST",
+        url: "/dashboard/policy-preview",
+        payload: {
+          title: "Write notes",
+          intent: "update notes",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["notes.md"] } }],
+          risk: "medium",
+          requester: "system"
+        }
+      });
+      expect(write.statusCode).toBe(200);
+      expect(write.headers["cache-control"]).toBe("no-store");
+      expect(write.json()).toMatchObject({ outcome: "needs_approval", actions: [{ kind: "fs.write" }] });
+
+      const unknown = await app.inject({
+        method: "POST",
+        url: "/dashboard/policy-preview",
+        payload: { title: "x", intent: "y", target: {}, requestedActions: [{ kind: "teleport", description: "z" }] }
+      });
+      expect(unknown.json().outcome).toBe("blocked");
+      expect((await app.inject({ method: "POST", url: "/dashboard/policy-preview", payload: {} })).statusCode).toBe(
+        400
+      );
+
+      expect((await app.inject({ method: "GET", url: "/work-items" })).json().workItems).toEqual([]);
+      expect((await app.inject({ method: "GET", url: "/api/events?limit=500" })).json().events.length).toBe(before);
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.body).toContain('<option value="fs.write"></option>');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves operator metric totals and summarizes recent policy decisions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-visibility-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Write",
+          intent: "write a file",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["notes.md"] } }],
+          risk: "medium"
+        }
+      });
+      await app.inject({ method: "GET", url: "/work-items/wrk_missing" });
+
+      const summary = await app.inject({ method: "GET", url: "/dashboard/metrics" });
+      expect(summary.statusCode).toBe(200);
+      expect(summary.headers["cache-control"]).toBe("no-store");
+      const metricsBody = summary.json();
+      expect(metricsBody.metrics.sqliteReady).toBe(true);
+      expect(metricsBody.metrics.httpRequests).toBeGreaterThanOrEqual(2);
+      expect(metricsBody.metrics.auditEvents).toBeGreaterThan(0);
+      expect(Date.parse(metricsBody.at)).not.toBeNaN();
+
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.body).toMatch(/class="decision-require_approval"><dt>Needed approval<\/dt><dd>1<\/dd>/);
+      expect(page.body).toContain("<code>fs.write</code>");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("bounds finished work items on the dashboard while keeping exact counts", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-bounded-"));
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+    for (let index = 0; index < 55; index += 1) {
+      const created = seed.create({
+        title: `Finished ${index}`,
+        requester: "user",
+        intent: "history",
+        requestedActions: [{ kind: "manual", description: "seed" }],
+        risk: "low"
+      });
+      seed.cancelWorkItem(created.id, { actor: "user" }, { via: "domain_service", actorId: "user" });
+    }
+    seed.create({
+      title: "Still active",
+      requester: "user",
+      intent: "active",
+      requestedActions: [{ kind: "manual", description: "seed" }],
+      risk: "low"
+    });
+    seed.close();
+    const app = buildTestGateway({ dbPath, logger: false });
+
+    try {
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.statusCode).toBe(200);
+      const markup = page.body.slice(0, page.body.lastIndexOf("<script>"));
+      expect(markup.match(/data-work-item="/g)).toHaveLength(51);
+      expect(page.body).toContain("Still active");
+      expect(page.body).toContain("Showing the 50 most recent of 55 finished items");
+
+      const wider = await app.inject({ method: "GET", url: "/dashboard/fragments?finished=60" });
+      expect(wider.json().fragments.queueFooter).toContain("All 55 finished items shown.");
+      expect((await app.inject({ method: "GET", url: "/dashboard/fragments?finished=-1" })).statusCode).toBe(400);
+
+      const latest = await app.inject({ method: "GET", url: "/dashboard/events?limit=5" });
+      const latestEvents = latest.json().events as Array<{ sequence: number }>;
+      expect(latestEvents).toHaveLength(5);
+      const older = await app.inject({
+        method: "GET",
+        url: `/dashboard/events?limit=5&beforeSequence=${latestEvents[0]!.sequence}`
+      });
+      const olderEvents = older.json().events as Array<{ sequence: number }>;
+      expect(olderEvents).toHaveLength(5);
+      expect(Math.max(...olderEvents.map((event) => event.sequence))).toBeLessThan(latestEvents[0]!.sequence);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves live dashboard fragments from the same view model as the page", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-fragments-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const before = await app.inject({ method: "GET", url: "/dashboard/fragments" });
+      expect(before.statusCode).toBe(200);
+      expect(before.headers["cache-control"]).toBe("no-store");
+      expect(before.json().fragments.queueList).toContain("No work items.");
+
+      await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: { title: "Fragment route", intent: "verify live fragments", risk: "high" }
+      });
+      const after = await app.inject({ method: "GET", url: "/dashboard/fragments" });
+      const fragments = after.json().fragments;
+
+      expect(Object.keys(fragments).sort()).toEqual(
+        [
+          "approvalsCount",
+          "approvalsList",
+          "cards",
+          "connectors",
+          "eventsTimeline",
+          "generatedAt",
+          "metrics",
+          "policy",
+          "queueFooter",
+          "queueList",
+          "systemStats"
+        ].sort()
+      );
+      expect(fragments.queueList).toContain("Fragment route");
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.body).toContain(`<div class="queue" id="queue-list">${fragments.queueList}</div>`);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("bounds work-item and agent detail audit events", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-detail-event-limit-"));
     const dbPath = join(dir, "control.db");
@@ -4329,6 +4502,9 @@ describe("gateway work-item routes", () => {
       "/agents/codex-cli",
       "/api/agents",
       "/api/agents/codex-cli",
+      "/dashboard/fragments",
+      "/dashboard/events",
+      "/dashboard/metrics",
       "/events"
     ];
 
