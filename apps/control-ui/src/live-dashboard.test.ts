@@ -295,7 +295,8 @@ describe("live dashboard review fixes", () => {
           sequence: 1,
           name: "policy.decided",
           timeUnixNano: "1790000000000000000",
-          attributes: { "work_item.id": "wrk_missed" }
+          attributes: { "work_item.id": "wrk_missed", "policy.decision": "deny" },
+          body: { workItemId: "wrk_missed", decision: "deny", reason: "denied while offline", matchedRules: [] }
         } as unknown as MissionControlViewModel["events"][number]
       ],
       now: NOW
@@ -306,7 +307,7 @@ describe("live dashboard review fixes", () => {
     await app.advance(1_500);
 
     expect(app.text("#events-timeline")).toContain("policy.decided");
-    expect(app.text("#policy-body")).toContain("policy.decided");
+    expect(app.text("#policy-body .decision-deny dd")).toBe("1");
     expect(app.calls.filter((call) => call.url === "/agents").length).toBeGreaterThan(rosterFetchesBefore);
   });
 

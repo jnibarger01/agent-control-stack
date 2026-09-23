@@ -149,6 +149,42 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("serves operator metric totals and summarizes recent policy decisions", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-visibility-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Write",
+          intent: "write a file",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["notes.md"] } }],
+          risk: "medium"
+        }
+      });
+      await app.inject({ method: "GET", url: "/work-items/wrk_missing" });
+
+      const summary = await app.inject({ method: "GET", url: "/dashboard/metrics" });
+      expect(summary.statusCode).toBe(200);
+      expect(summary.headers["cache-control"]).toBe("no-store");
+      const metricsBody = summary.json();
+      expect(metricsBody.metrics.sqliteReady).toBe(true);
+      expect(metricsBody.metrics.httpRequests).toBeGreaterThanOrEqual(2);
+      expect(metricsBody.metrics.auditEvents).toBeGreaterThan(0);
+      expect(Date.parse(metricsBody.at)).not.toBeNaN();
+
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.body).toMatch(/class="decision-require_approval"><dt>Needed approval<\/dt><dd>1<\/dd>/);
+      expect(page.body).toContain("<code>fs.write</code>");
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("bounds finished work items on the dashboard while keeping exact counts", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-bounded-"));
     const dbPath = join(dir, "control.db");
@@ -177,7 +213,7 @@ describe("mission control gateway", () => {
     try {
       const page = await app.inject({ method: "GET", url: "/" });
       expect(page.statusCode).toBe(200);
-      const markup = page.body.slice(0, page.body.indexOf("<script>"));
+      const markup = page.body.slice(0, page.body.lastIndexOf("<script>"));
       expect(markup.match(/data-work-item="/g)).toHaveLength(51);
       expect(page.body).toContain("Still active");
       expect(page.body).toContain("Showing the 50 most recent of 55 finished items");
@@ -229,7 +265,7 @@ describe("mission control gateway", () => {
           "eventsTimeline",
           "generatedAt",
           "metrics",
-          "policyEvents",
+          "policy",
           "queueFooter",
           "queueList",
           "systemStats"
@@ -4468,6 +4504,7 @@ describe("gateway work-item routes", () => {
       "/api/agents/codex-cli",
       "/dashboard/fragments",
       "/dashboard/events",
+      "/dashboard/metrics",
       "/events"
     ];
 

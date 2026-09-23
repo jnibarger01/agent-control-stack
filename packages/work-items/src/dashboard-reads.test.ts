@@ -104,6 +104,10 @@ describe("readEvents beforeSequence", () => {
       expect(seen).toEqual(all.map((event) => event.sequence));
       expect(pages.every((page) => page.every((value, index) => index === 0 || value > page[index - 1]!))).toBe(true);
       expect(() => store.readEvents({ beforeSequence: -1 })).toThrow(/beforeSequence/);
+      const created = store.readEvents({ name: "work_item.created", limit: 500 });
+      expect(created).toHaveLength(12);
+      expect(created.every((event) => event.name === "work_item.created")).toBe(true);
+      expect(store.readEvents({ name: "no.such.event" })).toEqual([]);
     } finally {
       store.close();
     }

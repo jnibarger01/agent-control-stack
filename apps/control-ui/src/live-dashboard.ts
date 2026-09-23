@@ -17,7 +17,8 @@ export const DASHBOARD_FRAGMENT_TARGETS = {
   approvalsList: "#approvals-list",
   approvalsCount: "#approvals-count",
   metrics: "#operator-metrics-body",
-  systemStats: "#system-stats"
+  systemStats: "#system-stats",
+  policy: "#policy-body"
 } as const;
 
 /**
@@ -27,8 +28,7 @@ export const DASHBOARD_FRAGMENT_TARGETS = {
  */
 export const DASHBOARD_CATCH_UP_TARGETS = {
   eventsTimeline: "#events-timeline",
-  connectors: "#connectors-body",
-  policyEvents: "#policy-body"
+  connectors: "#connectors-body"
 } as const;
 
 export type DashboardFragmentName = keyof typeof DASHBOARD_FRAGMENT_TARGETS | keyof typeof DASHBOARD_CATCH_UP_TARGETS;
