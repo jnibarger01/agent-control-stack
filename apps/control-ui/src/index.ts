@@ -702,7 +702,7 @@ export function renderDashboardFragments(
       sortApprovalItems(approvalItems, now),
       approvalOptionsByWorkItem(model),
       now,
-      model.approvalSlaMs ?? DEFAULT_APPROVAL_SLA_MS
+      model.approvalSlaMs === undefined ? DEFAULT_APPROVAL_SLA_MS : toCount(model.approvalSlaMs)
     ),
     approvalsCount: `${approvalItems.length} waiting`,
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
@@ -907,7 +907,7 @@ function finalizeAgent(agent: MissionControlAgent, now: Date): MissionControlAge
 
 function summarize(workItems: WorkItem[], agents: MissionControlAgent[], statusCounts?: Record<string, number>) {
   const count = (status: WorkItem["status"]) =>
-    statusCounts ? (statusCounts[status] ?? 0) : workItems.filter((item) => item.status === status).length;
+    statusCounts ? toCount(statusCounts[status]) : workItems.filter((item) => item.status === status).length;
   return {
     totalAgents: agents.length,
     onlineAgents: agents.filter((agent) => agent.status === "online").length,
@@ -917,8 +917,19 @@ function summarize(workItems: WorkItem[], agents: MissionControlAgent[], statusC
   };
 }
 
-function queueFooter(finished: MissionControlViewModel["finishedWorkItems"]): string {
-  if (!finished || finished.total === 0) return "";
+/**
+ * View-model numbers are interpolated into HTML unescaped, so coerce them to
+ * non-negative integers: a JS caller can hand the library anything.
+ */
+function toCount(value: unknown): number {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.max(0, Math.floor(number)) : 0;
+}
+
+function queueFooter(input: MissionControlViewModel["finishedWorkItems"]): string {
+  if (!input) return "";
+  const finished = { shown: toCount(input.shown), total: toCount(input.total) };
+  if (finished.total === 0) return "";
   if (finished.shown >= finished.total) {
     return `<p class="queue-footer-note">All ${finished.total} finished items shown.</p>`;
   }

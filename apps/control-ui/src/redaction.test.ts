@@ -298,3 +298,27 @@ describe("safety notes (#5)", () => {
     expect(html).not.toContain("Approval and cancellation actions");
   });
 });
+
+describe("view-model numbers cannot inject markup", () => {
+  it("coerces status counts, finished totals, and the approval SLA to integers", () => {
+    const payload = '<img src=x onerror="alert(1)">';
+    const html = renderDashboard({
+      workItems: [baseWorkItem],
+      events: [],
+      statusCounts: { running: payload, failed: "2" } as unknown as Record<string, number>,
+      finishedWorkItems: { shown: payload, total: payload, limit: 50 } as unknown as {
+        shown: number;
+        total: number;
+        limit: number;
+      },
+      approvalSlaMs: payload as unknown as number,
+      now: new Date("2026-09-22T00:01:00.000Z")
+    });
+    expect(html).not.toContain("onerror");
+    const { document } = new JSDOM(html).window;
+    const failedCard = [...document.querySelectorAll("#overview .card")].find((card) =>
+      card.textContent?.includes("Failed")
+    );
+    expect(failedCard?.querySelector("strong")?.textContent).toBe("2");
+  });
+});
