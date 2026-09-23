@@ -134,6 +134,42 @@ const readProcessOutputArgs = z
 
 const emptyArgs = z.object({}).strict();
 
+const searchSessionId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:-]+$/u, "search session id has an unexpected shape");
+
+const startSearchArgs = z
+  .object({
+    path: pathString,
+    pattern: z.string().min(1).max(MAX_SMALL_TEXT_LEN),
+    searchType: z.enum(["files", "content"]).optional(),
+    filePattern: z.string().min(1).max(1_024).optional(),
+    ignoreCase: z.boolean().optional(),
+    maxResults: z.number().int().min(1).max(10_000).optional(),
+    includeHidden: z.boolean().optional(),
+    contextLines: z.number().int().min(0).max(50).optional(),
+    timeout_ms: z
+      .number()
+      .int()
+      .min(1)
+      .max(5 * 60 * 1_000)
+      .optional(),
+    earlyTermination: z.boolean().optional(),
+    literalSearch: z.boolean().optional()
+  })
+  .strict();
+
+const getMoreSearchResultsArgs = z
+  .object({
+    sessionId: searchSessionId,
+    // Desktop Commander semantics: negative offset = tail.
+    offset: z.number().int().min(-1_000_000).max(1_000_000_000).optional(),
+    length: z.number().int().min(1).max(10_000).optional()
+  })
+  .strict();
+
 // --- the registry ----------------------------------------------------------
 
 const policies: readonly DesktopCommanderToolPolicy[] = [
@@ -273,6 +309,66 @@ const policies: readonly DesktopCommanderToolPolicy[] = [
     maxResultBytes: 32 * 1024
   },
   {
+    name: "get_runtime_identity",
+    riskClass: "read_only",
+    mutating: false,
+    network: false,
+    destructive: false,
+    requiresApproval: false,
+    argsSchema: emptyArgs,
+    pathArgs: [],
+    multiPathArgs: [],
+    cwdArgs: [],
+    commandArgs: [],
+    timeoutMs: 30_000,
+    maxResultBytes: 16 * 1024
+  },
+  {
+    name: "start_search",
+    riskClass: "read_only",
+    mutating: false,
+    network: false,
+    destructive: false,
+    requiresApproval: false,
+    argsSchema: startSearchArgs,
+    pathArgs: ["path"],
+    multiPathArgs: [],
+    cwdArgs: [],
+    commandArgs: [],
+    timeoutMs: 5 * 60 * 1_000,
+    maxResultBytes: 256 * 1024
+  },
+  {
+    name: "get_more_search_results",
+    riskClass: "read_only",
+    mutating: false,
+    network: false,
+    destructive: false,
+    requiresApproval: false,
+    argsSchema: getMoreSearchResultsArgs,
+    pathArgs: [],
+    multiPathArgs: [],
+    cwdArgs: [],
+    commandArgs: [],
+    timeoutMs: 60_000,
+    maxResultBytes: 256 * 1024
+  },
+  {
+    name: "list_searches",
+    riskClass: "read_only",
+    mutating: false,
+    network: false,
+    destructive: false,
+    requiresApproval: false,
+    argsSchema: emptyArgs,
+    pathArgs: [],
+    multiPathArgs: [],
+    cwdArgs: [],
+    commandArgs: [],
+    timeoutMs: 30_000,
+    maxResultBytes: 64 * 1024
+  },
+  {
     name: "create_directory",
     riskClass: "safe_mutation",
     mutating: true,
@@ -352,6 +448,159 @@ const policies: readonly DesktopCommanderToolPolicy[] = [
 const registry: ReadonlyMap<string, DesktopCommanderToolPolicy> = new Map(
   policies.map((policy) => [policy.name, policy])
 );
+
+/**
+ * Explicit managed-mode disposition for EVERY tool Desktop Commander registers.
+ *
+ * `capability`  - executable through ACS capability issuance (policy above).
+ * `unsupported` - deterministically denied in managed mode with
+ *                 `managed_tool_unsupported` (never `unknown_tool`).
+ *
+ * The list is pinned against Desktop Commander's own registry by
+ * contracts/desktop-commander/managed-tool-coverage.v1.json, which Desktop
+ * Commander's test suite also checks; a newly registered DC tool without a
+ * disposition fails both repositories' coverage tests.
+ */
+export type DesktopCommanderToolClass =
+  | "read_only"
+  | "filesystem_mutation"
+  | "process_execution"
+  | "process_control"
+  | "configuration_mutation"
+  | "unsupported";
+
+export interface DesktopCommanderManagedToolDisposition {
+  readonly name: string;
+  readonly toolClass: DesktopCommanderToolClass;
+  readonly managed: "capability" | "unsupported";
+  readonly reason: string;
+}
+
+const dispositions: readonly DesktopCommanderManagedToolDisposition[] = [
+  // read-only (capability, no approval)
+  { name: "get_config", toolClass: "read_only", managed: "capability", reason: "configuration read" },
+  {
+    name: "get_runtime_identity",
+    toolClass: "read_only",
+    managed: "capability",
+    reason: "stable runtime identity + redacted device state; no credentials or decisions"
+  },
+  { name: "get_file_info", toolClass: "read_only", managed: "capability", reason: "contained path metadata" },
+  { name: "list_directory", toolClass: "read_only", managed: "capability", reason: "contained directory listing" },
+  {
+    name: "read_file",
+    toolClass: "read_only",
+    managed: "capability",
+    reason: "contained file read; URL reads forbidden"
+  },
+  { name: "read_multiple_files", toolClass: "read_only", managed: "capability", reason: "contained file reads" },
+  { name: "start_search", toolClass: "read_only", managed: "capability", reason: "contained ripgrep search session" },
+  {
+    name: "get_more_search_results",
+    toolClass: "read_only",
+    managed: "capability",
+    reason: "pages an existing search session"
+  },
+  { name: "list_searches", toolClass: "read_only", managed: "capability", reason: "lists search sessions" },
+  { name: "list_sessions", toolClass: "read_only", managed: "capability", reason: "lists DC terminal sessions" },
+  { name: "list_processes", toolClass: "read_only", managed: "capability", reason: "process listing" },
+  { name: "read_process_output", toolClass: "read_only", managed: "capability", reason: "reads DC session output" },
+  { name: "get_usage_stats", toolClass: "read_only", managed: "capability", reason: "DC usage counters" },
+  // filesystem mutation (capability + approval)
+  {
+    name: "create_directory",
+    toolClass: "filesystem_mutation",
+    managed: "capability",
+    reason: "approval-bound mutation"
+  },
+  { name: "write_file", toolClass: "filesystem_mutation", managed: "capability", reason: "approval-bound mutation" },
+  { name: "edit_block", toolClass: "filesystem_mutation", managed: "capability", reason: "approval-bound mutation" },
+  { name: "move_file", toolClass: "filesystem_mutation", managed: "capability", reason: "approval-bound mutation" },
+  { name: "write_pdf", toolClass: "filesystem_mutation", managed: "unsupported", reason: "no ACS argument schema yet" },
+  // process execution
+  {
+    name: "start_process",
+    toolClass: "process_execution",
+    managed: "capability",
+    reason: "approval-bound; command validated and executable resolved by ACS"
+  },
+  {
+    name: "interact_with_process",
+    toolClass: "process_execution",
+    managed: "unsupported",
+    reason: "free-form input to a live process cannot be bound to a validated command"
+  },
+  { name: "acpx_list_sessions", toolClass: "process_execution", managed: "unsupported", reason: "spawns the acpx CLI" },
+  { name: "acpx_get_session", toolClass: "process_execution", managed: "unsupported", reason: "spawns the acpx CLI" },
+  { name: "acpx_exec", toolClass: "process_execution", managed: "unsupported", reason: "arbitrary agent execution" },
+  { name: "acpx_prompt", toolClass: "process_execution", managed: "unsupported", reason: "arbitrary agent execution" },
+  // process control
+  {
+    name: "kill_process",
+    toolClass: "process_control",
+    managed: "unsupported",
+    reason: "arbitrary PID signal; not scoped to DC-owned processes"
+  },
+  {
+    name: "force_terminate",
+    toolClass: "process_control",
+    managed: "unsupported",
+    reason: "no ACS argument schema yet"
+  },
+  {
+    name: "stop_search",
+    toolClass: "process_control",
+    managed: "unsupported",
+    reason: "no ACS argument schema yet; searches self-expire"
+  },
+  { name: "acpx_cancel", toolClass: "process_control", managed: "unsupported", reason: "acpx session control" },
+  // configuration mutation
+  {
+    name: "set_config_value",
+    toolClass: "configuration_mutation",
+    managed: "unsupported",
+    reason: "would let a caller widen DC's own mechanical limits; ACS owns authority"
+  },
+  // not machine operations
+  {
+    name: "get_recent_tool_calls",
+    toolClass: "unsupported",
+    managed: "unsupported",
+    reason: "discloses other principals' tool arguments"
+  },
+  {
+    name: "get_prompts",
+    toolClass: "unsupported",
+    managed: "unsupported",
+    reason: "product onboarding prompt injection, not a machine operation"
+  },
+  {
+    name: "give_feedback_to_desktop_commander",
+    toolClass: "unsupported",
+    managed: "unsupported",
+    reason: "opens an external network destination"
+  },
+  {
+    name: "track_ui_event",
+    toolClass: "unsupported",
+    managed: "unsupported",
+    reason: "UI telemetry, not an agent tool"
+  }
+];
+
+const dispositionRegistry: ReadonlyMap<string, DesktopCommanderManagedToolDisposition> = new Map(
+  dispositions.map((entry) => [entry.name, Object.freeze(entry)])
+);
+
+export function desktopCommanderManagedToolDisposition(
+  name: string
+): DesktopCommanderManagedToolDisposition | undefined {
+  return dispositionRegistry.get(name);
+}
+
+export function desktopCommanderManagedToolDispositions(): DesktopCommanderManagedToolDisposition[] {
+  return [...dispositionRegistry.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
 
 export function desktopCommanderToolPolicy(name: string): DesktopCommanderToolPolicy | undefined {
   return registry.get(name);

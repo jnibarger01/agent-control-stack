@@ -13,6 +13,7 @@ import {
   desktopCommanderAdapterConfigFromEnv,
   desktopCommanderContainmentFromEnv,
   desktopCommanderInvocationFingerprint,
+  desktopCommanderManagedToolDisposition,
   desktopCommanderRequiredScopes,
   desktopCommanderToolPolicy,
   normalizeInvocation,
@@ -1209,7 +1210,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         const dcPolicy = desktopCommanderToolPolicy(body.tool);
         if (!dcPolicy) {
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
-          return reply.code(403).send({ decision: "deny", reason: "unknown_tool" });
+          const disposition = desktopCommanderManagedToolDisposition(body.tool);
+          if (disposition?.managed === "unsupported") {
+            // A registered Desktop Commander tool with an explicit managed-mode
+            // disposition of "unsupported": deterministic, non-retryable.
+            return reply.code(403).send({
+              decision: "deny",
+              reason: "managed_tool_unsupported",
+              code: "managed_tool_unsupported",
+              detail: `${body.tool} (${disposition.toolClass}) is not supported through managed mode: ${disposition.reason}`
+            });
+          }
+          return reply.code(403).send({ decision: "deny", reason: "unknown_tool", code: "unknown_tool" });
         }
 
         let requestArguments: Record<string, unknown>;
@@ -1222,7 +1234,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           return reply.code(400).send({
             decision: "deny",
             reason: "invalid_arguments",
-            code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid"
+            code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid",
+            // The validation message only echoes the caller's own argument
+            // shape (key names, schema bounds, requested path); never secrets.
+            ...(error instanceof ControlStackError ? { detail: error.message.slice(0, 512) } : {})
           });
         }
 

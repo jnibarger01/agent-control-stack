@@ -1,0 +1,114 @@
+{
+  "contract": "acs.dc.v1/authorization-arguments",
+  "version": 1,
+  "doc": "docs/protocol/dc-authorization-arguments.md",
+  "placeholders": {
+    "${ROOT}": "realpath of a temporary allow root created by the test",
+    "${BIN:<name>}": "first executable <name> in /usr/bin, /bin, /usr/local/bin (ACS fixed executable dirs)"
+  },
+  "fixtureFilesystem": {
+    "directories": ["real", "real/sub"],
+    "symlinks": { "link-to-real": "real" }
+  },
+  "transportMetadataKeys": ["origin"],
+  "transportMetadataValues": { "origin": ["ui", "llm"] },
+  "cases": [
+    {
+      "name": "get_config without origin",
+      "tool": "get_config",
+      "raw": {},
+      "authorizationArguments": {},
+      "delivered": {}
+    },
+    {
+      "name": "get_config origin is transport metadata",
+      "tool": "get_config",
+      "raw": { "origin": "llm" },
+      "authorizationArguments": {},
+      "delivered": { "origin": "llm" }
+    },
+    {
+      "name": "list_directory origin ui is transport metadata",
+      "tool": "list_directory",
+      "raw": { "path": "${ROOT}/real", "origin": "ui" },
+      "authorizationArguments": { "path": "${ROOT}/real" },
+      "delivered": { "path": "${ROOT}/real", "origin": "ui" }
+    },
+    {
+      "name": "list_directory trailing slash is canonicalized",
+      "tool": "list_directory",
+      "raw": { "path": "${ROOT}/real/" },
+      "authorizationArguments": { "path": "${ROOT}/real" },
+      "delivered": { "path": "${ROOT}/real" }
+    },
+    {
+      "name": "list_directory relative path resolves against the first allow root",
+      "tool": "list_directory",
+      "raw": { "path": "real/sub", "depth": 2 },
+      "authorizationArguments": { "depth": 2, "path": "${ROOT}/real/sub" },
+      "delivered": { "depth": 2, "path": "${ROOT}/real/sub" }
+    },
+    {
+      "name": "list_directory symlink resolves to its canonical target",
+      "tool": "list_directory",
+      "raw": { "path": "${ROOT}/link-to-real/sub" },
+      "authorizationArguments": { "path": "${ROOT}/real/sub" },
+      "delivered": { "path": "${ROOT}/real/sub" }
+    },
+    {
+      "name": "list_directory omitted optional stays omitted (no default materialized)",
+      "tool": "list_directory",
+      "raw": { "path": "${ROOT}/real" },
+      "authorizationArguments": { "path": "${ROOT}/real" },
+      "delivered": { "path": "${ROOT}/real" }
+    },
+    {
+      "name": "start_process binds the fixed-dir executable and canonical cwd",
+      "tool": "start_process",
+      "raw": { "command": "git status", "timeout_ms": 5000, "cwd": "${ROOT}/link-to-real/", "origin": "llm" },
+      "authorizationArguments": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": 5000 },
+      "delivered": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "origin": "llm", "timeout_ms": 5000 }
+    },
+    {
+      "name": "start_search key order is irrelevant; booleans and numbers kept exactly",
+      "tool": "start_search",
+      "raw": { "pattern": "README", "path": "${ROOT}/real", "literalSearch": true, "maxResults": 10, "origin": "llm" },
+      "authorizationArguments": { "literalSearch": true, "maxResults": 10, "path": "${ROOT}/real", "pattern": "README" },
+      "delivered": { "literalSearch": true, "maxResults": 10, "origin": "llm", "path": "${ROOT}/real", "pattern": "README" }
+    },
+    {
+      "name": "read_multiple_files array order preserved, each element canonicalized",
+      "tool": "read_multiple_files",
+      "raw": { "paths": ["${ROOT}/real/b.txt", "${ROOT}/link-to-real/a.txt"] },
+      "authorizationArguments": { "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"] },
+      "delivered": { "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"] }
+    },
+    {
+      "name": "get_runtime_identity takes no arguments",
+      "tool": "get_runtime_identity",
+      "raw": { "origin": "llm" },
+      "authorizationArguments": {},
+      "delivered": { "origin": "llm" }
+    }
+  ],
+  "rejectedByAcs": [
+    { "name": "origin outside the advertised enum", "tool": "get_config", "raw": { "origin": "admin" } },
+    { "name": "origin must be a string", "tool": "list_directory", "raw": { "path": "${ROOT}/real", "origin": 1 } },
+    { "name": "numeric string is not coerced", "tool": "start_process", "raw": { "command": "git status", "cwd": "${ROOT}/real", "timeout_ms": "5000" } },
+    { "name": "boolean string is not coerced", "tool": "start_search", "raw": { "path": "${ROOT}/real", "pattern": "x", "literalSearch": "true" } },
+    { "name": "null is not absent", "tool": "list_directory", "raw": { "path": "${ROOT}/real", "depth": null } },
+    { "name": "unknown key is rejected", "tool": "list_directory", "raw": { "path": "${ROOT}/real", "surprise": true } },
+    { "name": "start_process shell is not a managed argument", "tool": "start_process", "raw": { "command": "git status", "cwd": "${ROOT}/real", "timeout_ms": 5000, "shell": "/bin/bash" } }
+  ],
+  "driftRejectedByDc": [
+    { "name": "raw executable name instead of bound resolved executable", "tool": "start_process", "bound": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": 5000 }, "delivered": { "command": "git status", "cwd": "${ROOT}/real", "timeout_ms": 5000 } },
+    { "name": "non-canonical path", "tool": "list_directory", "bound": { "path": "${ROOT}/real" }, "delivered": { "path": "${ROOT}/real/" } },
+    { "name": "numeric string", "tool": "start_process", "bound": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": 5000 }, "delivered": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": "5000" } },
+    { "name": "boolean string", "tool": "start_search", "bound": { "path": "${ROOT}/real", "pattern": "x", "literalSearch": true }, "delivered": { "path": "${ROOT}/real", "pattern": "x", "literalSearch": "true" } },
+    { "name": "null vs absent", "tool": "list_directory", "bound": { "path": "${ROOT}/real" }, "delivered": { "path": "${ROOT}/real", "depth": null } },
+    { "name": "default materialized by delivery", "tool": "list_directory", "bound": { "path": "${ROOT}/real" }, "delivered": { "path": "${ROOT}/real", "depth": 2 } },
+    { "name": "array reordered", "tool": "read_multiple_files", "bound": { "paths": ["${ROOT}/real/a.txt", "${ROOT}/real/b.txt"] }, "delivered": { "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"] } },
+    { "name": "extra authorization key", "tool": "start_process", "bound": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": 5000 }, "delivered": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "shell": "/bin/bash", "timeout_ms": 5000 } },
+    { "name": "invalid transport metadata", "tool": "get_config", "bound": {}, "delivered": { "origin": "admin" } }
+  ]
+}

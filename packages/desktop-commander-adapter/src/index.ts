@@ -18,9 +18,16 @@ export type { DesktopCommanderAdapterConfig } from "./config.js";
 export {
   desktopCommanderToolPolicy,
   isAllowlistedDesktopCommanderTool,
-  allowlistedDesktopCommanderToolNames
+  allowlistedDesktopCommanderToolNames,
+  desktopCommanderManagedToolDisposition,
+  desktopCommanderManagedToolDispositions
 } from "./tool-policy.js";
-export type { DesktopCommanderToolPolicy, DesktopCommanderRiskClass } from "./tool-policy.js";
+export type {
+  DesktopCommanderToolPolicy,
+  DesktopCommanderRiskClass,
+  DesktopCommanderToolClass,
+  DesktopCommanderManagedToolDisposition
+} from "./tool-policy.js";
 
 export { containPath, containCwd } from "./containment.js";
 export type { ContainmentConfig, ContainedPath } from "./containment.js";
@@ -35,6 +42,9 @@ export {
   DESKTOP_COMMANDER_INVOCATION_DOMAIN
 } from "./arguments.js";
 export type { NormalizedInvocation } from "./arguments.js";
+
+export { DC_TRANSPORT_METADATA_ARGUMENT_KEYS, splitTransportMetadata } from "./authorization-arguments.js";
+export type { SplitToolArguments } from "./authorization-arguments.js";
 
 export {
   DESKTOP_COMMANDER_CAPABILITY_VERSION,
