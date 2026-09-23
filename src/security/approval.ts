@@ -102,6 +102,27 @@ const SECRET_READ_PATTERNS: readonly RegExp[] = Object.freeze([
 ]);
 
 const WRITE_TOOLS = new Set(['write_file', 'edit_block', 'create_directory', 'move_file']);
+// Execution-plane tools that mutate local state (files, DC snapshot area, or
+// DC-owned processes). Classified like WRITE_TOOLS so they never fall through
+// to the read-only default.
+const EXECUTION_MUTATING_TOOLS = new Set(['apply_patch', 'snapshot_path', 'restore_snapshot', 'terminate_process']);
+
+/**
+ * The command string the kernel classifies. run_command has no shell string;
+ * its argv is classified as the equivalent command line (for classification
+ * ONLY — it is still executed without a shell) so the destructive / secret /
+ * network patterns and the network-binary blocklist apply to it exactly as
+ * they do to start_process.
+ */
+export function classificationCommand(tool: string, args: Record<string, unknown>): string | undefined {
+  if (typeof args.command === 'string') return args.command;
+  if (tool === 'run_command') {
+    // Malformed argv never executes: run_command rejects it with DC_INVALID_ARGUMENT.
+    if (!Array.isArray(args.argv) || args.argv.length === 0 || !args.argv.every((a) => typeof a === 'string')) return undefined;
+    return (args.argv as string[]).join(' ');
+  }
+  return undefined;
+}
 const READ_TOOLS = new Set([
   'read_file', 'read_multiple_files', 'list_directory', 'get_file_info',
   'search_files', 'get_config', 'list_processes', 'read_process_output',
@@ -117,15 +138,25 @@ function asStringArray(value: unknown): string[] {
 
 export function classifyOperation(input: OperationInput): ClassifiedOperation {
   const { tool, args } = input;
+  if (tool === 'secret_scan') {
+    // Detection-only: reports detector/location, never secret values, so it is
+    // not a credential read even though its name contains "secret". Only its
+    // real file argument is a path (target is an enum, not a path).
+    const scanPaths = typeof args.path === 'string' ? [args.path] : [];
+    return { tool, args, commandClass: 'read-only', network: 'none', paths: scanPaths, command: undefined, networkTargets: [], reason: 'secret_scan returns locations only, never secret values' };
+  }
   const paths: string[] = [];
   for (const key of PATH_KEYS) {
     for (const entry of asStringArray(args[key])) paths.push(entry);
   }
+  // New execution tools only (existing tools' path scope is unchanged).
+  if (tool === 'run_command' && typeof args.cwd === 'string') paths.push(args.cwd);
+  if ((tool === 'git_state' || tool === 'verify_head') && typeof args.repoPath === 'string') paths.push(args.repoPath);
   const networkTargets: string[] = [];
   for (const key of NETWORK_TARGET_KEYS) {
     for (const entry of asStringArray(args[key])) networkTargets.push(entry);
   }
-  const command = typeof args.command === 'string' ? args.command : undefined;
+  const command = classificationCommand(tool, args);
 
   let commandClass: CommandClass = 'read-only';
   let reason = 'default conservative classification';
@@ -163,7 +194,7 @@ export function classifyOperation(input: OperationInput): ClassifiedOperation {
   } else if (tool === 'start_process') {
     commandClass = 'destructive';
     reason = 'process spawn with no command string is treated as destructive (conservative)';
-  } else if (WRITE_TOOLS.has(tool)) {
+  } else if (WRITE_TOOLS.has(tool) || EXECUTION_MUTATING_TOOLS.has(tool)) {
     commandClass = 'local-write';
     reason = `tool '${tool}' mutates the filesystem`;
   } else if (SECRET_READ_PATTERNS.some((pattern) => pattern.test(tool))) {

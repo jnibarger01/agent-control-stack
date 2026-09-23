@@ -28,7 +28,24 @@ export interface SearchSession {
   totalMatches: number;
   totalContextLines: number;  // Track context lines separately
   wasIncomplete?: boolean;  // NEW: Track if search was incomplete due to permissions/access issues
+  resultsTruncated?: boolean;  // Stopped because the global result cap was reached
+  timedOut?: boolean;          // Stopped by the session timeout
+  errorCode?: string;          // Deterministic DC error code when isError
 }
+
+/**
+ * Hard mechanical bounds for every search session (independent of caller
+ * options): a global result ceiling (ripgrep's -m is per FILE), a default and
+ * maximum timeout, and a per-file size limit so a single huge file cannot
+ * dominate bytes scanned. Symlinks are never followed (ripgrep default; no -L)
+ * and the root is resolved through validatePath before spawning.
+ */
+export const SEARCH_LIMITS = Object.freeze({
+  hardMaxResults: 10_000,
+  defaultTimeoutMs: 120_000,
+  maxTimeoutMs: 5 * 60_000,
+  maxFileSize: '16M',
+});
 
 export interface SearchSessionOptions {
   rootPath: string;
@@ -112,12 +129,14 @@ export interface SearchSessionOptions {
 
     // Set up timeout if specified and auto-terminate
     // For exact filename searches, use a shorter default timeout
-    const timeoutMs = options.timeout ?? (this.isExactFilename(options.pattern) ? 1500 : undefined);
+    const requestedTimeout = options.timeout ?? (this.isExactFilename(options.pattern) ? 1500 : SEARCH_LIMITS.defaultTimeoutMs);
+    const timeoutMs = Math.min(Math.max(1, requestedTimeout), SEARCH_LIMITS.maxTimeoutMs);
     
     let killTimer: NodeJS.Timeout | null = null;
     if (timeoutMs) {
       killTimer = setTimeout(() => {
         if (!session.isComplete && !session.process.killed) {
+          session.timedOut = true;
           session.process.kill('SIGTERM');
         }
       }, timeoutMs);
@@ -164,6 +183,10 @@ export interface SearchSessionOptions {
       ).then(excelResults => {
         // Add Excel results to session (merged after initial response)
         for (const result of excelResults) {
+          if (session.results.length >= SEARCH_LIMITS.hardMaxResults) {
+            session.resultsTruncated = true;
+            break;
+          }
           session.results.push(result);
           session.totalMatches++;
         }
@@ -187,6 +210,10 @@ export interface SearchSessionOptions {
         options.literalSearch  // Respect literalSearch flag for Office files
       ).then(docxResults => {
         for (const result of docxResults) {
+          if (session.results.length >= SEARCH_LIMITS.hardMaxResults) {
+            session.resultsTruncated = true;
+            break;
+          }
           session.results.push(result);
           session.totalMatches++;
         }
@@ -238,6 +265,9 @@ export interface SearchSessionOptions {
     hasMoreResults: boolean;      // New field
     runtime: number;
     wasIncomplete?: boolean;      // NEW: Indicates if search was incomplete due to permissions
+    resultsTruncated: boolean;
+    timedOut: boolean;
+    errorCode?: string;
   } {
     const session = this.sessions.get(sessionId);
     
@@ -262,7 +292,10 @@ export interface SearchSessionOptions {
         error: session.error?.trim() || undefined,
         hasMoreResults: false, // Tail always returns what's available
         runtime: Date.now() - session.startTime,
-        wasIncomplete: session.wasIncomplete
+        wasIncomplete: session.wasIncomplete,
+        resultsTruncated: session.resultsTruncated ?? false,
+        timedOut: session.timedOut ?? false,
+        errorCode: session.errorCode,
       };
     }
 
@@ -282,7 +315,10 @@ export interface SearchSessionOptions {
       error: session.error?.trim() || undefined,
       hasMoreResults,
       runtime: Date.now() - session.startTime,
-      wasIncomplete: session.wasIncomplete
+      wasIncomplete: session.wasIncomplete,
+      resultsTruncated: session.resultsTruncated ?? false,
+      timedOut: session.timedOut ?? false,
+      errorCode: session.errorCode,
     };
   }
 
@@ -763,6 +799,9 @@ export interface SearchSessionOptions {
       args.push('-m', options.maxResults.toString());
     }
 
+    // Bound bytes scanned per file; never follow symlinks (no -L/--follow).
+    args.push('--max-filesize', SEARCH_LIMITS.maxFileSize);
+
     // File pattern filtering (for file type restrictions like *.js, *.d.ts)
     if (options.filePattern) {
       const patterns = options.filePattern
@@ -867,6 +906,12 @@ export interface SearchSessionOptions {
         session.wasIncomplete = true;
       }
 
+      // A malformed pattern is a deterministic caller error, never "no results".
+      if (session.error && /regex parse error|error parsing regex|unclosed (group|character class)/i.test(session.error)) {
+        session.isError = true;
+        session.errorCode = 'DC_INVALID_ARGUMENT';
+      }
+
       // Only treat as error if:
       // 1. Unexpected exit code (not 0, 1, or 2) AND
       // 2. We have meaningful errors after filtering AND
@@ -880,7 +925,7 @@ export interface SearchSessionOptions {
       }
 
       // If we have results, don't mark as error even if there were permission issues
-      if (session.totalMatches > 0) {
+      if (session.totalMatches > 0 && session.errorCode !== 'DC_INVALID_ARGUMENT') {
         session.isError = false;
       }
 
@@ -899,6 +944,7 @@ export interface SearchSessionOptions {
     process.on('error', (error: Error) => {
       session.isComplete = true;
       session.isError = true;
+      session.errorCode = 'DC_SUBSYSTEM_UNAVAILABLE';
       session.error = `Process error: ${error.message}`;
 
       // Rely on cleanupSessions(maxAge) only; no per-session timer
@@ -915,11 +961,20 @@ export interface SearchSessionOptions {
       session.buffer = '';
     }
     
+    const cap = Math.min(session.options.maxResults && session.options.maxResults > 0 ? session.options.maxResults : SEARCH_LIMITS.hardMaxResults, SEARCH_LIMITS.hardMaxResults);
     for (const line of lines) {
       if (!line.trim()) continue;
       
       const result = this.parseLine(line, session.options.searchType);
       if (result) {
+        if (session.results.length >= cap) {
+          // Global cap reached: stop collecting and stop scanning.
+          if (!session.resultsTruncated) {
+            session.resultsTruncated = true;
+            if (!session.process.killed) session.process.kill('SIGTERM');
+          }
+          break;
+        }
         session.results.push(result);
         // Separate counting of matches vs context lines
         if (result.type === 'content' && line.includes('"type":"context"')) {

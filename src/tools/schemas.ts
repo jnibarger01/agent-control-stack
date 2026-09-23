@@ -209,6 +209,7 @@ export const StartSearchArgsSchema = z.object({
   timeout_ms: z.number().optional(), // Match process naming convention
   earlyTermination: z.boolean().optional(), // Stop search early when exact filename match is found (default: true for files, false for content)
   literalSearch: z.boolean().optional().default(false), // Force literal string matching (-F flag) instead of regex
+  structured: z.boolean().optional(), // Return a JSON result instead of prose (additive)
   // 'ui' marks widget-fired calls (e.g. markdown link-target search);
   // excluded from tool-call telemetry (see isUiOriginCall in server.ts).
   origin: z.enum(['ui', 'llm']).optional(),
@@ -218,6 +219,7 @@ export const GetMoreSearchResultsArgsSchema = z.object({
   sessionId: z.string(),
   offset: z.number().optional().default(0),    // Same as file reading
   length: z.number().optional().default(100),  // Same as file reading (but smaller default)
+  structured: z.boolean().optional(), // Return a JSON result instead of prose (additive)
 });
 
 export const StopSearchArgsSchema = z.object({
@@ -280,6 +282,103 @@ export const AcpxCancelArgsSchema = z.object({
   session_id: z.string().min(1),
 });
 
+// ---------------------------------------------------------------------------
+// Execution-plane tools (strict: unknown keys are DC_INVALID_ARGUMENT).
+// `origin` is transport metadata (acs.dc.v1 authorizationArguments contract).
+// ---------------------------------------------------------------------------
+const originField = { origin: z.enum(['ui', 'llm']).optional() };
+const sha256Hex = z.string().regex(/^[a-f0-9]{64}$/, 'must be a lowercase sha256 hex digest');
+const commitSha = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/, 'must be a full lowercase commit SHA');
+
+export const HealthArgsSchema = z.object({ ...originField }).strict();
+
+export const LastErrorArgsSchema = z.object({
+  limit: z.number().int().min(1).max(50).optional(),
+  tool: z.string().min(1).max(128).optional(),
+  requestId: z.string().min(1).max(128).optional(),
+  correlationId: z.string().min(1).max(128).optional(),
+  ...originField,
+}).strict();
+
+export const RunCommandArgsSchema = z.object({
+  argv: z.array(z.string()).min(1).max(256),
+  cwd: z.string().min(1),
+  timeoutMs: z.number().int().min(1).max(15 * 60_000).optional(),
+  maxStdoutBytes: z.number().int().min(0).max(4 * 1024 * 1024).optional(),
+  maxStderrBytes: z.number().int().min(0).max(4 * 1024 * 1024).optional(),
+  expectedHeadSha: commitSha.optional(),
+  ...originField,
+}).strict();
+
+export const WaitForProcessArgsSchema = z.object({
+  pid: z.number().int().positive(),
+  timeoutMs: z.number().int().min(0).max(10 * 60_000).optional(),
+  until: z.object({
+    type: z.enum(['exit', 'stdout_pattern', 'stderr_pattern', 'either_pattern']),
+    pattern: z.string().min(1).max(1_000).optional(),
+  }).strict().optional(),
+  tailLines: z.number().int().min(0).max(1_000).optional(),
+  ...originField,
+}).strict();
+
+export const TerminateProcessArgsSchema = z.object({
+  pid: z.number().int().positive(),
+  graceMs: z.number().int().min(0).max(30_000).optional(),
+  force: z.boolean().optional(),
+  ...originField,
+}).strict();
+
+export const ApplyPatchArgsSchema = z.object({
+  path: z.string().min(1),
+  patch: z.string().min(1),
+  expectedSha256: sha256Hex,
+  expectedHeadSha: commitSha.optional(),
+  ...originField,
+}).strict();
+
+export const GitStateArgsSchema = z.object({ repoPath: z.string().min(1), ...originField }).strict();
+
+export const VerifyHeadArgsSchema = z.object({ repoPath: z.string().min(1), expectedSha: commitSha, ...originField }).strict();
+
+export const SnapshotPathArgsSchema = z.object({ path: z.string().min(1), reason: z.string().max(2_000).optional(), ...originField }).strict();
+
+export const RestoreSnapshotArgsSchema = z.object({
+  snapshotId: z.string().regex(/^snap_\d{8}T\d{6}Z_[a-f0-9]{16}$/, 'invalid snapshotId'),
+  expectedCurrentSha256: sha256Hex.optional(),
+  ...originField,
+}).strict();
+
+export const CapabilityManifestArgsSchema = z.object({ tool: z.string().min(1).max(128).optional(), ...originField }).strict();
+
+export const OperationPreviewArgsSchema = z.object({
+  tool: z.string().min(1).max(128),
+  arguments: z.record(z.unknown()).optional(),
+  ...originField,
+}).strict();
+
+export const SecretScanArgsSchema = z.object({
+  target: z.enum(['text', 'file', 'diff']),
+  text: z.string().optional(),
+  path: z.string().min(1).optional(),
+  patch: z.string().optional(),
+  ...originField,
+}).strict();
+
+const ServiceCheckSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('systemd_user'), name: z.string().min(1).max(255) }).strict(),
+  z.object({ type: z.literal('systemd_system'), name: z.string().min(1).max(255) }).strict(),
+  z.object({ type: z.literal('process'), pid: z.number().int().positive().optional(), name: z.string().min(1).max(64).optional() }).strict(),
+  z.object({ type: z.literal('port'), host: z.string().min(1).max(255).optional(), port: z.number().int().min(1).max(65_535) }).strict(),
+  z.object({ type: z.literal('http'), url: z.string().min(1).max(2_048), expectStatus: z.number().int().min(100).max(599).optional() }).strict(),
+  z.object({ type: z.literal('executable'), name: z.string().min(1).max(64) }).strict(),
+]);
+
+export const ServiceStatusArgsSchema = z.object({
+  checks: z.array(ServiceCheckSchema).min(1).max(25),
+  timeoutMs: z.number().int().min(100).max(10_000).optional(),
+  ...originField,
+}).strict();
+
 /**
  * Map of tool name -> argument schema, used by the dispatcher to detect and warn
  * about parameters a caller sent that the tool does not support. Keep in sync
@@ -319,4 +418,18 @@ export const toolArgSchemas: Record<string, z.ZodTypeAny> = {
   acpx_exec: AcpxExecArgsSchema,
   acpx_prompt: AcpxPromptArgsSchema,
   acpx_cancel: AcpxCancelArgsSchema,
+  health: HealthArgsSchema,
+  last_error: LastErrorArgsSchema,
+  run_command: RunCommandArgsSchema,
+  wait_for_process: WaitForProcessArgsSchema,
+  terminate_process: TerminateProcessArgsSchema,
+  apply_patch: ApplyPatchArgsSchema,
+  git_state: GitStateArgsSchema,
+  verify_head: VerifyHeadArgsSchema,
+  snapshot_path: SnapshotPathArgsSchema,
+  restore_snapshot: RestoreSnapshotArgsSchema,
+  capability_manifest: CapabilityManifestArgsSchema,
+  operation_preview: OperationPreviewArgsSchema,
+  secret_scan: SecretScanArgsSchema,
+  service_status: ServiceStatusArgsSchema,
 };

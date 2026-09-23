@@ -148,9 +148,12 @@ try {
     assert.deepEqual(
       tools.result.tools.map((tool) => tool.name).sort(),
       [
-        'create_directory', 'edit_block', 'get_config', 'get_file_info', 'get_runtime_identity',
-        'get_usage_stats', 'list_directory', 'list_processes', 'list_sessions', 'move_file',
-        'read_file', 'read_multiple_files', 'read_process_output', 'start_process', 'write_file',
+        'apply_patch', 'capability_manifest', 'create_directory', 'edit_block', 'get_config',
+        'get_file_info', 'get_more_search_results', 'get_runtime_identity', 'get_usage_stats', 'git_state',
+        'health', 'last_error', 'list_directory', 'list_processes', 'list_searches', 'list_sessions',
+        'move_file', 'operation_preview', 'read_file', 'read_multiple_files', 'read_process_output',
+        'restore_snapshot', 'run_command', 'secret_scan', 'snapshot_path', 'start_process', 'start_search',
+        'terminate_process', 'verify_head', 'wait_for_process', 'write_file',
       ],
       'managed discovery must advertise only the exact ACS v1 allowlist plus identity discovery',
     );
@@ -238,8 +241,129 @@ try {
     });
     assert.equal(forged.result.isError, true);
     assert.equal(forged.result._meta.acsAuthorization.code, 'ACS_CAPABILITY_SIGNATURE_INVALID');
+
+    // P0-2: `origin` is transport metadata. A capability bound WITHOUT origin
+    // verifies a delivered request that carries origin (full DC server path).
+    const signFresh = (toolName, normalizedArguments, scopes) => {
+      const fresh = {
+        ...payload,
+        toolName,
+        normalizedArguments,
+        invocationHash: computeDesktopCommanderInvocationHash(toolName, normalizedArguments),
+        scopes,
+        nonce: crypto.randomBytes(32).toString('base64url'),
+      };
+      return {
+        payload: fresh,
+        keyId: 'test-key-1',
+        signature: crypto.sign(null, Buffer.from(strictCanonicalJsonV1(fresh)), privateKey).toString('base64url'),
+      };
+    };
+    const withOrigin = await managed.request('tools/call', {
+      name: 'read_file',
+      arguments: { ...readArguments, origin: 'llm' },
+      _meta: { acsCapability: signFresh('read_file', readArguments, ['fs.read']) },
+    });
+    assert.equal(withOrigin.result.isError, undefined, JSON.stringify(withOrigin));
+    assert.match(withOrigin.result.content[0].text, /capability-authorized-read/);
+    const configWithOrigin = await managed.request('tools/call', {
+      name: 'get_config',
+      arguments: { origin: 'ui' },
+      _meta: { acsCapability: signFresh('get_config', {}, ['fs.read']) },
+    });
+    assert.equal(configWithOrigin.result.isError, undefined, JSON.stringify(configWithOrigin));
+    const badOrigin = await managed.request('tools/call', {
+      name: 'get_config',
+      arguments: { origin: 'admin' },
+      _meta: { acsCapability: signFresh('get_config', {}, ['fs.read']) },
+    });
+    assert.equal(badOrigin.result._meta.acsAuthorization.code, 'ACS_CAPABILITY_ARGUMENTS_MISMATCH');
+
+    // P0-5: get_runtime_identity stays callable without a capability (above),
+    // but a PRESENTED capability is verified, never ignored.
+    const identityGranted = await managed.request('tools/call', {
+      name: 'get_runtime_identity',
+      arguments: {},
+      _meta: { acsCapability: signFresh('get_runtime_identity', {}, ['process.exec']) },
+    });
+    assert.equal(identityGranted.result.isError, undefined, JSON.stringify(identityGranted));
+    assert.equal(identityGranted.result._meta.acsAuthorization.decision, 'granted');
+    const identityPayloadGranted = JSON.parse(identityGranted.result.content[0].text);
+    for (const forbidden of ['token', 'access_token', 'refresh_token', 'credentials', 'user', 'email', 'decision']) {
+      assert.equal(Object.prototype.hasOwnProperty.call(identityPayloadGranted, forbidden), false, forbidden);
+    }
+    const identityForged = await managed.request('tools/call', {
+      name: 'get_runtime_identity',
+      arguments: {},
+      _meta: { acsCapability: { payload: forgedPayload, keyId: 'test-key-1', signature: Buffer.alloc(64).toString('base64url') } },
+    });
+    assert.equal(identityForged.result.isError, true);
+    assert.equal(identityForged.result._meta.acsAuthorization.code, 'ACS_CAPABILITY_SIGNATURE_INVALID');
+
+    // Expansion: a capability-authorized new tool executes through the managed
+    // guard; the bound argv (ACS-resolved executable) is what runs, and a
+    // drifted argv is refused before execution.
+    const health = await managed.request('tools/call', {
+      name: 'health', arguments: {}, _meta: { acsCapability: signFresh('health', {}, ['process.exec']) },
+    });
+    assert.equal(health.result.isError, undefined, JSON.stringify(health));
+    assert.equal(health.result._meta.acsAuthorization.decision, 'granted');
+    assert.equal(JSON.parse(health.result.content[0].text).subsystems.managed_transport.status, 'ok');
+    const unsupported = await managed.request('tools/call', { name: 'service_status', arguments: { checks: [{ type: 'executable', name: 'node' }] } });
+    assert.equal(unsupported.result.isError, true);
+    assert.equal(unsupported.result._meta.acsAuthorization.code, 'ACS_CAPABILITY_MISSING');
   } finally {
     await managed.close();
+  }
+
+  // Production lane (bridge.env): DC_ACS_CAPABILITY_PUBLIC_KEY is configured
+  // and the gateway transports the ACS envelope under BOTH _meta.capability
+  // (enforcement pipeline) and _meta.acsCapability (managed guard). A
+  // capability-authorized run_command executes exactly the bound argv; a
+  // drifted argv is refused before execution.
+  const prod = new StdioProbe([], managedState, {
+    DESKTOP_COMMANDER_ACS_PUBLIC_KEY: publicKeyDer.toString('base64url'),
+    DESKTOP_COMMANDER_ACS_KEY_ID: 'test-key-1',
+    DC_ACS_CAPABILITY_PUBLIC_KEY: publicKeyDer.toString('base64url'),
+    DC_ACS_CAPABILITY_KEY_ID: 'test-key-1',
+  });
+  try {
+    const identity = await import('../dist/runtime-identity.js').then(({ getRuntimeIdentityState }) =>
+      getRuntimeIdentityState({ stateDirectory: managedState, homeDirectory: root }));
+    const init = await initialize(prod, { acsRuntimeBootstrap: { schemaVersion: 1, runtimeId: identity.runtime_id, challenge, scopes } });
+    assert.equal(init.error, undefined, JSON.stringify(init));
+    const sign = (toolName, normalizedArguments, toolScopes, approval) => {
+      const now = new Date();
+      const payload = {
+        version: 'acs.dc.v1', issuer: 'acs', audience: 'desktop-commander', runtimeId: identity.runtime_id,
+        workItemId: 'work_02', attemptId: 'attempt_02', leaseId: 'lease_02', leaseEpoch: 1, toolName, normalizedArguments,
+        invocationHash: computeDesktopCommanderInvocationHash(toolName, normalizedArguments),
+        actionHash: 'a'.repeat(64), requestHash: 'b'.repeat(64), planHash: 'c'.repeat(64), scopes: toolScopes,
+        ...(approval ? { approvalId: 'approval_02' } : {}),
+        issuedAt: now.toISOString(), expiresAt: new Date(now.getTime() + 29_000).toISOString(),
+        nonce: crypto.randomBytes(32).toString('base64url'),
+      };
+      const envelope = { payload, keyId: 'test-key-1', signature: crypto.sign(null, Buffer.from(strictCanonicalJsonV1(payload)), privateKey).toString('base64url') };
+      return { capability: envelope, acsCapability: envelope };
+    };
+    const boundRun = { argv: [process.execPath, '-e', 'process.stdout.write("managed-ok")'], cwd: root };
+    const ran = await prod.request('tools/call', {
+      name: 'run_command', arguments: { ...boundRun, origin: 'llm' }, _meta: sign('run_command', boundRun, ['process.spawn'], true),
+    });
+    assert.equal(ran.result.isError, undefined, JSON.stringify(ran));
+    assert.equal(JSON.parse(ran.result.content[0].text).stdout, 'managed-ok');
+    assert.equal(ran.result._meta.acsAuthorization.decision, 'granted');
+    const drifted = await prod.request('tools/call', {
+      name: 'run_command', arguments: { ...boundRun, argv: ['node', ...boundRun.argv.slice(1)] }, _meta: sign('run_command', boundRun, ['process.spawn'], true),
+    });
+    assert.equal(drifted.result.isError, true);
+    assert.equal(drifted.result._meta.acsAuthorization.code, 'ACS_CAPABILITY_ARGUMENTS_MISMATCH');
+    const noApproval = await prod.request('tools/call', {
+      name: 'run_command', arguments: boundRun, _meta: sign('run_command', boundRun, ['process.spawn'], false),
+    });
+    assert.equal(noApproval.result._meta.acsAuthorization.code, 'ACS_CAPABILITY_APPROVAL_REQUIRED');
+  } finally {
+    await prod.close();
   }
 
   const standalone = new StdioProbe(['--standalone'], standaloneState);

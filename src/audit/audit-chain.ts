@@ -53,6 +53,13 @@ export interface AuditEvent {
   // Full observability path fields.
   sourceAgent?: string;
   transport?: 'chatgpt' | 'oauth-gateway' | 'mcp' | string;
+  /**
+   * Trusted gateway attribution (additive, optional): present only when the
+   * request's _meta.gateway attestation HMAC-verified under
+   * DC_GATEWAY_ATTESTATION_KEY. Old events without this field remain
+   * verifiable (the field is hashed like any other when present).
+   */
+  gatewayActor?: { sub: string; client_id: string };
   executorPid?: number | null;
   durationMs?: number | null;
   error?: string | null;

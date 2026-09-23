@@ -14,13 +14,14 @@ import {
     type InitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
-import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability, getApprovalStore } from './enforcement/pipeline.js';
+import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability, getApprovalStore, GATEWAY_TRANSPORT_VERIFIED } from './enforcement/pipeline.js';
 // Item #5: pending approval requests live in the pipeline-owned store until
 // an approver (Telegram hook, UI, or the ACS orchestrator) resolves them;
 // the enforcement gate consults the same store for approval re-execution.
 const approvalStore = getApprovalStore();
 import { runRecoveryCheckup } from './cancellation/executor-recovery.js';
 import { claimCanonicalExecutor, renewLease, releaseLease } from './executor-lock.js';
+import { checkBreakGlassStatus } from './break-glass.js';
 import { getSystemInfo, getOSSpecificGuidance, getPathGuidance, getDevelopmentToolGuidance } from './utils/system-info.js';
 
 // Get system information once at startup
@@ -39,6 +40,16 @@ let EXECUTOR_LEASE_CLAIMED = false;
 export function ensureCanonicalExecutorLease(): void {
     if (process.env.DC_DISABLE_EXECUTOR_LEASE === '1') return;
     if (EXECUTOR_LEASE_CLAIMED) return;
+
+    // Item #1: mutual exclusion with the UNMANAGED/BREAK_GLASS fallback. Fail
+    // closed on ambiguous state — an unreadable/malformed marker refuses
+    // startup exactly like a live one, since we cannot prove it is safe.
+    const breakGlass = checkBreakGlassStatus();
+    if (breakGlass.active) {
+        console.error(`[executor-lease] REFUSED to start: ${breakGlass.detail}. The managed executor will not start while the UNMANAGED/BREAK_GLASS fallback may be active. Stop it first (systemctl --user stop desktop-commander-remote.service) before starting the managed executor.`);
+        process.exit(1);
+    }
+
     let claim;
     try {
         claim = claimCanonicalExecutor();
@@ -125,6 +136,14 @@ import {
     toolArgSchemas,
 } from './tools/schemas.js';
 import { ACPX_AGENT_ALLOWLIST } from './tools/acpx.js';
+import {
+    HealthArgsSchema, LastErrorArgsSchema, RunCommandArgsSchema, WaitForProcessArgsSchema, TerminateProcessArgsSchema,
+    ApplyPatchArgsSchema, GitStateArgsSchema, VerifyHeadArgsSchema, SnapshotPathArgsSchema, RestoreSnapshotArgsSchema,
+    CapabilityManifestArgsSchema, OperationPreviewArgsSchema, SecretScanArgsSchema, ServiceStatusArgsSchema,
+} from './tools/schemas.js';
+import * as executionHandlers from './handlers/execution-handlers.js';
+import { createRequestContext, currentRequestContext, runWithRequestContext } from './execution/context.js';
+import { decorateExecutionResult, finalizeExecution } from './execution/finalize.js';
 import {
     detectUnsupportedParams,
     getSupportedParams,
@@ -1201,7 +1220,10 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
             {
                 name: "kill_process",
                 description: `
-                        Terminate a running process by PID.
+                        LEGACY: terminate ANY process by PID (not limited to processes Desktop
+                        Commander started). Prefer terminate_process, which only signals
+                        DC-owned sessions, escalates gracefully, and reports the outcome.
+                        Kept for backwards compatibility; unsupported in managed (ACS) mode.
 
                         Use with caution as this will forcefully terminate the specified process.
 
@@ -1339,6 +1361,281 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
                     title: "Get Runtime Identity",
                     readOnlyHint: true,
                     openWorldHint: false,
+                },
+            },
+
+            {
+                name: "health",
+                description: `
+                        Read-only, degraded-mode-safe health report: version, build commit, pid, uptime,
+                        and independent status for configuration, runtime identity, allowed directories,
+                        process manager, search engine, managed transport and execution-event sinks, plus
+                        config/allowlist hashes and an overall healthy|degraded|unhealthy status.
+                        A broken subsystem is reported, never fatal. No secrets.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(HealthArgsSchema),
+                annotations: {
+                    title: "Health",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "last_error",
+                description: `
+                        Structured diagnostics for recent failed operations (default: the most recent):
+                        requestId, correlationId, timestamp, tool, stage, errorCode, errno, ruleId, sanitized
+                        message, normalized-arguments hash, cause category and retryability. Filter by tool,
+                        requestId or correlationId. Secrets are redacted and raw arguments are never stored.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(LastErrorArgsSchema),
+                annotations: {
+                    title: "Last Error",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "run_command",
+                description: `
+                        Run a bounded, NON-interactive command from an argv array: {argv, cwd, timeoutMs?,
+                        maxStdoutBytes?, maxStderrBytes?, expectedHeadSha?}. argv is executed directly
+                        (shell:false): no shell string, no implicit 'bash -c', no shell fallback, so shell
+                        metacharacters are literal arguments. cwd is mandatory and must resolve (symlinks
+                        resolved) inside allowed directories. Hard timeout (SIGTERM then SIGKILL of the
+                        process group), bounded output with truncation metadata, real exit code / signal,
+                        duration and requestId. Optional expectedHeadSha fails closed with DC_HEAD_MISMATCH.
+                        Prefer this over start_process for non-interactive commands.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(RunCommandArgsSchema),
+                annotations: {
+                    title: "Run Command",
+                    readOnlyHint: false,
+                    destructiveHint: true,
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "wait_for_process",
+                description: `
+                        Wait (no polling) on a Desktop Commander-owned process session until it exits,
+                        a regex matches its stdout/stderr (until.type = exit | stdout_pattern | stderr_pattern
+                        | either_pattern), or timeoutMs elapses. Returns state, exit code, signal, matched
+                        condition, bounded stdout/stderr tails, duration and timedOut. Pids not spawned and
+                        tracked by DC are refused with DC_PROCESS_NOT_OWNED.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(WaitForProcessArgsSchema),
+                annotations: {
+                    title: "Wait For Process",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "terminate_process",
+                description: `
+                        Scoped termination of a process Desktop Commander spawned and still tracks: SIGTERM
+                        to the session's process group, then (force, default true) SIGKILL after graceMs.
+                        Arbitrary system pids are refused with DC_PROCESS_NOT_OWNED. Returns signals sent,
+                        escalation, exit code and signal. Replaces the legacy kill_process for DC sessions.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(TerminateProcessArgsSchema),
+                annotations: {
+                    title: "Terminate Process",
+                    readOnlyHint: false,
+                    destructiveHint: true,
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "apply_patch",
+                description: `
+                        Atomically apply a single-file unified diff: {path, patch, expectedSha256,
+                        expectedHeadSha?}. The pre-image sha256 must equal expectedSha256 (else
+                        DC_HASH_MISMATCH, nothing written). The patch is validated and applied fully in
+                        memory (exact context match; ambiguous hunks rejected), written to a same-directory
+                        temp file with the original mode, re-verified, then renamed over the target; a file
+                        changed during the operation yields DC_PATH_CHANGED. Returns pre/post sha256.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(ApplyPatchArgsSchema),
+                annotations: {
+                    title: "Apply Patch",
+                    readOnlyHint: false,
+                    destructiveHint: true,
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "git_state",
+                description: `
+                        Read-only repository state for repoPath: repo root, HEAD SHA (the identity to use for
+                        write preconditions), branch (informational only), detached flag, parsed porcelain v2
+                        entries, dirty flag, staged/unstaged/untracked/conflict counts, stash list, upstream
+                        and ahead/behind.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(GitStateArgsSchema),
+                annotations: {
+                    title: "Git State",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "verify_head",
+                description: `
+                        Optimistic-concurrency check: compare repoPath's HEAD with expectedSha (full SHA).
+                        Returns actualSha, expectedSha, match, dirty and repo root; a mismatch is explicit
+                        (match:false, code DC_HEAD_MISMATCH).
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(VerifyHeadArgsSchema),
+                annotations: {
+                    title: "Verify HEAD",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "snapshot_path",
+                description: `
+                        Snapshot a file or bounded directory tree (inside allowed directories) into Desktop
+                        Commander's private snapshot area before a risky change. Returns an immutable
+                        snapshotId and manifest metadata (original path, hashes, sizes, request id).
+                        Symlinks are recorded, never followed. Oversized trees fail with DC_SNAPSHOT_TOO_LARGE.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(SnapshotPathArgsSchema),
+                annotations: {
+                    title: "Snapshot Path",
+                    readOnlyHint: false,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "restore_snapshot",
+                description: `
+                        Restore a snapshot created by this runtime: verifies manifest seal, object hashes and
+                        runtime binding (DC_SNAPSHOT_INVALID otherwise), re-validates the target against the
+                        allowed directories, honours expectedCurrentSha256 (DC_HASH_MISMATCH, nothing
+                        changed), preserves divergent current data as a pre-restore snapshot, and replaces the
+                        target via staged rename. Returns before/after hashes.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(RestoreSnapshotArgsSchema),
+                annotations: {
+                    title: "Restore Snapshot",
+                    readOnlyHint: false,
+                    destructiveHint: true,
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "capability_manifest",
+                description: `
+                        Machine-readable MECHANICAL capability description for every tool (or one): category,
+                        read/write/process/admin risk class, mechanical availability, supported
+                        preconditions, filesystem/process scope, shell use, evidence emission and
+                        authorization:"external". Mechanical capability does not imply caller authorization.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(CapabilityManifestArgsSchema),
+                annotations: {
+                    title: "Capability Manifest",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "operation_preview",
+                description: `
+                        Local mechanical preview of a proposed call {tool, arguments}: normalized arguments and
+                        their hash, resolved cwd/paths and whether they are inside allowed directories, argv
+                        and executable resolution, shell use, Desktop Commander command-restriction result,
+                        mutation/risk class and expected preconditions. Returns mechanically_valid and
+                        authorization:"external"; it never executes and never decides authorization.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(OperationPreviewArgsSchema),
+                annotations: {
+                    title: "Operation Preview",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "secret_scan",
+                description: `
+                        Defence-in-depth secret detection for target text | file | diff (added lines only).
+                        Reports detector, category and line/column; raw secret values are never returned.
+                        Files must be inside allowed directories and are size-bounded.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(SecretScanArgsSchema),
+                annotations: {
+                    title: "Secret Scan",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: false,
+                },
+            },
+            {
+                name: "service_status",
+                description: `
+                        Generic read-only service probes: systemd_user / systemd_system units, process by pid
+                        or name, TCP port, HTTP(S) GET health endpoint (loopback/private addresses only by
+                        default, no caller headers, no redirects), executable presence. Time-bounded,
+                        structured up/down/unknown/error per check.
+
+                        Mechanical capability only: authorization is external (ACS decides whether a caller may run this).
+
+                        ${CMD_PREFIX_DESCRIPTION}`,
+                inputSchema: zodToJsonSchema(ServiceStatusArgsSchema),
+                annotations: {
+                    title: "Service Status",
+                    readOnlyHint: true,
+                    
+                    openWorldHint: true,
                 },
             },
 
@@ -1489,10 +1786,24 @@ server.setRequestHandler(CallToolRequestSchema, async (request: CallToolRequest)
     // (server_call_tool, server_read_file, server_edit_block, ...). Deliberate
     // UI interactions are tracked separately via mcp_ui_event.
     const isUiOriginCall = !!(args && typeof args === 'object' && (args as any).origin === 'ui');
-    if (isUiOriginCall) {
-        return runInUiOriginCallContext(() => handleCallToolRequest(request));
-    }
-    return handleCallToolRequest(request);
+    // Request/error correlation + execution evidence for every tool call.
+    const executionContext = createRequestContext(request.params.name, args, request.params._meta);
+    return runWithRequestContext(executionContext, async () => {
+        let result: ServerResult | undefined;
+        let thrown: unknown;
+        try {
+            result = isUiOriginCall
+                ? await runInUiOriginCallContext(() => handleCallToolRequest(request))
+                : await handleCallToolRequest(request);
+            result = decorateExecutionResult(result, executionContext);
+            return result;
+        } catch (error) {
+            thrown = error;
+            throw error;
+        } finally {
+            finalizeExecution(executionContext, result, thrown);
+        }
+    });
 });
 
 async function handleCallToolRequest(request: CallToolRequest): Promise<ServerResult> {
@@ -1501,9 +1812,21 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         ? args as Record<string, unknown>
         : {};
     let authorization;
-    if (name !== 'get_runtime_identity') {
+    // get_runtime_identity is an identity primitive whose authorization is
+    // "external": it stays callable without a capability (local identity
+    // discovery). A capability that IS presented for it (the managed gateway
+    // path) is never ignored: it is verified like any other tool's.
+    const presentsAcsCapability = !!(request.params._meta && typeof request.params._meta === 'object'
+        && Object.prototype.hasOwnProperty.call(request.params._meta, 'acsCapability'));
+    const verifyManagedAuthorization = name !== 'get_runtime_identity' || presentsAcsCapability;
+    if (verifyManagedAuthorization) {
         try {
             authorization = await authorizeManagedToolCall(name, toolArguments, request.params._meta);
+            const executionContext = currentRequestContext();
+            if (executionContext && authorization) {
+                // Relayed from a VERIFIED capability only.
+                executionContext.acs = { workItemId: authorization.workItemId, attemptId: authorization.attemptId, leaseId: authorization.leaseId };
+            }
         } catch (error) {
             if (error instanceof ManagedAcsAuthorizationError) {
                 return managedAuthorizationErrorResult(error);
@@ -1518,29 +1841,42 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
     // approvals are returned to the caller as structured errors carrying the
     // exact mutation scope.
     const enforcementAgent = agentFromMeta(request.params._meta);
-    const enforcementTransport = enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp';
     const reqHash = requestHash(name, toolArguments);
     const cap = extractCapability(request.params._meta);
     const gate = await preExecuteEnforcement({
         tool: name,
         args: toolArguments,
         meta: request.params._meta,
-        transport: enforcementTransport,
+        transport: enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp',
     });
+    // Trusted transport attribution: when an attestation key is configured,
+    // the audit trail trusts ONLY HMAC-verified gateway meta. Trusted
+    // requests record the verified transport string and carry gatewayActor
+    // (gateway-vetted sub/client_id). Everything else — including a
+    // self-reported _meta.agent on a direct client while gateway mode is on —
+    // stays untrusted: agent 'unknown', base transport.
+    const enforcementTransport = (gate.allowed && gate.gatewayTrusted)
+        ? GATEWAY_TRANSPORT_VERIFIED
+        : (enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp');
+    const auditAgent = (process.env.DC_GATEWAY_ATTESTATION_KEY && !(gate.allowed && gate.gatewayTrusted))
+        ? 'unknown'
+        : enforcementAgent;
+    const attestAgent = auditAgent;
+    const attestGatewayActor = gate.allowed ? gate.gatewayActor : undefined;
     if (!gate.allowed) {
         // Red-team fix #8: record in the audit chain WHAT needed approval,
         // keyed by its approvalId, before returning the block.
         if (gate.kind === 'approval-required' && gate.approvalRequest) {
             approvalStore.submit(gate.approvalRequest);
             attestRequest({
-                requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+                requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
                 capabilityId: cap?.capabilityId, approvalId: gate.approvalRequest.approvalId,
                 commandClass: gate.classification.commandClass,
                 args: { approvalRequired: gate.code, command: gate.classification.command ?? null },
             });
         }
         const blockedAttestOk = attestRequest({
-            requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+            requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
             capabilityId: cap?.capabilityId, commandClass: gate.classification.commandClass,
             args: { blocked: gate.code, message: gate.message },
         });
@@ -1565,9 +1901,15 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         };
     }
     const allowedAttestOk = attestRequest({
-        requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
-        capabilityId: cap?.capabilityId, commandClass: gate.classification.commandClass, args: toolArguments,
+        requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
+        capabilityId: gate.allowed && gate.acsCapability ? gate.acsCapability.capabilityId : cap?.capabilityId,
+        commandClass: gate.classification.commandClass, args: toolArguments,
         ...(gate.allowed && gate.networkGuard ? { networkGuard: gate.networkGuard } : {}),
+        ...(attestGatewayActor ? { gatewayActor: attestGatewayActor } : {}),
+        ...(gate.allowed && gate.acsCapability ? {
+            workItemId: gate.acsCapability.workItemId,
+            attemptId: gate.acsCapability.attemptId,
+        } : {}),
     });
     if (!allowedAttestOk) {
         if (process.env.DC_AUDIT_STRICT === '1') {
@@ -1879,6 +2221,22 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 result = await handlers.handleAcpxCancel(args);
                 break;
 
+            // Execution-plane tools (structured results / DC error taxonomy)
+            case "health": result = await executionHandlers.handleHealth(args); break;
+            case "last_error": result = await executionHandlers.handleLastError(args); break;
+            case "run_command": result = await executionHandlers.handleRunCommand(args); break;
+            case "wait_for_process": result = await executionHandlers.handleWaitForProcess(args); break;
+            case "terminate_process": result = await executionHandlers.handleTerminateProcess(args); break;
+            case "apply_patch": result = await executionHandlers.handleApplyPatch(args); break;
+            case "git_state": result = await executionHandlers.handleGitState(args); break;
+            case "verify_head": result = await executionHandlers.handleVerifyHead(args); break;
+            case "snapshot_path": result = await executionHandlers.handleSnapshotPath(args); break;
+            case "restore_snapshot": result = await executionHandlers.handleRestoreSnapshot(args); break;
+            case "capability_manifest": result = await executionHandlers.handleCapabilityManifest(args); break;
+            case "operation_preview": result = await executionHandlers.handleOperationPreview(args); break;
+            case "secret_scan": result = await executionHandlers.handleSecretScan(args); break;
+            case "service_status": result = await executionHandlers.handleServiceStatus(args); break;
+
             default:
                 capture('server_unknown_tool', { name });
                 result = {
@@ -1887,7 +2245,7 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 };
         }
 
-        if (name !== 'get_runtime_identity') {
+        if (verifyManagedAuthorization) {
             result._meta = {
                 ...(result._meta ?? {}),
                 ...managedAuthorizationSuccessMeta(authorization),
@@ -2047,7 +2405,7 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         return {
             content: [{ type: "text", text: `Error: ${errorMessage}` }],
             isError: true,
-            ...(name !== 'get_runtime_identity'
+            ...(verifyManagedAuthorization
                 ? { _meta: managedAuthorizationSuccessMeta(authorization) }
                 : {}),
         };
@@ -2056,7 +2414,7 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         // call into the audit chain. Best-effort; never breaks the response.
         try {
             const resultAttestOk = attestResult({
-                requestHash: reqHash, tool: name, agent: enforcementAgent, transport: enforcementTransport,
+                requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
                 capabilityId: cap?.capabilityId, isError, durationMs: Date.now() - startTime,
                 executorPid: process.pid,
                 error: isError ? `tool ${name} returned isError` : undefined,

@@ -18,7 +18,9 @@
   "homepage": "https://github.com/wonderwhy-er/DesktopCommanderMCP",
   "documentation": "https://github.com/wonderwhy-er/DesktopCommanderMCP/blob/main/FAQ.md",
   "support": "https://github.com/wonderwhy-er/DesktopCommanderMCP/issues",
-  "privacy_policies": ["https://legal.desktopcommander.app/privacy_desktop_commander_mcp"],
+  "privacy_policies": [
+    "https://legal.desktopcommander.app/privacy_desktop_commander_mcp"
+  ],
   "icon": "icon.png",
   "server": {
     "type": "node",
@@ -162,11 +164,67 @@
     {
       "name": "acpx_cancel",
       "description": "Cooperatively cancel an existing registered ACPX session prompt."
+    },
+    {
+      "name": "health",
+      "description": "Report structured runtime and subsystem health without mutating state."
+    },
+    {
+      "name": "last_error",
+      "description": "Return bounded sanitized recent execution errors."
+    },
+    {
+      "name": "capability_manifest",
+      "description": "Describe execution capabilities and external authorization requirements."
+    },
+    {
+      "name": "operation_preview",
+      "description": "Preview a contained operation without executing it."
+    },
+    {
+      "name": "git_state",
+      "description": "Inspect contained Git repository state and working-tree changes."
+    },
+    {
+      "name": "verify_head",
+      "description": "Compare a contained repository HEAD against an expected commit SHA."
+    },
+    {
+      "name": "secret_scan",
+      "description": "Scan text, files, or diffs for secret patterns without returning raw secret values."
+    },
+    {
+      "name": "wait_for_process",
+      "description": "Wait for state or output from a Desktop Commander-owned process."
+    },
+    {
+      "name": "service_status",
+      "description": "Probe supported service status targets subject to runtime policy."
+    },
+    {
+      "name": "run_command",
+      "description": "Run an argv-only command without shell interpretation under execution policy."
+    },
+    {
+      "name": "terminate_process",
+      "description": "Terminate a Desktop Commander-owned process using bounded escalation."
+    },
+    {
+      "name": "apply_patch",
+      "description": "Apply a hash-guarded patch atomically to a contained file."
+    },
+    {
+      "name": "snapshot_path",
+      "description": "Create a restorable snapshot of a contained path."
+    },
+    {
+      "name": "restore_snapshot",
+      "description": "Restore a sealed snapshot with optional current-content precondition."
     }
   ],
   "keywords": [
     "orchestration",
-    "workflow", 
+    "workflow",
     "development",
     "prototyping",
     "terminal",

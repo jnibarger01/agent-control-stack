@@ -75,7 +75,147 @@ const TOOL_POLICIES: Readonly<Record<string, ManagedToolPolicy>> = Object.freeze
   move_file: FS_WRITE_POLICY,
   write_file: FS_WRITE_POLICY,
   start_process: Object.freeze({ scopes: ['process.spawn'] as const, requiresApproval: true }),
+  get_runtime_identity: PROCESS_READ_POLICY,
+  start_search: FS_READ_POLICY,
+  get_more_search_results: FS_READ_POLICY,
+  list_searches: FS_READ_POLICY,
+  health: PROCESS_READ_POLICY,
+  last_error: PROCESS_READ_POLICY,
+  capability_manifest: PROCESS_READ_POLICY,
+  operation_preview: FS_READ_POLICY,
+  git_state: FS_READ_POLICY,
+  verify_head: FS_READ_POLICY,
+  secret_scan: FS_READ_POLICY,
+  wait_for_process: PROCESS_READ_POLICY,
+  run_command: Object.freeze({ scopes: ['process.spawn'] as const, requiresApproval: true }),
+  terminate_process: Object.freeze({ scopes: ['process.exec'] as const, requiresApproval: true }),
+  apply_patch: FS_WRITE_POLICY,
+  snapshot_path: FS_WRITE_POLICY,
+  restore_snapshot: FS_WRITE_POLICY,
 });
+
+/**
+ * Explicit managed-mode disposition for every tool Desktop Commander
+ * registers (src/tools/schemas.ts toolArgSchemas). Mirrors ACS's
+ * desktopCommanderManagedToolDispositions and is pinned by
+ * test/fixtures/acs-managed-tool-coverage.v1.json (byte-identical copy of the
+ * ACS contract). A newly registered tool without an entry here fails
+ * test/test-managed-authorization-contract.js.
+ *
+ * This is NOT a DC authorization decision: `capability` tools still require a
+ * verified ACS capability per call; `unsupported` tools are simply never
+ * advertised or executed in managed mode (ACS denies them with
+ * managed_tool_unsupported before any capability exists).
+ */
+export type ManagedToolClass =
+  | 'read_only'
+  | 'filesystem_mutation'
+  | 'process_execution'
+  | 'process_control'
+  | 'configuration_mutation'
+  | 'unsupported';
+
+export interface ManagedToolDisposition {
+  toolClass: ManagedToolClass;
+  managed: 'capability' | 'unsupported';
+}
+
+const cap = (toolClass: ManagedToolClass): ManagedToolDisposition => Object.freeze({ toolClass, managed: 'capability' as const });
+const unsupported = (toolClass: ManagedToolClass): ManagedToolDisposition => Object.freeze({ toolClass, managed: 'unsupported' as const });
+
+const MANAGED_TOOL_DISPOSITIONS: Readonly<Record<string, ManagedToolDisposition>> = Object.freeze({
+  get_config: cap('read_only'),
+  get_runtime_identity: cap('read_only'),
+  get_file_info: cap('read_only'),
+  list_directory: cap('read_only'),
+  read_file: cap('read_only'),
+  read_multiple_files: cap('read_only'),
+  start_search: cap('read_only'),
+  get_more_search_results: cap('read_only'),
+  list_searches: cap('read_only'),
+  list_sessions: cap('read_only'),
+  list_processes: cap('read_only'),
+  read_process_output: cap('read_only'),
+  get_usage_stats: cap('read_only'),
+  create_directory: cap('filesystem_mutation'),
+  write_file: cap('filesystem_mutation'),
+  edit_block: cap('filesystem_mutation'),
+  move_file: cap('filesystem_mutation'),
+  write_pdf: unsupported('filesystem_mutation'),
+  start_process: cap('process_execution'),
+  interact_with_process: unsupported('process_execution'),
+  acpx_list_sessions: unsupported('process_execution'),
+  acpx_get_session: unsupported('process_execution'),
+  acpx_exec: unsupported('process_execution'),
+  acpx_prompt: unsupported('process_execution'),
+  kill_process: unsupported('process_control'),
+  force_terminate: unsupported('process_control'),
+  stop_search: unsupported('process_control'),
+  acpx_cancel: unsupported('process_control'),
+  set_config_value: unsupported('configuration_mutation'),
+  get_recent_tool_calls: unsupported('unsupported'),
+  get_prompts: unsupported('unsupported'),
+  give_feedback_to_desktop_commander: unsupported('unsupported'),
+  track_ui_event: unsupported('unsupported'),
+  health: cap('read_only'),
+  last_error: cap('read_only'),
+  capability_manifest: cap('read_only'),
+  operation_preview: cap('read_only'),
+  git_state: cap('read_only'),
+  verify_head: cap('read_only'),
+  secret_scan: cap('read_only'),
+  wait_for_process: cap('read_only'),
+  service_status: unsupported('read_only'),
+  run_command: cap('process_execution'),
+  terminate_process: cap('process_control'),
+  apply_patch: cap('filesystem_mutation'),
+  snapshot_path: cap('filesystem_mutation'),
+  restore_snapshot: cap('filesystem_mutation'),
+});
+
+export function listManagedToolDispositions(): Readonly<Record<string, ManagedToolDisposition>> {
+  return MANAGED_TOOL_DISPOSITIONS;
+}
+
+/**
+ * Canonical authorizationArguments contract (acs.dc.v1), shared with ACS
+ * (packages/desktop-commander-adapter/src/authorization-arguments.ts) and
+ * pinned by test/fixtures/acs-authorization-arguments.v1.json.
+ *
+ * Transport-metadata keys are validated and removed; `undefined` is absent.
+ * NOTHING else is normalized here: no path resolution, no default
+ * materialization, no type coercion, no array reordering. The delivered
+ * request must already carry the exact arguments ACS bound; key order is
+ * irrelevant because comparison is over strict canonical JSON.
+ */
+export const DC_TRANSPORT_METADATA_ARGUMENT_KEYS = Object.freeze(['origin'] as const);
+const TRANSPORT_METADATA_VALUES: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  origin: Object.freeze(['ui', 'llm']),
+});
+
+export class AuthorizationArgumentsError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthorizationArgumentsError';
+  }
+}
+
+export function authorizationArguments(delivered: unknown): Record<string, unknown> {
+  if (!isPlainObject(delivered)) throw new AuthorizationArgumentsError('tool arguments must be a plain object');
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(delivered)) {
+    if ((DC_TRANSPORT_METADATA_ARGUMENT_KEYS as readonly string[]).includes(key)) {
+      const allowed = TRANSPORT_METADATA_VALUES[key] ?? [];
+      if (typeof value !== 'string' || !allowed.includes(value)) {
+        throw new AuthorizationArgumentsError(`transport metadata '${key}' is invalid`);
+      }
+      continue;
+    }
+    if (value === undefined) continue;
+    result[key] = value;
+  }
+  return result;
+}
 
 export function isManagedAcsToolName(toolName: string): boolean {
   return Object.prototype.hasOwnProperty.call(TOOL_POLICIES, toolName);
@@ -373,6 +513,11 @@ export class ManagedAcsGuard {
     if (this.options.mode === 'managed') this.identityState = 'revoked';
   }
 
+  /** Non-secret runtime-identity handshake state (for health reporting only). */
+  identityStatus(): 'standalone' | 'missing' | 'active' | 'drift' | 'revoked' {
+    return this.options.mode === 'standalone' ? 'standalone' : this.identityState;
+  }
+
   authorize(
     toolName: string,
     actualArguments: Record<string, unknown>,
@@ -431,7 +576,13 @@ export class ManagedAcsGuard {
     if (typeof payload.toolName !== 'string' || !TOOL_PATTERN.test(payload.toolName) || payload.toolName !== toolName) {
       reject('ACS_CAPABILITY_TOOL_MISMATCH');
     }
-    if (!isPlainObject(payload.normalizedArguments) || !exactStructuralEqual(payload.normalizedArguments, actualArguments)) {
+    let boundCandidate: Record<string, unknown>;
+    try {
+      boundCandidate = authorizationArguments(actualArguments);
+    } catch {
+      reject('ACS_CAPABILITY_ARGUMENTS_MISMATCH');
+    }
+    if (!isPlainObject(payload.normalizedArguments) || !exactStructuralEqual(payload.normalizedArguments, boundCandidate)) {
       reject('ACS_CAPABILITY_ARGUMENTS_MISMATCH');
     }
     if (typeof payload.invocationHash !== 'string' || !HASH_PATTERN.test(payload.invocationHash)

@@ -3,8 +3,13 @@ import path from 'path';
 import fs from 'fs/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
 import { fileURLToPath } from 'url';
+import type { Readable } from 'stream';
 import { captureRemote } from '../utils/capture.js';
+import { StartupStderrCapture, describeChildStartupFailure } from './startup-stderr.js';
+import { GatewayOAuthProvider } from './gateway-oauth-provider.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,7 +24,7 @@ interface McpConfig {
 
 export class DesktopCommanderIntegration {
     private mcpClient: Client | null = null;
-    private mcpTransport: StdioClientTransport | null = null;
+    private mcpTransport: StdioClientTransport | StreamableHTTPClientTransport | null = null;
     private isReady: boolean = false;
     private initializePromise: Promise<void> | null = null;
     private shutdownRequested: boolean = false;
@@ -43,7 +48,10 @@ export class DesktopCommanderIntegration {
         this.disconnectHandler?.(reason);
     }
 
-    constructor(private readonly standalone: boolean = false) {}
+    constructor(
+        private readonly standalone: boolean = false,
+        private readonly managedMcpUrl?: string,
+    ) {}
 
     initialize(): Promise<void> {
         if (this.isReady) return Promise.resolve();
@@ -59,6 +67,12 @@ export class DesktopCommanderIntegration {
 
     private async initializeInternal() {
         console.debug('[DEBUG] DesktopCommanderIntegration.initialize() called');
+
+        if (this.managedMcpUrl) {
+            await this.initializeManagedHttp();
+            return;
+        }
+
         const config = await this.resolveMcpConfig();
 
         if (!config) {
@@ -69,15 +83,25 @@ export class DesktopCommanderIntegration {
         console.log(` - ⏳ Connecting to Local Desktop Commander MCP using: ${config.command} ${config.args.join(' ')}`);
         console.debug('[DEBUG] MCP config:', JSON.stringify(config, null, 2));
 
+        let startupStderr: StartupStderrCapture | null = null;
+        let childExited = false;
         try {
             console.debug('[DEBUG] Creating StdioClientTransport');
             // DC_REMOTE_DEVICE tells the spawned server it is serving remote
             // services, so it suppresses local-only behavior like opening the
             // welcome page in a browser the remote user would never see.
+            // stderr is piped (and forwarded to ours) rather than inherited so a
+            // child that dies during startup — e.g. refused by the executor
+            // lease — can explain why instead of a bare "Connection closed".
             this.mcpTransport = new StdioClientTransport({
                 ...config,
-                env: { ...getDefaultEnvironment(), ...config.env, DC_REMOTE_DEVICE: 'true' }
+                env: { ...getDefaultEnvironment(), ...config.env, DC_REMOTE_DEVICE: 'true' },
+                stderr: 'pipe',
             });
+            startupStderr = new StartupStderrCapture(this.mcpTransport.stderr as Readable | null);
+            // Client.connect() chains this handler; before initialization
+            // completes, a close can only mean the child went away.
+            this.mcpTransport.onclose = () => { childExited = true; };
 
             // Create MCP client
             console.debug('[DEBUG] Creating MCP Client');
@@ -102,6 +126,7 @@ export class DesktopCommanderIntegration {
                 throw new Error('Desktop Commander integration startup was cancelled by shutdown');
             }
             this.isReady = true;
+            startupStderr.stop();
             this.mcpTransport.onclose = () => this.handleLocalDisconnect('stdio transport closed');
             this.mcpTransport.onerror = (error: Error) =>
                 this.handleLocalDisconnect(`stdio transport error: ${error?.message ?? String(error)}`);
@@ -110,14 +135,120 @@ export class DesktopCommanderIntegration {
             console.debug('[DEBUG] Desktop Commander MCP connection successful');
 
         } catch (error) {
-            console.error(' - ❌ Failed to connect to Desktop Commander MCP:', error);
-            console.debug('[DEBUG] MCP connection error:', error);
             this.isReady = false;
             this.mcpClient = null;
             if (this.mcpTransport) {
                 try { await this.mcpTransport.close(); } catch { /* already dead */ }
                 this.mcpTransport = null;
             }
+            // Let stderr chunks already read from the dead child drain into the capture.
+            await new Promise((resolve) => setImmediate(resolve));
+            const startupError = startupStderr
+                ? describeChildStartupFailure(error, { childExited, stderr: startupStderr.summary() })
+                : error;
+            startupStderr?.stop();
+            console.error(' - ❌ Failed to connect to Desktop Commander MCP:', startupError instanceof Error ? startupError.message : startupError);
+            console.debug('[DEBUG] MCP connection error:', error);
+            // Telemetry keeps the original error only; child stderr stays local.
+            await captureRemote('desktop_integration_init_failed', { error });
+            throw startupError;
+        }
+    }
+
+    private async initializeManagedHttp(): Promise<void> {
+        const url = new URL(this.managedMcpUrl!);
+
+        if (url.pathname !== '/mcp') {
+            throw new Error(`Managed Desktop Commander URL must target /mcp (got ${url.pathname})`);
+        }
+
+        // Never attach the remote supervisor directly to the unauthenticated
+        // bridge. All managed calls must traverse the OAuth/ACS gateway.
+        if (
+            (url.hostname === '127.0.0.1' || url.hostname === 'localhost') &&
+            url.port === '8002'
+        ) {
+            throw new Error('Managed remote attachment to raw bridge port 8002 is forbidden');
+        }
+
+        console.log(` - ⏳ Attaching to managed Desktop Commander MCP: ${url.origin}${url.pathname}`);
+
+        const provider = new GatewayOAuthProvider();
+
+        const makeTransport = () =>
+            new StreamableHTTPClientTransport(url, { authProvider: provider });
+
+        const makeClient = () =>
+            new Client(
+                { name: 'desktop-commander-client', version: '1.0.0' },
+                { capabilities: {} },
+            );
+
+        let transport = makeTransport();
+        let client = makeClient();
+
+        try {
+            try {
+                await client.connect(transport, {
+                    timeout: MCP_CONNECT_TIMEOUT_MS,
+                    maxTotalTimeout: MCP_CONNECT_TIMEOUT_MS,
+                });
+            } catch (error) {
+                if (!(error instanceof UnauthorizedError)) throw error;
+
+                console.log(' - 🔐 Managed gateway authorization required');
+                const authorizationCode = await provider.waitForAuthorizationCode();
+
+                // Exchange the PKCE callback code using the transport that
+                // initiated the OAuth flow.
+                await transport.finishAuth(authorizationCode);
+                await transport.close().catch(() => undefined);
+
+                // A started Streamable HTTP transport is not restartable.
+                // Reconnect using a fresh transport and client; OAuth state is
+                // persisted by the provider.
+                transport = makeTransport();
+                client = makeClient();
+
+                await client.connect(transport, {
+                    timeout: MCP_CONNECT_TIMEOUT_MS,
+                    maxTotalTimeout: MCP_CONNECT_TIMEOUT_MS,
+                });
+            }
+
+            if (this.shutdownRequested) {
+                await transport.close().catch(() => undefined);
+                await client.close().catch(() => undefined);
+                throw new Error('Desktop Commander integration startup was cancelled by shutdown');
+            }
+
+            this.mcpTransport = transport;
+            this.mcpClient = client;
+            this.isReady = true;
+
+            transport.onclose = () =>
+                this.handleLocalDisconnect('managed HTTP transport closed');
+
+            transport.onerror = (error: Error) =>
+                this.handleLocalDisconnect(
+                    `managed HTTP transport error: ${error?.message ?? String(error)}`,
+                );
+
+            console.log(' - 🔌 Attached to managed Desktop Commander MCP');
+            console.debug('[DEBUG] Managed Desktop Commander MCP connection successful');
+        } catch (error) {
+            this.isReady = false;
+            this.mcpClient = null;
+            this.mcpTransport = null;
+
+            await transport.close().catch(() => undefined);
+            await client.close().catch(() => undefined);
+
+            console.error(
+                ' - ❌ Failed to attach to managed Desktop Commander MCP:',
+                error instanceof Error ? error.message : error,
+            );
+
             await captureRemote('desktop_integration_init_failed', { error });
             throw error;
         }
