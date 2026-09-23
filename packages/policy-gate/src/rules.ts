@@ -143,23 +143,26 @@ function isSudo(command: string[]): boolean {
   return command[0] === "sudo" || command.includes("sudo");
 }
 
+/** Action kinds policy evaluates. Anything else is denied as unknown (fail closed). */
+export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
+  "system.status",
+  "fs.list",
+  "fs.stat",
+  "fs.read",
+  "fs.search_name",
+  "fs.write",
+  "fs.patch",
+  "fs.move",
+  "fs.delete",
+  "agent.prompt",
+  "cmd.preview",
+  "cmd.run",
+  "service.restart",
+  "shell"
+]);
+
 function isSupportedAction(kind: string): boolean {
-  return (
-    kind === "system.status" ||
-    kind === "fs.list" ||
-    kind === "fs.stat" ||
-    kind === "fs.read" ||
-    kind === "fs.search_name" ||
-    kind === "fs.write" ||
-    kind === "fs.patch" ||
-    kind === "fs.move" ||
-    kind === "fs.delete" ||
-    kind === "agent.prompt" ||
-    kind === "cmd.preview" ||
-    kind === "cmd.run" ||
-    kind === "service.restart" ||
-    kind === "shell"
-  );
+  return SUPPORTED_ACTION_KINDS.includes(kind);
 }
 
 function isRmRfRoot(command: string[]): boolean {

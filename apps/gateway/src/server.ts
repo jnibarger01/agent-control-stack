@@ -41,6 +41,8 @@ import {
   createPolicyEngine,
   createWorkItemTools,
   explainPolicy,
+  previewWorkItemPolicy,
+  SUPPORTED_ACTION_KINDS,
   workItemToolNames
 } from "@agent-control-stack/policy-gate";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
@@ -549,7 +551,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       attemptLeasesByWorkItem: Object.fromEntries(
         ids.map((id) => [id, (leases.get(id) ?? []).map(toMissionControlAttemptLease)])
       ),
-      executionBackend: reportedExecutionBackend()
+      executionBackend: reportedExecutionBackend(),
+      composerActionKinds: [...SUPPORTED_ACTION_KINDS]
     };
   }
 
@@ -567,6 +570,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       reply.header("cache-control", "no-store");
       return { fragments: renderDashboardFragments(missionControlViewModel(request)) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  // Dashboard-internal: what would policy do with this composer draft? Same
+  // contract admission and create-time policy as POST /work-items, evaluated
+  // for the caller's requester identity, but nothing is created or audited.
+  app.post("/dashboard/policy-preview", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      const credential = gatewayCredentialForRequest(request, auth);
+      reply.header("cache-control", "no-store");
+      return previewWorkItemPolicy(policy, {
+        ...requestObject(request.body),
+        requester: credential ? requesterForCredential(credential) : "user"
+      });
     } catch (error) {
       return sendError(reply, error);
     }
@@ -2248,6 +2267,7 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/dc/runtime/bootstrap" ||
     path === "/dc/runtime/bootstrap/complete" ||
     path === "/policy/explain" ||
+    path === "/dashboard/policy-preview" ||
     path.startsWith("/work-items/") ||
     path.startsWith("/webhooks/")
   );
