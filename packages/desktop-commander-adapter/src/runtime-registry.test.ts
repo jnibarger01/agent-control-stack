@@ -165,6 +165,21 @@ describe("SqliteDesktopCommanderRuntimeRegistry", () => {
     store.close();
   });
 
+  it("reports whether a durable managed runtime is already active for restart reconciliation", () => {
+    const store = registry();
+    expect(store.hasActiveRuntime("runtime_1")).toBe(false);
+    const bootstrap = store.issueBootstrap({
+      runtimeId: "runtime_1",
+      identityConfigFingerprint: identity,
+      scopes: ["fs.read"]
+    });
+    store.completeBootstrap(bootstrap);
+    expect(store.hasActiveRuntime("runtime_1")).toBe(true);
+    store.revoke("runtime_1", "test revocation");
+    expect(store.hasActiveRuntime("runtime_1")).toBe(false);
+    store.close();
+  });
+
   it("supersedes an unconsumed bootstrap challenge so immediate startup retry is safe", () => {
     const store = registry();
     const first = store.issueBootstrap({
