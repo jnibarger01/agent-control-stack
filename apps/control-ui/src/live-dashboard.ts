@@ -20,7 +20,18 @@ export const DASHBOARD_FRAGMENT_TARGETS = {
   systemStats: "#system-stats"
 } as const;
 
-export type DashboardFragmentName = keyof typeof DASHBOARD_FRAGMENT_TARGETS;
+/**
+ * Sections that SSE events append to or refresh on their own. They are only
+ * replaced after a reconnect, because `/events` does not replay what was
+ * missed while the stream was down.
+ */
+export const DASHBOARD_CATCH_UP_TARGETS = {
+  eventsTimeline: "#events-timeline",
+  connectors: "#connectors-body",
+  policyEvents: "#policy-body"
+} as const;
+
+export type DashboardFragmentName = keyof typeof DASHBOARD_FRAGMENT_TARGETS | keyof typeof DASHBOARD_CATCH_UP_TARGETS;
 export type DashboardFragments = Record<DashboardFragmentName, string> & { generatedAt: string };
 
 /** Debounce for work-item events, so a burst of transitions costs one fetch. */
@@ -29,6 +40,16 @@ export const WORK_ITEM_REFRESH_DEBOUNCE_MS = 250;
 export const AGENT_REFRESH_DEBOUNCE_MS = 5_000;
 /** Never fetch fragments more often than this. */
 export const MIN_REFRESH_INTERVAL_MS = 1_000;
+/**
+ * Agent status ages out on elapsed time alone (online → stale → offline), so
+ * refresh on this cadence while connected even when no event arrives.
+ */
+export const PERIODIC_REFRESH_MS = 30_000;
+/** Retry a failed fragment fetch with backoff, capped here. */
+export const MAX_REFRESH_RETRY_MS = 30_000;
+
+/** Event name prefixes that change work items, attempts, or leases. */
+export const WORK_EVENT_PREFIXES = ["work_item.", "execution_attempt.", "attempt_lease."] as const;
 
 function scriptSafeJson(value: unknown): string {
   return JSON.stringify(value).replace(/</g, "\\u003c");
@@ -42,12 +63,17 @@ function scriptSafeJson(value: unknown): string {
 export function liveDashboardClientSource(): string {
   return `
 const dashboardFragmentTargets = ${scriptSafeJson(DASHBOARD_FRAGMENT_TARGETS)};
+const dashboardCatchUpTargets = ${scriptSafeJson(DASHBOARD_CATCH_UP_TARGETS)};
+const workEventPrefixes = ${scriptSafeJson(WORK_EVENT_PREFIXES)};
 const appliedFragments = {};
 let dashboardRefreshTimer = null;
 let dashboardRefreshDueAt = 0;
 let dashboardRefreshInFlight = false;
 let dashboardRefreshQueued = false;
 let lastDashboardRefreshAt = 0;
+let lastDashboardAttemptAt = 0;
+let dashboardRefreshFailures = 0;
+let dashboardCatchUpPending = false;
 let lastSseEventAt = 0;
 let dashboardRefreshError = '';
 let selectedWorkItemId = null;
@@ -74,8 +100,9 @@ function cssAttr(value) {
   return String(value).replace(/["\\\\]/g, '\\\\$&');
 }
 
-function scheduleDashboardRefresh(delayMs) {
-  const earliest = lastDashboardRefreshAt + ${MIN_REFRESH_INTERVAL_MS};
+function scheduleDashboardRefresh(delayMs, options) {
+  if (options && options.catchUp) dashboardCatchUpPending = true;
+  const earliest = lastDashboardAttemptAt + ${MIN_REFRESH_INTERVAL_MS};
   const due = Math.max(Date.now() + Math.max(0, delayMs || 0), earliest);
   if (dashboardRefreshTimer && dashboardRefreshDueAt <= due) return;
   if (dashboardRefreshTimer) clearTimeout(dashboardRefreshTimer);
@@ -92,22 +119,40 @@ async function refreshDashboard() {
     return;
   }
   dashboardRefreshInFlight = true;
+  lastDashboardAttemptAt = Date.now();
+  const catchUp = dashboardCatchUpPending;
+  dashboardCatchUpPending = false;
+  let retryIn = 0;
   try {
     const body = await fetchJson('/dashboard/fragments' + (dashboardFinishedLimit === null ? '' : '?finished=' + dashboardFinishedLimit));
-    applyDashboardFragments((body && body.fragments) || {});
+    if (!body || !body.fragments) throw new Error('invalid fragments response');
+    applyDashboardFragments(body.fragments, { catchUp: catchUp });
     dashboardRefreshError = '';
-  } catch (error) {
-    dashboardRefreshError = 'refresh failed';
-  } finally {
+    dashboardRefreshFailures = 0;
+    // Only a response that was actually applied counts as "updated".
     lastDashboardRefreshAt = Date.now();
+  } catch (error) {
+    dashboardRefreshFailures += 1;
+    dashboardRefreshError = 'refresh failed, retrying';
+    if (catchUp) dashboardCatchUpPending = true;
+    retryIn = Math.min(${MAX_REFRESH_RETRY_MS}, 1000 * Math.pow(2, dashboardRefreshFailures - 1));
+  } finally {
     dashboardRefreshInFlight = false;
     renderLiveStatus();
-    if (dashboardRefreshQueued) {
+    if (retryIn) {
+      dashboardRefreshQueued = false;
+      scheduleDashboardRefresh(retryIn);
+    } else if (dashboardRefreshQueued) {
       dashboardRefreshQueued = false;
       scheduleDashboardRefresh(${WORK_ITEM_REFRESH_DEBOUNCE_MS});
     }
   }
 }
+
+// Agent freshness ages out without events; keep counters honest while live.
+setInterval(function () {
+  if (sseConnected && document.visibilityState !== 'hidden') scheduleDashboardRefresh(0);
+}, ${PERIODIC_REFRESH_MS});
 
 function captureOperatorState() {
   const active = document.activeElement;
@@ -150,14 +195,15 @@ function restoreOperatorState(state) {
   }
 }
 
-function applyDashboardFragments(fragments) {
-  const changed = Object.keys(dashboardFragmentTargets).filter(function (name) {
+function applyDashboardFragments(fragments, options) {
+  const targets = Object.assign({}, dashboardFragmentTargets, options && options.catchUp ? dashboardCatchUpTargets : {});
+  const changed = Object.keys(targets).filter(function (name) {
     return typeof fragments[name] === 'string' && appliedFragments[name] !== fragments[name];
   });
   if (!changed.length) return false;
   const state = captureOperatorState();
   changed.forEach(function (name) {
-    const target = document.querySelector(dashboardFragmentTargets[name]);
+    const target = document.querySelector(targets[name]);
     if (!target) return;
     target.innerHTML = fragments[name];
     appliedFragments[name] = fragments[name];
@@ -181,7 +227,7 @@ function eventWorkItemId(data) {
 function onLiveAuditEvent(name, data) {
   lastSseEventAt = Date.now();
   renderLiveStatus();
-  if (name.indexOf('work_item.') === 0) {
+  if (workEventPrefixes.some(function (prefix) { return name.indexOf(prefix) === 0; })) {
     scheduleDashboardRefresh(${WORK_ITEM_REFRESH_DEBOUNCE_MS});
     const id = eventWorkItemId(data);
     if (selectedWorkItemId && id === selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });

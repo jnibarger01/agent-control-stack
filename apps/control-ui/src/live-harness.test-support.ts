@@ -16,6 +16,8 @@ export function bootLive(initial: MissionControlViewModel, extraRoutes: Record<s
   const assigned: string[] = [];
   let model: MissionControlViewModel | ((finished?: number) => MissionControlViewModel) = initial;
   let postResponse: { status: number; body: unknown } = { status: 200, body: {} };
+  let failFragments = 0;
+  let detailGate: (() => Promise<void>) | undefined;
 
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (error: Error) => {
@@ -57,6 +59,10 @@ export function bootLive(initial: MissionControlViewModel, extraRoutes: Record<s
         calls.push({ url, method, body: init?.body ? JSON.parse(init.body) : undefined });
         const path = url.split("?")[0] ?? url;
         if (path === "/dashboard/fragments") {
+          if (failFragments > 0) {
+            failFragments -= 1;
+            throw new Error("network down");
+          }
           const finished = new URL(url, "https://acs.local").searchParams.get("finished");
           const current = typeof model === "function" ? model(finished === null ? undefined : Number(finished)) : model;
           return { ok: true, status: 200, json: async () => ({ fragments: renderDashboardFragments(current) }) };
@@ -72,8 +78,10 @@ export function bootLive(initial: MissionControlViewModel, extraRoutes: Record<s
         }
         const detail = url.match(/^\/work-items\/([^/]+)$/);
         if (detail) {
+          // Snapshot the model at request time, then optionally hold the response.
           const current = typeof model === "function" ? model() : model;
           const found = current.workItems.find((candidate) => candidate.id === decodeURIComponent(detail[1] ?? ""));
+          if (detailGate) await detailGate();
           return { ok: true, status: 200, json: async () => ({ workItem: found, events: [] }) };
         }
         return { ok: true, status: 200, json: async () => ({ agents: [] }) };
@@ -130,6 +138,12 @@ export function bootLive(initial: MissionControlViewModel, extraRoutes: Record<s
     },
     setPostResponse(next: { status: number; body: unknown }) {
       postResponse = next;
+    },
+    failNextFragments(count: number) {
+      failFragments = count;
+    },
+    setDetailGate(gate: (() => Promise<void>) | undefined) {
+      detailGate = gate;
     },
     fragmentFetches: () => calls.filter((call) => call.url.startsWith("/dashboard/fragments")).length,
     liveText: () => document.querySelector(".live")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
