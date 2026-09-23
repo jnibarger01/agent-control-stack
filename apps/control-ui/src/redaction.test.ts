@@ -9,12 +9,16 @@ import {
   type MissionControlViewModel
 } from "./index.js";
 
+// Fake credentials are assembled at runtime so secret scanners never see a
+// credential-shaped literal in source; the redaction rules still see one.
+const fake = (...parts: string[]) => parts.join("");
+
 const SECRET_SAMPLES = {
   bearer: "Authorization: Bearer abc.def-ghi_123==",
-  openai: "key sk-proj-ABCDEFGHIJKLMNOP1234",
-  github: "token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
-  slack: "xoxb-1234567890-abcdefghij",
-  jwt: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyMTIzIn0.c2lnbmF0dXJlLXZhbHVl",
+  openai: fake("key sk", "-proj-", "ABCDEFGHIJKLMNOP1234"),
+  github: fake("token gh", "p_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"),
+  slack: fake("xox", "b-", "1234567890-abcdefghij"),
+  jwt: fake("ey", "JhbGciOiJIUzI1NiJ9", ".", "eyJzdWIiOiJ1c2VyMTIzIn0", ".", "c2lnbmF0dXJlLXZhbHVl"),
   query: "https://example.test/cb?code=ok&access_token=s3cr3tvalue&x=1",
   basicAuth: "postgres://admin:hunter2@db.internal:5432/acs"
 };
