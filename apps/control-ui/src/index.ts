@@ -14,6 +14,7 @@ import { redactSecrets, redactedAttributesJson, redactionClientSource } from "./
 import { workItemControlsClientSource, workItemControlsHtml } from "./work-item-controls.js";
 import { liveDashboardClientSource, type DashboardFragments } from "./live-dashboard.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
+import { composerClientSource, composerHtml } from "./composer.js";
 import { systemProbesClientSource } from "./system-probes.js";
 import {
   approvalWaitMs,
@@ -49,6 +50,7 @@ export {
   type DashboardFragments
 } from "./live-dashboard.js";
 export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE } from "./audit-timeline.js";
+export { COMPOSER_PREVIEW_DEBOUNCE_MS, composerHtml, DEFAULT_ACTION_KIND } from "./composer.js";
 export { PROBE_HISTORY, PROBE_INTERVAL_MS, PROBE_PATH, PROBE_SLOW_MS } from "./system-probes.js";
 export {
   approvalWaitMs,
@@ -120,6 +122,8 @@ export interface MissionControlViewModel {
   executionBackend?: string;
   /** Exact per-status counts across the store. When present, cards use these instead of counting `workItems`. */
   statusCounts?: Record<string, number>;
+  /** Action kinds the composer suggests (the policy's supported kinds). */
+  composerActionKinds?: string[];
   /** How long an approval may wait before it is flagged as over SLA. Defaults to 30 minutes. */
   approvalSlaMs?: number;
   /** Present when `workItems` carries only a window of finished items. */
@@ -733,7 +737,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div><div class="system-panel"><div id="system-stats">${fragments.systemStats}</div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
-        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
+        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composerHtml(model.composerActionKinds ?? [])}</article>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div>${connectorsPanel(agents, model.executionBackend)}</article>
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>audit</span></div>${policyPanel(events)}</article>
         <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
@@ -1144,17 +1148,6 @@ function eventTimeline(events: StoredAuditEvent[]): string {
         `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(redactedAttributesJson(event.attributes))}</small></li>`
     )
     .join("")}</ol>`;
-}
-
-function composer(): string {
-  return `<form id="task-form">
-    <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
-    <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
-    <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
-    <label>Requested action kind<input name="actionKind" placeholder="agent.prompt, fs.read, fs.write, shell" /></label>
-    <label>Requested action description<input name="actionDescription" placeholder="Defaults to prompt dispatch when blank" /></label>
-    <button type="submit">Create Work Item</button><output id="task-result"></output>
-  </form>`;
 }
 
 function clientScript(): string {
@@ -1822,35 +1815,7 @@ document.addEventListener('click', async (event) => {
 });
 
 
-document.querySelector('#task-form')?.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const formElement = event.currentTarget;
-  const form = new FormData(formElement);
-  const actionKind = String(form.get('actionKind') || '').trim();
-  const actionDescription = String(form.get('actionDescription') || '').trim();
-  const service = String(form.get('service') || '').trim();
-  const payload = {
-    title: String(form.get('title') || ''),
-    intent: String(form.get('intent') || ''),
-    risk: String(form.get('risk') || 'medium'),
-    target: service ? { services: [service] } : {},
-    requestedActions: [{
-      kind: actionKind || 'agent.prompt',
-      description: actionDescription || 'Dispatch prompt to selected agent',
-      params: {}
-    }]
-  };
-  const headers = { 'content-type': 'application/json' };
-  const res = await fetch('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
-  const body = await res.json().catch(() => ({}));
-  const createdId = body.id || (body.workItem && body.workItem.id) || '';
-  document.querySelector('#task-result').textContent = res.ok ? 'Created ' + createdId : 'Rejected: ' + (body.error || res.status);
-  if (res.ok) {
-    formElement.reset();
-    announce('Created ' + createdId);
-    scheduleDashboardRefresh(0);
-  }
-});
+${composerClientSource()}
 
 const viewAliases = {
   overview: 'overview',
@@ -2088,6 +2053,17 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 form { display: grid; gap: 11px; padding: 14px; }
 label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
 input, textarea, select { width: 100%; background: #ffffff; color: var(--ink); border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+.field-hint { color: var(--muted); font-size: 11px; margin-top: -4px; }
+.field-error { color: var(--red); font-size: 12px; min-height: 0; }
+.field-hint.field-error { color: var(--amber); }
+textarea[aria-invalid="true"] { border-color: var(--red); }
+.composer-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.composer-preview { border: 1px dashed var(--line); border-radius: 6px; padding: 8px 10px; font-size: 12px; }
+.composer-preview p { margin: 0 0 4px; }
+.composer-preview[data-outcome="auto_admitted"] { border-color: var(--green); }
+.composer-preview[data-outcome="needs_approval"] { border-color: var(--amber); }
+.composer-preview[data-outcome="blocked"], .composer-preview[data-outcome="rejected"] { border-color: var(--red); }
+.preview-actions { margin: 4px 0; padding-left: 16px; }
 .form-row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; }
 button[type=submit] { background: #2563eb; color: white; border: 0; border-radius: 9px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
 output { color: var(--accent); min-height: 20px; }
