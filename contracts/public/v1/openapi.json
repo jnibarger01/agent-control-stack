@@ -66,6 +66,93 @@
         }
       }
     },
+    "/authority": {
+      "get": {
+        "operationId": "getAuthority",
+        "summary": "Read the canonical execution mode and managed authority observation.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/execution-mode": {
+      "get": {
+        "operationId": "getExecutionMode",
+        "summary": "Read the canonical strict/admin execution mode.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "post": {
+        "operationId": "setExecutionMode",
+        "summary": "Set the canonical strict/admin execution mode.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "strict",
+                      "admin"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  }
+                },
+                "required": [
+                  "mode"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
     "/session/login": {
       "post": {
         "operationId": "createSession",

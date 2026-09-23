@@ -17,6 +17,9 @@ Commands:
   skills retrieve --problem <text>
   skills targets
   status [--json]
+  mode status
+  mode strict
+  mode admin
   doctor [--json]
   publication list [--json]
   audit export [--db <path>] [-o <file>]
@@ -34,6 +37,8 @@ export type AcsCommand =
   | { kind: "mcp"; forwarded: string[] }
   | { kind: "gateway"; forwarded: string[] }
   | { kind: "status"; json: boolean }
+  | { kind: "mode-status" }
+  | { kind: "mode-set"; mode: "strict" | "admin" }
   | { kind: "doctor"; json: boolean }
   | { kind: "publication-list"; json: boolean }
   | { kind: "audit-export"; dbPath?: string; outputPath?: string }
@@ -173,6 +178,15 @@ function parseAuditArgs(args: string[]): AcsCommand {
   );
 }
 
+function parseModeArgs(args: string[]): AcsCommand {
+  const sub = args[0];
+  if (args.length !== 1 || (sub !== "status" && sub !== "strict" && sub !== "admin")) {
+    throw new AcsUsageError("Usage: acs mode status | acs mode strict | acs mode admin");
+  }
+  if (sub === "status") return { kind: "mode-status" };
+  return { kind: "mode-set", mode: sub };
+}
+
 export function parseAcsArgs(args: string[]): AcsCommand {
   if (args.length === 0 || args.includes("--help") || args.includes("-h") || args[0] === "help") {
     return { kind: "help" };
@@ -195,6 +209,8 @@ export function parseAcsArgs(args: string[]): AcsCommand {
       return { kind: "gateway", forwarded: rejectUnexpectedArgs("gateway", takeOptionalServe(rest, "gateway")) };
     case "status":
       return parseStatusArgs("status", rest);
+    case "mode":
+      return parseModeArgs(rest);
     case "doctor":
       return parseStatusArgs("doctor", rest);
     case "publication":
