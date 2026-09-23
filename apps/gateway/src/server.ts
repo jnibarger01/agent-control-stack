@@ -24,7 +24,12 @@ import {
   type ContainmentConfig,
   type ExecutionAuthorization
 } from "@agent-control-stack/desktop-commander-adapter";
-import { projectAgents, renderDashboard, toMissionControlAttemptLease } from "@agent-control-stack/control-ui";
+import {
+  projectAgents,
+  renderDashboard,
+  toMissionControlAttemptLease,
+  type ApprovalActionOption
+} from "@agent-control-stack/control-ui";
 import {
   MachineController,
   loadMachineControllerConfig,
@@ -521,7 +526,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           workItems: workItemList,
           events,
           registeredAgents: workItems.listRegistryAgents(),
-          approvalActionHashesByWorkItem: approvalActionHashesByWorkItem(
+          approvalActionsByWorkItem: approvalActionsByWorkItem(
             policy,
             workItemList,
             gatewayCredentialForRequest(request, auth)?.actor
@@ -1938,11 +1943,11 @@ function requireApprovalActionHash(input: Record<string, unknown>): void {
   }
 }
 
-function approvalActionHashesByWorkItem(
+function approvalActionsByWorkItem(
   policy: ReturnType<typeof createPolicyEngine>,
   workItems: WorkItem[],
   actor: string | undefined
-): Record<string, string[]> {
+): Record<string, ApprovalActionOption[]> {
   if (!actor) {
     return {};
   }
@@ -1954,7 +1959,11 @@ function approvalActionHashesByWorkItem(
         policy
           .evaluateWorkItem(workItem, actor, "approve")
           .filter((evaluation) => evaluation.decision.decision === "require_approval")
-          .map((evaluation) => evaluation.actionHash)
+          .map((evaluation) => ({
+            actionHash: evaluation.actionHash,
+            kind: evaluation.action.kind,
+            description: evaluation.action.description
+          }))
       ])
       .filter(([, hashes]) => hashes.length > 0)
   );

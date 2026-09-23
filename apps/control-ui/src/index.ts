@@ -9,6 +9,16 @@ import {
   type StoredAuditEvent,
   type WorkItem
 } from "@agent-control-stack/work-items";
+import { redactSecrets, redactedAttributesJson, redactionClientSource } from "./redaction.js";
+
+export {
+  isSecretAttributeKey,
+  redactAttributes,
+  redactedAttributesJson,
+  redactSecrets,
+  SECRET_KEY_PATTERN,
+  SECRET_VALUE_PATTERNS
+} from "./redaction.js";
 
 export interface MissionControlAgent {
   id: string;
@@ -55,7 +65,10 @@ export interface MissionControlViewModel {
   events: StoredAuditEvent[];
   registeredAgents?: RegistryAgentDetail[];
   agents?: MissionControlAgent[];
+  /** Legacy hash-only approval options. Prefer `approvalActionsByWorkItem`, which labels each hash. */
   approvalActionHashesByWorkItem?: Record<string, string[]>;
+  /** Approval options per work item: each policy-gated action hash with the action it approves. */
+  approvalActionsByWorkItem?: Record<string, ApprovalActionOption[]>;
   /** Current execution plan per work item, when one has been drafted (packages/work-items getCurrentExecutionPlan). */
   executionPlansByWorkItem?: Record<string, ExecutionPlanRecord>;
   /** Current plan's admission outcome per work item, when it has been admitted (getExecutionPlanAdmission). */
@@ -67,6 +80,13 @@ export interface MissionControlViewModel {
   /** Explicit worker backend label, when the gateway knows it. Never a secret. */
   executionBackend?: string;
   now?: Date;
+}
+
+/** One approvable action: the policy fingerprint plus the requested action it fingerprints. */
+export interface ApprovalActionOption {
+  actionHash: string;
+  kind: string;
+  description?: string;
 }
 
 /** Canonical work-item statuses used by the queue filter chips. Unknown values are ignored (no-op). */
@@ -319,6 +339,8 @@ export type ApprovalConfirmRequest = {
   workItemId: string;
   action: "approve" | "reject";
   actionHash?: string;
+  /** Requested action kind the hash approves, when known. */
+  actionKind?: string;
   risk: string;
 };
 
@@ -356,11 +378,15 @@ export function requestApprovalConfirm(
     const hashLine = hashPrefix
       ? `<p class="approval-confirm-hash">Action hash: <code>${escapeHtml(hashPrefix)}</code></p>`
       : "";
+    const kindLine = request.actionKind
+      ? `<p class="approval-confirm-kind">Action: <code>${escapeHtml(request.actionKind)}</code></p>`
+      : "";
 
     overlay.innerHTML = `<div class="approval-confirm-card">
   <h3 id="approval-confirm-title">${escapeHtml(actionLabel)} high-risk work item?</h3>
   <p class="approval-confirm-id">Work item: <code>${escapeHtml(request.workItemId)}</code></p>
   <p class="approval-confirm-risk">Risk: <strong>${escapeHtml(request.risk)}</strong></p>
+  ${kindLine}
   ${hashLine}
   <div class="approval-confirm-actions">
     <button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>
@@ -411,6 +437,7 @@ export type ApprovalActionClickOptions = {
       reject?: string;
       unblock?: string;
       actionHash?: string;
+      actionKind?: string;
       risk?: string;
     };
     getAttribute?(name: string): string | null;
@@ -463,6 +490,7 @@ export async function handleApprovalActionClick(options: ApprovalActionClickOpti
       workItemId: id,
       action,
       actionHash: button.dataset.actionHash,
+      actionKind: button.dataset.actionKind,
       risk
     });
     if (!confirmed) {
@@ -540,11 +568,11 @@ export function renderWorkItemDetailHtml(
           const attrs = event.attributes ?? {};
           const ref = attrs["work_item.id"] || attrs["agent.id"] || attrs["connector.id"] || "";
           const when = event.timeUnixNano ? time(nanoToIso(event.timeUnixNano)) : "—";
-          return `<li><time>${when}</time><strong>${escapeHtml(event.name || "event")}</strong><small>${escapeHtml(ref)}</small></li>`;
+          return `<li><time>${when}</time><strong>${escapeHtml(event.name || "event")}</strong><small>${escapeHtml(redactSecrets(ref))}</small></li>`;
         })
         .join("")}</ol>`
     : `<p class="muted">No matching events.</p>`;
-  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(workItem.intent || "—")}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? JSON.stringify(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div><div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
+  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div><div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
 }
 
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
@@ -597,7 +625,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, executionAttemptsByWorkItem, attemptLeasesByWorkItem)}</article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, model.approvalActionHashesByWorkItem ?? {})}</article>
+        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, approvalOptionsByWorkItem(model))}</article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div>${operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, model.now ?? new Date())}</article>
@@ -608,7 +636,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div>${connectorsPanel(agents, model.executionBackend)}</article>
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>audit</span></div>${policyPanel(events)}</article>
-        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approval and cancellation actions use authenticated backend routes and append audit events. Bulk approval is not exposed.</p></article>
+        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone are not exposed here. Bulk approval is not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
       </section>
     </main>
     <script>${clientScript()}</script>
@@ -769,7 +797,7 @@ function agentTable(agents: MissionControlAgent[]): string {
   return `<div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">${agents
     .map(
       (agent) =>
-        `<tr class="agent-row" tabindex="0" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(agent.lastError) : "—"}</td></tr>`
+        `<tr class="agent-row" tabindex="0" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(redactSecrets(agent.lastError)) : "—"}</td></tr>`
     )
     .join("")}</tbody></table></div>`;
 }
@@ -820,7 +848,7 @@ function workQueue(
       const attempts = executionAttemptsByWorkItem[item.id] ?? [];
       const leases = attemptLeasesByWorkItem[item.id] ?? [];
       const agentId = workItemAgentId(item, attempts, leases);
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.intent)}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
     .join(
       ""
@@ -848,7 +876,17 @@ function executionSummary(attempts: ExecutionAttempt[], leases: MissionControlAt
   return `<small class="execution-status">Attempt #${escapeHtml(String(attempt.attemptNumber))} &middot; ${escapeHtml(attempt.status)}${worker ? ` &middot; ${escapeHtml(worker)}` : ""}${lease ? ` &middot; lease ${escapeHtml(lease.status)}` : ""}</small>`;
 }
 
-function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Record<string, string[]>): string {
+function approvalOptionsByWorkItem(model: MissionControlViewModel): Record<string, ApprovalActionOption[]> {
+  const labelled = model.approvalActionsByWorkItem ?? {};
+  const legacy = model.approvalActionHashesByWorkItem ?? {};
+  const out: Record<string, ApprovalActionOption[]> = {};
+  for (const id of new Set([...Object.keys(legacy), ...Object.keys(labelled)])) {
+    out[id] = labelled[id] ?? (legacy[id] ?? []).map((actionHash) => ({ actionHash, kind: "" }));
+  }
+  return out;
+}
+
+function approvalsPanel(items: WorkItem[], approvalActionsByWorkItem: Record<string, ApprovalActionOption[]>): string {
   if (!items.length) return `<p class="empty">No approvals or blocked work.</p>`;
   return `<div class="approvals-list" role="list">${items
     .map((item) => {
@@ -862,7 +900,7 @@ function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Recor
       const resultId = `approval-result-${escapeHtml(item.id)}`;
       const reason = `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="${reasonId}" data-reason="${escapeHtml(item.id)}" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label>`;
       const outcome = `<output id="${resultId}" class="approval-result" aria-live="polite"></output>`;
-      const approvalButtons = approvalButtonsFor(item, approvalActionHashesByWorkItem[item.id] ?? [], reasonId);
+      const approvalButtons = approvalButtonsFor(item, approvalActionsByWorkItem[item.id] ?? [], reasonId);
       if (item.status === "blocked") {
         return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
@@ -871,15 +909,18 @@ function approvalsPanel(items: WorkItem[], approvalActionHashesByWorkItem: Recor
     .join("")}</div>`;
 }
 
-function approvalButtonsFor(item: WorkItem, hashes: string[], reasonId: string): string {
-  if (!hashes.length) {
+function approvalButtonsFor(item: WorkItem, options: ApprovalActionOption[], reasonId: string): string {
+  if (!options.length) {
     return `<button type="button" data-approve="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" disabled aria-describedby="${reasonId}">Approval hash unavailable</button>`;
   }
-  return hashes
-    .map(
-      (hash, index) =>
-        `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(hash)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Approve ${index + 1}</button>`
-    )
+  return options
+    .map((option, index) => {
+      const hashPrefix = approvalActionHashPrefix(option.actionHash, 8);
+      const kind = option.kind ? ` ${escapeHtml(option.kind)}` : ` ${index + 1}`;
+      const described = option.description ? `: ${option.description}` : "";
+      const ariaLabel = `Approve ${option.kind || `action ${index + 1}`}${described} (hash ${hashPrefix}) for ${item.title}`;
+      return `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(option.actionHash)}"${option.kind ? ` data-action-kind="${escapeHtml(option.kind)}"` : ""} data-risk="${escapeHtml(item.risk)}" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${reasonId}" title="${escapeHtml(option.actionHash)}">Approve${kind} <code class="hash-prefix">${escapeHtml(hashPrefix)}</code></button>`;
+    })
     .join("");
 }
 
@@ -890,7 +931,7 @@ function workItemError(item: WorkItem): string {
 
 function workItemResultError(item: WorkItem): string | undefined {
   const result = item.result;
-  return result && typeof result.error === "string" ? result.error : undefined;
+  return result && typeof result.error === "string" ? redactSecrets(result.error) : undefined;
 }
 
 function operatorMetricsPanel(
@@ -971,7 +1012,7 @@ function eventTimeline(events: StoredAuditEvent[]): string {
   return `<ol class="timeline">${events
     .map(
       (event) =>
-        `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(JSON.stringify(event.attributes))}</small></li>`
+        `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(redactedAttributesJson(event.attributes))}</small></li>`
     )
     .join("")}</ol>`;
 }
@@ -1095,7 +1136,7 @@ function appendAuditEvent(event) {
   const nanos = Number(data.timeUnixNano);
   time.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
   name.textContent = data.name || event.type;
-  attrs.textContent = JSON.stringify(data.attributes || {});
+  attrs.textContent = redactedAttributesJsonClient(data.attributes || {});
   item.append(time, name, attrs);
   list.prepend(item);
   while (list.children.length > 10) list.lastElementChild?.remove();
@@ -1114,13 +1155,7 @@ function escapeClient(value) {
   });
 }
 
-function redactClient(value) {
-  return String(value ?? '')
-    .replace(/Bearer\\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer [redacted]')
-    .replace(/\\bsk-[A-Za-z0-9_-]{12,}\\b/g, '[redacted]')
-    .replace(/([?&](?:token|key|secret|password)=)[^&\\s]+/gi, '$1[redacted]');
-}
-
+${redactionClientSource()}
 function formatClientTime(value) {
   if (!value) return '—';
   const date = new Date(value);
@@ -1291,7 +1326,7 @@ function eventList(events) {
   return '<ol class="detail-events">' + events.slice(0, 8).map(function (event) {
     const attrs = event.attributes || {};
     const ref = attrs['work_item.id'] || attrs['agent.id'] || attrs['connector.id'] || '';
-    return '<li><time>' + escapeClient(eventClientTime(event)) + '</time><strong>' + escapeClient(event.name || 'event') + '</strong><small>' + escapeClient(ref) + '</small></li>';
+    return '<li><time>' + escapeClient(eventClientTime(event)) + '</time><strong>' + escapeClient(event.name || 'event') + '</strong><small>' + escapeClient(redactClient(ref)) + '</small></li>';
   }).join('') + '</ol>';
 }
 
@@ -1354,7 +1389,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +
-      detailRow('Target', workItem.target ? JSON.stringify(workItem.target) : '—') +
+      detailRow('Target', workItem.target ? redactedAttributesJsonClient(workItem.target) : '—') +
       detailRow('Created', formatClientTime(workItem.createdAt)) +
     '</dl>' +
     '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(action.description) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
@@ -1530,10 +1565,14 @@ function requestApprovalConfirm(request) {
     const hashLine = hashPrefix
       ? '<p class="approval-confirm-hash">Action hash: <code>' + escapeClientHtml(hashPrefix) + '</code></p>'
       : '';
+    const kindLine = request.actionKind
+      ? '<p class="approval-confirm-kind">Action: <code>' + escapeClientHtml(request.actionKind) + '</code></p>'
+      : '';
     overlay.innerHTML = '<div class="approval-confirm-card">' +
       '<h3 id="approval-confirm-title">' + escapeClientHtml(actionLabel) + ' high-risk work item?</h3>' +
       '<p class="approval-confirm-id">Work item: <code>' + escapeClientHtml(request.workItemId) + '</code></p>' +
       '<p class="approval-confirm-risk">Risk: <strong>' + escapeClientHtml(request.risk) + '</strong></p>' +
+      kindLine +
       hashLine +
       '<div class="approval-confirm-actions">' +
         '<button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>' +
@@ -1586,6 +1625,7 @@ document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach
         workItemId: id,
         action: action,
         actionHash: button.dataset.actionHash,
+        actionKind: button.dataset.actionKind,
         risk: risk
       });
       if (!confirmed) return;
@@ -1884,6 +1924,7 @@ output { color: var(--accent); min-height: 20px; }
 .reason-label .req { color: var(--red); font-weight: 600; }
 .approval-result { display: block; min-height: 1.25em; }
 .approval-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.approval-actions button .hash-prefix { font-size: 11px; opacity: .8; margin-left: 4px; }
 .approval-confirm-overlay { position: fixed; inset: 0; z-index: 2000; background: rgba(17, 20, 23, .45); display: grid; place-items: center; padding: 16px; }
 .approval-confirm-card { width: min(420px, 100%); background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 40px rgba(23, 32, 42, .22); padding: 18px; display: grid; gap: 10px; color: var(--ink); }
 .approval-confirm-card h3 { margin: 0; font-size: 16px; }
