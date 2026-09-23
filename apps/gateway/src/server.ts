@@ -2450,6 +2450,8 @@ function isRateLimitedRoute(url: string): boolean {
   const path = url.split("?", 1)[0];
   return (
     path === "/mcp" ||
+    path === "/execution-mode" ||
+    path === "/authority" ||
     path === "/session/login" ||
     path === "/oauth/device/code" ||
     path === "/oauth/token" ||
@@ -2464,9 +2466,10 @@ function isRateLimitedRoute(url: string): boolean {
   );
 }
 
-function isRateLimitedGetRoute(_url: string): boolean {
+function isRateLimitedGetRoute(url: string): boolean {
   // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
-  return false;
+  const path = url.split("?", 1)[0];
+  return path === "/execution-mode" || path === "/authority";
 }
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
