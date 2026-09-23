@@ -225,8 +225,11 @@ describe("mission control gateway", () => {
           "approvalsCount",
           "approvalsList",
           "cards",
+          "connectors",
+          "eventsTimeline",
           "generatedAt",
           "metrics",
+          "policyEvents",
           "queueFooter",
           "queueList",
           "systemStats"
