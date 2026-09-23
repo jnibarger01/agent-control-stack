@@ -11,7 +11,7 @@
 export const SECRET_VALUE_PATTERNS: ReadonlyArray<readonly [string, string, string]> = [
   [String.raw`Bearer\s+[A-Za-z0-9._~+/-]+=*`, "gi", "Bearer [redacted]"],
   [String.raw`\bsk-[A-Za-z0-9_-]{12,}`, "g", "[redacted]"],
-  [String.raw`\bgh[pousr]_[A-Za-z0-9]{20,}`, "g", "[redacted]"],
+  [String.raw`\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}`, "g", "[redacted]"],
   [String.raw`\bxox[abprs]-[A-Za-z0-9-]{10,}`, "g", "[redacted]"],
   [String.raw`\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}`, "g", "[redacted]"],
   [
@@ -19,11 +19,18 @@ export const SECRET_VALUE_PATTERNS: ReadonlyArray<readonly [string, string, stri
     "gi",
     "$1[redacted]"
   ],
-  [String.raw`(\b[a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@`, "gi", "$1[redacted]@"]
+  // Bounded quantifiers, as in packages/shared/src/redact.ts: unbounded adjacent
+  // classes gated on "://" / "@" backtrack catastrophically on long non-matches.
+  [String.raw`(\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\s/:@]{1,256}:)[^\s/@]{1,256}@`, "g", "$1[redacted]@"],
+  [String.raw`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----`, "g", "[redacted]"],
+  [String.raw`\b([A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|PASSWORD)[A-Z0-9_]*=)[^\s&"']+`, "g", "$1[redacted]"]
 ];
 
-/** Attribute keys whose non-numeric, non-boolean values are always redacted. */
+/** Attribute keys whose values are always redacted, whatever their type. */
 export const SECRET_KEY_PATTERN = String.raw`token|secret|passw(?:or)?d|authorization|cookie|credential|api[-_]?key|private[-_]?key`;
+
+/** Token-count accounting keys that match SECRET_KEY_PATTERN but are not secrets (same list as packages/shared). */
+export const NON_SECRET_KEY_PATTERN = String.raw`^(?:inputTokens|outputTokens|cacheReadInputTokens|cacheCreationInputTokens|maxTokens)$`;
 
 const MAX_REDACTION_DEPTH = 8;
 
@@ -31,6 +38,7 @@ const compiledValuePatterns = SECRET_VALUE_PATTERNS.map(
   ([source, flags, replacement]) => [new RegExp(source, flags), replacement] as const
 );
 const compiledKeyPattern = new RegExp(SECRET_KEY_PATTERN, "i");
+const compiledNonSecretKeyPattern = new RegExp(NON_SECRET_KEY_PATTERN, "i");
 
 export function redactSecrets(value: unknown): string {
   let text = String(value ?? "");
@@ -41,7 +49,7 @@ export function redactSecrets(value: unknown): string {
 }
 
 export function isSecretAttributeKey(key: string): boolean {
-  return compiledKeyPattern.test(key);
+  return compiledKeyPattern.test(key) && !compiledNonSecretKeyPattern.test(key);
 }
 
 /** Deep-copies `value`, redacting secret-looking strings and secret-named keys. */
@@ -52,10 +60,7 @@ export function redactAttributes(value: unknown, depth = 0): unknown {
   if (Array.isArray(value)) return value.map((entry) => redactAttributes(entry, depth + 1));
   const out: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    out[key] =
-      isSecretAttributeKey(key) && typeof entry !== "number" && typeof entry !== "boolean" && entry != null
-        ? "[redacted]"
-        : redactAttributes(entry, depth + 1);
+    out[key] = isSecretAttributeKey(key) && entry != null ? "[redacted]" : redactAttributes(entry, depth + 1);
   }
   return out;
 }
@@ -76,6 +81,7 @@ const redactionValuePatterns = ${scriptSafeJson(SECRET_VALUE_PATTERNS)}.map(func
   return [new RegExp(entry[0], entry[1]), entry[2]];
 });
 const redactionKeyPattern = new RegExp(${scriptSafeJson(SECRET_KEY_PATTERN)}, 'i');
+const redactionNonSecretKeyPattern = new RegExp(${scriptSafeJson(NON_SECRET_KEY_PATTERN)}, 'i');
 function redactClient(value) {
   let text = String(value ?? '');
   redactionValuePatterns.forEach(function (entry) { text = text.replace(entry[0], entry[1]); });
@@ -90,7 +96,7 @@ function redactAttributesClient(value, depth) {
   const out = {};
   Object.keys(value).forEach(function (key) {
     const entry = value[key];
-    out[key] = redactionKeyPattern.test(key) && typeof entry !== 'number' && typeof entry !== 'boolean' && entry != null
+    out[key] = redactionKeyPattern.test(key) && !redactionNonSecretKeyPattern.test(key) && entry != null
       ? '[redacted]'
       : redactAttributesClient(entry, level + 1);
   });
