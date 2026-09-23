@@ -13,6 +13,7 @@
 export const DASHBOARD_FRAGMENT_TARGETS = {
   cards: "#overview",
   queueList: "#queue-list",
+  queueFooter: "#queue-footer",
   approvalsList: "#approvals-list",
   approvalsCount: "#approvals-count",
   metrics: "#operator-metrics-body",
@@ -76,6 +77,24 @@ let dashboardCatchUpPending = false;
 let lastSseEventAt = 0;
 let dashboardRefreshError = '';
 let selectedWorkItemId = null;
+let dashboardFinishedLimit = (function () {
+  const raw = new URLSearchParams(location.search).get('finished');
+  const value = raw === null ? NaN : Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : null;
+})();
+
+// Finished items are paged; "show more" widens the window and keeps it in the URL.
+document.addEventListener('click', function (event) {
+  const button = event.target && event.target.closest ? event.target.closest('[data-load-more-finished]') : null;
+  if (!button) return;
+  const shown = Number(button.dataset.shown) || 0;
+  dashboardFinishedLimit = shown + (Number(button.dataset.step) || 50);
+  const params = new URLSearchParams(location.search);
+  params.set('finished', String(dashboardFinishedLimit));
+  try { history.replaceState(null, '', location.pathname + '?' + params.toString() + location.hash); } catch {}
+  button.disabled = true;
+  scheduleDashboardRefresh(0);
+});
 
 function cssAttr(value) {
   return String(value).replace(/["\\\\]/g, '\\\\$&');
@@ -105,7 +124,7 @@ async function refreshDashboard() {
   dashboardCatchUpPending = false;
   let retryIn = 0;
   try {
-    const body = await fetchJson('/dashboard/fragments');
+    const body = await fetchJson('/dashboard/fragments' + (dashboardFinishedLimit === null ? '' : '?finished=' + dashboardFinishedLimit));
     if (!body || !body.fragments) throw new Error('invalid fragments response');
     applyDashboardFragments(body.fragments, { catchUp: catchUp });
     dashboardRefreshError = '';
@@ -192,6 +211,7 @@ function applyDashboardFragments(fragments, options) {
   if (changed.indexOf('queueList') !== -1) applyQueueFilterClient(readQueueFilterFromDom());
   if (changed.indexOf('approvalsList') !== -1) applySseConnectionState(document, sseConnected);
   restoreOperatorState(state);
+  if (typeof onDashboardFragmentsApplied === 'function') onDashboardFragmentsApplied(changed);
   return true;
 }
 
