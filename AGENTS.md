@@ -78,6 +78,8 @@ Sensitive operations must require the documented approval and authorization chec
 
 Approval is a security boundary, not a user-interface state.
 
+The canonical execution mode is the single `execution_mode_state` row. `strict` is the default and keeps human approval for sensitive actions. `admin` lets ACS record that approval for authenticated managed execution when the executor lease is valid and unambiguous. Admin mode is not break-glass, does not skip capability issuance, and fails closed when authority is missing, corrupt, or conflicted. See `docs/protocol/execution-mode.md`.
+
 Any code that consumes an approval must verify all required binding data, including the fields defined by the current approval contract. This may include:
 
 * approval identifier;
