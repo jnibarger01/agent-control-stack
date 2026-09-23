@@ -1,10 +1,5 @@
 import { DatabaseSync } from "node:sqlite";
-import {
-  attemptLeaseSchema,
-  executionAttemptSchema,
-  type AttemptLease,
-  type ExecutionAttempt
-} from "./attempt.js";
+import { attemptLeaseSchema, executionAttemptSchema, type AttemptLease, type ExecutionAttempt } from "./attempt.js";
 
 interface ExecutionAttemptRow {
   attempt_id: string;
@@ -79,10 +74,49 @@ export class SqliteExecutionReadStore {
     ).map(rowToAttemptLease);
   }
 
+  /** Attempts for many work items in bounded `IN (...)` batches, instead of one query per item. */
+  listExecutionAttemptsForWorkItems(workItemIds: readonly string[]): Map<string, ExecutionAttempt[]> {
+    return this.groupByWorkItem(
+      workItemIds,
+      (placeholders) =>
+        `SELECT * FROM execution_attempts WHERE work_item_id IN (${placeholders}) ORDER BY attempt_number ASC`,
+      (row: ExecutionAttemptRow) => rowToExecutionAttempt(row)
+    );
+  }
+
+  /** Leases for many work items in bounded `IN (...)` batches, instead of one query per item. */
+  listAttemptLeasesForWorkItems(workItemIds: readonly string[]): Map<string, AttemptLease[]> {
+    return this.groupByWorkItem(
+      workItemIds,
+      (placeholders) =>
+        `SELECT * FROM attempt_leases WHERE work_item_id IN (${placeholders}) ORDER BY issued_at ASC, fencing_epoch ASC`,
+      (row: AttemptLeaseRow) => rowToAttemptLease(row)
+    );
+  }
+
+  private groupByWorkItem<Row extends { work_item_id: string }, T>(
+    workItemIds: readonly string[],
+    sql: (placeholders: string) => string,
+    map: (row: Row) => T
+  ): Map<string, T[]> {
+    const grouped = new Map<string, T[]>();
+    const ids = [...new Set(workItemIds)];
+    for (const id of ids) grouped.set(id, []);
+    for (let start = 0; start < ids.length; start += EXECUTION_READ_BATCH_SIZE) {
+      const batch = ids.slice(start, start + EXECUTION_READ_BATCH_SIZE);
+      const rows = this.db.prepare(sql(batch.map(() => "?").join(", "))).all(...batch) as unknown as Row[];
+      for (const row of rows) grouped.get(row.work_item_id)?.push(map(row));
+    }
+    return grouped;
+  }
+
   close(): void {
     this.db.close();
   }
 }
+
+/** Keeps each `IN (...)` well under SQLite's bound-parameter limit. */
+const EXECUTION_READ_BATCH_SIZE = 500;
 
 function rowToExecutionAttempt(row: ExecutionAttemptRow): ExecutionAttempt {
   return executionAttemptSchema.parse({

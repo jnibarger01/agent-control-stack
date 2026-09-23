@@ -13,6 +13,8 @@ import { escapeHtml } from "./html.js";
 import { redactSecrets, redactedAttributesJson, redactionClientSource } from "./redaction.js";
 import { workItemControlsClientSource, workItemControlsHtml } from "./work-item-controls.js";
 import { liveDashboardClientSource, type DashboardFragments } from "./live-dashboard.js";
+import { auditTimelineClientSource } from "./audit-timeline.js";
+import { systemProbesClientSource } from "./system-probes.js";
 
 export {
   isSecretAttributeKey,
@@ -38,6 +40,8 @@ export {
   type DashboardFragmentName,
   type DashboardFragments
 } from "./live-dashboard.js";
+export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE } from "./audit-timeline.js";
+export { PROBE_HISTORY, PROBE_INTERVAL_MS, PROBE_PATH, PROBE_SLOW_MS } from "./system-probes.js";
 
 export interface MissionControlAgent {
   id: string;
@@ -98,6 +102,10 @@ export interface MissionControlViewModel {
   attemptLeasesByWorkItem?: Record<string, MissionControlAttemptLease[]>;
   /** Explicit worker backend label, when the gateway knows it. Never a secret. */
   executionBackend?: string;
+  /** Exact per-status counts across the store. When present, cards use these instead of counting `workItems`. */
+  statusCounts?: Record<string, number>;
+  /** Present when `workItems` carries only a window of finished items. */
+  finishedWorkItems?: { shown: number; total: number; limit: number };
   now?: Date;
 }
 
@@ -628,7 +636,7 @@ export function renderDashboardFragments(
 ): DashboardFragments {
   const model = dashboardModel(input);
   const now = model.now ?? new Date();
-  const stats = summarize(model.workItems, agents);
+  const stats = summarize(model.workItems, agents, model.statusCounts);
   const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
   const attemptLeasesByWorkItem = model.attemptLeasesByWorkItem ?? {};
   return {
@@ -640,6 +648,7 @@ export function renderDashboardFragments(
       model.executionAttemptsByWorkItem ?? {},
       attemptLeasesByWorkItem
     ),
+    queueFooter: queueFooter(model.finishedWorkItems),
     approvalsList: approvalsPanel(approvalItems, approvalOptionsByWorkItem(model)),
     approvalsCount: `${approvalItems.length} waiting`,
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
@@ -690,14 +699,14 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <section id="overview" class="cards" data-view-panel="overview">${fragments.cards}</section>
       <section class="grid">
         <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}<div class="queue" id="queue-list">${fragments.queueList}</div>${workDetailPanel()}</article>
+        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}<div class="queue" id="queue-list">${fragments.queueList}</div><div id="queue-footer" class="queue-footer">${fragments.queueFooter}</div>${workDetailPanel()}</article>
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div><div id="operator-metrics-body">${fragments.metrics}</div></article>
-        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline([...events].reverse())}</article>
+        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline">${eventTimeline([...events].reverse())}</div><button type="button" id="events-load-older" class="load-more"${events.length ? "" : " disabled"}>Load older</button></article>
         <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div><div class="system-panel"><div id="system-stats">${fragments.systemStats}</div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
@@ -834,15 +843,28 @@ function finalizeAgent(agent: MissionControlAgent, now: Date): MissionControlAge
   return { ...agent, status, health };
 }
 
-function summarize(workItems: WorkItem[], agents: MissionControlAgent[]) {
+function summarize(workItems: WorkItem[], agents: MissionControlAgent[], statusCounts?: Record<string, number>) {
+  const count = (status: WorkItem["status"]) =>
+    statusCounts ? (statusCounts[status] ?? 0) : workItems.filter((item) => item.status === status).length;
   return {
     totalAgents: agents.length,
     onlineAgents: agents.filter((agent) => agent.status === "online").length,
-    running: workItems.filter((item) => item.status === "running").length,
-    approvals: workItems.filter((item) => item.status === "needs_approval").length,
-    failed: workItems.filter((item) => item.status === "failed" || item.status === "blocked").length
+    running: count("running"),
+    approvals: count("needs_approval"),
+    failed: count("failed") + count("blocked")
   };
 }
+
+function queueFooter(finished: MissionControlViewModel["finishedWorkItems"]): string {
+  if (!finished || finished.total === 0) return "";
+  if (finished.shown >= finished.total) {
+    return `<p class="queue-footer-note">All ${finished.total} finished items shown.</p>`;
+  }
+  const step = Math.min(FINISHED_PAGE_STEP, finished.total - finished.shown);
+  return `<p class="queue-footer-note">Showing the ${finished.shown} most recent of ${finished.total} finished items. Active items are always shown.</p><button type="button" class="load-more" data-load-more-finished data-shown="${finished.shown}" data-step="${FINISHED_PAGE_STEP}">Show ${step} more finished</button>`;
+}
+
+const FINISHED_PAGE_STEP = 50;
 
 function overviewCards(stats: ReturnType<typeof summarize>): string {
   const cards = [
@@ -1082,7 +1104,7 @@ function eventTimeline(events: StoredAuditEvent[]): string {
   return `<ol class="timeline">${events
     .map(
       (event) =>
-        `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(redactedAttributesJson(event.attributes))}</small></li>`
+        `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(redactedAttributesJson(event.attributes))}</small></li>`
     )
     .join("")}</ol>`;
 }
@@ -1207,26 +1229,8 @@ function appendAuditEvent(event) {
   } catch {
     return;
   }
-  const panel = document.querySelector('#events');
-  if (!panel) return;
-  panel.querySelector('.empty')?.remove();
-  let list = panel.querySelector('.timeline');
-  if (!list) {
-    list = document.createElement('ol');
-    list.className = 'timeline';
-    panel.appendChild(list);
-  }
-  const item = document.createElement('li');
-  const time = document.createElement('time');
-  const name = document.createElement('strong');
-  const attrs = document.createElement('small');
-  const nanos = Number(data.timeUnixNano);
-  time.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
-  name.textContent = data.name || event.type;
-  attrs.textContent = redactedAttributesJsonClient(data.attributes || {});
-  item.append(time, name, attrs);
-  list.prepend(item);
-  while (list.children.length > 10) list.lastElementChild?.remove();
+  if (!data.name) data.name = event.type;
+  insertLiveTimelineEvent(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
@@ -1246,6 +1250,8 @@ function escapeClient(value) {
 ${redactionClientSource()}
 ${workItemControlsClientSource()}
 ${liveDashboardClientSource()}
+${auditTimelineClientSource()}
+${systemProbesClientSource()}
 function onWorkItemControlSucceeded(control, id, body) {
   const created = body && body.workItem && body.workItem.id;
   announce(control === 'cancel' ? 'Cancel accepted for ' + id : control + ' created ' + (created || 'a new work item'));
@@ -1820,40 +1826,13 @@ const viewAliases = {
   system: 'system',
   dispatch: 'overview'
 };
-let systemProbeLoaded = false;
-async function probePath(path) {
-  const started = performance.now();
-  try {
-    const res = await fetch(path, { headers: { accept: 'application/json' } });
-    return { path, status: res.status, ms: Math.round(performance.now() - started) };
-  } catch {
-    return { path, status: 0, ms: Math.round(performance.now() - started) };
-  }
-}
-async function loadSystemProbe() {
-  if (systemProbeLoaded) return;
-  const probeRoot = document.querySelector('#system-probes');
-  if (!probeRoot) return;
-  systemProbeLoaded = true;
-  const row = await probePath('/readyz');
-  probeRoot.replaceChildren();
-  const list = document.createElement('dl');
-  const item = document.createElement('div');
-  const term = document.createElement('dt');
-  const value = document.createElement('dd');
-  term.textContent = row.path;
-  value.textContent = (row.status || 'down') + ' · ' + row.ms + 'ms';
-  item.append(term, value);
-  list.append(item);
-  probeRoot.append(list);
-}
 function showView(name) {
   const view = viewAliases[name] || 'overview';
   document.body.dataset.activeView = view;
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
-  if (view === 'system') void loadSystemProbe();
+  syncSystemProbes();
 }
 document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');
@@ -1938,6 +1917,16 @@ p { color: var(--muted); margin: 6px 0 0; }
 .live.connecting > span[aria-hidden="true"] { background: var(--muted); }
 .header-status { display: grid; justify-items: end; gap: 4px; }
 .dashboard-updated { color: var(--muted); font-size: 11px; min-height: 1em; }
+.queue-footer { display: grid; gap: 6px; margin-top: 8px; }
+.queue-footer-note { margin: 0; color: var(--muted); font-size: 12px; }
+.load-more, .tool-button { justify-self: start; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+.load-more:disabled, .tool-button:disabled { opacity: .55; cursor: not-allowed; }
+.tool-button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+.panel-tools { display: inline-flex; gap: 8px; align-items: center; }
+#events-load-older { margin-top: 10px; }
+.probe-trend { margin: 6px 0 0; letter-spacing: 2px; color: var(--green); }
+#system-probes[data-state="slow"] dd, #system-probes[data-state="failing"] dd, #system-probes[data-state="down"] dd { color: var(--amber); }
+#system-probes[data-state="down"] .probe-trend, #system-probes[data-state="failing"] .probe-trend { color: var(--red); }
 .action-status { margin: 0 0 10px; min-height: 1.25em; color: var(--muted); font-size: 13px; }
 .stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid #f1d18a; background: #fff8e6; color: var(--amber); border-radius: 8px; font-weight: 600; }
 .stale-banner[hidden] { display: none; }
