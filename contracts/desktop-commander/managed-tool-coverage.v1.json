@@ -24,20 +24,28 @@
       "toolClass": "process_execution",
       "managed": "unsupported"
     },
+    "apply_patch": {
+      "toolClass": "filesystem_mutation",
+      "managed": "capability",
+      "scopes": ["fs.write"],
+      "requiresApproval": true
+    },
+    "capability_manifest": {
+      "toolClass": "read_only",
+      "managed": "capability",
+      "scopes": ["process.exec"],
+      "requiresApproval": false
+    },
     "create_directory": {
       "toolClass": "filesystem_mutation",
       "managed": "capability",
-      "scopes": [
-        "fs.write"
-      ],
+      "scopes": ["fs.write"],
       "requiresApproval": true
     },
     "edit_block": {
       "toolClass": "filesystem_mutation",
       "managed": "capability",
-      "scopes": [
-        "fs.write"
-      ],
+      "scopes": ["fs.write"],
       "requiresApproval": true
     },
     "force_terminate": {
@@ -47,25 +55,19 @@
     "get_config": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "fs.read"
-      ],
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "get_file_info": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "fs.read"
-      ],
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "get_more_search_results": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "fs.read"
-      ],
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "get_prompts": {
@@ -79,22 +81,30 @@
     "get_runtime_identity": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "process.exec"
-      ],
+      "scopes": ["process.exec"],
       "requiresApproval": false
     },
     "get_usage_stats": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "process.exec"
-      ],
+      "scopes": ["process.exec"],
+      "requiresApproval": false
+    },
+    "git_state": {
+      "toolClass": "read_only",
+      "managed": "capability",
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "give_feedback_to_desktop_commander": {
       "toolClass": "unsupported",
       "managed": "unsupported"
+    },
+    "health": {
+      "toolClass": "read_only",
+      "managed": "capability",
+      "scopes": ["process.exec"],
+      "requiresApproval": false
     },
     "interact_with_process": {
       "toolClass": "process_execution",
@@ -104,104 +114,140 @@
       "toolClass": "process_control",
       "managed": "unsupported"
     },
+    "last_error": {
+      "toolClass": "read_only",
+      "managed": "capability",
+      "scopes": ["process.exec"],
+      "requiresApproval": false
+    },
     "list_directory": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "fs.read"
-      ],
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "list_processes": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "process.exec"
-      ],
+      "scopes": ["process.exec"],
       "requiresApproval": false
     },
     "list_searches": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "fs.read"
-      ],
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "list_sessions": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "process.exec"
-      ],
+      "scopes": ["process.exec"],
       "requiresApproval": false
     },
     "move_file": {
       "toolClass": "filesystem_mutation",
       "managed": "capability",
-      "scopes": [
-        "fs.write"
-      ],
+      "scopes": ["fs.write"],
       "requiresApproval": true
+    },
+    "operation_preview": {
+      "toolClass": "read_only",
+      "managed": "capability",
+      "scopes": ["fs.read"],
+      "requiresApproval": false
     },
     "read_file": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "fs.read"
-      ],
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "read_multiple_files": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "fs.read"
-      ],
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "read_process_output": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "process.exec"
-      ],
+      "scopes": ["process.exec"],
       "requiresApproval": false
+    },
+    "restore_snapshot": {
+      "toolClass": "filesystem_mutation",
+      "managed": "capability",
+      "scopes": ["fs.write"],
+      "requiresApproval": true
+    },
+    "run_command": {
+      "toolClass": "process_execution",
+      "managed": "capability",
+      "scopes": ["process.spawn"],
+      "requiresApproval": true
+    },
+    "secret_scan": {
+      "toolClass": "read_only",
+      "managed": "capability",
+      "scopes": ["fs.read"],
+      "requiresApproval": false
+    },
+    "service_status": {
+      "toolClass": "read_only",
+      "managed": "unsupported"
     },
     "set_config_value": {
       "toolClass": "configuration_mutation",
       "managed": "unsupported"
     },
+    "snapshot_path": {
+      "toolClass": "filesystem_mutation",
+      "managed": "capability",
+      "scopes": ["fs.write"],
+      "requiresApproval": true
+    },
     "start_process": {
       "toolClass": "process_execution",
       "managed": "capability",
-      "scopes": [
-        "process.spawn"
-      ],
+      "scopes": ["process.spawn"],
       "requiresApproval": true
     },
     "start_search": {
       "toolClass": "read_only",
       "managed": "capability",
-      "scopes": [
-        "fs.read"
-      ],
+      "scopes": ["fs.read"],
       "requiresApproval": false
     },
     "stop_search": {
       "toolClass": "process_control",
       "managed": "unsupported"
     },
+    "terminate_process": {
+      "toolClass": "process_control",
+      "managed": "capability",
+      "scopes": ["process.exec"],
+      "requiresApproval": true
+    },
     "track_ui_event": {
       "toolClass": "unsupported",
       "managed": "unsupported"
     },
+    "verify_head": {
+      "toolClass": "read_only",
+      "managed": "capability",
+      "scopes": ["fs.read"],
+      "requiresApproval": false
+    },
+    "wait_for_process": {
+      "toolClass": "read_only",
+      "managed": "capability",
+      "scopes": ["process.exec"],
+      "requiresApproval": false
+    },
     "write_file": {
       "toolClass": "filesystem_mutation",
       "managed": "capability",
-      "scopes": [
-        "fs.write"
-      ],
+      "scopes": ["fs.write"],
       "requiresApproval": true
     },
     "write_pdf": {

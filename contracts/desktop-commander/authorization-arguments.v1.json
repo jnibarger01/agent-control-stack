@@ -8,10 +8,14 @@
   },
   "fixtureFilesystem": {
     "directories": ["real", "real/sub"],
-    "symlinks": { "link-to-real": "real" }
+    "symlinks": {
+      "link-to-real": "real"
+    }
   },
   "transportMetadataKeys": ["origin"],
-  "transportMetadataValues": { "origin": ["ui", "llm"] },
+  "transportMetadataValues": {
+    "origin": ["ui", "llm"]
+  },
   "cases": [
     {
       "name": "get_config without origin",
@@ -23,92 +27,600 @@
     {
       "name": "get_config origin is transport metadata",
       "tool": "get_config",
-      "raw": { "origin": "llm" },
+      "raw": {
+        "origin": "llm"
+      },
       "authorizationArguments": {},
-      "delivered": { "origin": "llm" }
+      "delivered": {
+        "origin": "llm"
+      }
     },
     {
       "name": "list_directory origin ui is transport metadata",
       "tool": "list_directory",
-      "raw": { "path": "${ROOT}/real", "origin": "ui" },
-      "authorizationArguments": { "path": "${ROOT}/real" },
-      "delivered": { "path": "${ROOT}/real", "origin": "ui" }
+      "raw": {
+        "path": "${ROOT}/real",
+        "origin": "ui"
+      },
+      "authorizationArguments": {
+        "path": "${ROOT}/real"
+      },
+      "delivered": {
+        "path": "${ROOT}/real",
+        "origin": "ui"
+      }
     },
     {
       "name": "list_directory trailing slash is canonicalized",
       "tool": "list_directory",
-      "raw": { "path": "${ROOT}/real/" },
-      "authorizationArguments": { "path": "${ROOT}/real" },
-      "delivered": { "path": "${ROOT}/real" }
+      "raw": {
+        "path": "${ROOT}/real/"
+      },
+      "authorizationArguments": {
+        "path": "${ROOT}/real"
+      },
+      "delivered": {
+        "path": "${ROOT}/real"
+      }
     },
     {
       "name": "list_directory relative path resolves against the first allow root",
       "tool": "list_directory",
-      "raw": { "path": "real/sub", "depth": 2 },
-      "authorizationArguments": { "depth": 2, "path": "${ROOT}/real/sub" },
-      "delivered": { "depth": 2, "path": "${ROOT}/real/sub" }
+      "raw": {
+        "path": "real/sub",
+        "depth": 2
+      },
+      "authorizationArguments": {
+        "depth": 2,
+        "path": "${ROOT}/real/sub"
+      },
+      "delivered": {
+        "depth": 2,
+        "path": "${ROOT}/real/sub"
+      }
     },
     {
       "name": "list_directory symlink resolves to its canonical target",
       "tool": "list_directory",
-      "raw": { "path": "${ROOT}/link-to-real/sub" },
-      "authorizationArguments": { "path": "${ROOT}/real/sub" },
-      "delivered": { "path": "${ROOT}/real/sub" }
+      "raw": {
+        "path": "${ROOT}/link-to-real/sub"
+      },
+      "authorizationArguments": {
+        "path": "${ROOT}/real/sub"
+      },
+      "delivered": {
+        "path": "${ROOT}/real/sub"
+      }
     },
     {
       "name": "list_directory omitted optional stays omitted (no default materialized)",
       "tool": "list_directory",
-      "raw": { "path": "${ROOT}/real" },
-      "authorizationArguments": { "path": "${ROOT}/real" },
-      "delivered": { "path": "${ROOT}/real" }
+      "raw": {
+        "path": "${ROOT}/real"
+      },
+      "authorizationArguments": {
+        "path": "${ROOT}/real"
+      },
+      "delivered": {
+        "path": "${ROOT}/real"
+      }
     },
     {
       "name": "start_process binds the fixed-dir executable and canonical cwd",
       "tool": "start_process",
-      "raw": { "command": "git status", "timeout_ms": 5000, "cwd": "${ROOT}/link-to-real/", "origin": "llm" },
-      "authorizationArguments": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": 5000 },
-      "delivered": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "origin": "llm", "timeout_ms": 5000 }
+      "raw": {
+        "command": "git status",
+        "timeout_ms": 5000,
+        "cwd": "${ROOT}/link-to-real/",
+        "origin": "llm"
+      },
+      "authorizationArguments": {
+        "command": "${BIN:git} status",
+        "cwd": "${ROOT}/real",
+        "timeout_ms": 5000
+      },
+      "delivered": {
+        "command": "${BIN:git} status",
+        "cwd": "${ROOT}/real",
+        "origin": "llm",
+        "timeout_ms": 5000
+      }
     },
     {
       "name": "start_search key order is irrelevant; booleans and numbers kept exactly",
       "tool": "start_search",
-      "raw": { "pattern": "README", "path": "${ROOT}/real", "literalSearch": true, "maxResults": 10, "origin": "llm" },
-      "authorizationArguments": { "literalSearch": true, "maxResults": 10, "path": "${ROOT}/real", "pattern": "README" },
-      "delivered": { "literalSearch": true, "maxResults": 10, "origin": "llm", "path": "${ROOT}/real", "pattern": "README" }
+      "raw": {
+        "pattern": "README",
+        "path": "${ROOT}/real",
+        "literalSearch": true,
+        "maxResults": 10,
+        "origin": "llm"
+      },
+      "authorizationArguments": {
+        "literalSearch": true,
+        "maxResults": 10,
+        "path": "${ROOT}/real",
+        "pattern": "README"
+      },
+      "delivered": {
+        "literalSearch": true,
+        "maxResults": 10,
+        "origin": "llm",
+        "path": "${ROOT}/real",
+        "pattern": "README"
+      }
     },
     {
       "name": "read_multiple_files array order preserved, each element canonicalized",
       "tool": "read_multiple_files",
-      "raw": { "paths": ["${ROOT}/real/b.txt", "${ROOT}/link-to-real/a.txt"] },
-      "authorizationArguments": { "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"] },
-      "delivered": { "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"] }
+      "raw": {
+        "paths": ["${ROOT}/real/b.txt", "${ROOT}/link-to-real/a.txt"]
+      },
+      "authorizationArguments": {
+        "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"]
+      },
+      "delivered": {
+        "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"]
+      }
     },
     {
       "name": "get_runtime_identity takes no arguments",
       "tool": "get_runtime_identity",
-      "raw": { "origin": "llm" },
+      "raw": {
+        "origin": "llm"
+      },
       "authorizationArguments": {},
-      "delivered": { "origin": "llm" }
+      "delivered": {
+        "origin": "llm"
+      }
+    },
+    {
+      "name": "run_command binds the fixed-dir executable in argv and a canonical cwd; origin is transport metadata",
+      "tool": "run_command",
+      "raw": {
+        "argv": ["git", "status"],
+        "cwd": "${ROOT}/link-to-real/",
+        "timeoutMs": 5000,
+        "origin": "llm"
+      },
+      "authorizationArguments": {
+        "argv": ["${BIN:git}", "status"],
+        "cwd": "${ROOT}/real",
+        "timeoutMs": 5000
+      },
+      "delivered": {
+        "argv": ["${BIN:git}", "status"],
+        "cwd": "${ROOT}/real",
+        "origin": "llm",
+        "timeoutMs": 5000
+      }
+    },
+    {
+      "name": "apply_patch binds the canonical target path; hashes kept exactly",
+      "tool": "apply_patch",
+      "raw": {
+        "path": "${ROOT}/link-to-real/a.txt",
+        "patch": "@@ -1 +1 @@\n-a\n+b\n",
+        "expectedSha256": "0000000000000000000000000000000000000000000000000000000000000000"
+      },
+      "authorizationArguments": {
+        "expectedSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "patch": "@@ -1 +1 @@\n-a\n+b\n",
+        "path": "${ROOT}/real/a.txt"
+      },
+      "delivered": {
+        "expectedSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "patch": "@@ -1 +1 @@\n-a\n+b\n",
+        "path": "${ROOT}/real/a.txt"
+      }
+    },
+    {
+      "name": "git_state relative repoPath resolves against the first allow root",
+      "tool": "git_state",
+      "raw": {
+        "repoPath": "real"
+      },
+      "authorizationArguments": {
+        "repoPath": "${ROOT}/real"
+      },
+      "delivered": {
+        "repoPath": "${ROOT}/real"
+      }
+    },
+    {
+      "name": "secret_scan optional path absent stays absent",
+      "tool": "secret_scan",
+      "raw": {
+        "target": "text",
+        "text": "hello"
+      },
+      "authorizationArguments": {
+        "target": "text",
+        "text": "hello"
+      },
+      "delivered": {
+        "target": "text",
+        "text": "hello"
+      }
+    },
+    {
+      "name": "secret_scan optional path is canonicalized when present",
+      "tool": "secret_scan",
+      "raw": {
+        "target": "file",
+        "path": "${ROOT}/link-to-real/a.txt"
+      },
+      "authorizationArguments": {
+        "path": "${ROOT}/real/a.txt",
+        "target": "file"
+      },
+      "delivered": {
+        "path": "${ROOT}/real/a.txt",
+        "target": "file"
+      }
+    },
+    {
+      "name": "operation_preview nested paths are contained but never rewritten",
+      "tool": "operation_preview",
+      "raw": {
+        "tool": "list_directory",
+        "arguments": {
+          "path": "${ROOT}/link-to-real"
+        }
+      },
+      "authorizationArguments": {
+        "arguments": {
+          "path": "${ROOT}/link-to-real"
+        },
+        "tool": "list_directory"
+      },
+      "delivered": {
+        "arguments": {
+          "path": "${ROOT}/link-to-real"
+        },
+        "tool": "list_directory"
+      }
+    },
+    {
+      "name": "terminate_process scalar arguments bound exactly",
+      "tool": "terminate_process",
+      "raw": {
+        "pid": 4242,
+        "graceMs": 1000,
+        "force": false
+      },
+      "authorizationArguments": {
+        "force": false,
+        "graceMs": 1000,
+        "pid": 4242
+      },
+      "delivered": {
+        "force": false,
+        "graceMs": 1000,
+        "pid": 4242
+      }
+    },
+    {
+      "name": "health takes no arguments",
+      "tool": "health",
+      "raw": {
+        "origin": "ui"
+      },
+      "authorizationArguments": {},
+      "delivered": {
+        "origin": "ui"
+      }
     }
   ],
   "rejectedByAcs": [
-    { "name": "origin outside the advertised enum", "tool": "get_config", "raw": { "origin": "admin" } },
-    { "name": "origin must be a string", "tool": "list_directory", "raw": { "path": "${ROOT}/real", "origin": 1 } },
-    { "name": "numeric string is not coerced", "tool": "start_process", "raw": { "command": "git status", "cwd": "${ROOT}/real", "timeout_ms": "5000" } },
-    { "name": "boolean string is not coerced", "tool": "start_search", "raw": { "path": "${ROOT}/real", "pattern": "x", "literalSearch": "true" } },
-    { "name": "null is not absent", "tool": "list_directory", "raw": { "path": "${ROOT}/real", "depth": null } },
-    { "name": "unknown key is rejected", "tool": "list_directory", "raw": { "path": "${ROOT}/real", "surprise": true } },
-    { "name": "start_process shell is not a managed argument", "tool": "start_process", "raw": { "command": "git status", "cwd": "${ROOT}/real", "timeout_ms": 5000, "shell": "/bin/bash" } }
+    {
+      "name": "origin outside the advertised enum",
+      "tool": "get_config",
+      "raw": {
+        "origin": "admin"
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "origin must be a string",
+      "tool": "list_directory",
+      "raw": {
+        "path": "${ROOT}/real",
+        "origin": 1
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "numeric string is not coerced",
+      "tool": "start_process",
+      "raw": {
+        "command": "git status",
+        "cwd": "${ROOT}/real",
+        "timeout_ms": "5000"
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "boolean string is not coerced",
+      "tool": "start_search",
+      "raw": {
+        "path": "${ROOT}/real",
+        "pattern": "x",
+        "literalSearch": "true"
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "null is not absent",
+      "tool": "list_directory",
+      "raw": {
+        "path": "${ROOT}/real",
+        "depth": null
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "unknown key is rejected",
+      "tool": "list_directory",
+      "raw": {
+        "path": "${ROOT}/real",
+        "surprise": true
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "start_process shell is not a managed argument",
+      "tool": "start_process",
+      "raw": {
+        "command": "git status",
+        "cwd": "${ROOT}/real",
+        "timeout_ms": 5000,
+        "shell": "/bin/bash"
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "run_command argv element with whitespace",
+      "tool": "run_command",
+      "raw": {
+        "argv": ["git", "status --short"],
+        "cwd": "${ROOT}/real"
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "run_command argv shell metacharacter is not interpreted, it is refused",
+      "tool": "run_command",
+      "raw": {
+        "argv": ["git", "status;id"],
+        "cwd": "${ROOT}/real"
+      },
+      "code": "desktop_commander_command_shell_metacharacter"
+    },
+    {
+      "name": "run_command destructive command",
+      "tool": "run_command",
+      "raw": {
+        "argv": ["rm", "x"],
+        "cwd": "${ROOT}/real"
+      },
+      "code": "desktop_commander_command_forbidden"
+    },
+    {
+      "name": "run_command executable path is forbidden as input",
+      "tool": "run_command",
+      "raw": {
+        "argv": ["/usr/bin/git", "status"],
+        "cwd": "${ROOT}/real"
+      },
+      "code": "desktop_commander_command_executable_path"
+    },
+    {
+      "name": "run_command cwd outside the allow roots",
+      "tool": "run_command",
+      "raw": {
+        "argv": ["git", "status"],
+        "cwd": "/"
+      },
+      "code": "desktop_commander_path_outside_allow_root"
+    },
+    {
+      "name": "operation_preview nested path outside the allow roots",
+      "tool": "operation_preview",
+      "raw": {
+        "tool": "read_file",
+        "arguments": {
+          "path": "/etc/hostname"
+        }
+      },
+      "code": "desktop_commander_path_outside_allow_root"
+    },
+    {
+      "name": "secret_scan file outside the allow roots",
+      "tool": "secret_scan",
+      "raw": {
+        "target": "file",
+        "path": "/etc/hostname"
+      },
+      "code": "desktop_commander_path_outside_allow_root"
+    },
+    {
+      "name": "apply_patch expectedSha256 must be a sha256 digest",
+      "tool": "apply_patch",
+      "raw": {
+        "path": "${ROOT}/real/a.txt",
+        "patch": "x",
+        "expectedSha256": "abc"
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "restore_snapshot id traversal",
+      "tool": "restore_snapshot",
+      "raw": {
+        "snapshotId": "../../etc"
+      },
+      "code": "desktop_commander_argument_invalid"
+    },
+    {
+      "name": "service_status is not a managed tool",
+      "tool": "service_status",
+      "raw": {
+        "checks": [
+          {
+            "type": "port",
+            "port": 22
+          }
+        ]
+      },
+      "code": "desktop_commander_tool_not_allowlisted"
+    }
   ],
   "driftRejectedByDc": [
-    { "name": "raw executable name instead of bound resolved executable", "tool": "start_process", "bound": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": 5000 }, "delivered": { "command": "git status", "cwd": "${ROOT}/real", "timeout_ms": 5000 } },
-    { "name": "non-canonical path", "tool": "list_directory", "bound": { "path": "${ROOT}/real" }, "delivered": { "path": "${ROOT}/real/" } },
-    { "name": "numeric string", "tool": "start_process", "bound": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": 5000 }, "delivered": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": "5000" } },
-    { "name": "boolean string", "tool": "start_search", "bound": { "path": "${ROOT}/real", "pattern": "x", "literalSearch": true }, "delivered": { "path": "${ROOT}/real", "pattern": "x", "literalSearch": "true" } },
-    { "name": "null vs absent", "tool": "list_directory", "bound": { "path": "${ROOT}/real" }, "delivered": { "path": "${ROOT}/real", "depth": null } },
-    { "name": "default materialized by delivery", "tool": "list_directory", "bound": { "path": "${ROOT}/real" }, "delivered": { "path": "${ROOT}/real", "depth": 2 } },
-    { "name": "array reordered", "tool": "read_multiple_files", "bound": { "paths": ["${ROOT}/real/a.txt", "${ROOT}/real/b.txt"] }, "delivered": { "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"] } },
-    { "name": "extra authorization key", "tool": "start_process", "bound": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "timeout_ms": 5000 }, "delivered": { "command": "${BIN:git} status", "cwd": "${ROOT}/real", "shell": "/bin/bash", "timeout_ms": 5000 } },
-    { "name": "invalid transport metadata", "tool": "get_config", "bound": {}, "delivered": { "origin": "admin" } }
+    {
+      "name": "raw executable name instead of bound resolved executable",
+      "tool": "start_process",
+      "bound": {
+        "command": "${BIN:git} status",
+        "cwd": "${ROOT}/real",
+        "timeout_ms": 5000
+      },
+      "delivered": {
+        "command": "git status",
+        "cwd": "${ROOT}/real",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "name": "non-canonical path",
+      "tool": "list_directory",
+      "bound": {
+        "path": "${ROOT}/real"
+      },
+      "delivered": {
+        "path": "${ROOT}/real/"
+      }
+    },
+    {
+      "name": "numeric string",
+      "tool": "start_process",
+      "bound": {
+        "command": "${BIN:git} status",
+        "cwd": "${ROOT}/real",
+        "timeout_ms": 5000
+      },
+      "delivered": {
+        "command": "${BIN:git} status",
+        "cwd": "${ROOT}/real",
+        "timeout_ms": "5000"
+      }
+    },
+    {
+      "name": "boolean string",
+      "tool": "start_search",
+      "bound": {
+        "path": "${ROOT}/real",
+        "pattern": "x",
+        "literalSearch": true
+      },
+      "delivered": {
+        "path": "${ROOT}/real",
+        "pattern": "x",
+        "literalSearch": "true"
+      }
+    },
+    {
+      "name": "null vs absent",
+      "tool": "list_directory",
+      "bound": {
+        "path": "${ROOT}/real"
+      },
+      "delivered": {
+        "path": "${ROOT}/real",
+        "depth": null
+      }
+    },
+    {
+      "name": "default materialized by delivery",
+      "tool": "list_directory",
+      "bound": {
+        "path": "${ROOT}/real"
+      },
+      "delivered": {
+        "path": "${ROOT}/real",
+        "depth": 2
+      }
+    },
+    {
+      "name": "array reordered",
+      "tool": "read_multiple_files",
+      "bound": {
+        "paths": ["${ROOT}/real/a.txt", "${ROOT}/real/b.txt"]
+      },
+      "delivered": {
+        "paths": ["${ROOT}/real/b.txt", "${ROOT}/real/a.txt"]
+      }
+    },
+    {
+      "name": "extra authorization key",
+      "tool": "start_process",
+      "bound": {
+        "command": "${BIN:git} status",
+        "cwd": "${ROOT}/real",
+        "timeout_ms": 5000
+      },
+      "delivered": {
+        "command": "${BIN:git} status",
+        "cwd": "${ROOT}/real",
+        "shell": "/bin/bash",
+        "timeout_ms": 5000
+      }
+    },
+    {
+      "name": "invalid transport metadata",
+      "tool": "get_config",
+      "bound": {},
+      "delivered": {
+        "origin": "admin"
+      }
+    },
+    {
+      "name": "run_command raw argv[0] instead of bound resolved executable",
+      "tool": "run_command",
+      "bound": {
+        "argv": ["${BIN:git}", "status"],
+        "cwd": "${ROOT}/real"
+      },
+      "delivered": {
+        "argv": ["git", "status"],
+        "cwd": "${ROOT}/real"
+      }
+    },
+    {
+      "name": "apply_patch symlinked path instead of bound canonical path",
+      "tool": "apply_patch",
+      "bound": {
+        "expectedSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "patch": "x",
+        "path": "${ROOT}/real/a.txt"
+      },
+      "delivered": {
+        "expectedSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+        "patch": "x",
+        "path": "${ROOT}/link-to-real/a.txt"
+      }
+    },
+    {
+      "name": "run_command argv reordered",
+      "tool": "run_command",
+      "bound": {
+        "argv": ["${BIN:git}", "log", "status"],
+        "cwd": "${ROOT}/real"
+      },
+      "delivered": {
+        "argv": ["${BIN:git}", "status", "log"],
+        "cwd": "${ROOT}/real"
+      }
+    }
   ]
 }

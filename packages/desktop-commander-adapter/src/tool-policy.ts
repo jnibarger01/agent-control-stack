@@ -29,6 +29,12 @@ export interface DesktopCommanderToolPolicy {
   readonly cwdArgs: readonly string[];
   /** Argument keys carrying a shell command line to be parsed + policy-checked. */
   readonly commandArgs: readonly string[];
+  /** Argument keys carrying an OPTIONAL single path (contained + canonicalized when present). */
+  readonly optionalPathArgs?: readonly string[];
+  /** Argument keys carrying an argv array (validated like a command; argv[0] bound to its resolved executable). */
+  readonly argvArgs?: readonly string[];
+  /** Argument keys carrying a nested argument object whose path-like keys must be contained (not rewritten). */
+  readonly nestedPathContainerArgs?: readonly string[];
   readonly timeoutMs: number;
   readonly maxResultBytes: number;
 }
@@ -157,7 +163,8 @@ const startSearchArgs = z
       .max(5 * 60 * 1_000)
       .optional(),
     earlyTermination: z.boolean().optional(),
-    literalSearch: z.boolean().optional()
+    literalSearch: z.boolean().optional(),
+    structured: z.boolean().optional()
   })
   .strict();
 
@@ -166,9 +173,161 @@ const getMoreSearchResultsArgs = z
     sessionId: searchSessionId,
     // Desktop Commander semantics: negative offset = tail.
     offset: z.number().int().min(-1_000_000).max(1_000_000_000).optional(),
-    length: z.number().int().min(1).max(10_000).optional()
+    length: z.number().int().min(1).max(10_000).optional(),
+    structured: z.boolean().optional()
   })
   .strict();
+
+// --- execution-plane tools (Desktop Commander expansion) ---------------------
+
+const shaHex64 = z.string().regex(/^[a-f0-9]{64}$/u, "must be a lowercase sha256 hex digest");
+const commitSha = z.string().regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u, "must be a full lowercase commit SHA");
+const processId = z.number().int().min(1).max(2_147_483_647);
+const shortId = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9._:@-]+$/u);
+
+const lastErrorArgs = z
+  .object({
+    limit: z.number().int().min(1).max(50).optional(),
+    tool: shortId.optional(),
+    requestId: shortId.optional(),
+    correlationId: shortId.optional()
+  })
+  .strict();
+const capabilityManifestArgs = z.object({ tool: shortId.optional() }).strict();
+const operationPreviewArgs = z
+  .object({ tool: shortId, arguments: z.record(z.string(), z.unknown()).optional() })
+  .strict();
+const gitStateArgs = z.object({ repoPath: pathString }).strict();
+const verifyHeadArgs = z.object({ repoPath: pathString, expectedSha: commitSha }).strict();
+const secretScanArgs = z
+  .object({
+    target: z.enum(["text", "file", "diff"]),
+    text: z
+      .string()
+      .max(2 * 1024 * 1024)
+      .optional(),
+    path: pathString.optional(),
+    patch: z
+      .string()
+      .max(2 * 1024 * 1024)
+      .optional()
+  })
+  .strict();
+const waitForProcessArgs = z
+  .object({
+    pid: processId,
+    timeoutMs: z
+      .number()
+      .int()
+      .min(0)
+      .max(10 * 60 * 1_000)
+      .optional(),
+    until: z
+      .object({
+        type: z.enum(["exit", "stdout_pattern", "stderr_pattern", "either_pattern"]),
+        pattern: z.string().min(1).max(1_000).optional()
+      })
+      .strict()
+      .optional(),
+    tailLines: z.number().int().min(0).max(1_000).optional()
+  })
+  .strict();
+const runCommandArgs = z
+  .object({
+    argv: z.array(z.string().min(1).max(4_096)).min(1).max(256),
+    cwd: pathString,
+    timeoutMs: z
+      .number()
+      .int()
+      .min(1)
+      .max(15 * 60 * 1_000)
+      .optional(),
+    maxStdoutBytes: z
+      .number()
+      .int()
+      .min(0)
+      .max(4 * 1024 * 1024)
+      .optional(),
+    maxStderrBytes: z
+      .number()
+      .int()
+      .min(0)
+      .max(4 * 1024 * 1024)
+      .optional(),
+    expectedHeadSha: commitSha.optional()
+  })
+  .strict();
+const terminateProcessArgs = z
+  .object({ pid: processId, graceMs: z.number().int().min(0).max(30_000).optional(), force: z.boolean().optional() })
+  .strict();
+const applyPatchArgs = z
+  .object({
+    path: pathString,
+    patch: z
+      .string()
+      .min(1)
+      .max(1024 * 1024),
+    expectedSha256: shaHex64,
+    expectedHeadSha: commitSha.optional()
+  })
+  .strict();
+const snapshotPathArgs = z.object({ path: pathString, reason: z.string().max(2_000).optional() }).strict();
+const restoreSnapshotArgs = z
+  .object({
+    snapshotId: z.string().regex(/^snap_\d{8}T\d{6}Z_[a-f0-9]{16}$/u),
+    expectedCurrentSha256: shaHex64.optional()
+  })
+  .strict();
+
+function readOnlyPolicy(
+  name: string,
+  argsSchema: z.ZodTypeAny,
+  extra: Partial<DesktopCommanderToolPolicy> = {}
+): DesktopCommanderToolPolicy {
+  return {
+    name,
+    riskClass: "read_only",
+    mutating: false,
+    network: false,
+    destructive: false,
+    requiresApproval: false,
+    argsSchema,
+    pathArgs: [],
+    multiPathArgs: [],
+    cwdArgs: [],
+    commandArgs: [],
+    timeoutMs: 60_000,
+    maxResultBytes: 256 * 1024,
+    ...extra
+  };
+}
+
+function approvalPolicy(
+  name: string,
+  argsSchema: z.ZodTypeAny,
+  extra: Partial<DesktopCommanderToolPolicy> = {}
+): DesktopCommanderToolPolicy {
+  return {
+    name,
+    riskClass: "requires_approval",
+    mutating: true,
+    network: false,
+    destructive: false,
+    requiresApproval: true,
+    argsSchema,
+    pathArgs: [],
+    multiPathArgs: [],
+    cwdArgs: [],
+    commandArgs: [],
+    timeoutMs: 60_000,
+    maxResultBytes: 256 * 1024,
+    ...extra
+  };
+}
 
 // --- the registry ----------------------------------------------------------
 
@@ -442,7 +601,20 @@ const policies: readonly DesktopCommanderToolPolicy[] = [
     commandArgs: ["command"],
     timeoutMs: 15 * 60 * 1_000,
     maxResultBytes: 256 * 1024
-  }
+  },
+  readOnlyPolicy("health", emptyArgs),
+  readOnlyPolicy("last_error", lastErrorArgs),
+  readOnlyPolicy("capability_manifest", capabilityManifestArgs),
+  readOnlyPolicy("operation_preview", operationPreviewArgs, { nestedPathContainerArgs: ["arguments"] }),
+  readOnlyPolicy("git_state", gitStateArgs, { pathArgs: ["repoPath"] }),
+  readOnlyPolicy("verify_head", verifyHeadArgs, { pathArgs: ["repoPath"] }),
+  readOnlyPolicy("secret_scan", secretScanArgs, { optionalPathArgs: ["path"] }),
+  readOnlyPolicy("wait_for_process", waitForProcessArgs, { timeoutMs: 10 * 60 * 1_000 }),
+  approvalPolicy("run_command", runCommandArgs, { cwdArgs: ["cwd"], argvArgs: ["argv"], timeoutMs: 15 * 60 * 1_000 }),
+  approvalPolicy("terminate_process", terminateProcessArgs),
+  approvalPolicy("apply_patch", applyPatchArgs, { pathArgs: ["path"] }),
+  approvalPolicy("snapshot_path", snapshotPathArgs, { pathArgs: ["path"] }),
+  approvalPolicy("restore_snapshot", restoreSnapshotArgs)
 ];
 
 const registry: ReadonlyMap<string, DesktopCommanderToolPolicy> = new Map(
@@ -585,6 +757,75 @@ const dispositions: readonly DesktopCommanderManagedToolDisposition[] = [
     toolClass: "unsupported",
     managed: "unsupported",
     reason: "UI telemetry, not an agent tool"
+  },
+  { name: "health", toolClass: "read_only", managed: "capability", reason: "degraded-mode-safe status; no secrets" },
+  {
+    name: "last_error",
+    toolClass: "read_only",
+    managed: "capability",
+    reason: "sanitized diagnostics; arguments as hashes only"
+  },
+  {
+    name: "capability_manifest",
+    toolClass: "read_only",
+    managed: "capability",
+    reason: "mechanical capability; authorization external"
+  },
+  {
+    name: "operation_preview",
+    toolClass: "read_only",
+    managed: "capability",
+    reason: "mechanical preview; nested paths contained by ACS"
+  },
+  { name: "git_state", toolClass: "read_only", managed: "capability", reason: "contained read-only git inspection" },
+  { name: "verify_head", toolClass: "read_only", managed: "capability", reason: "contained HEAD comparison" },
+  {
+    name: "secret_scan",
+    toolClass: "read_only",
+    managed: "capability",
+    reason: "contained preflight scan; values never returned"
+  },
+  {
+    name: "wait_for_process",
+    toolClass: "read_only",
+    managed: "capability",
+    reason: "observes DC-owned sessions only"
+  },
+  {
+    name: "service_status",
+    toolClass: "read_only",
+    managed: "unsupported",
+    reason: "network probes; ACS defines no network-capable managed Desktop Commander tool"
+  },
+  {
+    name: "run_command",
+    toolClass: "process_execution",
+    managed: "capability",
+    reason: "approval-bound; argv validated by ACS command policy, executable resolved"
+  },
+  {
+    name: "terminate_process",
+    toolClass: "process_control",
+    managed: "capability",
+    reason: "approval-bound; DC-owned sessions only"
+  },
+  {
+    name: "apply_patch",
+    toolClass: "filesystem_mutation",
+    managed: "capability",
+    reason: "approval-bound; hash-guarded atomic write"
+  },
+  {
+    name: "snapshot_path",
+    toolClass: "filesystem_mutation",
+    managed: "capability",
+    reason: "approval-bound; writes the DC snapshot area"
+  },
+  {
+    name: "restore_snapshot",
+    toolClass: "filesystem_mutation",
+    managed: "capability",
+    reason: "approval-bound; restores a sealed DC snapshot"
   }
 ];
 

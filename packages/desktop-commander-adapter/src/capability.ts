@@ -93,7 +93,20 @@ export function desktopCommanderRequiredScopes(toolName: string): string[] {
     get_runtime_identity: "process.exec",
     start_search: "fs.read",
     get_more_search_results: "fs.read",
-    list_searches: "fs.read"
+    list_searches: "fs.read",
+    health: "process.exec",
+    last_error: "process.exec",
+    capability_manifest: "process.exec",
+    operation_preview: "fs.read",
+    git_state: "fs.read",
+    verify_head: "fs.read",
+    secret_scan: "fs.read",
+    wait_for_process: "process.exec",
+    run_command: "process.spawn",
+    terminate_process: "process.exec",
+    apply_patch: "fs.write",
+    snapshot_path: "fs.write",
+    restore_snapshot: "fs.write"
   };
   const scope = scopeByTool[policy.name];
   if (!scope) throw new ControlStackError("desktop_commander_capability_invalid", "tool has no v1 scope mapping");
@@ -200,9 +213,7 @@ function capabilityPrivateKey(config: Pick<CapabilitySigningConfig, "keyId" | "p
 }
 
 /** Validate signing material before any authoritative lifecycle mutation. */
-export function validateCapabilitySigningConfig(
-  config: Pick<CapabilitySigningConfig, "keyId" | "privateKey">
-): void {
+export function validateCapabilitySigningConfig(config: Pick<CapabilitySigningConfig, "keyId" | "privateKey">): void {
   void capabilityPrivateKey(config);
 }
 

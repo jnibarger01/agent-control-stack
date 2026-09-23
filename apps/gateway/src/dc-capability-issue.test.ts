@@ -495,4 +495,85 @@ describe("POST /dc/capability/issue (lease-bound)", () => {
       rmSync(ctx.root, { recursive: true, force: true });
     }
   });
+
+  it("binds run_command argv to the resolved executable and requires approval before issuance", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      await attestRuntime(ctx);
+      const response = await issuePayload(ctx.app, "run_command", {
+        argv: ["git", "status"],
+        cwd: ctx.root,
+        origin: "llm"
+      });
+      expect(response.statusCode).toBe(409);
+      expect(response.json()).toMatchObject({ decision: "require_approval" });
+      const detail = await ctx.app.inject({
+        method: "GET",
+        url: `/work-items/${response.json().workItemId}`,
+        headers: AUTH
+      });
+      const params = detail.json().workItem.requestedActions[0].params;
+      expect(params.approvalSummary).toMatch(/argv_executable=\/(usr\/)?(local\/)?bin\/git/u);
+      expect(params.requiredScopes).toEqual(["process.spawn"]);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses run_command shell metacharacters and destructive argv deterministically", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      const meta = await issuePayload(ctx.app, "run_command", { argv: ["git", "status;id"], cwd: ctx.root });
+      expect(meta.statusCode).toBe(400);
+      expect(meta.json().code).toBe("desktop_commander_command_shell_metacharacter");
+      const destructive = await issuePayload(ctx.app, "run_command", { argv: ["rm", "x"], cwd: ctx.root });
+      expect(destructive.statusCode).toBe(400);
+      expect(destructive.json().code).toBe("desktop_commander_command_forbidden");
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("issues read-only capabilities for the new diagnostics tools without approval", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      await attestRuntime(ctx);
+      for (const [tool, args, scope] of [
+        ["health", {}, "process.exec"],
+        ["last_error", { limit: 3 }, "process.exec"],
+        ["capability_manifest", {}, "process.exec"],
+        ["git_state", { repoPath: ctx.root }, "fs.read"],
+        ["operation_preview", { tool: "read_file", arguments: { path: join(ctx.root, "notes.txt") } }, "fs.read"]
+      ] as const) {
+        const response = await issuePayload(ctx.app, tool, args);
+        expect(response.statusCode, tool).toBe(200);
+        const payload = response.json().capability.payload;
+        expect(payload.scopes, tool).toEqual([scope]);
+        expect(payload).not.toHaveProperty("approvalId");
+      }
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("contains operation_preview nested paths and keeps service_status unsupported (no-network policy)", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      const outside = await issuePayload(ctx.app, "operation_preview", {
+        tool: "read_file",
+        arguments: { path: "/etc/hostname" }
+      });
+      expect(outside.statusCode).toBe(400);
+      expect(outside.json().code).toBe("desktop_commander_path_outside_allow_root");
+      const service = await issuePayload(ctx.app, "service_status", { checks: [{ type: "port", port: 22 }] });
+      expect(service.statusCode).toBe(403);
+      expect(service.json().code).toBe("managed_tool_unsupported");
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
 });

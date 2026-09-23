@@ -25,6 +25,8 @@ export interface NormalizedInvocation {
   canonicalPaths: string[];
 }
 
+const NESTED_PATH_KEYS = new Set(["path", "file_path", "source", "destination", "cwd", "repoPath"]);
+
 function normalizePaths(
   policy: DesktopCommanderToolPolicy,
   args: Record<string, unknown>,
@@ -51,6 +53,34 @@ function normalizePaths(
     const contained = containPath(containment, raw, baseCwd);
     next[key] = contained.canonical;
     canonicalPaths.push(contained.canonical);
+  }
+  for (const key of policy.optionalPathArgs ?? []) {
+    const raw = next[key];
+    if (raw === undefined) continue;
+    if (typeof raw !== "string") {
+      throw new ControlStackError("desktop_commander_argument_invalid", `expected string path for '${key}'`);
+    }
+    const contained = containPath(containment, raw, baseCwd);
+    next[key] = contained.canonical;
+    canonicalPaths.push(contained.canonical);
+  }
+  for (const key of policy.nestedPathContainerArgs ?? []) {
+    const nested = next[key];
+    if (nested === undefined) continue;
+    if (!nested || typeof nested !== "object" || Array.isArray(nested)) {
+      throw new ControlStackError("desktop_commander_argument_invalid", `expected object for '${key}'`);
+    }
+    // Containment check only (never rewritten): a mechanical preview must not
+    // reveal anything about paths outside the allow roots.
+    for (const [nestedKey, value] of Object.entries(nested as Record<string, unknown>)) {
+      if (NESTED_PATH_KEYS.has(nestedKey) && typeof value === "string") {
+        canonicalPaths.push(containPath(containment, value, baseCwd).canonical);
+      } else if (nestedKey === "paths" && Array.isArray(value)) {
+        for (const entry of value) {
+          if (typeof entry === "string") canonicalPaths.push(containPath(containment, entry, baseCwd).canonical);
+        }
+      }
+    }
   }
   for (const key of policy.multiPathArgs) {
     const raw = next[key];
@@ -114,6 +144,27 @@ export function normalizeInvocation(
     // canonicalised + proven inside an allow root) is the command policy's base.
     const validatedCommand = validateProcessCommand(commandLine, containment, commandCwd);
     args[key] = validatedCommand.resolvedCommandLine;
+  }
+
+  for (const key of policy.argvArgs ?? []) {
+    const argv = args[key];
+    if (
+      !Array.isArray(argv) ||
+      argv.length === 0 ||
+      !argv.every((entry) => typeof entry === "string" && entry.length > 0)
+    ) {
+      throw new ControlStackError("desktop_commander_argument_invalid", `expected non-empty string array for '${key}'`);
+    }
+    // Same command policy as start_process. Elements containing whitespace
+    // cannot be represented unambiguously by that policy and are rejected.
+    if (argv.some((entry) => /\s/u.test(entry as string))) {
+      throw new ControlStackError(
+        "desktop_commander_argument_invalid",
+        `'${key}' elements must not contain whitespace in managed mode`
+      );
+    }
+    const validatedCommand = validateProcessCommand((argv as string[]).join(" "), containment, commandCwd);
+    args[key] = [validatedCommand.resolvedExecutable, ...validatedCommand.args];
   }
 
   return {
