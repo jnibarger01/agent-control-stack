@@ -89,7 +89,11 @@ export function desktopCommanderRequiredScopes(toolName: string): string[] {
     list_sessions: "process.exec",
     list_processes: "process.exec",
     read_process_output: "process.exec",
-    get_usage_stats: "process.exec"
+    get_usage_stats: "process.exec",
+    get_runtime_identity: "process.exec",
+    start_search: "fs.read",
+    get_more_search_results: "fs.read",
+    list_searches: "fs.read"
   };
   const scope = scopeByTool[policy.name];
   if (!scope) throw new ControlStackError("desktop_commander_capability_invalid", "tool has no v1 scope mapping");

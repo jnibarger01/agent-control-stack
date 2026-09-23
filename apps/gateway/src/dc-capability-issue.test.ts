@@ -415,7 +415,81 @@ describe("POST /dc/capability/issue (lease-bound)", () => {
     try {
       const response = await issuePayload(ctx.app, "execute_python", { code: "1" });
       expect(response.statusCode).toBe(403);
-      expect(response.json()).toEqual({ decision: "deny", reason: "unknown_tool" });
+      expect(response.json()).toEqual({ decision: "deny", reason: "unknown_tool", code: "unknown_tool" });
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("denies registered-but-unsupported Desktop Commander tools deterministically, not as unknown_tool", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      for (const tool of ["kill_process", "set_config_value", "interact_with_process"]) {
+        const response = await issuePayload(ctx.app, tool, { pid: 1 });
+        expect(response.statusCode, tool).toBe(403);
+        const body = response.json();
+        expect(body.decision).toBe("deny");
+        expect(body.reason).toBe("managed_tool_unsupported");
+        expect(body.code).toBe("managed_tool_unsupported");
+        expect(body.detail).toContain(tool);
+      }
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a safe detail for deterministic argument rejections", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      const response = await issuePayload(ctx.app, "get_config", { origin: "admin" });
+      expect(response.statusCode).toBe(400);
+      const body = response.json();
+      expect(body).toMatchObject({
+        decision: "deny",
+        reason: "invalid_arguments",
+        code: "desktop_commander_argument_invalid"
+      });
+      expect(body.detail).toContain("origin");
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("treats origin as transport metadata: requests with and without origin bind identical arguments", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      await attestRuntime(ctx);
+      const withoutOrigin = await issuePayload(ctx.app, "list_directory", { path: ctx.root });
+      const withOrigin = await issuePayload(ctx.app, "list_directory", { path: ctx.root, origin: "llm" });
+      const configWithOrigin = await issuePayload(ctx.app, "get_config", { origin: "ui" });
+      expect(withoutOrigin.statusCode).toBe(200);
+      expect(withOrigin.statusCode).toBe(200);
+      expect(configWithOrigin.statusCode).toBe(200);
+      const bound = withOrigin.json().capability.payload;
+      expect(bound.normalizedArguments).toEqual(withoutOrigin.json().capability.payload.normalizedArguments);
+      expect(bound.normalizedArguments).not.toHaveProperty("origin");
+      expect(bound.invocationHash).toBe(withoutOrigin.json().capability.payload.invocationHash);
+      expect(configWithOrigin.json().capability.payload.normalizedArguments).toEqual({});
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("issues a read-only capability for get_runtime_identity", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      await attestRuntime(ctx);
+      const response = await issuePayload(ctx.app, "get_runtime_identity", {});
+      expect(response.statusCode).toBe(200);
+      const payload = response.json().capability.payload;
+      expect(payload.toolName).toBe("get_runtime_identity");
+      expect(payload.normalizedArguments).toEqual({});
+      expect(payload.scopes).toEqual(["process.exec"]);
+      expect(payload).not.toHaveProperty("approvalId");
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });

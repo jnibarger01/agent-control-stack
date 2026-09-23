@@ -3,6 +3,7 @@ import type { WorkItem } from "@agent-control-stack/work-items";
 import { containCwd, containPath, type ContainmentConfig } from "./containment.js";
 import { validateProcessCommand } from "./command-validation.js";
 import { desktopCommanderToolPolicy, type DesktopCommanderToolPolicy } from "./tool-policy.js";
+import { splitTransportMetadata } from "./authorization-arguments.js";
 
 /**
  * Phase 3 + Phase 6 support.
@@ -85,7 +86,10 @@ export function normalizeInvocation(
     );
   }
 
-  const parsed = policy.argsSchema.safeParse(rawParams);
+  // Transport metadata (e.g. `origin`) is validated and removed BEFORE the
+  // strict per-tool schema: it is never an authorization argument.
+  const { authorizationInput } = splitTransportMetadata(rawParams);
+  const parsed = policy.argsSchema.safeParse(authorizationInput);
   if (!parsed.success) {
     throw new ControlStackError(
       "desktop_commander_argument_invalid",
