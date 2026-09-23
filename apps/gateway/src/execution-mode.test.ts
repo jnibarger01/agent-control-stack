@@ -54,7 +54,10 @@ function keys() {
   };
 }
 
-async function gateway(authority: ManagedAuthorityObservation = healthyAuthority) {
+async function gateway(
+  authority: ManagedAuthorityObservation = healthyAuthority,
+  rateLimit?: { windowMs: number; maxRequests: number }
+) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-admin-mode-")));
   const signing = keys();
   const app = buildGateway({
@@ -70,7 +73,8 @@ async function gateway(authority: ManagedAuthorityObservation = healthyAuthority
       runtimeScopes: RUNTIME_SCOPES
     },
     desktopCommanderContainment: { allowedRoots: [root], deniedRoots: [] },
-    readManagedAuthority: () => authority
+    readManagedAuthority: () => authority,
+    ...(rateLimit ? { rateLimit } : {})
   });
   return { root, signing, app };
 }
@@ -142,6 +146,40 @@ describe("canonical execution mode", () => {
       // Strict: the admin banner is rendered hidden and empty (the live
       // dashboard toggles it in place instead of hard-reloading).
       expect(page.body).toMatch(/<div id="admin-mode-banner" class="admin-mode-banner" role="alert" hidden><\/div>/u);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rate-limits execution-mode and authority endpoints", async () => {
+    const ctx = await gateway(healthyAuthority, { windowMs: 60_000, maxRequests: 1 });
+    try {
+      const authorityFirst = await ctx.app.inject({ method: "GET", url: "/authority", headers: AUTH });
+      expect(authorityFirst.statusCode).toBe(200);
+      expect(authorityFirst.headers["x-ratelimit-remaining"]).toBe("0");
+      const authoritySecond = await ctx.app.inject({ method: "GET", url: "/authority", headers: AUTH });
+      expect(authoritySecond.statusCode).toBe(429);
+
+      const modeFirst = await ctx.app.inject({ method: "GET", url: "/execution-mode", headers: AUTH });
+      expect(modeFirst.statusCode).toBe(200);
+      const modeSecond = await ctx.app.inject({ method: "GET", url: "/execution-mode", headers: AUTH });
+      expect(modeSecond.statusCode).toBe(429);
+
+      const mutationFirst = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "admin", reason: "rate-limit coverage" }
+      });
+      expect(mutationFirst.statusCode).toBe(200);
+      const mutationSecond = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "strict", reason: "rate-limit coverage" }
+      });
+      expect(mutationSecond.statusCode).toBe(429);
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
