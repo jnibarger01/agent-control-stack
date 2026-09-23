@@ -107,6 +107,48 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("previews composer policy without creating or auditing anything", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-preview-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const before = (await app.inject({ method: "GET", url: "/api/events?limit=500" })).json().events.length;
+      const write = await app.inject({
+        method: "POST",
+        url: "/dashboard/policy-preview",
+        payload: {
+          title: "Write notes",
+          intent: "update notes",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["notes.md"] } }],
+          risk: "medium",
+          requester: "system"
+        }
+      });
+      expect(write.statusCode).toBe(200);
+      expect(write.headers["cache-control"]).toBe("no-store");
+      expect(write.json()).toMatchObject({ outcome: "needs_approval", actions: [{ kind: "fs.write" }] });
+
+      const unknown = await app.inject({
+        method: "POST",
+        url: "/dashboard/policy-preview",
+        payload: { title: "x", intent: "y", target: {}, requestedActions: [{ kind: "teleport", description: "z" }] }
+      });
+      expect(unknown.json().outcome).toBe("blocked");
+      expect((await app.inject({ method: "POST", url: "/dashboard/policy-preview", payload: {} })).statusCode).toBe(
+        400
+      );
+
+      expect((await app.inject({ method: "GET", url: "/work-items" })).json().workItems).toEqual([]);
+      expect((await app.inject({ method: "GET", url: "/api/events?limit=500" })).json().events.length).toBe(before);
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.body).toContain('<option value="fs.write"></option>');
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("bounds finished work items on the dashboard while keeping exact counts", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-bounded-"));
     const dbPath = join(dir, "control.db");
