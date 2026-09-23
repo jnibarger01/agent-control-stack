@@ -31,7 +31,13 @@ import {
   createPolicyEngine,
   createWorkItemTools,
   explainPolicy,
-  workItemToolNames
+  workItemToolNames,
+  ACS_ADMIN_APPROVER,
+  ACS_ADMIN_APPROVAL_REASON,
+  adminExecutionGate,
+  observeLiveManagedAuthority,
+  readExecutionModeValue,
+  type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
 import { ControlStackError, stableHash, strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import {
@@ -90,6 +96,7 @@ import {
   dcRuntimeBootstrapCompleteSchema,
   dcRuntimeBootstrapSchema,
   eventQuerySchema,
+  executionModeBodySchema,
   heartbeatBodySchema,
   retryBodySchema,
   sessionLoginBodySchema,
@@ -223,6 +230,12 @@ export interface GatewayOptions {
   };
   /** Containment roots for the gateway-side Phase 6-8 re-authorization. */
   desktopCommanderContainment?: ContainmentConfig;
+  /**
+   * Canonical managed-authority observation. Tests inject this. Production
+   * reads the executor lease and break-glass marker. It is not a second
+   * authority store.
+   */
+  readManagedAuthority?: () => ManagedAuthorityObservation;
   /** Shared shutdown gate; tests may inject one to assert claim drain behavior. */
   shutdownController?: ShutdownController;
 }
@@ -435,6 +448,50 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   };
   app.get("/readyz", readiness);
   app.get("/health", readiness);
+
+  const readAuthority = options.readManagedAuthority ?? (() => observeLiveManagedAuthority());
+  const executionModeView = () => {
+    const row = workItems.getExecutionMode();
+    const mode = readExecutionModeValue(row.raw);
+    const observation = readAuthority();
+    return {
+      authorityOwner: observation.authorityOwner,
+      authoritative: mode.state === "ok" && observation.authoritative,
+      executionMode: mode.state === "ok" ? mode.mode : mode.state,
+      approvalPolicy: mode.approvalPolicy,
+      updatedAt: row.updatedAt,
+      updatedBy: row.updatedBy,
+      executor: {
+        lease: {
+          active: observation.leaseActive,
+          ambiguous: observation.leaseAmbiguous
+        }
+      },
+      breakGlass: {
+        active: observation.breakGlassActive,
+        ambiguous: observation.breakGlassAmbiguous
+      },
+      managedRuntime: observation.managedRuntime,
+      detail: observation.detail
+    };
+  };
+  app.get("/execution-mode", { preHandler: requireRead }, async () => executionModeView());
+  app.get("/authority", { preHandler: requireRead }, async () => executionModeView());
+  app.post("/execution-mode", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) return;
+      const body = executionModeBodySchema.parse(requestObject(request.body));
+      workItems.setExecutionMode({
+        mode: body.mode,
+        updatedBy: actor,
+        reason: body.reason ?? `operator set ${body.mode}`
+      });
+      return executionModeView();
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
     const health = workItems.health();
     metrics.setSqliteReady(health.ok);
@@ -531,7 +588,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               executionReads.listAttemptLeases(workItem.id).map(toMissionControlAttemptLease)
             ])
           ),
-          executionBackend: reportedExecutionBackend()
+          executionBackend: reportedExecutionBackend(),
+          executionMode: workItems.getExecutionMode().mode ?? undefined,
+          executionModeProblem: workItems.getExecutionMode().mode
+            ? undefined
+            : workItems.getExecutionMode().raw
+              ? "corrupt"
+              : "missing"
         })
       );
     } catch (error) {
@@ -1083,6 +1146,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       // minting a second authorization. Still entirely within the existing
       // work-item store - no parallel approval bookkeeping.
       const argsSummaryFingerprint = stableHash({ tool: body.tool, argsSummary: body.argsSummary });
+      const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
       const existing = workItems
         .list()
         .filter(
@@ -1092,10 +1156,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             (candidate.requestedActions[0]?.params as Record<string, unknown> | undefined)?.tool === body.tool &&
             (candidate.requestedActions[0]?.params as Record<string, unknown> | undefined)?.argsSummaryFingerprint ===
               argsSummaryFingerprint &&
-            ["needs_approval", "approved"].includes(candidate.status)
+            ["needs_approval", "approved"].includes(candidate.status) &&
+            (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
+              ? true
+              : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
         )
         .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
-      const workItem =
+      let workItem =
         existing ??
         tools.create_work_item(
           createWorkItemSchema.parse({
@@ -1131,6 +1198,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           })
         );
 
+      const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
+      if (mode.state !== "ok") {
+        recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+        return reply.code(403).send({
+          decision: "deny",
+          code: mode.state === "missing" ? "execution_mode_missing" : "execution_mode_corrupt",
+          reason: "canonical execution mode is not usable",
+          workItemId: workItem.id
+        });
+      }
+
       const evaluations = policy.evaluateWorkItem(workItem, actor, "approve");
       const required = evaluations.filter((evaluation) => evaluation.decision.decision === "require_approval");
       const actionHash = required[0]?.actionHash ?? executionActionHash(workItem);
@@ -1144,6 +1222,78 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           detail: policy.summarize(evaluations).reason
         });
       }
+
+      if (mode.mode === "admin") {
+        const gate = adminExecutionGate(readAuthority(), true);
+        if (!gate.ok) {
+          recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+          workItems.recordSystemEvent({
+            name: "execution_mode.auto_authorization_denied",
+            body: { code: gate.code, tool: body.tool, workItemId: workItem.id, correlationId: body.correlationId ?? null },
+            attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+          });
+          return reply.code(403).send({
+            decision: "deny",
+            code: gate.code,
+            reason: gate.detail,
+            workItemId: workItem.id
+          });
+        }
+        if (workItem.status !== "approved") {
+          try {
+            const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
+            const adminRequired = adminEvaluations.filter(
+              (evaluation) => evaluation.decision.decision === "require_approval"
+            );
+            const adminActionHash = adminRequired[0]?.actionHash;
+            if (!adminActionHash || policy.summarize(adminEvaluations).decision === "deny") {
+              recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                code: "admin_authorization_failed",
+                reason: policy.summarize(adminEvaluations).reason,
+                workItemId: workItem.id
+              });
+            }
+            const approved = tools.approve_work_item({
+              id: workItem.id,
+              actionHash: adminActionHash,
+              approvedBy: ACS_ADMIN_APPROVER,
+              reason: ACS_ADMIN_APPROVAL_REASON
+            });
+            if (approved.decision.decision === "deny" || approved.workItem.status !== "approved") {
+              recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                code: "admin_authorization_failed",
+                reason: approved.decision.reason,
+                workItemId: workItem.id
+              });
+            }
+            workItem = approved.workItem;
+            workItems.recordSystemEvent({
+              name: "execution_mode.auto_authorized",
+              body: {
+                workItemId: workItem.id,
+                tool: body.tool,
+                correlationId: body.correlationId ?? null,
+                approvalPolicy: "auto",
+                approvedBy: ACS_ADMIN_APPROVER
+              },
+              attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+            });
+          } catch (error) {
+            recordDcCapabilityAudit(actor, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply.code(403).send({
+              decision: "deny",
+              code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
+              reason: "acs admin auto-authorization failed closed",
+              workItemId: workItem.id
+            });
+          }
+        }
+      }
+
       if (workItem.status !== "approved" || (dcPolicy.requiresApproval && required.length === 0)) {
         // Policy requires an approval that does not exist yet. Do NOT issue a
         // capability: the bridge must drive the existing approval flow first.

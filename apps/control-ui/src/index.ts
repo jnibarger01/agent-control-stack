@@ -66,6 +66,9 @@ export interface MissionControlViewModel {
   attemptLeasesByWorkItem?: Record<string, MissionControlAttemptLease[]>;
   /** Explicit worker backend label, when the gateway knows it. Never a secret. */
   executionBackend?: string;
+  /** Canonical execution mode. Absent when the row is missing or corrupt. */
+  executionMode?: "strict" | "admin";
+  executionModeProblem?: "missing" | "corrupt";
   now?: Date;
 }
 
@@ -588,8 +591,18 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <main id="main-content" tabindex="-1">
       <header>
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
-        <div class="live" aria-live="polite"><span aria-hidden="true"></span> SSE ready</div>
+        <div class="header-controls">
+          <fieldset class="execution-mode" id="execution-mode-control">
+            <legend>Execution Mode</legend>
+            <label><input type="radio" name="executionMode" value="strict" data-execution-mode="strict"${model.executionMode === "strict" ? " checked" : ""}> Strict</label>
+            <label><input type="radio" name="executionMode" value="admin" data-execution-mode="admin"${model.executionMode === "admin" ? " checked" : ""}> Admin / YOLO</label>
+            <p id="execution-mode-result" role="status"></p>
+          </fieldset>
+          <div class="live" aria-live="polite"><span aria-hidden="true"></span> SSE ready</div>
+        </div>
       </header>
+      ${model.executionMode === "admin" ? `<div id="admin-mode-banner" class="admin-mode-banner" role="alert">ACS ADMIN MODE -- human approval disabled</div>` : ""}
+      ${model.executionModeProblem ? `<div id="execution-mode-problem" class="admin-mode-banner" role="alert">ACS execution mode ${escapeHtml(model.executionModeProblem)} -- fail closed</div>` : ""}
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve and deny are disabled until the live stream reconnects.</div>
       <section id="overview" class="cards" data-view-panel="overview">${overviewCards(stats)}</section>
       <section class="grid">
@@ -1556,6 +1569,22 @@ function requestApprovalConfirm(request) {
   });
 }
 
+document.querySelectorAll('[data-execution-mode]').forEach((input) => {
+  input.addEventListener('change', async () => {
+    if (!input.checked) return;
+    const output = document.querySelector('#execution-mode-result');
+    const headers = { 'content-type': 'application/json' };
+    const res = await fetch('/execution-mode', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ mode: input.value, reason: 'operator set ' + input.value + ' from mission control' })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (output) output.textContent = res.ok ? 'mode ' + body.executionMode : 'Rejected: ' + (body.error || body.code || res.status);
+    if (res.ok) setTimeout(() => location.assign(location.href), 300);
+  });
+});
+
 document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
   button.addEventListener('click', async () => {
     const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
@@ -1757,6 +1786,11 @@ p { color: var(--muted); margin: 6px 0 0; }
 .live.disconnected span { background: var(--red); }
 .stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid #f1d18a; background: #fff8e6; color: var(--amber); border-radius: 8px; font-weight: 600; }
 .stale-banner[hidden] { display: none; }
+.header-controls { display: flex; gap: 12px; align-items: start; }
+.execution-mode { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); }
+.execution-mode legend { font-size: 12px; font-weight: 700; padding: 0 4px; }
+.execution-mode label { display: block; margin-top: 4px; }
+.admin-mode-banner { margin: 0 0 14px; padding: 12px 14px; border: 2px solid #ffb020; background: #3a2508; color: #ffd27a; border-radius: 8px; font-weight: 800; letter-spacing: .02em; }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px rgba(23, 32, 42, .06); }
 .card { padding: 15px; min-height: 108px; }
