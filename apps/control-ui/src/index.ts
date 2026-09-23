@@ -9,7 +9,9 @@ import {
   type StoredAuditEvent,
   type WorkItem
 } from "@agent-control-stack/work-items";
+import { escapeHtml } from "./html.js";
 import { redactSecrets, redactedAttributesJson, redactionClientSource } from "./redaction.js";
+import { workItemControlsClientSource, workItemControlsHtml } from "./work-item-controls.js";
 
 export {
   isSecretAttributeKey,
@@ -19,6 +21,14 @@ export {
   SECRET_KEY_PATTERN,
   SECRET_VALUE_PATTERNS
 } from "./redaction.js";
+export {
+  REASON_REQUIRED_CONTROLS,
+  WORK_ITEM_CONTROL_STATUSES,
+  WORK_ITEM_CONTROLS,
+  workItemControlsFor,
+  workItemControlsHtml,
+  type WorkItemControl
+} from "./work-item-controls.js";
 
 export interface MissionControlAgent {
   id: string;
@@ -303,7 +313,7 @@ export function nextSseReconnectDelayMs(attempt: number): number {
   return Math.min(30_000, 1_000 * 2 ** Math.min(n, 5));
 }
 
-/** Show/hide the stale-stream banner and disable approve/deny/unblock while disconnected. */
+/** Show/hide the stale-stream banner and disable approve/deny/unblock and work-item controls while disconnected. */
 export function applySseConnectionState(root: SseConnectionRoot, connected: boolean): void {
   const banner = root.querySelector("#sse-stale-banner");
   if (banner) banner.hidden = connected;
@@ -314,7 +324,9 @@ export function applySseConnectionState(root: SseConnectionRoot, connected: bool
       ? `<span aria-hidden="true"></span> Live`
       : `<span aria-hidden="true"></span> Disconnected`;
   }
-  for (const button of Array.from(root.querySelectorAll("[data-approve],[data-reject],[data-unblock]"))) {
+  for (const button of Array.from(
+    root.querySelectorAll("[data-approve],[data-reject],[data-unblock],[data-work-control]")
+  )) {
     const approveWithoutHash = button.getAttribute("data-approve") !== null && !button.getAttribute("data-action-hash");
     button.disabled = !connected || approveWithoutHash;
   }
@@ -337,7 +349,7 @@ export function approvalActionHashPrefix(hash: string, maxLen = 12): string {
 
 export type ApprovalConfirmRequest = {
   workItemId: string;
-  action: "approve" | "reject";
+  action: "approve" | "reject" | "cancel" | "retry" | "clone";
   actionHash?: string;
   /** Requested action kind the hash approves, when known. */
   actionKind?: string;
@@ -353,8 +365,17 @@ export type ApprovalConfirmDocument = {
   activeElement?: { focus?(): void } | null;
 };
 
+/** Confirm dialog copy. Cancel's dismiss button must not read "Cancel". */
+const CONFIRM_COPY: Record<ApprovalConfirmRequest["action"], { label: string; heading: string; dismiss: string }> = {
+  approve: { label: "Approve", heading: "Approve high-risk work item?", dismiss: "Cancel" },
+  reject: { label: "Deny", heading: "Deny high-risk work item?", dismiss: "Cancel" },
+  cancel: { label: "Cancel work item", heading: "Cancel this work item?", dismiss: "Keep work item" },
+  retry: { label: "Retry", heading: "Retry this work item as a new item?", dismiss: "Go back" },
+  clone: { label: "Clone", heading: "Clone this work item as a new item?", dismiss: "Go back" }
+};
+
 /**
- * Modal confirm for elevated-risk approve/deny.
+ * Modal confirm for elevated-risk approve/deny and for work-item controls.
  * Esc or Cancel resolves false without side effects; Confirm resolves true.
  * Initial focus is on Cancel (confirm is never the default focused control).
  */
@@ -373,7 +394,8 @@ export function requestApprovalConfirm(
     overlay.setAttribute("aria-labelledby", "approval-confirm-title");
     overlay.className = "approval-confirm-overlay";
 
-    const actionLabel = request.action === "approve" ? "Approve" : "Deny";
+    const copy = CONFIRM_COPY[request.action];
+    const actionLabel = copy.label;
     const hashPrefix = approvalActionHashPrefix(request.actionHash ?? "");
     const hashLine = hashPrefix
       ? `<p class="approval-confirm-hash">Action hash: <code>${escapeHtml(hashPrefix)}</code></p>`
@@ -383,13 +405,13 @@ export function requestApprovalConfirm(
       : "";
 
     overlay.innerHTML = `<div class="approval-confirm-card">
-  <h3 id="approval-confirm-title">${escapeHtml(actionLabel)} high-risk work item?</h3>
+  <h3 id="approval-confirm-title">${escapeHtml(copy.heading)}</h3>
   <p class="approval-confirm-id">Work item: <code>${escapeHtml(request.workItemId)}</code></p>
   <p class="approval-confirm-risk">Risk: <strong>${escapeHtml(request.risk)}</strong></p>
   ${kindLine}
   ${hashLine}
   <div class="approval-confirm-actions">
-    <button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>
+    <button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>${escapeHtml(copy.dismiss)}</button>
     <button type="button" id="approval-confirm-ok" data-approval-confirm-ok>${escapeHtml(actionLabel)}</button>
   </div>
 </div>`;
@@ -572,7 +594,7 @@ export function renderWorkItemDetailHtml(
         })
         .join("")}</ol>`
     : `<p class="muted">No matching events.</p>`;
-  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div><div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
+  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div>${workItemControlsHtml(workItem)}<div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
 }
 
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
@@ -636,7 +658,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div>${connectorsPanel(agents, model.executionBackend)}</article>
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>audit</span></div>${policyPanel(events)}</article>
-        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone are not exposed here. Bulk approval is not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
+        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
       </section>
     </main>
     <script>${clientScript()}</script>
@@ -1071,7 +1093,7 @@ function applySseConnectionState(root, connected) {
       ? '<span aria-hidden="true"></span> Live'
       : '<span aria-hidden="true"></span> Disconnected';
   }
-  root.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach(function (button) {
+  root.querySelectorAll('[data-approve],[data-reject],[data-unblock],[data-work-control]').forEach(function (button) {
     const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
     button.disabled = !connected || approveWithoutHash;
   });
@@ -1156,6 +1178,11 @@ function escapeClient(value) {
 }
 
 ${redactionClientSource()}
+${workItemControlsClientSource()}
+function onWorkItemControlSucceeded() {
+  setTimeout(function () { location.assign(location.href); }, 500);
+}
+
 function formatClientTime(value) {
   if (!value) return '—';
   const date = new Date(value);
@@ -1394,6 +1421,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
     '</dl>' +
     '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(action.description) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
     renderExecutionAuthority(executionAttempts, attemptLeases) +
+    workItemControlsMarkup(workItem, sseConnected) +
     '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
 }
 
@@ -1550,6 +1578,7 @@ function escapeClientHtml(value) {
   });
 }
 
+const confirmCopy = ${JSON.stringify(CONFIRM_COPY)};
 function requestApprovalConfirm(request) {
   return new Promise(function (resolve) {
     const existing = document.getElementById('approval-confirm-dialog');
@@ -1560,7 +1589,8 @@ function requestApprovalConfirm(request) {
     overlay.setAttribute('aria-modal', 'true');
     overlay.setAttribute('aria-labelledby', 'approval-confirm-title');
     overlay.className = 'approval-confirm-overlay';
-    const actionLabel = request.action === 'approve' ? 'Approve' : 'Deny';
+    const copy = confirmCopy[request.action] || confirmCopy.approve;
+    const actionLabel = copy.label;
     const hashPrefix = approvalActionHashPrefix(request.actionHash || '');
     const hashLine = hashPrefix
       ? '<p class="approval-confirm-hash">Action hash: <code>' + escapeClientHtml(hashPrefix) + '</code></p>'
@@ -1569,13 +1599,13 @@ function requestApprovalConfirm(request) {
       ? '<p class="approval-confirm-kind">Action: <code>' + escapeClientHtml(request.actionKind) + '</code></p>'
       : '';
     overlay.innerHTML = '<div class="approval-confirm-card">' +
-      '<h3 id="approval-confirm-title">' + escapeClientHtml(actionLabel) + ' high-risk work item?</h3>' +
+      '<h3 id="approval-confirm-title">' + escapeClientHtml(copy.heading) + '</h3>' +
       '<p class="approval-confirm-id">Work item: <code>' + escapeClientHtml(request.workItemId) + '</code></p>' +
       '<p class="approval-confirm-risk">Risk: <strong>' + escapeClientHtml(request.risk) + '</strong></p>' +
       kindLine +
       hashLine +
       '<div class="approval-confirm-actions">' +
-        '<button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>' +
+        '<button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>' + escapeClientHtml(copy.dismiss) + '</button>' +
         '<button type="button" id="approval-confirm-ok" data-approval-confirm-ok>' + escapeClientHtml(actionLabel) + '</button>' +
       '</div></div>';
     function finish(confirmed) {
@@ -1981,11 +2011,4 @@ nav a.active, nav a:hover { background: #243044; color: #ffffff; }
 .system-probes dt { color: var(--muted); }
 .system-probes dd { margin: 0; }
 `;
-}
-
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => {
-    const escapes: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
-    return escapes[char] ?? char;
-  });
 }
