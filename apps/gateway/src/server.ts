@@ -490,9 +490,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       detail: observation.detail
     };
   };
-  app.get("/execution-mode", { preHandler: requireRead }, async () => executionModeView());
-  app.get("/authority", { preHandler: requireRead }, async () => executionModeView());
-  app.post("/execution-mode", async (request, reply) => {
+  app.get(
+    "/execution-mode",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async () => executionModeView()
+  );
+  app.get(
+    "/authority",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async () => executionModeView()
+  );
+  app.post(
+    "/execution-mode",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
     try {
       const actor = requireMutationActor(request, reply, auth);
       if (!actor) return;
@@ -506,7 +517,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     } catch (error) {
       return sendError(reply, error);
     }
-  });
+    }
+  );
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
     const health = workItems.health();
     metrics.setSqliteReady(health.ok);
