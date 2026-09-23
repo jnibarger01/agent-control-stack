@@ -17,7 +17,8 @@ export const DASHBOARD_FRAGMENT_TARGETS = {
   approvalsList: "#approvals-list",
   approvalsCount: "#approvals-count",
   metrics: "#operator-metrics-body",
-  systemStats: "#system-stats"
+  systemStats: "#system-stats",
+  policy: "#policy-body"
 } as const;
 
 export type DashboardFragmentName = keyof typeof DASHBOARD_FRAGMENT_TARGETS;

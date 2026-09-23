@@ -552,7 +552,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         ids.map((id) => [id, (leases.get(id) ?? []).map(toMissionControlAttemptLease)])
       ),
       executionBackend: reportedExecutionBackend(),
-      composerActionKinds: [...SUPPORTED_ACTION_KINDS]
+      composerActionKinds: [...SUPPORTED_ACTION_KINDS],
+      policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW })
     };
   }
 
@@ -589,6 +590,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     } catch (error) {
       return sendError(reply, error);
     }
+  });
+
+  // Dashboard-internal: operator totals from the same registry /metrics renders.
+  app.get("/dashboard/metrics", { preHandler: requireRead }, async (_request, reply) => {
+    metrics.setSqliteReady(workItems.health().ok);
+    reply.header("cache-control", "no-store");
+    return { at: new Date().toISOString(), metrics: metrics.summary() };
   });
 
   // Dashboard-internal: older audit events for the timeline's "load older".
@@ -2036,6 +2044,8 @@ function reportedExecutionBackend(): "dry_run" | "desktop_commander" | undefined
 }
 
 const DASHBOARD_EVENT_PAGE = 50;
+/** Most recent policy decisions summarized on the Policy panel. */
+const POLICY_SUMMARY_WINDOW = 500;
 const dashboardQuerySchema = z
   .object({ finished: z.coerce.number().int().min(0).max(MAX_DASHBOARD_FINISHED_LIMIT).optional() })
   .passthrough();

@@ -15,6 +15,15 @@ import { workItemControlsClientSource, workItemControlsHtml } from "./work-item-
 import { liveDashboardClientSource, type DashboardFragments } from "./live-dashboard.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
 import { composerClientSource, composerHtml } from "./composer.js";
+import {
+  auditAttributesHtml,
+  auditRowsClientSource,
+  metricsClientSource,
+  policyPanelHtml,
+  summarizePolicyDecisions,
+  themeBootScript,
+  themeClientSource
+} from "./visibility.js";
 import { systemProbesClientSource } from "./system-probes.js";
 import {
   approvalWaitMs,
@@ -51,6 +60,18 @@ export {
 } from "./live-dashboard.js";
 export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE } from "./audit-timeline.js";
 export { COMPOSER_PREVIEW_DEBOUNCE_MS, composerHtml, DEFAULT_ACTION_KIND } from "./composer.js";
+export {
+  AUDIT_SUMMARY_KEYS,
+  auditAttributesHtml,
+  METRIC_ROWS,
+  METRICS_HISTORY,
+  METRICS_POLL_MS,
+  policyPanelHtml,
+  summarizePolicyDecisions,
+  THEME_CHOICES,
+  THEME_STORAGE_KEY,
+  type PolicyDecisionSummary
+} from "./visibility.js";
 export { PROBE_HISTORY, PROBE_INTERVAL_MS, PROBE_PATH, PROBE_SLOW_MS } from "./system-probes.js";
 export {
   approvalWaitMs,
@@ -122,6 +143,8 @@ export interface MissionControlViewModel {
   executionBackend?: string;
   /** Exact per-status counts across the store. When present, cards use these instead of counting `workItems`. */
   statusCounts?: Record<string, number>;
+  /** Recent `policy.decided` events for the Policy panel. Falls back to `events` when absent. */
+  policyDecisionEvents?: StoredAuditEvent[];
   /** Action kinds the composer suggests (the policy's supported kinds). */
   composerActionKinds?: string[];
   /** How long an approval may wait before it is flagged as over SLA. Defaults to 30 minutes. */
@@ -680,6 +703,11 @@ export function renderDashboardFragments(
     approvalsCount: `${approvalItems.length} waiting`,
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
     systemStats: systemStats(stats, model.executionBackend),
+    policy: policyPanelHtml(
+      summarizePolicyDecisions(model.policyDecisionEvents ?? model.events ?? []),
+      model.composerActionKinds ?? [],
+      (timeUnixNano) => time(nanoToIso(timeUnixNano))
+    ),
     generatedAt: now.toISOString()
   };
 }
@@ -696,6 +724,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>ACS Mission Control</title>
+    <script>${themeBootScript()}</script>
     <style>${styles()}</style>
   </head>
   <body data-active-view="overview">
@@ -719,7 +748,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <main id="main-content" tabindex="-1">
       <header>
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
-        <div class="header-status"><div class="live connecting" data-state="connecting"><span aria-hidden="true"></span> <span data-live-label>Connecting…</span></div><small id="dashboard-updated" class="dashboard-updated"></small><button type="button" id="notifications-toggle" class="tool-button" aria-pressed="false">Notify me</button></div>
+        <div class="header-status"><div class="live connecting" data-state="connecting"><span aria-hidden="true"></span> <span data-live-label>Connecting…</span></div><small id="dashboard-updated" class="dashboard-updated"></small><div class="header-tools"><button type="button" id="notifications-toggle" class="tool-button" aria-pressed="false">Notify me</button><button type="button" id="theme-toggle" class="tool-button">Theme: auto</button></div></div>
       </header>
       <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
@@ -732,14 +761,14 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
       </section>
       <section class="grid lower">
-        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div><div id="operator-metrics-body">${fragments.metrics}</div></article>
+        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body">${fragments.metrics}</div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>
         <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline">${eventTimeline([...events].reverse())}</div><button type="button" id="events-load-older" class="load-more"${events.length ? "" : " disabled"}>Load older</button></article>
         <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div><div class="system-panel"><div id="system-stats">${fragments.systemStats}</div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
         <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composerHtml(model.composerActionKinds ?? [])}</article>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div>${connectorsPanel(agents, model.executionBackend)}</article>
-        <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>audit</span></div>${policyPanel(events)}</article>
+        <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>recent decisions</span></div><div id="policy-body" class="policy-body">${fragments.policy}</div></article>
         <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
       </section>
     </main>
@@ -1090,7 +1119,6 @@ function operatorMetricsPanel(
     <div><dt>Pending approvals</dt><dd>${pendingApprovals.length}</dd></div>
     <div><dt>Oldest approval wait</dt><dd>${formatDuration(oldestApprovalWait)}</dd></div>
   </dl>
-  <p class="metrics-scrape">429s / rate limits: scrape authenticated <a href="/metrics"><code>GET /metrics</code></a> for <code>acs_rate_limit_rejected_total</code> and <code>acs_http_requests_total{status="429"}</code>. Full names: <code>docs/runbooks/operator-metrics.md</code>.</p>
   </div>`;
 }
 
@@ -1134,18 +1162,12 @@ function connectorsPanel(agents: MissionControlAgent[], executionBackend?: strin
   return `${rows}<p class="empty">Execution backend: ${backend}</p>`;
 }
 
-function policyPanel(events: StoredAuditEvent[]): string {
-  const policyEvents = events.filter((event) => /policy/i.test(event.name));
-  if (!policyEvents.length) return `<p class="empty">No policy events in the current audit window.</p>`;
-  return eventTimeline([...policyEvents].reverse());
-}
-
 function eventTimeline(events: StoredAuditEvent[]): string {
   if (!events.length) return `<p class="empty">No audit events recorded.</p>`;
   return `<ol class="timeline">${events
     .map(
       (event) =>
-        `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(redactedAttributesJson(event.attributes))}</small></li>`
+        `<li${event.sequence === undefined ? "" : ` data-sequence="${escapeHtml(String(event.sequence))}"`}><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong>${auditAttributesHtml(event.attributes)}</li>`
     )
     .join("")}</ol>`;
 }
@@ -1284,6 +1306,9 @@ ${liveDashboardClientSource()}
 ${auditTimelineClientSource()}
 ${systemProbesClientSource()}
 ${operatorWorkflowClientSource()}
+${auditRowsClientSource()}
+${metricsClientSource()}
+${themeClientSource()}
 function onDashboardFragmentsApplied() {
   updateTitleBadge();
   refreshWaitBadges();
@@ -1839,6 +1864,7 @@ function showView(name) {
     link.classList.toggle('active', link.dataset.nav === view);
   });
   syncSystemProbes();
+  syncMetricsPolling();
 }
 document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');
@@ -1890,29 +1916,143 @@ function styles(): string {
 :root {
   color-scheme: dark;
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  background: #0e1116;
-  color: #e8edf4;
   --bg: #0e1116;
   --surface: #171b22;
   --surface-2: #1e242e;
   --ink: #e8edf4;
   --muted: #8b97a8;
+  --muted-strong: #a9b6c7;
   --line: #2a3342;
+  --soft-line: #222a36;
   --side: #10141a;
+  --side-line: #252a30;
   --side-muted: #8b97a8;
+  --brand: #f8fafc;
+  --nav-ink: #c1c8d0;
+  --nav-active: #243044;
+  --nav-active-ink: #ffffff;
   --accent: #3b82f6;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
   --green: #3ddc97;
   --amber: #f5b942;
   --red: #ff6b6b;
+  --hover: #243044;
+  --control-bg: #171b22;
+  --control-line: #334052;
+  --control-hover-line: #4b6180;
+  --banner-bg: #2a2416;
+  --banner-line: #6b5420;
+  --attention-bg: #2a1c1c;
+  --pill-bg: #1e242e;
+  --pill-ink: #b4bfcd;
+  --pill-line: #334052;
+  --ok-bg: #13261e;
+  --ok-line: #24553f;
+  --warn-bg: #2a2416;
+  --warn-line: #6b5420;
+  --bad-bg: #2c1a1a;
+  --bad-line: #6b2f2f;
+  --overlay: rgba(4, 6, 9, .6);
+  --shadow: rgba(0, 0, 0, .25);
+  background: var(--bg);
+  color: var(--ink);
+}
+/* Light theme: follows the OS unless the operator picked a theme. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #f1f4f8;
+  --ink: #17202a;
+  --muted: #5b6778;
+  --muted-strong: #43536a;
+  --line: #d9e1ea;
+  --soft-line: #edf1f5;
+  --side: #eef2f6;
+  --side-line: #d9e1ea;
+  --side-muted: #5b6778;
+  --brand: #0f172a;
+  --nav-ink: #334155;
+  --nav-active: #dde6f2;
+  --nav-active-ink: #0f172a;
+  --accent: #2563eb;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
+  --green: #15803d;
+  --amber: #b45309;
+  --red: #b91c1c;
+  --hover: #f4f8ff;
+  --control-bg: #ffffff;
+  --control-line: #cbd5e1;
+  --control-hover-line: #9db7d7;
+  --banner-bg: #fff8e6;
+  --banner-line: #f1d18a;
+  --attention-bg: #fff8f7;
+  --pill-bg: #eef2f6;
+  --pill-ink: #45515f;
+  --pill-line: #d7dfe8;
+  --ok-bg: #eef9f2;
+  --ok-line: #a8d8bd;
+  --warn-bg: #fff8e6;
+  --warn-line: #f1d18a;
+  --bad-bg: #fff1ef;
+  --bad-line: #f0b8b2;
+  --overlay: rgba(17, 20, 23, .45);
+  --shadow: rgba(23, 32, 42, .08);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #f1f4f8;
+  --ink: #17202a;
+  --muted: #5b6778;
+  --muted-strong: #43536a;
+  --line: #d9e1ea;
+  --soft-line: #edf1f5;
+  --side: #eef2f6;
+  --side-line: #d9e1ea;
+  --side-muted: #5b6778;
+  --brand: #0f172a;
+  --nav-ink: #334155;
+  --nav-active: #dde6f2;
+  --nav-active-ink: #0f172a;
+  --accent: #2563eb;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
+  --green: #15803d;
+  --amber: #b45309;
+  --red: #b91c1c;
+  --hover: #f4f8ff;
+  --control-bg: #ffffff;
+  --control-line: #cbd5e1;
+  --control-hover-line: #9db7d7;
+  --banner-bg: #fff8e6;
+  --banner-line: #f1d18a;
+  --attention-bg: #fff8f7;
+  --pill-bg: #eef2f6;
+  --pill-ink: #45515f;
+  --pill-line: #d7dfe8;
+  --ok-bg: #eef9f2;
+  --ok-line: #a8d8bd;
+  --warn-bg: #fff8e6;
+  --warn-line: #f1d18a;
+  --bad-bg: #fff1ef;
+  --bad-line: #f0b8b2;
+  --overlay: rgba(17, 20, 23, .45);
+  --shadow: rgba(23, 32, 42, .08);
 }
 * { box-sizing: border-box; }
 body { margin: 0; min-height: 100vh; background: var(--bg); display: grid; grid-template-columns: 216px minmax(0, 1fr); }
-aside { border-right: 1px solid #252a30; padding: 22px 16px; background: var(--side); position: sticky; top: 0; height: 100vh; }
-.brand { color: #f8fafc; font-size: 20px; font-weight: 800; }
+aside { border-right: 1px solid var(--side-line); padding: 22px 16px; background: var(--side); position: sticky; top: 0; height: 100vh; }
+.brand { color: var(--brand); font-size: 20px; font-weight: 800; }
 .brand span { display: block; color: var(--side-muted); font-size: 11px; margin-top: 4px; font-weight: 700; }
 nav { display: grid; gap: 4px; margin-top: 30px; }
-nav a { color: #c1c8d0; text-decoration: none; padding: 10px 12px; border-radius: 8px; }
-nav a.active, nav a:hover { background: #27313b; color: #ffffff; }
+nav a { color: var(--nav-ink); text-decoration: none; padding: 10px 12px; border-radius: 8px; }
+nav a.active, nav a:hover { background: var(--nav-active); color: var(--nav-active-ink); }
 .rail-note { color: var(--side-muted); font-size: 12px; line-height: 1.45; position: absolute; bottom: 24px; left: 16px; right: 16px; }
 main { padding: 22px 24px 40px; min-width: 0; }
 header { display: flex; justify-content: space-between; align-items: start; gap: 16px; margin-bottom: 18px; }
@@ -1935,6 +2075,26 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 .shortcut-list dt, .shortcut-list dd { margin: 0; }
 #shortcut-help[hidden] { display: none; }
 .permalink { color: var(--accent); }
+.header-tools { display: flex; gap: 6px; }
+.event-summary { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.event-attrs summary { cursor: pointer; color: var(--accent); font-size: 11px; margin-top: 2px; }
+.event-attrs dl { display: grid; gap: 2px; margin: 4px 0 0; font-size: 12px; }
+.event-attrs dl div { display: grid; grid-template-columns: minmax(90px, 38%) 1fr; gap: 8px; }
+.event-attrs dt { color: var(--muted); overflow-wrap: anywhere; }
+.event-attrs dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.policy-body { padding: 12px 16px 16px; display: grid; gap: 10px; }
+.policy-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+.policy-counts div { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.policy-counts dt { color: var(--muted); font-size: 11px; }
+.policy-counts dd { margin: 2px 0 0; font-size: 20px; font-weight: 700; }
+.policy-counts .decision-allow dd { color: var(--green); }
+.policy-counts .decision-require_approval dd { color: var(--amber); }
+.policy-counts .decision-deny dd { color: var(--red); }
+.rule-list { margin: 0; padding-left: 18px; font-size: 12px; }
+.live-metrics { padding: 0 16px; }
+.metrics-table th[scope="row"] { font-weight: 500; color: var(--ink); text-transform: none; font-size: 13px; }
+.metrics-table tr.metric-hot th, .metrics-table tr.metric-hot td { color: var(--amber); }
+.metric-trend { letter-spacing: 1px; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .queue-footer { display: grid; gap: 6px; margin-top: 8px; }
 .queue-footer-note { margin: 0; color: var(--muted); font-size: 12px; }
 .load-more, .tool-button { justify-self: start; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px; }
@@ -1946,10 +2106,10 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 #system-probes[data-state="slow"] dd, #system-probes[data-state="failing"] dd, #system-probes[data-state="down"] dd { color: var(--amber); }
 #system-probes[data-state="down"] .probe-trend, #system-probes[data-state="failing"] .probe-trend { color: var(--red); }
 .action-status { margin: 0 0 10px; min-height: 1.25em; color: var(--muted); font-size: 13px; }
-.stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid #f1d18a; background: #fff8e6; color: var(--amber); border-radius: 8px; font-weight: 600; }
+.stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid var(--banner-line); background: var(--banner-bg); color: var(--amber); border-radius: 8px; font-weight: 600; }
 .stale-banner[hidden] { display: none; }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
-.card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px rgba(23, 32, 42, .06); }
+.card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px var(--shadow); }
 .card { padding: 15px; min-height: 108px; }
 .card span, .panel-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; }
 .card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
@@ -1957,58 +2117,58 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
 .lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .panel { min-width: 0; overflow: hidden; }
-.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: #fbfcfd; }
+.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .panel-head p { font-size: 12px; margin-top: 3px; }
 h2 { margin: 0; font-size: 16px; color: var(--ink); }
 table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid #edf1f5; vertical-align: top; font-size: 13px; }
-th { color: var(--muted); font-size: 11px; text-transform: uppercase; background: #fbfcfd; position: sticky; top: 0; z-index: 1; }
+th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--soft-line); vertical-align: top; font-size: 13px; }
+th { color: var(--muted); font-size: 11px; text-transform: uppercase; background: var(--surface); position: sticky; top: 0; z-index: 1; }
 td small { display: block; color: var(--muted); margin-top: 2px; }
 .table-wrap { overflow: auto; max-height: 430px; }
 .agent-row { cursor: pointer; }
-.agent-row:hover, .agent-row.selected { background: #eef4ff; }
+.agent-row:hover, .agent-row.selected { background: var(--hover); }
 .empty { padding: 18px; color: var(--muted); }
-.pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: #eef2f6; color: #45515f; border: 1px solid #d7dfe8; white-space: nowrap; }
-.online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: #a8d8bd; background: #eef9f2; }
-.stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: #f1d18a; background: #fff8e6; }
-.offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: #f0b8b2; background: #fff1ef; }
-.queue-item.attention { border-left: 3px solid var(--red); background: #fff8f7; }
+.pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: var(--pill-bg); color: var(--pill-ink); border: 1px solid var(--pill-line); white-space: nowrap; }
+.online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: var(--ok-line); background: var(--ok-bg); }
+.stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: var(--warn-line); background: var(--warn-bg); }
+.offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: var(--bad-line); background: var(--bad-bg); }
+.queue-item.attention { border-left: 3px solid var(--red); background: var(--attention-bg); }
 .attention-badge { color: var(--red); font-weight: 700; margin-left: 6px; font-size: 11px; }
 .plan-status, .execution-status { display: block; margin-top: 4px; }
 .plan-pending { color: var(--amber); }
 .plan-admitted { color: var(--green); }
-.execution-status { color: #43536a !important; }
-.queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: #fbfcfd; display: grid; gap: 10px; }
+.execution-status { color: var(--muted-strong) !important; }
+.queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); display: grid; gap: 10px; }
 .queue-filter-row { display: grid; gap: 8px; }
 .queue-filter-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
 .queue-filter-statuses { margin: 0; padding: 0; border: 0; }
 .queue-filter-statuses legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
 .queue-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #ccd6e2; background: #ffffff; border-radius: 999px; padding: 4px 10px; font-size: 12px; color: #344256; cursor: pointer; }
-.queue-filter-chip:has(input:checked) { border-color: #9db7d7; background: #eef4ff; color: var(--accent); }
+.queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--control-line); background: var(--control-bg); border-radius: 999px; padding: 4px 10px; font-size: 12px; color: var(--ink); cursor: pointer; }
+.queue-filter-chip:has(input:checked) { border-color: var(--control-hover-line); background: var(--hover); color: var(--accent); }
 .queue-filter-chip input { width: auto; margin: 0; accent-color: var(--accent); }
 .queue-filter-field { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
 .queue-filter-live { margin: 0; color: var(--muted); font-size: 12px; }
 .queue-item-filtered-out, .queue-item[hidden] { display: none !important; }
 .queue { display: grid; }
-.queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid #edf1f5; padding: 12px 14px; cursor: pointer; }
-.queue-item:hover, .queue-item.selected { background: #f4f8ff; }
+.queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid var(--soft-line); padding: 12px 14px; cursor: pointer; }
+.queue-item:hover, .queue-item.selected { background: var(--hover); }
 .queue-item.selected { box-shadow: inset 3px 0 0 var(--accent); }
 .approval-item > button { text-align: left; background: transparent; color: inherit; border: 0; cursor: pointer; }
 .approval-actions { display: flex; gap: 8px; }
-.approval-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
-.approval-actions button:hover { background: #f4f8ff; border-color: #9db7d7; }
-.approval-actions button:last-child { color: var(--red); border-color: #f0b8b2; }
+.approval-actions button { border: 1px solid var(--control-line); background: var(--control-bg); color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+.approval-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
+.approval-actions button:last-child { color: var(--red); border-color: var(--bad-line); }
 .system-panel { padding: 18px; display: grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: start; }
 .system-panel strong { font-size: 44px; color: var(--green); }
 .system-panel span { color: var(--muted); margin-top: 52px; margin-left: -130px; }
 .system-panel dl { margin: 0; display: grid; gap: 8px; }
-.system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
+.system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
 .system-panel dt { color: var(--muted); }
 .system-panel dd { margin: 0; color: var(--ink); }
 .operator-metrics { padding: 18px; display: grid; gap: 14px; }
 .operator-metrics dl { margin: 0; display: grid; gap: 8px; }
-.operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
+.operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
 .operator-metrics dt { color: var(--muted); }
 .operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
 .metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
@@ -2022,10 +2182,10 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .approval-item { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 12px; display: grid; gap: 9px; }
 .approval-item strong, .approval-item small { display: block; }
 .agent-layout { display: grid; }
-.detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: #fbfcfd; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
+.detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
 .detail-empty, .detail-loading, .detail-error { color: var(--muted); }
 .detail-error { color: var(--red); }
-.detail-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; border-bottom: 1px solid #e6ecf2; padding-bottom: 12px; margin-bottom: 12px; }
+.detail-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; border-bottom: 1px solid var(--soft-line); padding-bottom: 12px; margin-bottom: 12px; }
 .detail-head h3 { margin: 0; font-size: 16px; }
 .detail-head small { color: var(--muted); }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; margin: 0; }
@@ -2036,23 +2196,23 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .detail-section { margin-top: 14px; }
 .detail-section h4 { margin: 0 0 8px; font-size: 13px; color: var(--ink); }
 .execution-stack { display: grid; gap: 10px; }
-.execution-card { border: 1px solid #dbe4ee; background: #ffffff; border-radius: 8px; padding: 10px; }
+.execution-card { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 10px; }
 .execution-head, .lease-head { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
 .execution-head small { display: block; color: var(--muted); margin-top: 2px; }
-.lease-block { border-top: 1px solid #e6ecf2; margin-top: 10px; padding-top: 10px; }
+.lease-block { border-top: 1px solid var(--soft-line); margin-top: 10px; padding-top: 10px; }
 .lease-head strong { font-size: 12px; }
 .chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { border: 1px solid #ccd6e2; background: #ffffff; border-radius: 999px; padding: 4px 8px; font-size: 12px; color: #344256; }
+.chip { border: 1px solid var(--control-line); background: var(--control-bg); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: var(--ink); }
 .detail-events { list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }
 .detail-events li { border-left: 2px solid var(--accent); padding-left: 10px; }
 .detail-events time, .detail-events small { display: block; color: var(--muted); font-size: 11px; }
 .action-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.action-list li { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; background: #ffffff; }
+.action-list li { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--surface); }
 .action-list small { display: block; color: var(--muted); margin-top: 2px; }
 .muted { color: var(--muted); font-size: 13px; }
 form { display: grid; gap: 11px; padding: 14px; }
 label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
-input, textarea, select { width: 100%; background: #ffffff; color: var(--ink); border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
+input, textarea, select { width: 100%; background: var(--control-bg); color: var(--ink); border: 1px solid var(--control-line); border-radius: 8px; padding: 10px; }
 .field-hint { color: var(--muted); font-size: 11px; margin-top: -4px; }
 .field-error { color: var(--red); font-size: 12px; min-height: 0; }
 .field-hint.field-error { color: var(--amber); }
@@ -2065,12 +2225,12 @@ textarea[aria-invalid="true"] { border-color: var(--red); }
 .composer-preview[data-outcome="blocked"], .composer-preview[data-outcome="rejected"] { border-color: var(--red); }
 .preview-actions { margin: 4px 0; padding-left: 16px; }
 .form-row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; }
-button[type=submit] { background: #2563eb; color: white; border: 0; border-radius: 9px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
+button[type=submit] { background: var(--primary); color: var(--primary-ink); border: 0; border-radius: 9px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
 output { color: var(--accent); min-height: 20px; }
 .timeline { list-style: none; margin: 0; padding: 10px 14px 14px; display: grid; gap: 10px; }
-.timeline li { border-left: 2px solid #2563eb; padding-left: 10px; }
+.timeline li { border-left: 2px solid var(--primary); padding-left: 10px; }
 .timeline time, .timeline small { display: block; color: var(--muted); font-size: 11px; word-break: break-word; }
-.skip-link { position: absolute; left: -9999px; top: 0; z-index: 1000; background: #2563eb; color: #fff; padding: 10px 14px; border-radius: 8px; font-weight: 700; }
+.skip-link { position: absolute; left: -9999px; top: 0; z-index: 1000; background: var(--primary); color: var(--primary-ink); padding: 10px 14px; border-radius: 8px; font-weight: 700; }
 .skip-link:focus { left: 12px; top: 12px; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -2081,15 +2241,15 @@ output { color: var(--accent); min-height: 20px; }
 .approval-result { display: block; min-height: 1.25em; }
 .approval-actions button:disabled { opacity: .55; cursor: not-allowed; }
 .approval-actions button .hash-prefix { font-size: 11px; opacity: .8; margin-left: 4px; }
-.approval-confirm-overlay { position: fixed; inset: 0; z-index: 2000; background: rgba(17, 20, 23, .45); display: grid; place-items: center; padding: 16px; }
-.approval-confirm-card { width: min(420px, 100%); background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 40px rgba(23, 32, 42, .22); padding: 18px; display: grid; gap: 10px; color: var(--ink); }
+.approval-confirm-overlay { position: fixed; inset: 0; z-index: 2000; background: var(--overlay); display: grid; place-items: center; padding: 16px; }
+.approval-confirm-card { width: min(420px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 40px var(--shadow); padding: 18px; display: grid; gap: 10px; color: var(--ink); }
 .approval-confirm-card h3 { margin: 0; font-size: 16px; }
 .approval-confirm-card p { margin: 0; color: var(--muted); font-size: 13px; }
 .approval-confirm-card code { color: var(--ink); font-size: 12px; }
 .approval-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
-.approval-confirm-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 40px; }
-.approval-confirm-actions button:hover { background: #f4f8ff; border-color: #9db7d7; }
-#approval-confirm-ok { background: #fff1ef; color: var(--red); border-color: #f0b8b2; font-weight: 700; }
+.approval-confirm-actions button { border: 1px solid var(--control-line); background: var(--control-bg); color: var(--ink); border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 40px; }
+.approval-confirm-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
+#approval-confirm-ok { background: var(--bad-bg); color: var(--red); border-color: var(--bad-line); font-weight: 700; }
 #approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
 @media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
@@ -2129,11 +2289,7 @@ body[data-active-view="policy"] [data-view-panel~="policy"],
 body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
 /* The view rule above must not flatten the overview card grid. */
 body[data-active-view="overview"] #overview.cards { display: grid; }
-.panel-head, th, .queue-filter, .detail-panel, .execution-card, .approval-item, .approval-actions button, .queue-filter-chip, input, textarea, select, .approval-confirm-card, .chip, .action-list li { background: var(--surface); color: var(--ink); border-color: var(--line); }
-.stale-banner { background: #2a2416; color: var(--amber); border-color: #6b5420; }
-.agent-row:hover, .agent-row.selected, .queue-item:hover, .queue-item.selected { background: #243044; }
-.queue-item.attention { background: #2a1c1c; }
-nav a.active, nav a:hover { background: #243044; color: #ffffff; }
+.approval-item { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .system-probes { padding: 0 18px 16px; }
 .system-probes dl { margin: 0; display: grid; gap: 8px; }
 .system-probes div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }

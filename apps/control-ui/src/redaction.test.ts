@@ -124,7 +124,7 @@ describe("mission control display redaction", () => {
       now: new Date("2026-09-22T00:01:00.000Z")
     });
 
-    const markup = html.slice(0, html.indexOf("<script>"));
+    const markup = html.slice(0, html.lastIndexOf("<script>"));
     expectNoLeaks(markup);
     expect(markup).toContain("[redacted]");
     expect(markup).toContain("tool.result");

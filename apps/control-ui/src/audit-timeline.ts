@@ -9,7 +9,7 @@ export const LIVE_TIMELINE_CAP = 200;
 /** Page size for "load older". */
 export const OLDER_EVENTS_PAGE = 50;
 
-/** Relies on the dashboard client's `redactedAttributesJsonClient`, `fetchJson`, and `announce`. */
+/** Relies on the dashboard client's `auditAttributesMarkup`, `fetchJson`, and `announce`. */
 export function auditTimelineClientSource(): string {
   return `
 let timelinePaused = false;
@@ -35,12 +35,11 @@ function timelineItemElement(data) {
   if (data && data.sequence !== undefined) item.dataset.sequence = String(data.sequence);
   const time = document.createElement('time');
   const name = document.createElement('strong');
-  const attrs = document.createElement('small');
   const nanos = Number(data && data.timeUnixNano);
   time.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
   name.textContent = (data && data.name) || 'event';
-  attrs.textContent = redactedAttributesJsonClient((data && data.attributes) || {});
-  item.append(time, name, attrs);
+  item.append(time, name);
+  item.insertAdjacentHTML('beforeend', auditAttributesMarkup((data && data.attributes) || {}));
   return item;
 }
 

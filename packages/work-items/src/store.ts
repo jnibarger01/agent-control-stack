@@ -400,6 +400,8 @@ export interface ReadEventsOptions {
   afterSequence?: number;
   /** Page backwards: only events with a lower sequence (newest first within the page, returned ascending). */
   beforeSequence?: number;
+  /** Exact event name, e.g. "policy.decided" (indexed). */
+  name?: string;
   workItemId?: string;
   agentId?: string;
 }
@@ -3414,6 +3416,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
       where.push("sequence < ?");
       params.push(options.beforeSequence);
+    }
+    if (options.name) {
+      where.push("name = ?");
+      params.push(options.name);
     }
     if (options.workItemId) {
       where.push(`json_extract(attributes, '$."work_item.id"') = ?`);
