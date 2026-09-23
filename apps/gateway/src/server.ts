@@ -13,6 +13,7 @@ import {
   desktopCommanderAdapterConfigFromEnv,
   desktopCommanderContainmentFromEnv,
   desktopCommanderInvocationFingerprint,
+  desktopCommanderManagedToolDisposition,
   desktopCommanderRequiredScopes,
   desktopCommanderToolPolicy,
   normalizeInvocation,
@@ -43,7 +44,13 @@ import {
   explainPolicy,
   previewWorkItemPolicy,
   SUPPORTED_ACTION_KINDS,
-  workItemToolNames
+  workItemToolNames,
+  ACS_ADMIN_APPROVER,
+  ACS_ADMIN_APPROVAL_REASON,
+  adminExecutionGate,
+  observeLiveManagedAuthority,
+  readExecutionModeValue,
+  type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
@@ -103,6 +110,7 @@ import {
   dcRuntimeBootstrapCompleteSchema,
   dcRuntimeBootstrapSchema,
   eventQuerySchema,
+  executionModeBodySchema,
   heartbeatBodySchema,
   retryBodySchema,
   sessionLoginBodySchema,
@@ -237,6 +245,12 @@ export interface GatewayOptions {
   };
   /** Containment roots for the gateway-side Phase 6-8 re-authorization. */
   desktopCommanderContainment?: ContainmentConfig;
+  /**
+   * Canonical managed-authority observation. Tests inject this. Production
+   * reads the executor lease and break-glass marker. It is not a second
+   * authority store.
+   */
+  readManagedAuthority?: () => ManagedAuthorityObservation;
   /** Shared shutdown gate; tests may inject one to assert claim drain behavior. */
   shutdownController?: ShutdownController;
 }
@@ -449,6 +463,62 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   };
   app.get("/readyz", readiness);
   app.get("/health", readiness);
+
+  const readAuthority = options.readManagedAuthority ?? (() => observeLiveManagedAuthority());
+  const executionModeView = () => {
+    const row = workItems.getExecutionMode();
+    const mode = readExecutionModeValue(row.raw);
+    const observation = readAuthority();
+    return {
+      authorityOwner: observation.authorityOwner,
+      authoritative: mode.state === "ok" && observation.authoritative,
+      executionMode: mode.state === "ok" ? mode.mode : mode.state,
+      approvalPolicy: mode.approvalPolicy,
+      updatedAt: row.updatedAt,
+      updatedBy: row.updatedBy,
+      executor: {
+        lease: {
+          active: observation.leaseActive,
+          ambiguous: observation.leaseAmbiguous
+        }
+      },
+      breakGlass: {
+        active: observation.breakGlassActive,
+        ambiguous: observation.breakGlassAmbiguous
+      },
+      managedRuntime: observation.managedRuntime,
+      detail: observation.detail
+    };
+  };
+  app.get(
+    "/execution-mode",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async () => executionModeView()
+  );
+  app.get(
+    "/authority",
+    { preHandler: requireRead, config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async () => executionModeView()
+  );
+  app.post(
+    "/execution-mode",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const actor = requireMutationActor(request, reply, auth);
+        if (!actor) return;
+        const body = executionModeBodySchema.parse(requestObject(request.body));
+        workItems.setExecutionMode({
+          mode: body.mode,
+          updatedBy: actor,
+          reason: body.reason ?? `operator set ${body.mode}`
+        });
+        return executionModeView();
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
     const health = workItems.health();
     metrics.setSqliteReady(health.ok);
@@ -522,6 +592,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   }
 
+  function dashboardExecutionMode(): Pick<MissionControlViewModel, "executionMode" | "executionModeProblem"> {
+    const { mode, raw } = workItems.getExecutionMode();
+    return mode ? { executionMode: mode } : { executionModeProblem: raw ? "corrupt" : "missing" };
+  }
+
   function missionControlViewModel(request: FastifyRequest): MissionControlViewModel {
     // Every active item, plus only the most recent finished ones: the page
     // stays bounded as history grows. Card counts come from exact per-status
@@ -553,7 +628,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       ),
       executionBackend: reportedExecutionBackend(),
       composerActionKinds: [...SUPPORTED_ACTION_KINDS],
-      policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW })
+      policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW }),
+      ...dashboardExecutionMode()
     };
   }
 
@@ -1146,7 +1222,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         const dcPolicy = desktopCommanderToolPolicy(body.tool);
         if (!dcPolicy) {
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
-          return reply.code(403).send({ decision: "deny", reason: "unknown_tool" });
+          const disposition = desktopCommanderManagedToolDisposition(body.tool);
+          if (disposition?.managed === "unsupported") {
+            // A registered Desktop Commander tool with an explicit managed-mode
+            // disposition of "unsupported": deterministic, non-retryable.
+            return reply.code(403).send({
+              decision: "deny",
+              reason: "managed_tool_unsupported",
+              code: "managed_tool_unsupported",
+              detail: `${body.tool} (${disposition.toolClass}) is not supported through managed mode: ${disposition.reason}`
+            });
+          }
+          return reply.code(403).send({ decision: "deny", reason: "unknown_tool", code: "unknown_tool" });
         }
 
         let requestArguments: Record<string, unknown>;
@@ -1159,7 +1246,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           return reply.code(400).send({
             decision: "deny",
             reason: "invalid_arguments",
-            code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid"
+            code: error instanceof ControlStackError ? error.code : "desktop_commander_argument_invalid",
+            // The validation message only echoes the caller's own argument
+            // shape (key names, schema bounds, requested path); never secrets.
+            ...(error instanceof ControlStackError ? { detail: error.message.slice(0, 512) } : {})
           });
         }
 
@@ -1185,6 +1275,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           requesterSubject: dcActor
         });
 
+        const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
         const existing = workItems
           .list()
           .filter((candidate) => {
@@ -1193,7 +1284,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               candidate.requesterSubject === dcActor &&
               params?.tool === body.tool &&
               params?.bindingHash === bindingHash &&
-              ["needs_approval", "approved"].includes(candidate.status)
+              ["needs_approval", "approved"].includes(candidate.status) &&
+              (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
+                ? true
+                : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
             );
           })
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
@@ -1204,7 +1298,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
         const approvalSummary = dcApprovalSummary(body.tool, invocation.validatedArguments, invocationHash);
 
-        const workItem =
+        let workItem =
           existing ??
           tools.create_work_item(
             createWorkItemSchema.parse({
@@ -1255,6 +1349,93 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             detail: policy.summarize(evaluations).reason
           });
         }
+        const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
+        if (mode.state !== "ok") {
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply.code(403).send({
+            decision: "deny",
+            code: mode.state === "missing" ? "execution_mode_missing" : "execution_mode_corrupt",
+            reason: "canonical execution mode is not usable",
+            workItemId: workItem.id
+          });
+        }
+
+        if (mode.mode === "admin") {
+          const gate = adminExecutionGate(readAuthority(), true);
+          if (!gate.ok) {
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            workItems.recordSystemEvent({
+              name: "execution_mode.auto_authorization_denied",
+              body: {
+                code: gate.code,
+                tool: body.tool,
+                workItemId: workItem.id,
+                correlationId: body.correlationId ?? null
+              },
+              attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+            });
+            return reply.code(403).send({
+              decision: "deny",
+              code: gate.code,
+              reason: gate.detail,
+              workItemId: workItem.id
+            });
+          }
+          if (workItem.status !== "approved") {
+            try {
+              const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
+              const adminRequired = adminEvaluations.filter(
+                (evaluation) => evaluation.decision.decision === "require_approval"
+              );
+              const adminActionHash = adminRequired[0]?.actionHash;
+              if (!adminActionHash || policy.summarize(adminEvaluations).decision === "deny") {
+                recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+                return reply.code(403).send({
+                  decision: "deny",
+                  code: "admin_authorization_failed",
+                  reason: policy.summarize(adminEvaluations).reason,
+                  workItemId: workItem.id
+                });
+              }
+              const approved = tools.approve_work_item({
+                id: workItem.id,
+                actionHash: adminActionHash,
+                approvedBy: ACS_ADMIN_APPROVER,
+                reason: ACS_ADMIN_APPROVAL_REASON
+              });
+              if (approved.decision.decision === "deny" || approved.workItem.status !== "approved") {
+                recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+                return reply.code(403).send({
+                  decision: "deny",
+                  code: "admin_authorization_failed",
+                  reason: approved.decision.reason,
+                  workItemId: workItem.id
+                });
+              }
+              workItem = approved.workItem;
+              workItems.recordSystemEvent({
+                name: "execution_mode.auto_authorized",
+                body: {
+                  workItemId: workItem.id,
+                  tool: body.tool,
+                  correlationId: body.correlationId ?? null,
+                  approvalPolicy: "auto",
+                  approvedBy: ACS_ADMIN_APPROVER
+                },
+                attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+              });
+            } catch (error) {
+              recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
+                reason: "acs admin auto-authorization failed closed",
+                workItemId: workItem.id
+              });
+            }
+          }
+        }
+
         if (workItem.status !== "approved" || (dcPolicy.requiresApproval && required.length === 0)) {
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
           return reply.code(409).send({
@@ -1910,7 +2091,7 @@ function parseDcArgsSummary(argsSummary: string): Record<string, unknown> {
 }
 
 function dcApprovalSummary(toolName: string, args: Record<string, unknown>, invocationHash: string): string {
-  const paths = ["path", "file_path", "source", "destination", "cwd"]
+  const paths = ["path", "file_path", "source", "destination", "cwd", "repoPath"]
     .map((key) => (typeof args[key] === "string" ? `${key}=${String(args[key])}` : undefined))
     .filter((value): value is string => Boolean(value));
   const details: string[] = [...paths];
@@ -1926,6 +2107,18 @@ function dcApprovalSummary(toolName: string, args: Record<string, unknown>, invo
   if (typeof args.command === "string") {
     const executable = args.command.trim().split(/\s+/u)[0] ?? "<unknown>";
     details.push(`command_executable=${executable}`);
+  }
+  if (Array.isArray(args.argv) && typeof args.argv[0] === "string") {
+    details.push(`argv_executable=${args.argv[0]}`, `argv_count=${args.argv.length}`);
+  }
+  if (typeof args.patch === "string") {
+    details.push(`patch_bytes=${Buffer.byteLength(args.patch, "utf8")}`);
+  }
+  for (const key of ["expectedSha256", "expectedHeadSha", "expectedCurrentSha256", "snapshotId"]) {
+    if (typeof args[key] === "string") details.push(`${key}=${String(args[key])}`);
+  }
+  if (typeof args.pid === "number") {
+    details.push(`pid=${args.pid}`);
   }
   details.push(`invocation_sha256=${invocationHash}`);
   return `${toolName}: ${details.join(" · ")}`;
@@ -2269,6 +2462,8 @@ function isRateLimitedRoute(url: string): boolean {
   const path = url.split("?", 1)[0];
   return (
     path === "/mcp" ||
+    path === "/execution-mode" ||
+    path === "/authority" ||
     path === "/session/login" ||
     path === "/oauth/device/code" ||
     path === "/oauth/token" ||
@@ -2283,9 +2478,10 @@ function isRateLimitedRoute(url: string): boolean {
   );
 }
 
-function isRateLimitedGetRoute(_url: string): boolean {
+function isRateLimitedGetRoute(url: string): boolean {
   // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
-  return false;
+  const path = url.split("?", 1)[0];
+  return path === "/execution-mode" || path === "/authority";
 }
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {

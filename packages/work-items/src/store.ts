@@ -1068,6 +1068,23 @@ export interface WorkItemStore {
     body?: Record<string, unknown>;
     attributes?: Record<string, string | number | boolean>;
   }): StoredAuditEvent;
+  /** Read the single canonical execution-mode row. null mode means missing or corrupt. */
+  getExecutionMode(): {
+    mode: "strict" | "admin" | null;
+    raw: string | null;
+    updatedAt: string | null;
+    updatedBy: string | null;
+    reason: string | null;
+  };
+  /** Persist the canonical execution mode and append an audit event. */
+  setExecutionMode(input: { mode: "strict" | "admin"; updatedBy: string; reason: string }): {
+    mode: "strict" | "admin";
+    updatedAt: string;
+    updatedBy: string;
+    reason: string;
+  };
+  /** True when a granted approval row was recorded by the given approver. */
+  hasGrantedApprovalBy(workItemId: string, approvedBy: string): boolean;
   submitWorkResult(input: unknown): WorkItem;
   recordDerivedWorkResult(input: unknown): WorkItem;
   getExecutionResult(resultId: string): StoredExecutionResult | undefined;
@@ -4749,6 +4766,79 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, input.attributes ?? {}));
       return { value: event, events: [event] };
     });
+  }
+
+  getExecutionMode(): {
+    mode: "strict" | "admin" | null;
+    raw: string | null;
+    updatedAt: string | null;
+    updatedBy: string | null;
+    reason: string | null;
+  } {
+    const row = this.db
+      .prepare(`SELECT mode, updated_at, updated_by, reason FROM execution_mode_state WHERE id = 1`)
+      .get() as { mode?: string; updated_at?: string; updated_by?: string; reason?: string } | undefined;
+    if (!row || typeof row.mode !== "string") {
+      return { mode: null, raw: null, updatedAt: null, updatedBy: null, reason: null };
+    }
+    const mode = row.mode === "strict" || row.mode === "admin" ? row.mode : null;
+    return {
+      mode,
+      raw: row.mode,
+      updatedAt: typeof row.updated_at === "string" ? row.updated_at : null,
+      updatedBy: typeof row.updated_by === "string" ? row.updated_by : null,
+      reason: typeof row.reason === "string" ? row.reason : null
+    };
+  }
+
+  setExecutionMode(input: { mode: "strict" | "admin"; updatedBy: string; reason: string }): {
+    mode: "strict" | "admin";
+    updatedAt: string;
+    updatedBy: string;
+    reason: string;
+  } {
+    return this.write(() => {
+      if (input.mode !== "strict" && input.mode !== "admin") {
+        throw new ControlStackError("execution_mode_invalid", "execution mode must be strict or admin");
+      }
+      const updatedBy = requiredString(input.updatedBy, "updatedBy");
+      const reason = requiredString(input.reason, "reason");
+      const updatedAt = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO execution_mode_state (id, mode, updated_at, updated_by, reason)
+           VALUES (1, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             mode = excluded.mode,
+             updated_at = excluded.updated_at,
+             updated_by = excluded.updated_by,
+             reason = excluded.reason`
+        )
+        .run(input.mode, updatedAt, updatedBy, reason);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "execution_mode.changed",
+          { mode: input.mode, updatedBy, reason },
+          {
+            "execution_mode.mode": input.mode,
+            "execution_mode.actor": updatedBy
+          }
+        )
+      );
+      return {
+        value: { mode: input.mode, updatedAt, updatedBy, reason },
+        events: [event]
+      };
+    });
+  }
+
+  hasGrantedApprovalBy(workItemId: string, approvedBy: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS found FROM approval_records WHERE work_item_id = ? AND approved_by = ? AND status = 'granted'`
+      )
+      .get(workItemId, approvedBy) as { found?: number } | undefined;
+    return row?.found === 1;
   }
 
   failExpiredLeases(now = new Date()): WorkItem[] {

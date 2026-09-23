@@ -12,6 +12,18 @@ const operations = {
     "method": "GET",
     "path": "/health"
   },
+  "getAuthority": {
+    "method": "GET",
+    "path": "/authority"
+  },
+  "getExecutionMode": {
+    "method": "GET",
+    "path": "/execution-mode"
+  },
+  "setExecutionMode": {
+    "method": "POST",
+    "path": "/execution-mode"
+  },
   "createSession": {
     "method": "POST",
     "path": "/session/login"

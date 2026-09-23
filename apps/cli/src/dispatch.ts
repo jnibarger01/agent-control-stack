@@ -1,4 +1,5 @@
 import { runSkillsCommand } from "@agent-control-stack/procedural-learning";
+import { observeLiveManagedAuthority, readExecutionModeValue } from "@agent-control-stack/policy-gate";
 import { installGracefulShutdown, startGateway } from "@agent-control-stack/gateway";
 import { MachineController, loadMachineControllerConfig } from "@agent-control-stack/machine-controller";
 import { McpStdioServer } from "@agent-control-stack/mcp";
@@ -89,6 +90,40 @@ function defaultDbPath(explicit?: string): string {
   return explicit ?? process.env.ACS_DB_PATH ?? "storage/local.db";
 }
 
+export function formatExecutionModeStatus(dbPath = defaultDbPath()): { text: string; ok: boolean } {
+  const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
+  try {
+    const row = store.getExecutionMode();
+    const mode = readExecutionModeValue(row.raw);
+    const authority = observeLiveManagedAuthority();
+    const executionMode = mode.state === "ok" ? mode.mode : "unavailable";
+    const approvalPolicy = mode.approvalPolicy;
+    const authorityLabel = authority.managedRuntime && authority.authoritative ? "managed" : "unmanaged";
+    const text = [
+      `Execution mode: ${executionMode}`,
+      `Approval policy: ${approvalPolicy}`,
+      `Authority: ${authorityLabel}`,
+      `Authoritative: ${mode.state === "ok" && authority.authoritative}`
+    ].join("\n");
+    return { text: `${text}\n`, ok: mode.state === "ok" };
+  } finally {
+    store.close();
+  }
+}
+
+export function setExecutionModeFromCli(
+  mode: "strict" | "admin",
+  dbPath = defaultDbPath()
+): { text: string; ok: boolean } {
+  const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
+  try {
+    store.setExecutionMode({ mode, updatedBy: "acs-cli", reason: `acs mode ${mode}` });
+  } finally {
+    store.close();
+  }
+  return formatExecutionModeStatus(dbPath);
+}
+
 export function exportControlPlaneAuditJsonl(dbPath: string): string {
   return exportAuditChainJsonlFromDatabaseFile(dbPath);
 }
@@ -164,6 +199,16 @@ async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapt
         command.json ? `${JSON.stringify(status)}\n` : `health=${status.health.ok} audit=${status.audit.ok}\n`
       );
       return status.health.ok && status.audit.ok ? 0 : 1;
+    }
+    case "mode-status": {
+      const status = formatExecutionModeStatus();
+      io.stdout.write(status.text);
+      return status.ok ? 0 : 1;
+    }
+    case "mode-set": {
+      const status = setExecutionModeFromCli(command.mode);
+      io.stdout.write(status.text);
+      return status.ok ? 0 : 1;
     }
     case "doctor": {
       const status = adapters.readStatus();

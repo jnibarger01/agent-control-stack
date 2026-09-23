@@ -23,6 +23,9 @@
       "path": "../../packages/machine-controller"
     },
     {
+      "path": "../../packages/policy-gate"
+    },
+    {
       "path": "../../packages/procedural-learning"
     },
     {
