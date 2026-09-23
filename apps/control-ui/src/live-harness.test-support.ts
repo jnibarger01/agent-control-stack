@@ -7,7 +7,16 @@ type SseListener = (event: { data: string; type: string }) => void;
  * Boots the real dashboard client in JSDOM with a manual clock, so debounce,
  * throttle, and reconnect timing are exercised deterministically.
  */
-export function bootLive(initial: MissionControlViewModel, extraRoutes: Record<string, (url: string) => unknown> = {}) {
+export interface BootLiveOptions {
+  url?: string;
+  beforeParse?: (window: Record<string, unknown>) => void;
+}
+
+export function bootLive(
+  initial: MissionControlViewModel,
+  extraRoutes: Record<string, (url: string) => unknown> = {},
+  options: BootLiveOptions = {}
+) {
   let now = 1_800_000_000_000;
   let nextTimerId = 1;
   const timers = new Map<number, { due: number; fn: () => void; every?: number }>();
@@ -26,9 +35,10 @@ export function bootLive(initial: MissionControlViewModel, extraRoutes: Record<s
   const dom = new JSDOM(renderDashboard(initial), {
     runScripts: "dangerously",
     virtualConsole,
-    url: "https://acs.local/",
+    url: options.url ?? "https://acs.local/",
     beforeParse(window) {
       const w = window as unknown as Record<string, unknown> & { Date: DateConstructor };
+      options.beforeParse?.(w);
       w.Date.now = () => now;
       w.setTimeout = (fn: () => void, ms = 0) => {
         const id = nextTimerId++;
@@ -118,6 +128,13 @@ export function bootLive(initial: MissionControlViewModel, extraRoutes: Record<s
   return {
     window,
     document,
+    clock: () => now,
+    key(key: string, init: { ctrlKey?: boolean; target?: Element | null } = {}) {
+      const target = init.target ?? document.activeElement ?? document.body;
+      target.dispatchEvent(
+        new window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ctrlKey: init.ctrlKey })
+      );
+    },
     calls,
     assigned,
     advance,

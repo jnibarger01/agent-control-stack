@@ -15,6 +15,14 @@ import { workItemControlsClientSource, workItemControlsHtml } from "./work-item-
 import { liveDashboardClientSource, type DashboardFragments } from "./live-dashboard.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
 import { systemProbesClientSource } from "./system-probes.js";
+import {
+  approvalWaitMs,
+  approvalWaitStart,
+  DEFAULT_APPROVAL_SLA_MS,
+  formatWait,
+  operatorWorkflowClientSource,
+  sortApprovalItems
+} from "./operator-workflow.js";
 
 export {
   isSecretAttributeKey,
@@ -42,6 +50,14 @@ export {
 } from "./live-dashboard.js";
 export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE } from "./audit-timeline.js";
 export { PROBE_HISTORY, PROBE_INTERVAL_MS, PROBE_PATH, PROBE_SLOW_MS } from "./system-probes.js";
+export {
+  approvalWaitMs,
+  approvalWaitStart,
+  DEFAULT_APPROVAL_SLA_MS,
+  formatWait,
+  KEYBOARD_SHORTCUTS,
+  sortApprovalItems
+} from "./operator-workflow.js";
 
 export interface MissionControlAgent {
   id: string;
@@ -104,6 +120,8 @@ export interface MissionControlViewModel {
   executionBackend?: string;
   /** Exact per-status counts across the store. When present, cards use these instead of counting `workItems`. */
   statusCounts?: Record<string, number>;
+  /** How long an approval may wait before it is flagged as over SLA. Defaults to 30 minutes. */
+  approvalSlaMs?: number;
   /** Present when `workItems` carries only a window of finished items. */
   finishedWorkItems?: { shown: number; total: number; limit: number };
   now?: Date;
@@ -611,7 +629,7 @@ export function renderWorkItemDetailHtml(
         })
         .join("")}</ol>`
     : `<p class="muted">No matching events.</p>`;
-  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div>${workItemControlsHtml(workItem)}<div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
+  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)} · <a class="permalink" href="?item=${escapeHtml(encodeURIComponent(workItem.id))}#queue">Permalink</a></small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div>${workItemControlsHtml(workItem)}<div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
 }
 
 function dashboardModel(input: WorkItem[] | MissionControlViewModel): MissionControlViewModel {
@@ -649,7 +667,12 @@ export function renderDashboardFragments(
       attemptLeasesByWorkItem
     ),
     queueFooter: queueFooter(model.finishedWorkItems),
-    approvalsList: approvalsPanel(approvalItems, approvalOptionsByWorkItem(model)),
+    approvalsList: approvalsPanel(
+      sortApprovalItems(approvalItems, now),
+      approvalOptionsByWorkItem(model),
+      now,
+      model.approvalSlaMs ?? DEFAULT_APPROVAL_SLA_MS
+    ),
     approvalsCount: `${approvalItems.length} waiting`,
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
     systemStats: systemStats(stats, model.executionBackend),
@@ -687,12 +710,12 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <a href="#policy" data-nav="policy">Policy</a>
         <a href="#system" data-nav="system">System</a>
       </nav>
-      <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream.</p>
+      <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream. Press <kbd>?</kbd> for keyboard shortcuts.</p>
     </aside>
     <main id="main-content" tabindex="-1">
       <header>
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
-        <div class="header-status"><div class="live connecting" data-state="connecting"><span aria-hidden="true"></span> <span data-live-label>Connecting…</span></div><small id="dashboard-updated" class="dashboard-updated"></small></div>
+        <div class="header-status"><div class="live connecting" data-state="connecting"><span aria-hidden="true"></span> <span data-live-label>Connecting…</span></div><small id="dashboard-updated" class="dashboard-updated"></small><button type="button" id="notifications-toggle" class="tool-button" aria-pressed="false">Notify me</button></div>
       </header>
       <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
@@ -978,7 +1001,22 @@ function approvalOptionsByWorkItem(model: MissionControlViewModel): Record<strin
   return out;
 }
 
-function approvalsPanel(items: WorkItem[], approvalActionsByWorkItem: Record<string, ApprovalActionOption[]>): string {
+function waitBadge(item: WorkItem, now: Date, slaMs: number): { html: string; overdue: boolean } {
+  const wait = approvalWaitMs(item, now);
+  if (wait === undefined) return { html: "", overdue: false };
+  const overdue = slaMs > 0 && wait >= slaMs;
+  return {
+    overdue,
+    html: `<small class="wait-badge" data-waiting-since="${escapeHtml(approvalWaitStart(item))}" data-sla-ms="${slaMs}">waiting ${formatWait(wait)}${overdue ? " · over SLA" : ""}</small>`
+  };
+}
+
+function approvalsPanel(
+  items: WorkItem[],
+  approvalActionsByWorkItem: Record<string, ApprovalActionOption[]>,
+  now: Date,
+  slaMs: number
+): string {
   if (!items.length) return `<p class="empty">No approvals or blocked work.</p>`;
   return `<div class="approvals-list" role="list">${items
     .map((item) => {
@@ -993,10 +1031,12 @@ function approvalsPanel(items: WorkItem[], approvalActionsByWorkItem: Record<str
       const reason = `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="${reasonId}" data-reason="${escapeHtml(item.id)}" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label>`;
       const outcome = `<output id="${resultId}" class="approval-result" aria-live="polite"></output>`;
       const approvalButtons = approvalButtonsFor(item, approvalActionsByWorkItem[item.id] ?? [], reasonId);
+      const wait = waitBadge(item, now, slaMs);
+      const cardAttrs = `class="approval-item${wait.overdue ? " overdue" : ""}" role="listitem" data-risk="${escapeHtml(item.risk)}" data-status="${escapeHtml(item.status)}" data-work-item-ref="${escapeHtml(item.id)}"`;
       if (item.status === "blocked") {
-        return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+        return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(approvalSummary)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+      return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(approvalSummary)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
 }
@@ -1039,10 +1079,7 @@ function operatorMetricsPanel(
     activeLeases.map((lease) => lease.issuedAt),
     now
   );
-  const oldestApprovalWait = maxAgeMs(
-    pendingApprovals.map((item) => item.createdAt),
-    now
-  );
+  const oldestApprovalWait = maxAgeMs(pendingApprovals.map(approvalWaitStart), now);
   return `<div class="operator-metrics"><dl>
     <div><dt>Active leases</dt><dd>${activeLeases.length}</dd></div>
     <div><dt>Oldest lease age</dt><dd>${formatDuration(oldestLeaseAge)}</dd></div>
@@ -1231,6 +1268,7 @@ function appendAuditEvent(event) {
   }
   if (!data.name) data.name = event.type;
   insertLiveTimelineEvent(data);
+  if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
@@ -1252,6 +1290,11 @@ ${workItemControlsClientSource()}
 ${liveDashboardClientSource()}
 ${auditTimelineClientSource()}
 ${systemProbesClientSource()}
+${operatorWorkflowClientSource()}
+function onDashboardFragmentsApplied() {
+  updateTitleBadge();
+  refreshWaitBadges();
+}
 function onWorkItemControlSucceeded(control, id, body) {
   const created = body && body.workItem && body.workItem.id;
   announce(control === 'cancel' ? 'Cancel accepted for ' + id : control + ' created ' + (created || 'a new work item'));
@@ -1285,11 +1328,7 @@ function bindWorkItems() {
   document.addEventListener('click', function (event) {
     const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
     if (!button) return;
-    document.querySelectorAll('[data-work-item]').forEach(function (candidate) { candidate.classList.remove('selected'); candidate.removeAttribute('aria-current'); });
-    button.classList.add('selected');
-    button.setAttribute('aria-current', 'true');
-    selectedWorkItemId = button.dataset.workItem;
-    void loadWorkDetail(selectedWorkItemId, { preserve: false });
+    selectWorkItem(button.dataset.workItem);
   });
 }
 
@@ -1309,7 +1348,7 @@ async function loadWorkDetail(id, options) {
     if (selectedWorkItemId !== id) return;
     renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
     if (!preserve) {
-      target.focus({ preventScroll: false });
+      if (!options || options.focusDetail !== false) target.focus({ preventScroll: false });
       return;
     }
     const nextReason = target.querySelector('[data-control-reason]');
@@ -1512,7 +1551,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
   }
   const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
   target.setAttribute('aria-labelledby', 'work-detail-title');
-  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + '</small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
+  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +
@@ -1659,6 +1698,8 @@ bindWorkItems();
 bindAgentRows();
 refreshAgentRoster();
 connectSse();
+renderNotificationToggle();
+updateTitleBadge();
 
 function isElevatedApprovalRisk(risk) {
   const normalized = String(risk || '').trim().toLowerCase();
@@ -1842,7 +1883,8 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const href = link.getAttribute('href') || '#overview';
   history.replaceState(null, '', href);
 });
-showView((location.hash || '#overview').replace('#', ''));`;
+showView((location.hash || '#overview').replace('#', ''));
+openWorkItemFromLocation();`;
 }
 
 function pill(value: string): string {
@@ -1917,6 +1959,17 @@ p { color: var(--muted); margin: 6px 0 0; }
 .live.connecting > span[aria-hidden="true"] { background: var(--muted); }
 .header-status { display: grid; justify-items: end; gap: 4px; }
 .dashboard-updated { color: var(--muted); font-size: 11px; min-height: 1em; }
+.wait-badge { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.approval-item.overdue { border-color: var(--amber); box-shadow: inset 3px 0 0 var(--amber); }
+.approval-item.overdue .wait-badge { color: var(--amber); font-weight: 600; }
+.approval-item[data-risk="critical"] { box-shadow: inset 3px 0 0 var(--red); }
+.approval-item[data-risk="critical"].overdue { box-shadow: inset 3px 0 0 var(--red), inset 6px 0 0 var(--amber); }
+kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; background: var(--surface); color: var(--ink); }
+.shortcut-list { display: grid; gap: 6px; margin: 12px 0; }
+.shortcut-list div { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: center; }
+.shortcut-list dt, .shortcut-list dd { margin: 0; }
+#shortcut-help[hidden] { display: none; }
+.permalink { color: var(--accent); }
 .queue-footer { display: grid; gap: 6px; margin-top: 8px; }
 .queue-footer-note { margin: 0; color: var(--muted); font-size: 12px; }
 .load-more, .tool-button { justify-self: start; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px; }
