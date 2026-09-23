@@ -91,7 +91,7 @@ document.addEventListener('click', function (event) {
   dashboardFinishedLimit = shown + (Number(button.dataset.step) || 50);
   const params = new URLSearchParams(location.search);
   params.set('finished', String(dashboardFinishedLimit));
-  history.replaceState(null, '', location.pathname + '?' + params.toString() + location.hash);
+  try { history.replaceState(null, '', location.pathname + '?' + params.toString() + location.hash); } catch {}
   button.disabled = true;
   scheduleDashboardRefresh(0);
 });
@@ -211,6 +211,7 @@ function applyDashboardFragments(fragments, options) {
   if (changed.indexOf('queueList') !== -1) applyQueueFilterClient(readQueueFilterFromDom());
   if (changed.indexOf('approvalsList') !== -1) applySseConnectionState(document, sseConnected);
   restoreOperatorState(state);
+  if (typeof onDashboardFragmentsApplied === 'function') onDashboardFragmentsApplied(changed);
   return true;
 }
 
