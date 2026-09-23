@@ -398,8 +398,29 @@ export const MAX_EVENT_LIMIT = 500;
 export interface ReadEventsOptions {
   limit?: number;
   afterSequence?: number;
+  /** Page backwards: only events with a lower sequence (newest first within the page, returned ascending). */
+  beforeSequence?: number;
   workItemId?: string;
   agentId?: string;
+}
+
+export const DEFAULT_DASHBOARD_FINISHED_LIMIT = 50;
+export const MAX_DASHBOARD_FINISHED_LIMIT = 1_000;
+
+export interface DashboardWorkItemsOptions {
+  /** Most recent finished (terminal) items to include. Active items are always all included. */
+  finishedLimit?: number;
+}
+
+export interface DashboardWorkItems {
+  /** Every non-terminal work item, newest first. */
+  active: WorkItem[];
+  /** The most recently updated terminal work items, newest first, up to `finishedLimit`. */
+  finished: WorkItem[];
+  finishedTotal: number;
+  finishedLimit: number;
+  /** Exact counts per status across the whole store. */
+  statusCounts: Record<string, number>;
 }
 
 export type HealthCheck = { ok: true } | { ok: false; code: string };
@@ -873,6 +894,7 @@ export interface WorkItemStore {
   create(input: unknown): WorkItem;
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
+  listDashboardWorkItems(options?: DashboardWorkItemsOptions): DashboardWorkItems;
   createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord;
   getExecutionPlan(planId: string): ExecutionPlanRecord | undefined;
   getCurrentExecutionPlan(workItemId: string): ExecutionPlanRecord | undefined;
@@ -1148,6 +1170,35 @@ export class SqliteWorkItemStore implements WorkItemStore {
           .prepare(`SELECT * FROM work_items ORDER BY created_at DESC LIMIT ?`)
           .all(filter.limit) as unknown as WorkItemRow[]);
     return rows.map(rowToWorkItem);
+  }
+
+  listDashboardWorkItems(options: DashboardWorkItemsOptions = {}): DashboardWorkItems {
+    const requested = options.finishedLimit ?? DEFAULT_DASHBOARD_FINISHED_LIMIT;
+    if (!Number.isInteger(requested) || requested < 0) {
+      throw new ControlStackError("invalid_dashboard_query", "finishedLimit must be a non-negative integer");
+    }
+    const finishedLimit = Math.min(requested, MAX_DASHBOARD_FINISHED_LIMIT);
+    const terminal = TERMINAL_WORK_ITEM_STATUSES.map(() => "?").join(", ");
+    const active = (
+      this.db
+        .prepare(`SELECT * FROM work_items WHERE status NOT IN (${terminal}) ORDER BY created_at DESC`)
+        .all(...TERMINAL_WORK_ITEM_STATUSES) as unknown as WorkItemRow[]
+    ).map(rowToWorkItem);
+    const finished = (
+      this.db
+        .prepare(
+          `SELECT * FROM work_items WHERE status IN (${terminal}) ORDER BY updated_at DESC, created_at DESC LIMIT ?`
+        )
+        .all(...TERMINAL_WORK_ITEM_STATUSES, finishedLimit) as unknown as WorkItemRow[]
+    ).map(rowToWorkItem);
+    const statusCounts: Record<string, number> = {};
+    for (const row of this.db
+      .prepare(`SELECT status, COUNT(*) AS count FROM work_items GROUP BY status`)
+      .all() as unknown as Array<{ status: string; count: number }>) {
+      statusCounts[row.status] = Number(row.count);
+    }
+    const finishedTotal = TERMINAL_WORK_ITEM_STATUSES.reduce((sum, status) => sum + (statusCounts[status] ?? 0), 0);
+    return { active, finished, finishedTotal, finishedLimit, statusCounts };
   }
 
   createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord {
@@ -3356,6 +3407,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
       where.push("sequence > ?");
       params.push(options.afterSequence);
+    }
+    if (options.beforeSequence !== undefined) {
+      if (!Number.isInteger(options.beforeSequence) || options.beforeSequence < 0) {
+        throw new ControlStackError("invalid_event_query", "beforeSequence must be a non-negative integer");
+      }
+      where.push("sequence < ?");
+      params.push(options.beforeSequence);
     }
     if (options.workItemId) {
       where.push(`json_extract(attributes, '$."work_item.id"') = ?`);
@@ -6019,8 +6077,10 @@ function resultStatus(outcome: ResultOutcome): WorkItemStatus {
   }
 }
 
+const TERMINAL_WORK_ITEM_STATUSES: readonly WorkItemStatus[] = ["succeeded", "failed", "cancelled", "rejected"];
+
 function isTerminalStatus(status: WorkItemStatus): boolean {
-  return status === "succeeded" || status === "failed" || status === "cancelled" || status === "rejected";
+  return TERMINAL_WORK_ITEM_STATUSES.includes(status);
 }
 
 function resultPayloadHash(input: PersistedResultInput): string {

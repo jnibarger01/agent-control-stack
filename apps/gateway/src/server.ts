@@ -27,8 +27,10 @@ import {
 import {
   projectAgents,
   renderDashboard,
+  renderDashboardFragments,
   toMissionControlAttemptLease,
-  type ApprovalActionOption
+  type ApprovalActionOption,
+  type MissionControlViewModel
 } from "@agent-control-stack/control-ui";
 import {
   MachineController,
@@ -51,6 +53,7 @@ import {
   SqliteExecutionReadStore,
   SqliteWorkItemStore,
   DEFAULT_EVENT_LIMIT,
+  MAX_DASHBOARD_FINISHED_LIMIT,
   MAX_EVENT_LIMIT,
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
@@ -517,32 +520,69 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   }
 
+  function missionControlViewModel(request: FastifyRequest): MissionControlViewModel {
+    // Every active item, plus only the most recent finished ones: the page
+    // stays bounded as history grows. Card counts come from exact per-status
+    // counts, so trimming finished items never undercounts failures.
+    const { finished } = dashboardQuerySchema.parse(request.query ?? {});
+    const dashboard = workItems.listDashboardWorkItems(finished === undefined ? {} : { finishedLimit: finished });
+    const workItemList = [...dashboard.active, ...dashboard.finished];
+    const ids = workItemList.map((workItem) => workItem.id);
+    const attempts = executionReads.listExecutionAttemptsForWorkItems(ids);
+    const leases = executionReads.listAttemptLeasesForWorkItems(ids);
+    return {
+      workItems: workItemList,
+      statusCounts: dashboard.statusCounts,
+      finishedWorkItems: {
+        shown: dashboard.finished.length,
+        total: dashboard.finishedTotal,
+        limit: dashboard.finishedLimit
+      },
+      events: workItems.readEvents(eventReadOptions(request.query)),
+      registeredAgents: workItems.listRegistryAgents(),
+      approvalActionsByWorkItem: approvalActionsByWorkItem(
+        policy,
+        workItemList,
+        gatewayCredentialForRequest(request, auth)?.actor
+      ),
+      executionAttemptsByWorkItem: Object.fromEntries(ids.map((id) => [id, attempts.get(id) ?? []])),
+      attemptLeasesByWorkItem: Object.fromEntries(
+        ids.map((id) => [id, (leases.get(id) ?? []).map(toMissionControlAttemptLease)])
+      ),
+      executionBackend: reportedExecutionBackend()
+    };
+  }
+
   app.get("/", { preHandler: requireRead }, async (request, reply) => {
     try {
-      const workItemList = workItems.list();
-      const events = workItems.readEvents(eventReadOptions(request.query));
-      reply.type("text/html").send(
-        renderDashboard({
-          workItems: workItemList,
-          events,
-          registeredAgents: workItems.listRegistryAgents(),
-          approvalActionsByWorkItem: approvalActionsByWorkItem(
-            policy,
-            workItemList,
-            gatewayCredentialForRequest(request, auth)?.actor
-          ),
-          executionAttemptsByWorkItem: Object.fromEntries(
-            workItemList.map((workItem) => [workItem.id, executionReads.listExecutionAttempts(workItem.id)])
-          ),
-          attemptLeasesByWorkItem: Object.fromEntries(
-            workItemList.map((workItem) => [
-              workItem.id,
-              executionReads.listAttemptLeases(workItem.id).map(toMissionControlAttemptLease)
-            ])
-          ),
-          executionBackend: reportedExecutionBackend()
+      reply.type("text/html").send(renderDashboard(missionControlViewModel(request)));
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  // Dashboard-internal: server-rendered section markup for Mission Control's
+  // in-place live updates. Same read guard and data as GET /; not a public API.
+  app.get("/dashboard/fragments", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      reply.header("cache-control", "no-store");
+      return { fragments: renderDashboardFragments(missionControlViewModel(request)) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  // Dashboard-internal: older audit events for the timeline's "load older".
+  app.get("/dashboard/events", { preHandler: requireRead }, async (request, reply) => {
+    try {
+      const { beforeSequence, limit } = dashboardEventsQuerySchema.parse(request.query ?? {});
+      reply.header("cache-control", "no-store");
+      return {
+        events: workItems.readEvents({
+          limit: Math.min(limit ?? DASHBOARD_EVENT_PAGE, MAX_EVENT_LIMIT),
+          ...(beforeSequence === undefined ? {} : { beforeSequence })
         })
-      );
+      };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -1975,6 +2015,15 @@ function reportedExecutionBackend(): "dry_run" | "desktop_commander" | undefined
   if (raw === "desktop_commander") return "desktop_commander";
   return undefined;
 }
+
+const DASHBOARD_EVENT_PAGE = 50;
+const dashboardQuerySchema = z
+  .object({ finished: z.coerce.number().int().min(0).max(MAX_DASHBOARD_FINISHED_LIMIT).optional() })
+  .passthrough();
+const dashboardEventsQuerySchema = z.object({
+  beforeSequence: z.coerce.number().int().positive().optional(),
+  limit: z.coerce.number().int().positive().optional()
+});
 
 function eventReadOptions(
   query: unknown,
