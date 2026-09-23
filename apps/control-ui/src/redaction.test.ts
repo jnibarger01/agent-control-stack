@@ -4,6 +4,7 @@ import {
   redactAttributes,
   redactSecrets,
   renderDashboard,
+  renderWorkItemDetailHtml,
   requestApprovalConfirm,
   type ApprovalConfirmDocument,
   type MissionControlViewModel
@@ -19,11 +20,15 @@ const SECRET_SAMPLES = {
   github: fake("token gh", "p_", "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"),
   slack: fake("xox", "b-", "1234567890-abcdefghij"),
   jwt: fake("ey", "JhbGciOiJIUzI1NiJ9", ".", "eyJzdWIiOiJ1c2VyMTIzIn0", ".", "c2lnbmF0dXJlLXZhbHVl"),
+  githubPat: fake("pat github", "_pat_", "11ABCDEFG0123456789_abcdefghijklmnopqrstuv"),
+  envLine: fake("DEPLOY_", "API_KEY=", "zzq7value"),
   query: "https://example.test/cb?code=ok&access_token=s3cr3tvalue&x=1",
   basicAuth: "postgres://admin:hunter2@db.internal:5432/acs"
 };
 
 const LEAKED = [
+  "11ABCDEFG0123456789_abcdefghijklmnopqrstuv",
+  "zzq7value",
   "abc.def-ghi_123",
   "ABCDEFGHIJKLMNOP1234",
   "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
@@ -70,14 +75,17 @@ describe("redactSecrets", () => {
 });
 
 describe("redactAttributes", () => {
-  it("redacts secret-named keys at any depth but keeps numeric token counts", () => {
+  it("redacts secret-named keys of any type at any depth, keeping only token-count accounting keys", () => {
     const redacted = redactAttributes({
       "work_item.id": "wrk_1",
       accessToken: "plain-looking-value",
       nested: { client_secret: "abc", headers: { Authorization: "Basic Zm9vOmJhcg==" } },
       list: [{ password: "pw" }, "Bearer abc.def-ghi_123=="],
       inputTokens: 1234,
-      "x-api-key": "k"
+      "x-api-key": "k",
+      api_key: 123456,
+      password: 1234,
+      tokenIssued: true
     }) as Record<string, unknown>;
 
     expect(redacted).toEqual({
@@ -86,8 +94,18 @@ describe("redactAttributes", () => {
       nested: { client_secret: "[redacted]", headers: { Authorization: "[redacted]" } },
       list: [{ password: "[redacted]" }, "Bearer [redacted]"],
       inputTokens: 1234,
-      "x-api-key": "[redacted]"
+      "x-api-key": "[redacted]",
+      api_key: "[redacted]",
+      password: "[redacted]",
+      tokenIssued: "[redacted]"
     });
+  });
+
+  it("stays linear on long non-matching input (no catastrophic backtracking)", () => {
+    const hostile = "a://" + "b".repeat(200_000) + ":" + "c".repeat(200_000);
+    const started = performance.now();
+    expect(redactSecrets(hostile)).toBe(hostile);
+    expect(performance.now() - started).toBeLessThan(1_000);
   });
 
   it("truncates pathologically deep input instead of recursing forever", () => {
@@ -166,7 +184,13 @@ describe("mission control display redaction", () => {
     for (const sample of Object.values(SECRET_SAMPLES)) {
       expect(window.redactClient(sample)).toBe(redactSecrets(sample));
     }
-    const attrs = { token: "t", nested: { cookie: "c", ok: SECRET_SAMPLES.jwt }, count: 3 };
+    const attrs = {
+      token: "t",
+      nested: { cookie: "c", ok: SECRET_SAMPLES.jwt },
+      count: 3,
+      api_key: 99,
+      inputTokens: 7
+    };
     expect(window.redactAttributesClient(attrs)).toEqual(redactAttributes(attrs));
 
     listeners.get("open")?.({ data: "", type: "open" });
@@ -206,6 +230,32 @@ describe("approval buttons name the action they approve (#4)", () => {
       "Approve shell: run npm test (hash bbbbbbbb…) for Redaction fixture"
     );
     expect(html).not.toContain(">Approve 1<");
+  });
+
+  it("redacts action descriptions in approval labels and detail markup", () => {
+    const html = renderDashboard({
+      workItems: [
+        {
+          ...baseWorkItem,
+          requestedActions: [{ kind: "shell", description: `curl -H "${SECRET_SAMPLES.bearer}"`, params: {} }]
+        }
+      ],
+      events: [],
+      approvalActionsByWorkItem: {
+        wrk_redact: [{ actionHash: "aaaaaaaa11112222", kind: "shell", description: `use ${SECRET_SAMPLES.github}` }]
+      },
+      now: new Date("2026-09-22T00:01:00.000Z")
+    });
+    expectNoLeaks(html.slice(0, html.lastIndexOf("<script>")));
+    expect(
+      new JSDOM(html).window.document.querySelector('[data-approve="wrk_redact"]')?.getAttribute("aria-label")
+    ).toContain("use token [redacted]");
+    expectNoLeaks(
+      renderWorkItemDetailHtml({
+        ...baseWorkItem,
+        requestedActions: [{ kind: "shell", description: SECRET_SAMPLES.bearer }]
+      })
+    );
   });
 
   it("falls back to numbered labels with the hash prefix for legacy hash-only input", () => {
