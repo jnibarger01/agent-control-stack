@@ -504,19 +504,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     "/execution-mode",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
-    try {
-      const actor = requireMutationActor(request, reply, auth);
-      if (!actor) return;
-      const body = executionModeBodySchema.parse(requestObject(request.body));
-      workItems.setExecutionMode({
-        mode: body.mode,
-        updatedBy: actor,
-        reason: body.reason ?? `operator set ${body.mode}`
-      });
-      return executionModeView();
-    } catch (error) {
-      return sendError(reply, error);
-    }
+      try {
+        const actor = requireMutationActor(request, reply, auth);
+        if (!actor) return;
+        const body = executionModeBodySchema.parse(requestObject(request.body));
+        workItems.setExecutionMode({
+          mode: body.mode,
+          updatedBy: actor,
+          reason: body.reason ?? `operator set ${body.mode}`
+        });
+        return executionModeView();
+      } catch (error) {
+        return sendError(reply, error);
+      }
     }
   );
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
