@@ -32,8 +32,12 @@ export {
 } from "./work-item-controls.js";
 export {
   AGENT_REFRESH_DEBOUNCE_MS,
+  DASHBOARD_CATCH_UP_TARGETS,
   DASHBOARD_FRAGMENT_TARGETS,
+  MAX_REFRESH_RETRY_MS,
   MIN_REFRESH_INTERVAL_MS,
+  PERIODIC_REFRESH_MS,
+  WORK_EVENT_PREFIXES,
   WORK_ITEM_REFRESH_DEBOUNCE_MS,
   type DashboardFragmentName,
   type DashboardFragments
@@ -644,13 +648,15 @@ export function renderDashboardFragments(
     approvalsCount: `${approvalItems.length} waiting`,
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
     systemStats: systemStats(stats, model.executionBackend),
+    eventsTimeline: eventTimeline([...(model.events ?? [])].reverse()),
+    connectors: connectorsPanel(agents, model.executionBackend),
+    policyEvents: policyPanel(model.events ?? []),
     generatedAt: now.toISOString()
   };
 }
 
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
   const model = dashboardModel(input);
-  const events = model.events ?? [];
   const agents = dashboardAgents(model);
   const fragments = renderDashboardFragments(model, agents);
 
@@ -697,13 +703,13 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div><div id="operator-metrics-body">${fragments.metrics}</div></article>
-        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline([...events].reverse())}</article>
+        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div><div id="events-timeline">${fragments.eventsTimeline}</div></article>
         <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div><div class="system-panel"><div id="system-stats">${fragments.systemStats}</div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
         <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
-        <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div>${connectorsPanel(agents, model.executionBackend)}</article>
-        <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>audit</span></div>${policyPanel(events)}</article>
+        <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div><div id="connectors-body">${fragments.connectors}</div></article>
+        <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>audit</span></div><div id="policy-body">${fragments.policyEvents}</div></article>
         <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
       </section>
     </main>
@@ -1129,7 +1135,14 @@ const sseEventNames = [
   'acp.initialized',
   'acp.disconnected',
   'acp.error',
-  'tunnel_session.heartbeat'
+  'tunnel_session.heartbeat',
+  'execution_attempt.created',
+  'execution_attempt.transitioned',
+  'execution_attempt.result_accepted',
+  'attempt_lease.issued',
+  'attempt_lease.renewed',
+  'attempt_lease.stolen',
+  'attempt_lease.expired'
 ];
 
 function nextSseReconnectDelayMs(attempt) {
@@ -1173,8 +1186,10 @@ function connectSse() {
     applySseConnectionState(document, true);
     // Events may have been missed while the stream was down (or before it
     // first opened): catch up by re-fetching sections instead of reloading.
-    scheduleDashboardRefresh(0);
+    scheduleDashboardRefresh(0, { catchUp: reconnected });
     if (reconnected) {
+      refreshAgentRoster();
+      if (selectedAgentId) loadAgentDetail(selectedAgentId);
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -1207,7 +1222,7 @@ function appendAuditEvent(event) {
   } catch {
     return;
   }
-  const panel = document.querySelector('#events');
+  const panel = document.querySelector('#events-timeline');
   if (!panel) return;
   panel.querySelector('.empty')?.remove();
   let list = panel.querySelector('.timeline');
@@ -1287,9 +1302,11 @@ function bindWorkItems() {
   });
 }
 
+let workDetailGeneration = 0;
 async function loadWorkDetail(id, options) {
   const target = document.querySelector('#work-detail');
   if (!target || !id) return;
+  const generation = ++workDetailGeneration;
   const preserve = Boolean(options && options.preserve);
   const reasonInput = preserve ? target.querySelector('[data-control-reason]') : null;
   const reason = reasonInput ? reasonInput.value : '';
@@ -1300,7 +1317,8 @@ async function loadWorkDetail(id, options) {
   if (!preserve) target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
   try {
     const body = await fetchJson('/work-items/' + encodeURIComponent(id));
-    if (selectedWorkItemId !== id) return;
+    // Drop responses superseded by a newer load, even for the same item.
+    if (generation !== workDetailGeneration || selectedWorkItemId !== id) return;
     renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
     if (!preserve) {
       target.focus({ preventScroll: false });
@@ -1313,7 +1331,7 @@ async function loadWorkDetail(id, options) {
     const nextActive = activeId ? document.getElementById(activeId) : null;
     if (nextActive) nextActive.focus({ preventScroll: true });
   } catch (error) {
-    if (preserve) return;
+    if (preserve || generation !== workDetailGeneration) return;
     target.innerHTML = '<div class="detail-error" role="alert">' + escapeClient(error.message) + '</div>';
     target.focus({ preventScroll: false });
   }

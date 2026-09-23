@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { JSDOM, VirtualConsole } from "jsdom";
 import {
   DASHBOARD_FRAGMENT_TARGETS,
+  PERIODIC_REFRESH_MS,
   renderDashboard,
   renderDashboardFragments,
   type MissionControlViewModel
@@ -40,6 +41,8 @@ function bootLive(initial: MissionControlViewModel) {
   const assigned: string[] = [];
   let model = initial;
   let postResponse: { status: number; body: unknown } = { status: 200, body: {} };
+  let failFragments = 0;
+  let detailGate: (() => Promise<void>) | undefined;
 
   const virtualConsole = new VirtualConsole();
   virtualConsole.on("jsdomError", (error: Error) => {
@@ -80,6 +83,10 @@ function bootLive(initial: MissionControlViewModel) {
         const method = init?.method ?? "GET";
         calls.push({ url, method, body: init?.body ? JSON.parse(init.body) : undefined });
         if (url === "/dashboard/fragments") {
+          if (failFragments > 0) {
+            failFragments -= 1;
+            throw new Error("network down");
+          }
           return { ok: true, status: 200, json: async () => ({ fragments: renderDashboardFragments(model) }) };
         }
         if (method === "POST") {
@@ -87,7 +94,9 @@ function bootLive(initial: MissionControlViewModel) {
         }
         const detail = url.match(/^\/work-items\/([^/]+)$/);
         if (detail) {
+          // Snapshot the model at request time, then optionally hold the response.
           const found = model.workItems.find((candidate) => candidate.id === decodeURIComponent(detail[1] ?? ""));
+          if (detailGate) await detailGate();
           return { ok: true, status: 200, json: async () => ({ workItem: found, events: [] }) };
         }
         return { ok: true, status: 200, json: async () => ({ agents: [] }) };
@@ -144,6 +153,12 @@ function bootLive(initial: MissionControlViewModel) {
     },
     setPostResponse(next: { status: number; body: unknown }) {
       postResponse = next;
+    },
+    failNextFragments(count: number) {
+      failFragments = count;
+    },
+    setDetailGate(gate: (() => Promise<void>) | undefined) {
+      detailGate = gate;
     },
     fragmentFetches: () => calls.filter((call) => call.url === "/dashboard/fragments").length,
     liveText: () => document.querySelector(".live")?.textContent?.replace(/\s+/g, " ").trim() ?? "",
@@ -354,5 +369,113 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.text("#action-status")).toBe("Created wrk_made");
     expect((form.querySelector('[name="title"]') as HTMLInputElement).value).toBe("");
     expect(app.assigned).toEqual([]);
+  });
+});
+
+describe("live dashboard review fixes", () => {
+  it("refreshes periodically while connected so agent freshness ages out without events", async () => {
+    const app = bootLive({ workItems: [item("wrk_a")], events: [], now: NOW });
+    app.open();
+    await app.advance(2_000);
+    const baseline = app.fragmentFetches();
+    await app.advance(PERIODIC_REFRESH_MS);
+    expect(app.fragmentFetches()).toBe(baseline + 1);
+    app.error();
+    await app.advance(500);
+    const whileDown = app.fragmentFetches();
+    await app.advance(PERIODIC_REFRESH_MS);
+    // Reconnect attempts may catch up, but the periodic timer itself is idle while down.
+    expect(app.fragmentFetches() - whileDown).toBeLessThanOrEqual(1);
+  });
+
+  it("refreshes for execution attempt and lease events", async () => {
+    const app = bootLive({ workItems: [item("wrk_a", { status: "running" })], events: [], now: NOW });
+    app.open();
+    await app.advance(2_000);
+    for (const name of ["attempt_lease.renewed", "attempt_lease.expired", "execution_attempt.transitioned"]) {
+      const before = app.fragmentFetches();
+      app.emit(name, { "work_item.id": "wrk_a" });
+      await app.advance(1_500);
+      expect(app.fragmentFetches(), name).toBe(before + 1);
+    }
+  });
+
+  it("ignores a superseded work-detail response for the same item", async () => {
+    const app = bootLive({ workItems: [item("wrk_a", { status: "running" })], events: [], now: NOW });
+    app.open();
+    await app.advance(2_000);
+    const releases: Array<() => void> = [];
+    app.setDetailGate(() => new Promise<void>((resolve) => releases.push(resolve)));
+
+    (app.document.querySelector('[data-work-item="wrk_a"]') as HTMLElement).click(); // snapshot: running
+    await app.flush();
+    app.setModel({ workItems: [item("wrk_a", { status: "blocked" })], events: [], now: NOW });
+    app.emit("work_item.blocked", { "work_item.id": "wrk_a" }); // snapshot: blocked
+    await app.flush();
+    expect(releases).toHaveLength(2);
+
+    releases[1]!(); // newer response lands first
+    await app.flush();
+    releases[0]!(); // stale response lands last
+    await app.flush();
+    expect(app.text("#work-detail .detail-head")).toContain("blocked");
+    expect(app.text("#work-detail .detail-head")).not.toContain("running");
+  });
+
+  it("catches up the timeline, connectors, policy, and agent roster after a reconnect", async () => {
+    const app = bootLive({ workItems: [], events: [], now: NOW });
+    app.open();
+    await app.advance(2_000);
+    app.error();
+    app.setModel({
+      workItems: [],
+      events: [
+        {
+          sequence: 1,
+          name: "policy.decided",
+          timeUnixNano: "1790000000000000000",
+          attributes: { "work_item.id": "wrk_missed" }
+        } as unknown as MissionControlViewModel["events"][number]
+      ],
+      now: NOW
+    });
+    const rosterFetchesBefore = app.calls.filter((call) => call.url === "/agents").length;
+    await app.advance(1_000);
+    app.open();
+    await app.advance(1_500);
+
+    expect(app.text("#events-timeline")).toContain("policy.decided");
+    expect(app.text("#policy-body")).toContain("policy.decided");
+    expect(app.calls.filter((call) => call.url === "/agents").length).toBeGreaterThan(rosterFetchesBefore);
+  });
+
+  it("does not replace the live timeline on ordinary refreshes", async () => {
+    const app = bootLive({ workItems: [item("wrk_a")], events: [], now: NOW });
+    app.open();
+    await app.advance(2_000);
+    app.emit("work_item.running", { "work_item.id": "wrk_a" });
+    await app.advance(1_500);
+    expect(app.text("#events-timeline")).toContain("work_item.running");
+  });
+
+  it("retries failed fragment fetches with backoff and only marks successful updates", async () => {
+    const app = bootLive({ workItems: [item("wrk_a")], events: [], now: NOW });
+    app.failNextFragments(2);
+    app.open();
+    await app.advance(0);
+    expect(app.fragmentFetches()).toBe(1);
+    expect(app.liveText()).toContain("refresh failed, retrying");
+    expect(app.text("#dashboard-updated")).toBe("");
+
+    await app.advance(1_000); // first retry after 1s, fails again
+    expect(app.fragmentFetches()).toBe(2);
+    await app.advance(1_999);
+    expect(app.fragmentFetches()).toBe(2);
+    app.setModel({ workItems: [item("wrk_a"), item("wrk_b")], events: [], now: NOW });
+    await app.advance(1); // second retry after 2s succeeds
+    expect(app.fragmentFetches()).toBe(3);
+    expect(app.document.querySelector('[data-work-item="wrk_b"]')).not.toBeNull();
+    expect(app.liveText()).not.toContain("refresh failed");
+    expect(app.text("#dashboard-updated")).toMatch(/^Updated /);
   });
 });

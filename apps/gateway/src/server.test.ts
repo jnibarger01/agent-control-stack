@@ -126,7 +126,18 @@ describe("mission control gateway", () => {
       const fragments = after.json().fragments;
 
       expect(Object.keys(fragments).sort()).toEqual(
-        ["approvalsCount", "approvalsList", "cards", "generatedAt", "metrics", "queueList", "systemStats"].sort()
+        [
+          "approvalsCount",
+          "approvalsList",
+          "cards",
+          "connectors",
+          "eventsTimeline",
+          "generatedAt",
+          "metrics",
+          "policyEvents",
+          "queueList",
+          "systemStats"
+        ].sort()
       );
       expect(fragments.queueList).toContain("Fragment route");
       const page = await app.inject({ method: "GET", url: "/" });
