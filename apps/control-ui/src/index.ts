@@ -596,7 +596,7 @@ export function renderWorkItemDetailHtml(
     ? `<ul class="action-list">${actions
         .map(
           (action) =>
-            `<li><strong>${escapeHtml(action.kind)}</strong><small>${escapeHtml(action.description ?? "")}</small></li>`
+            `<li><strong>${escapeHtml(action.kind)}</strong><small>${escapeHtml(redactSecrets(action.description ?? ""))}</small></li>`
         )
         .join("")}</ul>`
     : `<p class="muted">No requested actions.</p>`;
@@ -996,7 +996,7 @@ function approvalsPanel(items: WorkItem[], approvalActionsByWorkItem: Record<str
       if (item.status === "blocked") {
         return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(approvalSummary)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+      return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(redactSecrets(approvalSummary))}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
 }
@@ -1009,7 +1009,7 @@ function approvalButtonsFor(item: WorkItem, options: ApprovalActionOption[], rea
     .map((option, index) => {
       const hashPrefix = approvalActionHashPrefix(option.actionHash, 8);
       const kind = option.kind ? ` ${escapeHtml(option.kind)}` : ` ${index + 1}`;
-      const described = option.description ? `: ${option.description}` : "";
+      const described = option.description ? `: ${redactSecrets(option.description)}` : "";
       const ariaLabel = `Approve ${option.kind || `action ${index + 1}`}${described} (hash ${hashPrefix}) for ${item.title}`;
       return `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(option.actionHash)}"${option.kind ? ` data-action-kind="${escapeHtml(option.kind)}"` : ""} data-risk="${escapeHtml(item.risk)}" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${reasonId}" title="${escapeHtml(option.actionHash)}">Approve${kind} <code class="hash-prefix">${escapeHtml(hashPrefix)}</code></button>`;
     })
@@ -1519,7 +1519,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
       detailRow('Target', workItem.target ? redactedAttributesJsonClient(workItem.target) : '—') +
       detailRow('Created', formatClientTime(workItem.createdAt)) +
     '</dl>' +
-    '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(action.description) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
+    '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(redactClient(action.description)) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
     renderExecutionAuthority(executionAttempts, attemptLeases) +
     workItemControlsMarkup(workItem, sseConnected) +
     '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
