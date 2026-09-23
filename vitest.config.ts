@@ -21,7 +21,7 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "json-summary", "json"],
       include: ["packages/**/*.ts", "apps/**/*.ts", "harness/**/*.ts", "evals/**/*.ts"],
-      exclude: ["**/*.test.ts", "**/dist/**", "**/*.d.ts", "**/cli.ts"],
+      exclude: ["**/*.test.ts", "**/*.test-support.ts", "**/dist/**", "**/*.d.ts", "**/cli.ts"],
       thresholds: { statements: 75, branches: 70, functions: 85, lines: 75 }
     }
   }

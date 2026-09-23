@@ -294,7 +294,7 @@ describe("safety notes (#5)", () => {
   it("describes only the controls the dashboard actually exposes", () => {
     const html = renderDashboard({ workItems: [baseWorkItem], events: [], now: new Date("2026-09-22T00:01:00.000Z") });
     expect(html).toContain("Approve, reject, and unblock use authenticated backend routes");
-    expect(html).toContain("Cancel, retry, and clone are not exposed here");
+    expect(html).toContain("Cancel, retry, and clone live in work-item detail");
     expect(html).not.toContain("Approval and cancellation actions");
   });
 });
