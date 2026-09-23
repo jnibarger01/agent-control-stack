@@ -649,6 +649,24 @@
       "properties": [],
       "propertyTypes": {},
       "propertyEnums": {}
+    },
+    "GET /session": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "GET /connectors": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
+    },
+    "GET /work-items/{id}/execution-plan": {
+      "required": [],
+      "properties": [],
+      "propertyTypes": {},
+      "propertyEnums": {}
     }
   },
   "tools": {

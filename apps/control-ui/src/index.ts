@@ -10,6 +10,8 @@ import {
   type WorkItem
 } from "@agent-control-stack/work-items";
 
+export { CONSOLE_ASSET_DIR } from "./console-assets.js";
+
 export interface MissionControlAgent {
   id: string;
   displayName: string;

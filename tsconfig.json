@@ -26,6 +26,7 @@
     { "path": "packages/moa-orchestrator" },
     { "path": "packages/vercel-bridge-contract" },
     { "path": "apps/control-ui" },
+    { "path": "apps/control-ui/app" },
     { "path": "apps/vercel-mcp-ingress" },
     { "path": "apps/vercel-bridge-worker" },
     { "path": "apps/mcp" },

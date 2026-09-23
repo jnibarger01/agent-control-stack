@@ -25,6 +25,7 @@ import {
   type ExecutionAuthorization
 } from "@agent-control-stack/desktop-commander-adapter";
 import { projectAgents, renderDashboard, toMissionControlAttemptLease } from "@agent-control-stack/control-ui";
+import { registerConsole } from "./console.js";
 import {
   MachineController,
   loadMachineControllerConfig,
@@ -36,7 +37,7 @@ import {
   explainPolicy,
   workItemToolNames
 } from "@agent-control-stack/policy-gate";
-import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import { ControlStackError, stableHash, redactValue } from "@agent-control-stack/shared";
 import {
   executionActionHash,
   executionPlanApprovalRequestHash,
@@ -86,6 +87,9 @@ import {
   cancelBodySchema,
   capabilitiesBodySchema,
   connectorBodySchema,
+  connectorListSchema,
+  sessionInfoSchema,
+  executionPlanProjectionSchema,
   connectorKeyRotationBodySchema,
   cloneBodySchema,
   createWorkItemSchema,
@@ -126,6 +130,11 @@ import { gatewayListenConfig } from "./runtime-config.js";
 import { DeviceAuthStore } from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
 import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-client.js";
+import {
+  createRuntimeObservabilityClientFromEnv,
+  RUNTIME_OBSERVABILITY_UNAVAILABLE_CODE,
+  type RuntimeObservabilityClient
+} from "./runtime-observability.js";
 
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
@@ -208,6 +217,7 @@ export interface GatewayOptions {
   maxSseClients?: number;
   maxSseClientsPerPrincipal?: number;
   portfolioClient?: PortfolioClient;
+  runtimeObservability?: RuntimeObservabilityClient;
   /**
    * Optional /readyz sandbox prerequisite probe (bwrap / systemd-run / cgroup v2).
    * Default off via ACS_READYZ_SANDBOX_PROBE; enable on real-execution hosts only.
@@ -278,6 +288,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   }
   const metrics = new GatewayMetrics();
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
+  const runtimeObservability = options.runtimeObservability ?? createRuntimeObservabilityClientFromEnv();
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
@@ -487,6 +498,24 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  // New console projections require configured authentication even in local
+  // development. The existing SSR and API compatibility behavior is unchanged.
+  const requireProjectionRead = async (request: FastifyRequest, reply: FastifyReply) => {
+    reply.header("cache-control", "no-store");
+    if (!auth || !hasReadAccess(request, auth)) sendReadAccessError(reply, auth);
+  };
+  app.get("/session", { preHandler: requireProjectionRead }, async (request, reply) => {
+    const credential = gatewayCredentialForRequest(request, auth);
+    if (!credential) return reply.code(401).send({ error: "unauthorized" });
+    return sessionInfoSchema.parse(
+      redactValue({
+        actor: credential.actor,
+        actorId: credential.actorId || null,
+        roles: credential.roles
+      })
+    );
+  });
+
   registerDeviceAuthRoutes(app, {
     store: deviceAuthStore,
     auth,
@@ -543,6 +572,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  registerConsole(app);
+
+  app.get("/api/runtime-observability", { preHandler: requireProjectionRead }, async (_request, reply) => {
+    try {
+      return await runtimeObservability.getSnapshot();
+    } catch {
+      return reply.code(503).send({ error: "runtime observability unavailable", code: RUNTIME_OBSERVABILITY_UNAVAILABLE_CODE });
+    }
+  });
+
   app.get("/mcp/tools", async (request, reply) => {
     const requiredScopes = ["acs:work:read"] as const;
     const authorization = await authorizeMcpRequest({
@@ -568,6 +607,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       auth: authorization.auth
     });
     return { tools: workItemToolNames };
+  });
+
+  app.get("/connectors", { preHandler: requireProjectionRead }, async () => {
+    return connectorListSchema.parse(redactValue({ connectors: workItems.listConnectors() }));
   });
 
   app.post("/connectors", async (request, reply) => {
@@ -891,6 +934,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return sendError(reply, error);
     }
   });
+
+  app.get<{ Params: { id: string } }>(
+    "/work-items/:id/execution-plan",
+    { preHandler: requireProjectionRead },
+    async (request, reply) => {
+      if (!workItems.get(request.params.id)) return reply.code(404).send({ error: "work item not found" });
+      const plan = workItems.getCurrentExecutionPlan(request.params.id) ?? null;
+      return executionPlanProjectionSchema.parse(redactValue({ plan }));
+    }
+  );
 
   app.get<{ Params: { id: string } }>("/work-items/:id", { preHandler: requireRead }, async (request, reply) => {
     try {

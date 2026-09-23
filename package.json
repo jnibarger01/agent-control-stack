@@ -15,7 +15,7 @@
     "packages/*"
   ],
   "scripts": {
-    "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site && npm run release:dry-run-gate",
+    "build": "npm run build:chatgpt-widget && tsc -b && npm run build:control-console && npm run build -w apps/public-site && npm run release:dry-run-gate",
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
     "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety",
     "test:vitest": "vitest run",
@@ -46,12 +46,16 @@
     "start:vercel-bridge": "node apps/vercel-bridge-worker/dist/cli.js",
     "start:scheduler": "node apps/scheduler/dist/cli.js",
     "acs": "node apps/runtime/dist/cli.js",
-    "ops:pending-approval-digest": "node packages/policy-gate/dist/pending-approval-digest-cli.js"
+    "ops:pending-approval-digest": "node packages/policy-gate/dist/pending-approval-digest-cli.js",
+    "build:control-console": "node scripts/build-control-console.mjs",
+    "test:console-e2e": "node apps/control-ui/app/e2e/run.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^24.13.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
     "@vitest/coverage-v8": "^3.2.7",
     "axe-core": "^4.13.0",
     "eslint": "^10.10.0",
@@ -60,6 +64,7 @@
     "tsx": "^4.23.13",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.70.0",
+    "vite": "7.3.6",
     "vitest": "^3.2.4"
   },
   "allowScripts": {
