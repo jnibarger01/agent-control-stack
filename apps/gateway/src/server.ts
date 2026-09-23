@@ -2079,7 +2079,7 @@ function parseDcArgsSummary(argsSummary: string): Record<string, unknown> {
 }
 
 function dcApprovalSummary(toolName: string, args: Record<string, unknown>, invocationHash: string): string {
-  const paths = ["path", "file_path", "source", "destination", "cwd"]
+  const paths = ["path", "file_path", "source", "destination", "cwd", "repoPath"]
     .map((key) => (typeof args[key] === "string" ? `${key}=${String(args[key])}` : undefined))
     .filter((value): value is string => Boolean(value));
   const details: string[] = [...paths];
@@ -2095,6 +2095,18 @@ function dcApprovalSummary(toolName: string, args: Record<string, unknown>, invo
   if (typeof args.command === "string") {
     const executable = args.command.trim().split(/\s+/u)[0] ?? "<unknown>";
     details.push(`command_executable=${executable}`);
+  }
+  if (Array.isArray(args.argv) && typeof args.argv[0] === "string") {
+    details.push(`argv_executable=${args.argv[0]}`, `argv_count=${args.argv.length}`);
+  }
+  if (typeof args.patch === "string") {
+    details.push(`patch_bytes=${Buffer.byteLength(args.patch, "utf8")}`);
+  }
+  for (const key of ["expectedSha256", "expectedHeadSha", "expectedCurrentSha256", "snapshotId"]) {
+    if (typeof args[key] === "string") details.push(`${key}=${String(args[key])}`);
+  }
+  if (typeof args.pid === "number") {
+    details.push(`pid=${args.pid}`);
   }
   details.push(`invocation_sha256=${invocationHash}`);
   return `${toolName}: ${details.join(" · ")}`;

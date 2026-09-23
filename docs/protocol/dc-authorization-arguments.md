@@ -61,16 +61,39 @@ is rejected as input). That is safe because DC never re-normalizes.
 
 Every tool DC registers has an explicit disposition (`desktopCommanderManagedToolDispositions`):
 
-| class                  | managed       | tools                                                                                                                                                                                                                                   |
-| ---------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| read_only              | capability    | get_config, get_runtime_identity, get_file_info, list_directory, read_file, read_multiple_files, start_search, get_more_search_results, list_searches, list_sessions, list_processes, read_process_output, get_usage_stats |
-| filesystem_mutation    | capability + approval | create_directory, write_file, edit_block, move_file                                                                                                                                                                             |
-| filesystem_mutation    | unsupported   | write_pdf                                                                                                                                                                                                                               |
-| process_execution      | capability + approval | start_process                                                                                                                                                                                                                   |
-| process_execution      | unsupported   | interact_with_process, acpx_list_sessions, acpx_get_session, acpx_exec, acpx_prompt                                                                                                                                                     |
-| process_control        | unsupported   | kill_process, force_terminate, stop_search, acpx_cancel                                                                                                                                                                                 |
-| configuration_mutation | unsupported   | set_config_value                                                                                                                                                                                                                        |
-| unsupported            | unsupported   | get_recent_tool_calls, get_prompts, give_feedback_to_desktop_commander, track_ui_event                                                                                                                                                  |
+| class                  | managed               | tools                                                                                                                                                                                                                      |
+| ---------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| read_only              | capability            | get_config, get_runtime_identity, get_file_info, list_directory, read_file, read_multiple_files, start_search, get_more_search_results, list_searches, list_sessions, list_processes, read_process_output, get_usage_stats |
+| filesystem_mutation    | capability + approval | create_directory, write_file, edit_block, move_file                                                                                                                                                                        |
+| filesystem_mutation    | unsupported           | write_pdf                                                                                                                                                                                                                  |
+| process_execution      | capability + approval | start_process                                                                                                                                                                                                              |
+| process_execution      | unsupported           | interact_with_process, acpx_list_sessions, acpx_get_session, acpx_exec, acpx_prompt                                                                                                                                        |
+| process_control        | unsupported           | kill_process, force_terminate, stop_search, acpx_cancel                                                                                                                                                                    |
+| configuration_mutation | unsupported           | set_config_value                                                                                                                                                                                                           |
+| unsupported            | unsupported           | get_recent_tool_calls, get_prompts, give_feedback_to_desktop_commander, track_ui_event                                                                                                                                     |
+
+Execution-plane tools added with the Desktop Commander expansion
+(`managed-tool-coverage.v1.json` is authoritative):
+
+| class               | managed               | tools                                                                                                                            |
+| ------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| read_only           | capability            | health, last_error, capability_manifest, operation_preview, git_state, verify_head, secret_scan, wait_for_process                |
+| read_only           | unsupported           | service_status (network probes; ACS defines no network-capable managed DC tool, and the `network: false` invariant is unchanged) |
+| process_execution   | capability + approval | run_command                                                                                                                      |
+| process_control     | capability + approval | terminate_process                                                                                                                |
+| filesystem_mutation | capability + approval | apply_patch, snapshot_path, restore_snapshot                                                                                     |
+
+Normalization for the new argument shapes:
+
+- `argvArgs` (`run_command.argv`): validated with the same command policy as
+  `start_process`. Whitespace-containing elements are rejected, and the executable is bound
+  as `[resolvedExecutable, ...validatedArgs]`, e.g. `["git","status"]` →
+  `["/usr/bin/git","status"]`.
+- `optionalPathArgs` (`secret_scan.path`): contained and canonicalized when present,
+  absent otherwise.
+- `nestedPathContainerArgs` (`operation_preview.arguments`): nested
+  `path/file_path/source/destination/cwd/repoPath/paths[]` must be contained. They are
+  never rewritten, so the preview sees what the caller proposed.
 
 Unsupported tools are denied with `403 {decision:"deny", reason/code:"managed_tool_unsupported", detail}`.
 Tools absent from the table are denied with `unknown_tool`. DC's coverage test fails when a newly
@@ -86,11 +109,11 @@ is presented for it.
 A managed `tools/call` that is not forwarded is answered with HTTP 200 and a JSON-RPC error that
 preserves the request `id`:
 
-| kind                                 | JSON-RPC code | retryable | source                                                   |
-| ------------------------------------ | ------------- | --------- | -------------------------------------------------------- |
-| `managed_authorization_denied`       | -32001        | false     | ACS `decision: "deny"`                                   |
-| `managed_authorization_required`     | -32002        | true      | ACS `decision: "require_approval"` (workItemId, actionHash) |
-| `managed_authorization_unavailable`  | -32003        | true      | unreachable / timeout / 5xx / 429 / malformed            |
+| kind                                | JSON-RPC code | retryable | source                                                      |
+| ----------------------------------- | ------------- | --------- | ----------------------------------------------------------- |
+| `managed_authorization_denied`      | -32001        | false     | ACS `decision: "deny"`                                      |
+| `managed_authorization_required`    | -32002        | true      | ACS `decision: "require_approval"` (workItemId, actionHash) |
+| `managed_authorization_unavailable` | -32003        | true      | unreachable / timeout / 5xx / 429 / malformed               |
 
 `error.data` carries `kind`, `acsCode`, `retryable` and the allowlisted ACS string fields `reason`,
 `detail`, `workItemId`, `actionHash` and `approvalInstructions`.

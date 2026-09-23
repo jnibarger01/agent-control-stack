@@ -27,7 +27,7 @@ const fixture = JSON.parse(readFileSync(new URL("authorization-arguments.v1.json
   transportMetadataValues: Record<string, string[]>;
   fixtureFilesystem: { directories: string[]; symlinks: Record<string, string> };
   cases: { name: string; tool: string; raw: unknown; authorizationArguments: unknown; delivered: unknown }[];
-  rejectedByAcs: { name: string; tool: string; raw: unknown }[];
+  rejectedByAcs: { name: string; tool: string; raw: unknown; code: string }[];
 };
 const coverage = JSON.parse(readFileSync(new URL("managed-tool-coverage.v1.json", contractsDir), "utf8")) as {
   tools: Record<string, { toolClass: string; managed: string; scopes?: string[]; requiresApproval?: boolean }>;
@@ -91,7 +91,8 @@ describe("authorizationArguments contract (acs.dc.v1)", () => {
       // deliberately NOT re-normalizable (an absolute executable is rejected as
       // input); that is safe because Desktop Commander never re-normalizes, it
       // compares the delivered bytes against the bound bytes.
-      if (desktopCommanderToolPolicy(testCase.tool)!.commandArgs.length > 0) return;
+      const policy = desktopCommanderToolPolicy(testCase.tool)!;
+      if (policy.commandArgs.length > 0 || (policy.argvArgs ?? []).length > 0) return;
       const again = normalizeInvocation(testCase.tool, deliveredFor(invocation.validatedArguments, raw), containment);
       expect(strictCanonicalJsonV1(again.validatedArguments)).toBe(strictCanonicalJsonV1(expected));
     });
@@ -101,7 +102,7 @@ describe("authorizationArguments contract (acs.dc.v1)", () => {
     it(`rejects deterministically: ${testCase.name}`, () => {
       expect(() =>
         normalizeInvocation(testCase.tool, substitute(testCase.raw) as Record<string, unknown>, containment)
-      ).toThrow(expect.objectContaining({ code: "desktop_commander_argument_invalid" }));
+      ).toThrow(expect.objectContaining({ code: testCase.code }));
     });
   }
 
