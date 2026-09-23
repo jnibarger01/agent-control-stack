@@ -105,6 +105,13 @@ export const cloneBodySchema = z.object({
   risk: workItemRiskSchema.optional()
 });
 
+export const executionModeBodySchema = z
+  .object({
+    mode: z.enum(["strict", "admin"]),
+    reason: z.string().min(1).max(512).optional()
+  })
+  .strict();
+
 /**
  * External webhook ingest contract. Strict: unknown fields are rejected so a
  * webhook caller cannot smuggle control-plane fields (requester, status, etc).
@@ -361,6 +368,25 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
   { method: "get", path: "/livez", operationId: "getLiveness", summary: "Read process liveness." },
   { method: "get", path: "/readyz", operationId: "getReadiness", summary: "Read control-plane readiness." },
   { method: "get", path: "/health", operationId: "getHealth", summary: "Read control-plane health." },
+  {
+    method: "get",
+    path: "/authority",
+    operationId: "getAuthority",
+    summary: "Read the canonical execution mode and managed authority observation."
+  },
+  {
+    method: "get",
+    path: "/execution-mode",
+    operationId: "getExecutionMode",
+    summary: "Read the canonical strict/admin execution mode."
+  },
+  {
+    method: "post",
+    path: "/execution-mode",
+    operationId: "setExecutionMode",
+    summary: "Set the canonical strict/admin execution mode.",
+    requestSchema: executionModeBodySchema
+  },
   {
     method: "post",
     path: "/session/login",

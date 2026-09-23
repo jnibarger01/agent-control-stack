@@ -9,3 +9,5 @@ export * from "./rules.js";
 export * from "./tools.js";
 export * from "./verification-policy.js";
 export * from "./pending-approval-digest.js";
+export * from "./execution-mode.js";
+export * from "./managed-authority.js";

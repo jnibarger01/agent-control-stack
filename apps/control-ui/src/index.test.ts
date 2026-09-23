@@ -69,6 +69,9 @@ describe("renderDashboard", () => {
     expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities')");
     expect(html).not.toContain("JSON.stringify(await res.json(), null, 2)");
     expect(html).not.toContain("data-approve-all");
+    expect(html).toContain("Execution Mode");
+    expect(html).toContain("Admin / YOLO");
+    expect(html).toContain('data-execution-mode="strict"');
   });
 
   it("renders an operator metrics panel with lease age, approval wait, and /metrics scrape notes", () => {

@@ -155,6 +155,9 @@ export interface MissionControlViewModel {
   approvalSlaMs?: number;
   /** Present when `workItems` carries only a window of finished items. */
   finishedWorkItems?: { shown: number; total: number; limit: number };
+  /** Canonical execution mode. Absent when the row is missing or corrupt. */
+  executionMode?: "strict" | "admin";
+  executionModeProblem?: "missing" | "corrupt";
   now?: Date;
 }
 
@@ -718,6 +721,8 @@ export function renderDashboardFragments(
   };
 }
 
+const ADMIN_MODE_BANNER_TEXT = "ACS ADMIN MODE -- human approval disabled";
+
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
   const model = dashboardModel(input);
   const events = model.events ?? [];
@@ -754,9 +759,19 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <main id="main-content" tabindex="-1">
       <header>
         <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
+        <div class="header-controls">
+          <fieldset class="execution-mode" id="execution-mode-control">
+            <legend>Execution Mode</legend>
+            <label><input type="radio" name="executionMode" value="strict" data-execution-mode="strict"${model.executionMode === "strict" ? " checked" : ""}> Strict</label>
+            <label><input type="radio" name="executionMode" value="admin" data-execution-mode="admin"${model.executionMode === "admin" ? " checked" : ""}> Admin / YOLO</label>
+            <p id="execution-mode-result" role="status"></p>
+          </fieldset>
         <div class="header-status"><div class="live connecting" data-state="connecting"><span aria-hidden="true"></span> <span data-live-label>Connecting…</span></div><small id="dashboard-updated" class="dashboard-updated"></small><div class="header-tools"><button type="button" id="notifications-toggle" class="tool-button" aria-pressed="false">Notify me</button><button type="button" id="theme-toggle" class="tool-button">Theme: auto</button></div></div>
+        </div>
       </header>
       <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
+      <div id="admin-mode-banner" class="admin-mode-banner" role="alert"${model.executionMode === "admin" ? "" : " hidden"}>${model.executionMode === "admin" ? ADMIN_MODE_BANNER_TEXT : ""}</div>
+      <div id="execution-mode-problem" class="admin-mode-banner" role="alert"${model.executionModeProblem ? "" : " hidden"}>${model.executionModeProblem ? `ACS execution mode ${escapeHtml(model.executionModeProblem)} -- fail closed` : ""}</div>
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
       <section id="overview" class="cards" data-view-panel="overview">${fragments.cards}</section>
       <section class="grid">
@@ -1817,6 +1832,31 @@ function requestApprovalConfirm(request) {
   });
 }
 
+document.querySelectorAll('[data-execution-mode]').forEach((input) => {
+  input.addEventListener('change', async () => {
+    if (!input.checked) return;
+    const output = document.querySelector('#execution-mode-result');
+    const headers = { 'content-type': 'application/json' };
+    const res = await fetch('/execution-mode', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ mode: input.value, reason: 'operator set ' + input.value + ' from mission control' })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (output) output.textContent = res.ok ? 'mode ' + body.executionMode : 'Rejected: ' + (body.error || body.code || res.status);
+    if (res.ok) {
+      // Update in place (no hard reload): banners follow the confirmed mode.
+      const admin = document.querySelector('#admin-mode-banner');
+      const problem = document.querySelector('#execution-mode-problem');
+      if (admin) {
+        admin.hidden = body.executionMode !== 'admin';
+        admin.textContent = body.executionMode === 'admin' ? ${JSON.stringify(ADMIN_MODE_BANNER_TEXT)} : '';
+      }
+      if (problem) problem.hidden = true;
+    }
+  });
+});
+
 // Delegated: approval cards are replaced by live fragment patches.
 document.addEventListener('click', async (event) => {
     const button = event.target && event.target.closest ? event.target.closest('[data-approve],[data-reject],[data-unblock]') : null;
@@ -1972,6 +2012,9 @@ function styles(): string {
   --control-hover-line: #4b6180;
   --banner-bg: #2a2416;
   --banner-line: #6b5420;
+  --admin-banner-line: #ffb020;
+  --admin-banner-bg: #3a2508;
+  --admin-banner-ink: #ffd27a;
   --attention-bg: #2a1c1c;
   --pill-bg: #1e242e;
   --pill-ink: #b4bfcd;
@@ -2018,6 +2061,9 @@ function styles(): string {
   --control-hover-line: #9db7d7;
   --banner-bg: #fff8e6;
   --banner-line: #f1d18a;
+  --admin-banner-line: #b7791f;
+  --admin-banner-bg: #fff4e0;
+  --admin-banner-ink: #7a4a00;
   --attention-bg: #fff8f7;
   --pill-bg: #eef2f6;
   --pill-ink: #45515f;
@@ -2061,6 +2107,9 @@ function styles(): string {
   --control-hover-line: #9db7d7;
   --banner-bg: #fff8e6;
   --banner-line: #f1d18a;
+  --admin-banner-line: #b7791f;
+  --admin-banner-bg: #fff4e0;
+  --admin-banner-ink: #7a4a00;
   --attention-bg: #fff8f7;
   --pill-bg: #eef2f6;
   --pill-ink: #45515f;
@@ -2137,6 +2186,12 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 .action-status { margin: 0 0 10px; min-height: 1.25em; color: var(--muted); font-size: 13px; }
 .stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid var(--banner-line); background: var(--banner-bg); color: var(--amber); border-radius: 8px; font-weight: 600; }
 .stale-banner[hidden] { display: none; }
+.header-controls { display: flex; gap: 12px; align-items: start; }
+.execution-mode { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); }
+.execution-mode legend { font-size: 12px; font-weight: 700; padding: 0 4px; }
+.execution-mode label { display: block; margin-top: 4px; }
+.admin-mode-banner { margin: 0 0 14px; padding: 12px 14px; border: 2px solid var(--admin-banner-line); background: var(--admin-banner-bg); color: var(--admin-banner-ink); border-radius: 8px; font-weight: 800; letter-spacing: .02em; }
+.admin-mode-banner[hidden] { display: none; }
 .cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px var(--shadow); }
 .card { padding: 15px; min-height: 108px; }
