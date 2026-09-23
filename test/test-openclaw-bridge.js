@@ -278,9 +278,12 @@ try {
     assert.deepEqual(
       tools.result.tools.map((tool) => tool.name).sort(),
       [
-        'create_directory', 'edit_block', 'get_config', 'get_file_info', 'get_runtime_identity',
-        'get_usage_stats', 'list_directory', 'list_processes', 'list_sessions', 'move_file',
-        'read_file', 'read_multiple_files', 'read_process_output', 'start_process', 'write_file',
+        'apply_patch', 'capability_manifest', 'create_directory', 'edit_block', 'get_config',
+        'get_file_info', 'get_more_search_results', 'get_runtime_identity', 'get_usage_stats', 'git_state',
+        'health', 'last_error', 'list_directory', 'list_processes', 'list_searches', 'list_sessions',
+        'move_file', 'operation_preview', 'read_file', 'read_multiple_files', 'read_process_output',
+        'restore_snapshot', 'run_command', 'secret_scan', 'snapshot_path', 'start_process', 'start_search',
+        'terminate_process', 'verify_head', 'wait_for_process', 'write_file',
       ],
       'tool discovery must derive from the managed child and expose nothing else',
     );

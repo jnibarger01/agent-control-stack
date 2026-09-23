@@ -64,6 +64,13 @@ export async function authorizeManagedToolCall(
   return (await getManagedAcsGuard()).authorize(toolName, args, meta);
 }
 
+/** Handshake state without creating a guard as a side effect of health checks. */
+export async function managedAcsIdentityStatus(): Promise<string> {
+  if (desktopCommanderExecutionMode() === 'standalone') return 'standalone';
+  if (!guardPromise) return 'not_initialized';
+  return (await guardPromise).identityStatus();
+}
+
 export async function revokeManagedAcsRuntime(): Promise<void> {
   (await getManagedAcsGuard()).revoke();
 }

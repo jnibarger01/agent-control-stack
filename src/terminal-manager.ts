@@ -1,4 +1,5 @@
 import { spawn } from 'child_process';
+import { EventEmitter } from 'events';
 import path from 'path';
 import { TerminalSession, CommandExecutionResult, ActiveSession, TimingInfo, OutputEvent } from './types.js';
 import { DEFAULT_COMMAND_TIMEOUT } from './config.js';
@@ -150,7 +151,39 @@ function getShellSpawnArgs(shellPath: string, command: string): ShellSpawnConfig
   };
 }
 
+/** Per-stream tail retained for each DC-spawned session (bounded). */
+export const STREAM_TAIL_MAX_CHARS = 64 * 1024;
+
+export interface SessionStreamState {
+  stdoutTail: string;
+  stderrTail: string;
+  stdoutChars: number;
+  stderrChars: number;
+  exited: boolean;
+  exitCode: number | null;
+  exitSignal: string | null;
+  endTime?: Date;
+}
+
+export interface OwnedSessionStatus {
+  pid: number;
+  ownership: 'active' | 'completed' | 'recovered';
+  sessionId?: string;
+  startTime?: Date;
+  endTime?: Date;
+  exited: boolean;
+  exitCode: number | null;
+  exitSignal: string | null;
+}
+
 export class TerminalManager {
+  /**
+   * Emits 'output' (pid, stream, text) and 'exit' (pid, code, signal) for
+   * DC-spawned sessions, so callers can wait without polling
+   * (wait_for_process). Listeners must not throw.
+   */
+  readonly sessionEvents = new EventEmitter().setMaxListeners(200);
+  private streamState: Map<number, SessionStreamState> = new Map();
   private sessions: Map<number, TerminalSession> = new Map();
   private completedSessions: Map<number, CompletedSession> = new Map();
   // Sessions recovered from a durable record after a server restart (P2.1).
@@ -503,6 +536,7 @@ export class TerminalManager {
         }
         // Append to line-based buffer
         this.appendToLineBuffer(session, text);
+        this.recordStreamOutput(childProcess.pid!, 'stdout', text);
 
         // Record output event if collecting timing
         if (collectTiming) {
@@ -547,6 +581,7 @@ export class TerminalManager {
         }
         // Append to line-based buffer
         this.appendToLineBuffer(session, text);
+        this.recordStreamOutput(childProcess.pid!, 'stderr', text);
 
         // Record output event if collecting timing
         if (collectTiming) {
@@ -604,9 +639,11 @@ export class TerminalManager {
           if (this.completedSessions.size > 100) {
             const oldestKey = Array.from(this.completedSessions.keys())[0];
             this.completedSessions.delete(oldestKey);
+            this.streamState.delete(oldestKey);
           }
 
           this.sessions.delete(childProcess.pid);
+          this.recordStreamExit(childProcess.pid, code ?? null, signal ?? null);
           void this.persistSessionExit(session.sessionId, code ?? null, signal ?? null);
         }
         exitReason = 'process_exit';
@@ -970,6 +1007,82 @@ export class TerminalManager {
 
   listCompletedSessions(): CompletedSession[] {
     return Array.from(this.completedSessions.values());
+  }
+
+  private recordStreamOutput(pid: number, stream: 'stdout' | 'stderr', text: string): void {
+    let state = this.streamState.get(pid);
+    if (!state) {
+      state = { stdoutTail: '', stderrTail: '', stdoutChars: 0, stderrChars: 0, exited: false, exitCode: null, exitSignal: null };
+      this.streamState.set(pid, state);
+    }
+    if (stream === 'stdout') {
+      state.stdoutChars += text.length;
+      state.stdoutTail = (state.stdoutTail + text).slice(-STREAM_TAIL_MAX_CHARS);
+    } else {
+      state.stderrChars += text.length;
+      state.stderrTail = (state.stderrTail + text).slice(-STREAM_TAIL_MAX_CHARS);
+    }
+    this.sessionEvents.emit('output', pid, stream, text);
+  }
+
+  private recordStreamExit(pid: number, code: number | null, signal: string | null): void {
+    let state = this.streamState.get(pid);
+    if (!state) {
+      state = { stdoutTail: '', stderrTail: '', stdoutChars: 0, stderrChars: 0, exited: false, exitCode: null, exitSignal: null };
+      this.streamState.set(pid, state);
+    }
+    state.exited = true;
+    state.exitCode = code;
+    state.exitSignal = signal;
+    state.endTime = new Date();
+    this.sessionEvents.emit('exit', pid, code, signal);
+  }
+
+  /** Per-stream tails for a DC-spawned session, or undefined if never tracked. */
+  getStreamState(pid: number): SessionStreamState | undefined {
+    const state = this.streamState.get(pid);
+    return state ? { ...state } : undefined;
+  }
+
+  /**
+   * Ownership lookup: only processes Desktop Commander spawned (active or
+   * recently completed) or recovered from its own durable session store.
+   * Any other pid returns undefined — callers must refuse it.
+   */
+  getOwnedSessionStatus(pid: number): OwnedSessionStatus | undefined {
+    const active = this.sessions.get(pid);
+    if (active) {
+      return { pid, ownership: 'active', sessionId: active.sessionId, startTime: active.startTime, exited: false, exitCode: null, exitSignal: null };
+    }
+    const completed = this.completedSessions.get(pid);
+    if (completed) {
+      const state = this.streamState.get(pid);
+      return {
+        pid,
+        ownership: 'completed',
+        startTime: completed.startTime,
+        endTime: completed.endTime,
+        exited: true,
+        exitCode: completed.exitCode,
+        exitSignal: state?.exitSignal ?? null,
+      };
+    }
+    const recovered = this.recoveredSessions.get(pid);
+    if (recovered) {
+      return { pid, ownership: 'recovered', sessionId: recovered.sessionId, startTime: new Date(recovered.createdAt), exited: false, exitCode: null, exitSignal: null };
+    }
+    return undefined;
+  }
+
+  /**
+   * Send one signal to an owned session's process tree. Returns false when
+   * the pid is not an owned, still-running session. Never signals an
+   * arbitrary pid.
+   */
+  signalOwnedSession(pid: number, signal: NodeJS.Signals): boolean {
+    if (!this.sessions.has(pid) && !this.recoveredSessions.has(pid)) return false;
+    terminateProcessTree(pid, signal);
+    return true;
   }
 }
 

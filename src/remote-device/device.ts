@@ -32,6 +32,7 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, operatio
 export interface MCPDeviceOptions {
     persistSession?: boolean;
     standalone?: boolean;
+    managedMcpUrl?: string;
     onStateChange?: (state: DeviceAuthState) => void;
 }
 
@@ -99,7 +100,10 @@ export class MCPDevice {
         this.onStateChange = options.onStateChange;
 
         // Initialize desktop integration
-        this.desktop = new DesktopCommanderIntegration(options.standalone === true);
+        this.desktop = new DesktopCommanderIntegration(
+            options.standalone === true,
+            options.managedMcpUrl,
+        );
 
         // Graceful shutdown handlers (only set once)
         this.setupShutdownHandlers();
