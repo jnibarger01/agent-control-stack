@@ -237,14 +237,25 @@ export function capabilityTransport(managed, { identity, requestId }) {
           : json && typeof json.decision === 'string'
             ? json.decision
             : `acs_http_${status || 'unreachable'}`;
-      throw Object.assign(new Error(`ACS did not authorize this invocation (${code})`), { acsCode: code });
+      // Preserve the approval challenge metadata ACS attaches to a
+      // require_approval response (workItemId/actionHash/approvalInstructions).
+      // Transport only: this confers no authority, it just lets the caller
+      // find the existing work item to approve through ACS's own endpoint.
+      const acsApproval = {};
+      if (json && typeof json.workItemId === 'string') acsApproval.workItemId = json.workItemId;
+      if (json && typeof json.actionHash === 'string') acsApproval.actionHash = json.actionHash;
+      if (json && typeof json.approvalInstructions === 'string') acsApproval.approvalInstructions = json.approvalInstructions;
+      throw Object.assign(new Error(`ACS did not authorize this invocation (${code})`), { acsCode: code, acsApproval });
     }
     const envelope = json.capability;
     if (
       !envelope || typeof envelope !== 'object' ||
       typeof envelope.signature !== 'string' || envelope.signature.length === 0 ||
       typeof envelope.keyId !== 'string' || envelope.keyId.length === 0 ||
-      !envelope.payload || typeof envelope.payload !== 'object'
+      !envelope.payload || typeof envelope.payload !== 'object' ||
+      !envelope.payload.normalizedArguments ||
+      typeof envelope.payload.normalizedArguments !== 'object' ||
+      Array.isArray(envelope.payload.normalizedArguments)
     ) {
       throw Object.assign(new Error('ACS returned a malformed capability envelope'), { acsCode: 'acs_malformed_capability' });
     }
@@ -252,6 +263,9 @@ export function capabilityTransport(managed, { identity, requestId }) {
       ...parsed,
       params: {
         ...cleanParams,
+        // Forward exactly the argument object ACS normalized and signed. The
+        // managed guard compares these bytes structurally before execution.
+        arguments: envelope.payload.normalizedArguments,
         _meta: {
           ...(cleanParams._meta || {}),
           [ACS_CAPABILITY_META_KEY]: envelope,

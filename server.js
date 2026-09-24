@@ -505,8 +505,16 @@ const server = http.createServer(async (req, res) => {
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
+            const approval = e && e.acsApproval && typeof e.acsApproval === 'object' ? e.acsApproval : {};
+            // A require_approval response is not a failure the caller can do
+            // nothing about: surface the ACS work item so a human can approve
+            // it and the same call can be retried. Still fail-closed — the
+            // tools/call is never forwarded to Desktop Commander here.
+            const errorKind = code === 'require_approval' && approval.workItemId
+              ? 'managed_authorization_required'
+              : 'managed_authorization_unavailable';
             log(req.method, '/mcp', 503, `managed fail-closed: ${code}`);
-            return send(res, 503, { error: 'managed_authorization_unavailable', code });
+            return send(res, 503, { error: errorKind, code, ...approval });
           }
         } else if (parsed && parsed.method === 'initialize' && NATIVE_RUNTIME_BOOTSTRAP) {
           // Managed initialize: fetch an ACS runtime bootstrap challenge and
