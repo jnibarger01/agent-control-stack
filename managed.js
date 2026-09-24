@@ -103,12 +103,16 @@ export async function issueRuntimeBootstrap(managed, identity) {
  * in ACS's authoritative registry so capability issuance can proceed. The
  * cryptographic execution gate remains the per-call capability signature.
  */
-export async function completeRuntimeBootstrap(managed, identity, challenge) {
+export async function completeRuntimeBootstrap(managed, identity, challenge, runtimeIdentity) {
+  // runtimeIdentity is the child's own proof (result._meta.acsRuntimeIdentity from
+  // the initialize response), forwarded exactly as produced — never manufactured
+  // from the challenge. ACS verifies it against the challenge it issued.
   const { status } = await acsPost(managed, '/dc/runtime/bootstrap/complete', {
     runtimeId: identity.runtimeId,
     identityConfigFingerprint: identity.identityConfigFingerprint,
     scopes: [...identity.scopes],
     challenge: challenge.challenge,
+    runtimeIdentity,
   });
   if (status !== 204) {
     throw Object.assign(new Error('ACS runtime bootstrap completion failed'), { acsCode: 'runtime_bootstrap_rejected' });

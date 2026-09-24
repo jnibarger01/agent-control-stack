@@ -225,13 +225,41 @@ function failClosed(reason, target = pair) {
   target.sessions.clear(); target.routes.clear();
 }
 
+/**
+ * The cached initialize response carries the child's proof for the challenge
+ * that was injected when THIS child was initialized. When the gateway injects
+ * a DIFFERENT (fresh ACS) challenge, that cached proof is stale — replaying it
+ * makes ACS reject the attestation (proof/challenge mismatch). Never rewrite
+ * the proof here: recycle the pair so the next initialize genuinely reaches a
+ * fresh child, which derives a fresh proof from the new challenge itself.
+ */
+function recycleForStaleProof(reason) {
+  console.error(`bridge: recycling executor pair (${reason})`);
+  const target = pair;
+  if (!target) return;
+  try { target.upstream.close(); } catch { /* onclose handles teardown */ }
+}
+
 async function forward(session, msg, headers) {
   if (session.closed || !pair || pair !== session.pair) return;
   const outbound = injectAttestation(structuredClone(msg), headers);
   lastDebug = { last_headers: headers, last_upstream_message: outbound };
 
   if (isInitialize(msg)) {
-    if (pair.initResponse) { await session.transport.send({ ...pair.initResponse, id: msg.id }); return; }
+    if (pair.initResponse) {
+      const injectedChallenge = msg?.params?._meta?.acsRuntimeBootstrap?.challenge;
+      const proofChallenge = pair.initResponse?.result?._meta?.acsRuntimeIdentity?.challenge;
+      if (injectedChallenge && proofChallenge && injectedChallenge !== proofChallenge) {
+        recycleForStaleProof('initialize challenge differs from cached child proof');
+        // This session belongs to the recycled pair; the client reconnects and
+        // its initialize lands on the fresh child.
+        session.closed = true;
+        try { await session.transport.close(); } catch { /* already closing */ }
+        return;
+      }
+      await session.transport.send({ ...pair.initResponse, id: msg.id });
+      return;
+    }
     if (!pair.initPromise) {
       pair.initPromise = new Promise((resolve, reject) => { pair.initResolve = resolve; pair.initReject = reject; });
       pair.initPromise.catch(() => {});

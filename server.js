@@ -405,6 +405,108 @@ function proxyMcp(req, res, bodyBuf, auth) {
   req.on('aborted', () => ureq.destroy());
 }
 
+/**
+ * Buffered initialize proxy with runtime-bootstrap attestation.
+ *
+ * Unlike `proxyMcp` (which streams), this path buffers the child's initialize
+ * response so the gateway can extract `result._meta.acsRuntimeIdentity` — the
+ * child's own proof — and hand that exact object to ACS's completion endpoint.
+ * The child's initialize success is only released to the client after ACS
+ * answers 204. Missing or malformed proof, non-200 child response, or ACS
+ * rejection all fail closed with 503 before anything is exposed.
+ */
+function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, auth) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(req.url, UPSTREAM);
+    const headers = {};
+    for (const [k, v] of Object.entries(req.headers)) {
+      const lk = k.toLowerCase();
+      if (HOP.has(lk)) continue;
+      if (lk === 'x-forwarded-host' || lk === 'x-forwarded-proto' || lk === 'forwarded') continue;
+      if (lk === 'x-dc-agent' || lk === 'x-dc-client' || lk === 'x-dc-attestation') continue;
+      headers[k] = v;
+    }
+    headers['x-forwarded-for'] = 'gateway-authenticated';
+    if (GATEWAY_EXECUTION_TOKEN && auth) {
+      const iat = now();
+      headers['x-dc-agent'] = String(auth.sub || '');
+      headers['x-dc-client'] = String(auth.client_id || '');
+      headers['x-dc-attestation'] = mintAttestation({
+        sub: auth.sub, client_id: auth.client_id, jti: auth.jti, iat, exp: iat + 60,
+      });
+    }
+    const upstream = new URL(UPSTREAM);
+    headers.host = upstream.host;
+    const opts = { protocol: upstream.protocol, hostname: upstream.hostname, port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80), path: url.pathname + url.search, method: req.method, headers };
+    const fail = (acsCode) => {
+      const err = Object.assign(new Error(`managed initialize attestation failed: ${acsCode}`), { acsCode });
+      reject(err);
+    };
+    const ureq = http.request(opts, (ures) => {
+      const chunks = [];
+      let size = 0;
+      ures.on('data', (c) => { size += c.length; if (size > 4 * 1024 * 1024) { ures.destroy(); fail('initialize_response_too_large'); } else chunks.push(c); });
+      ures.on('error', () => fail('initialize_upstream_error'));
+      ures.on('end', async () => {
+        try {
+          if ((ures.statusCode || 0) !== 200) return fail('initialize_upstream_not_ok');
+          const payload = Buffer.concat(chunks);
+          const contentType = String(ures.headers['content-type'] || '');
+          // MCP streamable-HTTP children may answer initialize with either a
+          // plain JSON document or an SSE stream (`data:` frames). Handle both:
+          // proof extraction parses the frame, but the client is always given
+          // the child's original bytes, unmodified.
+          let parsedInitializeResponse;
+          try {
+            if (contentType.includes('text/event-stream')) {
+              const dataLines = payload.toString('utf8')
+                .split(/\r?\n/)
+                .filter((line) => line.startsWith('data:'))
+                .map((line) => line.slice(5).trim())
+                .filter(Boolean);
+              if (dataLines.length === 0) return fail('initialize_response_not_json');
+              parsedInitializeResponse = JSON.parse(dataLines[dataLines.length - 1]);
+            } else {
+              parsedInitializeResponse = JSON.parse(payload.toString('utf8'));
+            }
+          } catch {
+            return fail('initialize_response_not_json');
+          }
+          // The proof must be the child's own object, present and well-formed.
+          // It is forwarded exactly as produced — never reconstructed here.
+          const runtimeIdentity =
+            parsedInitializeResponse && typeof parsedInitializeResponse === 'object'
+              ? parsedInitializeResponse?.result?._meta?.acsRuntimeIdentity
+              : undefined;
+          const valid =
+            runtimeIdentity && typeof runtimeIdentity === 'object' && !Array.isArray(runtimeIdentity) &&
+            runtimeIdentity.schemaVersion === 1 &&
+            typeof runtimeIdentity.runtimeId === 'string' && runtimeIdentity.runtimeId.length > 0 &&
+            typeof runtimeIdentity.challenge === 'string' && runtimeIdentity.challenge.length > 0 &&
+            Array.isArray(runtimeIdentity.scopes);
+          if (!valid) return fail('runtime_identity_proof_missing_or_malformed');
+          await completeRuntimeBootstrap(MANAGED, identity, challenge, runtimeIdentity);
+          const out = {};
+          for (const [k, v] of Object.entries(ures.headers)) if (!HOP.has(k.toLowerCase())) out[k] = v;
+          delete out['transfer-encoding'];
+          out['content-length'] = String(payload.length);
+          res.writeHead(ures.statusCode || 200, out);
+          res.end(payload);
+          log(req.method, '/dc/runtime/bootstrap/complete', 204);
+          resolve();
+        } catch (e) {
+          reject(e && e.acsCode ? e : Object.assign(new Error('managed initialize attestation failed'), { acsCode: 'bootstrap_complete_failed' }));
+        }
+      });
+    });
+    ureq.setTimeout(30_000, () => ureq.destroy(new Error('initialize upstream timeout')));
+    ureq.on('error', () => fail('initialize_upstream_unreachable'));
+    if (bodyBuf && bodyBuf.length) ureq.write(bodyBuf);
+    ureq.end();
+    req.on('aborted', () => { ureq.destroy(); reject(Object.assign(new Error('client aborted during initialize'), { acsCode: 'initialize_client_aborted' })); });
+  });
+}
+
 // ---------------------------------------------------------------------------
 // /ready + /authority support (hardening item #2)
 // ---------------------------------------------------------------------------
@@ -519,22 +621,26 @@ const server = http.createServer(async (req, res) => {
         } else if (parsed && parsed.method === 'initialize' && NATIVE_RUNTIME_BOOTSTRAP) {
           // Managed initialize: fetch an ACS runtime bootstrap challenge and
           // transport it to the child in _meta.acsRuntimeBootstrap. The child
-          // structurally validates it during initialize; the challenge is then
-          // completed in ACS's registry so the runtime becomes attested. Any
-          // failure is fail-closed: initialize is not forwarded.
+          // structurally validates it during initialize and returns its own
+          // proof in result._meta.acsRuntimeIdentity. That exact object is the
+          // completion payload ACS requires; initialize is buffered (not
+          // streamed) until the proof is verified and ACS accepts completion.
+          // Any failure is fail-closed: the client never sees a successful
+          // initialize without a completed attestation.
           try {
             const identity = dcRuntimeIdentityFromState();
             if (!identity) throw Object.assign(new Error('DC runtime identity unavailable'), { acsCode: 'runtime_identity_unavailable' });
             const challenge = await issueRuntimeBootstrap(MANAGED, identity);
             body = Buffer.from(JSON.stringify(injectRuntimeBootstrap(parsed, challenge)), 'utf8');
-            completeRuntimeBootstrap(MANAGED, identity, challenge)
-              .then(() => log(req.method, '/dc/runtime/bootstrap/complete', 204))
-              .catch((e) => log(req.method, '/dc/runtime/bootstrap/complete', 503, e?.acsCode || 'bootstrap_complete_failed'));
+            await proxyInitializeWithAttestation(req, res, body, identity, challenge, auth);
+            log(req.method, '/mcp', 200, 'initialize attested + proxied');
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
             log(req.method, '/mcp', 503, `managed initialize fail-closed: ${code}`);
-            return send(res, 503, { error: 'managed_authorization_unavailable', code });
+            if (!res.headersSent) return send(res, 503, { error: 'managed_authorization_unavailable', code });
+            return res.destroy();
           }
+          return;
         }
       }
       proxyMcp(req, res, body, auth);
