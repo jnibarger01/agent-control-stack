@@ -18,6 +18,11 @@ import {
   portfolioLimitInputSchema,
   portfolioListRepositoriesInputSchema
 } from "./portfolio-client.js";
+import {
+  shellRecipeListInputSchema,
+  shellRecipePreviewInputSchema,
+  shellRecipeRequestInputSchema
+} from "./shell-recipes.js";
 
 export { createWorkItemSchema, listWorkItemsSchema, submitWorkResultSchema };
 
@@ -201,17 +206,20 @@ export const portfolioToolNames = [
   "portfolio.list_pending_work",
   "portfolio.list_recent_progress"
 ] as const;
+export const shellRecipeToolNames = ["shell.recipe_list", "shell.recipe_preview", "shell.recipe_request"] as const;
 export const mcpToolNames = [
   ...workItemToolNames,
   ...dashboardToolNames,
   ...portfolioToolNames,
+  ...shellRecipeToolNames,
   directAgentToolName
 ] as const;
 export type McpToolName = (typeof mcpToolNames)[number];
 export const remoteMcpToolNames = [
   ...workItemToolNames.filter((name) => name !== "approve_work_item"),
   ...dashboardToolNames,
-  ...portfolioToolNames
+  ...portfolioToolNames,
+  ...shellRecipeToolNames
 ];
 
 export const toolsCallParamsSchema = z.object({
@@ -247,6 +255,9 @@ export const gatewayMcpInputSchemas = {
   "portfolio.list_failures": portfolioLimitInputSchema,
   "portfolio.list_pending_work": portfolioLimitInputSchema,
   "portfolio.list_recent_progress": portfolioLimitInputSchema,
+  "shell.recipe_list": shellRecipeListInputSchema,
+  "shell.recipe_preview": shellRecipePreviewInputSchema,
+  "shell.recipe_request": shellRecipeRequestInputSchema,
   [directAgentToolName]: directAgentInputSchema
 } satisfies Record<McpToolName, z.ZodType>;
 
@@ -254,6 +265,7 @@ export function mcpRequiredScopes(name: McpToolName): McpScope[] {
   if (name === directAgentToolName) return ["acs:work:approve"];
   switch (name) {
     case "create_work_item":
+    case "shell.recipe_request":
       return ["acs:work:create"];
     case "get_work_item":
     case "list_work_items":
@@ -267,6 +279,8 @@ export function mcpRequiredScopes(name: McpToolName): McpScope[] {
     case "portfolio.list_failures":
     case "portfolio.list_pending_work":
     case "portfolio.list_recent_progress":
+    case "shell.recipe_list":
+    case "shell.recipe_preview":
       return ["acs:work:read"];
     case "approve_work_item":
     case "unblock_work_item":
@@ -291,6 +305,8 @@ export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
     case "portfolio.list_failures":
     case "portfolio.list_pending_work":
     case "portfolio.list_recent_progress":
+    case "shell.recipe_list":
+    case "shell.recipe_preview":
       return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
     case "cancel_work_item":
     case "reject_work_item":
@@ -339,6 +355,12 @@ export function mcpToolDescription(name: McpToolName): string {
       return "List pending GitHub pull requests and issues from Visualizer. This never mutates GitHub.";
     case "portfolio.list_recent_progress":
       return "List recent GitHub portfolio progress events from Visualizer. This never mutates GitHub.";
+    case "shell.recipe_list":
+      return "List explicitly configured named shell recipes. This never executes or creates work.";
+    case "shell.recipe_preview":
+      return "Preview the exact governed work item and policy outcome for one configured shell recipe without persisting it.";
+    case "shell.recipe_request":
+      return "Create a governed work item for one configured shell recipe. It never executes or approves the command directly.";
   }
 }
 

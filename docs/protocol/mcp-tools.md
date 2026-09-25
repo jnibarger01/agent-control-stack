@@ -34,11 +34,11 @@ There is no single tool catalog. Two independent MCP servers exist, with differe
 | Entry point  | `apps/mcp/src/server.ts` (`McpStdioServer`)                                                 | `apps/gateway/src/mcp.ts` (`handleMcpHttpRequest`)                                                                                                                                                           |
 | Backed by    | `MachineController` (`packages/machine-controller`)                                         | work-item tools (`packages/policy-gate/src/tools.ts`, `packages/work-items`)                                                                                                                                 |
 | Transport    | stdio, `Content-Length`-framed JSON-RPC                                                     | HTTP JSON-RPC (`apps/gateway`), per [ADR 0007](../adr/0007-chatgpt-https-mcp-transport.md)                                                                                                                   |
-| Tool naming  | dotted (`system.status`, `fs.read`, ...)                                                    | snake_case (`create_work_item`, `approve_work_item`, ...)                                                                                                                                                    |
+| Tool naming  | dotted (`system.status`, `fs.read`, ...)                                                    | primarily snake_case for work items, plus namespaced dotted tools such as `portfolio.*` and `shell.recipe_*`                                                                                                |
 | What it does | Reads the local machine directly (files, command previews, one read-only command execution) | Creates and manages governed work items that a separate worker later claims and executes                                                                                                                     |
 | Auth         | none (local process, trusted caller)                                                        | `authorizeMcpRequest` — bearer/OAuth scopes, per `apps/gateway/src/auth.ts`; optional per-identity tool allowlist (`ACS_MCP_TOOL_ALLOWLIST_JSON`, see [oauth-authentication.md](../oauth-authentication.md)) |
 
-There is no naming convention that unifies the two — the local server's tool names are the literal `MachineController.callTool` dispatch keys (dots), and the gateway's are the literal `createWorkItemTools` keys (underscores). Do not assume one implies the other.
+There is no naming convention that unifies the two — the local server exposes `MachineController.callTool` dispatch keys, while the gateway combines work-item tools with explicitly registered namespaced tools. Do not assume a local tool name implies a gateway equivalent.
 
 ## Common envelope
 
@@ -274,6 +274,50 @@ alone does not enable writes in V1 — ACS still has no GitHub mutation
 implementation (`PORTFOLIO_V2_WRITES_NOT_IMPLEMENTED`). Contract coverage:
 `apps/gateway/src/portfolio-client.test.ts` and
 `apps/gateway/src/portfolio-mcp.test.ts`.
+
+### Named shell recipes
+
+The gateway exposes three recipe tools for explicitly configured, fixed shell
+commands. Recipes are loaded from `ACS_SHELL_RECIPES_JSON`; when the variable
+is absent or empty, the registry is empty.
+
+```json
+[
+  {
+    "id": "restart-worker",
+    "description": "Restart the ACS worker",
+    "command": "systemctl",
+    "args": ["restart", "acs-worker.service"],
+    "cwd": "/workspace/agent-control-stack",
+    "timeout_ms": 30000
+  }
+]
+```
+
+Recipe configuration is strict. IDs are unique, `command` is a PATH command
+name rather than an executable path, argv entries are fixed literal tokens, and
+callers cannot substitute command, argv, cwd, environment, shell, or flags.
+Do not embed credentials or secret values in recipe configuration.
+
+- `shell.recipe_list {}` requires `acs:work:read` and returns recipe IDs and
+  descriptions only. It neither previews nor creates work.
+- `shell.recipe_preview {"id":"restart-worker"}` requires `acs:work:read`.
+  It returns the exact governed work-item candidate, configured invocation, and
+  current policy outcome without persisting a work item or approval.
+- `shell.recipe_request {"id":"restart-worker","reason":"restore service"}`
+  requires `acs:work:create`. It creates exactly one governed work item with
+  one `shell` action that reconstructs to Desktop Commander
+  `start_process`. The normal policy gate determines its status.
+
+These tools add no direct shell execution path. A mutating recipe remains in
+`needs_approval` until an authorized non-MCP approval channel grants the exact
+policy-evaluated action. Execution then uses the existing worker
+claim/lease/approval-consumption path. MCP identities still cannot call
+`approve_work_item`.
+
+Malformed recipe configuration or duplicate IDs fail closed with
+`shell_recipe_config_invalid`; an unknown recipe ID fails with
+`shell_recipe_not_found`.
 
 ### `create_work_item`
 

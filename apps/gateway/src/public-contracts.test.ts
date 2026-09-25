@@ -14,7 +14,8 @@ import {
   portfolioToolNames,
   publicContractExamples,
   publicHttpOperations,
-  remoteMcpToolNames
+  remoteMcpToolNames,
+  shellRecipeToolNames
 } from "./public-contracts.js";
 import { buildGateway } from "./server.js";
 
@@ -58,10 +59,11 @@ describe("frozen MCP/OpenAPI snapshot coverage", () => {
     tools: Record<string, unknown>;
   };
   const required = [...workItemToolNames, ...portfolioToolNames];
+  const generatedRequired = [...required, ...shellRecipeToolNames];
 
   it("keeps work-item and portfolio tools in the committed mcp-tools snapshot", () => {
     const names = new Set(mcpTools.tools.map((tool) => tool.name));
-    for (const name of required) {
+    for (const name of generatedRequired) {
       expect(names.has(name), `${name} missing from mcp-tools.json`).toBe(true);
       expect(mcpTools.tools.find((tool) => tool.name === name)?.inputSchema).toBeDefined();
     }
@@ -101,6 +103,32 @@ describe("generated public contract clients", () => {
       });
       expect(gatewayMcpInputSchemas[name]).toBeDefined();
     }
+  });
+
+  it("advertises the three shell recipe tools with least-privilege scopes and annotations", () => {
+    expect(shellRecipeToolNames).toEqual(["shell.recipe_list", "shell.recipe_preview", "shell.recipe_request"]);
+    for (const name of shellRecipeToolNames) {
+      expect(remoteMcpToolNames).toContain(name);
+      expect(gatewayMcpInputSchemas[name]).toBeDefined();
+    }
+    expect(mcpRequiredScopes("shell.recipe_list")).toEqual(["acs:work:read"]);
+    expect(mcpRequiredScopes("shell.recipe_preview")).toEqual(["acs:work:read"]);
+    expect(mcpRequiredScopes("shell.recipe_request")).toEqual(["acs:work:create"]);
+    expect(mcpToolAnnotations("shell.recipe_list")).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    });
+    expect(mcpToolAnnotations("shell.recipe_preview")).toEqual({
+      readOnlyHint: true,
+      destructiveHint: false,
+      openWorldHint: false
+    });
+    expect(mcpToolAnnotations("shell.recipe_request")).toEqual({
+      readOnlyHint: false,
+      destructiveHint: false,
+      openWorldHint: false
+    });
   });
 
   it("exercise successful HTTP and MCP calls through generated operation bindings", async () => {

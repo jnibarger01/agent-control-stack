@@ -19,6 +19,7 @@ import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
 import { explainPolicy } from "./explain.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
+import { previewWorkItemPolicy } from "./preview.js";
 
 export const workItemToolNames = [
   "create_work_item",
@@ -470,6 +471,9 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
     },
     explain_policy(input: unknown) {
       return explainPolicy(input);
+    },
+    preview_work_item_policy(input: unknown) {
+      return previewWorkItemPolicy(policy, input);
     },
     approve_work_item(input: unknown): { decision: PolicyDecision; workItem: WorkItem; approvals: ApprovalGrant[] } {
       return gateApproval(store, policy, input);

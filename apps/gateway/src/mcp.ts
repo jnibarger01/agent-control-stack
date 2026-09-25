@@ -35,12 +35,23 @@ import {
   mcpToolDescription,
   portfolioToolNames,
   remoteMcpToolNames,
+  shellRecipeToolNames,
   toolsCallParamsSchema,
   type McpToolName
 } from "./public-contracts.js";
+import {
+  configuredShellRecipes,
+  listShellRecipes,
+  publicRecipe,
+  resolveShellRecipe,
+  shellRecipePreviewInputSchema,
+  shellRecipeRequestInputSchema,
+  shellRecipeWorkItemInput
+} from "./shell-recipes.js";
 
 type GatewayWorkItemTools = ReturnType<typeof createWorkItemTools>;
 type GatewayToolName = (typeof workItemToolNames)[number];
+type ShellRecipeToolName = (typeof shellRecipeToolNames)[number];
 type DirectAgentToolName = typeof directAgentToolName;
 type JsonRpcId = string | number | null;
 
@@ -349,7 +360,7 @@ async function handleToolsCall(input: {
       });
     }
   }
-  if (parsed.data.name === "create_work_item" && input.maxPendingWorkItems !== undefined) {
+  if ((parsed.data.name === "create_work_item" || parsed.data.name === "shell.recipe_request") && input.maxPendingWorkItems !== undefined) {
     const pending = input.store
       .list()
       .filter((workItem) =>
@@ -519,6 +530,9 @@ async function callMcpTool(input: {
     });
   }
   if (input.name === "open_acs_dashboard") return dashboardOverview(input.store);
+  if (isShellRecipeTool(input.name)) {
+    return callShellRecipeTool(input.tools, input.name, input.args, input.actor);
+  }
   if (input.name === "get_execution_detail") {
     const id = z.object({ id: z.string().min(1) }).parse(input.args).id;
     const detail = executionDetail(input.store, id);
@@ -530,6 +544,39 @@ async function callMcpTool(input: {
   }
 
   return callGatewayTool(input.tools, input.name, input.args, input.auth, input.actor);
+}
+
+function callShellRecipeTool(
+  tools: GatewayWorkItemTools,
+  name: ShellRecipeToolName,
+  args: unknown,
+  actor: string
+): unknown {
+  const registry = configuredShellRecipes();
+
+  if (name === "shell.recipe_list") {
+    gatewayMcpInputSchemas[name].parse(args);
+    return listShellRecipes(registry);
+  }
+
+  if (name === "shell.recipe_preview") {
+    const parsed = shellRecipePreviewInputSchema.parse(args);
+    const recipe = resolveShellRecipe(registry, parsed.id);
+    const workItem = shellRecipeWorkItemInput(recipe, actor);
+    return {
+      recipe: publicRecipe(recipe),
+      workItem,
+      policy: tools.preview_work_item_policy(workItem)
+    };
+  }
+
+  const parsed = shellRecipeRequestInputSchema.parse(args);
+  const recipe = resolveShellRecipe(registry, parsed.id);
+  const workItemInput = shellRecipeWorkItemInput(recipe, actor, parsed.reason);
+  return {
+    recipeId: recipe.id,
+    workItem: tools.create_work_item(workItemInput)
+  };
 }
 
 function callGatewayTool(
@@ -612,9 +659,19 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
 function isMutatingTool(name: McpToolName): boolean {
   if (name === directAgentToolName) return true;
   if (isPortfolioTool(name)) return false;
-  return !["get_work_item", "list_work_items", "explain_policy", "open_acs_dashboard", "get_execution_detail"].includes(
-    name
-  );
+  return ![
+    "get_work_item",
+    "list_work_items",
+    "explain_policy",
+    "open_acs_dashboard",
+    "get_execution_detail",
+    "shell.recipe_list",
+    "shell.recipe_preview"
+  ].includes(name);
+}
+
+function isShellRecipeTool(name: McpToolName): name is ShellRecipeToolName {
+  return (shellRecipeToolNames as readonly string[]).includes(name);
 }
 
 function isPortfolioTool(name: McpToolName): name is (typeof portfolioToolNames)[number] {
