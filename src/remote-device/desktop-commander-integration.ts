@@ -32,6 +32,10 @@ interface McpConfig {
     env?: Record<string, string>;
 }
 
+/** SDK messages that concern only the optional standalone SSE stream. */
+export const OPTIONAL_SSE_STREAM_ERROR = /^(Failed to reconnect SSE stream:|SSE stream disconnected:|Failed to reconnect:|Maximum reconnection attempts)/;
+const SSE_ERROR_LOG_INTERVAL_MS = 60_000;
+
 export class DesktopCommanderIntegration {
     private mcpClient: Client | null = null;
     private mcpTransport: StdioClientTransport | StreamableHTTPClientTransport | null = null;
@@ -43,6 +47,19 @@ export class DesktopCommanderIntegration {
     private replacingTransport = false;
     /** Single-flight guard: the in-progress managed session (re)attach, if any. */
     private managedAttachFlight: Promise<void> | null = null;
+    private sseErrorLoggedAt = 0;
+    private sseErrorsSuppressed = 0;
+
+    private logSseStreamError(message: string, now: number = Date.now()): void {
+        if (now - this.sseErrorLoggedAt < SSE_ERROR_LOG_INTERVAL_MS) {
+            this.sseErrorsSuppressed += 1;
+            return;
+        }
+        const suppressed = this.sseErrorsSuppressed;
+        this.sseErrorLoggedAt = now;
+        this.sseErrorsSuppressed = 0;
+        console.error(` - ⚠️ Managed MCP SSE stream unavailable (session kept): ${message}${suppressed ? ` [+${suppressed} suppressed]` : ''}`);
+    }
 
     get ready(): boolean {
         return this.isReady && this.mcpClient !== null;
@@ -73,6 +90,16 @@ export class DesktopCommanderIntegration {
     private handleManagedTransportError(error: Error): void {
         if (error instanceof StreamableHTTPError) {
             console.error(` - ⚠️ Managed MCP request failed without dropping the session: ${error.message}`);
+            return;
+        }
+        // The standalone GET SSE stream is optional in Streamable HTTP; the SDK
+        // manages its own reconnection and reports those failures as plain
+        // Errors. Losing it does not affect POST tool calls (a dead POST path
+        // still surfaces as a request timeout and replaceManagedTransport), so
+        // it must not tear down the session. Tearing down here caused a
+        // ~1/s attach/detach flap against the ACS gateway.
+        if (OPTIONAL_SSE_STREAM_ERROR.test(error?.message ?? '')) {
+            this.logSseStreamError(error.message);
             return;
         }
         this.handleLocalDisconnect(

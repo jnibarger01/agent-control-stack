@@ -105,3 +105,41 @@ assert.equal(raced.isReady, true);
 
 console.log('managed HTTP single-flight replace tests passed');
 
+// Optional standalone SSE stream failures must not tear down the session
+// (previously caused a ~1/s attach/detach flap against the ACS gateway).
+for (const message of [
+  'Failed to reconnect SSE stream: Streamable HTTP error: Failed to open SSE stream: ',
+  'SSE stream disconnected: TypeError: terminated',
+  'Failed to reconnect: fetch failed',
+  'Maximum reconnection attempts (2) exceeded.',
+]) {
+  const sse = readyIntegration();
+  sse.integration.handleManagedTransportError(new Error(message));
+  assert.equal(sse.integration.ready, true, `SSE-only error must keep the session: ${message}`);
+  assert.equal(sse.integration.mcpTransport?.id, 'transport');
+  assert.deepEqual(sse.reasons, [], `SSE-only error must not notify disconnect: ${message}`);
+}
+
+// Look-alikes that are not SDK SSE-stream errors still disconnect.
+for (const message of ['socket hang up: Failed to reconnect SSE stream:', 'ECONNRESET', 'fetch failed']) {
+  const real = readyIntegration();
+  real.integration.handleManagedTransportError(new Error(message));
+  assert.equal(real.integration.ready, false, `non-SSE error must disconnect: ${message}`);
+}
+
+// SSE log is rate-limited to one line per minute with a suppressed count.
+{
+  const rl = readyIntegration();
+  const lines = [];
+  const orig = console.error;
+  console.error = (...a) => lines.push(a.join(' '));
+  try {
+    rl.integration.logSseStreamError('Failed to reconnect SSE stream: x', 1_000_000);
+    for (let i = 0; i < 5; i++) rl.integration.logSseStreamError('Failed to reconnect SSE stream: x', 1_000_000 + i * 1000);
+    rl.integration.logSseStreamError('Failed to reconnect SSE stream: x', 1_000_000 + 61_000);
+  } finally { console.error = orig; }
+  assert.equal(lines.length, 2, 'one line per minute');
+  assert.match(lines[1], /\[\+5 suppressed\]/);
+}
+
+console.log('managed SSE stream resilience tests passed');
