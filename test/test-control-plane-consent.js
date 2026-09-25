@@ -147,14 +147,20 @@ try {
     assert.equal(calls.createClient[0].options.auth.detectSessionInUrl, true);
   });
 
-  await test('in-flight PKCE magic-link callbacks keep PKCE so a pre-deploy email can still complete', async () => {
-    const { calls } = await renderConsent({
+  await test('in-flight PKCE callbacks stay compatible but replacement email sign-in resets to implicit', async () => {
+    const { el, calls, liveCalls } = await renderConsent({
       session: { access_token: 'fresh' },
       search: '?authorization_id=auth-123&code=pkce-code',
       details: { authorization_id: 'auth-123', scope: 'openid', client: { id: 'c', name: 'Claude', uri: '' }, user: { email: 'jace@example.com' } },
     });
     assert.equal(calls.createClient[0].options.auth.flowType, 'pkce');
     assert.deepEqual(calls.replaceState, [null, '', 'https://relay.example.test:8443/oauth/consent?authorization_id=auth-123']);
+
+    el('email').value = 'jace@example.com';
+    await el('email-form').listeners.submit({ preventDefault() {} });
+    assert.equal(liveCalls.createClient.length, 2);
+    assert.equal(liveCalls.createClient[1].options.auth.flowType, 'implicit');
+    assert.equal(liveCalls.signInWithOtp.options.emailRedirectTo, 'https://relay.example.test:8443/oauth/consent?authorization_id=auth-123');
   });
 
   await test('email sign-in keeps the OAuth authorization request in the magic-link return URL', async () => {
@@ -203,6 +209,21 @@ try {
     assert.equal(failed.el('signin').hidden, false);
     assert.equal(failed.el('status').textContent, 'Magic-link session could not be established');
     assert.equal(failed.calls.detailsFor, undefined);
+  });
+
+  await test('query-form callback errors are scrubbed before a replacement sign-in', async () => {
+    const failed = await renderConsent({
+      session: null,
+      search: '?authorization_id=auth-123&error=access_denied&error_code=otp_expired&error_description=Expired%20sign-in%20link&error_uri=https%3A%2F%2Fexample.invalid%2Fhelp',
+      details: { client: { name: 'Claude' } },
+    });
+    assert.equal(failed.el('signin').hidden, false);
+    assert.equal(failed.el('status').textContent, 'Expired sign-in link');
+    assert.deepEqual(failed.calls.replaceState, [null, '', 'https://relay.example.test:8443/oauth/consent?authorization_id=auth-123']);
+
+    failed.el('email').value = 'jace@example.com';
+    await failed.el('email-form').listeners.submit({ preventDefault() {} });
+    assert.equal(failed.liveCalls.signInWithOtp.options.emailRedirectTo, 'https://relay.example.test:8443/oauth/consent?authorization_id=auth-123');
   });
 
   await test('"Have a code?" is available without sending an email; valid code → session → client details shown', async () => {
