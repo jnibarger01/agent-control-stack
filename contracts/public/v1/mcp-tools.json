@@ -674,6 +674,88 @@
       }
     },
     {
+      "name": "shell.recipe_list",
+      "exposure": "remote",
+      "description": "List explicitly configured named shell recipes. This never executes or creates work.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "shell.recipe_preview",
+      "exposure": "remote",
+      "description": "Preview the exact governed work item and policy outcome for one configured shell recipe without persisting it.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:read"
+      ],
+      "annotations": {
+        "readOnlyHint": true,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
+      "name": "shell.recipe_request",
+      "exposure": "remote",
+      "description": "Create a governed work item for one configured shell recipe. It never executes or approves the command directly.",
+      "inputSchema": {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1000
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "additionalProperties": false
+      },
+      "requiredScopes": [
+        "acs:work:create"
+      ],
+      "annotations": {
+        "readOnlyHint": false,
+        "destructiveHint": false,
+        "openWorldHint": false
+      }
+    },
+    {
       "name": "test.agent.run",
       "exposure": "development_only",
       "description": "Run one allowed agent once from a clean JSON payload through the approval-scoped gateway path.",
