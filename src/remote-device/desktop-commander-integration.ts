@@ -3,8 +3,9 @@ import path from 'path';
 import fs from 'fs/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
+import { Agent, fetch as undiciFetch } from 'undici';
 import { fileURLToPath } from 'url';
 import type { Readable } from 'stream';
 import { captureRemote } from '../utils/capture.js';
@@ -14,6 +15,15 @@ import { GatewayOAuthProvider } from './gateway-oauth-provider.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const MCP_CONNECT_TIMEOUT_MS = 15_000;
+// Shorter than the remote MCP caller's timeout. A wedged Streamable HTTP
+// session never emits a POST; waiting for the SDK's 60s default makes the
+// remote caller time out before we can replace the session and retry.
+const MANAGED_REQUEST_TIMEOUT_MS = 8_000;
+
+const managedHttpAgent = new Agent({
+    connections: 8,
+    pipelining: 0,
+});
 
 interface McpConfig {
     command: string;
@@ -21,6 +31,10 @@ interface McpConfig {
     cwd?: string;
     env?: Record<string, string>;
 }
+
+/** SDK messages that concern only the optional standalone SSE stream. */
+export const OPTIONAL_SSE_STREAM_ERROR = /^(Failed to reconnect SSE stream:|SSE stream disconnected:|Failed to reconnect:|Maximum reconnection attempts)/;
+const SSE_ERROR_LOG_INTERVAL_MS = 60_000;
 
 export class DesktopCommanderIntegration {
     private mcpClient: Client | null = null;
@@ -30,6 +44,20 @@ export class DesktopCommanderIntegration {
     private shutdownRequested: boolean = false;
     private disconnectHandler: ((reason: string) => void) | null = null;
     private reinitPromise: Promise<void> | null = null;
+    private replacingTransport = false;
+    private sseErrorLoggedAt = 0;
+    private sseErrorsSuppressed = 0;
+
+    private logSseStreamError(message: string, now: number = Date.now()): void {
+        if (now - this.sseErrorLoggedAt < SSE_ERROR_LOG_INTERVAL_MS) {
+            this.sseErrorsSuppressed += 1;
+            return;
+        }
+        const suppressed = this.sseErrorsSuppressed;
+        this.sseErrorLoggedAt = now;
+        this.sseErrorsSuppressed = 0;
+        console.error(` - ⚠️ Managed MCP SSE stream unavailable (session kept): ${message}${suppressed ? ` [+${suppressed} suppressed]` : ''}`);
+    }
 
     get ready(): boolean {
         return this.isReady && this.mcpClient !== null;
@@ -46,6 +74,35 @@ export class DesktopCommanderIntegration {
         this.mcpTransport = null;
         console.error(` - ❌ Local Desktop Commander MCP went away (${reason})`);
         this.disconnectHandler?.(reason);
+    }
+
+    /**
+     * Request-scoped HTTP failures must not drop the managed session.
+     * ACS fail-closed responses arrive as StreamableHTTPError (HTTP 503/409
+     * mapped by the gateway). The SDK reports those through onerror and also
+     * rejects the in-flight callTool. Disconnecting here marks the device
+     * offline before the failure is written back, so the remote caller hangs
+     * until its timeout. Real socket loss still arrives as onclose, or as a
+     * non-HTTP error, and those still disconnect.
+     */
+    private handleManagedTransportError(error: Error): void {
+        if (error instanceof StreamableHTTPError) {
+            console.error(` - ⚠️ Managed MCP request failed without dropping the session: ${error.message}`);
+            return;
+        }
+        // The standalone GET SSE stream is optional in Streamable HTTP; the SDK
+        // manages its own reconnection and reports those failures as plain
+        // Errors. Losing it does not affect POST tool calls (a dead POST path
+        // still surfaces as a request timeout and replaceManagedTransport), so
+        // it must not tear down the session. Tearing down here caused a
+        // ~1/s attach/detach flap against the ACS gateway.
+        if (OPTIONAL_SSE_STREAM_ERROR.test(error?.message ?? '')) {
+            this.logSseStreamError(error.message);
+            return;
+        }
+        this.handleLocalDisconnect(
+            `managed HTTP transport error: ${error?.message ?? String(error)}`,
+        );
     }
 
     constructor(
@@ -176,7 +233,17 @@ export class DesktopCommanderIntegration {
         const provider = new GatewayOAuthProvider();
 
         const makeTransport = () =>
-            new StreamableHTTPClientTransport(url, { authProvider: provider });
+            new StreamableHTTPClientTransport(url, {
+                authProvider: provider,
+                // Do not let tool POSTs share a keep-alive connection with the
+                // long-lived GET SSE stream. Pipelining a POST onto that socket
+                // never reaches the auth proxy, and every later call waits
+                // until the protocol timeout.
+                fetch: (input, init) => undiciFetch(input as never, {
+                    ...(init as object),
+                    dispatcher: managedHttpAgent,
+                }) as unknown as Promise<Response>,
+            });
 
         const makeClient = () =>
             new Client(
@@ -226,13 +293,17 @@ export class DesktopCommanderIntegration {
             this.mcpClient = client;
             this.isReady = true;
 
-            transport.onclose = () =>
+            transport.onclose = () => {
+                if (this.replacingTransport) return;
                 this.handleLocalDisconnect('managed HTTP transport closed');
+            };
 
-            transport.onerror = (error: Error) =>
-                this.handleLocalDisconnect(
-                    `managed HTTP transport error: ${error?.message ?? String(error)}`,
-                );
+            // StreamableHTTPClientTransport calls onerror for every failed POST,
+            // including ACS fail-closed HTTP 503s. Those are one request, not a
+            // dead session. Treating them as transport loss marks the device
+            // offline before the result is written, so the remote caller waits
+            // until timeout.
+            transport.onerror = (error: Error) => this.handleManagedTransportError(error);
 
             console.log(' - 🔌 Attached to managed Desktop Commander MCP');
             console.debug('[DEBUG] Managed Desktop Commander MCP connection successful');
@@ -319,19 +390,56 @@ export class DesktopCommanderIntegration {
         return null;
     }
 
+    private isManagedRequestTimeout(error: unknown): boolean {
+        const message = error instanceof Error ? error.message : String(error);
+        return message.includes('Request timed out') || message.includes('-32001');
+    }
+
+    /**
+     * Drop a Streamable HTTP session that accepted no further POSTs and attach
+     * a new one. Intentional: onclose during this swap must not mark the device
+     * offline, or the in-flight remote call is abandoned before the retry.
+     */
+    private async replaceManagedTransport(): Promise<void> {
+        if (!this.managedMcpUrl) return;
+        this.replacingTransport = true;
+        const previous = this.mcpTransport;
+        this.isReady = false;
+        this.mcpClient = null;
+        this.mcpTransport = null;
+        try {
+            await previous?.close().catch(() => undefined);
+            await this.initializeManagedHttp();
+        } finally {
+            this.replacingTransport = false;
+        }
+    }
+
     async callClientTool(toolName: string, args: any, metadata?: any) {
         await this.ensureReady();
 
         // Proxy other tools to MCP server
         try {
             console.debug('[DEBUG] Calling MCP tool:', toolName, 'args:', JSON.stringify(args).substring(0, 100));
-            const result = await this.mcpClient!.callTool({
+            const invoke = () => this.mcpClient!.callTool({
                 name: toolName,
                 arguments: args,
                 _meta: { remote: true, ...metadata || {} }
-            } as any);
-            console.debug('[DEBUG] Tool call successful:', toolName);
-            return result;
+            } as any, undefined, this.managedMcpUrl ? { timeout: MANAGED_REQUEST_TIMEOUT_MS } : undefined);
+            try {
+                const result = await invoke();
+                console.debug('[DEBUG] Tool call successful:', toolName);
+                return result;
+            } catch (error) {
+                if (this.managedMcpUrl && this.isManagedRequestTimeout(error)) {
+                    console.error(` - ⚠️ Managed MCP request timed out without a proxy POST; replacing session and retrying once: ${toolName}`);
+                    await this.replaceManagedTransport();
+                    const result = await invoke();
+                    console.debug('[DEBUG] Tool call successful after session replace:', toolName);
+                    return result;
+                }
+                throw error;
+            }
         } catch (error) {
             console.error(`Error executing tool ${toolName}:`, error);
             console.debug('[DEBUG] Tool call error details:', error);
@@ -344,8 +452,19 @@ export class DesktopCommanderIntegration {
         if (!this.mcpClient) return { tools: [] };
 
         try {
-            // List tools from MCP server
-            const mcpTools = await this.mcpClient.listTools();
+            const list = () => this.mcpClient!.listTools(
+                undefined,
+                this.managedMcpUrl ? { timeout: MANAGED_REQUEST_TIMEOUT_MS } : undefined,
+            );
+            let mcpTools;
+            try {
+                mcpTools = await list();
+            } catch (error) {
+                if (!(this.managedMcpUrl && this.isManagedRequestTimeout(error))) throw error;
+                console.error(' - ⚠️ Managed MCP tools/list timed out; replacing session and retrying once');
+                await this.replaceManagedTransport();
+                mcpTools = await list();
+            }
 
             // Merge tools
             return {
