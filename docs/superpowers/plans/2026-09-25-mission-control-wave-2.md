@@ -66,8 +66,13 @@ What is still missing, checked against the code:
   (`render/queue.ts`, `render/approvals.ts`, …).
 - **Acceptance:** `index.ts` is under 400 lines. The client passes `tsc
 --noEmit` and eslint. Rendered HTML is byte-identical before and after, using
-  a snapshot test captured before the move. CSP is unchanged: still an inline
-  script, now with a hash computed at build time if CSP uses hashes.
+  a snapshot test captured before the move. CSP behavior is unchanged.
+  Mission Control currently sends no `Content-Security-Policy` header and uses
+  no nonces or hashes, so the bundle stays an inline script and no build-time
+  hash is added in this refactor.
+- **Follow-up (separate security PR, not part of #1):** For CSP hardening, serve
+  the bundle as a same-origin external script and set `script-src 'self'`.
+  Don't add more inline-script hash or nonce machinery.
 - **Risk:** This is a large mechanical diff. Land it alone, with no behavior
   changes mixed in.
 
@@ -221,9 +226,16 @@ PLAN` shows a scan. Filters live in the URL so they can be shared.
 
 - **Change:** Add a dedicated list of quarantined items and attempts showing
   the reason, the evidence event, and the time in quarantine, plus a link to
-  the runbook. Only use existing backend transitions. If no "release from
-  quarantine" route exists, show "requires CLI" rather than inventing a
-  mutation.
+  the runbook.
+- **Operator action: "Retry through policy".** There is no canonical release
+  mutation. The internal `quarantined → pending_policy` transition in
+  `state-machine.ts` is not an operator route. The supported path is
+  `POST /work-items/:id/retry`, which creates a **new** linked work item in
+  `pending_policy` and leaves the quarantined item unchanged as history. Reuse
+  the wave-1 retry control, including its required reason and confirmation. Do
+  not label it "Release", and do not add a release route.
+- **Acceptance:** After a retry, the quarantined item still shows as
+  `quarantined`, and the new item appears in its lineage (#11).
 
 ---
 
@@ -257,11 +269,22 @@ PLAN` shows a scan. Filters live in the URL so they can be shared.
 - **Change:** Add a service worker and VAPID Web Push for
   `work_item.needs_approval`. The payload is **only** "N approvals waiting" plus
   a deep link, with no titles, intents, or hashes, because push goes through
-  third-party relays. Subscriptions are stored per dashboard session and
-  revoked on logout and session expiry.
+  third-party relays.
+- **Subscription lifecycle:** Dashboard sessions are stateless HMAC-signed
+  cookies, and there is no `/session/logout` route, so subscriptions can't be
+  tied to a session. Instead:
+  - Store each subscription against the authenticated principal or credential,
+    with its own `expires_at`.
+  - Provide an explicit unsubscribe/delete route, read-guarded and audited.
+  - Garbage-collect expired subscriptions.
+  - Revoking the principal or credential deletes its subscriptions.
+- **Boundary (ADR 0001):** Web Push is allowed as an optional outbound
+  integration, like the pending-approval digest webhook. It stays default-off,
+  carries only non-sensitive metadata, and grants **zero** approval or
+  execution authority. The deep link still requires a normal dashboard login.
 - **Risk:** This is the only item that adds an outbound network dependency.
-  Gate it behind a config flag that defaults to off, and document it in the
-  threat model before building it.
+  Keep it behind the default-off config flag and add it to the threat model in
+  the same PR.
 
 ---
 
@@ -277,7 +300,7 @@ PLAN` shows a scan. Filters live in the URL so they can be shared.
 | 6   | #12, #13, #14   | Audit query surface; shares the filter backend              |
 | 7   | #15, #16, #17   | Operator workflow                                           |
 | 8   | #19             | Layout pass once panels are final                           |
-| 9   | #20             | Needs threat-model sign-off first                           |
+| 9   | #20             | Adds subscription state and a threat-model entry            |
 
 PRs 3 through 7 can run in parallel once PR 2 lands.
 
@@ -291,11 +314,18 @@ PRs 3 through 7 can run in parallel once PR 2 lands.
 - Any UI for real execution before `docs/releases/sandbox-real-execution-gate.md`
   passes.
 
-## Open questions
+## Resolved decisions
 
-1. Is there a canonical "release from quarantine" transition? This decides
-   whether #17 has a button or only a CLI hint.
-2. Does the deployment CSP use nonces or hashes for the inline script? This
-   decides the mechanics of #1.
-3. Is Web Push (#20) acceptable under the local-first boundary (ADR 0001), or
-   should it be a local webhook only, like the digest?
+1. **Quarantine release:** There is no canonical release route. #17 uses
+   "Retry through policy" (`POST /work-items/:id/retry`), which creates a new
+   linked item and leaves the quarantined one unchanged. Sources:
+   `packages/work-items/src/state-machine.ts`, the store's retry and
+   `createLinkedWorkItem`, and the retry route in `apps/gateway/src/server.ts`.
+2. **CSP:** Mission Control sends no CSP header and uses no nonces or hashes.
+   #1 preserves that. CSP hardening is a separate PR using an external
+   same-origin script and `script-src 'self'`.
+3. **Web Push:** It is compatible with ADR 0001 when it is default-off, sends
+   no sensitive data, and grants no authority. Subscriptions are scoped to the
+   principal or credential with their own expiry, explicit unsubscribe, and
+   garbage collection, because sessions are stateless and there is no logout
+   route.
