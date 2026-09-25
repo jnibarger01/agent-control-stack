@@ -87,16 +87,22 @@ const $=(id)=>document.getElementById(id);
 const status=(t)=>{$('status').textContent=t;};
 const params=new URLSearchParams(location.search);
 const authorizationId=params.get('authorization_id');
-const hadAuthCallback=params.has('code')||Boolean(location.hash);
+const callbackQueryKeys=['code','error','error_code','error_description'];
+const hadAuthCallback=callbackQueryKeys.some((key)=>params.has(key))||Boolean(location.hash);
 const hashParams=new URLSearchParams(String(location.hash||'').replace(/^#/,''));
-const callbackError=hashParams.get('error_description')||hashParams.get('error');
+const callbackError=params.get('error_description')||params.get('error')||params.get('error_code')||hashParams.get('error_description')||hashParams.get('error');
 // New email sign-ins use implicit so a different browser context can complete.
 // Keep PKCE only when an in-flight ?code= callback is already on the URL.
 const flowType=params.has('code')?'pkce':'implicit';
 const client=window.supabase.createClient(SUPABASE_URL,KEY,{auth:{flowType:flowType,persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+let emailClient=flowType==='implicit'?client:null;
 const RESTART='Start again from the application that sent you here.';
 let email='';
-function returnUrl(){const u=new URL(location.href);u.searchParams.delete('code');u.hash='';return u.toString();}
+function implicitEmailClient(){
+  if(!emailClient) emailClient=window.supabase.createClient(SUPABASE_URL,KEY,{auth:{flowType:'implicit',persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+  return emailClient;
+}
+function returnUrl(){const u=new URL(location.href);for(const key of [...callbackQueryKeys,'error_uri']) u.searchParams.delete(key);u.hash='';return u.toString();}
 function host(uri){try{return uri?'('+new URL(uri).host+')':'';}catch(e){return '';}}
 async function showSignIn(){$('consent').hidden=true;$('signin').hidden=false;status('');}
 async function showConsent(){
@@ -122,7 +128,7 @@ async function decide(approve){
   location.assign(data.redirect_url);
 }
 $('email-form').addEventListener('submit',async(e)=>{e.preventDefault();email=$('email').value.trim();status('Sending…');
-  const {error}=await client.auth.signInWithOtp({email,options:{emailRedirectTo:returnUrl(),shouldCreateUser:false}});
+  const {error}=await implicitEmailClient().auth.signInWithOtp({email,options:{emailRedirectTo:returnUrl(),shouldCreateUser:false}});
   if(error){status(error.message);return;}
   status('Check your email.');});
 $('otp-form').addEventListener('submit',async(e)=>{e.preventDefault();
