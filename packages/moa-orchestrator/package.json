@@ -12,7 +12,7 @@
     }
   },
   "dependencies": {
-    "fastify": "^5.12.4",
+    "fastify": "^5.12.5",
     "zod": "^4.0.0"
   }
 }
