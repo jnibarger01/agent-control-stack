@@ -23,6 +23,10 @@
  *   I — tampered args -> ACS_CAPABILITY_ARGS_MISMATCH (structural + hash).
  *   J — malformed envelope (bad version / nonce / hashes) -> MALFORMED.
  *   K — audit: allowed request attests with capabilityId/workItemId/attemptId.
+ *   L — replay: the SAME envelope gated twice -> second is ACS_CAPABILITY_REPLAY
+ *       (nonce consumed exactly once, atomically under concurrent gates);
+ *       a rejected capability does not burn its nonce; the pure verifier
+ *       (verifyAcsCapability) never consumes.
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -38,7 +42,7 @@ process.env.DC_ENFORCEMENT = 'off'; // ACS verification must run anyway (fail cl
 
 const {
   preExecuteEnforcement, verifyAcsCapability, attestRequest, requestHash,
-  extractCapability,
+  extractCapability, resetConsumedAcsNoncesForTest,
 } = await import('../dist/enforcement/pipeline.js');
 const { strictCanonicalJsonV1, computeDesktopCommanderInvocationHash } = await import('../dist/managed-acs.js');
 const { AuditChain, verifyChain } = await import('../dist/audit/audit-chain.js');
@@ -268,6 +272,62 @@ async function testEnforcementOnAlsoFailsClosed() {
   process.env.DC_ENFORCEMENT = 'off';
 }
 
+async function testNonceReplayProtection() {
+  process.env.DC_ACS_CAPABILITY_PUBLIC_KEY = keys.publicBase64url;
+  try {
+    // L1 — sequential replay: the same envelope is accepted once; the second
+    // gate is rejected with the dedicated replay code.
+    const envelope = buildEnvelope();
+    const first = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, envelope);
+    assert.equal(first.allowed, true, 'first use of a capability is accepted');
+    const second = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, envelope);
+    assert.equal(second.allowed, false, 'replayed capability is rejected');
+    assert.equal(second.code, 'ACS_CAPABILITY_REPLAY', `expected ACS_CAPABILITY_REPLAY, got ${second.code}`);
+
+    // L2 — concurrent replay: N gates of the SAME envelope race; exactly one
+    // is allowed. The consume is synchronous check-and-set on the event loop,
+    // so two concurrent gates can never both observe "unused".
+    resetConsumedAcsNoncesForTest();
+    const racing = buildEnvelope();
+    const results = await Promise.all(Array.from({ length: 8 }, () =>
+      gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, racing)));
+    const allowedCount = results.filter((r) => r.allowed).length;
+    assert.equal(allowedCount, 1, `exactly one concurrent gate may pass (got ${allowedCount})`);
+    assert.equal(results.filter((r) => !r.allowed && r.code === 'ACS_CAPABILITY_REPLAY').length, 7,
+      'every losing racer is rejected with ACS_CAPABILITY_REPLAY');
+
+    // L3 — a REJECTED capability must not burn its nonce. The gateway-
+    // attestation rejection runs BEFORE the capability consume step, so the
+    // envelope is untouched; clearing the attestation requirement and gating
+    // the SAME envelope again must then be accepted. (Args are bound inside
+    // the signed payload, so a re-gate with different args would be a NEW
+    // rejection — ARGS_MISMATCH — not a nonce-burning one.)
+    resetConsumedAcsNoncesForTest();
+    const previousAttestKey = process.env.DC_GATEWAY_ATTESTATION_KEY;
+    process.env.DC_GATEWAY_ATTESTATION_KEY = 'nonce-test-attestation-key';
+    const early = buildEnvelope();
+    const rejected = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, early);
+    assert.equal(rejected.allowed, false, 'missing gateway attribution is rejected pre-consume');
+    assert.equal(rejected.code, 'GATEWAY_ATTESTATION_INVALID');
+    if (previousAttestKey === undefined) delete process.env.DC_GATEWAY_ATTESTATION_KEY;
+    else process.env.DC_GATEWAY_ATTESTATION_KEY = previousAttestKey;
+    const onTime = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, early);
+    assert.equal(onTime.allowed, true, 'a rejected capability must not have consumed its nonce');
+
+    // L4 — the pure verifier never consumes: verifyAcsCapability has no gate
+    // state, so repeated direct verification keeps succeeding.
+    resetConsumedAcsNoncesForTest();
+    const pure = buildEnvelope();
+    for (let i = 0; i < 3; i++) {
+      const check = verifyAcsCapability(pure, { tool: 'read_file', args: { path: '/tmp/x.txt' } });
+      assert.equal(check.ok, true, `pure verifier call ${i + 1} must stay stateless`);
+    }
+  } finally {
+    resetConsumedAcsNoncesForTest();
+    delete process.env.DC_ACS_CAPABILITY_PUBLIC_KEY;
+  }
+}
+
 async function testGatewayAcsRequiresAttribution() {
   const previous = process.env.DC_GATEWAY_ATTESTATION_KEY;
   process.env.DC_GATEWAY_ATTESTATION_KEY = 'isolated-gateway-test-key';
@@ -299,6 +359,7 @@ const tests = [
   testDirectVerifierResults,
   testAuditAttestation,
   testEnforcementOnAlsoFailsClosed,
+  testNonceReplayProtection,
 ];
 for (const test of tests) {
   await test();

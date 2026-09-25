@@ -2,17 +2,24 @@ import { createClient, SupabaseClient, Session, UserResponse, User, RealtimeChan
 import { captureRemote } from '../utils/capture.js';
 import { VERSION } from '../version.js';
 
-const NUL_CHAR = String.fromCharCode(0);
-const NUL_RE = new RegExp(NUL_CHAR, 'g');
+/**
+ * Control characters EXCEPT tab (0x09), LF (0x0A) and CR (0x0D) — those three
+ * are legitimate text content. NUL is the Postgres blocker (22P05 in text and
+ * jsonb); the rest corrupt protocol framing and log rendering, so they are
+ * stripped from anything written to the control plane. Built from an explicit
+ * class rather than a raw control byte so the stripped set is visible in code.
+ */
+const CONTROL_CHARS_RE = /[\x00-\x08\x0b-\x1f\x7f]/;
+const CONTROL_CHARS_RE_GLOBAL = /[\x00-\x08\x0b-\x1f\x7f]/g;
 
 /**
- * Strip NUL characters (U+0000) from strings and object keys — Postgres rejects
- * them in jsonb and text (22P05). Walks the structure rather than
- * round-tripping JSON, which would also match escape text in legitimate content.
+ * Strip control characters (U+0000–U+0008, U+000B–U+001F, U+007F) from strings
+ * and object keys. Walks the structure rather than round-tripping JSON, which
+ * would also match escape text in legitimate content.
  */
 export function stripNullBytes<T>(value: T): T {
     if (typeof value === 'string') {
-        return (value.includes(NUL_CHAR) ? value.replace(NUL_RE, '') : value) as T;
+        return (CONTROL_CHARS_RE.test(value) ? value.replace(CONTROL_CHARS_RE_GLOBAL, '') : value) as T;
     }
     if (Array.isArray(value)) {
         return value.map((item) => stripNullBytes(item)) as T;
@@ -23,7 +30,7 @@ export function stripNullBytes<T>(value: T): T {
         if (proto !== Object.prototype && proto !== null) return value;
         const out: Record<string, any> = {};
         for (const [k, v] of Object.entries(value as Record<string, any>)) {
-            out[k.includes(NUL_CHAR) ? k.replace(NUL_RE, '') : k] = stripNullBytes(v);
+            out[CONTROL_CHARS_RE.test(k) ? k.replace(CONTROL_CHARS_RE_GLOBAL, '') : k] = stripNullBytes(v);
         }
         return out as T;
     }
@@ -195,6 +202,8 @@ export class RemoteChannel {
     private presenceTracked = false;
     /** Last capability value written (null = never), to avoid redundant writes. */
     private transportCapableWritten: boolean | null = null;
+    /** Tool capabilities returned by the managed/local MCP tools/list response. */
+    private registeredCapabilities: Record<string, any> = {};
     /** Re-entrancy guard: on a wedged socket each track() buffers for the full
      * 10s push timeout, so 10s health ticks would stack pushes. */
     private isTrackingPresence = false;
@@ -470,6 +479,13 @@ export class RemoteChannel {
 
         console.debug('[DEBUG] RemoteChannel.registerDevice() called, deviceId:', currentDeviceId);
 
+        // Preserve the MCP tool schemas supplied by DesktopCommanderIntegration.listClientTools().
+        // The hosted Remote MCP uses this device capability record to expose the
+        // device's actual tool contract instead of falling back to a stale catalog.
+        this.registeredCapabilities = capabilities && typeof capabilities === 'object' && !Array.isArray(capabilities)
+            ? capabilities
+            : {};
+
         let existingDevice = null;
 
         if (currentDeviceId && this.user) {
@@ -571,7 +587,15 @@ export class RemoteChannel {
      * replaces the whole column, so a second literal would silently drop keys.
      */
     private capabilitiesPayload(broadcastCapable: boolean): Record<string, any> {
+        // Never let advertised tool metadata override transport/version fields
+        // owned by this device process. Preserve everything else (notably tools).
+        const {
+            app_version: _ignoredAppVersion,
+            transport_broadcast_v1: _ignoredTransportCapability,
+            ...advertisedCapabilities
+        } = this.registeredCapabilities;
         return {
+            ...advertisedCapabilities,
             app_version: VERSION,
             ...(broadcastCapable ? { transport_broadcast_v1: true } : {})
         };
@@ -710,14 +734,14 @@ export class RemoteChannel {
     }
 
     /**
-     * Handle a 'new_call' doorbell. It carries ids only; the row is fetched by
-     * primary key and fed through the same handler as a postgres_changes
-     * payload, so device.ts stays transport-agnostic.
+     * Handle a 'new_call' doorbell. It carries ids only; one conditional update
+     * claims the row (pending -> executing) and returns it, and it is handed to
+     * device.ts marked as claimed.
      */
     private async onDoorbell(payload: any): Promise<void> {
         const callId = payload?.call_id;
         if (!callId) return;
-        if (payload?.device_id && payload.device_id !== this.deviceId) {
+        if (payload?.device_id !== this.deviceId) {
             console.debug('[DEBUG] Ignoring doorbell for different device');
             return;
         }
@@ -729,45 +753,67 @@ export class RemoteChannel {
         if (!this.client) return;
 
         // Retry on transient failures (a REST blip while the socket stays
-        // healthy). Post-flip this fetch is the only way we learn about a call,
+        // healthy). This claim is the only way we learn about a call,
         // so a hiccup must not cost a 5-minute timeout.
         let row: any = null;
-        let lastError: any = null;
+        let claimError: any = null;
         for (const delayMs of [0, 500, 1500]) {
             if (delayMs > 0) await this.sleep(delayMs);
             const { data, error } = await this.client
                 .from('mcp_remote_calls')
-                .select('*')
+                .update({ status: 'executing' })
                 .eq('id', callId)
-                .maybeSingle();
+                .eq('device_id', this.deviceId)
+                .eq('status', 'pending')
+                .select('*');
             if (!error) {
-                row = data;
-                lastError = null;
+                row = data?.[0] ?? null;
                 break;
             }
-            lastError = error;
-            console.debug(`[DEBUG] Doorbell row fetch attempt failed for ${callId}: ${error.message} — retrying`);
+            claimError = error;
+            console.debug(`[DEBUG] Doorbell claim attempt failed for ${callId}: ${error.message} — retrying`);
         }
 
-        if (lastError) {
-            console.error(`[DEBUG] Doorbell row fetch failed for ${callId} after retries:`, lastError.message);
-            await captureRemote('remote_channel_doorbell_fetch_error', { error: lastError });
-            return;
-        }
-        if (!row) {
-            // Already claimed and deleted, or cleanup raced delivery. Not
-            // retried: the row is always inserted before the doorbell is sent.
-            await captureRemote('remote_channel_doorbell_row_missing', { call_id: callId });
-            return;
-        }
-        // Optimization, not a guard — saves a hop on a duplicate doorbell
-        // (retry, reconnect). Exactly-once lives in device.ts (seenCallIds + DB claim).
-        if (row.status !== 'pending') {
-            console.debug('[DEBUG] Doorbell call already claimed:', callId);
+        if (row) {
+            console.log(
+                `[REMOTE-DISPATCH] claimed call=${callId} tool=${row.tool_name} device=${row.device_id}`
+            );
+            this.dispatchToolCall({ new: row, claimed: true });
             return;
         }
 
-        this.dispatchToolCall({ new: row });
+        if (!claimError) {
+            console.debug('[DEBUG] Doorbell call already claimed or gone:', callId);
+            await captureRemote('remote_channel_doorbell_claim_no_row', { call_id: callId });
+            return;
+        }
+
+        await captureRemote('remote_channel_mark_call_executing_error', { error: claimError });
+
+        // A failed claim may never have reached the database, so read the row
+        // back: still 'pending' means nobody holds it and it can be delivered.
+        const { data: current, error } = await this.client
+            .from('mcp_remote_calls')
+            .select('*')
+            .eq('id', callId)
+            .eq('device_id', this.deviceId)
+            .maybeSingle();
+
+        if (error) {
+            console.error(`[DEBUG] Doorbell row fetch failed for ${callId} after claim errors:`, error.message);
+            await captureRemote('remote_channel_doorbell_fetch_error', { error });
+            return;
+        }
+
+        if (current?.status === 'pending') {
+            this.dispatchToolCall({ new: current });
+        } else {
+            console.debug('[DEBUG] Doorbell call already claimed or gone:', callId);
+            await captureRemote('remote_channel_doorbell_claim_unresolved', {
+                call_id: callId,
+                status: current?.status ?? null,
+            });
+        }
     }
 
     /**

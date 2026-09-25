@@ -2087,7 +2087,12 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         try {
             const resultAttestOk = attestResult({
                 requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
-                capabilityId: cap?.capabilityId, isError, durationMs: Date.now() - startTime,
+                // Same derived capability ID as the request-side audit: ACS
+                // envelopes carry no top-level capabilityId field, so the
+                // completion record must derive it from the gate attestation
+                // (or fall back to the local HMAC capability's id).
+                capabilityId: gate.allowed && gate.acsCapability ? gate.acsCapability.capabilityId : cap?.capabilityId,
+                isError, durationMs: Date.now() - startTime,
                 executorPid: process.pid,
                 error: isError ? `tool ${name} returned isError` : undefined,
             });

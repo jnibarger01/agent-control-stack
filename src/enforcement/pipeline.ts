@@ -215,6 +215,7 @@ export function gatewayActorFromMeta(meta: unknown): GatewayActor | undefined {
 export type AcsCapabilityRejectionCode =
   | 'ACS_CAPABILITY_INVALID_SIGNATURE'
   | 'ACS_CAPABILITY_EXPIRED'
+  | 'ACS_CAPABILITY_REPLAY'
   | 'ACS_CAPABILITY_TOOL_MISMATCH'
   | 'ACS_CAPABILITY_ARGS_MISMATCH'
   | 'ACS_CAPABILITY_MALFORMED';
@@ -277,6 +278,60 @@ function requireIdString(value: unknown): value is string {
 /** Base64url Ed25519 signatures are exactly 64 bytes (86 base64url chars). */
 function isBase64urlSignature(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{86}$/.test(value);
+}
+
+/**
+ * Nonce replay protection (red-team merge blocker #1): a signed capability
+ * nonce is accepted EXACTLY ONCE. Without consumption, a captured envelope
+ * replays the same authorized side effect repeatedly until its TTL expires.
+ *
+ * Atomicity: check-and-set is one synchronous step — find + set run back to
+ * back with no await between them, so on Node's single-threaded event loop
+ * two concurrent requests can never both observe "unused" for the same
+ * nonce. The enforcement pipeline runs inside the canonical executor
+ * process (executor-lock.ts fails a second executor closed), which makes
+ * this process the single authorization point; a synchronous in-process
+ * consume is therefore the correct serialization point.
+ *
+ * Memory bound: consumed nonces are hashed (raw nonces are never stored)
+ * and evicted via a rotating index once the TTL ceiling (30s) has passed —
+ * a nonce older than that cannot verify anyway (EXPIRED precedes replay),
+ * so eviction cannot re-open a replay window.
+ */
+const ACS_NONCE_TTL_CEILING_MS = 30_000;
+const ACS_NONCE_STORE_MAX = 10_000;
+const consumedAcsNonces = new Map<string, number>(); // nonceHash -> expiryMs
+
+export function resetConsumedAcsNoncesForTest(): void {
+  consumedAcsNonces.clear();
+}
+
+/** Test-visibility only: whether this nonce hash has already been consumed. */
+export function isAcsNonceConsumedForTest(nonceHash: string): boolean {
+  return consumedAcsNonces.has(nonceHash);
+}
+
+function consumeAcsNonceAtomic(nonce: string, now: number): boolean {
+  const nonceHash = sha256Hex(`acs.dc.v1:nonce:${nonce}`);
+  if (consumedAcsNonces.has(nonceHash)) return false;
+  consumedAcsNonces.set(nonceHash, now + ACS_NONCE_TTL_CEILING_MS);
+  if (consumedAcsNonces.size > ACS_NONCE_STORE_MAX) {
+    // Evict only entries whose TTL has passed (a still-live nonce must not
+    // be evicted — that would re-open its replay window).
+    for (const [hash, expiry] of consumedAcsNonces) {
+      if (expiry <= now) consumedAcsNonces.delete(hash);
+      if (consumedAcsNonces.size <= ACS_NONCE_STORE_MAX) break;
+    }
+    // Degenerate flood case (all entries still live): drop the oldest.
+    // Live-nonce replay is then possible for at most the oldest entries,
+    // bounded by ACS_NONCE_STORE_MAX consumed within one 30s window.
+    while (consumedAcsNonces.size > ACS_NONCE_STORE_MAX) {
+      const oldest = consumedAcsNonces.keys().next().value;
+      if (oldest === undefined) break;
+      consumedAcsNonces.delete(oldest);
+    }
+  }
+  return true;
 }
 
 /**
@@ -499,6 +554,23 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
         kind: 'capability-rejected',
         code: acs.code,
         message: `ACS capability rejected: ${acs.reason}`,
+        classification,
+      };
+    }
+    // Consume the capability nonce atomically: each signed capability is
+    // accepted exactly once, so a captured envelope cannot replay the same
+    // authorized side effect repeatedly for up to its TTL. Runs only after
+    // every other check passed, so a rejected capability never burns its
+    // nonce; runs regardless of DC_ENFORCEMENT (fail closed, same posture
+    // as above).
+    const acsEnvelopePayload = (cap as unknown as Record<string, unknown>).payload as Record<string, unknown> | undefined;
+    const acsNonce = acsEnvelopePayload?.nonce;
+    if (typeof acsNonce !== 'string' || !consumeAcsNonceAtomic(acsNonce, now)) {
+      return {
+        allowed: false,
+        kind: 'capability-rejected',
+        code: 'ACS_CAPABILITY_REPLAY',
+        message: 'ACS capability rejected: this capability nonce was already consumed (replay protection)',
         classification,
       };
     }

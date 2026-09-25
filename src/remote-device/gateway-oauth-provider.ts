@@ -219,8 +219,12 @@ export class GatewayOAuthProvider implements OAuthClientProvider {
                 return;
             }
 
+            // Fail closed (round-2 LOW): without an expected state there is
+            // nothing to bind this callback to, so a callback injection or
+            // code-substitution attempt could not be detected. Never complete
+            // authorization on an unverifiable callback.
             const returnedState = url.searchParams.get('state') || undefined;
-            if (this.expectedState && returnedState !== this.expectedState) {
+            if (!this.expectedState || returnedState !== this.expectedState) {
                 res.writeHead(400, { 'content-type': 'text/plain; charset=utf-8' });
                 res.end('Desktop Commander authorization state mismatch.');
 
