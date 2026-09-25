@@ -48,7 +48,16 @@ describe("renderDashboard", () => {
 
     expect(html).toContain("ACS Mission Control");
     expect(html).toContain("Inspect me");
-    expect(html).toContain("Live state comes from the registry");
+    expect(html).toContain("Secure Agents. Real Progress.");
+    expect(html).toContain('data-nav="visualizer"');
+    expect(html).toContain("Canonical Execution Graph");
+    expect(html).toContain("Read-only projection from the Visualizer durable graph store");
+    expect(html).toContain('id="overview-visualizer-health"');
+    expect(html).toContain('id="visualizer-nav-health"');
+    expect(html).toContain('id="visualizer-summary"');
+    expect(html).toContain('id="visualizer-filter-runtime"');
+    expect(html).toContain('id="visualizer-filter-state"');
+    expect(html).not.toContain('class="viz-stage"');
     expect(html).toContain("New Task Composer");
     expect(html).toContain("authenticated session");
     expect(html).not.toContain("ACS_GATEWAY_TOKEN");
@@ -64,14 +73,33 @@ describe("renderDashboard", () => {
     expect(html).toContain(`data-agent="/repo"`);
     expect(html).toContain(`data-agent-id="/repo"`);
     expect(html).toContain("refreshAgentRoster()");
-    expect(html).toContain("fetchJson('/agents')");
+    expect(html).toContain("fetchWithTimeout('/'");
     expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8')");
     expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities')");
     expect(html).not.toContain("JSON.stringify(await res.json(), null, 2)");
     expect(html).not.toContain("data-approve-all");
     expect(html).toContain("Execution Mode");
-    expect(html).toContain("Admin / YOLO");
-    expect(html).toContain("data-execution-mode=\"strict\"");
+    expect(html).toContain("Admin — automatic approval");
+    expect(html).toContain('data-execution-mode="strict"');
+  });
+
+  it("renders the screenshot-style shell and uses the authenticated operator display value", () => {
+    const html = renderDashboard({
+      workItems: [workItem],
+      events: [],
+      operatorDisplayName: "operator:jace",
+      executionMode: "strict",
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain('class="mission-topbar"');
+    expect(html).toContain('class="overview-grid overview-grid-top"');
+    expect(html).toContain('data-nav="visualizer"');
+    expect(html).toContain('id="visualizer"');
+    expect(html).toContain("operator:jace");
+    expect(html).toContain('class="operator-avatar">OJ</span>');
+    expect(html).toContain("Strict Mode");
+    expect(html).not.toContain(">jace</strong><small>Operator");
   });
 
   it("renders an operator metrics panel with lease age, approval wait, and /metrics scrape notes", () => {
@@ -142,7 +170,7 @@ describe("renderDashboard", () => {
     expect(html).toContain("function connectSse()");
     expect(html).toContain("nextSseReconnectDelayMs(sseReconnectAttempt)");
     expect(html).toContain("addEventListener('error'");
-    expect(html).toContain("if (!sseConnected)");
+    expect(html).toContain("!snapshotCurrent || !sseConnected");
 
     const dom = new JSDOM(html);
     const { document } = dom.window;
@@ -161,23 +189,26 @@ describe("renderDashboard", () => {
     } | null;
 
     expect(banner).not.toBeNull();
-    expect(banner?.hasAttribute("hidden")).toBe(true);
-    expect(approve?.disabled).toBe(false);
-    expect(reject?.disabled).toBe(false);
-    expect(unblock?.disabled).toBe(false);
+    expect(banner?.hasAttribute("hidden")).toBe(false);
+    expect(approve?.disabled).toBe(true);
+    expect(reject?.disabled).toBe(true);
+    expect(unblock?.disabled).toBe(true);
 
     applySseConnectionState(document, false);
     expect(banner?.hidden).toBe(false);
     expect(live?.classList.contains("disconnected")).toBe(true);
-    expect(live?.textContent).toContain("Disconnected");
+    expect(live?.textContent).toContain("Reconnecting");
     expect(approve?.disabled).toBe(true);
     expect(reject?.disabled).toBe(true);
     expect(unblock?.disabled).toBe(true);
 
     applySseConnectionState(document, true);
+    expect(approve?.disabled).toBe(true);
+    expect(banner?.hidden).toBe(false);
+    applySseConnectionState(document, true, true);
     expect(banner?.hidden).toBe(true);
     expect(live?.classList.contains("disconnected")).toBe(false);
-    expect(live?.textContent).toContain("Live");
+    expect(live?.textContent).toContain("Connected");
     expect(approve?.disabled).toBe(false);
     expect(reject?.disabled).toBe(false);
     expect(unblock?.disabled).toBe(false);
@@ -563,7 +594,7 @@ describe("high-risk approval confirm", () => {
     expect(html).toContain("function isElevatedApprovalRisk(risk)");
     expect(html).toContain("function requestApprovalConfirm(request)");
     expect(html).toContain("approval-confirm-dialog");
-    expect(html).toContain("cancelBtn?.focus()");
+    expect(html).toContain("overlay.querySelector('#approval-confirm-cancel').focus()");
     expect(html).toContain("event.key === 'Escape'");
   });
 

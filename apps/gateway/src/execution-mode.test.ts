@@ -104,7 +104,12 @@ async function attest(app: Awaited<ReturnType<typeof gateway>>["app"]) {
   expect(completed.statusCode).toBe(204);
 }
 
-function issue(app: Awaited<ReturnType<typeof gateway>>["app"], tool: string, args: Record<string, unknown>, correlationId?: string) {
+function issue(
+  app: Awaited<ReturnType<typeof gateway>>["app"],
+  tool: string,
+  args: Record<string, unknown>,
+  correlationId?: string
+) {
   return app.inject({
     method: "POST",
     url: "/dc/capability/issue",
@@ -133,8 +138,8 @@ describe("canonical execution mode", () => {
       });
       const page = await ctx.app.inject({ method: "GET", url: "/", headers: AUTH });
       expect(page.body).toContain("Execution Mode");
-      expect(page.body).toContain("Admin / YOLO");
-      expect(page.body).not.toContain("ACS ADMIN MODE -- human approval disabled");
+      expect(page.body).toContain("Admin — automatic approval");
+      expect(page.body).toMatch(/id="admin-mode-banner"[^>]* hidden/);
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
@@ -169,12 +174,7 @@ describe("canonical execution mode", () => {
       expect(switched.json()).toMatchObject({ executionMode: "admin", approvalPolicy: "auto" });
 
       const correlationId = "corr-admin-start";
-      const response = await issue(
-        ctx.app,
-        "create_directory",
-        { path: join(ctx.root, "admin-made") },
-        correlationId
-      );
+      const response = await issue(ctx.app, "create_directory", { path: join(ctx.root, "admin-made") }, correlationId);
       expect(response.statusCode).toBe(200);
       expect(response.json().decision).toBe("allow");
       expect(response.json().decision).not.toBe("require_approval");
@@ -199,7 +199,11 @@ describe("canonical execution mode", () => {
       });
       expect(detail.json().workItem.metadata.correlationId).toBe(correlationId);
       expect(detail.json().events.map((event: { name: string }) => event.name)).toEqual(
-        expect.arrayContaining(["approval.granted", "execution_mode.auto_authorized", "desktop_commander.capability_issued"])
+        expect.arrayContaining([
+          "approval.granted",
+          "execution_mode.auto_authorized",
+          "desktop_commander.capability_issued"
+        ])
       );
       expect(JSON.stringify(detail.json().events)).toContain(ACS_ADMIN_APPROVER);
 
@@ -243,7 +247,11 @@ describe("canonical execution mode", () => {
         method: "POST",
         url: "/dc/capability/issue",
         headers: { "x-dc-actor": "chatgpt:jacen" },
-        payload: { client_id: "chatgpt-desktop", tool: "read_file", argsSummary: JSON.stringify({ path: join(ctx.root, "n.txt") }) }
+        payload: {
+          client_id: "chatgpt-desktop",
+          tool: "read_file",
+          argsSummary: JSON.stringify({ path: join(ctx.root, "n.txt") })
+        }
       });
       expect(unauthenticated.statusCode).toBe(401);
     } finally {

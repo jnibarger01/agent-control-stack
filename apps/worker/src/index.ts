@@ -490,7 +490,10 @@ async function runDesktopCommanderExecution(input: DesktopCommanderExecutionInpu
       lease,
       workerId,
       containment: machineExecutorContainmentFromEnv(),
-      requestId
+      requestId,
+      ...(lease.approvalId
+        ? { approvalActionHash: workItems.getExecutionPlanApprovalById(lease.approvalId)?.actionHash }
+        : {})
     });
   } catch (error) {
     const code =

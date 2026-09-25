@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import { z } from "zod";
 import type { MachineControllerConfig } from "./config.js";
-import { resolveSafePath } from "./path.js";
+import { isInside, resolveSafePath } from "./path.js";
 
 export const riskLevelSchema = z.enum(["read_only", "safe_mutation", "requires_approval", "destructive", "forbidden"]);
 export type RiskLevel = z.infer<typeof riskLevelSchema>;
@@ -32,6 +32,7 @@ export interface CommandRunResult {
 
 const defaultDeniedCommands = new Set(["rm", "shred", "mkfs", "dd", "chmod", "chown", "sudo"]);
 const shellMetaPattern = /[;&|`$<>]/;
+const projectsRoot = "/home/jacen/projects";
 export const subprocessEnvAllowlist = ["HOME", "PATH", "SHELL", "TMPDIR", "USER"] as const;
 
 export function previewCommand(config: MachineControllerConfig, input: unknown): CommandPreview {
@@ -50,6 +51,13 @@ export function previewCommand(config: MachineControllerConfig, input: unknown):
   if (isDestructive(command, args)) {
     return { cwd, command, args, risk: "destructive", reason: "command is destructive" };
   }
+  const projectRisk = classifyProjectCommand(config, cwd, command, args);
+  if (projectRisk === "read_only" && config.commands.allowReadonly.includes(command)) {
+    return { cwd, command, args, risk: projectRisk, reason: "allowed project-scoped read-only command" };
+  }
+  if (projectRisk === "requires_approval") {
+    return { cwd, command, args, risk: projectRisk, reason: "project-scoped process execution requires approval" };
+  }
   if (isMutation(command, args)) {
     return { cwd, command, args, risk: "requires_approval", reason: "command can mutate local state" };
   }
@@ -58,6 +66,59 @@ export function previewCommand(config: MachineControllerConfig, input: unknown):
   }
 
   return { cwd, command, args, risk: "forbidden", reason: "no read-only allow rule matched" };
+}
+
+/**
+ * Recognize the narrow project command forms that Desktop Commander can
+ * otherwise only classify as forbidden. Mutating or arbitrary code execution
+ * remains approval-gated; only known read-only git inspection is read-only.
+ */
+function classifyProjectCommand(
+  config: MachineControllerConfig,
+  cwd: string,
+  command: string,
+  args: string[]
+): "read_only" | "requires_approval" | undefined {
+  if (!isInside(projectsRoot, cwd)) return undefined;
+
+  if (command === "git" && args[0] === "-C" && args.length >= 3 && isExistingProjectPath(config, args[1] ?? "", cwd)) {
+    const gitArgs = args.slice(2);
+    if (isKnownReadonly("git", gitArgs)) return "read_only";
+    if (isMutation("git", gitArgs)) return "requires_approval";
+    return undefined;
+  }
+
+  if (
+    command === "npm" && args[0] === "--prefix" && args.length >= 2 &&
+    isExistingProjectPath(config, args[1] ?? "", cwd)
+  ) {
+    return "requires_approval";
+  }
+
+  if (
+    command === "npx" && args[0] === "--prefix" && args[2] === "tsc" &&
+    isExistingProjectPath(config, args[1] ?? "", cwd)
+  ) {
+    return "requires_approval";
+  }
+
+  if (
+    command === "node" && args[0]?.startsWith("/") &&
+    isExistingProjectPath(config, args[0], cwd)
+  ) {
+    return "requires_approval";
+  }
+
+  return undefined;
+}
+
+function isExistingProjectPath(config: MachineControllerConfig, requestedPath: string, cwd: string): boolean {
+  if (!requestedPath) return false;
+  try {
+    return isInside(projectsRoot, resolveSafePath(config, requestedPath, { cwd }).realPath);
+  } catch {
+    return false;
+  }
 }
 
 export interface BoundedCommandOptions {
@@ -223,7 +284,8 @@ function asError(error: unknown): Error {
 
 function isKnownReadonly(command: string, args: string[]): boolean {
   return (
-    (command === "git" && ["status", "diff", "log", "show"].includes(args[0] ?? "")) ||
+    (command === "git" && (["status", "diff", "log", "show"].includes(args[0] ?? "") ||
+      (args[0] === "worktree" && args[1] === "list"))) ||
     (command === "bun" && args[0] === "--version") ||
     (command === "node" && ["--version", "-v"].includes(args[0] ?? "")) ||
     (command === "python3" && ["--version", "-V"].includes(args[0] ?? "")) ||
@@ -240,7 +302,10 @@ function isMutation(command: string, args: string[]): boolean {
     (command === "bun" && args[0] === "test") ||
     (command === "npm" && ["install", "i", "update"].includes(args[0] ?? "")) ||
     (command === "pnpm" && ["add", "install", "update"].includes(args[0] ?? "")) ||
-    (command === "git" && ["commit", "push", "merge", "rebase", "checkout", "switch"].includes(args[0] ?? "")) ||
+    (command === "git" && (
+      ["fetch", "commit", "push", "merge", "rebase", "checkout", "switch"].includes(args[0] ?? "") ||
+      (args[0] === "worktree" && args[1] === "add")
+    )) ||
     (command === "docker" && ["restart", "stop", "rm", "run", "compose"].includes(args[0] ?? "")) ||
     (command === "systemctl" && ["restart", "stop", "start"].includes(args[0] ?? ""))
   );

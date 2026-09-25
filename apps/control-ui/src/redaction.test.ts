@@ -293,7 +293,7 @@ describe("approval buttons name the action they approve (#4)", () => {
 describe("safety notes (#5)", () => {
   it("describes only the controls the dashboard actually exposes", () => {
     const html = renderDashboard({ workItems: [baseWorkItem], events: [], now: new Date("2026-09-22T00:01:00.000Z") });
-    expect(html).toContain("Approve, reject, and unblock use authenticated backend routes");
+    expect(html).toContain("Approve and reject require a reason and authenticated backend checks");
     expect(html).toContain("Cancel, retry, and clone are not exposed here");
     expect(html).not.toContain("Approval and cancellation actions");
   });

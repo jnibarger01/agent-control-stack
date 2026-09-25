@@ -107,6 +107,191 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("protects the same-origin Visualizer projection route and reports unconfigured state", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-unconfigured-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: testAuth,
+      visualizerBaseUrl: false
+    });
+
+    try {
+      const anonymous = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/projection"
+      });
+      const authenticated = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/projection",
+        headers: { authorization: "Bearer t" }
+      });
+      const anonymousStatus = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/status"
+      });
+      const authenticatedStatus = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/status",
+        headers: { authorization: "Bearer t" }
+      });
+
+      expect(anonymous.statusCode).toBe(401);
+      expect(anonymousStatus.statusCode).toBe(401);
+      expect(authenticated.statusCode).toBe(200);
+      expect(authenticated.json()).toMatchObject({
+        schemaVersion: 1,
+        configured: false,
+        items: []
+      });
+      expect(authenticatedStatus.statusCode).toBe(200);
+      expect(authenticatedStatus.json()).toMatchObject({
+        schemaVersion: 1,
+        configured: false,
+        reachable: false,
+        state: "not_configured"
+      });
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves Visualizer operational status through the authenticated read-only boundary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-status-"));
+    const calls: Array<{ url: string; method?: string }> = [];
+    const visualizerFetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      calls.push({ url: String(input), method: init?.method });
+      return new Response(JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: "2026-09-23T16:20:00.000Z",
+        status: "healthy",
+        eventStreams: { activeClients: 1 },
+        executions: { activeCount: 2, queueDepth: 0 },
+        runtimes: [
+          { runtime: "codex", status: "healthy" },
+          { runtime: "hermes", status: "healthy" },
+          { runtime: "openclaw", status: "healthy" },
+          { runtime: "opencode", status: "healthy" },
+          { runtime: "claude", status: "healthy" },
+          { runtime: "pi", status: "healthy" }
+        ],
+        database: { availability: "available" },
+        approvals: { pendingCount: 0 }
+      }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as typeof fetch;
+    const app = buildTestGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      visualizerBaseUrl: "http://127.0.0.1:4317",
+      visualizerFetch
+    });
+
+    try {
+      const status = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/status"
+      });
+      expect(status.statusCode).toBe(200);
+      expect(status.headers["cache-control"]).toBe("no-store");
+      expect(status.headers["x-content-type-options"]).toBe("nosniff");
+      expect(status.headers["x-ratelimit-remaining"]).toBeDefined();
+      expect(status.json()).toMatchObject({
+        configured: true,
+        reachable: true,
+        state: "healthy",
+        database: "available",
+        activeExecutions: 2,
+        queueDepth: 0
+      });
+      expect(calls).toEqual([{
+        url: "http://127.0.0.1:4317/api/v1/system-status",
+        method: "GET"
+      }]);
+
+      const mutation = await app.inject({
+        method: "POST",
+        url: "/api/visualizer/status",
+        payload: { action: "restart" }
+      });
+      expect(mutation.statusCode).toBe(404);
+      expect(calls).toHaveLength(1);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves Visualizer projection through bounded read-only loopback GETs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-projection-"));
+    const calls: Array<{ url: string; method?: string }> = [];
+    const visualizerFetch = (async (
+      input: string | URL | Request,
+      init?: RequestInit
+    ) => {
+      calls.push({ url: String(input), method: init?.method });
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    const app = buildTestGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      visualizerBaseUrl: "http://127.0.0.1:4174",
+      visualizerFetch
+    });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Project me",
+          intent: "verify visualizer gateway projection",
+          target: {},
+          risk: "low"
+        }
+      });
+      expect(created.statusCode).toBe(201);
+
+      const projection = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/projection?limit=1"
+      });
+
+      expect(projection.statusCode).toBe(200);
+      expect(projection.headers["cache-control"]).toBe("no-store");
+      expect(projection.headers["x-content-type-options"]).toBe("nosniff");
+      expect(projection.headers["x-ratelimit-remaining"]).toBeDefined();
+      expect(projection.json()).toMatchObject({
+        schemaVersion: 1,
+        configured: true,
+        items: [{
+          workItemId: created.json().id,
+          title: "Project me",
+          state: "not_projected"
+        }]
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toMatch(
+        /^http:\/\/127\.0\.0\.1:4174\/api\/v1\/executions\/[0-9a-f-]+\/graph$/
+      );
+      expect(calls[0]?.method).toBe("GET");
+
+      const mutation = await app.inject({
+        method: "POST",
+        url: "/api/visualizer/projection",
+        payload: { action: "approve" }
+      });
+      expect(mutation.statusCode).toBe(404);
+      expect(calls).toHaveLength(1);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("bounds work-item and agent detail audit events", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-detail-event-limit-"));
     const dbPath = join(dir, "control.db");

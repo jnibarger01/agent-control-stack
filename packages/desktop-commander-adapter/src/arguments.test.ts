@@ -116,6 +116,38 @@ describe("normalizeInvocation", () => {
   });
 });
 
+const projectsRepo = realpathSync(process.cwd());
+const isProjectsRepo = projectsRepo === "/home/jacen/projects" || projectsRepo.startsWith("/home/jacen/projects/");
+
+describe.skipIf(!isProjectsRepo)("project-scoped start_process ACS rules", () => {
+  const projectContainment: ContainmentConfig = { allowedRoots: ["/home/jacen/projects"], deniedRoots: [] };
+
+  it.each([
+    "git -C " + projectsRepo + " worktree list",
+    "git -C " + projectsRepo + " worktree add /home/jacen/projects/dc-wt-own-relay-plane feature/test",
+    "npm --prefix " + projectsRepo + " run check",
+    "npx --prefix " + projectsRepo + " tsc -b",
+    "node " + join(projectsRepo, "packages/machine-controller/src/command.test.ts")
+  ])("normalizes project process command for approval: %s", (command) => {
+    const invocation = normalizeInvocation(
+      "start_process",
+      { command, timeout_ms: 1000, cwd: projectsRepo },
+      projectContainment
+    );
+
+    expect(invocation.policy.requiresApproval).toBe(true);
+    expect(invocation.validatedArguments.command).toMatch(/^\/(usr\/)?bin\/(git|npm|npx|node) /);
+  });
+
+  it("keeps git project paths inside the ACS projects root", () => {
+    expect(() => normalizeInvocation(
+      "start_process",
+      { command: "git -C /tmp status", timeout_ms: 1000, cwd: projectsRepo },
+      projectContainment
+    )).toThrow(/forbidden|outside every allow root/);
+  });
+});
+
 describe("reconstructDesktopCommanderInvocation", () => {
   it("derives the invocation from a single requested action", () => {
     const norm = reconstructDesktopCommanderInvocation(

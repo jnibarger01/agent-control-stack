@@ -16,6 +16,7 @@ Commands:
   skills quarantine <skill>
   skills retrieve --problem <text>
   skills targets
+  code --repo <path> --base-commit <sha> [--model ollama:<model>] <prompt>
   status [--json]
   mode status
   mode strict
@@ -43,7 +44,8 @@ export type AcsCommand =
   | { kind: "publication-list"; json: boolean }
   | { kind: "audit-export"; dbPath?: string; outputPath?: string }
   | { kind: "audit-verify"; dbPath?: string; filePath?: string }
-  | { kind: "skills"; args: string[] };
+  | { kind: "skills"; args: string[] }
+  | { kind: "code"; args: string[] };
 
 export class AcsUsageError extends Error {
   readonly usage = true;
@@ -219,6 +221,8 @@ export function parseAcsArgs(args: string[]): AcsCommand {
       return parseAuditArgs(rest);
     case "skills":
       return { kind: "skills", args: rest };
+    case "code":
+      return { kind: "code", args: rest };
     default:
       throw new AcsUsageError(`unknown command: ${command}`);
   }

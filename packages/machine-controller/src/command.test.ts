@@ -2,8 +2,80 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { runReadonlyCommand } from "./command.js";
+import { previewCommand, runReadonlyCommand } from "./command.js";
 import type { MachineControllerConfig } from "./config.js";
+
+describe("git command classification", () => {
+  it("treats fetch as a governed mutation", () => {
+    expect(
+      previewCommand(config(tmpdir()), {
+        cwd: tmpdir(),
+        command: "git",
+        args: ["fetch", "--all", "--prune"]
+      })
+    ).toMatchObject({ risk: "requires_approval", reason: "command can mutate local state" });
+  });
+
+  it("keeps forced fetch destructive", () => {
+    expect(
+      previewCommand(config(tmpdir()), {
+        cwd: tmpdir(),
+        command: "git",
+        args: ["fetch", "--force"]
+      })
+    ).toMatchObject({ risk: "destructive", reason: "command is destructive" });
+  });
+});
+
+const projectRoot = process.cwd();
+const isUnderProjects = projectRoot === "/home/jacen/projects" || projectRoot.startsWith("/home/jacen/projects/");
+
+describe.skipIf(!isUnderProjects)("project-scoped process command classification", () => {
+  it("allows read-only git inspection with an in-project -C path", () => {
+    expect(
+      previewCommand(config(projectRoot), {
+        cwd: projectRoot,
+        command: "git",
+        args: ["-C", projectRoot, "status", "--short"]
+      })
+    ).toMatchObject({ risk: "read_only" });
+    expect(
+      previewCommand(config(projectRoot), {
+        cwd: projectRoot,
+        command: "git",
+        args: ["-C", projectRoot, "worktree", "list"]
+      })
+    ).toMatchObject({ risk: "read_only" });
+  });
+
+  it.each([
+    ["git", ["-C", projectRoot, "fetch", "--all"]],
+    ["git", ["-C", projectRoot, "worktree", "add", join(projectRoot, "new-worktree"), "feature/test"]],
+    ["npm", ["--prefix", projectRoot, "run", "check"]],
+    ["npx", ["--prefix", projectRoot, "tsc", "-b"]],
+    ["node", [join(projectRoot, "packages/machine-controller/src/command.test.ts")]]
+  ])("classifies %s project execution as requiring approval", (command, args) => {
+    expect(previewCommand(config(projectRoot), { cwd: projectRoot, command, args }))
+      .toMatchObject({ risk: "requires_approval" });
+  });
+
+  it("does not allow project command forms to escape /home/jacen/projects", () => {
+    expect(
+      previewCommand(config(projectRoot), {
+        cwd: projectRoot,
+        command: "git",
+        args: ["-C", "/tmp", "status"]
+      })
+    ).toMatchObject({ risk: "forbidden" });
+    expect(
+      previewCommand(config(projectRoot), {
+        cwd: projectRoot,
+        command: "node",
+        args: ["/etc/hosts"]
+      })
+    ).toMatchObject({ risk: "forbidden" });
+  });
+});
 
 describe("read-only command process cleanup", () => {
   let descendantPid: number | undefined;

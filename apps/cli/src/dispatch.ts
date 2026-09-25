@@ -12,6 +12,7 @@ import {
 import { DEFAULT_HEARTBEAT_TTL_MS, SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { readFileSync, writeFileSync } from "node:fs";
 import { runWorkerOnce } from "@agent-control-stack/worker";
+import { runManagedCodingCli, parseCodingCliArgs } from "@agent-control-stack/coding-harness";
 import { listAvailableActors } from "./available-actors.js";
 import { discoverLocalActors as runLocalActorDiscovery } from "./discover-actors.js";
 import { ACS_CLI_VERSION, ACS_HELP, AcsUsageError, parseAcsArgs, type AcsCommand } from "./parse.js";
@@ -111,7 +112,10 @@ export function formatExecutionModeStatus(dbPath = defaultDbPath()): { text: str
   }
 }
 
-export function setExecutionModeFromCli(mode: "strict" | "admin", dbPath = defaultDbPath()): { text: string; ok: boolean } {
+export function setExecutionModeFromCli(
+  mode: "strict" | "admin",
+  dbPath = defaultDbPath()
+): { text: string; ok: boolean } {
   const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
   try {
     store.setExecutionMode({ mode, updatedBy: "acs-cli", reason: `acs mode ${mode}` });
@@ -244,6 +248,24 @@ async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapt
     }
     case "skills":
       return runSkillsCommand(command.args, io);
+    case "code": {
+      const approver = process.env.ACS_CODE_APPROVER;
+      const dbPath = process.env.ACS_DB_PATH;
+      if (!approver || !dbPath) {
+        io.stderr.write("acs code requires ACS_CODE_APPROVER and ACS_DB_PATH\n");
+        return 2;
+      }
+      return runManagedCodingCli(
+        {
+          ...parseCodingCliArgs(command.args),
+          approver,
+          dbPath,
+          ...(process.env.ACS_CODE_WORKER_ID ? { workerId: process.env.ACS_CODE_WORKER_ID } : {}),
+          ...(process.env.ACS_CODE_WORKTREE_ROOT ? { worktreeRoot: process.env.ACS_CODE_WORKTREE_ROOT } : {})
+        },
+        io.stdout
+      );
+    }
     default: {
       const _exhaustive: never = command;
       throw new Error(`unhandled command ${JSON.stringify(_exhaustive)}`);

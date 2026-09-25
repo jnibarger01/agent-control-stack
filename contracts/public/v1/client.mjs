@@ -84,6 +84,18 @@ const operations = {
     "method": "GET",
     "path": "/work-items/{id}"
   },
+  "createHarnessInvocation": {
+    "method": "POST",
+    "path": "/harness/dc-invocations"
+  },
+  "dispatchHarnessInvocation": {
+    "method": "POST",
+    "path": "/harness/dc-invocations/{id}/dispatch"
+  },
+  "getExecutionResult": {
+    "method": "GET",
+    "path": "/work-items/{id}/execution-result"
+  },
   "approveWorkItem": {
     "method": "POST",
     "path": "/work-items/{id}/approve"
