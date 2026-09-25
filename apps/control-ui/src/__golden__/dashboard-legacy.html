@@ -1,0 +1,2215 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ACS Mission Control</title>
+    <script>try{var t=localStorage.getItem("acs.mc.theme");if(t==="light"||t==="dark")document.documentElement.dataset.theme=t;}catch(e){}</script>
+    <style>
+:root {
+  color-scheme: dark;
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  --bg: #0e1116;
+  --surface: #171b22;
+  --surface-2: #1e242e;
+  --ink: #e8edf4;
+  --muted: #8b97a8;
+  --muted-strong: #a9b6c7;
+  --line: #2a3342;
+  --soft-line: #222a36;
+  --side: #10141a;
+  --side-line: #252a30;
+  --side-muted: #8b97a8;
+  --brand: #f8fafc;
+  --nav-ink: #c1c8d0;
+  --nav-active: #243044;
+  --nav-active-ink: #ffffff;
+  --accent: #3b82f6;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
+  --green: #3ddc97;
+  --amber: #f5b942;
+  --red: #ff6b6b;
+  --hover: #243044;
+  --control-bg: #171b22;
+  --control-line: #334052;
+  --control-hover-line: #4b6180;
+  --banner-bg: #2a2416;
+  --banner-line: #6b5420;
+  --admin-banner-line: #ffb020;
+  --admin-banner-bg: #3a2508;
+  --admin-banner-ink: #ffd27a;
+  --attention-bg: #2a1c1c;
+  --pill-bg: #1e242e;
+  --pill-ink: #b4bfcd;
+  --pill-line: #334052;
+  --ok-bg: #13261e;
+  --ok-line: #24553f;
+  --warn-bg: #2a2416;
+  --warn-line: #6b5420;
+  --bad-bg: #2c1a1a;
+  --bad-line: #6b2f2f;
+  --overlay: rgba(4, 6, 9, .6);
+  --shadow: rgba(0, 0, 0, .25);
+  background: var(--bg);
+  color: var(--ink);
+}
+/* Light theme: follows the OS unless the operator picked a theme. */
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #f1f4f8;
+  --ink: #17202a;
+  --muted: #5b6778;
+  --muted-strong: #43536a;
+  --line: #d9e1ea;
+  --soft-line: #edf1f5;
+  --side: #eef2f6;
+  --side-line: #d9e1ea;
+  --side-muted: #5b6778;
+  --brand: #0f172a;
+  --nav-ink: #334155;
+  --nav-active: #dde6f2;
+  --nav-active-ink: #0f172a;
+  --accent: #2563eb;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
+  --green: #15803d;
+  --amber: #b45309;
+  --red: #b91c1c;
+  --hover: #f4f8ff;
+  --control-bg: #ffffff;
+  --control-line: #cbd5e1;
+  --control-hover-line: #9db7d7;
+  --banner-bg: #fff8e6;
+  --banner-line: #f1d18a;
+  --admin-banner-line: #b7791f;
+  --admin-banner-bg: #fff4e0;
+  --admin-banner-ink: #7a4a00;
+  --attention-bg: #fff8f7;
+  --pill-bg: #eef2f6;
+  --pill-ink: #45515f;
+  --pill-line: #d7dfe8;
+  --ok-bg: #eef9f2;
+  --ok-line: #a8d8bd;
+  --warn-bg: #fff8e6;
+  --warn-line: #f1d18a;
+  --bad-bg: #fff1ef;
+  --bad-line: #f0b8b2;
+  --overlay: rgba(17, 20, 23, .45);
+  --shadow: rgba(23, 32, 42, .08);
+  }
+}
+:root[data-theme="light"] {
+  color-scheme: light;
+  --bg: #f5f7fa;
+  --surface: #ffffff;
+  --surface-2: #f1f4f8;
+  --ink: #17202a;
+  --muted: #5b6778;
+  --muted-strong: #43536a;
+  --line: #d9e1ea;
+  --soft-line: #edf1f5;
+  --side: #eef2f6;
+  --side-line: #d9e1ea;
+  --side-muted: #5b6778;
+  --brand: #0f172a;
+  --nav-ink: #334155;
+  --nav-active: #dde6f2;
+  --nav-active-ink: #0f172a;
+  --accent: #2563eb;
+  --primary: #2563eb;
+  --primary-ink: #ffffff;
+  --green: #15803d;
+  --amber: #b45309;
+  --red: #b91c1c;
+  --hover: #f4f8ff;
+  --control-bg: #ffffff;
+  --control-line: #cbd5e1;
+  --control-hover-line: #9db7d7;
+  --banner-bg: #fff8e6;
+  --banner-line: #f1d18a;
+  --admin-banner-line: #b7791f;
+  --admin-banner-bg: #fff4e0;
+  --admin-banner-ink: #7a4a00;
+  --attention-bg: #fff8f7;
+  --pill-bg: #eef2f6;
+  --pill-ink: #45515f;
+  --pill-line: #d7dfe8;
+  --ok-bg: #eef9f2;
+  --ok-line: #a8d8bd;
+  --warn-bg: #fff8e6;
+  --warn-line: #f1d18a;
+  --bad-bg: #fff1ef;
+  --bad-line: #f0b8b2;
+  --overlay: rgba(17, 20, 23, .45);
+  --shadow: rgba(23, 32, 42, .08);
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-height: 100vh; background: var(--bg); display: grid; grid-template-columns: 216px minmax(0, 1fr); }
+aside { border-right: 1px solid var(--side-line); padding: 22px 16px; background: var(--side); position: sticky; top: 0; height: 100vh; }
+.brand { color: var(--brand); font-size: 20px; font-weight: 800; }
+.brand span { display: block; color: var(--side-muted); font-size: 11px; margin-top: 4px; font-weight: 700; }
+nav { display: grid; gap: 4px; margin-top: 30px; }
+nav a { color: var(--nav-ink); text-decoration: none; padding: 10px 12px; border-radius: 8px; }
+nav a.active, nav a:hover { background: var(--nav-active); color: var(--nav-active-ink); }
+.rail-note { color: var(--side-muted); font-size: 12px; line-height: 1.45; position: absolute; bottom: 24px; left: 16px; right: 16px; }
+main { padding: 22px 24px 40px; min-width: 0; }
+header { display: flex; justify-content: space-between; align-items: start; gap: 16px; margin-bottom: 18px; }
+h1 { margin: 0; font-size: 26px; color: var(--ink); }
+p { color: var(--muted); margin: 6px 0 0; }
+.live { border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: var(--surface); white-space: nowrap; }
+.live > span[aria-hidden="true"] { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
+.live.disconnected > span[aria-hidden="true"] { background: var(--red); }
+.live.connecting > span[aria-hidden="true"] { background: var(--muted); }
+.header-status { display: grid; justify-items: end; gap: 4px; }
+.dashboard-updated { color: var(--muted); font-size: 11px; min-height: 1em; }
+.wait-badge { color: var(--muted); font-size: 11px; margin-left: 4px; }
+.approval-item.overdue { border-color: var(--amber); box-shadow: inset 3px 0 0 var(--amber); }
+.approval-item.overdue .wait-badge { color: var(--amber); font-weight: 600; }
+.approval-item[data-risk="critical"] { box-shadow: inset 3px 0 0 var(--red); }
+.approval-item[data-risk="critical"].overdue { box-shadow: inset 3px 0 0 var(--red), inset 6px 0 0 var(--amber); }
+kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 4px; padding: 1px 5px; background: var(--surface); color: var(--ink); }
+.shortcut-list { display: grid; gap: 6px; margin: 12px 0; }
+.shortcut-list div { display: grid; grid-template-columns: 72px 1fr; gap: 10px; align-items: center; }
+.shortcut-list dt, .shortcut-list dd { margin: 0; }
+#shortcut-help[hidden] { display: none; }
+.permalink { color: var(--accent); }
+.header-tools { display: flex; gap: 6px; }
+.event-summary { display: block; color: var(--muted); overflow-wrap: anywhere; }
+.event-attrs summary { cursor: pointer; color: var(--accent); font-size: 11px; margin-top: 2px; }
+.event-attrs dl { display: grid; gap: 2px; margin: 4px 0 0; font-size: 12px; }
+.event-attrs dl div { display: grid; grid-template-columns: minmax(90px, 38%) 1fr; gap: 8px; }
+.event-attrs dt { color: var(--muted); overflow-wrap: anywhere; }
+.event-attrs dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.policy-body { padding: 12px 16px 16px; display: grid; gap: 10px; }
+.policy-counts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 0; }
+.policy-counts div { border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.policy-counts dt { color: var(--muted); font-size: 11px; }
+.policy-counts dd { margin: 2px 0 0; font-size: 20px; font-weight: 700; }
+.policy-counts .decision-allow dd { color: var(--green); }
+.policy-counts .decision-require_approval dd { color: var(--amber); }
+.policy-counts .decision-deny dd { color: var(--red); }
+.rule-list { margin: 0; padding-left: 18px; font-size: 12px; }
+.live-metrics { padding: 0 16px; }
+.metrics-table th[scope="row"] { font-weight: 500; color: var(--ink); text-transform: none; font-size: 13px; }
+.metrics-table tr.metric-hot th, .metrics-table tr.metric-hot td { color: var(--amber); }
+.metric-trend { letter-spacing: 1px; color: var(--accent); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.queue-footer { display: grid; gap: 6px; margin-top: 8px; }
+.queue-footer-note { margin: 0; color: var(--muted); font-size: 12px; }
+.load-more, .tool-button { justify-self: start; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); color: var(--ink); padding: 6px 10px; cursor: pointer; font: inherit; font-size: 12px; }
+.load-more:disabled, .tool-button:disabled { opacity: .55; cursor: not-allowed; }
+.tool-button[aria-pressed="true"] { border-color: var(--amber); color: var(--amber); }
+.panel-tools { display: inline-flex; gap: 8px; align-items: center; }
+#events-load-older { margin-top: 10px; }
+.probe-trend { margin: 6px 0 0; letter-spacing: 2px; color: var(--green); }
+#system-probes[data-state="slow"] dd, #system-probes[data-state="failing"] dd, #system-probes[data-state="down"] dd { color: var(--amber); }
+#system-probes[data-state="down"] .probe-trend, #system-probes[data-state="failing"] .probe-trend { color: var(--red); }
+.action-status { margin: 0 0 10px; min-height: 1.25em; color: var(--muted); font-size: 13px; }
+.stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid var(--banner-line); background: var(--banner-bg); color: var(--amber); border-radius: 8px; font-weight: 600; }
+.stale-banner[hidden] { display: none; }
+.header-controls { display: flex; gap: 12px; align-items: start; }
+.execution-mode { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); }
+.execution-mode legend { font-size: 12px; font-weight: 700; padding: 0 4px; }
+.execution-mode label { display: block; margin-top: 4px; }
+.admin-mode-banner { margin: 0 0 14px; padding: 12px 14px; border: 2px solid var(--admin-banner-line); background: var(--admin-banner-bg); color: var(--admin-banner-ink); border-radius: 8px; font-weight: 800; letter-spacing: .02em; }
+.admin-mode-banner[hidden] { display: none; }
+.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px var(--shadow); }
+.card { padding: 15px; min-height: 108px; }
+.card span, .panel-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+.card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
+.card p { font-size: 12px; line-height: 1.35; }
+.grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
+.lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.panel { min-width: 0; overflow: hidden; }
+.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
+.panel-head p { font-size: 12px; margin-top: 3px; }
+h2 { margin: 0; font-size: 16px; color: var(--ink); }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--soft-line); vertical-align: top; font-size: 13px; }
+th { color: var(--muted); font-size: 11px; text-transform: uppercase; background: var(--surface); position: sticky; top: 0; z-index: 1; }
+td small { display: block; color: var(--muted); margin-top: 2px; }
+.table-wrap { overflow: auto; max-height: 430px; }
+.agent-row { cursor: pointer; }
+.agent-row:hover, .agent-row.selected { background: var(--hover); }
+.empty { padding: 18px; color: var(--muted); }
+.pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: var(--pill-bg); color: var(--pill-ink); border: 1px solid var(--pill-line); white-space: nowrap; }
+.online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: var(--ok-line); background: var(--ok-bg); }
+.stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: var(--warn-line); background: var(--warn-bg); }
+.offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: var(--bad-line); background: var(--bad-bg); }
+.queue-item.attention { border-left: 3px solid var(--red); background: var(--attention-bg); }
+.attention-badge { color: var(--red); font-weight: 700; margin-left: 6px; font-size: 11px; }
+.plan-status, .execution-status { display: block; margin-top: 4px; }
+.plan-pending { color: var(--amber); }
+.plan-admitted { color: var(--green); }
+.execution-status { color: var(--muted-strong) !important; }
+.queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); display: grid; gap: 10px; }
+.queue-filter-row { display: grid; gap: 8px; }
+.queue-filter-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.queue-filter-statuses { margin: 0; padding: 0; border: 0; }
+.queue-filter-statuses legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
+.queue-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--control-line); background: var(--control-bg); border-radius: 999px; padding: 4px 10px; font-size: 12px; color: var(--ink); cursor: pointer; }
+.queue-filter-chip:has(input:checked) { border-color: var(--control-hover-line); background: var(--hover); color: var(--accent); }
+.queue-filter-chip input { width: auto; margin: 0; accent-color: var(--accent); }
+.queue-filter-field { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+.queue-filter-live { margin: 0; color: var(--muted); font-size: 12px; }
+.queue-item-filtered-out, .queue-item[hidden] { display: none !important; }
+.queue { display: grid; }
+.queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid var(--soft-line); padding: 12px 14px; cursor: pointer; }
+.queue-item:hover, .queue-item.selected { background: var(--hover); }
+.queue-item.selected { box-shadow: inset 3px 0 0 var(--accent); }
+.approval-item > button { text-align: left; background: transparent; color: inherit; border: 0; cursor: pointer; }
+.approval-actions { display: flex; gap: 8px; }
+.approval-actions button { border: 1px solid var(--control-line); background: var(--control-bg); color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
+.approval-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
+.approval-actions button:last-child { color: var(--red); border-color: var(--bad-line); }
+.system-panel { padding: 18px; display: grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: start; }
+.system-panel strong { font-size: 44px; color: var(--green); }
+.system-panel span { color: var(--muted); margin-top: 52px; margin-left: -130px; }
+.system-panel dl { margin: 0; display: grid; gap: 8px; }
+.system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
+.system-panel dt { color: var(--muted); }
+.system-panel dd { margin: 0; color: var(--ink); }
+.operator-metrics { padding: 18px; display: grid; gap: 14px; }
+.operator-metrics dl { margin: 0; display: grid; gap: 8px; }
+.operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
+.operator-metrics dt { color: var(--muted); }
+.operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+.metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.metrics-scrape code { font-size: 12px; }
+.queue-item strong, .queue-item small { display: block; margin-top: 6px; }
+.queue-item small { color: var(--muted); }
+.error-line { color: var(--red) !important; }
+.approvals-grid { grid-template-columns: 1fr; }
+.approval-controls { padding: 14px; border-bottom: 1px solid var(--line); }
+.approvals-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 14px; }
+.approval-item { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 12px; display: grid; gap: 9px; }
+.approval-item strong, .approval-item small { display: block; }
+.agent-layout { display: grid; }
+.detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
+.detail-empty, .detail-loading, .detail-error { color: var(--muted); }
+.detail-error { color: var(--red); }
+.detail-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; border-bottom: 1px solid var(--soft-line); padding-bottom: 12px; margin-bottom: 12px; }
+.detail-head h3 { margin: 0; font-size: 16px; }
+.detail-head small { color: var(--muted); }
+.detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; margin: 0; }
+.detail-grid.compact { margin-top: 10px; }
+.detail-grid div { min-width: 0; }
+.detail-grid dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
+.detail-grid dd { margin: 2px 0 0; overflow-wrap: anywhere; }
+.detail-section { margin-top: 14px; }
+.detail-section h4 { margin: 0 0 8px; font-size: 13px; color: var(--ink); }
+.execution-stack { display: grid; gap: 10px; }
+.execution-card { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; padding: 10px; }
+.execution-head, .lease-head { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
+.execution-head small { display: block; color: var(--muted); margin-top: 2px; }
+.lease-block { border-top: 1px solid var(--soft-line); margin-top: 10px; padding-top: 10px; }
+.lease-head strong { font-size: 12px; }
+.chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip { border: 1px solid var(--control-line); background: var(--control-bg); border-radius: 999px; padding: 4px 8px; font-size: 12px; color: var(--ink); }
+.detail-events { list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }
+.detail-events li { border-left: 2px solid var(--accent); padding-left: 10px; }
+.detail-events time, .detail-events small { display: block; color: var(--muted); font-size: 11px; }
+.action-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.action-list li { border: 1px solid var(--line); border-radius: 8px; padding: 8px; background: var(--surface); }
+.action-list small { display: block; color: var(--muted); margin-top: 2px; }
+.muted { color: var(--muted); font-size: 13px; }
+form { display: grid; gap: 11px; padding: 14px; }
+label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
+input, textarea, select { width: 100%; background: var(--control-bg); color: var(--ink); border: 1px solid var(--control-line); border-radius: 8px; padding: 10px; }
+.field-hint { color: var(--muted); font-size: 11px; margin-top: -4px; }
+.field-error { color: var(--red); font-size: 12px; min-height: 0; }
+.field-hint.field-error { color: var(--amber); }
+textarea[aria-invalid="true"] { border-color: var(--red); }
+.composer-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.composer-preview { border: 1px dashed var(--line); border-radius: 6px; padding: 8px 10px; font-size: 12px; }
+.composer-preview p { margin: 0 0 4px; }
+.composer-preview[data-outcome="auto_admitted"] { border-color: var(--green); }
+.composer-preview[data-outcome="needs_approval"] { border-color: var(--amber); }
+.composer-preview[data-outcome="blocked"], .composer-preview[data-outcome="rejected"] { border-color: var(--red); }
+.preview-actions { margin: 4px 0; padding-left: 16px; }
+.form-row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; }
+button[type=submit] { background: var(--primary); color: var(--primary-ink); border: 0; border-radius: 9px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
+output { color: var(--accent); min-height: 20px; }
+.timeline { list-style: none; margin: 0; padding: 10px 14px 14px; display: grid; gap: 10px; }
+.timeline li { border-left: 2px solid var(--primary); padding-left: 10px; }
+.timeline time, .timeline small { display: block; color: var(--muted); font-size: 11px; word-break: break-word; }
+.skip-link { position: absolute; left: -9999px; top: 0; z-index: 1000; background: var(--primary); color: var(--primary-ink); padding: 10px 14px; border-radius: 8px; font-weight: 700; }
+.skip-link:focus { left: 12px; top: 12px; }
+:focus { outline: none; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.reason-field { display: grid; gap: 5px; }
+.reason-label { color: var(--muted); font-size: 12px; }
+.reason-label .req { color: var(--red); font-weight: 600; }
+.approval-result { display: block; min-height: 1.25em; }
+.approval-actions button:disabled { opacity: .55; cursor: not-allowed; }
+.approval-actions button .hash-prefix { font-size: 11px; opacity: .8; margin-left: 4px; }
+.approval-confirm-overlay { position: fixed; inset: 0; z-index: 2000; background: var(--overlay); display: grid; place-items: center; padding: 16px; }
+.approval-confirm-card { width: min(420px, 100%); background: var(--surface); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 40px var(--shadow); padding: 18px; display: grid; gap: 10px; color: var(--ink); }
+.approval-confirm-card h3 { margin: 0; font-size: 16px; }
+.approval-confirm-card p { margin: 0; color: var(--muted); font-size: 13px; }
+.approval-confirm-card code { color: var(--ink); font-size: 12px; }
+.approval-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
+.approval-confirm-actions button { border: 1px solid var(--control-line); background: var(--control-bg); color: var(--ink); border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 40px; }
+.approval-confirm-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
+#approval-confirm-ok { background: var(--bad-bg); color: var(--red); border-color: var(--bad-line); font-weight: 700; }
+#approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
+@media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
+@media (max-width: 767px) {
+  body { grid-template-columns: 1fr; }
+  aside { position: static; height: auto; padding: 12px 14px; }
+  nav { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 14px; }
+  nav a { padding: 8px 10px; font-size: 13px; }
+  .rail-note { display: none; }
+  main { padding: 14px 12px 28px; }
+  header { display: grid; gap: 10px; }
+  .cards { grid-template-columns: 1fr; }
+  .grid, .lower, .detail-grid, .form-row, .system-panel { grid-template-columns: 1fr; }
+  .system-panel span { margin: 0; }
+  .approvals-list { grid-template-columns: 1fr; padding: 12px; }
+  .approval-actions { flex-direction: column; }
+  .approval-actions button { width: 100%; min-height: 44px; font-size: 15px; }
+  .table-wrap { max-height: none; }
+  .agent-table th:nth-child(n+5), .agent-table td:nth-child(n+5) { display: none; }
+  .queue-filter-fields { grid-template-columns: 1fr; }
+  .queue-filter-chip { min-height: 44px; }
+  .queue-item { padding: 14px 12px; min-height: 44px; }
+  .detail-panel { margin: 8px; max-height: none; }
+  .live { justify-self: start; white-space: normal; max-width: 100%; }
+  .header-status { justify-items: start; }
+}
+body[data-active-view] [data-view-panel] { display: none; }
+body[data-active-view="overview"] [data-view-panel~="overview"],
+body[data-active-view="queue"] [data-view-panel~="queue"],
+body[data-active-view="execution"] [data-view-panel~="execution"],
+body[data-active-view="approvals"] [data-view-panel~="approvals"],
+body[data-active-view="agents"] [data-view-panel~="agents"],
+body[data-active-view="connectors"] [data-view-panel~="connectors"],
+body[data-active-view="metrics"] [data-view-panel~="metrics"],
+body[data-active-view="audit"] [data-view-panel~="audit"],
+body[data-active-view="policy"] [data-view-panel~="policy"],
+body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
+/* The view rule above must not flatten the overview card grid. */
+body[data-active-view="overview"] #overview.cards { display: grid; }
+.approval-item { background: var(--surface); color: var(--ink); border-color: var(--line); }
+.system-probes { padding: 0 18px 16px; }
+.system-probes dl { margin: 0; display: grid; gap: 8px; }
+.system-probes div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
+.system-probes dt { color: var(--muted); }
+.system-probes dd { margin: 0; }
+</style>
+  </head>
+  <body data-active-view="overview">
+    <a class="skip-link" href="#main-content">Skip to main content</a>
+    <aside aria-label="Mission control navigation">
+      <div class="brand">ACS<span>MISSION CONTROL</span></div>
+      <nav aria-label="Primary">
+        <a href="#overview" class="active" data-nav="overview">Overview</a>
+        <a href="#queue" data-nav="queue">Work Queue</a>
+        <a href="#queue" data-nav="execution">Execution</a>
+        <a href="#approvals" data-nav="approvals">Approvals</a>
+        <a href="#agents" data-nav="agents">Agents</a>
+        <a href="#connectors" data-nav="connectors">Connectors</a>
+        <a href="#operator-metrics" data-nav="metrics">Metrics</a>
+        <a href="#events" data-nav="audit">Audit</a>
+        <a href="#policy" data-nav="policy">Policy</a>
+        <a href="#system" data-nav="system">System</a>
+      </nav>
+      <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream. Press <kbd>?</kbd> for keyboard shortcuts.</p>
+    </aside>
+    <main id="main-content" tabindex="-1">
+      <header>
+        <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
+        <div class="header-controls">
+          <fieldset class="execution-mode" id="execution-mode-control">
+            <legend>Execution Mode</legend>
+            <label><input type="radio" name="executionMode" value="strict" data-execution-mode="strict"> Strict</label>
+            <label><input type="radio" name="executionMode" value="admin" data-execution-mode="admin"> Admin / YOLO</label>
+            <p id="execution-mode-result" role="status"></p>
+          </fieldset>
+        <div class="header-status"><div class="live connecting" data-state="connecting"><span aria-hidden="true"></span> <span data-live-label>Connecting…</span></div><small id="dashboard-updated" class="dashboard-updated"></small><div class="header-tools"><button type="button" id="notifications-toggle" class="tool-button" aria-pressed="false">Notify me</button><button type="button" id="theme-toggle" class="tool-button">Theme: auto</button></div></div>
+        </div>
+      </header>
+      <p id="action-status" class="action-status" role="status" aria-live="polite"></p>
+      <div id="admin-mode-banner" class="admin-mode-banner" role="alert" hidden></div>
+      <div id="execution-mode-problem" class="admin-mode-banner" role="alert" hidden></div>
+      <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
+      <section id="overview" class="cards" data-view-panel="overview"><article class="card"><span>Total Agents</span><strong>1</strong><p>Observed from persisted connector, tunnel, worker, and target events</p></article><article class="card"><span>Online Agents</span><strong>0</strong><p>Only recent heartbeats count as online</p></article><article class="card"><span>Running Tasks</span><strong>0</strong><p>Lease-bound work currently running</p></article><article class="card"><span>Pending Approvals</span><strong>1</strong><p>Policy-gated work waiting on a human</p></article><article class="card"><span>Failed / Blocked</span><strong>1</strong><p>Items that need operator attention</p></article></section>
+      <section class="grid">
+        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">1 observed</span></div><div class="agent-layout"><div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body"><tr class="agent-row" tabindex="0" data-agent="/repo" data-agent-id="/repo"><td><strong>/repo</strong><small>/repo</small></td><td>target</td><td><span class="pill stale">stale</span></td><td><span class="pill unknown">unknown</span></td><td>Blocked task</td><td>—</td><td>—</td></tr></tbody></table></div><section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
+    <div class="detail-empty"><h3>No agent selected</h3><p>Select a row to load the registry record.</p></div>
+  </section></div></article>
+        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">2 items</span></div><div class="queue-filter" id="queue-filter" role="search" aria-label="Filter work queue">
+  <div class="queue-filter-row">
+    <fieldset class="queue-filter-statuses">
+      <legend>Status</legend>
+      <div class="queue-filter-chips"><label class="queue-filter-chip" for="queue-status-draft"><input type="checkbox" id="queue-status-draft" name="queue-status" value="draft" data-queue-status="draft" /> <span>draft</span></label><label class="queue-filter-chip" for="queue-status-pending_policy"><input type="checkbox" id="queue-status-pending_policy" name="queue-status" value="pending_policy" data-queue-status="pending_policy" /> <span>pending_policy</span></label><label class="queue-filter-chip" for="queue-status-needs_approval"><input type="checkbox" id="queue-status-needs_approval" name="queue-status" value="needs_approval" data-queue-status="needs_approval" /> <span>needs_approval</span></label><label class="queue-filter-chip" for="queue-status-approved"><input type="checkbox" id="queue-status-approved" name="queue-status" value="approved" data-queue-status="approved" /> <span>approved</span></label><label class="queue-filter-chip" for="queue-status-running"><input type="checkbox" id="queue-status-running" name="queue-status" value="running" data-queue-status="running" /> <span>running</span></label><label class="queue-filter-chip" for="queue-status-cancelling"><input type="checkbox" id="queue-status-cancelling" name="queue-status" value="cancelling" data-queue-status="cancelling" /> <span>cancelling</span></label><label class="queue-filter-chip" for="queue-status-succeeded"><input type="checkbox" id="queue-status-succeeded" name="queue-status" value="succeeded" data-queue-status="succeeded" /> <span>succeeded</span></label><label class="queue-filter-chip" for="queue-status-failed"><input type="checkbox" id="queue-status-failed" name="queue-status" value="failed" data-queue-status="failed" /> <span>failed</span></label><label class="queue-filter-chip" for="queue-status-blocked"><input type="checkbox" id="queue-status-blocked" name="queue-status" value="blocked" data-queue-status="blocked" /> <span>blocked</span></label><label class="queue-filter-chip" for="queue-status-cancelled"><input type="checkbox" id="queue-status-cancelled" name="queue-status" value="cancelled" data-queue-status="cancelled" /> <span>cancelled</span></label><label class="queue-filter-chip" for="queue-status-rejected"><input type="checkbox" id="queue-status-rejected" name="queue-status" value="rejected" data-queue-status="rejected" /> <span>rejected</span></label><label class="queue-filter-chip" for="queue-status-unknown"><input type="checkbox" id="queue-status-unknown" name="queue-status" value="unknown" data-queue-status="unknown" /> <span>unknown</span></label><label class="queue-filter-chip" for="queue-status-quarantined"><input type="checkbox" id="queue-status-quarantined" name="queue-status" value="quarantined" data-queue-status="quarantined" /> <span>quarantined</span></label></div>
+    </fieldset>
+  </div>
+  <div class="queue-filter-row queue-filter-fields">
+    <label class="queue-filter-field" for="queue-filter-agent">Agent id
+      <input id="queue-filter-agent" name="queue-agent" type="search" autocomplete="off" spellcheck="false" placeholder="agent / worker / target" />
+    </label>
+    <label class="queue-filter-field" for="queue-filter-text">Search title or id
+      <input id="queue-filter-text" name="queue-text" type="search" autocomplete="off" spellcheck="false" placeholder="title or work item id" />
+    </label>
+  </div>
+  <p id="queue-filter-live" class="queue-filter-live" aria-live="polite">Showing all work items</p>
+</div><div class="queue" id="queue-list"><button class="queue-item attention" data-work-item="wrk_approve" data-status="needs_approval" data-title="Approve me" data-agent-id="/repo"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Approve me</strong><small>verify rendering</small></button><button class="queue-item attention" data-work-item="wrk_blocked" data-status="blocked" data-title="Blocked task" data-agent-id="/repo"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Blocked task</strong><small>verify rendering</small><small class="error-line">worker lease expired token=[redacted]</small></button></div><div id="queue-footer" class="queue-footer"></div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section></article>
+      </section>
+      <section class="grid approvals-grid">
+        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
+      </section>
+      <section class="grid lower">
+        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body"><div class="operator-metrics"><dl>
+    <div><dt>Active leases</dt><dd>0</dd></div>
+    <div><dt>Oldest lease age</dt><dd>—</dd></div>
+    <div><dt>Pending approvals</dt><dd>1</dd></div>
+    <div><dt>Oldest approval wait</dt><dd>40m 0s</dd></div>
+  </dl>
+  </div></div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>
+        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline"><p class="empty">No audit events recorded.</p></div><button type="button" id="events-load-older" class="load-more" disabled>Load older</button></article>
+        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div><div class="system-panel"><div id="system-stats"><dl><div><dt>Agents online</dt><dd>0 / 1</dd></div><div><dt>Running tasks</dt><dd>0</dd></div><div><dt>Pending approvals</dt><dd>1</dd></div><div><dt>Failed or blocked</dt><dd>1</dd></div><div><dt>Execution backend</dt><dd>unset</dd></div></dl></div><div id="system-probes" class="system-probes"></div></div></article>
+      </section>
+      <section class="grid lower">
+        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div><form id="task-form" novalidate data-known-action-kinds="[]">
+    <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
+    <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
+    <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
+    <label>Requested action kind<input name="actionKind" list="composer-action-kinds" autocomplete="off" spellcheck="false" placeholder="agent.prompt" aria-describedby="composer-kind-hint" /></label>
+    <datalist id="composer-action-kinds"></datalist>
+    <small id="composer-kind-hint" class="field-hint">Defaults to agent.prompt.</small>
+    <label>Requested action description<input name="actionDescription" placeholder="Defaults to prompt dispatch when blank" /></label>
+    <label>Action params (JSON object, optional)<textarea name="actionParams" rows="3" spellcheck="false" placeholder='{"paths": ["README.md"]}' aria-describedby="composer-params-error"></textarea></label>
+    <small id="composer-params-error" class="field-error" role="alert"></small>
+    <section id="composer-preview" class="composer-preview" aria-live="polite" aria-label="Policy preview"><p class="muted">Fill in a title and instructions to preview policy.</p></section>
+    <div class="composer-actions"><button type="button" id="composer-preview-button" class="tool-button">Check policy</button><button type="submit">Create Work Item</button></div><output id="task-result"></output>
+  </form></article>
+        <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>0 observed</span></div><div id="connectors-body"><p class="empty">No connectors observed.</p><p class="empty">Execution backend: unset</p></div></article>
+        <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>recent decisions</span></div><div id="policy-body" class="policy-body"><p class="empty">No policy decisions in the recent window.</p></div></article>
+        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
+      </section>
+    </main>
+    <script>
+let sseSource = null;
+let sseReconnectAttempt = 0;
+let sseReconnectTimer = null;
+let sseEverOpened = false;
+let sseConnected = false;
+let sseReconnectAt = 0;
+const sseEventNames = [
+  'work_item.created',
+  'work_item.pending_policy',
+  'work_item.needs_approval',
+  'work_item.approved',
+  'work_item.running',
+  'work_item.blocked',
+  'work_item.failed',
+  'work_item.succeeded',
+  'work_item.cancelled',
+  'work_item.rejected',
+  'work_item.cancelling',
+  'work_item.unknown',
+  'work_item.quarantined',
+  'work_item.retried',
+  'work_item.cloned',
+  'agent.created',
+  'agent.updated',
+  'agent.heartbeat',
+  'agent.capabilities_replaced',
+  'acp.initialized',
+  'acp.disconnected',
+  'acp.error',
+  'tunnel_session.heartbeat',
+  'execution_attempt.created',
+  'execution_attempt.transitioned',
+  'execution_attempt.result_accepted',
+  'attempt_lease.issued',
+  'attempt_lease.renewed',
+  'attempt_lease.stolen',
+  'attempt_lease.expired'
+];
+
+function nextSseReconnectDelayMs(attempt) {
+  const n = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
+  return Math.min(30000, 1000 * Math.pow(2, Math.min(n, 5)));
+}
+
+function applySseConnectionState(root, connected) {
+  sseConnected = connected;
+  const banner = root.querySelector('#sse-stale-banner');
+  if (banner) banner.hidden = connected;
+  const live = root.querySelector('.live');
+  if (live) {
+    live.classList.toggle('disconnected', !connected);
+    live.innerHTML = connected
+      ? '<span aria-hidden="true"></span> Live'
+      : '<span aria-hidden="true"></span> Disconnected';
+  }
+  root.querySelectorAll('[data-approve],[data-reject],[data-unblock],[data-work-control]').forEach(function (button) {
+    const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
+    button.disabled = !connected || approveWithoutHash;
+  });
+  renderLiveStatus();
+}
+
+function connectSse() {
+  if (sseReconnectTimer) {
+    clearTimeout(sseReconnectTimer);
+    sseReconnectTimer = null;
+  }
+  if (sseSource) {
+    sseSource.close();
+    sseSource = null;
+  }
+  sseSource = new EventSource('/events');
+  sseSource.addEventListener('open', function () {
+    const reconnected = sseEverOpened && !sseConnected;
+    sseReconnectAttempt = 0;
+    sseReconnectAt = 0;
+    sseEverOpened = true;
+    applySseConnectionState(document, true);
+    // Events may have been missed while the stream was down (or before it
+    // first opened): catch up by re-fetching sections instead of reloading.
+    scheduleDashboardRefresh(0, { catchUp: reconnected });
+    if (reconnected) {
+      refreshAgentRoster();
+      if (selectedAgentId) loadAgentDetail(selectedAgentId);
+      announce('Live stream reconnected');
+      if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+    }
+  });
+  sseSource.addEventListener('error', function () {
+    if (sseSource) {
+      sseSource.close();
+      sseSource = null;
+    }
+    if (!sseReconnectTimer) {
+      const delay = nextSseReconnectDelayMs(sseReconnectAttempt);
+      sseReconnectAttempt += 1;
+      sseReconnectAt = Date.now() + delay;
+      sseReconnectTimer = setTimeout(function () {
+        sseReconnectTimer = null;
+        connectSse();
+      }, delay);
+    }
+    applySseConnectionState(document, false);
+  });
+  sseEventNames.forEach(function (name) {
+    sseSource.addEventListener(name, appendAuditEvent);
+  });
+}
+
+function appendAuditEvent(event) {
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch {
+    return;
+  }
+  if (!data.name) data.name = event.type;
+  insertLiveTimelineEvent(data);
+  if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
+  const eventName = String(data.name || event.type || '');
+  onLiveAuditEvent(eventName, data);
+  if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
+    refreshAgentRoster();
+    if (selectedAgentId) loadAgentDetail(selectedAgentId);
+  }
+}
+
+let selectedAgentId = null;
+
+function escapeClient(value) {
+  return String(value ?? '').replace(/[&<>"']/g, function (char) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] || char;
+  });
+}
+
+
+const redactionValuePatterns = [["Bearer\\s+[A-Za-z0-9._~+/-]+=*","gi","Bearer [redacted]"],["\\bsk-[A-Za-z0-9_-]{12,}","g","[redacted]"],["\\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}","g","[redacted]"],["\\bxox[abprs]-[A-Za-z0-9-]{10,}","g","[redacted]"],["\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}","g","[redacted]"],["([?&](?:token|access_token|refresh_token|key|api_key|apikey|secret|password|sig|signature)=)[^&\\s\"']+","gi","$1[redacted]"],["(\\b[A-Za-z][A-Za-z0-9+.-]{0,31}://[^\\s/:@]{1,256}:)[^\\s/@]{1,256}@","g","$1[redacted]@"],["-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----","g","[redacted]"],["\\b([A-Z0-9_]*(?:SECRET|TOKEN|API_KEY|PASSWORD)[A-Z0-9_]*=)[^\\s&\"']+","g","$1[redacted]"]].map(function (entry) {
+  return [new RegExp(entry[0], entry[1]), entry[2]];
+});
+const redactionKeyPattern = new RegExp("token|secret|passw(?:or)?d|authorization|cookie|credential|api[-_]?key|private[-_]?key", 'i');
+const redactionNonSecretKeyPattern = new RegExp("^(?:inputTokens|outputTokens|cacheReadInputTokens|cacheCreationInputTokens|maxTokens)$", 'i');
+function redactClient(value) {
+  let text = String(value ?? '');
+  redactionValuePatterns.forEach(function (entry) { text = text.replace(entry[0], entry[1]); });
+  return text;
+}
+function redactAttributesClient(value, depth) {
+  const level = depth || 0;
+  if (typeof value === 'string') return redactClient(value);
+  if (value === null || typeof value !== 'object') return value;
+  if (level >= 8) return '[truncated]';
+  if (Array.isArray(value)) return value.map(function (entry) { return redactAttributesClient(entry, level + 1); });
+  const out = {};
+  Object.keys(value).forEach(function (key) {
+    const entry = value[key];
+    out[key] = redactionKeyPattern.test(key) && !redactionNonSecretKeyPattern.test(key) && entry != null
+      ? '[redacted]'
+      : redactAttributesClient(entry, level + 1);
+  });
+  return out;
+}
+function redactedAttributesJsonClient(value) {
+  return JSON.stringify(redactAttributesClient(value ?? {})) ?? '';
+}
+
+
+const workItemControlStatuses = {"cancel":["draft","pending_policy","needs_approval","approved","running","blocked"],"retry":["succeeded","failed","cancelled","rejected"],"clone":["*"]};
+const workItemControlLabels = {"cancel":"Cancel work item","retry":"Retry as new item","clone":"Clone as new item"};
+const reasonRequiredControls = ["cancel","retry"];
+function workItemControlsFor(status) {
+  return ["cancel","retry","clone"].filter(function (control) {
+    const statuses = workItemControlStatuses[control];
+    return statuses.indexOf('*') !== -1 || statuses.indexOf(status) !== -1;
+  });
+}
+function workItemControlsMarkup(workItem, connected) {
+  const controls = workItemControlsFor(String(workItem.status || ''));
+  if (!controls.length) return '';
+  const id = escapeClient(workItem.id);
+  const reasonId = 'control-reason-' + id;
+  const needsReason = controls.some(function (control) { return reasonRequiredControls.indexOf(control) !== -1; });
+  const reason = needsReason
+    ? '<label class="reason-field" for="' + reasonId + '"><span class="reason-label">Reason <span class="req">(required for cancel and retry)</span></span><input id="' + reasonId + '" data-control-reason="' + id + '" autocomplete="off" placeholder="Why cancel or retry" /></label>'
+    : '';
+  const buttons = controls.map(function (control) {
+    return '<button type="button" data-work-control="' + control + '" data-work-item-id="' + id + '" data-risk="' + escapeClient(workItem.risk) + '"' + (needsReason ? ' aria-describedby="' + reasonId + '"' : '') + (connected ? '' : ' disabled') + '>' + workItemControlLabels[control] + '</button>';
+  }).join('');
+  return '<div class="detail-section work-controls" data-work-controls="' + id + '"><h4>Controls</h4>' + reason + '<div class="approval-actions" role="group" aria-label="Controls for ' + escapeClient(workItem.title) + '">' + buttons + '</div><output id="control-result-' + id + '" class="approval-result" aria-live="polite"></output></div>';
+}
+let workItemControlInFlight = false;
+document.addEventListener('click', async function (event) {
+  const button = event.target && event.target.closest ? event.target.closest('[data-work-control]') : null;
+  if (!button) return;
+  const control = button.dataset.workControl;
+  const id = button.dataset.workItemId;
+  const output = document.getElementById('control-result-' + id);
+  const say = function (text) { if (output) output.textContent = text; };
+  if (!sseConnected) { say('Disconnected: controls disabled until reconnect'); return; }
+  if (workItemControlInFlight || document.getElementById('approval-confirm-dialog')) return;
+  const reasonInput = document.querySelector('[data-control-reason="' + id + '"]');
+  const reason = reasonInput ? reasonInput.value.trim() : '';
+  if (reasonRequiredControls.indexOf(control) !== -1 && !reason) {
+    say('Reason required');
+    if (reasonInput) reasonInput.focus();
+    return;
+  }
+  const risk = button.dataset.risk || '';
+  if (control === 'cancel' || isElevatedApprovalRisk(risk)) {
+    const confirmed = await requestApprovalConfirm({ workItemId: id, action: control, risk: risk });
+    if (!confirmed) { say(''); return; }
+  }
+  workItemControlInFlight = true;
+  button.disabled = true;
+  try {
+    const payload = control === 'clone' ? {} : { reason: reason };
+    const res = await fetch('/work-items/' + encodeURIComponent(id) + '/' + control, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const body = await res.json().catch(function () { return {}; });
+    if (!res.ok) {
+      say('Rejected: ' + (body.error || body.code || res.status));
+      return;
+    }
+    const created = control === 'cancel' ? '' : (body.workItem && body.workItem.id) || '';
+    say(control === 'cancel' ? 'cancel accepted' : control + ' created ' + created);
+    if (typeof onWorkItemControlSucceeded === 'function') onWorkItemControlSucceeded(control, id, body);
+  } catch (error) {
+    say('Request failed: ' + (error && error.message ? error.message : 'network error'));
+  } finally {
+    workItemControlInFlight = false;
+    button.disabled = !sseConnected;
+  }
+});
+
+
+const dashboardFragmentTargets = {"cards":"#overview","queueList":"#queue-list","queueFooter":"#queue-footer","approvalsList":"#approvals-list","approvalsCount":"#approvals-count","metrics":"#operator-metrics-body","systemStats":"#system-stats","policy":"#policy-body"};
+const dashboardCatchUpTargets = {"eventsTimeline":"#events-timeline","connectors":"#connectors-body"};
+const workEventPrefixes = ["work_item.","execution_attempt.","attempt_lease."];
+const appliedFragments = {};
+let dashboardRefreshTimer = null;
+let dashboardRefreshDueAt = 0;
+let dashboardRefreshInFlight = false;
+let dashboardRefreshQueued = false;
+let lastDashboardRefreshAt = 0;
+let lastDashboardAttemptAt = 0;
+let dashboardRefreshFailures = 0;
+let dashboardCatchUpPending = false;
+let lastSseEventAt = 0;
+let dashboardRefreshError = '';
+let selectedWorkItemId = null;
+let dashboardFinishedLimit = (function () {
+  const raw = new URLSearchParams(location.search).get('finished');
+  const value = raw === null ? NaN : Number(raw);
+  return Number.isInteger(value) && value >= 0 ? value : null;
+})();
+
+// Finished items are paged; "show more" widens the window and keeps it in the URL.
+document.addEventListener('click', function (event) {
+  const button = event.target && event.target.closest ? event.target.closest('[data-load-more-finished]') : null;
+  if (!button) return;
+  const shown = Number(button.dataset.shown) || 0;
+  dashboardFinishedLimit = shown + (Number(button.dataset.step) || 50);
+  const params = new URLSearchParams(location.search);
+  params.set('finished', String(dashboardFinishedLimit));
+  try { history.replaceState(null, '', location.pathname + '?' + params.toString() + location.hash); } catch {}
+  button.disabled = true;
+  scheduleDashboardRefresh(0);
+});
+
+function cssAttr(value) {
+  return String(value).replace(/["\\]/g, '\\$&');
+}
+
+function scheduleDashboardRefresh(delayMs, options) {
+  if (options && options.catchUp) dashboardCatchUpPending = true;
+  const earliest = lastDashboardAttemptAt + 1000;
+  const due = Math.max(Date.now() + Math.max(0, delayMs || 0), earliest);
+  if (dashboardRefreshTimer && dashboardRefreshDueAt <= due) return;
+  if (dashboardRefreshTimer) clearTimeout(dashboardRefreshTimer);
+  dashboardRefreshDueAt = due;
+  dashboardRefreshTimer = setTimeout(function () {
+    dashboardRefreshTimer = null;
+    void refreshDashboard();
+  }, Math.max(0, due - Date.now()));
+}
+
+async function refreshDashboard() {
+  if (dashboardRefreshInFlight) {
+    dashboardRefreshQueued = true;
+    return;
+  }
+  dashboardRefreshInFlight = true;
+  lastDashboardAttemptAt = Date.now();
+  const catchUp = dashboardCatchUpPending;
+  dashboardCatchUpPending = false;
+  let retryIn = 0;
+  try {
+    const body = await fetchJson('/dashboard/fragments' + (dashboardFinishedLimit === null ? '' : '?finished=' + dashboardFinishedLimit));
+    if (!body || !body.fragments) throw new Error('invalid fragments response');
+    applyDashboardFragments(body.fragments, { catchUp: catchUp });
+    dashboardRefreshError = '';
+    dashboardRefreshFailures = 0;
+    // Only a response that was actually applied counts as "updated".
+    lastDashboardRefreshAt = Date.now();
+  } catch (error) {
+    dashboardRefreshFailures += 1;
+    dashboardRefreshError = 'refresh failed, retrying';
+    if (catchUp) dashboardCatchUpPending = true;
+    retryIn = Math.min(30000, 1000 * Math.pow(2, dashboardRefreshFailures - 1));
+  } finally {
+    dashboardRefreshInFlight = false;
+    renderLiveStatus();
+    if (retryIn) {
+      dashboardRefreshQueued = false;
+      scheduleDashboardRefresh(retryIn);
+    } else if (dashboardRefreshQueued) {
+      dashboardRefreshQueued = false;
+      scheduleDashboardRefresh(250);
+    }
+  }
+}
+
+// Agent freshness ages out without events; keep counters honest while live.
+setInterval(function () {
+  if (sseConnected && document.visibilityState !== 'hidden') scheduleDashboardRefresh(0);
+}, 30000);
+
+function captureOperatorState() {
+  const active = document.activeElement;
+  const reasons = {};
+  document.querySelectorAll('[data-reason]').forEach(function (input) {
+    if (input.value) reasons[input.dataset.reason] = input.value;
+  });
+  const outputs = {};
+  document.querySelectorAll('.approval-result[id]').forEach(function (output) {
+    if (output.textContent) outputs[output.id] = output.textContent;
+  });
+  return {
+    activeId: active && active.id ? active.id : null,
+    activeSelector: active && active.dataset && active.dataset.workItem ? '[data-work-item="' + cssAttr(active.dataset.workItem) + '"]' : null,
+    reasons: reasons,
+    outputs: outputs
+  };
+}
+
+function restoreOperatorState(state) {
+  Object.keys(state.reasons).forEach(function (id) {
+    const input = document.querySelector('[data-reason="' + cssAttr(id) + '"]');
+    if (input && !input.value) input.value = state.reasons[id];
+  });
+  Object.keys(state.outputs).forEach(function (id) {
+    const output = document.getElementById(id);
+    if (output && !output.textContent) output.textContent = state.outputs[id];
+  });
+  if (selectedWorkItemId) {
+    const selected = document.querySelector('[data-work-item="' + cssAttr(selectedWorkItemId) + '"]');
+    if (selected) {
+      selected.classList.add('selected');
+      selected.setAttribute('aria-current', 'true');
+    }
+  }
+  const target = (state.activeId && document.getElementById(state.activeId)) ||
+    (state.activeSelector && document.querySelector(state.activeSelector));
+  if (target && document.activeElement !== target && typeof target.focus === 'function') {
+    target.focus({ preventScroll: true });
+  }
+}
+
+function applyDashboardFragments(fragments, options) {
+  const targets = Object.assign({}, dashboardFragmentTargets, options && options.catchUp ? dashboardCatchUpTargets : {});
+  const changed = Object.keys(targets).filter(function (name) {
+    return typeof fragments[name] === 'string' && appliedFragments[name] !== fragments[name];
+  });
+  if (!changed.length) return false;
+  const state = captureOperatorState();
+  changed.forEach(function (name) {
+    const target = document.querySelector(targets[name]);
+    if (!target) return;
+    target.innerHTML = fragments[name];
+    appliedFragments[name] = fragments[name];
+  });
+  if (changed.indexOf('queueList') !== -1) applyQueueFilterClient(readQueueFilterFromDom());
+  if (changed.indexOf('approvalsList') !== -1) applySseConnectionState(document, sseConnected);
+  restoreOperatorState(state);
+  if (typeof onDashboardFragmentsApplied === 'function') onDashboardFragmentsApplied(changed);
+  return true;
+}
+
+function announce(message) {
+  const region = document.getElementById('action-status');
+  if (region) region.textContent = message;
+}
+
+function eventWorkItemId(data) {
+  const attrs = (data && data.attributes) || {};
+  return attrs['work_item.id'] || attrs['work_item.source_id'] || '';
+}
+
+function onLiveAuditEvent(name, data) {
+  lastSseEventAt = Date.now();
+  renderLiveStatus();
+  if (workEventPrefixes.some(function (prefix) { return name.indexOf(prefix) === 0; })) {
+    scheduleDashboardRefresh(250);
+    const id = eventWorkItemId(data);
+    if (selectedWorkItemId && id === selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+  } else if (name.indexOf('agent.') === 0 || name.indexOf('acp.') === 0 || name === 'tunnel_session.heartbeat') {
+    scheduleDashboardRefresh(5000);
+  }
+}
+
+function secondsSince(timestamp) {
+  return Math.max(0, Math.round((Date.now() - timestamp) / 1000));
+}
+
+function renderLiveStatus() {
+  const live = document.querySelector('.live');
+  if (!live) return;
+  let state;
+  let text;
+  if (sseConnected) {
+    state = 'live';
+    text = 'Live';
+    if (lastSseEventAt) text += ' · last event ' + secondsSince(lastSseEventAt) + 's ago';
+  } else if (!sseEverOpened && !sseReconnectAt) {
+    state = 'connecting';
+    text = 'Connecting…';
+  } else {
+    state = 'disconnected';
+    const wait = sseReconnectAt ? Math.max(0, Math.ceil((sseReconnectAt - Date.now()) / 1000)) : 0;
+    text = 'Disconnected · ' + (wait > 0 ? 'reconnecting in ' + wait + 's' : 'reconnecting…') + ' (attempt ' + Math.max(1, sseReconnectAttempt) + ')';
+  }
+  if (dashboardRefreshError) text += ' · ' + dashboardRefreshError;
+  live.dataset.state = state;
+  live.classList.toggle('disconnected', state === 'disconnected');
+  live.classList.toggle('connecting', state === 'connecting');
+  const label = live.querySelector('[data-live-label]');
+  if (label) label.textContent = text;
+  else live.innerHTML = '<span aria-hidden="true"></span> <span data-live-label>' + escapeClient(text) + '</span>';
+  const updated = document.getElementById('dashboard-updated');
+  if (updated) updated.textContent = lastDashboardRefreshAt ? 'Updated ' + new Date(lastDashboardRefreshAt).toLocaleTimeString() : '';
+}
+
+setInterval(renderLiveStatus, 1000);
+
+
+let timelinePaused = false;
+let timelineBuffer = [];
+let timelineCap = 200;
+let timelineLoadingOlder = false;
+
+function timelineList() {
+  const root = document.getElementById('events-timeline');
+  if (!root) return null;
+  let list = root.querySelector('.timeline');
+  if (!list) {
+    root.querySelector('.empty')?.remove();
+    list = document.createElement('ol');
+    list.className = 'timeline';
+    root.appendChild(list);
+  }
+  return list;
+}
+
+function timelineItemElement(data) {
+  const item = document.createElement('li');
+  if (data && data.sequence !== undefined) item.dataset.sequence = String(data.sequence);
+  const time = document.createElement('time');
+  const name = document.createElement('strong');
+  const nanos = Number(data && data.timeUnixNano);
+  time.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
+  name.textContent = (data && data.name) || 'event';
+  item.append(time, name);
+  item.insertAdjacentHTML('beforeend', auditAttributesMarkup((data && data.attributes) || {}));
+  return item;
+}
+
+function renderTimelineControls() {
+  const pause = document.getElementById('events-pause');
+  if (pause) {
+    pause.setAttribute('aria-pressed', timelinePaused ? 'true' : 'false');
+    pause.textContent = timelinePaused
+      ? 'Resume' + (timelineBuffer.length ? ' (' + timelineBuffer.length + ' new)' : '')
+      : 'Pause';
+  }
+}
+
+function insertLiveTimelineEvent(data) {
+  if (timelinePaused) {
+    timelineBuffer.push(data);
+    renderTimelineControls();
+    return;
+  }
+  const list = timelineList();
+  if (!list) return;
+  list.prepend(timelineItemElement(data));
+  while (list.children.length > timelineCap) list.lastElementChild?.remove();
+}
+
+function setTimelinePaused(paused) {
+  timelinePaused = paused;
+  if (!paused && timelineBuffer.length) {
+    const buffered = timelineBuffer;
+    timelineBuffer = [];
+    buffered.forEach(insertLiveTimelineEvent);
+  }
+  renderTimelineControls();
+}
+
+function oldestTimelineSequence() {
+  const list = timelineList();
+  const items = list ? Array.from(list.querySelectorAll('li[data-sequence]')) : [];
+  let oldest = Infinity;
+  items.forEach(function (item) {
+    const value = Number(item.dataset.sequence);
+    if (Number.isFinite(value) && value < oldest) oldest = value;
+  });
+  return Number.isFinite(oldest) ? oldest : null;
+}
+
+async function loadOlderTimelineEvents() {
+  if (timelineLoadingOlder) return;
+  const button = document.getElementById('events-load-older');
+  const before = oldestTimelineSequence();
+  if (before === null || before <= 1) {
+    if (button) { button.disabled = true; button.textContent = 'No older events'; }
+    return;
+  }
+  timelineLoadingOlder = true;
+  if (button) button.disabled = true;
+  try {
+    const body = await fetchJson('/dashboard/events?beforeSequence=' + before + '&limit=50');
+    const events = Array.isArray(body && body.events) ? body.events : [];
+    const list = timelineList();
+    // Server returns ascending; the timeline is newest-first.
+    events.slice().reverse().forEach(function (event) { list.appendChild(timelineItemElement(event)); });
+    timelineCap += events.length;
+    announce(events.length ? 'Loaded ' + events.length + ' older events' : 'No older events');
+    if (button) {
+      const exhausted = events.length < 50;
+      button.disabled = exhausted;
+      button.textContent = exhausted ? 'No older events' : 'Load older';
+    }
+  } catch (error) {
+    announce('Could not load older events');
+    if (button) button.disabled = false;
+  } finally {
+    timelineLoadingOlder = false;
+  }
+}
+
+document.getElementById('events-pause')?.addEventListener('click', function () { setTimelinePaused(!timelinePaused); });
+document.getElementById('events-load-older')?.addEventListener('click', function () { void loadOlderTimelineEvents(); });
+
+
+const probeHistory = [];
+let probeTimer = null;
+let probeInFlight = false;
+let lastProbeHealthy = null;
+
+async function probePath(path) {
+  const started = performance.now();
+  try {
+    const res = await fetch(path, { headers: { accept: 'application/json' }, cache: 'no-store' });
+    return { path, status: res.status, ms: Math.round(performance.now() - started), at: Date.now() };
+  } catch {
+    return { path, status: 0, ms: Math.round(performance.now() - started), at: Date.now() };
+  }
+}
+
+function probeHealthy(row) {
+  return row.status >= 200 && row.status < 300 && row.ms < 1000;
+}
+
+function renderProbes() {
+  const root = document.querySelector('#system-probes');
+  if (!root || !probeHistory.length) return;
+  const latest = probeHistory[probeHistory.length - 1];
+  const okRows = probeHistory.filter(function (row) { return row.status >= 200 && row.status < 300; });
+  const avg = okRows.length ? Math.round(okRows.reduce(function (sum, row) { return sum + row.ms; }, 0) / okRows.length) : null;
+  const failures = probeHistory.length - okRows.length;
+  const state = latest.status === 0 ? 'down' : latest.status >= 300 ? 'failing' : latest.ms >= 1000 ? 'slow' : 'ok';
+  root.dataset.state = state;
+  const rows = [
+    ['/readyz', (latest.status || 'unreachable') + ' · ' + latest.ms + 'ms · ' + state],
+    ['Average (ok, last ' + probeHistory.length + ')', avg === null ? '—' : avg + 'ms'],
+    ['Failures (last ' + probeHistory.length + ')', String(failures)],
+    ['Last checked', new Date(latest.at).toLocaleTimeString()]
+  ];
+  const list = document.createElement('dl');
+  rows.forEach(function (row) {
+    const item = document.createElement('div');
+    const term = document.createElement('dt');
+    const value = document.createElement('dd');
+    term.textContent = row[0];
+    value.textContent = row[1];
+    item.append(term, value);
+    list.append(item);
+  });
+  const trend = document.createElement('p');
+  trend.className = 'probe-trend';
+  trend.setAttribute('aria-label', 'Recent probe results, oldest first');
+  trend.textContent = probeHistory.map(function (row) { return probeHealthy(row) ? '▮' : '▯'; }).join('');
+  root.replaceChildren(list, trend);
+}
+
+async function runSystemProbe() {
+  if (probeInFlight) return;
+  probeInFlight = true;
+  try {
+    const row = await probePath('/readyz');
+    probeHistory.push(row);
+    while (probeHistory.length > 10) probeHistory.shift();
+    const healthy = probeHealthy(row);
+    if (lastProbeHealthy !== null && healthy !== lastProbeHealthy) {
+      announce(healthy ? 'Gateway readiness recovered' : 'Gateway readiness degraded');
+    }
+    lastProbeHealthy = healthy;
+    renderProbes();
+  } finally {
+    probeInFlight = false;
+  }
+}
+
+function syncSystemProbes() {
+  const active = document.body.dataset.activeView === 'system' && document.visibilityState !== 'hidden';
+  if (active && !probeTimer) {
+    void runSystemProbe();
+    probeTimer = setInterval(function () { void runSystemProbe(); }, 20000);
+  } else if (!active && probeTimer) {
+    clearInterval(probeTimer);
+    probeTimer = null;
+  }
+}
+
+document.addEventListener('visibilitychange', syncSystemProbes);
+
+
+const goToViews = {"o":"overview","q":"queue","a":"approvals","g":"agents","c":"connectors","x":"execution","m":"metrics","e":"audit","p":"policy","s":"system"};
+const keyboardShortcuts = [{"keys":"j / k","action":"Next / previous work item"},{"keys":"/","action":"Search the work queue"},{"keys":"a","action":"Go to the first waiting approval's reason"},{"keys":"g o","action":"Overview"},{"keys":"g q","action":"Work queue"},{"keys":"g a","action":"Approvals"},{"keys":"g g","action":"Agents"},{"keys":"g m","action":"Metrics"},{"keys":"g e","action":"Audit events"},{"keys":"g p","action":"Policy"},{"keys":"g s","action":"System"},{"keys":"?","action":"Show or hide this help"},{"keys":"Esc","action":"Close help"}];
+const baseDocumentTitle = document.title;
+let pendingGoKeyAt = 0;
+let notificationsWanted = false;
+try { notificationsWanted = localStorage.getItem('acs.mc.notifications') === 'on'; } catch {}
+
+// --- #15 deep links: ?item=<id> selects and opens a work item.
+function workItemIdFromLocation() {
+  return new URLSearchParams(location.search).get('item');
+}
+// URL sync is best-effort: it must never block selecting a work item.
+function safeReplaceState(path) {
+  try { history.replaceState(null, '', path); } catch {}
+}
+function writeSelectedItemToLocation(id) {
+  try {
+    const url = new URL(location.href);
+    if (id) url.searchParams.set('item', id); else url.searchParams.delete('item');
+    safeReplaceState(url.pathname + url.search + url.hash);
+  } catch {}
+}
+function selectWorkItem(id, options) {
+  if (!id) return;
+  document.querySelectorAll('[data-work-item]').forEach(function (candidate) {
+    const match = candidate.dataset.workItem === id;
+    candidate.classList.toggle('selected', match);
+    if (match) candidate.setAttribute('aria-current', 'true'); else candidate.removeAttribute('aria-current');
+  });
+  selectedWorkItemId = id;
+  writeSelectedItemToLocation(id);
+  if (options && options.scroll) {
+    const row = document.querySelector('[data-work-item="' + cssAttr(id) + '"]');
+    if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
+  }
+  void loadWorkDetail(id, { preserve: false, focusDetail: !(options && options.keepFocus) });
+}
+function workItemPermalink(id) {
+  return '?item=' + encodeURIComponent(id) + '#queue';
+}
+function openWorkItemFromLocation() {
+  const id = workItemIdFromLocation();
+  if (!id) return;
+  if (!location.hash) showView('queue');
+  selectWorkItem(id, { scroll: true });
+}
+window.addEventListener('popstate', openWorkItemFromLocation);
+
+// --- #14 live wait badges between refreshes.
+function formatWaitClient(ms) {
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return seconds + 's';
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm';
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h ' + (minutes % 60) + 'm';
+  return Math.floor(hours / 24) + 'd ' + (hours % 24) + 'h';
+}
+function refreshWaitBadges() {
+  document.querySelectorAll('[data-waiting-since]').forEach(function (badge) {
+    const started = Date.parse(badge.dataset.waitingSince || '');
+    if (!Number.isFinite(started)) return;
+    const wait = Math.max(0, Date.now() - started);
+    const sla = Number(badge.dataset.slaMs) || 0;
+    const over = sla > 0 && wait >= sla;
+    badge.textContent = 'waiting ' + formatWaitClient(wait) + (over ? ' · over SLA' : '');
+    const card = badge.closest('.approval-item');
+    if (card) card.classList.toggle('overdue', over);
+  });
+}
+setInterval(refreshWaitBadges, 15000);
+
+// --- #16 title badge + opt-in notifications.
+function pendingApprovalCount() {
+  return document.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"]').length;
+}
+function updateTitleBadge() {
+  const count = pendingApprovalCount();
+  document.title = count ? '(' + count + ') ' + baseDocumentTitle : baseDocumentTitle;
+}
+function notificationsSupported() {
+  return typeof Notification !== 'undefined';
+}
+function renderNotificationToggle() {
+  const toggle = document.getElementById('notifications-toggle');
+  if (!toggle) return;
+  if (!notificationsSupported()) {
+    toggle.hidden = true;
+    return;
+  }
+  const denied = Notification.permission === 'denied';
+  const on = notificationsWanted && Notification.permission === 'granted';
+  toggle.disabled = denied;
+  toggle.setAttribute('aria-pressed', on ? 'true' : 'false');
+  toggle.textContent = denied ? 'Notifications blocked' : on ? 'Notifications on' : 'Notify me';
+  toggle.title = denied ? 'Notifications are blocked in browser settings' : 'Notify when new work needs approval while this tab is in the background';
+}
+async function toggleNotifications() {
+  if (!notificationsSupported()) return;
+  if (notificationsWanted && Notification.permission === 'granted') {
+    notificationsWanted = false;
+  } else {
+    const permission = Notification.permission === 'default' ? await Notification.requestPermission() : Notification.permission;
+    notificationsWanted = permission === 'granted';
+  }
+  try { localStorage.setItem('acs.mc.notifications', notificationsWanted ? 'on' : 'off'); } catch {}
+  announce(notificationsWanted ? 'Approval notifications on' : 'Approval notifications off');
+  renderNotificationToggle();
+}
+function notifyApprovalNeeded(data) {
+  if (!notificationsWanted || !notificationsSupported() || Notification.permission !== 'granted') return;
+  if (document.visibilityState !== 'hidden') return;
+  const attrs = (data && data.attributes) || {};
+  const id = attrs['work_item.id'] || '';
+  const risk = attrs['work_item.risk'] ? ' (' + attrs['work_item.risk'] + ' risk)' : '';
+  try {
+    const notification = new Notification('Approval needed', {
+      body: (id ? 'Work item ' + id : 'A work item') + risk + ' is waiting on an operator.',
+      tag: 'acs-approval-' + id
+    });
+    notification.onclick = function () {
+      window.focus();
+      showView('approvals');
+      if (id) selectWorkItem(id, { scroll: true });
+      notification.close();
+    };
+  } catch {}
+}
+document.getElementById('notifications-toggle')?.addEventListener('click', function () { void toggleNotifications(); });
+
+// --- #13 keyboard shortcuts.
+function isTypingTarget(element) {
+  if (!element) return false;
+  const tag = String(element.tagName || '').toLowerCase();
+  return tag === 'input' || tag === 'textarea' || tag === 'select' || element.isContentEditable === true;
+}
+function visibleQueueItems() {
+  return Array.from(document.querySelectorAll('#queue-list [data-work-item]')).filter(function (row) { return !row.hidden; });
+}
+function moveQueueSelection(delta) {
+  const rows = visibleQueueItems();
+  if (!rows.length) return;
+  const current = rows.findIndex(function (row) { return row.dataset.workItem === selectedWorkItemId; });
+  const next = current === -1 ? (delta > 0 ? 0 : rows.length - 1) : Math.min(rows.length - 1, Math.max(0, current + delta));
+  const row = rows[next];
+  const view = document.body.dataset.activeView;
+  if (view !== 'queue' && view !== 'execution' && view !== 'overview') showView('queue');
+  row.focus({ preventScroll: false });
+  selectWorkItem(row.dataset.workItem, { scroll: true, keepFocus: true });
+}
+function shortcutHelpDialog() {
+  let dialog = document.getElementById('shortcut-help');
+  if (dialog) return dialog;
+  dialog = document.createElement('div');
+  dialog.id = 'shortcut-help';
+  dialog.className = 'approval-confirm-overlay';
+  dialog.setAttribute('role', 'dialog');
+  dialog.setAttribute('aria-modal', 'true');
+  dialog.setAttribute('aria-labelledby', 'shortcut-help-title');
+  dialog.hidden = true;
+  dialog.innerHTML = '<div class="approval-confirm-card shortcut-card"><h3 id="shortcut-help-title">Keyboard shortcuts</h3><dl class="shortcut-list">' +
+    keyboardShortcuts.map(function (entry) { return '<div><dt><kbd>' + escapeClient(entry.keys) + '</kbd></dt><dd>' + escapeClient(entry.action) + '</dd></div>'; }).join('') +
+    '</dl><p class="muted">Shortcuts are ignored while typing in a field.</p><div class="approval-confirm-actions"><button type="button" id="shortcut-help-close">Close</button></div></div>';
+  document.body.appendChild(dialog);
+  dialog.querySelector('#shortcut-help-close').addEventListener('click', function () { setShortcutHelp(false); });
+  return dialog;
+}
+let shortcutHelpReturnFocus = null;
+function setShortcutHelp(open) {
+  const dialog = shortcutHelpDialog();
+  if (open && dialog.hidden) {
+    shortcutHelpReturnFocus = document.activeElement;
+    dialog.hidden = false;
+    dialog.querySelector('#shortcut-help-close').focus();
+  } else if (!open && !dialog.hidden) {
+    dialog.hidden = true;
+    if (shortcutHelpReturnFocus && shortcutHelpReturnFocus.focus) shortcutHelpReturnFocus.focus();
+  }
+}
+document.addEventListener('keydown', function (event) {
+  if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
+  const help = document.getElementById('shortcut-help');
+  const helpOpen = Boolean(help && !help.hidden);
+  if (event.key === 'Escape' && helpOpen) {
+    event.preventDefault();
+    setShortcutHelp(false);
+    return;
+  }
+  if (document.getElementById('approval-confirm-dialog')) return;
+  if (isTypingTarget(event.target)) return;
+  const key = event.key;
+  if (key === '?') {
+    event.preventDefault();
+    setShortcutHelp(!helpOpen);
+    return;
+  }
+  if (helpOpen) return;
+  if (pendingGoKeyAt && Date.now() - pendingGoKeyAt < 1500) {
+    pendingGoKeyAt = 0;
+    const view = goToViews[key];
+    if (view) {
+      event.preventDefault();
+      showView(view);
+      safeReplaceState(location.pathname + location.search + '#' + view);
+    }
+    return;
+  }
+  pendingGoKeyAt = 0;
+  if (key === 'g') { pendingGoKeyAt = Date.now(); return; }
+  if (key === 'j' || key === 'k') { event.preventDefault(); moveQueueSelection(key === 'j' ? 1 : -1); return; }
+  if (key === '/') {
+    event.preventDefault();
+    showView('queue');
+    document.getElementById('queue-filter-text')?.focus();
+    return;
+  }
+  if (key === 'a') {
+    const reason = document.querySelector('#approvals-list .approval-item[data-status="needs_approval"] [data-reason]');
+    if (!reason) { announce('No approvals waiting'); return; }
+    event.preventDefault();
+    showView('approvals');
+    reason.focus();
+  }
+});
+
+
+const auditSummaryKeys = ["work_item.id","work_item.status","policy.decision","agent.id","worker.id","connector.id","action.kind"];
+function auditDisplayValue(value) {
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+function auditAttributesMarkup(attributes) {
+  const raw = redactAttributesClient(attributes || {});
+  const redacted = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const keys = Object.keys(redacted);
+  if (!keys.length) return '<small class="event-summary">no attributes</small>';
+  const preferred = auditSummaryKeys.filter(function (key) { return key in redacted; });
+  const summaryKeys = (preferred.length ? preferred : keys).slice(0, 3);
+  const summary = summaryKeys.map(function (key) { return key + '=' + auditDisplayValue(redacted[key]); }).join(' · ');
+  const rows = keys.map(function (key) { return '<div><dt>' + escapeClient(key) + '</dt><dd>' + escapeClient(auditDisplayValue(redacted[key])) + '</dd></div>'; }).join('');
+  return '<small class="event-summary">' + escapeClient(summary) + '</small><details class="event-attrs"><summary>' + keys.length + ' attribute' + (keys.length === 1 ? '' : 's') + '</summary><dl>' + rows + '</dl></details>';
+}
+
+
+const metricRows = [{"key":"http429","label":"HTTP 429 responses","bad":true},{"key":"rateLimited","label":"Rate-limit rejections","bad":true},{"key":"http5xx","label":"HTTP 5xx responses","bad":true},{"key":"authLockouts","label":"Auth lockouts","bad":true},{"key":"sseRejected","label":"SSE connections refused","bad":true},{"key":"sseDropped","label":"SSE clients dropped","bad":true},{"key":"httpRequests","label":"HTTP requests","bad":false},{"key":"auditEvents","label":"Audit events","bad":false}];
+const metricSamples = [];
+let metricsTimer = null;
+let metricsInFlight = false;
+const trendBars = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+function metricTrend(key) {
+  const deltas = [];
+  for (let i = 1; i < metricSamples.length; i += 1) {
+    deltas.push(Math.max(0, Number(metricSamples[i].metrics[key] || 0) - Number(metricSamples[i - 1].metrics[key] || 0)));
+  }
+  if (!deltas.length) return '';
+  const max = Math.max.apply(null, deltas);
+  return deltas.map(function (delta) { return max === 0 ? trendBars[0] : trendBars[Math.min(7, Math.round((delta / max) * 7))]; }).join('');
+}
+
+function renderLiveMetrics() {
+  const root = document.getElementById('live-metrics');
+  if (!root || !metricSamples.length) return;
+  const latest = metricSamples[metricSamples.length - 1];
+  const previous = metricSamples.length > 1 ? metricSamples[metricSamples.length - 2] : null;
+  const rows = metricRows.map(function (row) {
+    const total = Number(latest.metrics[row.key] || 0);
+    const delta = previous ? Math.max(0, total - Number(previous.metrics[row.key] || 0)) : null;
+    const hot = row.bad && delta !== null && delta > 0;
+    return '<tr class="' + (hot ? 'metric-hot' : '') + '"><th scope="row">' + escapeClient(row.label) + '</th><td>' + total + '</td><td>' + (delta === null ? '—' : '+' + delta) + '</td><td class="metric-trend" aria-hidden="true">' + metricTrend(row.key) + '</td></tr>';
+  }).join('');
+  root.innerHTML = '<table class="metrics-table"><thead><tr><th scope="col">Since gateway start</th><th scope="col">Total</th><th scope="col">Δ last poll</th><th scope="col">Trend</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<p class="muted">SQLite ' + (latest.metrics.sqliteReady ? 'ready' : 'NOT ready') + ' · polled ' + new Date(latest.at).toLocaleTimeString() + ' every 15s while this view is open.</p>';
+}
+
+async function pollMetrics() {
+  if (metricsInFlight) return;
+  metricsInFlight = true;
+  try {
+    const body = await fetchJson('/dashboard/metrics');
+    if (body && body.metrics) {
+      const previous = metricSamples[metricSamples.length - 1];
+      metricSamples.push({ at: body.at || new Date().toISOString(), metrics: body.metrics });
+      while (metricSamples.length > 20) metricSamples.shift();
+      if (previous && previous.metrics.sqliteReady && !body.metrics.sqliteReady) announce('SQLite control plane is not ready');
+      renderLiveMetrics();
+    }
+  } catch (error) {
+    const root = document.getElementById('live-metrics');
+    if (root && !metricSamples.length) root.innerHTML = '<p class="muted">Metrics unavailable.</p>';
+  } finally {
+    metricsInFlight = false;
+  }
+}
+
+function syncMetricsPolling() {
+  const active = document.body.dataset.activeView === 'metrics' && document.visibilityState !== 'hidden';
+  if (active && !metricsTimer) {
+    void pollMetrics();
+    metricsTimer = setInterval(function () { void pollMetrics(); }, 15000);
+  } else if (!active && metricsTimer) {
+    clearInterval(metricsTimer);
+    metricsTimer = null;
+  }
+}
+document.addEventListener('visibilitychange', syncMetricsPolling);
+
+
+const themeChoices = ["auto","light","dark"];
+function currentThemeChoice() {
+  const value = document.documentElement.dataset.theme;
+  return value === 'light' || value === 'dark' ? value : 'auto';
+}
+function renderThemeToggle() {
+  const toggle = document.getElementById('theme-toggle');
+  if (!toggle) return;
+  const choice = currentThemeChoice();
+  toggle.textContent = 'Theme: ' + choice;
+  toggle.setAttribute('aria-label', 'Theme: ' + choice + '. Activate to switch.');
+}
+function setThemeChoice(choice) {
+  if (choice === 'auto') delete document.documentElement.dataset.theme;
+  else document.documentElement.dataset.theme = choice;
+  try {
+    if (choice === 'auto') localStorage.removeItem("acs.mc.theme");
+    else localStorage.setItem("acs.mc.theme", choice);
+  } catch {}
+  renderThemeToggle();
+  announce('Theme: ' + choice);
+}
+document.getElementById('theme-toggle')?.addEventListener('click', function () {
+  const next = themeChoices[(themeChoices.indexOf(currentThemeChoice()) + 1) % themeChoices.length];
+  setThemeChoice(next);
+});
+renderThemeToggle();
+
+function onDashboardFragmentsApplied() {
+  updateTitleBadge();
+  refreshWaitBadges();
+}
+function onWorkItemControlSucceeded(control, id, body) {
+  const created = body && body.workItem && body.workItem.id;
+  announce(control === 'cancel' ? 'Cancel accepted for ' + id : control + ' created ' + (created || 'a new work item'));
+  scheduleDashboardRefresh(0);
+  if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+}
+
+function formatClientTime(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? redactClient(value) : date.toLocaleString();
+}
+
+function pillMarkup(value) {
+  const safe = escapeClient(value || 'unknown');
+  return '<span class="pill ' + safe + '">' + safe + '</span>';
+}
+
+function fetchJson(url) {
+  return fetch(url, { headers: { accept: 'application/json' } }).then(async function (res) {
+    const body = await res.json().catch(function () { return {}; });
+    if (!res.ok) {
+      throw new Error(body.error || body.code || ('HTTP ' + res.status));
+    }
+    return body;
+  });
+}
+
+function bindWorkItems() {
+  // Delegated: queue items are replaced by live fragment patches.
+  document.addEventListener('click', function (event) {
+    const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
+    if (!button) return;
+    selectWorkItem(button.dataset.workItem);
+  });
+}
+
+let workDetailGeneration = 0;
+async function loadWorkDetail(id, options) {
+  const target = document.querySelector('#work-detail');
+  if (!target || !id) return;
+  const generation = ++workDetailGeneration;
+  const preserve = Boolean(options && options.preserve);
+  const reasonInput = preserve ? target.querySelector('[data-control-reason]') : null;
+  const reason = reasonInput ? reasonInput.value : '';
+  const output = preserve ? target.querySelector('.approval-result') : null;
+  const outputText = output ? output.textContent : '';
+  const active = document.activeElement;
+  const activeId = preserve && active && active.id && target.contains(active) ? active.id : null;
+  if (!preserve) target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
+  try {
+    const body = await fetchJson('/work-items/' + encodeURIComponent(id));
+    // Drop responses superseded by a newer load, even for the same item.
+    if (generation !== workDetailGeneration || selectedWorkItemId !== id) return;
+    renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
+    if (!preserve) {
+      if (!options || options.focusDetail !== false) target.focus({ preventScroll: false });
+      return;
+    }
+    const nextReason = target.querySelector('[data-control-reason]');
+    if (nextReason && reason) nextReason.value = reason;
+    const nextOutput = target.querySelector('.approval-result');
+    if (nextOutput && outputText) nextOutput.textContent = outputText;
+    const nextActive = activeId ? document.getElementById(activeId) : null;
+    if (nextActive) nextActive.focus({ preventScroll: true });
+  } catch (error) {
+    if (preserve || generation !== workDetailGeneration) return;
+    target.innerHTML = '<div class="detail-error" role="alert">' + escapeClient(error.message) + '</div>';
+    target.focus({ preventScroll: false });
+  }
+}
+
+function agentRowsMarkup(agents) {
+  return agents.map(function (agent) {
+    const id = escapeClient(agent.id);
+    const name = escapeClient(agent.displayName || agent.name || agent.id);
+    return '<tr class="agent-row" tabindex="0" data-agent="' + id + '" data-agent-id="' + id + '">' +
+      '<td><strong>' + name + '</strong><small>' + id + '</small></td>' +
+      '<td>' + escapeClient(agent.kind || 'observed') + '</td>' +
+      '<td>' + pillMarkup(agent.status || agent.effectiveStatus || 'observed') + '</td>' +
+      '<td>' + pillMarkup(agent.health || 'unknown') + '</td>' +
+      '<td>' + escapeClient(agent.currentTask || '—') + '</td>' +
+      '<td>' + escapeClient(formatClientTime(agent.lastHeartbeatAt)) + '</td>' +
+      '<td>' + escapeClient(redactClient(agent.lastError || '—')) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function renderAgentTable(agents) {
+  const wrap = document.querySelector('#agents .table-wrap');
+  if (!wrap) return;
+  if (!agents.length) {
+    wrap.innerHTML = '<p class="empty">No agents or connectors observed.</p>';
+    return;
+  }
+  wrap.innerHTML = '<table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">' + agentRowsMarkup(agents) + '</tbody></table>';
+  bindAgentRows();
+}
+
+function bindAgentRows() {
+  document.querySelectorAll('[data-agent]').forEach(function (row) {
+    const activate = function () {
+      selectedAgentId = row.dataset.agent;
+      document.querySelectorAll('[data-agent]').forEach(function (candidate) { candidate.classList.remove('selected'); });
+      row.classList.add('selected');
+      loadAgentDetail(selectedAgentId);
+    };
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+}
+
+async function refreshAgentRoster() {
+  try {
+    const body = await fetchJson('/agents');
+    const agents = Array.isArray(body.agents) ? body.agents : [];
+    const count = document.querySelector('#agent-count');
+    if (count) count.textContent = agents.length + ' observed';
+    renderAgentTable(agents);
+    if (selectedAgentId && agents.some(function (agent) { return agent.id === selectedAgentId; })) {
+      document.querySelectorAll('[data-agent]').forEach(function (row) {
+        if (row.dataset.agent === selectedAgentId) row.classList.add('selected');
+      });
+    }
+  } catch (error) {
+    const detail = document.querySelector('#agent-detail');
+    if (detail && !selectedAgentId) {
+      detail.innerHTML = '<div class="detail-error">Agent backend unavailable: ' + escapeClient(error.message) + '</div>';
+    }
+  }
+}
+
+async function loadAgentDetail(id) {
+  const target = document.querySelector('#agent-detail');
+  if (!target || !id) return;
+  target.innerHTML = '<div class="detail-loading">Loading agent detail...</div>';
+  try {
+    const projected = await fetchJson('/agents/' + encodeURIComponent(id) + '?limit=8');
+    const registry = await fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8').catch(function () { return null; });
+    const capabilities = await fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities').catch(function () { return null; });
+    renderAgentDetail(target, {
+      projected: projected.agent,
+      registry: registry && registry.agent,
+      adapterStatus: (registry && registry.adapterStatus) || projected.adapterStatus,
+      events: (registry && registry.events && registry.events.length ? registry.events : projected.events) || [],
+      capabilities: (capabilities && capabilities.capabilities) || (registry && registry.agent && registry.agent.capabilities) || []
+    });
+  } catch (error) {
+    target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
+  }
+}
+
+function capabilityNames(input) {
+  return (Array.isArray(input) ? input : [])
+    .map(function (capability) { return typeof capability === 'string' ? capability : capability && capability.name; })
+    .filter(Boolean);
+}
+
+function renderAgentDetail(target, detail) {
+  const agent = detail.projected || detail.registry || {};
+  const registry = detail.registry || {};
+  const capabilities = capabilityNames(detail.capabilities).concat(capabilityNames(agent.capabilities || []));
+  const uniqueCapabilities = Array.from(new Set(capabilities)).sort();
+  const adapter = detail.adapterStatus ? (detail.adapterStatus.state || detail.adapterStatus.status || 'connected') : 'not configured';
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.displayName || registry.name || agent.id) + '</h3><small>' + escapeClient(agent.id || registry.id || '') + '</small></div><div>' + pillMarkup(agent.status || registry.effectiveStatus || registry.status || 'observed') + ' ' + pillMarkup(agent.health || 'unknown') + '</div></div>' +
+    '<dl class="detail-grid">' +
+      detailRow('Type', agent.kind || registry.kind) +
+      detailRow('Provider', registry.provider) +
+      detailRow('Model', registry.model) +
+      detailRow('Endpoint', registry.endpoint ? redactClient(registry.endpoint) : undefined) +
+      detailRow('Current task', agent.currentTask) +
+      detailRow('Current work item', agent.currentWorkItemId) +
+      detailRow('Heartbeat', formatClientTime(agent.lastHeartbeatAt || registry.lastHeartbeatAt)) +
+      detailRow('Adapter', adapter) +
+    '</dl>' +
+    '<div class="detail-section"><h4>Capabilities</h4>' + capabilityList(uniqueCapabilities) + '</div>' +
+    '<div class="detail-section"><h4>Recent Events</h4>' + eventList(detail.events || []) + '</div>';
+}
+
+function detailRow(label, value) {
+  return '<div><dt>' + escapeClient(label) + '</dt><dd>' + escapeClient(redactClient(value || '—')) + '</dd></div>';
+}
+
+function capabilityList(capabilities) {
+  if (!capabilities.length) return '<p class="muted">No capabilities recorded.</p>';
+  return '<div class="chip-list">' + capabilities.map(function (name) {
+    return '<span class="chip">' + escapeClient(name) + '</span>';
+  }).join('') + '</div>';
+}
+
+function eventList(events) {
+  if (!events.length) return '<p class="muted">No matching events.</p>';
+  return '<ol class="detail-events">' + events.slice(0, 8).map(function (event) {
+    const attrs = event.attributes || {};
+    const ref = attrs['work_item.id'] || attrs['agent.id'] || attrs['connector.id'] || '';
+    return '<li><time>' + escapeClient(eventClientTime(event)) + '</time><strong>' + escapeClient(event.name || 'event') + '</strong><small>' + escapeClient(redactClient(ref)) + '</small></li>';
+  }).join('') + '</ol>';
+}
+
+function eventClientTime(event) {
+  const nanos = Number(event && event.timeUnixNano);
+  return Number.isFinite(nanos) ? formatClientTime(new Date(Math.floor(nanos / 1000000)).toISOString()) : '—';
+}
+
+function shortHash(value) {
+  const text = String(value || '');
+  return text.length > 16 ? text.slice(0, 12) + '…' : text;
+}
+
+function renderExecutionAuthority(executionAttempts, attemptLeases) {
+  const attempts = Array.isArray(executionAttempts) ? executionAttempts.slice() : [];
+  const leases = Array.isArray(attemptLeases) ? attemptLeases : [];
+  if (!attempts.length) {
+    return '<div class="detail-section"><h4>Execution Authority</h4><p class="muted">No execution attempts recorded.</p></div>';
+  }
+  attempts.sort(function (left, right) { return Number(right.attemptNumber || 0) - Number(left.attemptNumber || 0); });
+  return '<div class="detail-section"><h4>Execution Authority</h4><div class="execution-stack">' + attempts.map(function (attempt) {
+    const matching = leases.filter(function (lease) { return lease.attemptId === attempt.attemptId; }).sort(function (left, right) { return Number(right.fencingEpoch || 0) - Number(left.fencingEpoch || 0); });
+    const lease = matching[0];
+    const worker = (lease && lease.workerId) || attempt.claimedByWorkerId || '—';
+    const leaseMarkup = lease
+      ? '<div class="lease-block"><div class="lease-head"><strong>Lease ' + escapeClient(lease.leaseId) + '</strong>' + pillMarkup(lease.status || 'unknown') + '</div><dl class="detail-grid compact">' +
+          detailRow('Worker', worker) +
+          detailRow('Fencing epoch', String(lease.fencingEpoch ?? attempt.currentFencingEpoch ?? 0)) +
+          detailRow('Admission', lease.admissionId) +
+          detailRow('Approval', lease.approvalId || 'not required / not bound') +
+          detailRow('Policy', lease.policyVersion) +
+          detailRow('Policy decision', shortHash(lease.policyDecisionHash)) +
+          detailRow('Issued', formatClientTime(lease.issuedAt)) +
+          detailRow('Expires', formatClientTime(lease.expiresAt)) +
+          detailRow('Last renewed', formatClientTime(lease.lastRenewedAt)) +
+          detailRow('Max expiry', formatClientTime(lease.maxExpiresAt)) +
+        '</dl></div>'
+      : '<p class="muted">No lease recorded for this attempt.</p>';
+    return '<article class="execution-card"><div class="execution-head"><div><strong>Attempt #' + escapeClient(attempt.attemptNumber) + '</strong><small>' + escapeClient(attempt.attemptId) + '</small></div>' + pillMarkup(attempt.status || 'unknown') + '</div><dl class="detail-grid compact">' +
+      detailRow('Worker', worker) +
+      detailRow('Fencing epoch', String(attempt.currentFencingEpoch ?? 0)) +
+      detailRow('Plan', attempt.planId) +
+      detailRow('Plan hash', shortHash(attempt.planHash)) +
+      detailRow('Input hash', shortHash(attempt.inputHash)) +
+      detailRow('Protocol', attempt.protocolVersion) +
+      detailRow('Started', formatClientTime(attempt.startedAt)) +
+      detailRow('Updated', formatClientTime(attempt.updatedAt)) +
+    '</dl>' + leaseMarkup + '</article>';
+  }).join('') + '</div></div>';
+}
+
+function renderWorkDetail(target, workItem, events, executionAttempts, attemptLeases) {
+  if (!workItem) {
+    target.innerHTML = '<div class="detail-error">Work item not found.</div>';
+    return;
+  }
+  const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
+  target.setAttribute('aria-labelledby', 'work-detail-title');
+  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
+    '<dl class="detail-grid">' +
+      detailRow('Requester', workItem.requester) +
+      detailRow('Intent', workItem.intent) +
+      detailRow('Target', workItem.target ? redactedAttributesJsonClient(workItem.target) : '—') +
+      detailRow('Created', formatClientTime(workItem.createdAt)) +
+    '</dl>' +
+    '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(redactClient(action.description)) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
+    renderExecutionAuthority(executionAttempts, attemptLeases) +
+    workItemControlsMarkup(workItem, sseConnected) +
+    '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
+}
+
+function knownQueueStatuses() {
+  return new Set(['draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'cancelling', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected', 'unknown', 'quarantined']);
+}
+
+function readQueueFilterFromDom() {
+  const statuses = [];
+  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
+    if (input.checked) statuses.push(input.getAttribute('data-queue-status') || input.value || '');
+  });
+  const agentInput = document.querySelector('#queue-filter-agent');
+  const textInput = document.querySelector('#queue-filter-text');
+  return {
+    statuses: statuses.filter(Boolean),
+    agentId: agentInput ? String(agentInput.value || '').trim() : '',
+    text: textInput ? String(textInput.value || '').trim() : ''
+  };
+}
+
+function parseQueueFilterFromLocation() {
+  const params = new URLSearchParams(location.search || '');
+  if (![...params.keys()].some(function (key) { return key === 'status' || key === 'q' || key === 'text' || key === 'agent'; })) {
+    const hash = String(location.hash || '').replace(/^#/, '');
+    const query = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1)
+      : hash.includes('=') ? hash.replace(/^[A-Za-z0-9_-]+&/, '')
+      : '';
+    if (query) {
+      const hashParams = new URLSearchParams(query);
+      hashParams.forEach(function (value, key) { params.append(key, value); });
+    }
+  }
+  const statuses = [];
+  params.getAll('status').forEach(function (entry) {
+    String(entry).split(',').forEach(function (part) {
+      const status = part.trim();
+      if (status) statuses.push(status);
+    });
+  });
+  return {
+    statuses: statuses,
+    agentId: String(params.get('agent') || '').trim(),
+    text: String(params.get('q') || params.get('text') || '').trim()
+  };
+}
+
+function writeQueueFilterToLocation(filter) {
+  const url = new URL(location.href);
+  url.searchParams.delete('status');
+  url.searchParams.delete('q');
+  url.searchParams.delete('text');
+  url.searchParams.delete('agent');
+  filter.statuses.forEach(function (status) {
+    if (status) url.searchParams.append('status', status);
+  });
+  if (filter.agentId) url.searchParams.set('agent', filter.agentId);
+  if (filter.text) url.searchParams.set('q', filter.text);
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+
+function syncQueueFilterControls(filter) {
+  const selected = new Set(filter.statuses);
+  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
+    const status = input.getAttribute('data-queue-status') || input.value || '';
+    input.checked = selected.has(status);
+  });
+  const agentInput = document.querySelector('#queue-filter-agent');
+  const textInput = document.querySelector('#queue-filter-text');
+  if (agentInput) agentInput.value = filter.agentId || '';
+  if (textInput) textInput.value = filter.text || '';
+}
+
+function applyQueueFilterClient(filter) {
+  const known = knownQueueStatuses();
+  const knownStatuses = filter.statuses.filter(function (status) { return known.has(status); });
+  const text = String(filter.text || '').trim().toLowerCase();
+  const agent = String(filter.agentId || '').trim().toLowerCase();
+  const buttons = Array.from(document.querySelectorAll('[data-work-item]'));
+  let visible = 0;
+  buttons.forEach(function (el) {
+    const id = el.getAttribute('data-work-item') || '';
+    const title = el.getAttribute('data-title') || '';
+    const status = el.getAttribute('data-status') || '';
+    const agentId = (el.getAttribute('data-agent-id') || '').toLowerCase();
+    let show = true;
+    if (knownStatuses.length && knownStatuses.indexOf(status) === -1) show = false;
+    if (show && text) {
+      const hay = (title + ' ' + id).toLowerCase();
+      if (hay.indexOf(text) === -1) show = false;
+    }
+    if (show && agent && agentId.indexOf(agent) === -1) show = false;
+    el.hidden = !show;
+    el.classList.toggle('queue-item-filtered-out', !show);
+    if (show) visible += 1;
+  });
+  const effectivelyEmpty = !knownStatuses.length && !text && !agent;
+  const count = document.querySelector('#queue-filter-count');
+  if (count) count.textContent = effectivelyEmpty ? (buttons.length + ' items') : (visible + ' of ' + buttons.length + ' items');
+  const live = document.querySelector('#queue-filter-live');
+  if (live) {
+    live.textContent = effectivelyEmpty
+      ? ('Showing all ' + buttons.length + ' work items')
+      : ('Showing ' + visible + ' of ' + buttons.length + ' work items');
+  }
+  return visible;
+}
+
+function bindQueueFilter() {
+  if (!document.querySelector('#queue-filter')) return;
+  const initial = parseQueueFilterFromLocation();
+  syncQueueFilterControls(initial);
+  applyQueueFilterClient(initial);
+  const applyFromDom = function () {
+    const filter = readQueueFilterFromDom();
+    writeQueueFilterToLocation(filter);
+    applyQueueFilterClient(filter);
+  };
+  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
+    input.addEventListener('change', applyFromDom);
+  });
+  const agentInput = document.querySelector('#queue-filter-agent');
+  const textInput = document.querySelector('#queue-filter-text');
+  if (agentInput) agentInput.addEventListener('input', applyFromDom);
+  if (textInput) textInput.addEventListener('input', applyFromDom);
+  window.addEventListener('popstate', function () {
+    const filter = parseQueueFilterFromLocation();
+    syncQueueFilterControls(filter);
+    applyQueueFilterClient(filter);
+  });
+}
+
+bindQueueFilter();
+bindWorkItems();
+bindAgentRows();
+refreshAgentRoster();
+connectSse();
+renderNotificationToggle();
+updateTitleBadge();
+
+function isElevatedApprovalRisk(risk) {
+  const normalized = String(risk || '').trim().toLowerCase();
+  return normalized === 'high' || normalized === 'critical';
+}
+
+function approvalActionHashPrefix(hash, maxLen) {
+  const text = String(hash || '');
+  const limit = typeof maxLen === 'number' ? maxLen : 12;
+  if (!text) return '';
+  return text.length > limit ? text.slice(0, limit) + '…' : text;
+}
+
+function escapeClientHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, function (char) {
+    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] || char;
+  });
+}
+
+const confirmCopy = {"approve":{"label":"Approve","heading":"Approve high-risk work item?","dismiss":"Cancel"},"reject":{"label":"Deny","heading":"Deny high-risk work item?","dismiss":"Cancel"},"cancel":{"label":"Cancel work item","heading":"Cancel this work item?","dismiss":"Keep work item"},"retry":{"label":"Retry","heading":"Retry this work item as a new item?","dismiss":"Go back"},"clone":{"label":"Clone","heading":"Clone this work item as a new item?","dismiss":"Go back"}};
+function requestApprovalConfirm(request) {
+  return new Promise(function (resolve) {
+    const existing = document.getElementById('approval-confirm-dialog');
+    if (existing) existing.remove();
+    const overlay = document.createElement('div');
+    overlay.id = 'approval-confirm-dialog';
+    overlay.setAttribute('role', 'dialog');
+    overlay.setAttribute('aria-modal', 'true');
+    overlay.setAttribute('aria-labelledby', 'approval-confirm-title');
+    overlay.className = 'approval-confirm-overlay';
+    const copy = confirmCopy[request.action] || confirmCopy.approve;
+    const actionLabel = copy.label;
+    const hashPrefix = approvalActionHashPrefix(request.actionHash || '');
+    const hashLine = hashPrefix
+      ? '<p class="approval-confirm-hash">Action hash: <code>' + escapeClientHtml(hashPrefix) + '</code></p>'
+      : '';
+    const kindLine = request.actionKind
+      ? '<p class="approval-confirm-kind">Action: <code>' + escapeClientHtml(request.actionKind) + '</code></p>'
+      : '';
+    overlay.innerHTML = '<div class="approval-confirm-card">' +
+      '<h3 id="approval-confirm-title">' + escapeClientHtml(copy.heading) + '</h3>' +
+      '<p class="approval-confirm-id">Work item: <code>' + escapeClientHtml(request.workItemId) + '</code></p>' +
+      '<p class="approval-confirm-risk">Risk: <strong>' + escapeClientHtml(request.risk) + '</strong></p>' +
+      kindLine +
+      hashLine +
+      '<div class="approval-confirm-actions">' +
+        '<button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>' + escapeClientHtml(copy.dismiss) + '</button>' +
+        '<button type="button" id="approval-confirm-ok" data-approval-confirm-ok>' + escapeClientHtml(actionLabel) + '</button>' +
+      '</div></div>';
+    function finish(confirmed) {
+      document.removeEventListener('keydown', onKeyDown);
+      overlay.remove();
+      resolve(confirmed);
+    }
+    function onKeyDown(event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        finish(false);
+      }
+    }
+    document.body.appendChild(overlay);
+    document.addEventListener('keydown', onKeyDown);
+    const cancelBtn = overlay.querySelector('#approval-confirm-cancel');
+    const okBtn = overlay.querySelector('#approval-confirm-ok');
+    cancelBtn?.addEventListener('click', function () { finish(false); });
+    okBtn?.addEventListener('click', function () { finish(true); });
+    cancelBtn?.focus();
+  });
+}
+
+document.querySelectorAll('[data-execution-mode]').forEach((input) => {
+  input.addEventListener('change', async () => {
+    if (!input.checked) return;
+    const output = document.querySelector('#execution-mode-result');
+    const headers = { 'content-type': 'application/json' };
+    const res = await fetch('/execution-mode', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ mode: input.value, reason: 'operator set ' + input.value + ' from mission control' })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (output) output.textContent = res.ok ? 'mode ' + body.executionMode : 'Rejected: ' + (body.error || body.code || res.status);
+    if (res.ok) {
+      // Update in place (no hard reload): banners follow the confirmed mode.
+      const admin = document.querySelector('#admin-mode-banner');
+      const problem = document.querySelector('#execution-mode-problem');
+      if (admin) {
+        admin.hidden = body.executionMode !== 'admin';
+        admin.textContent = body.executionMode === 'admin' ? "ACS ADMIN MODE -- human approval disabled" : '';
+      }
+      if (problem) problem.hidden = true;
+    }
+  });
+});
+
+// Delegated: approval cards are replaced by live fragment patches.
+document.addEventListener('click', async (event) => {
+    const button = event.target && event.target.closest ? event.target.closest('[data-approve],[data-reject],[data-unblock]') : null;
+    if (!button || button.disabled) return;
+    const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
+    const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'reject' : 'unblock';
+    const risk = button.dataset.risk || '';
+    if (!sseConnected) {
+      const output = document.querySelector('#approval-result-' + id);
+      if (output) output.textContent = 'Disconnected: actions disabled until reconnect';
+      return;
+    }
+    const reasonInput = document.querySelector('[data-reason="' + id + '"]');
+    const reason = reasonInput ? reasonInput.value.trim() : '';
+    const output = document.querySelector('#approval-result-' + id);
+    if (action !== 'unblock' && !reason) {
+      output.textContent = 'Reason required';
+      if (reasonInput) reasonInput.focus();
+      return;
+    }
+    if ((action === 'approve' || action === 'reject') && isElevatedApprovalRisk(risk)) {
+      if (document.getElementById('approval-confirm-dialog')) {
+        return;
+      }
+      const confirmed = await requestApprovalConfirm({
+        workItemId: id,
+        action: action,
+        actionHash: button.dataset.actionHash,
+        actionKind: button.dataset.actionKind,
+        risk: risk
+      });
+      if (!confirmed) return;
+    }
+    const headers = { 'content-type': 'application/json' };
+    const payload = action === 'unblock' ? {} : { reason };
+    if (action === 'approve') {
+      if (!button.dataset.actionHash) {
+        output.textContent = 'Approval action hash unavailable';
+        return;
+      }
+      payload.actionHash = button.dataset.actionHash;
+    }
+    const res = await fetch('/work-items/' + encodeURIComponent(id) + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
+    const body = await res.json().catch(() => ({}));
+    output.textContent = res.ok ? action + ' accepted' : 'Rejected: ' + (body.error || body.code || res.status);
+    if (res.ok) {
+      announce(action + ' accepted for ' + id);
+      scheduleDashboardRefresh(0);
+    }
+});
+
+
+
+const composerForm = document.getElementById('task-form');
+let composerKnownKinds = [];
+try { composerKnownKinds = JSON.parse(composerForm ? composerForm.dataset.knownActionKinds || '[]' : '[]'); } catch {}
+let composerPreviewTimer = null;
+let composerPreviewSeq = 0;
+
+function composerDraft(form) {
+  const data = new FormData(form);
+  const kind = String(data.get('actionKind') || '').trim() || 'agent.prompt';
+  const description = String(data.get('actionDescription') || '').trim() || 'Dispatch prompt to selected agent';
+  const service = String(data.get('service') || '').trim();
+  const rawParams = String(data.get('actionParams') || '').trim();
+  let params = {};
+  let paramsError = '';
+  if (rawParams) {
+    try {
+      params = JSON.parse(rawParams);
+      if (params === null || typeof params !== 'object' || Array.isArray(params)) paramsError = 'Params must be a JSON object, like {"paths": ["README.md"]}.';
+    } catch (error) {
+      paramsError = 'Params are not valid JSON: ' + (error && error.message ? error.message : 'parse error');
+    }
+  }
+  return {
+    ready: Boolean(String(data.get('title') || '').trim() && String(data.get('intent') || '').trim()),
+    kind: kind,
+    paramsError: paramsError,
+    payload: {
+      title: String(data.get('title') || ''),
+      intent: String(data.get('intent') || ''),
+      risk: String(data.get('risk') || 'medium'),
+      target: service ? { services: [service] } : {},
+      requestedActions: [{ kind: kind, description: description, params: paramsError ? {} : params }]
+    }
+  };
+}
+
+function showComposerParamsError(form, message) {
+  const field = form.querySelector('[name="actionParams"]');
+  const error = document.getElementById('composer-params-error');
+  if (error) error.textContent = message;
+  if (field) {
+    if (message) field.setAttribute('aria-invalid', 'true'); else field.removeAttribute('aria-invalid');
+  }
+}
+
+const previewOutcomeCopy = {
+  auto_admitted: 'Would be auto-admitted: no approval needed.',
+  needs_approval: 'Would wait for operator approval.',
+  blocked: 'Would be blocked by policy.',
+  rejected: 'Would be rejected before policy runs.'
+};
+
+function renderComposerPreview(preview) {
+  const root = document.getElementById('composer-preview');
+  if (!root) return;
+  root.dataset.outcome = preview.outcome || '';
+  const actions = Array.isArray(preview.actions) ? preview.actions : [];
+  root.innerHTML = '<p class="preview-outcome"><strong>' + escapeClient(previewOutcomeCopy[preview.outcome] || preview.outcome || 'Unknown') + '</strong> ' + escapeClient(preview.reason || '') + '</p>' +
+    (actions.length ? '<ul class="preview-actions">' + actions.map(function (action) {
+      return '<li><code>' + escapeClient(action.kind) + '</code> ' + pillMarkup(action.decision) + ' <small>' + escapeClient(action.reason) + '</small></li>';
+    }).join('') + '</ul>' : '') +
+    (Array.isArray(preview.matchedRules) && preview.matchedRules.length ? '<small class="muted">Rules: ' + escapeClient(preview.matchedRules.join(', ')) + '</small>' : '');
+}
+
+function renderComposerHint(form, draft) {
+  const hint = document.getElementById('composer-kind-hint');
+  if (!hint || !composerKnownKinds.length) return;
+  const unknown = composerKnownKinds.indexOf(draft.kind) === -1;
+  hint.classList.toggle('field-error', unknown);
+  hint.textContent = unknown
+    ? draft.kind + ' is not an action kind policy knows; it will be denied.'
+    : 'Suggestions are the action kinds policy evaluates; any other kind is denied.';
+}
+
+async function previewComposerPolicy(form) {
+  const draft = composerDraft(form);
+  renderComposerHint(form, draft);
+  showComposerParamsError(form, draft.paramsError);
+  const root = document.getElementById('composer-preview');
+  if (!draft.ready) {
+    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Fill in a title and instructions to preview policy.</p>'; }
+    return;
+  }
+  if (draft.paramsError) return;
+  const seq = ++composerPreviewSeq;
+  try {
+    const res = await fetch('/dashboard/policy-preview', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json' },
+      body: JSON.stringify(draft.payload)
+    });
+    const body = await res.json().catch(function () { return {}; });
+    if (seq !== composerPreviewSeq) return;
+    if (!res.ok) {
+      if (root) { root.dataset.outcome = 'error'; root.innerHTML = '<p class="muted">Preview unavailable: ' + escapeClient(body.error || body.code || res.status) + '</p>'; }
+      return;
+    }
+    renderComposerPreview(body);
+  } catch (error) {
+    if (seq === composerPreviewSeq && root) { root.dataset.outcome = 'error'; root.innerHTML = '<p class="muted">Preview unavailable.</p>'; }
+  }
+}
+
+function scheduleComposerPreview(form) {
+  if (composerPreviewTimer) clearTimeout(composerPreviewTimer);
+  composerPreviewTimer = setTimeout(function () {
+    composerPreviewTimer = null;
+    void previewComposerPolicy(form);
+  }, 600);
+}
+
+composerForm?.addEventListener('input', function () { scheduleComposerPreview(composerForm); });
+composerForm?.addEventListener('change', function () { scheduleComposerPreview(composerForm); });
+document.getElementById('composer-preview-button')?.addEventListener('click', function () { void previewComposerPolicy(composerForm); });
+
+composerForm?.addEventListener('submit', async function (event) {
+  event.preventDefault();
+  const form = composerForm;
+  const result = document.getElementById('task-result');
+  const draft = composerDraft(form);
+  showComposerParamsError(form, draft.paramsError);
+  if (!draft.ready) {
+    if (result) result.textContent = 'Title and instructions are required';
+    (form.querySelector('[name="title"]').value.trim() ? form.querySelector('[name="intent"]') : form.querySelector('[name="title"]')).focus();
+    return;
+  }
+  if (draft.paramsError) {
+    if (result) result.textContent = 'Fix the action params first';
+    form.querySelector('[name="actionParams"]')?.focus();
+    return;
+  }
+  const res = await fetch('/work-items', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(draft.payload) });
+  const body = await res.json().catch(function () { return {}; });
+  const createdId = body.id || (body.workItem && body.workItem.id) || '';
+  if (result) result.textContent = res.ok ? 'Created ' + createdId + (body.status ? ' (' + body.status + ')' : '') : 'Rejected: ' + (body.error || res.status);
+  if (res.ok) {
+    form.reset();
+    composerPreviewSeq += 1;
+    const root = document.getElementById('composer-preview');
+    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Fill in a title and instructions to preview policy.</p>'; }
+    announce('Created ' + createdId);
+    scheduleDashboardRefresh(0);
+  }
+});
+
+
+const viewAliases = {
+  overview: 'overview',
+  queue: 'queue',
+  execution: 'execution',
+  approvals: 'approvals',
+  agents: 'agents',
+  connectors: 'connectors',
+  'operator-metrics': 'metrics',
+  metrics: 'metrics',
+  events: 'audit',
+  audit: 'audit',
+  policy: 'policy',
+  system: 'system',
+  dispatch: 'overview'
+};
+function showView(name) {
+  const view = viewAliases[name] || 'overview';
+  document.body.dataset.activeView = view;
+  document.querySelectorAll('nav a[data-nav]').forEach((link) => {
+    link.classList.toggle('active', link.dataset.nav === view);
+  });
+  syncSystemProbes();
+  syncMetricsPolling();
+}
+document.querySelector('aside nav')?.addEventListener('click', (event) => {
+  const link = event.target.closest('a[data-nav]');
+  if (!link) return;
+  event.preventDefault();
+  showView(link.dataset.nav);
+  const href = link.getAttribute('href') || '#overview';
+  history.replaceState(null, '', href);
+});
+showView((location.hash || '#overview').replace('#', ''));
+openWorkItemFromLocation();</script>
+  </body>
+</html>
