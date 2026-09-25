@@ -33,6 +33,8 @@
     "device:install": "cd src/remote-device && npm install",
     "device:start": "tsx src/remote-device/device.ts --standalone",
     "device:start:dev": "nodemon --watch src/remote-device --exec tsx src/remote-device/device.ts --standalone",
+    "control-plane:start": "bash -c 'set -a; source \"$HOME/.config/dc-relay/relay.env\"; set +a; npm run build && exec node dist/control-plane/server.js'",
+    "control-plane:test": "npm run build && node test/test-control-plane.js && node test/test-control-plane-pairing-crypto.js && node test/test-control-plane-pairing.js && node test/test-control-plane-mcp.js && node test/test-control-plane-consent.js && node test/test-control-plane-prefix.js && node test/test-control-plane-server-contract.js && node test/test-control-plane-supabase-store.js",
     "sync-version": "node scripts/sync-version.js",
     "bump": "node scripts/sync-version.js --bump",
     "bump:minor": "node scripts/sync-version.js --bump --minor",
@@ -139,6 +141,7 @@
     "nexe": "^5.0.0-beta.4",
     "nodemon": "^3.0.2",
     "shx": "^0.3.4",
+    "supabase": "^2.117.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "^5.3.3"
