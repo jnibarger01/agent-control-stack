@@ -3,6 +3,7 @@ import { ControlStackError, redactValue } from "@agent-control-stack/shared";
 import { z } from "zod";
 import type { MachineControllerConfig } from "./config.js";
 import { resolveSafePath } from "./path.js";
+import { classifyReadonlyCommand } from "./readonly-rules.js";
 
 export const riskLevelSchema = z.enum(["read_only", "safe_mutation", "requires_approval", "destructive", "forbidden"]);
 export type RiskLevel = z.infer<typeof riskLevelSchema>;
@@ -53,11 +54,15 @@ export function previewCommand(config: MachineControllerConfig, input: unknown):
   if (isMutation(command, args)) {
     return { cwd, command, args, risk: "requires_approval", reason: "command can mutate local state" };
   }
-  if (isKnownReadonly(command, args) && config.commands.allowReadonly.includes(command)) {
-    return { cwd, command, args, risk: "read_only", reason: "command is an allowed read-only diagnostic" };
+  if (!config.commands.allowReadonly.includes(command)) {
+    return { cwd, command, args, risk: "forbidden", reason: "no read-only allow rule matched" };
   }
-
-  return { cwd, command, args, risk: "forbidden", reason: "no read-only allow rule matched" };
+  const verdict = classifyReadonlyCommand(config, cwd, command, args);
+  if (!verdict.ok) {
+    return { cwd, command, args, risk: "forbidden", reason: verdict.reason };
+  }
+  // Path arguments come back canonicalised, so the previewed command is exactly what runs.
+  return { cwd, command, args: verdict.args, risk: "read_only", reason: "command is an allowed read-only diagnostic" };
 }
 
 export interface BoundedCommandOptions {
@@ -219,18 +224,6 @@ function hasErrorCode(error: unknown, code: string): boolean {
 
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
-}
-
-function isKnownReadonly(command: string, args: string[]): boolean {
-  return (
-    (command === "git" && ["status", "diff", "log", "show"].includes(args[0] ?? "")) ||
-    (command === "bun" && args[0] === "--version") ||
-    (command === "node" && ["--version", "-v"].includes(args[0] ?? "")) ||
-    (command === "python3" && ["--version", "-V"].includes(args[0] ?? "")) ||
-    (command === "docker" && args[0] === "ps") ||
-    (command === "df" && ["", "-h"].includes(args[0] ?? "")) ||
-    (command === "free" && ["", "-h"].includes(args[0] ?? ""))
-  );
 }
 
 function isMutation(command: string, args: string[]): boolean {

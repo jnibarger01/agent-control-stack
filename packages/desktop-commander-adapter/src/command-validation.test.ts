@@ -51,7 +51,19 @@ describe("validateProcessCommand", () => {
   });
 
   it("contains path-bearing output flags", () => {
-    expect(() => validateProcessCommand("git diff --output=/etc/acs-command-escape", roots)).toThrow(/outside every allow root/);
+    expect(() => validateProcessCommand("git diff --output=/etc/acs-command-escape", roots)).toThrow(
+      /forbidden by ACS policy.*--output/
+    );
+  });
+
+  it("refuses git --output even inside an allow root, because it writes a file", () => {
+    expect(() => validateProcessCommand(`git diff --output=${roots[0]}/diff.txt`, roots)).toThrow(/forbidden by ACS policy.*--output/);
+  });
+
+  it("does not inherit the machine controller's wider read-only rules", () => {
+    for (const command of ["ls", "rg foo x", "grep foo x", "find .", "cat x"]) {
+      expect(() => validateProcessCommand(command, roots)).toThrow(/forbidden by ACS policy/);
+    }
   });
 
   it("resolves accepted executables from a fixed system path", () => {

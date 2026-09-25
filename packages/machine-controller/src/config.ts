@@ -29,7 +29,8 @@ const rawConfigSchema = z.object({
   commands: z
     .object({
       allow_readonly: z.array(z.string().min(1)).default([]),
-      deny: z.array(z.string().min(1)).default([])
+      deny: z.array(z.string().min(1)).default([]),
+      allowed_units: z.array(z.string().regex(/^[A-Za-z0-9@._:-]+\.(service|timer|socket|target)$/)).default([])
     })
     .optional(),
   agents: z
@@ -72,6 +73,8 @@ export interface MachineControllerConfig {
   commands: {
     allowReadonly: string[];
     deny: string[];
+    /** systemd units that `systemctl status` / `journalctl -u` may inspect; empty means none. */
+    allowedUnits?: string[];
   };
   agents?: Array<{
     id: string;
@@ -118,7 +121,7 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
     command_timeout_ms: 120_000,
     command_termination_grace_ms: 1_000
   };
-  const commands = raw.commands ?? { allow_readonly: [], deny: [] };
+  const commands = raw.commands ?? { allow_readonly: [], deny: [], allowed_units: [] };
   const agents = raw.agents;
   const audit = raw.audit ?? { log_path: ".acs/audit/mcp.jsonl" };
 
@@ -138,7 +141,8 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
     },
     commands: {
       allowReadonly: commands.allow_readonly,
-      deny: commands.deny
+      deny: commands.deny,
+      allowedUnits: commands.allowed_units
     },
     agents: agents.map((agent) => ({
       id: agent.id,
