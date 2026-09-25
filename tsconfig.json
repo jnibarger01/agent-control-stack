@@ -3,6 +3,7 @@
   "references": [
     { "path": "./tsconfig.compounding.json" },
     { "path": "packages/shared" },
+    { "path": "packages/strands-runtime" },
     { "path": "packages/work-items" },
     { "path": "./packages/actor-router" },
     { "path": "packages/acp-adapter" },

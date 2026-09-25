@@ -15,6 +15,7 @@
     "packages/*"
   ],
   "scripts": {
+    "harness": "npm run harness -w packages/strands-runtime --",
     "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site && npm run release:dry-run-gate",
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
     "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety",
