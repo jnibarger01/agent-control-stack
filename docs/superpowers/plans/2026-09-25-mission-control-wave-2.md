@@ -59,22 +59,30 @@ What is still missing, checked against the code:
 
 - **Problem:** The inline client script is untyped and unlinted. Every wave-1
   feature added to it, and regressions only show up in JSDOM tests.
-- **Change:** Move the client into `src/client/*.ts` and bundle it at build
-  time with esbuild (already transitively available; if not, add it as a
-  devDependency) into one IIFE string that the server inlines. Move CSS into
-  `src/styles.css`, read once at startup. Split server render by panel
-  (`render/queue.ts`, `render/approvals.ts`, …).
-- **Acceptance:** `index.ts` is under 400 lines. The client passes `tsc
---noEmit` and eslint. Rendered HTML is byte-identical before and after, using
-  a snapshot test captured before the move. CSP behavior is unchanged.
-  Mission Control currently sends no `Content-Security-Policy` header and uses
-  no nonces or hashes, so the bundle stays an inline script and no build-time
-  hash is added in this refactor.
+- **Split into two PRs.** Bundling rewrites the client JS text, so it cannot be
+  byte-identical to the current output. Doing the structural move first keeps
+  the byte-identical guard meaningful for that step.
+- **1a: structural split (done).** `index.ts` is now a 96-line re-export barrel.
+  The code moved into `types.ts`, `queue-filter.ts`, `sse-connection.ts`,
+  `approval-actions.ts`, `agents.ts`, `format.ts`, `styles.ts`,
+  `client-script.ts`, and `render/{page,fragments,panels,work-detail}.ts`.
+  Golden files in `src/__golden__/` (`render-golden.test.ts`) were captured
+  before the move and pass unchanged after it. The public exports are the same.
+  CSS stays a TS string module, because `tsc` does not copy `.css` files into
+  `dist/`.
+- **1b: typed client bundle (next).** Move the client JS (`client-script.ts`
+  and the `*ClientSource()` strings) into `src/client/*.ts` with DOM lib types.
+  Bundle it with esbuild into a committed generated module that exports the
+  script string, with a `--check` mode in CI in the same style as
+  `contracts:check`. That way vitest and `tsc -b` need no extra build step. The
+  JSDOM behavior tests and the Playwright suite (#3) are the guard, and the
+  golden files are regenerated once in that PR.
+- **CSP:** Behavior stays unchanged. Mission Control sends no
+  `Content-Security-Policy` header and uses no nonces or hashes, so the bundle
+  stays an inline script and no build-time hash is added.
 - **Follow-up (separate security PR, not part of #1):** For CSP hardening, serve
   the bundle as a same-origin external script and set `script-src 'self'`.
   Don't add more inline-script hash or nonce machinery.
-- **Risk:** This is a large mechanical diff. Land it alone, with no behavior
-  changes mixed in.
 
 ### 2. Typed dashboard read-model contract
 
@@ -292,7 +300,7 @@ PLAN` shows a scan. Filters live in the URL so they can be shared.
 
 | PR  | Items           | Why together                                                |
 | --- | --------------- | ----------------------------------------------------------- |
-| 1   | #1              | Mechanical refactor, isolated, snapshot-guarded             |
+| 1   | #1a, then #1b   | Mechanical split (golden-guarded), then typed client bundle |
 | 2   | #2, #3          | Test infrastructure before new surface area                 |
 | 3   | #4, #5, #10     | Execution-safety view; shares attempt and lease data        |
 | 4   | #6, #18         | Fail-closed UI states                                       |
