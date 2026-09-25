@@ -60,7 +60,8 @@ export function sendMessagePage(res: ServerResponse, status: number, heading: st
  * client, Claude, …). Supabase redirects here with ?authorization_id=…, and
  * everything shown comes from getAuthorizationDetails: nothing assumes which
  * client is asking. If the browser has no Supabase session, the same page
- * offers email sign-in (magic link back to this URL, or the email's code).
+ * offers email sign-in. The standard Supabase template sends a magic link;
+ * separately issued email OTPs remain supported as a fallback.
  */
 export function sendConsentPage(res: ServerResponse, supabaseUrl: string, publishableKey: string, basePath = ''): void {
   const origin = new URL(supabaseUrl).origin;
@@ -70,7 +71,7 @@ export function sendConsentPage(res: ServerResponse, supabaseUrl: string, publis
 <section id="signin" hidden>
   <p>Sign in to continue.</p>
   <form id="email-form"><input id="email" type="email" autocomplete="email" placeholder="you@example.com" required><button type="submit">Email me a sign-in link</button></form>
-  <form id="otp-form"><p class="muted">Have a code? Enter the 8-digit code from a sign-in email (or one issued by your administrator):</p><input id="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="12345678"><button type="submit">Verify code</button></form>
+  <form id="otp-form"><p class="muted">Have a code? Enter an 8-digit code only if one was issued separately. The standard Supabase sign-in email contains a link, not a code.</p><input id="otp" inputmode="numeric" autocomplete="one-time-code" placeholder="12345678"><button type="submit">Verify code</button></form>
 </section>
 <section id="consent" hidden>
   <p><strong id="client-name"></strong> <span id="client-host" class="muted"></span> wants to access your account <strong id="user-email"></strong>.</p>
@@ -86,10 +87,13 @@ const $=(id)=>document.getElementById(id);
 const status=(t)=>{$('status').textContent=t;};
 const params=new URLSearchParams(location.search);
 const authorizationId=params.get('authorization_id');
-const client=window.supabase.createClient(SUPABASE_URL,KEY,{auth:{flowType:'pkce',persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+// This page is a browser-only email sign-in surface. Use implicit auth so a
+// magic link still completes when an email client opens it in a new browser
+// context; PKCE would require the verifier stored in the tab that requested it.
+const client=window.supabase.createClient(SUPABASE_URL,KEY,{auth:{flowType:'implicit',persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
 const RESTART='Start again from the application that sent you here.';
 let email='';
-function returnUrl(){const u=new URL(location.href);u.searchParams.delete('code');return u.toString();}
+function returnUrl(){const u=new URL(location.href);u.searchParams.delete('code');u.hash='';return u.toString();}
 function host(uri){try{return uri?'('+new URL(uri).host+')':'';}catch(e){return '';}}
 async function showSignIn(){$('consent').hidden=true;$('signin').hidden=false;status('');}
 async function showConsent(){
@@ -129,9 +133,11 @@ $('approve').addEventListener('click',()=>decide(true));
 $('deny').addEventListener('click',()=>decide(false));
 $('switch').addEventListener('click',async()=>{await client.auth.signOut();await showSignIn();});
 window.__consentReady=(async()=>{
-  // detectSessionInUrl exchanges a magic-link ?code= during getSession(); drop it from the address bar afterwards.
-  const {data}=await client.auth.getSession();
-  if(params.has('code')) history.replaceState(null,'',returnUrl());
+  // detectSessionInUrl consumes the magic-link session from the URL. Remove
+  // callback credentials from the address bar after auth-js has processed them.
+  const {data,error}=await client.auth.getSession();
+  if(params.has('code')||location.hash) history.replaceState(null,'',returnUrl());
+  if(error){await showSignIn();status(error.message);return;}
   if(data.session) await showConsent(); else await showSignIn();
 })().catch((e)=>status(e&&e.message||'Unexpected error'));
 })();`;
