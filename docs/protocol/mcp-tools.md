@@ -174,6 +174,42 @@ Returns `{ cwd, command, args, risk, reason }`. `risk` is one of the levels abov
 
 **Important divergence from the old spec:** this tool has no approval path and no `approval_token` field. It classifies the command exactly as `cmd.preview` does and throws `command_refused` for anything that doesn't classify as `read_only`. There is currently no MCP tool, local or gateway, that executes a mutating shell command directly — mutating work only happens through the gateway's work-item/worker-claim flow, which is a separate execution path entirely (see [approval-lifecycle.md](approval-lifecycle.md)). Environment is allowlisted to `HOME, PATH, SHELL, TMPDIR, USER`; timeout and output caps are enforced (`security.command_timeout_ms`, `security.max_output_bytes`); stdout/stderr are redacted the same way `fs.read` output is.
 
+#### Read-only command rules
+
+A command is `read_only` only when it is listed in `commands.allow_readonly`
+**and** its exact shape matches a rule in
+`packages/machine-controller/src/readonly-rules.ts`. Rules allowlist
+subcommands, flags, and positionals; anything unrecognised is refused as
+`forbidden`, and `cmd.preview`'s `reason` names the refused flag or path.
+
+| Command                                       | Allowed shape                                                                                                                                                                |
+| --------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `git`                                         | `status`, `diff`, `log`, `show` (no `--output`, no `--ext-diff`); `rev-parse`, `branch` (no positionals), `remote [-v]`, `describe` (no `--dirty`), `blame FILE`, `ls-files` |
+| `ls`                                          | `-l -a -A -h -1 -t -r -S -d -F`, paths; no `-R`                                                                                                                              |
+| `wc`, `head`, `tail`                          | count flags (`-n N`, `-c N`) and one or more regular files; no `-f`/`-F`                                                                                                     |
+| `rg`, `grep`                                  | pattern (or `-e`), basic match flags, one or more **regular files** — never a directory, so recursion cannot reach denied or credential files                                |
+| `find`                                        | start paths plus `-name -iname -path -type -maxdepth -mindepth` only                                                                                                         |
+| `du`                                          | `-s -h -c -k -d N`, paths                                                                                                                                                    |
+| `ps`                                          | `-eo` with fixed columns (`pid,ppid,user,stat,etime,start,comm,%cpu,%mem,rss,vsz,nlwp`); no `args`/`cmd`                                                                     |
+| `ss`                                          | exactly one of `-ltn -lun -ltnp -lunp -s`                                                                                                                                    |
+| `uname`, `uptime`, `whoami`, `id`, `hostname` | bare, or one info flag (`uname`, `uptime`)                                                                                                                                   |
+| `systemctl`                                   | `status`/`is-active`/`is-enabled UNIT...`, `list-timers`                                                                                                                     |
+| `journalctl`                                  | `-u UNIT -n N` required; `--no-pager`, `-o short\|short-iso\|cat`; no `-f`                                                                                                   |
+| `docker`                                      | `ps`, `images`, `logs --tail N NAME`, `stats --no-stream`                                                                                                                    |
+| `which`                                       | one command name                                                                                                                                                             |
+| `node`, `bun`, `python3`, `df`, `free`        | version / usage flags only (unchanged)                                                                                                                                       |
+
+Path positionals go through `resolveSafePath` (allow roots, deny roots,
+credential-like names, symlinks resolved) and are rewritten to their canonical
+real path, so the previewed command is what runs. `find` and `du` are refused
+when a `paths.deny` root lies inside the start path. `systemctl` and
+`journalctl` units must be listed in `commands.allowed_units` (for example
+`acs-worker.service`); it defaults to empty, which refuses all unit inspection.
+
+The Desktop Commander adapter shares this classifier but keeps its own
+narrower `allow_readonly` list; it does not gain `ls`, `rg`, `grep`, `find`,
+or the other new commands.
+
 ## Gateway MCP tools
 
 ### ChatGPT App dashboard

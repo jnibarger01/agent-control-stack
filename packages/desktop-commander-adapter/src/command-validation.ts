@@ -165,7 +165,10 @@ function machineControllerShimConfig(containmentRoots: readonly string[], denied
     },
     paths: { allow: [...containmentRoots], deny: [] },
     commands: {
-      allowReadonly: ["git", "node", "npm", "pnpm", "bun", "python3", "docker", "df", "free", "ls", "cat", "rg", "grep"],
+      // Only commands this surface has always classified as read-only. The machine controller's wider
+      // rule set (ls, rg, find, ...) is not inherited here: this shim has no deny roots, so enabling
+      // those needs its own containment review.
+      allowReadonly: ["git", "node", "npm", "pnpm", "bun", "python3", "docker", "df", "free"],
       deny: [...deniedCommands]
     },
     audit: { logPath: "/dev/null" }
