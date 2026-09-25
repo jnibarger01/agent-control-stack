@@ -43,14 +43,20 @@ function element(id) {
   return el;
 }
 
-async function renderConsent({ session = { access_token: 't' }, sessionError = null, details, detailsError = null, search = '?authorization_id=auth-123', hash = '', validOtp = null } = {}) {
+async function renderConsent({ session = { access_token: 't' }, sessionError = null, initializeError = null, search = '?authorization_id=auth-123', hash = '', validOtp = null, details, detailsError = null } = {}) {
   const html = await (await fetch(`${base}/oauth/consent${search}`)).text();
   const scripts = [...html.matchAll(/<script nonce="[^"]+">([\s\S]*?)<\/script>/g)].map((m) => m[1]);
   assert.equal(scripts.length, 1, 'expected one inline script');
   const elements = new Map();
   const calls = { approve: [], deny: [], assigned: [], createClient: [] };
+  const location = { search, hash, href: `https://relay.example.test:8443/oauth/consent${search}${hash}`, assign: (url) => calls.assigned.push(url) };
   const fakeClient = {
     auth: {
+      initialize: async () => {
+        calls.initialized = true;
+        if (location.hash) location.hash = '';
+        return { error: initializeError };
+      },
       getSession: async () => ({ data: { session }, error: sessionError }),
       signOut: async () => ({}),
       signInWithOtp: async (params) => { calls.signInWithOtp = params; return { error: null }; },
@@ -62,21 +68,20 @@ async function renderConsent({ session = { access_token: 't' }, sessionError = n
       },
     },
   };
-  const href = `https://relay.example.test:8443/oauth/consent${search}`;
   const context = {
     URL, URLSearchParams, console,
     document: {
       getElementById: (id) => { if (!elements.has(id)) elements.set(id, element(id)); return elements.get(id); },
       createElement: (tag) => element(tag),
     },
-    location: { search, hash, href: `${href}${hash}`, assign: (url) => calls.assigned.push(url) },
+    location,
     history: { replaceState: (...args) => { calls.replaceState = args; } },
   };
   context.window = { supabase: { createClient: (url, key, options) => { calls.createClient.push({ url, key, options }); return fakeClient; } } };
   vm.createContext(context);
   vm.runInContext(scripts[0], context);
   await context.window.__consentReady;
-  return { html, el: (id) => context.document.getElementById(id), calls: JSON.parse(JSON.stringify(calls)), liveCalls: calls };
+  return { html, el: (id) => context.document.getElementById(id), calls: JSON.parse(JSON.stringify(calls)), liveCalls: calls, location };
 }
 
 try {
@@ -142,6 +147,16 @@ try {
     assert.equal(calls.createClient[0].options.auth.detectSessionInUrl, true);
   });
 
+  await test('in-flight PKCE magic-link callbacks keep PKCE so a pre-deploy email can still complete', async () => {
+    const { calls } = await renderConsent({
+      session: { access_token: 'fresh' },
+      search: '?authorization_id=auth-123&code=pkce-code',
+      details: { authorization_id: 'auth-123', scope: 'openid', client: { id: 'c', name: 'Claude', uri: '' }, user: { email: 'jace@example.com' } },
+    });
+    assert.equal(calls.createClient[0].options.auth.flowType, 'pkce');
+    assert.deepEqual(calls.replaceState, [null, '', 'https://relay.example.test:8443/oauth/consent?authorization_id=auth-123']);
+  });
+
   await test('email sign-in keeps the OAuth authorization request in the magic-link return URL', async () => {
     const { el, liveCalls } = await renderConsent({ session: null, details: { client: { name: 'Claude' } } });
     el('email').value = 'jace@example.com';
@@ -151,7 +166,7 @@ try {
     assert.equal(liveCalls.signInWithOtp.options.emailRedirectTo, 'https://relay.example.test:8443/oauth/consent?authorization_id=auth-123');
   });
 
-  await test('magic-link callback credentials are scrubbed and session-detection errors remain visible', async () => {
+  await test('magic-link callback credentials are scrubbed after auth-js clears the fragment', async () => {
     const ok = await renderConsent({
       session: { access_token: 'fresh' },
       hash: '#access_token=fresh&refresh_token=refresh&type=magiclink',
@@ -161,8 +176,25 @@ try {
         user: { email: 'jace@example.com' },
       },
     });
+    assert.equal(ok.calls.initialized, true);
+    assert.equal(ok.location.hash, '');
     assert.deepEqual(ok.calls.replaceState, [null, '', 'https://relay.example.test:8443/oauth/consent?authorization_id=auth-123']);
+  });
 
+  await test('initialize callback errors stay visible when getSession has no error', async () => {
+    const failed = await renderConsent({
+      session: null,
+      initializeError: { message: 'Magic-link session could not be established' },
+      hash: '#error=access_denied&error_description=Magic-link%20session%20could%20not%20be%20established',
+      details: { client: { name: 'Claude' } },
+    });
+    assert.equal(failed.el('signin').hidden, false);
+    assert.equal(failed.el('status').textContent, 'Magic-link session could not be established');
+    assert.equal(failed.calls.detailsFor, undefined);
+    assert.deepEqual(failed.calls.replaceState, [null, '', 'https://relay.example.test:8443/oauth/consent?authorization_id=auth-123']);
+  });
+
+  await test('session-detection errors remain visible', async () => {
     const failed = await renderConsent({
       session: null,
       sessionError: { message: 'Magic-link session could not be established' },

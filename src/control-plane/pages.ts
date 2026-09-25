@@ -87,10 +87,13 @@ const $=(id)=>document.getElementById(id);
 const status=(t)=>{$('status').textContent=t;};
 const params=new URLSearchParams(location.search);
 const authorizationId=params.get('authorization_id');
-// This page is a browser-only email sign-in surface. Use implicit auth so a
-// magic link still completes when an email client opens it in a new browser
-// context; PKCE would require the verifier stored in the tab that requested it.
-const client=window.supabase.createClient(SUPABASE_URL,KEY,{auth:{flowType:'implicit',persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
+const hadAuthCallback=params.has('code')||Boolean(location.hash);
+const hashParams=new URLSearchParams(String(location.hash||'').replace(/^#/,''));
+const callbackError=hashParams.get('error_description')||hashParams.get('error');
+// New email sign-ins use implicit so a different browser context can complete.
+// Keep PKCE only when an in-flight ?code= callback is already on the URL.
+const flowType=params.has('code')?'pkce':'implicit';
+const client=window.supabase.createClient(SUPABASE_URL,KEY,{auth:{flowType:flowType,persistSession:true,autoRefreshToken:true,detectSessionInUrl:true}});
 const RESTART='Start again from the application that sent you here.';
 let email='';
 function returnUrl(){const u=new URL(location.href);u.searchParams.delete('code');u.hash='';return u.toString();}
@@ -133,11 +136,14 @@ $('approve').addEventListener('click',()=>decide(true));
 $('deny').addEventListener('click',()=>decide(false));
 $('switch').addEventListener('click',async()=>{await client.auth.signOut();await showSignIn();});
 window.__consentReady=(async()=>{
-  // detectSessionInUrl consumes the magic-link session from the URL. Remove
-  // callback credentials from the address bar after auth-js has processed them.
+  // Snapshot callback presence before auth-js clears the fragment. Prefer
+  // initialize() errors over getSession(), which only reports stored session.
+  let initError=null;
+  if(client.auth.initialize){const init=await client.auth.initialize();initError=init&&init.error;}
   const {data,error}=await client.auth.getSession();
-  if(params.has('code')||location.hash) history.replaceState(null,'',returnUrl());
-  if(error){await showSignIn();status(error.message);return;}
+  if(hadAuthCallback) history.replaceState(null,'',returnUrl());
+  const visible=initError||error||(callbackError&&{message:callbackError});
+  if(visible){await showSignIn();status(visible.message);return;}
   if(data.session) await showConsent(); else await showSignIn();
 })().catch((e)=>status(e&&e.message||'Unexpected error'));
 })();`;
