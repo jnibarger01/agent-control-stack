@@ -22,7 +22,9 @@
     "setup": "dist/setup-claude-server.js",
     "remove": "dist/uninstall-claude-server.js",
     "dc-health": "dist/health/health-check.js",
-    "dc-audit-ui": "dist/audit/audit-server.js"
+    "dc-audit-ui": "dist/audit/audit-server.js",
+    "jace-commander": "dist/jace-commander/cli.js",
+    "jc-privileged-helper": "dist/jace-commander/privileged-helper.js"
   },
   "main": "dist/local-runtime.js",
   "types": "dist/local-runtime.d.ts",
@@ -43,7 +45,7 @@
     "bump": "node scripts/sync-version.js --bump",
     "bump:minor": "node scripts/sync-version.js --bump --minor",
     "bump:major": "node scripts/sync-version.js --bump --major",
-    "build": "tsc && shx cp setup-claude-server.js uninstall-claude-server.js track-installation.js dist/ && shx chmod +x dist/*.js dist/harness/*.js dist/openclaw-bridge/*.js && shx mkdir -p dist/data && shx cp src/data/onboarding-prompts.json dist/data/ && shx mkdir -p dist/remote-device/scripts && shx cp src/remote-device/scripts/blocking-offline-update.js dist/remote-device/scripts/ && node scripts/build-ui-runtime.cjs",
+    "build": "tsc && shx cp setup-claude-server.js uninstall-claude-server.js track-installation.js dist/ && shx chmod +x dist/*.js dist/harness/*.js dist/openclaw-bridge/*.js dist/jace-commander/cli.js dist/jace-commander/privileged-helper.js && shx mkdir -p dist/data && shx cp src/data/onboarding-prompts.json dist/data/ && shx mkdir -p dist/remote-device/scripts && shx cp src/remote-device/scripts/blocking-offline-update.js dist/remote-device/scripts/ && node scripts/build-ui-runtime.cjs",
     "watch": "tsc --watch",
     "start": "node dist/index.js",
     "start:standalone": "node dist/index.js --standalone",

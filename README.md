@@ -135,6 +135,10 @@ for an ACS-managed service. Managed mode receives only the ACS Ed25519 public ke
 policy, approvals, leases, capability signing, and audit authority remain in ACS.
 Local launch does not require Supabase, device authorization, or a hosted channel.
 
+## Jace Commander
+
+`jace-commander` is a second MCP server in this package for the Jace stack. It reads ACS, codex-swarm, the visualizer, Mission Router state and LoopTrace chains, and it can run **one exact command as root per human-approved ACS capability** (`acs.jc.v1`), through a root-owned helper and a single pinned sudoers rule. See [docs/jace-commander.md](docs/jace-commander.md) for the architecture, contract, install steps and known risks. It is fail-closed until ACS implements `acs.jc.v1` issuance.
+
 ## OpenClaw ACS Bridge
 
 `dist/openclaw-bridge/index.js` (`desktop-commander-openclaw-bridge` on `PATH`
