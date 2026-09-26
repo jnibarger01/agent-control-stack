@@ -7,6 +7,17 @@ import {
 } from "@agent-control-stack/acp-adapter";
 import {
   authorizeDesktopCommanderExecution,
+  authorizeJaceCommanderExecution,
+  jaceCommanderApprovalSummary,
+  jaceCommanderSigningConfigFromEnv,
+  prepareJaceCommanderCapability,
+  signPreparedJaceCommanderCapability,
+  SqliteJaceCommanderIssuanceRegistry,
+  validateJaceCommanderInvocation,
+  validateJaceCommanderSigningConfig,
+  type JaceCommanderExecutionAuthorization,
+  type JaceCommanderInvocation,
+  type JaceCommanderSigningConfig,
   authorizationDeniedEvent,
   capabilityDeniedEvent,
   capabilityIssuedEvent,
@@ -152,6 +163,9 @@ const DEFAULT_JSON_BODY_LIMIT_BYTES = 256 * 1024;
 /** Attempt lease TTL for gateway-claimed Desktop Commander bridge executions. */
 const DC_BRIDGE_LEASE_MS = 300_000;
 const DC_BRIDGE_WORKER_ID = "acs-dc-bridge";
+/** Dedicated worker identity of the Jace Commander managed bridge (acs.jc.v1 issuance). */
+const JC_BRIDGE_WORKER_ID = "acs-jc-bridge";
+const JC_BRIDGE_LEASE_MS = 300_000;
 /** Result submission keeps an explicit route bodyLimit; currently matches the default. */
 const MAX_RESULT_BODY_BYTES = DEFAULT_JSON_BODY_LIMIT_BYTES;
 // Well above the socket's 16 KB high-water mark, so ordinary bursts ride
@@ -243,6 +257,13 @@ export interface GatewayOptions {
     identityConfigFingerprint?: string;
     runtimeScopes?: readonly string[];
   };
+  /**
+   * ACS-only Jace Commander (acs.jc.v1) signing material for
+   * POST /jc/capability/issue. Defaults to ACS_JACE_COMMANDER_CAPABILITY_* env;
+   * `false` or absent config makes the endpoint answer 503 (fail closed).
+   * Must be a different key from the acs.dc.v1 key.
+   */
+  jaceCommanderCapability?: JaceCommanderSigningConfig | false;
   /** Containment roots for the gateway-side Phase 6-8 re-authorization. */
   desktopCommanderContainment?: ContainmentConfig;
   /**
@@ -305,6 +326,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
+  const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
+  const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
   /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
   function recordLeaseAuthorizedExecutionEvent(
     authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch?: number },
@@ -1627,6 +1650,305 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
 
+  // ACS-issued Jace Commander capability issuance (acs.jc.v1, lease-bound, per call).
+  //
+  // Mirrors /dc/capability/issue with a separate worker identity, signing key,
+  // tool table and issuance table. privileged_exec (root execution of one exact
+  // argv) is ALWAYS approval-gated by a human: policy-gate returns
+  // require_approval for `privileged.exec`, admin execution mode never
+  // auto-approves it, and the durable issuance gate rejects `acs:admin` and
+  // self-approvals before anything is signed.
+  app.post(
+    "/jc/capability/issue",
+    { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      try {
+        const workerId = requireWorkerIdentity(request, reply, auth);
+        if (!workerId) {
+          return;
+        }
+        if (workerId !== JC_BRIDGE_WORKER_ID) {
+          return reply.code(403).send({
+            error: "dedicated Jace Commander bridge identity is required",
+            code: "jc_bridge_identity_required"
+          });
+        }
+        const jcActor = firstHeader(request.headers["x-dc-actor"]);
+        if (!jcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(jcActor)) {
+          return reply.code(400).send({ error: "x-dc-actor header is required", code: "jc_actor_invalid" });
+        }
+        const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
+        if (!jcSigningConfig) {
+          return reply.code(503).send({
+            error: "jace-commander capability issuance not configured",
+            code: "capability_issuance_unconfigured"
+          });
+        }
+        try {
+          validateJaceCommanderSigningConfig(jcSigningConfig);
+        } catch {
+          return reply
+            .code(503)
+            .send({ error: "capability signing key is invalid", code: "capability_signing_key_invalid" });
+        }
+
+        let invocation: JaceCommanderInvocation;
+        try {
+          invocation = validateJaceCommanderInvocation(body.tool, parseDcArgsSummary(body.argsSummary));
+        } catch (error) {
+          recordJcCapabilityAudit(workerId, request.id, body.tool, jcActor, "denied");
+          const code = error instanceof ControlStackError ? error.code : "jace_commander_argument_invalid";
+          const unknownTool = code === "jace_commander_tool_not_allowlisted";
+          return reply.code(unknownTool ? 403 : 400).send({
+            decision: "deny",
+            reason: unknownTool ? "unknown_tool" : "invalid_arguments",
+            code,
+            ...(error instanceof ControlStackError ? { detail: error.message.slice(0, 512) } : {})
+          });
+        }
+
+        const toolPolicy = invocation.policy;
+        const bindingHash = stableHash({
+          contract: "acs.jc.v1",
+          tool: invocation.toolName,
+          invocationHash: invocation.invocationHash,
+          runtimeId: jcSigningConfig.runtimeId,
+          requiredScopes: toolPolicy.scopes,
+          requesterSubject: jcActor
+        });
+
+        const existing = workItems
+          .list()
+          .filter((candidate) => {
+            const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
+            return (
+              candidate.requesterSubject === jcActor &&
+              params?.tool === invocation.toolName &&
+              params?.bindingHash === bindingHash &&
+              ["needs_approval", "approved"].includes(candidate.status) &&
+              // An admin auto-grant never counts toward a jc capability.
+              !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER)
+            );
+          })
+          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+
+        if (!existing && !hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
+          return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
+        }
+
+        let workItem =
+          existing ??
+          tools.create_work_item(
+            createWorkItemSchema.parse({
+              title:
+                invocation.toolName === "privileged_exec"
+                  ? `ROOT: ${String((invocation.arguments.argv as string[]).join(" ")).slice(0, 180)}`
+                  : `Jace Commander capability: ${invocation.toolName}`,
+              intent: `ACS-issued acs.jc.v1 capability for Jace Commander tool ${invocation.toolName} requested by ${jcActor}`,
+              requester: "agent",
+              requesterSubject: jcActor,
+              target: {},
+              requestedActions: [
+                {
+                  kind: toolPolicy.actionKind,
+                  description: `Jace Commander tool ${invocation.toolName}`,
+                  params: {
+                    tool: invocation.toolName,
+                    contract: "acs.jc.v1",
+                    invocationHash: invocation.invocationHash,
+                    bindingHash,
+                    runtimeId: jcSigningConfig.runtimeId,
+                    requiredScopes: [...toolPolicy.scopes],
+                    requesterSubject: jcActor,
+                    approvalSummary: jaceCommanderApprovalSummary(invocation),
+                    write:
+                      toolPolicy.actionKind === "privileged.exec" || toolPolicy.actionKind === "jc.integration.write",
+                    network: false
+                  }
+                }
+              ],
+              risk: toolPolicy.risk,
+              ...(body.correlationId ? { metadata: { correlationId: body.correlationId } } : {})
+            })
+          );
+
+        const evaluations = policy.evaluateWorkItem(workItem, workerId, "approve");
+        const required = evaluations.filter((evaluation) => evaluation.decision.decision === "require_approval");
+        const actionHash = required[0]?.actionHash ?? executionActionHash(workItem);
+
+        if (workItem.status === "blocked" || policy.summarize(evaluations).decision === "deny") {
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          return reply.code(403).send({
+            decision: "deny",
+            reason: "policy_denied",
+            workItemId: workItem.id,
+            detail: policy.summarize(evaluations).reason
+          });
+        }
+        // Deliberately NO admin-mode auto-approval here (unlike /dc/capability/issue):
+        // Jace Commander capabilities only ride approvals granted through the
+        // normal human approval path.
+        if (workItem.status !== "approved" || (toolPolicy.requiresApproval && required.length === 0)) {
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          return reply.code(409).send({
+            decision: "require_approval",
+            workItemId: workItem.id,
+            actionHash,
+            approvalSummary: jaceCommanderApprovalSummary(invocation),
+            approvalInstructions: `A human must POST /work-items/${workItem.id}/approve with actionHash ${actionHash}, then retry the identical call`
+          });
+        }
+
+        const claimed = tools.claim_approved_work_item_by_id({
+          id: workItem.id,
+          workerId,
+          leaseMs: JC_BRIDGE_LEASE_MS
+        });
+        if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          return reply.code(409).send({
+            decision: "require_approval",
+            workItemId: workItem.id,
+            actionHash,
+            approvalInstructions: `A human must POST /work-items/${workItem.id}/approve with actionHash ${actionHash}, then retry the identical call`
+          });
+        }
+        workItem = workItems.get(workItem.id) ?? workItem;
+        const lease = workItems.getActiveLeaseForAttempt(claimed.attemptId);
+        if (!lease) {
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          return reply
+            .code(503)
+            .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
+        }
+
+        const authority = {
+          workItemId: claimed.id,
+          attemptId: claimed.attemptId,
+          leaseId: claimed.leaseId,
+          workerId,
+          fencingEpoch: claimed.fencingEpoch
+        };
+        const deny = (code: string, status = 403) => {
+          try {
+            recordLeaseAuthorizedExecutionEvent(authority, {
+              name: "jace_commander.capability_denied",
+              body: { tool: invocation.toolName, code, requestId: request.id },
+              attributes: {
+                "jace_commander.tool": invocation.toolName,
+                "jace_commander.invocation_hash": invocation.invocationHash,
+                "jace_commander.denial_code": code
+              }
+            });
+          } catch {
+            // Lease authority may already have lapsed.
+          }
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          return reply
+            .code(status)
+            .send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
+        };
+
+        let authorization: JaceCommanderExecutionAuthorization;
+        try {
+          authorization = authorizeJaceCommanderExecution({
+            claimed,
+            trustedWorkItem: workItem,
+            lease,
+            workerId,
+            invocation
+          });
+        } catch (error) {
+          return deny(error instanceof ControlStackError ? error.code : "authorization_failed");
+        }
+        if (toolPolicy.requiresApproval) {
+          const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
+          if (!approval) return deny("approval_binding_missing");
+          authorization = {
+            ...authorization,
+            approvalActionHash: approval.actionHash
+          } as JaceCommanderExecutionAuthorization;
+        }
+
+        const payload = prepareJaceCommanderCapability(authorization, jcSigningConfig);
+        try {
+          const recorded = jcIssuanceRegistry.recordIssuance({
+            runtimeId: payload.runtimeId,
+            toolName: payload.toolName,
+            leaseId: payload.leaseId,
+            attemptId: payload.attemptId,
+            workItemId: payload.workItemId,
+            workerId,
+            fencingEpoch: payload.leaseEpoch,
+            planHash: payload.planHash,
+            actionHash: payload.actionHash,
+            invocationHash: payload.invocationHash,
+            approvalId: payload.approvalId,
+            requesterSubject: jcActor,
+            keyId: jcSigningConfig.keyId,
+            nonce: payload.nonce,
+            issuedAt: payload.issuedAt,
+            expiresAt: payload.expiresAt
+          });
+          if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
+            throw new ControlStackError(
+              "jace_commander_capability_issuance_rejected",
+              "issuance binding does not match capability payload"
+            );
+          }
+        } catch (error) {
+          return deny(error instanceof ControlStackError ? error.code : "jace_commander_capability_issuance_rejected");
+        }
+
+        try {
+          recordLeaseAuthorizedExecutionEvent(authority, {
+            name: "jace_commander.capability_issued",
+            body: {
+              tool: payload.toolName,
+              runtimeId: payload.runtimeId,
+              keyId: jcSigningConfig.keyId,
+              requestHash: payload.requestHash,
+              expiresAt: payload.expiresAt,
+              ...(payload.approvalId ? { approvalId: payload.approvalId } : {})
+            },
+            attributes: {
+              "jace_commander.tool": payload.toolName,
+              "jace_commander.invocation_hash": payload.invocationHash,
+              "jace_commander.runtime_id": payload.runtimeId,
+              "execution.request_hash": payload.requestHash,
+              ...(payload.approvalId ? { "approval.id": payload.approvalId } : {})
+            }
+          });
+        } catch (error) {
+          return reply.code(503).send({
+            error: "capability evidence could not be committed",
+            code: "capability_evidence_unavailable",
+            detail: error instanceof Error ? error.message : String(error)
+          });
+        }
+
+        const capability = signPreparedJaceCommanderCapability(payload, jcSigningConfig);
+        recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
+        return {
+          decision: "allow",
+          capability,
+          workItemId: workItem.id,
+          attemptId: payload.attemptId,
+          leaseId: payload.leaseId,
+          leaseEpoch: payload.leaseEpoch,
+          planHash: payload.planHash,
+          actionHash: payload.actionHash,
+          claimActionHash: claimed.actionHash,
+          inputHash: claimed.inputHash,
+          invocationHash: payload.invocationHash,
+          workerId
+        };
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   // Managed-runtime bootstrap: only the dedicated bridge can issue or
   // complete a challenge. Completion must include the exact identity metadata
   // echoed by the managed Desktop Commander child during MCP initialize.
@@ -1939,6 +2261,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     executionReads.close();
     deviceAuthStore.close();
     capabilityIssuanceRegistry.close();
+    jcIssuanceRegistry.close();
     workItems.close();
   });
 
@@ -1976,6 +2299,26 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   }
 
   /** Hash-chained audit evidence for /dc/capability/issue (issued vs denied). */
+  function recordJcCapabilityAudit(
+    actor: string,
+    requestId: string,
+    toolName: string,
+    jcActor: string,
+    outcome: "issued" | "denied",
+    workItemId?: string
+  ): void {
+    workItems.recordConnectorRequest({
+      actor,
+      source: `jc-capability-${outcome}`,
+      route: "/jc/capability/issue",
+      toolName,
+      workItemId,
+      requestId,
+      authMethod: "gateway_bearer",
+      authSubject: jcActor
+    });
+  }
+
   function recordDcCapabilityAudit(
     actor: string,
     requestId: string,
@@ -2148,6 +2491,19 @@ type DcCapabilitySigningConfig = CapabilitySigningConfig & {
   identityConfigFingerprint: string;
   runtimeScopes: readonly string[];
 };
+
+function resolveJaceCommanderSigningConfig(
+  override: GatewayOptions["jaceCommanderCapability"]
+): JaceCommanderSigningConfig | undefined {
+  if (override === false) return undefined;
+  if (override) return { ...override, ttlMs: override.ttlMs ?? 29_000 };
+  try {
+    return jaceCommanderSigningConfigFromEnv(process.env);
+  } catch {
+    // Incomplete/invalid env: the route answers 503 rather than issuing.
+    return undefined;
+  }
+}
 
 function resolveCapabilitySigningConfig(
   override: GatewayOptions["desktopCommanderCapability"],
@@ -2469,6 +2825,7 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/oauth/token" ||
     path === "/work-items" ||
     path === "/dc/capability/issue" ||
+    path === "/jc/capability/issue" ||
     path === "/dc/runtime/bootstrap" ||
     path === "/dc/runtime/bootstrap/complete" ||
     path === "/policy/explain" ||
