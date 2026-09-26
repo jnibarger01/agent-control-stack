@@ -96,3 +96,33 @@ export type {
 
 export { disabledDeviceAuthorizationProvider } from "./device-authorization.js";
 export type { DeviceAuthorizationProvider, DeviceAuthorizationGrant } from "./device-authorization.js";
+
+export {
+  JACE_COMMANDER_AUDIENCE,
+  JACE_COMMANDER_CAPABILITY_VERSION,
+  JACE_COMMANDER_INVOCATION_DOMAIN,
+  JACE_COMMANDER_PRIVILEGED_TOOL,
+  PRIVILEGED_EXEC_ACTION_KIND,
+  authorizeJaceCommanderExecution,
+  jaceCommanderApprovalSummary,
+  jaceCommanderInvocationHash,
+  jaceCommanderNonceHash,
+  jaceCommanderSigningConfigFromEnv,
+  jaceCommanderToolNames,
+  jaceCommanderToolPolicy,
+  prepareJaceCommanderCapability,
+  signPreparedJaceCommanderCapability,
+  validateJaceCommanderInvocation,
+  validateJaceCommanderSigningConfig
+} from "./jace-commander.js";
+export type {
+  JaceCommanderCapability,
+  JaceCommanderCapabilityPayload,
+  JaceCommanderExecutionAuthorization,
+  JaceCommanderInvocation,
+  JaceCommanderScope,
+  JaceCommanderSigningConfig,
+  JaceCommanderToolPolicy
+} from "./jace-commander.js";
+export { SqliteJaceCommanderIssuanceRegistry } from "./jace-commander-registry.js";
+export type { JaceCommanderIssuanceBinding } from "./jace-commander-registry.js";

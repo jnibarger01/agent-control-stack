@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
+import { ACS_ADMIN_APPROVER } from "./execution-mode.js";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
 
 export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
@@ -38,6 +39,29 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
 
   if (!isSupportedAction(context.action.kind)) {
     return risk("forbidden", "unknown action kind is denied", ["deny:unknown-action"]);
+  }
+  // Jace Commander privileged_exec (acs.jc.v1): root execution of one exact
+  // argv. Never auto-allowed, never admin-auto-approved, never self-approved;
+  // it can only proceed on a human approval of this exact action hash. The
+  // argv is deliberately NOT mapped to `command`, so the ordinary `sudo` /
+  // shell-metacharacter denials below keep applying to every other action.
+  if (context.action.kind === PRIVILEGED_EXEC_KIND) {
+    if (context.operation === "approve" && context.actor === ACS_ADMIN_APPROVER) {
+      return risk("forbidden", "privileged execution requires a human approver", ["deny:privileged-admin-approval"]);
+    }
+    if (context.operation === "approve" && context.actor === context.requester) {
+      return risk("forbidden", "privileged execution cannot be self-approved", ["deny:self-approval"]);
+    }
+    return risk("requires_approval", "privileged execution always requires human approval", [
+      "approval:privileged-exec"
+    ]);
+  }
+  if (JC_READ_KINDS.has(context.action.kind) && context.write !== true && context.destructive !== true) {
+    return risk("read_only", "Jace Commander read-only integration view is allowed", ["allow:jc-read"]);
+  }
+  if (context.action.kind === "jc.integration.write" && context.destructive !== true) {
+    // Creates an ACS work item that is itself policy-evaluated on its own.
+    return risk("safe_mutation", "Jace Commander mission submission is allowed", ["allow:jc-mission-submit"]);
   }
   if (isSudo(command)) {
     return risk("forbidden", "sudo is denied by default", ["deny:sudo"]);
@@ -158,8 +182,15 @@ export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
   "cmd.preview",
   "cmd.run",
   "service.restart",
-  "shell"
+  "shell",
+  "jc.integration.read",
+  "jc.integration.write",
+  "jc.fs.read",
+  "privileged.exec"
 ]);
+
+const PRIVILEGED_EXEC_KIND = "privileged.exec";
+const JC_READ_KINDS: ReadonlySet<string> = new Set(["jc.integration.read", "jc.fs.read"]);
 
 function isSupportedAction(kind: string): boolean {
   return SUPPORTED_ACTION_KINDS.includes(kind);

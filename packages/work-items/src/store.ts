@@ -617,7 +617,9 @@ const executionAuditEventNames = new Set([
   "desktop_commander.capability_denied",
   "desktop_commander.tool_called",
   "desktop_commander.tool_succeeded",
-  "desktop_commander.tool_failed"
+  "desktop_commander.tool_failed",
+  "jace_commander.capability_issued",
+  "jace_commander.capability_denied"
 ]);
 
 export const localAgentEventTypes = [
