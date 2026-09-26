@@ -2415,8 +2415,8 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         try {
             const resultAttestOk = attestResult({
                 requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
-                // Same verified identifier the request attestation recorded:
-                // strict ACS envelopes carry no top-level capabilityId.
+                // Same derived capability ID as the request-side audit: ACS
+                // envelopes carry no top-level capabilityId field.
                 capabilityId: gate.allowed && gate.acsCapability ? gate.acsCapability.capabilityId : cap?.capabilityId,
                 isError, durationMs: Date.now() - startTime,
                 executorPid: process.pid,

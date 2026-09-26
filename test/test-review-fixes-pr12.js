@@ -65,7 +65,7 @@ await test('ACS pipeline: the same verified capability cannot be used twice (per
   assert.equal(first.allowed, true, JSON.stringify(first));
   const replay = await preExecuteEnforcement({ tool: 'read_file', args, meta: { agent: 'a', capability: cap } });
   assert.equal(replay.allowed, false);
-  assert.equal(replay.code, 'ACS_CAPABILITY_REPLAYED');
+  assert.equal(replay.code, 'ACS_CAPABILITY_REPLAY');
   assert.ok(fs.readdirSync(path.join(stateDir, 'acs-pipeline-nonces')).length >= 1);
 });
 

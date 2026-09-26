@@ -219,10 +219,10 @@ export function gatewayActorFromMeta(meta: unknown): GatewayActor | undefined {
 export type AcsCapabilityRejectionCode =
   | 'ACS_CAPABILITY_INVALID_SIGNATURE'
   | 'ACS_CAPABILITY_EXPIRED'
+  | 'ACS_CAPABILITY_REPLAY'
   | 'ACS_CAPABILITY_TOOL_MISMATCH'
   | 'ACS_CAPABILITY_ARGS_MISMATCH'
-  | 'ACS_CAPABILITY_MALFORMED'
-  | 'ACS_CAPABILITY_REPLAYED';
+  | 'ACS_CAPABILITY_MALFORMED';
 
 export interface AcsCapabilityAttestation {
   capabilityId: string;
@@ -240,49 +240,6 @@ export type AcsCapabilityVerifyResult =
 export function acsCapabilityPublicKeyEnv(): string | undefined {
   const key = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY;
   return key && key.length > 0 ? key : undefined;
-}
-
-/**
- * Single-use reservation of a verified acs.dc.v1 capability's (keyId, nonce).
- * Persistent (one O_EXCL marker per nonce digest) so a replay is refused even
- * across restarts, and independent of ManagedAcsGuard, which is inactive in
- * standalone mode. Retained through expiresAt + 5 s; store failures fail
- * closed. Uses its own directory so the managed guard's store (which reserves
- * the same nonce in managed mode) never collides with it.
- */
-export function reserveAcsPipelineNonce(envelope: unknown, now: number): { ok: true } | { ok: false; reason: string } {
-  const payload = isPlainRecord(envelope) && isPlainRecord(envelope.payload) ? envelope.payload : undefined;
-  const keyId = isPlainRecord(envelope) && typeof envelope.keyId === 'string' ? envelope.keyId : '';
-  if (!payload || typeof payload.nonce !== 'string' || typeof payload.expiresAt !== 'string') {
-    return { ok: false, reason: 'capability has no reservable nonce' };
-  }
-  const retainUntil = Date.parse(payload.expiresAt) + 5_000;
-  const stateDir = process.env.DESKTOP_COMMANDER_STATE_DIR
-    ? path.resolve(process.env.DESKTOP_COMMANDER_STATE_DIR)
-    : path.join(os.homedir(), '.desktop-commander');
-  const dir = path.join(stateDir, 'acs-pipeline-nonces');
-  try {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    for (const entry of fs.readdirSync(dir)) {
-      if (!/^[a-f0-9]{64}$/.test(entry)) continue;
-      const entryPath = path.join(dir, entry);
-      const expiry = Number(fs.readFileSync(entryPath, 'utf8'));
-      if (Number.isSafeInteger(expiry) && expiry <= now) fs.rmSync(entryPath, { force: true });
-    }
-    const digest = crypto.createHash('sha256').update(`${keyId}:${payload.nonce}`, 'utf8').digest('hex');
-    const fd = fs.openSync(path.join(dir, digest), 'wx', 0o600);
-    try {
-      fs.writeFileSync(fd, String(retainUntil));
-    } finally {
-      fs.closeSync(fd);
-    }
-    return { ok: true };
-  } catch (error) {
-    return {
-      ok: false,
-      reason: (error as NodeJS.ErrnoException).code === 'EEXIST' ? 'capability nonce was already used' : 'nonce replay store unavailable',
-    };
-  }
 }
 
 /** The pinned ACS capability key id, when set. */
@@ -325,6 +282,70 @@ function requireIdString(value: unknown): value is string {
 /** Base64url Ed25519 signatures are exactly 64 bytes (86 base64url chars). */
 function isBase64urlSignature(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{86}$/.test(value);
+}
+
+/**
+ * Nonce replay protection: a signed capability nonce is accepted exactly once.
+ * Consumed nonces are stored only as hashes and bounded to the 30s TTL ceiling.
+ */
+const ACS_NONCE_TTL_CEILING_MS = 30_000;
+const ACS_NONCE_SKEW_MS = 5_000;
+const ACS_NONCE_STORE_MAX = 10_000;
+const consumedAcsNonces = new Map<string, number>();
+
+/**
+ * Persistent backing store: one O_EXCL marker file per nonce hash, so a nonce
+ * stays consumed across a restart inside its validity window and concurrent
+ * processes cannot both win. The in-memory map is only a fast path.
+ */
+function acsNonceStoreDir(): string {
+  const stateDir = process.env.DESKTOP_COMMANDER_STATE_DIR
+    ? path.resolve(process.env.DESKTOP_COMMANDER_STATE_DIR)
+    : path.join(os.homedir(), '.desktop-commander');
+  return path.join(stateDir, 'acs-pipeline-nonces');
+}
+
+export function resetConsumedAcsNoncesForTest(): void {
+  consumedAcsNonces.clear();
+  fs.rmSync(acsNonceStoreDir(), { recursive: true, force: true });
+}
+
+export function isAcsNonceConsumedForTest(nonceHash: string): boolean {
+  return consumedAcsNonces.has(nonceHash);
+}
+
+function consumeAcsNonceAtomic(nonce: string, now: number): boolean {
+  const nonceHash = sha256Hex(`acs.dc.v1:nonce:${nonce}`);
+  if (consumedAcsNonces.has(nonceHash)) return false;
+  const retainUntil = now + ACS_NONCE_TTL_CEILING_MS + ACS_NONCE_SKEW_MS;
+  for (const [hash, expiry] of consumedAcsNonces) {
+    if (expiry <= now) consumedAcsNonces.delete(hash);
+  }
+  const dir = acsNonceStoreDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    let retained = 0;
+    for (const entry of fs.readdirSync(dir)) {
+      if (!/^[a-f0-9]{64}$/.test(entry)) continue;
+      const entryPath = path.join(dir, entry);
+      const expiry = Number(fs.readFileSync(entryPath, 'utf8'));
+      if (Number.isSafeInteger(expiry) && expiry <= now) fs.rmSync(entryPath, { force: true });
+      else retained += 1;
+    }
+    // Never evict an unexpired nonce to make room: that would re-open replay.
+    if (retained >= ACS_NONCE_STORE_MAX) return false;
+    const fd = fs.openSync(path.join(dir, nonceHash), 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, String(retainUntil));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // EEXIST (replay) and any store failure both fail closed.
+    return false;
+  }
+  consumedAcsNonces.set(nonceHash, retainUntil);
+  return true;
 }
 
 /**
@@ -558,13 +579,16 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
         classification,
       };
     }
-    const reservation = reserveAcsPipelineNonce(cap, now);
-    if (!reservation.ok) {
+    // Consume only after all other checks pass so rejected capabilities
+    // never burn their nonce.
+    const acsEnvelopePayload = (cap as unknown as Record<string, unknown>).payload as Record<string, unknown> | undefined;
+    const acsNonce = acsEnvelopePayload?.nonce;
+    if (typeof acsNonce !== 'string' || !consumeAcsNonceAtomic(acsNonce, now)) {
       return {
         allowed: false,
         kind: 'capability-rejected',
-        code: 'ACS_CAPABILITY_REPLAYED',
-        message: `ACS capability rejected: ${reservation.reason}`,
+        code: 'ACS_CAPABILITY_REPLAY',
+        message: 'ACS capability rejected: this capability nonce was already consumed (replay protection)',
         classification,
       };
     }
