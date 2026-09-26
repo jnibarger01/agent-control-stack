@@ -3,7 +3,7 @@ import { commandManager } from '../command-manager.js';
 import { authorizationArguments } from '../managed-acs.js';
 import { DcToolError } from './errors.js';
 import { normalizedArgumentsHash } from './context.js';
-import { assertExecutableNotBlocked, whichExecutable } from './scope.js';
+import { assertExecutableNotBlocked, realExecutable, whichExecutable } from './scope.js';
 import { validatePath } from '../tools/filesystem.js';
 import { TOOL_MECHANICS } from './tool-catalog.js';
 
@@ -81,7 +81,10 @@ export async function operationPreview(input: { tool: unknown; arguments?: unkno
       let restriction = 'not_blocked_by_dc_config';
       try {
         await assertExecutableNotBlocked(argv[0]);
-        if (resolvedExecutable) await assertExecutableNotBlocked(resolvedExecutable);
+        if (resolvedExecutable) {
+          await assertExecutableNotBlocked(resolvedExecutable);
+          await assertExecutableNotBlocked(await realExecutable(resolvedExecutable));
+        }
       } catch (error) {
         restriction = error instanceof DcToolError ? error.dcCode : 'DC_INTERNAL_ERROR';
         problems.push(`${restriction}: ${argv[0]}`);

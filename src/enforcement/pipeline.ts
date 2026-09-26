@@ -31,6 +31,9 @@
  */
 import { redactValue } from '../execution/secret-scan.js';
 import crypto from 'crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { canonicalCapabilityPayload, signCapabilityPayload, verifyCapability, LocalCapabilityIssuer, type ExecutionCapability, type CommandClass, type NetworkProfile, type RejectionResult, type VerifyResult } from '../security/capability.js';
 import { classifyOperation, classificationCommand, buildApprovalRequest, getApprovalPolicy, InMemoryApprovalStore, type ClassifiedOperation, type ApprovalRequest, type ApprovalStore } from '../security/approval.js';
 import { checkNetworkBinaries, checkNetworkBinariesInRaw, networkGuardSummary, scrubEnvironmentForNoNetwork, type NetworkGuardSummary } from '../security/network-guard.js';
@@ -218,7 +221,8 @@ export type AcsCapabilityRejectionCode =
   | 'ACS_CAPABILITY_EXPIRED'
   | 'ACS_CAPABILITY_TOOL_MISMATCH'
   | 'ACS_CAPABILITY_ARGS_MISMATCH'
-  | 'ACS_CAPABILITY_MALFORMED';
+  | 'ACS_CAPABILITY_MALFORMED'
+  | 'ACS_CAPABILITY_REPLAYED';
 
 export interface AcsCapabilityAttestation {
   capabilityId: string;
@@ -236,6 +240,49 @@ export type AcsCapabilityVerifyResult =
 export function acsCapabilityPublicKeyEnv(): string | undefined {
   const key = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY;
   return key && key.length > 0 ? key : undefined;
+}
+
+/**
+ * Single-use reservation of a verified acs.dc.v1 capability's (keyId, nonce).
+ * Persistent (one O_EXCL marker per nonce digest) so a replay is refused even
+ * across restarts, and independent of ManagedAcsGuard, which is inactive in
+ * standalone mode. Retained through expiresAt + 5 s; store failures fail
+ * closed. Uses its own directory so the managed guard's store (which reserves
+ * the same nonce in managed mode) never collides with it.
+ */
+export function reserveAcsPipelineNonce(envelope: unknown, now: number): { ok: true } | { ok: false; reason: string } {
+  const payload = isPlainRecord(envelope) && isPlainRecord(envelope.payload) ? envelope.payload : undefined;
+  const keyId = isPlainRecord(envelope) && typeof envelope.keyId === 'string' ? envelope.keyId : '';
+  if (!payload || typeof payload.nonce !== 'string' || typeof payload.expiresAt !== 'string') {
+    return { ok: false, reason: 'capability has no reservable nonce' };
+  }
+  const retainUntil = Date.parse(payload.expiresAt) + 5_000;
+  const stateDir = process.env.DESKTOP_COMMANDER_STATE_DIR
+    ? path.resolve(process.env.DESKTOP_COMMANDER_STATE_DIR)
+    : path.join(os.homedir(), '.desktop-commander');
+  const dir = path.join(stateDir, 'acs-pipeline-nonces');
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    for (const entry of fs.readdirSync(dir)) {
+      if (!/^[a-f0-9]{64}$/.test(entry)) continue;
+      const entryPath = path.join(dir, entry);
+      const expiry = Number(fs.readFileSync(entryPath, 'utf8'));
+      if (Number.isSafeInteger(expiry) && expiry <= now) fs.rmSync(entryPath, { force: true });
+    }
+    const digest = crypto.createHash('sha256').update(`${keyId}:${payload.nonce}`, 'utf8').digest('hex');
+    const fd = fs.openSync(path.join(dir, digest), 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, String(retainUntil));
+    } finally {
+      fs.closeSync(fd);
+    }
+    return { ok: true };
+  } catch (error) {
+    return {
+      ok: false,
+      reason: (error as NodeJS.ErrnoException).code === 'EEXIST' ? 'capability nonce was already used' : 'nonce replay store unavailable',
+    };
+  }
 }
 
 /** The pinned ACS capability key id, when set. */
@@ -487,7 +534,11 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   //     entirely in ACS mode.
   let acsCapability: AcsCapabilityAttestation | undefined;
   const acsMode = !!acsCapabilityPublicKeyEnv();
-  if (acsMode && !cap) {
+  // get_runtime_identity is the identity-discovery primitive gateways call
+  // BEFORE they can request a capability bound to the runtime ID (the server
+  // exempts it from ManagedAcsGuard for the same reason). A capability that IS
+  // presented for it is still fully verified below.
+  if (acsMode && !cap && ctx.tool !== 'get_runtime_identity') {
     return {
       allowed: false,
       kind: 'capability-rejected',
@@ -504,6 +555,16 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
         kind: 'capability-rejected',
         code: acs.code,
         message: `ACS capability rejected: ${acs.reason}`,
+        classification,
+      };
+    }
+    const reservation = reserveAcsPipelineNonce(cap, now);
+    if (!reservation.ok) {
+      return {
+        allowed: false,
+        kind: 'capability-rejected',
+        code: 'ACS_CAPABILITY_REPLAYED',
+        message: `ACS capability rejected: ${reservation.reason}`,
         classification,
       };
     }

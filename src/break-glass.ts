@@ -61,8 +61,10 @@ export function checkBreakGlassStatus(stateDir?: string): BreakGlassStatus {
     return { active: true, ambiguous: true, detail: `break-glass marker present but unreadable: ${markerPath}` };
   }
   const info = parsed as Partial<BreakGlassInfo>;
-  if (typeof info.pid !== 'number') {
-    return { active: true, ambiguous: true, detail: `break-glass marker malformed (no pid): ${markerPath}` };
+  // Only a positive safe integer is a real PID; -1, 1.5, NaN etc. would be
+  // reported "not alive" and make a malformed marker look safely stale.
+  if (typeof info.pid !== 'number' || !Number.isSafeInteger(info.pid) || info.pid <= 0) {
+    return { active: true, ambiguous: true, detail: `break-glass marker malformed (invalid pid): ${markerPath}` };
   }
   const alive = isPidAlive(info.pid);
   if (!alive) {

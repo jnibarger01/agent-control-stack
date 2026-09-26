@@ -160,6 +160,11 @@ export class GatewayOAuthProvider implements OAuthClientProvider {
     async redirectToAuthorization(authorizationUrl: URL): Promise<void> {
         this.expectedState = authorizationUrl.searchParams.get('state') || undefined;
 
+        // A new authorization round never reuses a previous round's settled
+        // (and unconsumed) code or error.
+        if (this.authorizationPromise && !this.authorizationResolve) {
+            this.authorizationPromise = undefined;
+        }
         this.ensureAuthorizationPromise();
         await this.startCallbackServer();
 
@@ -179,8 +184,20 @@ export class GatewayOAuthProvider implements OAuthClientProvider {
         }
     }
 
+    /**
+     * Returns the current round's code. The promise survives settlement until
+     * it is consumed here: the browser callback can complete BEFORE the
+     * caller observes UnauthorizedError and starts waiting, and clearing it on
+     * settle would leave the waiter on a fresh promise nobody resolves.
+     */
     waitForAuthorizationCode(): Promise<string> {
-        return this.ensureAuthorizationPromise();
+        const promise = this.ensureAuthorizationPromise();
+        promise
+            .finally(() => {
+                if (this.authorizationPromise === promise) this.authorizationPromise = undefined;
+            })
+            .catch(() => undefined);
+        return promise;
     }
 
     private ensureAuthorizationPromise(): Promise<string> {
@@ -269,7 +286,8 @@ export class GatewayOAuthProvider implements OAuthClientProvider {
             this.authorizationResolve?.(code);
         }
 
-        this.authorizationPromise = undefined;
+        // Keep the settled promise for waitForAuthorizationCode(); only the
+        // settle handles are dropped so it cannot be settled twice.
         this.authorizationResolve = undefined;
         this.authorizationReject = undefined;
     }
