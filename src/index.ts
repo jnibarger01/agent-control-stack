@@ -12,7 +12,7 @@ import { runSetup } from './npm-scripts/setup.js';
 import { runUninstall } from './npm-scripts/uninstall.js';
 import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
-import { runRemote } from './npm-scripts/remote.js';
+import { runRemote, parseRemoteMode } from './npm-scripts/remote.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
 import { desktopCommanderExecutionMode, revokeManagedAcsRuntime } from './managed-acs-runtime.js';
 import { reconcileSessionsOnStartup } from './session-reconciliation.js';
@@ -40,13 +40,8 @@ async function runServer() {
 
     // Check if first argument is "remote"
     if (process.argv[2] === 'remote') {
-      const standalone = process.argv.includes('--standalone');
-      const managed = process.argv.includes('--managed');
-
-      if (standalone === managed) {
-        throw new Error('Remote Desktop Commander requires exactly one of --standalone or --managed');
-      }
-
+      // Single canonical mode validation, shared with runRemote().
+      parseRemoteMode();
       await runRemote();
       return;
     }

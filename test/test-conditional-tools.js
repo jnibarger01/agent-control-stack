@@ -5,7 +5,25 @@
  */
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const SERVER_ENTRY = fileURLToPath(new URL("../dist/index.js", import.meta.url));
+
+// Each spawned executor claims the canonical executor lease. Point HOME, the
+// lease directory and the state directory at a throwaway tree so this test
+// never contends with (or disturbs) a live executor on the host. The lease
+// itself stays enabled.
+const isolatedRoot = await fs.mkdtemp(path.join(os.tmpdir(), "dc-conditional-tools-"));
+const isolatedEnv = {
+    ...getDefaultEnvironment(),
+    HOME: isolatedRoot,
+    DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: path.join(isolatedRoot, "lease"),
+    DESKTOP_COMMANDER_STATE_DIR: path.join(isolatedRoot, "state"),
+};
 
 async function testConditionalTools() {
     console.log('\n=== Test: Conditional Tool Registration ===\n');
@@ -23,8 +41,9 @@ async function testConditionalTools() {
     );
 
     const regularTransport = new StdioClientTransport({
-        command: "node",
-        args: ["../dist/index.js", "--standalone"]
+        command: process.execPath,
+        args: [SERVER_ENTRY, "--standalone"],
+        env: isolatedEnv
     });
 
     await regularClient.connect(regularTransport);
@@ -59,8 +78,9 @@ async function testConditionalTools() {
     );
 
     const dcTransport = new StdioClientTransport({
-        command: "node",
-        args: ["../dist/index.js", "--standalone"]
+        command: process.execPath,
+        args: [SERVER_ENTRY, "--standalone"],
+        env: isolatedEnv
     });
 
     await dcClient.connect(dcTransport);
@@ -91,7 +111,9 @@ async function testConditionalTools() {
     console.log('\n=== All Tests Passed! ===\n');
 }
 
-testConditionalTools().catch(error => {
-    console.error('Test failed:', error);
-    process.exit(1);
-});
+testConditionalTools()
+    .catch(error => {
+        console.error('Test failed:', error);
+        process.exitCode = 1;
+    })
+    .finally(() => fs.rm(isolatedRoot, { recursive: true, force: true }));
