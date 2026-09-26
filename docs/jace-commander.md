@@ -17,11 +17,15 @@ Source: `src/jace-commander/`. Deploy: `deploy/jace-commander/`. Tests:
 | Root privileged helper, sudoers rule, installer | Implemented. Live-tested in a container with a real `sudo` and an unprivileged user |
 | CLI device login (ACS RFC 8628 + Ed25519 PoP) | Implemented and tested against a fake ACS |
 | LoopTrace chain (byte-compatible with ACS `agentos-contracts`) | Implemented. Pinned to a vector produced by the ACS reference code |
-| **ACS issuing `acs.jc.v1` capabilities** | **Not implemented: blocker, see [ACS work required](#acs-work-required)** |
-| Gateway route `https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp` | Not wired yet, see [Deployment](#deployment) |
+| ACS issuing `acs.jc.v1` (`POST /jc/capability/issue`) | Implemented in `agent-control-stack` ([contract](https://github.com/jnibarger01/agent-control-stack/blob/main/docs/protocol/acs-jc-v1-capability-contract.md)) |
+| Gateway lane `https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp` | Implemented in `desktop-commander-mcp-gateway` (`JC_ENABLED=1`, own OAuth audience, `BRIDGE_PROFILE=jace-commander`) |
+| Runtime identity bootstrap for jc (DC §7 equivalent) | Not implemented; runtime pinned by `JC_RUNTIME_ID` on all three sides |
+| ACS result submission for jc attempts | Not implemented; the helper's root audit chain is the execution evidence |
 
-Until ACS issues `acs.jc.v1`, managed mode rejects every call and
-`privileged_exec` can never run. The feature is fail-closed until then.
+Verified end to end in a container: MCP client → gateway `/jc/mcp` → ACS
+`/jc/capability/issue` (409 approval challenge) → human approval → bridge →
+`jace-commander serve` → `sudo -n` → root helper → `id -u` returned `0`. A
+third identical call required a new approval.
 
 ## Architecture
 
@@ -50,7 +54,7 @@ jace-commander serve        (runs as the agent user, e.g. jacen)
 
 Authority follows ACS ADR 0009, 0011 and 0017. **ACS is the only component
 that decides.** codex-swarm, Mission Router, LoopTrace and the visualizer are
-read here, never driven around ACS. The only write is `acs_submit_mission`,
+read here, never driven around ACS. The only integration write is `acs_submit_mission`,
 which asks ACS to create a governed work item.
 
 ## Tools
@@ -70,14 +74,19 @@ Views are fixed allowlists. Callers cannot supply upstream paths.
 
 ## The sudo flow
 
-1. The agent calls `acs_submit_mission` describing the exact command (for
-   example `argv: ["/usr/bin/apt-get","update"]`).
-2. ACS policy marks it `require_approval`. A human approves the exact
-   `actionHash` in ACS Mission Control (or via the device-verified CLI).
-3. On the agent's `privileged_exec` call, the gateway asks ACS for a
-   capability. ACS consumes the approval and signs an `acs.jc.v1` capability
-   bound to that exact `{argv, cwd, timeoutMs, stdin}`, with `approvalId`, a
-   TTL of 30 s or less, and a single-use nonce.
+1. The agent calls `privileged_exec` with the exact argv (for example
+   `argv: ["/usr/bin/apt-get","update"]`). The gateway asks ACS
+   `/jc/capability/issue`. ACS creates a critical-risk `needs_approval` work
+   item titled `ROOT: <argv>`, and the call fails closed with
+   `managed_authorization_required {workItemId, actionHash, approvalSummary}`.
+2. A human approves that exact `actionHash` in ACS
+   (`POST /work-items/:id/approve`, Mission Control, or the device-verified
+   CLI). The following never count: `acs:admin` auto-approval, admin
+   execution mode, and self-approval.
+3. The agent retries the identical call. ACS claims the item, consumes the
+   approval, and signs an `acs.jc.v1` capability bound to that exact
+   `{argv, cwd, timeoutMs, stdin}`, with `approvalId`, a TTL of 30 s or less,
+   and a single-use nonce. The next run needs a new approval.
 4. `jace-commander` forwards `{capability, arguments}` to the helper through
    `sudo -n`. It makes no decision itself.
 5. The helper, as root, with **root-owned** config, checks all of the following:
@@ -129,24 +138,20 @@ adapter both hard-deny `sudo`. A DC capability cannot be replayed here: the
 version and audience are rejected. The reverse also holds, because DC rejects
 the `jace-commander` audience.
 
-## ACS work required
+## ACS side
 
-This is the blocker. It belongs in `agent-control-stack`, not in this repo:
+This is implemented in `agent-control-stack`. See
+`docs/protocol/acs-jc-v1-capability-contract.md` there.
 
-1. An `acs.jc.v1` issuer route, e.g. `POST /jc/capability/issue`, mirroring
-   `/dc/capability/issue`. It should use a dedicated bridge worker identity, a
-   separate Ed25519 key (`ACS_JACE_COMMANDER_CAPABILITY_PRIVATE_KEY`), the
-   tool→scope table in `src/jace-commander/contract.ts`, and the invocation
-   hash above.
-2. A policy rule for `privileged_exec`: **always `require_approval`, never
-   `allow`**, with self-approval denied (the existing high/critical rule),
-   `approvalId` consumed transactionally at issuance, and the approval bound
-   to the exact normalized argv. Today `isSudo()` returns `forbidden`. The
-   change is to route `privileged_exec` to `require_approval` while keeping
-   `sudo` inside ordinary DC `run_command` forbidden.
-3. Runtime identity bootstrap for `jace-commander` (same §7 handshake as DC).
-   This repo does not implement the bootstrap handshake yet. The runtime is
-   pinned by `JC_RUNTIME_ID` / `runtimeId` in the helper config.
+* `POST /jc/capability/issue` uses worker identity `acs-jc-bridge` and key
+  `ACS_JACE_COMMANDER_CAPABILITY_*`, separate from the DC key.
+* Policy kind `privileged.exec` always evaluates to `require_approval`.
+  Approval by `acs:admin` or by the requester is denied. `sudo` inside
+  ordinary commands stays forbidden.
+* The durable issuance table (migration 028) requires a consumed approval
+  bound to the plan and action, granted by neither `acs:admin` nor the
+  requester. It allows one capability per approval and uses unique nonce
+  hashes.
 
 ## Authentication
 
@@ -199,10 +204,15 @@ nvm or `~/.local`). It copies only the helper's five modules to
 creates `/var/lib/jace-commander/nonces` and `/var/log/jace-commander` as
 root `0700`.
 
-Gateway wiring (follow-up in `desktop-commander-mcp-gateway`): run a second
-bridge instance with `jace-commander serve` as its child on its own loopback
-port. Route `/jc/mcp` in `server.js` to it, with the same OAuth check and a
-`/jc/capability/issue` call in managed mode.
+Gateway wiring (`desktop-commander-mcp-gateway`, see its
+`docs/jace-commander-lane.md`):
+
+* Run a second `bridge.js` with `BRIDGE_PROFILE=jace-commander` on its own
+  port (default 8003).
+* Start the gateway with `JC_ENABLED=1 ACS_JC_GATEWAY_TOKEN=<acs-jc-bridge credential>`.
+* MCP clients connect to `https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp`.
+  OAuth mints tokens bound to that resource, and a `/mcp` token is rejected
+  there (and vice versa).
 
 ## Known risks
 

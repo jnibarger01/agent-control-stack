@@ -70,7 +70,7 @@ export const JC_TOOLS = [
   },
   {
     name: 'acs_submit_mission',
-    description: 'Submit a mission to ACS as a governed work item. ACS policy decides allow / deny / require_approval; nothing executes here. Use this to request approval for a privileged_exec.',
+    description: 'Submit a mission to ACS as a governed work item. ACS policy decides allow / deny / require_approval; nothing executes here.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -122,7 +122,7 @@ export const JC_TOOLS = [
   },
   {
     name: 'privileged_exec',
-    description: 'Run ONE exact command as root via the jc-privileged-helper. Requires an ACS acs.jc.v1 capability carrying a human approvalId bound to this exact argv/cwd/timeoutMs/stdin. Obtain approval first via acs_submit_mission. No shell: argv[0] must be an absolute path.',
+    description: 'Run ONE exact command as root via the jc-privileged-helper. Requires an ACS acs.jc.v1 capability carrying a human approvalId bound to this exact argv/cwd/timeoutMs/stdin. The first call returns an ACS approval challenge (workItemId, actionHash, argv); after a human approves it in ACS, retry the identical call. Each approval authorizes one run. No shell: argv[0] must be an absolute path.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -259,7 +259,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       }
       case 'privileged_exec': {
         if (capability === undefined) {
-          return fail('JC_CAPABILITY_MISSING', 'privileged_exec requires an ACS acs.jc.v1 capability with a human approvalId; submit the exact command via acs_submit_mission and have it approved first');
+          return fail('JC_CAPABILITY_MISSING', 'privileged_exec requires an ACS acs.jc.v1 capability with a human approvalId; call it through the managed gateway (/jc/mcp), have a human approve the returned ACS work item, then retry the identical call');
         }
         const verdict = await invokeHelper({ capability, arguments: args }, helperOptions);
         return verdict.ok === true ? ok(verdict) : fail(String(verdict.code ?? 'PRIVILEGED_REJECTED'), 'privileged execution rejected; nothing ran');
