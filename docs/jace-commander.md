@@ -17,11 +17,11 @@ Source: `src/jace-commander/`. Deploy: `deploy/jace-commander/`. Tests:
 | Root privileged helper, sudoers rule, installer | Implemented. Live-tested in a container with a real `sudo` and an unprivileged user |
 | CLI device login (ACS RFC 8628 + Ed25519 PoP) | Implemented and tested against a fake ACS |
 | LoopTrace chain (byte-compatible with ACS `agentos-contracts`) | Implemented. Pinned to a vector produced by the ACS reference code |
-| **ACS issuing `acs.jc.v1` capabilities** | **Not implemented: blocker, see [ACS work required](#acs-work-required)** |
+| ACS issuing `acs.jc.v1` capabilities | Implemented in ACS (`POST /jc/capability/issue`, branch `feat/jc-capability-issuer`). Interop vector pinned in both repos (`test/test-jace-commander-acs-interop.js`) |
 | Gateway route `https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp` | Not wired yet, see [Deployment](#deployment) |
 
-Until ACS issues `acs.jc.v1`, managed mode rejects every call and
-`privileged_exec` can never run. The feature is fail-closed until then.
+Until the ACS issuer is deployed and the gateway calls it, managed mode rejects
+every call and `privileged_exec` can never run. The feature is fail-closed until then.
 
 ## Architecture
 
@@ -131,7 +131,8 @@ the `jace-commander` audience.
 
 ## ACS work required
 
-This is the blocker. It belongs in `agent-control-stack`, not in this repo:
+Items 1 and 2 are implemented in `agent-control-stack`
+(`docs/protocol/acs-jc-v1-capability-contract.md`). Item 3 is still open.
 
 1. An `acs.jc.v1` issuer route, e.g. `POST /jc/capability/issue`, mirroring
    `/dc/capability/issue`. It should use a dedicated bridge worker identity, a
