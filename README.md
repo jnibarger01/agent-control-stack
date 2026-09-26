@@ -45,6 +45,13 @@ ChatGPT ──HTTPS──► https://jacen-ubuntu.tailaa6d41.ts.net/mcp
     and existing sessions must re-initialize.
 - `test-e2e.sh` — end-to-end flow test (run against `GW=<url>`).
 
+## Jace Commander lane (`/jc/mcp`)
+
+Optional second lane (`JC_ENABLED=1`). It serves the Jace Commander MCP server
+with its own OAuth audience (`…/jc/mcp`) and is always ACS-managed through
+`POST /jc/capability/issue`. Root commands (`privileged_exec`) need a human
+approval in ACS for each run. See [docs/jace-commander-lane.md](docs/jace-commander-lane.md).
+
 ## Files that must never be committed (gitignored)
 
 - `.env` (0600): ports, origin, `SIGNING_KEY`, `CONSENT_PASSPHRASE`
