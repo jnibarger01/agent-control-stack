@@ -6,6 +6,7 @@ import {
   type WorkItem
 } from "@agent-control-stack/work-items";
 import { approvalActionHashPrefix } from "../approval-actions.js";
+import { executionModeChip } from "../execution-mode.js";
 import { nanoToIso, pill, time } from "../format.js";
 import { escapeHtml } from "../html.js";
 import { approvalWaitMs, approvalWaitStart, formatWait } from "../operator-workflow.js";
@@ -135,7 +136,7 @@ export function workQueueItems(
       const attempts = executionAttemptsByWorkItem[item.id] ?? [];
       const leases = attemptLeasesByWorkItem[item.id] ?? [];
       const agentId = workItemAgentId(item, attempts, leases);
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
     .join("");
 }

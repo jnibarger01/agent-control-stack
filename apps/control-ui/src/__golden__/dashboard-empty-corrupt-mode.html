@@ -237,6 +237,10 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .agent-row:hover, .agent-row.selected { background: var(--hover); }
 .empty { padding: 18px; color: var(--muted); }
 .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: var(--pill-bg); color: var(--pill-ink); border: 1px solid var(--pill-line); white-space: nowrap; }
+.pill.execution-mode { font-weight: 700; letter-spacing: 0.04em; }
+.execution-mode-dry_run { color: var(--amber); border-color: var(--warn-line); background: var(--warn-bg); border-style: dashed; }
+.execution-mode-desktop_commander { color: var(--red); border-color: var(--bad-line); background: var(--bad-bg); }
+.execution-mode-unknown { color: var(--muted); border-style: dotted; }
 .online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: var(--ok-line); background: var(--ok-bg); }
 .stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: var(--warn-line); background: var(--warn-bg); }
 .offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: var(--bad-line); background: var(--bad-bg); }
@@ -1727,6 +1731,25 @@ function renderExecutionAuthority(executionAttempts, attemptLeases) {
   }).join('') + '</div></div>';
 }
 
+var EXECUTION_MODE_LABELS_CLIENT = { dry_run: 'DRY RUN', desktop_commander: 'LIVE EXECUTION', unknown: 'MODE UNKNOWN' };
+
+function resultExecutionModeClient(workItem) {
+  var result = workItem && workItem.result;
+  if (!result || typeof result !== 'object') return 'none';
+  var sim = result.simulationMetadata;
+  var candidates = [result.executionMode, result.execution_mode, sim && typeof sim === 'object' ? sim.executionMode : undefined];
+  for (var i = 0; i < candidates.length; i++) {
+    if (candidates[i] === 'dry_run' || candidates[i] === 'desktop_commander') return candidates[i];
+  }
+  return 'unknown';
+}
+
+function executionModeChipClient(workItem) {
+  var mode = resultExecutionModeClient(workItem);
+  if (mode === 'none') return '';
+  return ' <span class="pill execution-mode execution-mode-' + escapeClient(mode) + '" data-execution-mode="' + escapeClient(mode) + '">' + EXECUTION_MODE_LABELS_CLIENT[mode] + '</span>';
+}
+
 function renderWorkDetail(target, workItem, events, executionAttempts, attemptLeases) {
   if (!workItem) {
     target.innerHTML = '<div class="detail-error">Work item not found.</div>';
@@ -1734,7 +1757,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
   }
   const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
   target.setAttribute('aria-labelledby', 'work-detail-title');
-  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
+  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + executionModeChipClient(workItem) + '</div></div>' +
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +

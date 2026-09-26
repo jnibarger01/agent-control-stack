@@ -29,6 +29,13 @@ export { renderDashboardFragments } from "./render/fragments.js";
 export { renderDashboard } from "./render/page.js";
 export { type WorkItemDetailView, renderWorkItemDetailHtml } from "./render/work-detail.js";
 export {
+  executionModeChip,
+  executionModeChipHtml,
+  hasExecutionResult,
+  resultExecutionMode,
+  type ResultExecutionMode
+} from "./execution-mode.js";
+export {
   type SseConnectionRoot,
   type SseConnectionElement,
   type SseConnectionButton,

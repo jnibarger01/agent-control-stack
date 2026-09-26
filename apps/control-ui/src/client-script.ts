@@ -411,6 +411,25 @@ function renderExecutionAuthority(executionAttempts, attemptLeases) {
   }).join('') + '</div></div>';
 }
 
+var EXECUTION_MODE_LABELS_CLIENT = { dry_run: 'DRY RUN', desktop_commander: 'LIVE EXECUTION', unknown: 'MODE UNKNOWN' };
+
+function resultExecutionModeClient(workItem) {
+  var result = workItem && workItem.result;
+  if (!result || typeof result !== 'object') return 'none';
+  var sim = result.simulationMetadata;
+  var candidates = [result.executionMode, result.execution_mode, sim && typeof sim === 'object' ? sim.executionMode : undefined];
+  for (var i = 0; i < candidates.length; i++) {
+    if (candidates[i] === 'dry_run' || candidates[i] === 'desktop_commander') return candidates[i];
+  }
+  return 'unknown';
+}
+
+function executionModeChipClient(workItem) {
+  var mode = resultExecutionModeClient(workItem);
+  if (mode === 'none') return '';
+  return ' <span class="pill execution-mode execution-mode-' + escapeClient(mode) + '" data-execution-mode="' + escapeClient(mode) + '">' + EXECUTION_MODE_LABELS_CLIENT[mode] + '</span>';
+}
+
 function renderWorkDetail(target, workItem, events, executionAttempts, attemptLeases) {
   if (!workItem) {
     target.innerHTML = '<div class="detail-error">Work item not found.</div>';
@@ -418,7 +437,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
   }
   const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
   target.setAttribute('aria-labelledby', 'work-detail-title');
-  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
+  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + executionModeChipClient(workItem) + '</div></div>' +
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +
