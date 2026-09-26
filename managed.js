@@ -34,6 +34,10 @@ export const ACS_CAPABILITY_META_KEY = 'capability';
 /** Desktop Commander's managed guard transports the same envelope at this key. */
 export const ACS_GUARD_META_KEY = 'acsCapability';
 
+/** Jace Commander (acs.jc.v1) — a separate version/audience; never interchangeable with acs.dc.v1. */
+export const JC_CAPABILITY_VERSION = 'acs.jc.v1';
+export const JC_AUDIENCE = 'jace-commander';
+
 export function managedModeFromEnv(env = process.env) {
   const enabled = env.ACS_MANAGED_MODE === '1';
   if (!enabled) return { enabled: false };
@@ -42,7 +46,18 @@ export function managedModeFromEnv(env = process.env) {
   if (!acsGatewayUrl || !acsGatewayToken) {
     throw new Error('managed mode requires ACS_GATEWAY_URL and ACS_GATEWAY_TOKEN; refusing to start');
   }
-  return { enabled: true, acsGatewayUrl, acsGatewayToken, timeoutMs: parseInt(env.ACS_ISSUANCE_TIMEOUT_MS || '5000', 10) };
+  const timeoutMs = parseInt(env.ACS_ISSUANCE_TIMEOUT_MS || '5000', 10);
+  // Jace Commander is served only when its bridge upstream is configured. It
+  // uses its own ACS worker identity: the DC bridge token must never be able
+  // to mint acs.jc.v1 capabilities (or vice versa).
+  let jc = null;
+  if (env.JC_UPSTREAM) {
+    const jcToken = env.ACS_JC_GATEWAY_TOKEN || '';
+    if (!jcToken) throw new Error('managed /jc/mcp requires ACS_JC_GATEWAY_TOKEN; refusing to start');
+    if (jcToken === acsGatewayToken) throw new Error('ACS_JC_GATEWAY_TOKEN must differ from ACS_GATEWAY_TOKEN; refusing to start');
+    jc = { acsGatewayUrl, acsGatewayToken: jcToken, timeoutMs };
+  }
+  return { enabled: true, acsGatewayUrl, acsGatewayToken, timeoutMs, jc };
 }
 
 export function sortedScopes(raw) {
@@ -201,7 +216,48 @@ export function identityAttribution(auth) {
  * Stripped first, ALWAYS: any client-supplied _meta.acs* metadata. A spoofed
  * _meta.capability/_meta.acsCapability must never reach Desktop Commander.
  */
-export function capabilityTransport(managed, { identity, requestId }) {
+/**
+ * Per-variant transport rules. Each MCP route is bound to exactly one ACS
+ * issuance endpoint and one capability contract; an envelope minted for the
+ * other route is rejected here (fail closed) before anything is forwarded,
+ * and the executor re-checks version/audience itself.
+ */
+const TRANSPORT_VARIANTS = Object.freeze({
+  dc: Object.freeze({
+    issuePath: '/dc/capability/issue',
+    actorHeader: 'x-dc-actor',
+    // Legacy dual transport: DC's pipeline reads _meta.capability, the
+    // managed guard reads _meta.acsCapability.
+    metaKeys: Object.freeze([ACS_CAPABILITY_META_KEY, ACS_GUARD_META_KEY]),
+    acceptPayload: (p) => p.version !== JC_CAPABILITY_VERSION && p.audience !== JC_AUDIENCE,
+  }),
+  jc: Object.freeze({
+    issuePath: '/jc/capability/issue',
+    actorHeader: 'x-jc-actor',
+    metaKeys: Object.freeze([ACS_GUARD_META_KEY]),
+    acceptPayload: (p) => p.version === JC_CAPABILITY_VERSION && p.audience === JC_AUDIENCE,
+  }),
+});
+
+export function capabilityTransport(managed, opts) {
+  return governedTransport(managed, opts, TRANSPORT_VARIANTS.dc);
+}
+
+/**
+ * Jace Commander variant: requests an acs.jc.v1 capability from
+ * POST /jc/capability/issue (audience jace-commander) using the dedicated JC
+ * worker identity (managed.jc) and injects it at params._meta.acsCapability.
+ */
+export function jcCapabilityTransport(managed, opts) {
+  if (!managed || !managed.jc) {
+    return async () => {
+      throw Object.assign(new Error('Jace Commander ACS issuance not configured'), { acsCode: 'jc_issuance_unconfigured' });
+    };
+  }
+  return governedTransport(managed.jc, opts, TRANSPORT_VARIANTS.jc);
+}
+
+function governedTransport(managed, { identity, requestId }, variant) {
   return async function rewriteForAcs(parsed) {
     const params = parsed && typeof parsed === 'object' ? parsed.params : undefined;
     const toolName = params && typeof params.name === 'string' ? params.name : null;
@@ -213,7 +269,6 @@ export function capabilityTransport(managed, { identity, requestId }) {
     }
     // Anti-spoof: drop every client-supplied ACS authority field.
     const clientMeta = typeof params._meta === 'object' && params._meta !== null ? params._meta : {};
-    const spoofed = Object.keys(clientMeta).filter((k) => k === 'capability' || k.startsWith('acs'));
     const cleanParams = { ...params };
     const strippedMeta = Object.fromEntries(
       Object.entries(clientMeta).filter(([k]) => k !== 'capability' && !k.startsWith('acs')),
@@ -227,12 +282,12 @@ export function capabilityTransport(managed, { identity, requestId }) {
       throw Object.assign(new Error('managed mode requires authenticated subject and client_id'), { acsCode: 'identity_missing' });
     }
     const actor = subject.startsWith('chatgpt:') ? subject : `chatgpt:${subject}`;
-    const { status, json } = await acsPost(managed, '/dc/capability/issue', {
+    const { status, json } = await acsPost(managed, variant.issuePath, {
       client_id: clientId,
       tool: toolName,
       argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
       correlationId: requestId,
-    }, { 'x-dc-actor': actor });
+    }, { [variant.actorHeader]: actor });
     if (status !== 200 || !json || json.decision !== 'allow') {
       const code = json && typeof json.code === 'string'
         ? json.code
@@ -263,6 +318,10 @@ export function capabilityTransport(managed, { identity, requestId }) {
     ) {
       throw Object.assign(new Error('ACS returned a malformed capability envelope'), { acsCode: 'acs_malformed_capability' });
     }
+    if (!variant.acceptPayload(envelope.payload)) {
+      throw Object.assign(new Error('ACS returned a capability for a different executor'), { acsCode: 'acs_capability_wrong_audience' });
+    }
+    const capabilityMeta = Object.fromEntries(variant.metaKeys.map((k) => [k, envelope]));
     return {
       ...parsed,
       params: {
@@ -272,8 +331,7 @@ export function capabilityTransport(managed, { identity, requestId }) {
         arguments: envelope.payload.normalizedArguments,
         _meta: {
           ...(cleanParams._meta || {}),
-          [ACS_CAPABILITY_META_KEY]: envelope,
-          [ACS_GUARD_META_KEY]: envelope,
+          ...capabilityMeta,
           // Authoritative lease/result binding derived by ACS (transport only;
           // ACS validates every binding independently at result acceptance).
           acsLeaseBinding: {

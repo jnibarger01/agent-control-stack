@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * stdio -> Streamable HTTP MCP multiplexer for Desktop Commander.
+ * stdio -> Streamable HTTP MCP multiplexer for Desktop Commander, or (with
+ * BRIDGE_VARIANT=jc) for Jace Commander (`dist/jace-commander/cli.js serve`).
  *
  * There is exactly one upstream StdioClientTransport (and therefore one
  * Desktop Commander executor). Each downstream HTTP client gets its own
@@ -18,26 +19,45 @@ import os from 'node:os';
 import path from 'node:path';
 
 const ACS_CAPABILITY_META_KEY = 'capability';
+const ACS_GUARD_META_KEY = 'acsCapability';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
-const PORT = parseInt(process.env.BRIDGE_PORT || '8002', 10);
+const VARIANT = process.env.BRIDGE_VARIANT || 'dc';
+if (VARIANT !== 'dc' && VARIANT !== 'jc') {
+  console.error(`bridge: unknown BRIDGE_VARIANT ${JSON.stringify(VARIANT)}; refusing to start`);
+  process.exit(1);
+}
+const JC = VARIANT === 'jc';
+const PORT = parseInt(process.env.BRIDGE_PORT || (JC ? '8003' : '8002'), 10);
 // Explicit ACS managed mode: the executor is started WITHOUT --standalone;
 // authority comes only from ACS-issued capabilities transported by the
 // authenticated gateway. A configured --standalone argument in managed mode
 // is refused outright (never silently stripped) so no legacy execution path
 // can exist on the managed lane.
 const MANAGED = process.env.ACS_MANAGED_MODE === '1';
-const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
+// Jace Commander executor: an explicit checkout built at >= DC 60a8939
+// (JC_DC_DIR + JC_CMD). The argv is fixed to `serve`: this bridge has no way to
+// pass --standalone, so the child always runs in managed mode and requires an
+// acs.jc.v1 capability on every tools/call.
+if (JC && (process.env.DC_ARGS || process.env.DC_CMD || process.env.DC_CWD)) {
+  console.error('bridge: DC_* executor overrides are not valid for the jc variant; use JC_DC_DIR/JC_CMD');
+  process.exit(1);
+}
+const JC_DIR = process.env.JC_DC_DIR || '/home/jacen/projects/desktop-commander';
+const JC_ENTRY = process.env.JC_ENTRY || path.join(JC_DIR, 'dist/jace-commander/cli.js');
+const DC_CMD = JC
+  ? process.env.JC_CMD || '/home/linuxbrew/.linuxbrew/bin/node'
+  : process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
 const DEFAULT_DC_ARGS = MANAGED
   ? '/home/jacen/projects/desktop-commander/dist/index.js'
   : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
-const DC_ARGS = (process.env.DC_ARGS || DEFAULT_DC_ARGS).split(' ');
+const DC_ARGS = JC ? [JC_ENTRY, 'serve'] : (process.env.DC_ARGS || DEFAULT_DC_ARGS).split(' ');
 if (MANAGED && DC_ARGS.includes('--standalone')) {
   console.error('bridge: managed mode refuses a --standalone executor; fix DC_ARGS');
   process.exit(1);
 }
-const DC_CWD = process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
+const DC_CWD = JC ? JC_DIR : process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || '';
 const GATEWAY_ATTESTATION_KEY = process.env.DC_GATEWAY_ATTESTATION_KEY || '';
 const PIPELINE_ACS_PUBLIC_KEY = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY || '';
@@ -47,7 +67,26 @@ const PIPELINE_ACS_KEY_ID = process.env.DC_ACS_CAPABILITY_KEY_ID || '';
 const ACS_DC_PUBLIC_KEY = process.env.ACS_DC_PUBLIC_KEY || '';
 const ACS_DC_KEY_ID = process.env.ACS_DC_KEY_ID || '';
 const ACS_DC_SCOPES = process.env.ACS_DC_RUNTIME_SCOPES || 'fs.read,fs.write,process.exec,process.spawn';
-const CHILD_ENV = {
+// Jace Commander child environment: an explicit allowlist of JC_* settings
+// (docs/jace-commander.md). The ACS verification key is PUBLIC material only.
+const JC_CHILD_ENV_KEYS = Object.freeze([
+  'JC_ACS_PUBLIC_KEY', 'JC_ACS_KEY_ID', 'JC_RUNTIME_ID', 'JC_STATE_DIR', 'JC_PUBLIC_MCP_URL', 'JC_ACS_URL',
+  'JC_ACS_TOKEN', 'JC_SWARM_URL', 'JC_SWARM_TOKEN', 'JC_VISUALIZER_URL', 'JC_MISSION_ROUTER_DIR',
+  'JC_TRACE_ROOTS', 'JC_PRIVILEGED_HELPER', 'JC_SUDO_PATH',
+]);
+if (JC && MANAGED && (!process.env.JC_ACS_PUBLIC_KEY || !process.env.JC_ACS_KEY_ID || !process.env.JC_RUNTIME_ID)) {
+  console.error('bridge: managed jc variant requires JC_ACS_PUBLIC_KEY, JC_ACS_KEY_ID and JC_RUNTIME_ID; refusing to start');
+  process.exit(1);
+}
+const JC_CHILD_ENV = {
+  PATH: process.env.PATH || '',
+  HOME: process.env.HOME || '',
+  LANG: process.env.LANG || 'C.UTF-8',
+  TMPDIR: process.env.TMPDIR || '/tmp',
+  NODE_ENV: process.env.NODE_ENV || 'production',
+  ...Object.fromEntries(JC_CHILD_ENV_KEYS.filter((k) => process.env[k]).map((k) => [k, process.env[k]])),
+};
+const DC_CHILD_ENV = {
   PATH: process.env.PATH || '',
   HOME: process.env.HOME || '',
   LANG: process.env.LANG || 'C.UTF-8',
@@ -72,7 +111,8 @@ const CHILD_ENV = {
       }
     : {}),
 };
-if (MANAGED && (!ACS_DC_PUBLIC_KEY || !ACS_DC_KEY_ID)) {
+const CHILD_ENV = JC ? JC_CHILD_ENV : DC_CHILD_ENV;
+if (MANAGED && !JC && (!ACS_DC_PUBLIC_KEY || !ACS_DC_KEY_ID)) {
   console.error('bridge: managed mode requires ACS_DC_PUBLIC_KEY and ACS_DC_KEY_ID; refusing to start');
   process.exit(1);
 }
@@ -178,9 +218,9 @@ async function submitAcsResult(route, msg) {
     artifacts: [],
     ...(isError ? { error: summary.slice(0, 4000) } : {}),
     simulationMetadata: {
-      executionMode: 'desktop_commander',
+      executionMode: JC ? 'jace_commander' : 'desktop_commander',
       simulated: false,
-      backend: 'desktop-commander-mcp',
+      backend: JC ? 'jace-commander-mcp' : 'desktop-commander-mcp',
       toolName: payload.toolName,
       invocationFingerprint: payload.invocationHash,
       requestId: payload.attemptId,
@@ -285,8 +325,9 @@ async function forward(session, msg, headers) {
   if (session.pending.has(key)) { failClosed(`duplicate downstream request id in session ${session.id}`, session.pair); return; }
   const upstreamId = `gw-${randomUUID()}`;
   session.pending.set(key, upstreamId);
+  // JC capabilities travel only at _meta.acsCapability (acs.jc.v1).
   const governed = outbound.params && typeof outbound.params._meta === 'object' && outbound.params._meta !== null
-    ? outbound.params._meta[ACS_CAPABILITY_META_KEY]
+    ? outbound.params._meta[JC ? ACS_GUARD_META_KEY : ACS_CAPABILITY_META_KEY]
     : undefined;
   pair.routes.set(upstreamId, {
     session, downstreamId: msg.id, initialize: false,
@@ -339,7 +380,7 @@ function spawnPair() {
   };
   upstream.start().catch((e) => { console.error('bridge: upstream start failed:', e?.message); process.exit(1); });
   spawnCount++; pair = next;
-  console.log(`bridge: Desktop Commander stdio executor started (spawn_count=${spawnCount})`);
+  console.log(`bridge: ${JC ? 'Jace Commander' : 'Desktop Commander'} stdio executor started (spawn_count=${spawnCount})`);
 }
 
 function createSession(headers) {
@@ -379,7 +420,7 @@ function createSession(headers) {
 }
 
 spawnPair();
-console.log(`bridge: executor mode: ${MANAGED ? 'managed (ACS-authorized capabilities only)' : 'standalone'}`);
+console.log(`bridge: variant=${VARIANT} executor mode: ${MANAGED ? 'managed (ACS-authorized capabilities only)' : JC ? 'unmanaged gateway (child still requires acs.jc.v1)' : 'standalone'}`);
 
 // --- /health, /ready, /authority (hardening item #2) -----------------------
 // Non-secret introspection only: no capability payloads, HMAC/Ed25519 key
@@ -403,7 +444,24 @@ function leaseStatus(file, label) {
   if (!isPidAlive(info.pid)) return { active: false, ambiguous: false, detail: `${label} stale (pid ${info.pid} not alive)` };
   return { active: true, ambiguous: false, pid: info.pid, detail: `${label} held by pid ${info.pid}` };
 }
+function computeJcAuthority() {
+  const initialized = !!(pair && pair.initResponse);
+  return {
+    variant: 'jc',
+    configuredExecutionMode: MANAGED ? 'managed' : 'unmanaged_gateway',
+    // The child is always started as `serve` (managed); there is no standalone path.
+    childMode: 'managed',
+    bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    enforcement: {
+      executionTokenConfigured: !!EXECUTION_TOKEN,
+      capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID),
+    },
+    authoritative: !!pair && initialized,
+  };
+}
+
 function computeAuthority() {
+  if (JC) return computeJcAuthority();
   const executorLease = leaseStatus(path.join(dcStateDir(), 'executor.lock'), 'executor lease');
   const breakGlass = leaseStatus(path.join(dcStateDir(), 'break-glass.lock'), 'break-glass marker');
   const initialized = !!(pair && pair.initResponse);
@@ -414,6 +472,7 @@ function computeAuthority() {
   else observedMode = 'none_active';
   const authoritative = observedMode === 'managed' && !!pair && initialized && !executorLease.ambiguous;
   return {
+    variant: 'dc',
     configuredExecutionMode: MANAGED ? 'managed' : 'standalone_config',
     observedMode,
     authorityOwner: executorLease.active ? `managed:pid:${executorLease.pid}`
@@ -433,8 +492,14 @@ function computeAuthority() {
 const httpServer = http.createServer(async (req, res) => {
   const path = req.url ? req.url.split('?')[0] : '/';
   if (path === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok'); return; }
-  if (path === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, pid: process.pid, service: 'desktop-commander-mcp-bridge' })); return; }
+  if (path === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, pid: process.pid, service: JC ? 'jace-commander-mcp-bridge' : 'desktop-commander-mcp-bridge' })); return; }
   if (path === '/authority') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(computeAuthority())); return; }
+  if (path === '/ready' && JC) {
+    const ready = !!pair;
+    res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ready, variant: 'jc', hasUpstreamPair: !!pair }));
+    return;
+  }
   if (path === '/ready') {
     const authority = computeAuthority();
     const ready = !!pair && authority.observedMode !== 'ambiguous_conflict' && !authority.executor.lease.ambiguous && !authority.executor.breakGlass.ambiguous;

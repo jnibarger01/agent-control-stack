@@ -1,0 +1,31 @@
+# Jace Commander MCP bridge: a second bridge.js instance (BRIDGE_VARIANT=jc)
+# whose stdio child is `node <dc>/dist/jace-commander/cli.js serve` (managed;
+# the bridge has no way to pass --standalone). Loopback only; the auth gateway
+# routes https://<host>/jc/mcp here after OAuth + ACS acs.jc.v1 issuance.
+#
+# Install:  cp jace-commander-mcp.service ~/.config/systemd/user/
+#           install -m 0600 ../jace-commander-bridge.env.example \
+#             ~/.config/desktop-commander-mcp-gateway/jc-bridge.env   # then fill in
+#           systemctl --user daemon-reload && systemctl --user enable --now jace-commander-mcp
+# Then set JC_UPSTREAM / ACS_JC_GATEWAY_TOKEN in gateway.env and restart
+# desktop-commander-auth-proxy.service.
+[Unit]
+Description=Jace Commander MCP bridge (stdio -> Streamable HTTP, loopback only)
+After=network.target
+
+[Service]
+WorkingDirectory=/home/jacen/projects/desktop-commander-mcp-gateway
+Environment=BRIDGE_VARIANT=jc
+Environment=BRIDGE_PORT=8003
+Environment=NODE_ENV=production
+EnvironmentFile=/home/jacen/.config/desktop-commander-mcp-gateway/jc-bridge.env
+ExecStart=/home/linuxbrew/.linuxbrew/bin/node /home/jacen/projects/desktop-commander-mcp-gateway/bridge.js
+Restart=on-failure
+RestartSec=5
+# privileged_exec reaches its root helper via `sudo -n` (setuid), which
+# NoNewPrivileges=true would block. The helper, not this unit, is the gate.
+NoNewPrivileges=false
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
