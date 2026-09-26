@@ -9,6 +9,7 @@ import os from 'os';
 import fs from 'fs/promises';
 import path from 'path';
 import { captureRemote } from '../utils/capture.js';
+import { parseMcpInfo, RemoteConfig } from './oauth-relay.js';
 
 const LOCAL_MCP_STARTUP_TIMEOUT_MS = 15_000;
 const REMOTE_CONFIG_TIMEOUT_MS = 10_000;
@@ -45,6 +46,14 @@ export interface MCPDeviceOptions {
  */
 const SEEN_CALL_IDS_MAX = 100;
 
+/** Capped exponential backoff with jitter: ~1s, 2s, 4s ... up to 60s. */
+export const LOCAL_MCP_RETRY_BASE_MS = 1_000;
+export const LOCAL_MCP_RETRY_MAX_MS = 60_000;
+export function localMcpRetryDelayMs(attempt: number, random: () => number = Math.random): number {
+    const exp = Math.min(LOCAL_MCP_RETRY_MAX_MS, LOCAL_MCP_RETRY_BASE_MS * 2 ** Math.min(Math.max(attempt, 0), 16));
+    return Math.round(exp * (0.5 + 0.5 * random()));
+}
+
 export class MCPDevice {
     private baseServerUrl: string;
     private remoteChannel: RemoteChannel;
@@ -59,6 +68,8 @@ export class MCPDevice {
     private currentState: DeviceAuthState = 'DISCONNECTED';
     /** Call ids already handled by THIS process (insertion-ordered, bounded). */
     private seenCallIds: Set<string> = new Set();
+    /** Serializes device.json writes so an older session can never land last. */
+    private persistChain: Promise<void> = Promise.resolve();
 
     private assertRunning(): void {
         if (this.isShuttingDown) throw new Error('MCP device startup cancelled by shutdown');
@@ -70,6 +81,7 @@ export class MCPDevice {
         );
         this.remoteChannel = new RemoteChannel({
             isLocalReady: () => this.desktop?.ready === true,
+            onSessionTokens: (tokens) => this.savePersistedConfig(tokens),
             onReconnectExhausted: async ({ attempts, message }) => {
                 if (this.isShuttingDown) return;
                 console.error(JSON.stringify({
@@ -91,7 +103,9 @@ export class MCPDevice {
         });
         this.deviceId = undefined;
         this.isShuttingDown = false;
-        this.configPath = path.join(os.homedir(), '.desktop-commander-device', 'device.json');
+        this.configPath = process.env.DESKTOP_COMMANDER_DEVICE_CONFIG_PATH
+            ? path.resolve(process.env.DESKTOP_COMMANDER_DEVICE_CONFIG_PATH)
+            : path.join(os.homedir(), '.desktop-commander-device', 'device.json');
         // Default ON. Off meant a full re-authorization on every start, and each
         // one mints a fresh GoTrue session that nothing ever revokes; the orphaned
         // refresh-token families get replayed, trip GoTrue's reuse detection, and
@@ -192,16 +206,19 @@ export class MCPDevice {
             this.assertRunning();
 
             console.log(`⏳ Connecting to Remote MCP ${this.baseServerUrl}`);
-            const { supabaseUrl, anonKey } = await withTimeout(
+            const remoteConfig = await withTimeout(
                 this.fetchSupabaseConfig(),
                 REMOTE_CONFIG_TIMEOUT_MS,
                 'Remote MCP configuration fetch',
             );
             this.assertRunning();
             console.log(`   - 🔌 Connected to Remote MCP`);
+            if (remoteConfig.mode === 'supabase_oauth_pkce') {
+                console.log('   - 🔑 Own relay: Supabase OAuth device authorization');
+            }
 
             // Initialize Remote Channel
-            this.remoteChannel.initialize(supabaseUrl, anonKey);
+            this.remoteChannel.initialize(remoteConfig.supabaseUrl, remoteConfig.anonKey, remoteConfig.oauth);
 
             // Load persisted configuration (deviceId, session)
             let session = await this.loadPersistedConfig();
@@ -225,6 +242,7 @@ export class MCPDevice {
                 console.log('\n🔐 Authenticating with Remote MCP server...');
                 const authenticator = new DeviceAuthenticator(this.baseServerUrl, {
                     onStateChange: (state) => this.transition(state),
+                    oauth: remoteConfig.oauth,
                 });
                 session = await authenticator.authenticate(this.deviceId);
                 this.assertRunning();
@@ -261,8 +279,9 @@ export class MCPDevice {
 
             const deviceName = os.hostname();
 
-            // Register as device
-            await withTimeout(
+            // Register as device. The own relay may assign the id here (first
+            // pairing) or confirm the persisted one; adopt whatever it bound.
+            const registeredDeviceId = await withTimeout(
                 this.remoteChannel.registerDevice(
                     await this.desktop.listClientTools(),
                     this.deviceId,
@@ -273,6 +292,12 @@ export class MCPDevice {
                 'Remote MCP device registration',
             );
             this.assertRunning();
+            if (registeredDeviceId && registeredDeviceId !== this.deviceId) {
+                console.log(`   - ✅ Device ID assigned: ${registeredDeviceId}`);
+                this.deviceId = registeredDeviceId;
+                await this.savePersistedConfig();
+                this.assertRunning();
+            }
 
             console.log('✅ Device ready:');
             console.log(`   - User:         ${this.remoteChannel.user!.email}`);
@@ -337,11 +362,27 @@ export class MCPDevice {
         }
     }
 
-    async savePersistedConfig() {
+    /**
+     * Persist deviceId and (unless --no-persist-session) the session. Writes are
+     * serialized and atomic (temp file + rename, 0600): Supabase refresh tokens
+     * rotate on every use, so a torn or out-of-order write strands the device
+     * with an "Already Used" token on its next start.
+     */
+    savePersistedConfig(tokens?: { access_token: string; refresh_token: string | null }): Promise<void> {
+        const write = this.persistChain.then(() => this.writePersistedConfig(tokens));
+        this.persistChain = write.catch(() => { /* reported inside */ });
+        return this.persistChain;
+    }
+
+    private async writePersistedConfig(tokens?: { access_token: string; refresh_token: string | null }): Promise<void> {
+        let tempPath: string | null = null;
         try {
             console.debug('[DEBUG] Saving persisted config, persistSession:', this.persistSession);
-            const currentSessionStore = await this.remoteChannel.getSession();
-            const session = currentSessionStore.data.session;
+            let session: { access_token: string; refresh_token: string | null } | null = tokens ?? null;
+            if (!session && this.persistSession) {
+                const current = (await this.remoteChannel.getSession()).data.session;
+                session = current ? { access_token: current.access_token, refresh_token: current.refresh_token } : null;
+            }
 
             const config = {
                 deviceId: this.deviceId,
@@ -353,17 +394,28 @@ export class MCPDevice {
             };
             // Ensure the config directory exists
             console.debug('[DEBUG] Creating config directory:', path.dirname(this.configPath));
-            await fs.mkdir(path.dirname(this.configPath), { recursive: true });
-            await fs.writeFile(this.configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
+            await fs.mkdir(path.dirname(this.configPath), { recursive: true, mode: 0o700 });
+            tempPath = `${this.configPath}.${process.pid}.${Date.now()}.tmp`;
+            const handle = await fs.open(tempPath, 'wx', 0o600);
+            try {
+                await handle.writeFile(JSON.stringify(config, null, 2));
+                await handle.sync();
+            } finally {
+                await handle.close();
+            }
+            await fs.rename(tempPath, this.configPath);
+            tempPath = null;
             console.debug('[DEBUG] Config saved to:', this.configPath);
         } catch (error: any) {
             console.error(' - ❌ Failed to save config:', error.message);
             console.debug('[DEBUG] Config save error details:', error);
             await captureRemote('remote_device_config_save_error', { error });
+        } finally {
+            if (tempPath) await fs.unlink(tempPath).catch(() => { });
         }
     }
 
-    async fetchSupabaseConfig() {
+    async fetchSupabaseConfig(): Promise<RemoteConfig> {
         // No auth header needed for this public endpoint
         console.debug('[DEBUG] Fetching Supabase config from:', `${this.baseServerUrl}/api/mcp-info`);
         const response = await fetch(`${this.baseServerUrl}/api/mcp-info`, {
@@ -377,27 +429,55 @@ export class MCPDevice {
 
         const config = await response.json();
         console.debug('[DEBUG] Supabase config received, URL:', config.supabaseUrl?.substring(0, 30) + '...');
-        return {
-            supabaseUrl: config.supabaseUrl,
-            anonKey: config.supabasePublishableKey
-        };
+        return parseMcpInfo(config, this.baseServerUrl);
     }
 
     // Methods moved to RemoteChannel
 
+    private localMcpRecovery: Promise<void> | null = null;
+
+    /** Overridable in tests; unref'd so a pending retry never holds shutdown. */
+    private sleep = (ms: number): Promise<void> => new Promise((resolve) => {
+        const timer = setTimeout(resolve, ms);
+        timer.unref?.();
+    });
+
+    /**
+     * Local MCP loss must self-heal. Own-relay dispatch only routes calls to a
+     * device whose Presence says local_mcp_ready, and the only other re-attach
+     * path is on-demand inside a call, so a single failed attempt (e.g. the
+     * managed gateway restarting) would leave the device present but unable
+     * to execute forever. Retry with capped exponential backoff until attached
+     * or shutting down. Single-flight: concurrent losses join one loop.
+     */
     private async handleLocalMcpLoss(reason: string): Promise<void> {
         if (this.isShuttingDown) return;
         if (this.deviceId) {
             await this.remoteChannel.setOnlineStatus(this.deviceId, 'offline').catch((error: any) =>
                 console.error('Failed to mark device offline after local MCP loss:', error.message));
         }
-        try {
-            await this.desktop.ensureReady();
-            this.remoteChannel.syncReachabilityStatus();
-            console.log(`♻️  Local Desktop Commander MCP restarted (${reason})`);
-        } catch (error: any) {
-            console.error(`❌ Could not restart local Desktop Commander MCP: ${error.message}`);
-            await captureRemote('remote_device_local_mcp_restart_failed', { error, reason });
+        if (this.localMcpRecovery) return this.localMcpRecovery;
+        this.localMcpRecovery = this.recoverLocalMcp(reason).finally(() => {
+            this.localMcpRecovery = null;
+        });
+        return this.localMcpRecovery;
+    }
+
+    private async recoverLocalMcp(reason: string): Promise<void> {
+        for (let attempt = 0; !this.isShuttingDown; attempt++) {
+            try {
+                await this.desktop.ensureReady();
+                if (this.isShuttingDown) return;
+                this.remoteChannel.syncReachabilityStatus();
+                console.log(`♻️  Local Desktop Commander MCP restarted (${reason})${attempt > 0 ? ` after ${attempt + 1} attempts` : ''}`);
+                return;
+            } catch (error: any) {
+                const delayMs = localMcpRetryDelayMs(attempt);
+                console.error(`❌ Could not restart local Desktop Commander MCP (attempt ${attempt + 1}, retrying in ${Math.round(delayMs / 1000)}s): ${error?.message ?? error}`);
+                // Report once per outage, not once per retry.
+                if (attempt === 0) await captureRemote('remote_device_local_mcp_restart_failed', { error, reason });
+                await this.sleep(delayMs);
+            }
         }
     }
 
@@ -442,8 +522,9 @@ export class MCPDevice {
             // DB claim second — keeps the row state machine honest, gives
             // cross-restart/cross-process protection, and is observable. It may
             // fail open (returns true on a transient write error); the local
-            // guard above is what makes execution exactly-once.
-            const claimed = await this.remoteChannel.markCallExecuting(call_id);
+            // guard above is what makes execution exactly-once. The doorbell
+            // path claims before dispatch and marks the payload `claimed`.
+            const claimed = payload.claimed === true || await this.remoteChannel.markCallExecuting(call_id);
             if (!claimed) {
                 // markCallExecuting already logged the duplicate-delivery skip.
                 return;

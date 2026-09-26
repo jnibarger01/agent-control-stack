@@ -137,7 +137,7 @@ Local launch does not require Supabase, device authorization, or a hosted channe
 
 ## Jace Commander
 
-`jace-commander` is a second MCP server in this package for the Jace stack. It reads ACS, codex-swarm, the visualizer, Mission Router state and LoopTrace chains, and it can run **one exact command as root per human-approved ACS capability** (`acs.jc.v1`), through a root-owned helper and a single pinned sudoers rule. See [docs/jace-commander.md](docs/jace-commander.md) for the architecture, contract, install steps and known risks. It is fail-closed until ACS implements `acs.jc.v1` issuance.
+`jace-commander` is a second MCP server in this package for the Jace stack. It reads ACS, codex-swarm, the visualizer, Mission Router state and LoopTrace chains, and it can run **one exact command as root per human-approved ACS capability** (`acs.jc.v1`), through a root-owned helper and a single pinned sudoers rule. See [docs/jace-commander.md](docs/jace-commander.md) for the architecture, contract, install steps and known risks. ACS issues `acs.jc.v1` via `POST /jc/capability/issue`; the public endpoint is the gateway lane `/jc/mcp`.
 
 ## OpenClaw ACS Bridge
 

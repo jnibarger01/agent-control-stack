@@ -216,6 +216,7 @@ export function gatewayActorFromMeta(meta: unknown): GatewayActor | undefined {
 export type AcsCapabilityRejectionCode =
   | 'ACS_CAPABILITY_INVALID_SIGNATURE'
   | 'ACS_CAPABILITY_EXPIRED'
+  | 'ACS_CAPABILITY_REPLAY'
   | 'ACS_CAPABILITY_TOOL_MISMATCH'
   | 'ACS_CAPABILITY_ARGS_MISMATCH'
   | 'ACS_CAPABILITY_MALFORMED';
@@ -278,6 +279,40 @@ function requireIdString(value: unknown): value is string {
 /** Base64url Ed25519 signatures are exactly 64 bytes (86 base64url chars). */
 function isBase64urlSignature(value: unknown): value is string {
   return typeof value === 'string' && /^[A-Za-z0-9_-]{86}$/.test(value);
+}
+
+/**
+ * Nonce replay protection: a signed capability nonce is accepted exactly once.
+ * Consumed nonces are stored only as hashes and bounded to the 30s TTL ceiling.
+ */
+const ACS_NONCE_TTL_CEILING_MS = 30_000;
+const ACS_NONCE_STORE_MAX = 10_000;
+const consumedAcsNonces = new Map<string, number>();
+
+export function resetConsumedAcsNoncesForTest(): void {
+  consumedAcsNonces.clear();
+}
+
+export function isAcsNonceConsumedForTest(nonceHash: string): boolean {
+  return consumedAcsNonces.has(nonceHash);
+}
+
+function consumeAcsNonceAtomic(nonce: string, now: number): boolean {
+  const nonceHash = sha256Hex(`acs.dc.v1:nonce:${nonce}`);
+  if (consumedAcsNonces.has(nonceHash)) return false;
+  consumedAcsNonces.set(nonceHash, now + ACS_NONCE_TTL_CEILING_MS);
+  if (consumedAcsNonces.size > ACS_NONCE_STORE_MAX) {
+    for (const [hash, expiry] of consumedAcsNonces) {
+      if (expiry <= now) consumedAcsNonces.delete(hash);
+      if (consumedAcsNonces.size <= ACS_NONCE_STORE_MAX) break;
+    }
+    while (consumedAcsNonces.size > ACS_NONCE_STORE_MAX) {
+      const oldest = consumedAcsNonces.keys().next().value;
+      if (oldest === undefined) break;
+      consumedAcsNonces.delete(oldest);
+    }
+  }
+  return true;
 }
 
 /**
@@ -504,6 +539,19 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
         kind: 'capability-rejected',
         code: acs.code,
         message: `ACS capability rejected: ${acs.reason}`,
+        classification,
+      };
+    }
+    // Consume only after all other checks pass so rejected capabilities
+    // never burn their nonce.
+    const acsEnvelopePayload = (cap as unknown as Record<string, unknown>).payload as Record<string, unknown> | undefined;
+    const acsNonce = acsEnvelopePayload?.nonce;
+    if (typeof acsNonce !== 'string' || !consumeAcsNonceAtomic(acsNonce, now)) {
+      return {
+        allowed: false,
+        kind: 'capability-rejected',
+        code: 'ACS_CAPABILITY_REPLAY',
+        message: 'ACS capability rejected: this capability nonce was already consumed (replay protection)',
         classification,
       };
     }

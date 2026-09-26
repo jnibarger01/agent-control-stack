@@ -6,6 +6,7 @@
 import { spawn } from 'child_process';
 import path from 'path';
 import fs from 'fs/promises';
+import os from 'os';
 import { fileURLToPath } from 'url';
 
 // Get directory name
@@ -54,34 +55,44 @@ function runCommand(command, args, cwd = __dirname) {
 /**
  * Run a single Node.js test file as a subprocess
  */
-function runTestFile(testFile) {
-  return new Promise((resolve) => {
-    console.log(`\n${colors.cyan}Running test module: ${testFile}${colors.reset}`);
-    
-    const startTime = Date.now();
-    const proc = spawn('node', [testFile], {
-      cwd: __dirname,
-      stdio: 'inherit',
-      shell: false
+async function runTestFile(testFile) {
+  // Every test module gets its own throwaway HOME. Desktop Commander keeps
+  // host state under HOME (~/.claude-server-commander/config.json, the
+  // executor lease in ~/.desktop-commander), and that state belongs to any
+  // live executor on this machine. Tests must never read or rewrite it.
+  const testHome = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-test-home-'));
+  try {
+    return await new Promise((resolve) => {
+      console.log(`\n${colors.cyan}Running test module: ${testFile}${colors.reset}`);
+
+      const startTime = Date.now();
+      const proc = spawn('node', [testFile], {
+        cwd: __dirname,
+        env: { ...process.env, HOME: testHome, USERPROFILE: testHome },
+        stdio: 'inherit',
+        shell: false
+      });
+
+      proc.on('close', (code) => {
+        const duration = Date.now() - startTime;
+        if (code === 0) {
+          console.log(`${colors.green}✓ Test passed: ${testFile} (${duration}ms)${colors.reset}`);
+          resolve({ success: true, file: testFile, duration, exitCode: code });
+        } else {
+          console.error(`${colors.red}✗ Test failed: ${testFile} (${duration}ms) - Exit code: ${code}${colors.reset}`);
+          resolve({ success: false, file: testFile, duration, exitCode: code });
+        }
+      });
+
+      proc.on('error', (err) => {
+        const duration = Date.now() - startTime;
+        console.error(`${colors.red}✗ Error running ${testFile}: ${err.message}${colors.reset}`);
+        resolve({ success: false, file: testFile, duration, error: err.message });
+      });
     });
-    
-    proc.on('close', (code) => {
-      const duration = Date.now() - startTime;
-      if (code === 0) {
-        console.log(`${colors.green}✓ Test passed: ${testFile} (${duration}ms)${colors.reset}`);
-        resolve({ success: true, file: testFile, duration, exitCode: code });
-      } else {
-        console.error(`${colors.red}✗ Test failed: ${testFile} (${duration}ms) - Exit code: ${code}${colors.reset}`);
-        resolve({ success: false, file: testFile, duration, exitCode: code });
-      }
-    });
-    
-    proc.on('error', (err) => {
-      const duration = Date.now() - startTime;
-      console.error(`${colors.red}✗ Error running ${testFile}: ${err.message}${colors.reset}`);
-      resolve({ success: false, file: testFile, duration, error: err.message });
-    });
-  });
+  } finally {
+    await fs.rm(testHome, { recursive: true, force: true, maxRetries: 50, retryDelay: 100 });
+  }
 }
 
 /**

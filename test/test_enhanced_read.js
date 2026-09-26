@@ -1,12 +1,32 @@
 // Test script to verify enhanced file reading
-import { readFileInternal } from '../dist/tools/filesystem.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import fs from 'fs/promises';
+import { rmSync } from 'fs';
+import os from 'os';
 
 // Get the test directory path
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const TEST_FILE_PATH = join(__dirname, 'test_output', 'file_with_1500_lines.txt');
+const FIXTURE_DIR = join(__dirname, 'test_output');
+const TEST_FILE_PATH = join(FIXTURE_DIR, 'file_with_1500_lines.txt');
+
+// readFileInternal enforces allowedDirectories from the persisted user config
+// (~/.claude-server-commander/config.json, resolved from HOME at import time).
+// Other suites pin that list to their own directories, so point HOME at a
+// throwaway config that allows exactly this fixture directory before loading dist.
+const isolatedHome = await fs.mkdtemp(join(os.tmpdir(), 'dc-enhanced-read-'));
+await fs.mkdir(join(isolatedHome, '.claude-server-commander'));
+await fs.writeFile(
+    join(isolatedHome, '.claude-server-commander', 'config.json'),
+    JSON.stringify({ allowedDirectories: [FIXTURE_DIR] }),
+);
+process.env.HOME = isolatedHome;
+process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
+process.on('exit', () => {
+    rmSync(isolatedHome, { recursive: true, force: true });
+});
+const { readFileInternal } = await import('../dist/tools/filesystem.js');
 
 async function testEnhancedReading() {
     let testsPassed = 0;

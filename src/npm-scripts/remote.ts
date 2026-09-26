@@ -1,6 +1,35 @@
 import { MCPDevice } from '../remote-device/device.js';
 import os from 'os';
 
+export interface RemoteMode {
+    standalone: boolean;
+    managed: boolean;
+    managedMcpUrl?: string;
+}
+
+/**
+ * Single canonical validation of the remote-device CLI mode flags: exactly one
+ * of --standalone / --managed, and DC_MANAGED_MCP_URL when --managed. The two
+ * entrypoints (index.ts pre-check and runRemote) previously duplicated this
+ * logic; drift between them would let an invalid invocation pass one check
+ * and fail later with a less precise error.
+ */
+export function parseRemoteMode(argv: string[] = process.argv): RemoteMode {
+    const standalone = argv.includes('--standalone');
+    const managed = argv.includes('--managed');
+
+    if (standalone === managed) {
+        throw new Error('Remote Desktop Commander requires exactly one of --standalone or --managed');
+    }
+
+    const managedMcpUrl = managed ? process.env.DC_MANAGED_MCP_URL : undefined;
+    if (managed && !managedMcpUrl) {
+        throw new Error('DC_MANAGED_MCP_URL is required with --managed');
+    }
+
+    return { standalone, managed, managedMcpUrl };
+}
+
 export async function runRemote() {
     // --persist-session is kept as an accepted no-op so existing invocations
     // and docs keep working; --no-persist-session opts back out.
@@ -32,17 +61,8 @@ export async function runRemote() {
         }
     }
 
-    const standalone = process.argv.includes('--standalone');
-    const managed = process.argv.includes('--managed');
-
-    if (standalone === managed) {
-        throw new Error('Remote Desktop Commander requires exactly one of --standalone or --managed');
-    }
-
-    const managedMcpUrl = managed ? process.env.DC_MANAGED_MCP_URL : undefined;
-    if (managed && !managedMcpUrl) {
-        throw new Error('DC_MANAGED_MCP_URL is required with --managed');
-    }
+    // Single canonical validation (shared with the index.ts pre-check).
+    const { standalone, managedMcpUrl } = parseRemoteMode();
 
     const device = new MCPDevice({
         persistSession,

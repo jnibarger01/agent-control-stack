@@ -23,6 +23,7 @@
  *   I — tampered args -> ACS_CAPABILITY_ARGS_MISMATCH (structural + hash).
  *   J — malformed envelope (bad version / nonce / hashes) -> MALFORMED.
  *   K — audit: allowed request attests with capabilityId/workItemId/attemptId.
+ *   L — replay: the same envelope is accepted once, then rejected as replay.
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -38,7 +39,7 @@ process.env.DC_ENFORCEMENT = 'off'; // ACS verification must run anyway (fail cl
 
 const {
   preExecuteEnforcement, verifyAcsCapability, attestRequest, requestHash,
-  extractCapability,
+  extractCapability, resetConsumedAcsNoncesForTest,
 } = await import('../dist/enforcement/pipeline.js');
 const { strictCanonicalJsonV1, computeDesktopCommanderInvocationHash } = await import('../dist/managed-acs.js');
 const { AuditChain, verifyChain } = await import('../dist/audit/audit-chain.js');
@@ -271,6 +272,47 @@ async function testEnforcementOnAlsoFailsClosed() {
   process.env.DC_ENFORCEMENT = 'off';
 }
 
+async function testNonceReplayProtection() {
+  process.env.DC_ACS_CAPABILITY_PUBLIC_KEY = keys.publicBase64url;
+  try {
+    const envelope = buildEnvelope();
+    const first = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, envelope);
+    assert.equal(first.allowed, true);
+    const second = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, envelope);
+    assert.equal(second.allowed, false);
+    assert.equal(second.code, 'ACS_CAPABILITY_REPLAY');
+
+    resetConsumedAcsNoncesForTest();
+    const racing = buildEnvelope();
+    const results = await Promise.all(Array.from({ length: 8 }, () =>
+      gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, racing)));
+    assert.equal(results.filter((r) => r.allowed).length, 1);
+    assert.equal(results.filter((r) => !r.allowed && r.code === 'ACS_CAPABILITY_REPLAY').length, 7);
+
+    resetConsumedAcsNoncesForTest();
+    const previousAttestKey = process.env.DC_GATEWAY_ATTESTATION_KEY;
+    process.env.DC_GATEWAY_ATTESTATION_KEY = 'nonce-test-attestation-key';
+    const early = buildEnvelope();
+    const rejected = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, early);
+    assert.equal(rejected.allowed, false);
+    assert.equal(rejected.code, 'GATEWAY_ATTESTATION_INVALID');
+    if (previousAttestKey === undefined) delete process.env.DC_GATEWAY_ATTESTATION_KEY;
+    else process.env.DC_GATEWAY_ATTESTATION_KEY = previousAttestKey;
+    const onTime = await gateWith({ DC_ACS_CAPABILITY_PUBLIC_KEY: keys.publicBase64url }, early);
+    assert.equal(onTime.allowed, true);
+
+    resetConsumedAcsNoncesForTest();
+    const pure = buildEnvelope();
+    for (let i = 0; i < 3; i++) {
+      const check = verifyAcsCapability(pure, { tool: 'read_file', args: { path: '/tmp/x.txt' } });
+      assert.equal(check.ok, true);
+    }
+  } finally {
+    resetConsumedAcsNoncesForTest();
+    delete process.env.DC_ACS_CAPABILITY_PUBLIC_KEY;
+  }
+}
+
 async function testGatewayAcsRequiresAttribution() {
   const previous = process.env.DC_GATEWAY_ATTESTATION_KEY;
   process.env.DC_GATEWAY_ATTESTATION_KEY = 'isolated-gateway-test-key';
@@ -302,6 +344,7 @@ const tests = [
   testDirectVerifierResults,
   testAuditAttestation,
   testEnforcementOnAlsoFailsClosed,
+  testNonceReplayProtection,
 ];
 for (const test of tests) {
   await test();

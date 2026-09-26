@@ -11,6 +11,7 @@ dist/
 # IDE and editor files
 .idea/
 .vscode/
+.claude/settings.local.json
 *.swp
 *.swo
 .DS_Store
