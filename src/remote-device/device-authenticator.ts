@@ -2,6 +2,7 @@ import open from 'open';
 import os from 'os';
 import crypto from 'crypto';
 import { captureRemote } from '../utils/capture.js';
+import { exchangeAuthorizationCode, OAuthRelaySettings } from './oauth-relay.js';
 
 interface AuthSession {
     access_token: string;
@@ -45,6 +46,9 @@ interface PollResponse {
     error?: string;
     error_description?: string;
     device_id?: string;
+    /** Own-relay mode: the plane relays the Supabase OAuth code, never a token. */
+    authorization_code?: string;
+    redirect_uri?: string;
 }
 
 const CLIENT_ID = 'mcp-device';
@@ -88,6 +92,8 @@ export interface DeviceAuthenticatorOptions {
     openBrowser?: (url: string) => Promise<unknown>;
     sleep?: (milliseconds: number) => Promise<void>;
     onStateChange?: (state: DeviceAuthState) => void;
+    /** Own-relay (supabase_oauth_pkce) mode; absent = DC cloud behavior. */
+    oauth?: OAuthRelaySettings;
 }
 
 export class DeviceAuthenticator {
@@ -96,6 +102,7 @@ export class DeviceAuthenticator {
     private readonly openBrowser: (url: string) => Promise<unknown>;
     private readonly sleepImpl: (milliseconds: number) => Promise<void>;
     private readonly onStateChange?: (state: DeviceAuthState) => void;
+    private readonly oauth?: OAuthRelaySettings;
 
     constructor(baseServerUrl: string, options: DeviceAuthenticatorOptions = {}) {
         this.baseServerUrl = normalizeRemoteControlPlaneUrl(baseServerUrl);
@@ -103,6 +110,7 @@ export class DeviceAuthenticator {
         this.openBrowser = options.openBrowser || ((url) => open(url));
         this.sleepImpl = options.sleep || ((milliseconds) => this.sleep(milliseconds));
         this.onStateChange = options.onStateChange;
+        this.oauth = options.oauth;
     }
 
     async authenticate(deviceId?: string): Promise<AuthSession> {
@@ -199,7 +207,9 @@ export class DeviceAuthenticator {
         console.log('📋 Please complete authentication in your browser:\n');
         console.log('   1. Open this URL in your browser:');
         console.log(`      ${browserUrl}\n`);
-        console.log(deviceAuth.session_id
+        console.log(this.oauth
+            ? '   2. Sign in and approve access for this device.\n'
+            : deviceAuth.session_id
             ? '   2. Complete the Add Device and Verify Device steps.\n'
             : '   2. Complete the device verification step and authorize this device.\n');
         console.log(`   Code expires in ${Math.floor(deviceAuth.expires_in / 60)} minutes.\n`);
@@ -253,6 +263,23 @@ export class DeviceAuthenticator {
                 }
                 // Continue polling on network errors
                 continue;
+            }
+
+            // Own-relay: the plane hands back the Supabase authorization code and
+            // this device redeems it with the same PKCE verifier it started with.
+            if (this.oauth && response.ok && data.authorization_code) {
+                if (data.redirect_uri && data.redirect_uri !== this.oauth.redirectUri) {
+                    throw new Error('Relay returned an unexpected redirect_uri');
+                }
+                const tokens = await exchangeAuthorizationCode(this.fetchImpl, {
+                    supabaseUrl: this.oauth.supabaseUrl,
+                    anonKey: this.oauth.anonKey,
+                    clientId: this.oauth.clientId,
+                    redirectUri: this.oauth.redirectUri,
+                    code: data.authorization_code,
+                    codeVerifier,
+                });
+                return { device_id: data.device_id, access_token: tokens.access_token, refresh_token: tokens.refresh_token };
             }
 
             // Successful authentication is the authoritative verification result.

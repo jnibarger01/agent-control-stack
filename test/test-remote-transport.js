@@ -78,7 +78,7 @@ function makeDevice({ claimResults = [] } = {}) {
  * `update(...).eq(...)` (awaited) and `select(...).eq(...).maybeSingle()`.
  * Records every mcp_devices write in `writes`.
  */
-function makeFakeClient({ row = null, failFetches = 0, writeLatencies = [] } = {}) {
+function makeFakeClient({ row = null, failFetches = 0, failClaims = 0, lostClaims = 0, writeLatencies = [], claimDeviceId = DEVICE_ID } = {}) {
   const writes = [];
   // Recorded when a write COMPLETES, not when it is issued. `writes` alone
   // cannot test ordering: setOnlineStatus evaluates .update() synchronously
@@ -86,7 +86,46 @@ function makeFakeClient({ row = null, failFetches = 0, writeLatencies = [] } = {
   // statusWriteChain serialisation.
   const completions = [];
   let fetchAttempts = 0;
+  let claimAttempts = 0;
   let pendingWrite = null;
+  let lastClaim = null;
+
+  const claim = () => {
+    const filters = {};
+    let selected = null;
+    const settle = () => {
+      claimAttempts++;
+      const failed = claimAttempts <= failClaims;
+      const wantsRow = selected === '*';
+      const matches =
+        filters.id === row?.id &&
+        filters.status === 'pending' &&
+        (!wantsRow || filters.device_id === claimDeviceId);
+      const committed =
+        !!row &&
+        matches &&
+        row.status === 'pending' &&
+        (!failed || claimAttempts <= lostClaims);
+      if (committed) row.status = 'executing';
+      lastClaim = { filters: { ...filters }, select: selected };
+      if (failed) return { data: null, error: { message: 'claim failed' } };
+      if (selected === null) return { data: null, error: null };
+      return { data: committed ? [wantsRow ? row : { id: row.id }] : [], error: null };
+    };
+    const builder = {
+      eq: (col, value) => {
+        filters[col] = value;
+        return builder;
+      },
+      select: (cols = '*') => {
+        selected = cols;
+        return builder;
+      },
+      then: (onFulfilled, onRejected) =>
+        Promise.resolve().then(settle).then(onFulfilled, onRejected),
+    };
+    return builder;
+  };
 
   const result = () => {
     const p = Promise.resolve({ data: null, error: null });
@@ -105,8 +144,6 @@ function makeFakeClient({ row = null, failFetches = 0, writeLatencies = [] } = {
   const chain = {
     update: (payload) => {
       writes.push(payload);
-      // Per-write completion latency, so a test can make an earlier write land
-      // LATER than a later one — the only way to observe serialisation.
       pendingWrite = {
         payload,
         delay: writeLatencies.length ? writeLatencies.shift() : 0,
@@ -115,10 +152,11 @@ function makeFakeClient({ row = null, failFetches = 0, writeLatencies = [] } = {
     },
     select: () => chain,
     insert: () => chain,
-    eq: () => {
+    eq: (col, value) => {
       if (!pendingWrite) return result();
       const { payload, delay } = pendingWrite;
       pendingWrite = null;
+      if (payload.status === 'executing') return claim().eq(col, value);
       let settleTimer;
       let rejectWrite;
       const p = new Promise((resolve, reject) => {
@@ -127,14 +165,9 @@ function makeFakeClient({ row = null, failFetches = 0, writeLatencies = [] } = {
           completions.push(payload);
           resolve({ data: null, error: null });
         };
-        // Only defer when a test actually asked for latency, so every other
-        // test keeps the original resolve-immediately semantics.
         if (delay > 0) settleTimer = realSetTimeout(settle, delay);
         else settle();
       });
-      // markCallExecuting chains .eq().eq().select() off a single update(), so
-      // this must stay chainable exactly like result() does — returning a bare
-      // promise leaves that chain hanging forever.
       p.eq = () => p;
       p.lte = () => p;
       p.select = () => p;
@@ -156,13 +189,9 @@ function makeFakeClient({ row = null, failFetches = 0, writeLatencies = [] } = {
     writes,
     completions,
     attempts: () => fetchAttempts,
-    // Required by recreateChannel(); without them it dies on a TypeError before
-    // reaching anything the recreate tests stub.
+    claims: () => claimAttempts,
+    lastClaim: () => lastClaim,
     removeChannel: () => Promise.resolve('ok'),
-    // isDisconnecting models a client that has already settled, so
-    // waitForSocketSettled() polls once and returns. NOTE: this fake has no
-    // real connection state, so it cannot observe whether a new socket was
-    // actually dialled — the recreate tests verify sequencing, not transport.
     realtime: { disconnect: () => Promise.resolve(), isDisconnecting: () => false },
     from: () => chain,
   };
@@ -173,6 +202,8 @@ function makeRemoteChannel(opts = {}) {
   const client = makeFakeClient(opts);
   rc.client = client; // private in TS, plain property at runtime
   rc._user = { id: 'user-1', email: 'tester@example.com' };
+  rc.lastKnownSession = { access_token: 'test-access', refresh_token: 'test-refresh' };
+  rc.presenceTracked = true;
   rc.deviceId = DEVICE_ID;
   rc.deviceName = 'test-device';
   rc.onToolCall = () => {};
@@ -213,6 +244,15 @@ await test('a lost DB claim (another process won) skips execution', async () => 
   assert(executed.length === 0, `expected no execution, got ${executed.length}`);
 });
 
+await test('a delivery the doorbell already claimed executes once without claiming again', async () => {
+  const { device, executed } = makeDevice();
+  let dbClaims = 0;
+  device.remoteChannel.markCallExecuting = async () => { dbClaims++; return true; };
+  await device.handleNewToolCall({ ...payloadFor('call-e'), claimed: true });
+  assert(executed.length === 1, `expected 1 execution, got ${executed.length}`);
+  assert(dbClaims === 0, `expected no DB claim, got ${dbClaims}`);
+});
+
 await test('calls for another device are ignored and do not poison the dedupe set', async () => {
   const { device, executed } = makeDevice();
   await device.handleNewToolCall(payloadFor('call-d', OTHER_DEVICE));
@@ -233,35 +273,92 @@ await test('the seen-call-id set stays bounded', async () => {
 await test('doorbell for another device is ignored without fetching', async () => {
   const { rc, client } = makeRemoteChannel();
   await rc.onDoorbell({ call_id: 'x', device_id: OTHER_DEVICE });
-  assert(client.attempts() === 0, 'must not even fetch the row');
+  assert(client.attempts() === 0 && client.claims() === 0, 'must not even fetch the row');
 });
 
 await test('doorbell delivers a pending row through the shared handler', async () => {
   const row = { id: 'x', status: 'pending', tool_name: 'start_process' };
-  const { rc } = makeRemoteChannel({ row });
+  const { rc, client } = makeRemoteChannel({ row });
   const delivered = [];
   rc.onToolCall = (p) => delivered.push(p);
   await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
   assert(delivered.length === 1, 'expected one delivery');
-  assert(delivered[0].new === row, 'must pass the fetched row as {new: row}');
+  assert(delivered[0].new === row, 'must pass the claimed row as {new: row}');
+  assert(delivered[0].claimed === true, 'must mark the delivery claimed');
+  assert(client.claims() === 1 && client.attempts() === 0, 'one claim, no separate fetch');
+});
+
+await test('the doorbell claim filters by id, device and pending status, and asks for the row', async () => {
+  const { rc, client } = makeRemoteChannel({ row: { id: 'x', status: 'pending' } });
+  await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
+  const claim = client.lastClaim();
+  assert(claim.filters.id === 'x', `claim must filter on the call id: ${JSON.stringify(claim)}`);
+  assert(claim.filters.device_id === DEVICE_ID, `claim must filter on this device: ${JSON.stringify(claim)}`);
+  assert(claim.filters.status === 'pending', `claim must stay conditional on pending: ${JSON.stringify(claim)}`);
+  assert(claim.select === '*', 'claim must select the row, or PostgREST returns no representation');
+});
+
+await test('a claim that does not match this device delivers nothing', async () => {
+  const { rc, client } = makeRemoteChannel({
+    row: { id: 'x', status: 'pending' },
+    claimDeviceId: OTHER_DEVICE,
+  });
+  const delivered = [];
+  rc.onToolCall = (p) => delivered.push(p);
+  await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
+  assert(delivered.length === 0, 'a row owned by another device must not be delivered');
+  assert(client.claims() === 1 && client.attempts() === 0, 'one claim, no read-back');
 });
 
 await test('doorbell for an already-claimed row does not re-deliver', async () => {
-  const { rc } = makeRemoteChannel({ row: { id: 'x', status: 'executing' } });
+  const { rc, client } = makeRemoteChannel({ row: { id: 'x', status: 'executing' } });
   const delivered = [];
   rc.onToolCall = (p) => delivered.push(p);
   await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
   assert(delivered.length === 0, 'non-pending rows must not be re-delivered');
+  assert(client.attempts() === 0, 'a clean empty claim needs no fetch');
 });
 
-await test('doorbell row fetch retries a transient failure', async () => {
-  const { rc, client } = makeRemoteChannel({ row: { id: 'x', status: 'pending' }, failFetches: 2 });
+await test('doorbell claim retries a transient failure', async () => {
+  const { rc, client } = makeRemoteChannel({
+    row: { id: 'x', status: 'pending' },
+    failClaims: 2,
+  });
   const delivered = [];
   rc.onToolCall = (p) => delivered.push(p);
   rc.sleep = () => Promise.resolve();
   await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
-  assert(client.attempts() === 3, `expected 3 attempts, got ${client.attempts()}`);
+  assert(client.claims() === 3, `expected 3 attempts, got ${client.claims()}`);
   assert(delivered.length === 1, 'should deliver after the retry succeeds');
+  assert(delivered[0].claimed === true, 'the successful retry claimed it');
+});
+
+await test('a claim that reads back executing is never delivered — the claimant is unknowable', async () => {
+  const { rc, client } = makeRemoteChannel({
+    row: { id: 'x', status: 'pending' },
+    failClaims: 1,
+    lostClaims: 1,
+  });
+  const delivered = [];
+  rc.onToolCall = (p) => delivered.push(p);
+  rc.sleep = () => Promise.resolve();
+  await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
+  assert(client.attempts() === 1, `expected one read-back, got ${client.attempts()}`);
+  assert(delivered.length === 0, `an executing row must not be delivered, got ${delivered.length}`);
+});
+
+await test('every claim failing falls back to an unclaimed delivery', async () => {
+  const { rc, client } = makeRemoteChannel({
+    row: { id: 'x', status: 'pending' },
+    failClaims: 3,
+  });
+  const delivered = [];
+  rc.onToolCall = (p) => delivered.push(p);
+  rc.sleep = () => Promise.resolve();
+  await rc.onDoorbell({ call_id: 'x', device_id: DEVICE_ID });
+  assert(client.claims() === 3 && client.attempts() === 1, 'three claims, then one fetch');
+  assert(delivered.length === 1, 'the fetched pending row must be delivered');
+  assert(delivered[0].claimed !== true, 'device.ts must still claim it');
 });
 
 await test('doorbell with a missing row is a no-op', async () => {
@@ -313,10 +410,9 @@ await test('the result row is written BEFORE the doorbell is rung', async () => 
 });
 
 // --- 4. Heartbeat cadence tiers ---------------------------------------------
-// The server tiers its offline sweep on the capability FLAG, not the app
-// version, and the flag is only set once presence is proven. So an unproven
-// device is judged by the fast 45s rule and must heartbeat fast enough to
-// survive it, or it is swept offline before it ever proves presence.
+// The hosted service currently applies the observed legacy ~45s sweep even
+// when transport_broadcast_v1=true, so capable devices use the bounded
+// compatibility cadence rather than the historical 5-minute client cadence.
 
 await test('unproven tier heartbeats inside the server 45s sweep threshold', async () => {
   const { rc } = makeRemoteChannel();
@@ -330,15 +426,15 @@ await test('unproven tier heartbeats inside the server 45s sweep threshold', asy
   assert(rc.heartbeatIntervalMs() === cadence, 'a withdrawn capability uses the fast cadence');
 });
 
-await test('capable tier heartbeats inside the server capable sweep threshold', async () => {
+await test('capable tier uses compatibility cadence inside the observed legacy sweep', async () => {
   const { rc } = makeRemoteChannel();
   rc.transportCapableWritten = true;
   const cadence = rc.heartbeatIntervalMs();
   assert(
-    cadence * 2 < SERVER_CAPABLE_OFFLINE_TIMEOUT_MS,
-    `capable cadence ${cadence}ms must allow >=2 writes inside ${SERVER_CAPABLE_OFFLINE_TIMEOUT_MS}ms`
+    cadence * 2 < SERVER_LEGACY_OFFLINE_TIMEOUT_MS,
+    `capable compatibility cadence ${cadence}ms must allow >=2 writes inside ${SERVER_LEGACY_OFFLINE_TIMEOUT_MS}ms`
   );
-  assert(cadence > SERVER_LEGACY_OFFLINE_TIMEOUT_MS, 'capable cadence is the slow one');
+  assert(cadence < SERVER_CAPABLE_OFFLINE_TIMEOUT_MS, 'compatibility cadence remains bounded');
 });
 
 await test('withdrawing the capability re-arms the heartbeat at the fast cadence', async () => {
@@ -390,11 +486,29 @@ await test('heartbeat stays silent when no transport is joined', async () => {
   assert(client.writes.length === 0, 'a deaf device must let the sweep age its row out');
 });
 
-await test('heartbeat writes when the private channel is joined', async () => {
+await test('heartbeat writes only when channel, Presence, session, and local MCP are healthy', async () => {
   const { rc, client } = makeRemoteChannel();
   rc.channel = makeChannelState('joined');
   await rc.updateHeartbeat(DEVICE_ID);
-  assert(client.writes.length === 1, 'private channel joined = reachable');
+  assert(client.writes.length === 1, 'all online proofs should permit the compatibility heartbeat');
+});
+
+await test('heartbeat stops when Presence is lost', async () => {
+  const { rc, client } = makeRemoteChannel();
+  rc.channel = makeChannelState('joined');
+  rc.presenceTracked = false;
+  await rc.updateHeartbeat(DEVICE_ID);
+  assert(client.writes.length === 0, 'Presence loss must stop online assertions');
+});
+
+await test('heartbeat stops when the local MCP is not ready', async () => {
+  let ready = true;
+  const { rc, client } = makeRemoteChannel();
+  rc.isLocalReady = () => ready;
+  rc.channel = makeChannelState('joined');
+  ready = false;
+  await rc.updateHeartbeat(DEVICE_ID);
+  assert(client.writes.length === 0, 'local MCP loss must stop online assertions');
 });
 
 await test('status goes offline when the private channel is not joined', async () => {
@@ -403,6 +517,15 @@ await test('status goes offline when the private channel is not joined', async (
   rc.syncReachabilityStatus();
   await rc.statusWriteChain;
   assert(client.writes[0].status === 'offline', 'genuinely deaf device goes offline');
+});
+
+await test('status goes offline when Presence disappears even if channel remains joined', async () => {
+  const { rc, client } = makeRemoteChannel();
+  rc.channel = makeChannelState('joined');
+  rc.presenceTracked = false;
+  rc.syncReachabilityStatus();
+  await rc.statusWriteChain;
+  assert(client.writes[0].status === 'offline', 'joined without Presence is not dispatchable');
 });
 
 await test('concurrent status writes stay ordered', async () => {
@@ -429,6 +552,36 @@ await test('concurrent status writes stay ordered', async () => {
     `writes must COMPLETE in issue order so the join wins, got ${client.completions
       .map((w) => w.status)
       .join(',')}`
+  );
+});
+
+await test('registration preserves the advertised MCP tool schemas', async () => {
+  const { rc, client } = makeRemoteChannel({ row: { id: DEVICE_ID, device_name: 'test-device' } });
+  rc.createChannel = async () => {};
+  const tools = [{
+    name: 'start_process',
+    inputSchema: {
+      type: 'object',
+      properties: { command: { type: 'string' }, cwd: { type: 'string' } },
+      required: ['command'],
+    },
+  }];
+  await rc.registerDevice({
+    tools,
+    app_version: 'spoofed',
+    transport_broadcast_v1: true,
+  }, DEVICE_ID, 'test-device', () => {});
+  const metadataWrite = client.writes.find((write) => write.capabilities);
+  assert(metadataWrite, 'registration must update device metadata');
+  assert(metadataWrite.capabilities.tools === tools, 'tool schemas must survive capability registration');
+  assert(
+    metadataWrite.capabilities.tools[0].inputSchema.properties.cwd.type === 'string',
+    'start_process cwd must be advertised to the remote MCP surface'
+  );
+  assert(metadataWrite.capabilities.app_version !== 'spoofed', 'device owns app_version');
+  assert(
+    metadataWrite.capabilities.transport_broadcast_v1 === undefined,
+    'registration must not advertise broadcast capability before Presence is proven'
   );
 });
 
@@ -512,6 +665,7 @@ await test('timestamp fence rejects an online commit accepted before final offli
 
 await test('sustained recreate failure withdraws the transport capability', async () => {
   const { rc, client } = makeRemoteChannel();
+  rc.registeredCapabilities = { tools: [{ name: 'start_process', inputSchema: { properties: { cwd: { type: 'string' } } } }] };
   rc.transportCapableWritten = true; // previously proven
   rc.sleep = () => Promise.resolve(); // skip the jittered backoff
   rc.createChannel = () => Promise.reject(new Error('Unauthorized'));
@@ -527,6 +681,10 @@ await test('sustained recreate failure withdraws the transport capability', asyn
     'the withdrawn payload must not carry the flag'
   );
   assert(capWrite.capabilities.app_version !== undefined, 'app_version must survive');
+  assert(
+    capWrite.capabilities.tools?.[0]?.inputSchema?.properties?.cwd?.type === 'string',
+    'withdrawing transport capability must preserve advertised tool schemas'
+  );
 });
 
 await test('a single recreate failure does not withdraw the capability', async () => {

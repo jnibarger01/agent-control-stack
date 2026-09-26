@@ -11,6 +11,13 @@ import {
 
 process.env.DESKTOP_COMMANDER_DISABLE_TELEMETRY = '1';
 const root = await fs.mkdtemp(path.join(os.tmpdir(), 'dc-local-runtime-'));
+// The spawned executor claims the canonical executor lease under
+// $HOME/.desktop-commander. getDefaultEnvironment() forwards HOME to the child,
+// so isolating HOME keeps this test off a live host executor's lease without
+// disabling the lease or widening the runtime's forwarded-env allowlist.
+const originalHome = process.env.HOME;
+process.env.HOME = path.join(root, 'home');
+await fs.mkdir(process.env.HOME, { recursive: true });
 const stateDir = path.join(root, 'child-state');
 process.env.DESKTOP_COMMANDER_STATE_DIR = path.join(root, 'parent-state');
 
@@ -42,6 +49,10 @@ const runtime = createLocalMcpRuntime({
   env: {
     DESKTOP_COMMANDER_DISABLE_TELEMETRY: '1',
     DESKTOP_COMMANDER_STATE_DIR: stateDir,
+    // This suite smokes runtime mechanics (spawn/read/reap), not the
+    // approval gate, which has dedicated coverage elsewhere. The fail-closed
+    // unmatched-command default would otherwise block the smoke spawn.
+    DC_UNMATCHED_COMMAND_POLICY: 'auto',
   },
 });
 
@@ -240,5 +251,7 @@ try {
 } finally {
   await runtime.shutdown().catch(() => undefined);
   delete process.env.DESKTOP_COMMANDER_STATE_DIR;
+  if (originalHome === undefined) delete process.env.HOME;
+  else process.env.HOME = originalHome;
   await fs.rm(root, { recursive: true, force: true });
 }

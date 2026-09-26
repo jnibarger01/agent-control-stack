@@ -23,6 +23,9 @@ const privateKeyDer = Buffer.concat([
   Buffer.from('9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60', 'hex'),
 ]);
 const privateKey = crypto.createPrivateKey({ key: privateKeyDer, format: 'der', type: 'pkcs8' });
+const goldenVector = JSON.parse(
+  fs.readFileSync(new URL('./fixtures/acs-dc-v1.json', import.meta.url), 'utf8'),
+);
 
 const vectorPayload = {
   actionHash: 'b'.repeat(64),
@@ -61,9 +64,40 @@ assert.deepEqual(FIXED_ACS_SCOPES, [
   'process.spawn',
 ]);
 assert.equal(strictCanonicalJsonV1(vectorPayload), vectorCanonical);
+assert.deepEqual(goldenVector.payload, vectorPayload);
+assert.equal(goldenVector.canonicalPayload, vectorCanonical);
+assert.equal(goldenVector.invocationHash, vectorPayload.invocationHash);
+assert.equal(goldenVector.signature, vectorSignature);
+assert.equal(goldenVector.invocationDomainSeparatorHex, '0a');
+assert.deepEqual(goldenVector.envelope, {
+  payload: vectorPayload,
+  signature: vectorSignature,
+  keyId: 'test-key-1',
+});
+assert.deepEqual(goldenVector.bootstrap, {
+  request: {
+    schemaVersion: 1,
+    runtimeId: 'runtime_01',
+    challenge: 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
+    scopes: FIXED_ACS_SCOPES,
+  },
+  reply: {
+    schemaVersion: 1,
+    runtimeId: 'runtime_01',
+    challenge: 'BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc',
+    scopes: FIXED_ACS_SCOPES,
+  },
+});
 assert.equal(
   computeDesktopCommanderInvocationHash('read_file', { path: '/safe/example.txt' }),
   vectorPayload.invocationHash,
+);
+assert.notEqual(
+  crypto.createHash('sha256')
+    .update(`acs:desktop-commander-invocation:v1\\n${JSON.stringify({ arguments: { path: '/safe/example.txt' }, toolName: 'read_file' })}`)
+    .digest('hex'),
+  vectorPayload.invocationHash,
+  'a literal backslash+n separator must never replace the actual LF byte',
 );
 assert.equal(
   crypto.verify(
@@ -86,6 +120,22 @@ for (const invalid of [
 const accessor = {};
 Object.defineProperty(accessor, 'secret', { enumerable: true, get: () => 'nope' });
 assert.throws(() => strictCanonicalJsonV1(accessor), /accessor/);
+const arraySubclass = new (class extends Array {})('not-plain');
+assert.throws(() => strictCanonicalJsonV1(arraySubclass), /plain array/);
+let arrayAccessorReads = 0;
+const arrayAccessor = ['safe'];
+Object.defineProperty(arrayAccessor, '0', {
+  enumerable: true,
+  get() {
+    arrayAccessorReads += 1;
+    return 'unsafe';
+  },
+});
+assert.throws(() => strictCanonicalJsonV1(arrayAccessor), /accessor/);
+assert.equal(arrayAccessorReads, 0, 'canonicalization must reject an array accessor without invoking it');
+const hiddenArrayEntry = ['hidden'];
+Object.defineProperty(hiddenArrayEntry, '0', { enumerable: false });
+assert.throws(() => strictCanonicalJsonV1(hiddenArrayEntry), /non-enumerable/);
 
 const now = Date.parse('2026-01-01T00:00:10.000Z');
 const bootstrapChallenge = Buffer.alloc(32, 7).toString('base64url');
@@ -295,6 +345,10 @@ try {
 
 const rejectionCases = [
   ['ACS_CAPABILITY_MISSING', undefined],
+  ['ACS_CAPABILITY_MALFORMED', {
+    ...sign(payload()),
+    payload: payload({ normalizedArguments: { path: undefined } }),
+  }],
   ['ACS_CAPABILITY_EXTRA_FIELD', { ...sign(payload()), alg: 'EdDSA' }],
   ['ACS_CAPABILITY_KEY_UNKNOWN', { ...sign(payload()), keyId: 'other-key' }],
   ['ACS_CAPABILITY_SIGNATURE_INVALID', { ...sign(payload()), signature: Buffer.alloc(64).toString('base64url') }],
@@ -315,6 +369,11 @@ const rejectionCases = [
   ['ACS_CAPABILITY_SCOPE_MISMATCH', sign(payload({ scopes: ['fs.write'] }))],
   ['ACS_CAPABILITY_APPROVAL_FORBIDDEN', sign(payload({ approvalId: 'approval_01' }))],
   ['ACS_CAPABILITY_TIME_INVALID', sign(payload({ expiresAt: '2026-01-01T00:00:45.000Z' }))],
+  ['ACS_CAPABILITY_TIME_INVALID', sign(payload({ expiresAt: '2026-01-01T00:00:04.000Z' }))],
+  ['ACS_CAPABILITY_TIME_INVALID', sign(payload({
+    issuedAt: '2026-01-01T00:00:16.000Z',
+    expiresAt: '2026-01-01T00:00:30.000Z',
+  }))],
   ['ACS_CAPABILITY_TIME_INVALID', sign(payload({ issuedAt: '2026-01-01T00:00:20Z' }))],
   ['ACS_CAPABILITY_NONCE_INVALID', sign(payload({ nonce: 'short' }))],
 ];

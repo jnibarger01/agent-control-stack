@@ -1,18 +1,34 @@
 import { createClient, SupabaseClient, Session, UserResponse, User, RealtimeChannel } from '@supabase/supabase-js';
 import { captureRemote } from '../utils/capture.js';
 import { VERSION } from '../version.js';
-
-const NUL_CHAR = String.fromCharCode(0);
-const NUL_RE = new RegExp(NUL_CHAR, 'g');
+import crypto from 'crypto';
+import {
+    deviceTopic,
+    OAuthRelaySettings,
+    oauthRelayFetch,
+    presenceMeta,
+    registerWithRelay,
+    relayCapabilities,
+} from './oauth-relay.js';
 
 /**
- * Strip NUL characters (U+0000) from strings and object keys — Postgres rejects
- * them in jsonb and text (22P05). Walks the structure rather than
- * round-tripping JSON, which would also match escape text in legitimate content.
+ * Control characters EXCEPT tab (0x09), LF (0x0A) and CR (0x0D) — those three
+ * are legitimate text content. NUL is the Postgres blocker (22P05 in text and
+ * jsonb); the rest corrupt protocol framing and log rendering, so they are
+ * stripped from anything written to the control plane. Built from an explicit
+ * class rather than a raw control byte so the stripped set is visible in code.
+ */
+const CONTROL_CHARS_RE = /[\x00-\x08\x0b-\x1f\x7f]/;
+const CONTROL_CHARS_RE_GLOBAL = /[\x00-\x08\x0b-\x1f\x7f]/g;
+
+/**
+ * Strip control characters (U+0000–U+0008, U+000B–U+001F, U+007F) from strings
+ * and object keys. Walks the structure rather than round-tripping JSON, which
+ * would also match escape text in legitimate content.
  */
 export function stripNullBytes<T>(value: T): T {
     if (typeof value === 'string') {
-        return (value.includes(NUL_CHAR) ? value.replace(NUL_RE, '') : value) as T;
+        return (CONTROL_CHARS_RE.test(value) ? value.replace(CONTROL_CHARS_RE_GLOBAL, '') : value) as T;
     }
     if (Array.isArray(value)) {
         return value.map((item) => stripNullBytes(item)) as T;
@@ -23,7 +39,7 @@ export function stripNullBytes<T>(value: T): T {
         if (proto !== Object.prototype && proto !== null) return value;
         const out: Record<string, any> = {};
         for (const [k, v] of Object.entries(value as Record<string, any>)) {
-            out[k.includes(NUL_CHAR) ? k.replace(NUL_RE, '') : k] = stripNullBytes(v);
+            out[CONTROL_CHARS_RE.test(k) ? k.replace(CONTROL_CHARS_RE_GLOBAL, '') : k] = stripNullBytes(v);
         }
         return out as T;
     }
@@ -45,10 +61,16 @@ interface DeviceData {
     last_seen: string;
 }
 
-// last_seen cadences. The server tiers its sweep on the transport_broadcast_v1
-// flag, so each must fit its tier's threshold in the server's constants.ts:
-// capable -> 15 min, unflagged -> 45s.
-const CAPABLE_HEARTBEAT_INTERVAL = 5 * 60 * 1000;
+// The hosted control plane currently sweeps capable devices on the legacy
+// ~45s last_seen threshold despite transport_broadcast_v1=true (reproduced
+// 2026-09-08 with Presence still visible). Keep the compatibility write bounded
+// and configurable, with a conservative default that fits that observed tier.
+const CAPABLE_HEARTBEAT_INTERVAL = (() => {
+    const configured = Number.parseInt(process.env.REMOTE_STATUS_HEARTBEAT_INTERVAL_MS ?? '', 10);
+    return Number.isFinite(configured) && configured >= 1_000 && configured <= 600_000
+        ? configured
+        : 5 * 1000;
+})();
 const LEGACY_HEARTBEAT_INTERVAL = 15 * 1000;
 // Cap on a recreate's rebuild step so a hung await can't disable the watchdog.
 // Must exceed createChannel()'s worst case (~31.5s of presence retries).
@@ -61,7 +83,12 @@ const JOINING_WEDGE_TIMEOUT_MS = 30000;
 const HEARTBEAT_STALE_TIMEOUT_MS = 75000;
 // Fixed cadence for our own token refresh, independent of auth-js's internal
 // ticker (disabled in initialize()) — see the clock-skew comment below for why.
-const TOKEN_REFRESH_INTERVAL_MS = 45 * 60 * 1000;
+const TOKEN_REFRESH_INTERVAL_MS = (() => {
+    const configured = Number.parseInt(process.env.REMOTE_TOKEN_REFRESH_INTERVAL_MS ?? '', 10);
+    return Number.isFinite(configured) && configured >= 10_000 && configured <= 45 * 60 * 1000
+        ? configured
+        : 45 * 60 * 1000;
+})();
 // Below this, skew is noise — leave Date.now untouched. Above it, correct.
 const CLOCK_SKEW_CORRECTION_THRESHOLD_MS = 5 * 60 * 1000;
 // Failed recreates before withdrawing transport_broadcast_v1 — keeping it while
@@ -96,6 +123,15 @@ export interface RemoteChannelFailure {
 export interface RemoteChannelOptions {
     maxReconnectAttempts?: number;
     onReconnectExhausted?: (failure: RemoteChannelFailure) => void | Promise<void>;
+    isLocalReady?: () => boolean;
+    /**
+     * Called with every rotated token pair (TOKEN_REFRESHED, or a restore after
+     * SIGNED_OUT) so the owner can persist it. Supabase refresh tokens are
+     * single-use: a stale copy on disk fails with "Already Used" on next start.
+     */
+    onSessionTokens?: (tokens: { access_token: string; refresh_token: string | null }) => void | Promise<void>;
+    /** Test seam for relay registration. */
+    fetchImpl?: typeof fetch;
 }
 
 // auth-js compares token expiry against this device's own Date.now(), with no
@@ -164,6 +200,15 @@ export class RemoteChannel {
     private reconnectExhausted = false;
     private readonly maxReconnectAttempts: number;
     private readonly onReconnectExhausted?: (failure: RemoteChannelFailure) => void | Promise<void>;
+    private readonly isLocalReady: () => boolean;
+    private readonly onSessionTokens?: (tokens: { access_token: string; refresh_token: string | null }) => void | Promise<void>;
+    private readonly fetchImpl: typeof fetch;
+    /** Own-relay mode (supabase_oauth_pkce); null = DC cloud. */
+    private oauth: OAuthRelaySettings | null = null;
+    /** Own-relay: Presence connection_generation, fresh per channel join. */
+    private connectionGeneration: string | null = null;
+    /** Own-relay: local readiness last published in Presence meta. */
+    private trackedLocalReady: boolean | null = null;
 
     constructor(options: RemoteChannelOptions = {}) {
         const configuredMax = options.maxReconnectAttempts ?? DEFAULT_MAX_RECONNECT_ATTEMPTS;
@@ -172,6 +217,21 @@ export class RemoteChannel {
         }
         this.maxReconnectAttempts = configuredMax;
         this.onReconnectExhausted = options.onReconnectExhausted;
+        this.isLocalReady = options.isLocalReady ?? (() => true);
+        this.onSessionTokens = options.onSessionTokens;
+        this.fetchImpl = options.fetchImpl ?? fetch;
+    }
+
+    get isOAuthRelay(): boolean { return this.oauth !== null; }
+
+    private emitSessionTokens(tokens: { access_token: string; refresh_token: string | null }): void {
+        if (!this.onSessionTokens) return;
+        try {
+            Promise.resolve(this.onSessionTokens(tokens)).catch((error: any) =>
+                console.error('[DEBUG] Persisting rotated session failed:', error?.message));
+        } catch (error: any) {
+            console.error('[DEBUG] Persisting rotated session failed:', error?.message);
+        }
     }
 
 
@@ -186,6 +246,8 @@ export class RemoteChannel {
     private presenceTracked = false;
     /** Last capability value written (null = never), to avoid redundant writes. */
     private transportCapableWritten: boolean | null = null;
+    /** Tool capabilities returned by the managed/local MCP tools/list response. */
+    private registeredCapabilities: Record<string, any> = {};
     /** Re-entrancy guard: on a wedged socket each track() buffers for the full
      * 10s push timeout, so 10s health ticks would stack pushes. */
     private isTrackingPresence = false;
@@ -213,13 +275,14 @@ export class RemoteChannel {
     get user(): User | null { return this._user; }
 
 
-    initialize(url: string, key: string): void {
+    initialize(url: string, key: string, oauth?: OAuthRelaySettings): void {
+        this.oauth = oauth ?? null;
         // autoRefreshToken:false — we drive refresh ourselves (startTokenRefresh(),
         // see TOKEN_REFRESH_INTERVAL_MS) instead of auth-js's local-clock-driven
         // ticker. clockAwareFetch — see the clock-skew correction block above.
         this.client = createClient(url, key, {
             auth: { autoRefreshToken: false },
-            global: { fetch: clockAwareFetch },
+            global: { fetch: this.oauth ? oauthRelayFetch(clockAwareFetch, this.oauth) : clockAwareFetch },
             realtime: {
                 // supabase-js's resolver ends in `?? supabaseKey`, so after SIGNED_OUT
                 // the socket silently re-pins to the anon key and every private-channel
@@ -301,6 +364,7 @@ export class RemoteChannel {
                         access_token: newSession.access_token,
                         refresh_token: newSession.refresh_token ?? this.lastKnownSession?.refresh_token ?? null,
                     };
+                    this.emitSessionTokens(this.lastKnownSession);
                 } else if (event === 'SIGNED_OUT') {
                     void this.handleSignedOut();
                 }
@@ -346,6 +410,7 @@ export class RemoteChannel {
                                     access_token: renewed.access_token,
                                     refresh_token: renewed.refresh_token ?? cached.refresh_token,
                                 };
+                                this.emitSessionTokens(this.lastKnownSession);
                             }
                             console.log('   - ✅ Remote session restored after a transient sign-out');
                             await captureRemote('remote_channel_signed_out_recovered', {});
@@ -457,9 +522,19 @@ export class RemoteChannel {
         return { data, error };
     }
 
-    async registerDevice(capabilities: any, currentDeviceId: string | undefined, deviceName: string, onToolCall: (payload: any) => void): Promise<void> {
+    /** Returns the device id the channel is now bound to. */
+    async registerDevice(capabilities: any, currentDeviceId: string | undefined, deviceName: string, onToolCall: (payload: any) => void): Promise<string> {
 
         console.debug('[DEBUG] RemoteChannel.registerDevice() called, deviceId:', currentDeviceId);
+
+        // Preserve the MCP tool schemas supplied by DesktopCommanderIntegration.listClientTools().
+        // The hosted Remote MCP uses this device capability record to expose the
+        // device's actual tool contract instead of falling back to a stale catalog.
+        this.registeredCapabilities = capabilities && typeof capabilities === 'object' && !Array.isArray(capabilities)
+            ? capabilities
+            : {};
+
+        if (this.oauth) return this.registerWithOwnRelay(currentDeviceId, deviceName, onToolCall);
 
         let existingDevice = null;
 
@@ -493,12 +568,40 @@ export class RemoteChannel {
             await this.createChannel().catch((error) => {
                 console.debug(`[DEBUG] Failed to create channel, will retry after socket reconnect: ${error?.message || error} — ${this.connState()}`);
             });
+            return existingDevice.id;
 
         } else {
             console.error(`   - ❌ Device not found: ${currentDeviceId}`);
             await captureRemote('remote_channel_register_device_error', { error: 'Device not found', deviceId: currentDeviceId });
             throw new Error(`Device not found: ${currentDeviceId}`);
         }
+    }
+
+    /**
+     * Own-relay registration: POST /api/devices/register with this device's own
+     * token. The relay binds the token's auth session to the device and returns
+     * the row, whose id this process adopts (new, or the persisted one).
+     */
+    private async registerWithOwnRelay(currentDeviceId: string | undefined, deviceName: string, onToolCall: (payload: any) => void): Promise<string> {
+        const accessToken = (await this.client?.auth.getSession())?.data.session?.access_token ?? this.lastKnownSession?.access_token;
+        if (!accessToken) throw new Error('No session for relay device registration');
+        if (this.shuttingDown) throw new Error('Remote channel registration cancelled by shutdown');
+        const device = await registerWithRelay(this.fetchImpl, {
+            registrationUrl: this.oauth!.registrationUrl,
+            accessToken,
+            deviceId: currentDeviceId,
+            deviceName,
+            capabilities: this.capabilitiesPayload(true),
+        });
+        if (this.shuttingDown) throw new Error('Remote channel registration cancelled by shutdown');
+        this.transportCapableWritten = true;
+        this.deviceId = device.id;
+        this.deviceName = deviceName;
+        this.onToolCall = onToolCall;
+        await this.createChannel().catch((error) => {
+            console.debug(`[DEBUG] Failed to create channel, will retry after socket reconnect: ${error?.message || error} — ${this.connState()}`);
+        });
+        return device.id;
     }
 
     /**
@@ -520,25 +623,30 @@ export class RemoteChannel {
         for (let attempt = 1; attempt <= attempts; attempt++) {
             if (!this.channel || this.channel.state !== 'joined') return;
             let status: string;
+            const localReady = this.isLocalReady();
             try {
-                status = await this.channel.track({
-                    device_id: this.deviceId,
-                    device_name: this.deviceName,
-                    app_version: VERSION,
-                    platform: process.platform
-                });
+                status = await this.channel.track(this.oauth
+                    ? { ...presenceMeta(this.deviceId!, localReady, this.connectionGeneration!) }
+                    : {
+                        device_id: this.deviceId,
+                        device_name: this.deviceName,
+                        app_version: VERSION,
+                        platform: process.platform
+                    });
             } catch (trackErr: any) {
                 status = `threw: ${trackErr?.message}`;
             }
 
             if (status === 'ok') {
                 this.presenceTracked = true;
+                if (this.oauth) this.trackedLocalReady = localReady;
                 console.log(`👋 Presence tracked (device ${this.deviceId} visible as online)`);
                 // Reconnect attempts preceding this join (0 on a first join).
                 captureRemote('remote_channel_presence_tracked', { recoveredAfterAttempts: recovered }).catch(() => { });
                 // Proven end-to-end (joined AND presence published) — only now
                 // may the server treat our presence as authoritative.
                 await this.setTransportCapable(true);
+                this.syncReachabilityStatus();
                 return;
             }
 
@@ -553,6 +661,7 @@ export class RemoteChannel {
         // dispatch at all. The faster heartbeat tier keeps the device's status
         // accurate for the DB-status fallback while it recovers.
         await this.setTransportCapable(false);
+        this.syncReachabilityStatus();
     }
 
     /**
@@ -560,7 +669,16 @@ export class RemoteChannel {
      * replaces the whole column, so a second literal would silently drop keys.
      */
     private capabilitiesPayload(broadcastCapable: boolean): Record<string, any> {
+        if (this.oauth) return relayCapabilities(this.registeredCapabilities, VERSION, broadcastCapable);
+        // Never let advertised tool metadata override transport/version fields
+        // owned by this device process. Preserve everything else (notably tools).
+        const {
+            app_version: _ignoredAppVersion,
+            transport_broadcast_v1: _ignoredTransportCapability,
+            ...advertisedCapabilities
+        } = this.registeredCapabilities;
         return {
+            ...advertisedCapabilities,
             app_version: VERSION,
             ...(broadcastCapable ? { transport_broadcast_v1: true } : {})
         };
@@ -611,8 +729,13 @@ export class RemoteChannel {
             }
 
             // Private per-user channel: new_call doorbells + this device's
-            // Presence, keyed by device id.
-            const channelName = `user:${this.user.id}`;
+            // Presence, keyed by device id. The own relay scopes the topic to
+            // the device and stamps each join with a fresh connection generation.
+            if (this.oauth) {
+                this.connectionGeneration = crypto.randomUUID();
+                this.trackedLocalReady = null;
+            }
+            const channelName = this.oauth ? deviceTopic(this.user.id, this.deviceId) : `user:${this.user.id}`;
             console.debug(`[DEBUG] Creating channel: ${channelName}`);
             this.channel = this.client.channel(channelName, {
                 // ack: true — without it send() resolves 'ok' once the frame hits
@@ -652,9 +775,6 @@ export class RemoteChannel {
                         this.reconnectAttempt = 0;
                         this.lastHeartbeatOkAt = performance.now(); // a fresh join is proof of life too
                         console.log(`✅ Channel subscribed${recovered > 0 ? ` (recovered after ${recovered} attempt${recovered === 1 ? '' : 's'})` : ''}`);
-                        // Update device status on successful connection (queued, so
-                        // it can't be overtaken by a teardown's status write).
-                        this.queueStatusWrite('online');
                         // Presence is the live signal dispatch reads, so resolve
                         // only once it lands — otherwise registerDevice() reports
                         // "Device ready" while still undispatchable.
@@ -702,14 +822,14 @@ export class RemoteChannel {
     }
 
     /**
-     * Handle a 'new_call' doorbell. It carries ids only; the row is fetched by
-     * primary key and fed through the same handler as a postgres_changes
-     * payload, so device.ts stays transport-agnostic.
+     * Handle a 'new_call' doorbell. It carries ids only; one conditional update
+     * claims the row (pending -> executing) and returns it, and it is handed to
+     * device.ts marked as claimed.
      */
     private async onDoorbell(payload: any): Promise<void> {
         const callId = payload?.call_id;
         if (!callId) return;
-        if (payload?.device_id && payload.device_id !== this.deviceId) {
+        if (payload?.device_id !== this.deviceId) {
             console.debug('[DEBUG] Ignoring doorbell for different device');
             return;
         }
@@ -720,46 +840,123 @@ export class RemoteChannel {
 
         if (!this.client) return;
 
+        if (this.oauth) {
+            await this.onRelayDoorbell(callId);
+            return;
+        }
+
         // Retry on transient failures (a REST blip while the socket stays
-        // healthy). Post-flip this fetch is the only way we learn about a call,
+        // healthy). This claim is the only way we learn about a call,
         // so a hiccup must not cost a 5-minute timeout.
         let row: any = null;
-        let lastError: any = null;
+        let claimError: any = null;
         for (const delayMs of [0, 500, 1500]) {
             if (delayMs > 0) await this.sleep(delayMs);
             const { data, error } = await this.client
                 .from('mcp_remote_calls')
-                .select('*')
+                .update({ status: 'executing' })
                 .eq('id', callId)
-                .maybeSingle();
+                .eq('device_id', this.deviceId)
+                .eq('status', 'pending')
+                .select('*');
             if (!error) {
-                row = data;
-                lastError = null;
+                row = data?.[0] ?? null;
                 break;
             }
-            lastError = error;
-            console.debug(`[DEBUG] Doorbell row fetch attempt failed for ${callId}: ${error.message} — retrying`);
+            claimError = error;
+            console.debug(`[DEBUG] Doorbell claim attempt failed for ${callId}: ${error.message} — retrying`);
         }
 
-        if (lastError) {
-            console.error(`[DEBUG] Doorbell row fetch failed for ${callId} after retries:`, lastError.message);
-            await captureRemote('remote_channel_doorbell_fetch_error', { error: lastError });
-            return;
-        }
-        if (!row) {
-            // Already claimed and deleted, or cleanup raced delivery. Not
-            // retried: the row is always inserted before the doorbell is sent.
-            await captureRemote('remote_channel_doorbell_row_missing', { call_id: callId });
-            return;
-        }
-        // Optimization, not a guard — saves a hop on a duplicate doorbell
-        // (retry, reconnect). Exactly-once lives in device.ts (seenCallIds + DB claim).
-        if (row.status !== 'pending') {
-            console.debug('[DEBUG] Doorbell call already claimed:', callId);
+        if (row) {
+            console.log(
+                `[REMOTE-DISPATCH] claimed call=${callId} tool=${row.tool_name} device=${row.device_id}`
+            );
+            this.dispatchToolCall({ new: row, claimed: true });
             return;
         }
 
-        this.dispatchToolCall({ new: row });
+        if (!claimError) {
+            console.debug('[DEBUG] Doorbell call already claimed or gone:', callId);
+            await captureRemote('remote_channel_doorbell_claim_no_row', { call_id: callId });
+            return;
+        }
+
+        await captureRemote('remote_channel_mark_call_executing_error', { error: claimError });
+
+        // A failed claim may never have reached the database, so read the row
+        // back: still 'pending' means nobody holds it and it can be delivered.
+        const { data: current, error } = await this.client
+            .from('mcp_remote_calls')
+            .select('*')
+            .eq('id', callId)
+            .eq('device_id', this.deviceId)
+            .maybeSingle();
+
+        if (error) {
+            console.error(`[DEBUG] Doorbell row fetch failed for ${callId} after claim errors:`, error.message);
+            await captureRemote('remote_channel_doorbell_fetch_error', { error });
+            return;
+        }
+
+        if (current?.status === 'pending') {
+            this.dispatchToolCall({ new: current });
+        } else {
+            console.debug('[DEBUG] Doorbell call already claimed or gone:', callId);
+            await captureRemote('remote_channel_doorbell_claim_unresolved', {
+                call_id: callId,
+                status: current?.status ?? null,
+            });
+        }
+    }
+
+    /** Own-relay claim: the RPC checks this device's session and connection generation. */
+    private async claimRelayCall(callId: string): Promise<boolean> {
+        const { data, error } = await this.client!.rpc('claim_mcp_remote_call', {
+            p_call_id: callId,
+            p_device_id: this.deviceId,
+            p_connection_generation: this.connectionGeneration,
+        });
+        if (error) throw error;
+        return data === true;
+    }
+
+    private async onRelayDoorbell(callId: string): Promise<void> {
+        let claimed = false;
+        let claimError: any = null;
+        for (const delayMs of [0, 500, 1500]) {
+            if (delayMs > 0) await this.sleep(delayMs);
+            try {
+                claimed = await this.claimRelayCall(callId);
+                claimError = null;
+                break;
+            } catch (error: any) {
+                claimError = error;
+                console.debug(`[DEBUG] Relay claim attempt failed for ${callId}: ${error?.message} — retrying`);
+            }
+        }
+        if (claimError) {
+            // Without a successful claim RPC this device must not execute: the
+            // server's deadline times the call out.
+            console.error(`[DEBUG] Relay claim failed for ${callId}:`, claimError?.message);
+            await captureRemote('remote_channel_mark_call_executing_error', { error: claimError });
+            return;
+        }
+        if (!claimed) {
+            console.debug('[DEBUG] Relay call not claimable (other generation, taken, or expired):', callId);
+            return;
+        }
+        const { data: row, error } = await this.client!
+            .from('mcp_remote_calls')
+            .select('*')
+            .eq('id', callId)
+            .eq('device_id', this.deviceId)
+            .maybeSingle();
+        if (error || !row) {
+            console.error(`[DEBUG] Claimed relay call ${callId} could not be read:`, error?.message ?? 'no row');
+            return;
+        }
+        console.log(`[REMOTE-DISPATCH] claimed call=${callId} tool=${row.tool_name} device=${row.device_id}`);
+        this.dispatchToolCall({ new: row, claimed: true });
     }
 
     /**
@@ -768,6 +965,8 @@ export class RemoteChannel {
      * updateCallResult() resolves, so the server's fetch-by-id sees a terminal row.
      */
     async notifyResult(callId: string): Promise<void> {
+        // Own relay: complete_mcp_remote_call sends the result doorbell from the DB.
+        if (this.oauth) return;
         if (!this.channel || this.channel.state !== 'joined') {
             console.debug('[DEBUG] Result doorbell skipped — channel not joined (recovery poll covers)');
             return;
@@ -1070,6 +1269,15 @@ export class RemoteChannel {
      */
     async markCallExecuting(callId: string): Promise<boolean> {
         if (!this.client) throw new Error('Client not initialized');
+        if (this.oauth) {
+            try {
+                return await this.claimRelayCall(callId);
+            } catch (error: any) {
+                // Unlike DC cloud, fail closed: an unclaimed call cannot be completed.
+                console.error('[DEBUG] Failed to claim relay call:', error?.message);
+                return false;
+            }
+        }
         const { data, error } = await this.client
             .from('mcp_remote_calls')
             .update({ status: 'executing' })
@@ -1110,6 +1318,11 @@ export class RemoteChannel {
         // fallback below wouldn't fire, stranding the call until the 5-min timeout.
         if (errorMessage !== null) updateData.error_message = stripNullBytes(errorMessage);
 
+        if (this.oauth) {
+            await this.completeRelayCall(callId, status, updateData.result ?? null, updateData.error_message ?? null);
+            return;
+        }
+
         // Gated: the size is only knowable by serializing, and results reach
         // 13 MB — doing that eagerly for a log line would cost more than the
         // rest of this function.
@@ -1147,7 +1360,47 @@ export class RemoteChannel {
         }
     }
 
-    /** Reachable means the private channel is joined. Gates the heartbeat and `status`. */
+    private async completeRelayCall(callId: string, status: string, result: any, errorMessage: string | null): Promise<void> {
+        const { data, error } = await this.client!.rpc('complete_mcp_remote_call', {
+            p_call_id: callId,
+            p_device_id: this.deviceId,
+            p_connection_generation: this.connectionGeneration,
+            p_status: status,
+            p_result: result,
+            p_error_message: errorMessage,
+        });
+        if (error) {
+            console.error('[DEBUG] Failed to complete relay call:', error.message);
+            await captureRemote('remote_channel_update_call_result_error', { error });
+            // Same honest fallback as DC cloud: an unstorable result becomes a terminal failure.
+            if (result !== null && status !== 'failed') {
+                await this.completeRelayCall(callId, 'failed', null, `Result could not be stored (${error.message})`);
+            }
+            return;
+        }
+        if (data === null) {
+            // The row timed out or this generation lost the claim; the DB's terminal state stands.
+            console.warn(`[DEBUG] Relay completion lost the race for ${callId} (timed out or superseded) — not retrying`);
+            return;
+        }
+        console.debug('[DEBUG] Relay call completed:', callId);
+    }
+
+    /**
+     * Online is a conjunction of the actual local and remote proofs needed for
+     * a forwarded call: authenticated session, joined channel, acknowledged
+     * Presence, and a ready local MCP child.
+     */
+    private isOnlineEligible(): boolean {
+        return !this.shuttingDown
+            && !this.sessionLost
+            && this.lastKnownSession !== null
+            && this.channel?.state === 'joined'
+            && this.presenceTracked
+            && this.isLocalReady();
+    }
+
+    /** Reachable means the private channel is joined. */
     private isReachable(): boolean {
         return this.channel?.state === 'joined';
     }
@@ -1158,8 +1411,13 @@ export class RemoteChannel {
      * private channel's error path re-fires on every rejoin and would oscillate
      * the row against the heartbeat. Same predicate as the heartbeat gate.
      */
-    private syncReachabilityStatus(): void {
-        this.queueStatusWrite(this.isReachable() ? 'online' : 'offline');
+    syncReachabilityStatus(): void {
+        this.queueStatusWrite(this.isOnlineEligible() ? 'online' : 'offline');
+        // Own relay: dispatch reads local_mcp_ready from Presence, so republish on change.
+        if (this.oauth && this.presenceTracked && !this.isTrackingPresence
+            && this.trackedLocalReady !== null && this.trackedLocalReady !== this.isLocalReady()) {
+            this.trackPresenceWithRetry(0, 1).catch(() => { /* logged inside */ });
+        }
     }
 
     /**
@@ -1228,7 +1486,7 @@ export class RemoteChannel {
             return;
         }
         this.statusWriteChain = this.statusWriteChain.then(async () => {
-          if (this.shuttingDown || !this.isReachable()) return;
+          if (this.shuttingDown || !this.isOnlineEligible()) return;
           await this.runStatusWrite(async () => {
             // Skip the write entirely when no transport is up. Bumping last_seen
             // on a deaf device would keep its row perpetually young, so the
@@ -1236,12 +1494,20 @@ export class RemoteChannel {
             // stale 'online' — and whenever presence is unavailable (kill
             // switch, wedged socket) that stale row is exactly what dispatch
             // falls back to. Staying silent lets the sweep do its job.
-            if (!this.isReachable()) {
-                console.debug('[DEBUG] Skipping heartbeat write — no transport joined; letting the row age out');
+            if (!this.isOnlineEligible()) {
+                console.debug('[DEBUG] Skipping heartbeat write — online proofs incomplete; letting the row age out');
                 return;
             }
 
             const timestamp = this.nextStatusTimestamp();
+            console.debug(JSON.stringify({
+                event: 'remote_status_write_requested',
+                status: 'online',
+                timestamp,
+                presenceTracked: this.presenceTracked,
+                localReady: this.isLocalReady(),
+                transportCapable: this.transportCapableWritten === true,
+            }));
             const { error } = await this.client!
                 .from('mcp_devices')
                 .update({ last_seen: timestamp, status: 'online' })
@@ -1252,7 +1518,7 @@ export class RemoteChannel {
                 console.error('[DEBUG] Heartbeat update failed:', error.message);
                 await captureRemote('remote_channel_heartbeat_error', { error });
             } else {
-                console.debug('[DEBUG] last_seen bookkeeping write ok:', deviceId);
+                console.debug(JSON.stringify({ event: 'remote_status_write_acknowledged', status: 'online', timestamp }));
             }
           });
         }).catch((error: any) => {
@@ -1346,6 +1612,14 @@ export class RemoteChannel {
         }
 
         const timestamp = this.nextStatusTimestamp();
+        console.debug(JSON.stringify({
+            event: 'remote_status_write_requested',
+            status,
+            timestamp,
+            presenceTracked: this.presenceTracked,
+            localReady: this.isLocalReady(),
+            transportCapable: this.transportCapableWritten === true,
+        }));
         const { error } = await this.client
             .from('mcp_devices')
             .update({ status: status, last_seen: timestamp })
@@ -1360,7 +1634,7 @@ export class RemoteChannel {
             await captureRemote('remote_channel_status_update_error', { error, status });
             return;
         } else {
-            console.debug(`[DEBUG] Device status set to ${status}`);
+            console.debug(JSON.stringify({ event: 'remote_status_write_acknowledged', status, timestamp }));
         }
 
         // console.log(status === 'online' ? `🔌 Device marked as ${status}` : `❌ Device marked as ${status}`);
@@ -1420,15 +1694,17 @@ export class RemoteChannel {
             console.debug('[DEBUG] Spawning blocking update script:', scriptPath);
             console.debug('[DEBUG] Using node executable:', process.execPath);
 
-            const result = spawnSync('node', [
+            // Only the access token crosses the process boundary, and only on
+            // stdin: argv is world-readable via ps, and a refresh token here would
+            // let the child rotate the family out from under this process.
+            const result = spawnSync(process.execPath, [
                 scriptPath,
                 deviceId,
                 supabaseUrl,
                 supabaseKey,
-                session.access_token,
-                session.refresh_token || '',
                 this.nextStatusTimestamp()
             ], {
+                input: JSON.stringify({ access_token: session.access_token }),
                 timeout: 3000,
                 stdio: 'pipe', // Capture output to prevent blocking
                 encoding: 'utf-8'
@@ -1451,7 +1727,7 @@ export class RemoteChannel {
             } else if (result.status === 0) {
                 console.log('✓ Device marked as offline (blocking)');
             } else if (result.status === 2) {
-                console.warn('⚠️ Device offline update timed out');
+                console.warn('⚠️ Device offline update skipped (access token expired) or timed out');
             } else if (result.signal) {
                 console.error(`❌ Update process killed by signal: ${result.signal}`);
             } else {

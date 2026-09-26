@@ -3,19 +3,50 @@
 /**
  * Blocking script to update device status to offline
  * Runs synchronously during shutdown to ensure DB update completes
- * 
- * Usage: node blocking-offline-update.js <deviceId> <supabaseUrl> <supabaseKey> <accessToken> <refreshToken> <statusTimestamp>
+ *
+ * Usage: node blocking-offline-update.js <deviceId> <supabaseUrl> <supabaseKey> <statusTimestamp>
+ *        stdin: {"access_token":"..."}
+ *
+ * The access token arrives on stdin only (argv is visible to every local user
+ * via ps). No refresh token is ever passed, and this process never refreshes:
+ * a refresh here would rotate the parent's single-use refresh token. An expired
+ * access token exits 2 without writing; the server's staleness sweep covers it.
  */
 
+import { readFileSync } from 'node:fs';
 import { createClient } from '@supabase/supabase-js';
 
 // Parse command line arguments
-const [deviceId, supabaseUrl, supabaseKey, accessToken, refreshToken, statusTimestamp] = process.argv.slice(2);
+const [deviceId, supabaseUrl, supabaseKey, statusTimestamp] = process.argv.slice(2);
 
-if (!deviceId || !supabaseUrl || !supabaseKey || !accessToken || !refreshToken || !statusTimestamp || Number.isNaN(Date.parse(statusTimestamp))) {
+if (!deviceId || !supabaseUrl || !supabaseKey || !statusTimestamp || Number.isNaN(Date.parse(statusTimestamp))) {
     console.error('❌ Missing required arguments');
-    console.error('Usage: node blocking-offline-update.js <deviceId> <supabaseUrl> <supabaseKey> <accessToken> <refreshToken> <statusTimestamp>');
+    console.error('Usage: node blocking-offline-update.js <deviceId> <supabaseUrl> <supabaseKey> <statusTimestamp>  (access token on stdin)');
     process.exit(1);
+}
+
+let accessToken;
+try {
+    accessToken = JSON.parse(readFileSync(0, 'utf8')).access_token;
+} catch {
+    accessToken = undefined;
+}
+if (typeof accessToken !== 'string' || accessToken.split('.').length !== 3) {
+    console.error('❌ Missing access token on stdin');
+    process.exit(1);
+}
+
+function tokenExpired(token) {
+    try {
+        const claims = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString('utf8'));
+        return typeof claims.exp !== 'number' || claims.exp * 1000 <= Date.now() + 5_000;
+    } catch {
+        return true;
+    }
+}
+if (tokenExpired(accessToken)) {
+    console.error('⏱️ Access token expired; skipping offline write (no refresh in this process)');
+    process.exit(2);
 }
 
 // Set timeout for entire operation
@@ -26,20 +57,10 @@ const timeoutHandle = setTimeout(() => {
 }, TIMEOUT_MS);
 
 try {
-    // Create Supabase client
-    const client = createClient(supabaseUrl, supabaseKey);
-
-    // Set session using access token and refresh token
-    const { error: authError } = await client.auth.setSession({
-        access_token: accessToken,
-        refresh_token: refreshToken
+    const client = createClient(supabaseUrl, supabaseKey, {
+        auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+        global: { headers: { Authorization: `Bearer ${accessToken}` } },
     });
-
-    if (authError) {
-        console.error('❌ Auth error:', authError.message);
-        clearTimeout(timeoutHandle);
-        process.exit(3); // Exit code 3 for auth error
-    }
 
     // Update device status to offline, stamping the exact shutdown moment so
     // "last seen X ago" is precise for clean shutdowns (the periodic

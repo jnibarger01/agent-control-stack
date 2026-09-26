@@ -62,6 +62,9 @@ const FS_WRITE_POLICY = Object.freeze({ scopes: ['fs.write'] as const, requiresA
 const PROCESS_READ_POLICY = Object.freeze({ scopes: ['process.exec'] as const, requiresApproval: false });
 const TOOL_POLICIES: Readonly<Record<string, ManagedToolPolicy>> = Object.freeze({
   get_config: FS_READ_POLICY,
+  // Mirrors ACS tool-policy (read_only, strict {} args, fs.read). Keep in
+  // lockstep with agent-control-stack desktop-commander-adapter scopeByTool.
+  get_runtime_identity: FS_READ_POLICY,
   get_file_info: FS_READ_POLICY,
   get_usage_stats: PROCESS_READ_POLICY,
   list_directory: FS_READ_POLICY,
@@ -165,17 +168,29 @@ export function strictCanonicalJsonV1(value: unknown): string {
     active.add(entry);
     try {
       if (Array.isArray(entry)) {
+        if (Object.getPrototypeOf(entry) !== Array.prototype) {
+          throw new TypeError('strict canonical JSON requires a plain array');
+        }
         const ownKeys = Reflect.ownKeys(entry);
         const allowedKeys = new Set(['length', ...Array.from({ length: entry.length }, (_, index) => String(index))]);
         if (ownKeys.some((key) => typeof key !== 'string' || !allowedKeys.has(key))) {
           throw new TypeError('strict canonical JSON rejects extra array properties');
         }
+        const serialized: string[] = [];
         for (let index = 0; index < entry.length; index += 1) {
-          if (!Object.prototype.hasOwnProperty.call(entry, index)) {
+          const descriptor = Object.getOwnPropertyDescriptor(entry, String(index));
+          if (descriptor === undefined) {
             throw new TypeError('strict canonical JSON rejects sparse arrays');
           }
+          if (!descriptor.enumerable) {
+            throw new TypeError('strict canonical JSON rejects non-enumerable array entries');
+          }
+          if (!('value' in descriptor)) {
+            throw new TypeError('strict canonical JSON rejects array accessors');
+          }
+          serialized.push(serialize(descriptor.value));
         }
-        return `[${entry.map((item) => serialize(item)).join(',')}]`;
+        return `[${serialized.join(',')}]`;
       }
       if (!isPlainObject(entry)) throw new TypeError('strict canonical JSON requires plain objects');
       const keys = sortedOwnKeys(entry);
@@ -399,10 +414,10 @@ export class ManagedAcsGuard {
     let signedBytes: Buffer;
     try {
       signedBytes = Buffer.from(strictCanonicalJsonV1(payload), 'utf8');
-      this.ensurePublicKey();
     } catch {
-      reject('ACS_CAPABILITY_KEY_UNKNOWN');
+      reject('ACS_CAPABILITY_MALFORMED');
     }
+    this.ensurePublicKey();
     const verificationKey = this.publicKey;
     if (!verificationKey || !crypto.verify(null, signedBytes, verificationKey, signature)) {
       reject('ACS_CAPABILITY_SIGNATURE_INVALID');

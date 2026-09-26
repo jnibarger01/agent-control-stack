@@ -18,8 +18,11 @@
   "bin": {
     "desktop-commander": "dist/index.js",
     "dc-agent": "dist/harness/cli.js",
+    "desktop-commander-openclaw-bridge": "dist/openclaw-bridge/index.js",
     "setup": "dist/setup-claude-server.js",
-    "remove": "dist/uninstall-claude-server.js"
+    "remove": "dist/uninstall-claude-server.js",
+    "dc-health": "dist/health/health-check.js",
+    "dc-audit-ui": "dist/audit/audit-server.js"
   },
   "main": "dist/local-runtime.js",
   "types": "dist/local-runtime.d.ts",
@@ -36,14 +39,17 @@
     "device:start": "tsx src/remote-device/device.ts --standalone",
     "device:start:dev": "nodemon --watch src/remote-device --exec tsx src/remote-device/device.ts --standalone",
     "agent": "npm run build && node dist/harness/cli.js",
+    "control-plane:start": "bash -c 'set -a; source \"$HOME/.config/dc-relay/relay.env\"; set +a; npm run build && exec node dist/control-plane/server.js'",
+    "control-plane:test": "npm run build && node test/test-control-plane.js && node test/test-control-plane-pairing-crypto.js && node test/test-control-plane-pairing.js && node test/test-control-plane-mcp.js && node test/test-control-plane-consent.js && node test/test-control-plane-prefix.js && node test/test-control-plane-server-contract.js && node test/test-control-plane-supabase-store.js",
     "sync-version": "node scripts/sync-version.js",
     "bump": "node scripts/sync-version.js --bump",
     "bump:minor": "node scripts/sync-version.js --bump --minor",
     "bump:major": "node scripts/sync-version.js --bump --major",
-    "build": "tsc && shx cp setup-claude-server.js uninstall-claude-server.js track-installation.js dist/ && shx chmod +x dist/*.js dist/harness/*.js && shx mkdir -p dist/data && shx cp src/data/onboarding-prompts.json dist/data/ && shx mkdir -p dist/remote-device/scripts && shx cp src/remote-device/scripts/blocking-offline-update.js dist/remote-device/scripts/ && node scripts/build-ui-runtime.cjs",
+    "build": "tsc && shx cp setup-claude-server.js uninstall-claude-server.js track-installation.js dist/ && shx chmod +x dist/*.js dist/harness/*.js dist/openclaw-bridge/*.js && shx mkdir -p dist/data && shx cp src/data/onboarding-prompts.json dist/data/ && shx mkdir -p dist/remote-device/scripts && shx cp src/remote-device/scripts/blocking-offline-update.js dist/remote-device/scripts/ && node scripts/build-ui-runtime.cjs",
     "watch": "tsc --watch",
     "start": "node dist/index.js",
     "start:standalone": "node dist/index.js --standalone",
+    "start:openclaw-bridge": "node dist/openclaw-bridge/index.js",
     "start:debug": "node --inspect-brk=9229 dist/index.js",
     "setup": "npm install --include=dev && npm run build && node setup-claude-server.js",
     "setup:debug": "npm install && npm run build && node setup-claude-server.js --debug",
@@ -70,7 +76,9 @@
     "logs:export": "npm run build && node scripts/export-fuzzy-logs.js",
     "count-tokens": "npm run build && node scripts/count-tokens.js",
     "count-tokens:json": "npm run build && node scripts/count-tokens.js --json",
-    "sbom": "npm sbom --sbom-format cyclonedx"
+    "sbom": "npm sbom --sbom-format cyclonedx",
+    "health": "node dist/health/health-check.js",
+    "audit-ui": "node dist/audit/audit-server.js"
   },
   "publishConfig": {
     "access": "public"
@@ -142,6 +150,7 @@
     "jsdom": "^30.0.1",
     "nodemon": "^3.0.2",
     "shx": "^0.3.4",
+    "supabase": "^2.117.0",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "^5.3.3"

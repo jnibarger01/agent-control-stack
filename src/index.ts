@@ -4,7 +4,7 @@
 // submitted. See src/bootstrap.ts for why import order matters.
 import './bootstrap.js';
 import { FilteredStdioServerTransport } from './custom-stdio.js';
-import { server, flushDeferredMessages } from './server.js';
+import { server, flushDeferredMessages, ensureCanonicalExecutorLease } from './server.js';
 import { commandManager } from './command-manager.js';
 import { configManager } from './config-manager.js';
 import { featureFlagManager } from './utils/feature-flags.js';
@@ -12,7 +12,7 @@ import { runSetup } from './npm-scripts/setup.js';
 import { runUninstall } from './npm-scripts/uninstall.js';
 import { capture } from './utils/capture.js';
 import { logToStderr, logger } from './utils/logger.js';
-import { runRemote } from './npm-scripts/remote.js';
+import { runRemote, parseRemoteMode } from './npm-scripts/remote.js';
 import { ensureChromeAvailable } from './tools/pdf/markdown.js';
 import { desktopCommanderExecutionMode, revokeManagedAcsRuntime } from './managed-acs-runtime.js';
 import { reconcileSessionsOnStartup } from './session-reconciliation.js';
@@ -40,9 +40,8 @@ async function runServer() {
 
     // Check if first argument is "remote"
     if (process.argv[2] === 'remote') {
-      if (!process.argv.includes('--standalone')) {
-        throw new Error('Remote Desktop Commander requires explicit --standalone opt-in');
-      }
+      // Single canonical mode validation, shared with runRemote().
+      parseRemoteMode();
       await runRemote();
       return;
     }
@@ -58,6 +57,12 @@ async function runServer() {
 
     const executionMode = desktopCommanderExecutionMode();
     logToStderr('info', `Desktop Commander execution mode: ${executionMode}`);
+
+    // Item #2 ownership semantics: this process (the executor entrypoint)
+    // claims the canonical executor lease — the remote-device supervisor that
+    // spawned it does NOT claim (it is a relay/client, not an executor). Any
+    // second executor refuses here, fail closed.
+    ensureCanonicalExecutorLease();
 
     // Create transport FIRST so all logging gets properly buffered
     // This must happen before any code that might use logger.*

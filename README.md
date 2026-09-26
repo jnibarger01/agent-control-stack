@@ -33,6 +33,7 @@ Work with code and text, run processes, and automate tasks, going far beyond oth
 ## Table of Contents
 - [Features](#features)
 - [Programmatic local runtime](#programmatic-local-runtime)
+- [OpenClaw ACS Bridge](#openclaw-acs-bridge)
 - [How to install](#how-to-install)
 - [Getting Started](#getting-started)
 - [Usage](#usage)
@@ -133,6 +134,186 @@ The executable equivalent is `desktop-commander --standalone`. Never use that fl
 for an ACS-managed service. Managed mode receives only the ACS Ed25519 public key;
 policy, approvals, leases, capability signing, and audit authority remain in ACS.
 Local launch does not require Supabase, device authorization, or a hosted channel.
+
+## OpenClaw ACS Bridge
+
+`dist/openclaw-bridge/index.js` (`desktop-commander-openclaw-bridge` on `PATH`
+once installed) is a second, separate stdio MCP entrypoint for hosts — such as
+OpenClaw — that must not be trusted to send Desktop Commander's `_meta`
+directly. It is a thin, unprivileged adapter, not a second implementation of
+ACS:
+
+- It holds no ACS signing key and cannot mint or approve a capability itself.
+- It never falls back to standalone execution and never fails open — any
+  issuer or configuration problem denies the call.
+- It starts the managed child through the same `createLocalMcpRuntime()`
+  default used above, so the child's runtime-identity bootstrap and every
+  existing managed ACS policy are unchanged.
+- It never forwards a client's inbound MCP `_meta` anywhere. A client that
+  sends `_meta.acsCapability` to the bridge is wasting its time: the bridge
+  builds the child's `_meta` itself, from its own issuer request, every time.
+
+### Architecture
+
+```
+ OpenClaw (MCP client)
+        │  stdio, tools/list + tools/call only
+        │  (inbound _meta is read by nothing and forwarded nowhere)
+        ▼
+ desktop-commander-openclaw-bridge            ACS capability issuer
+ ┌─────────────────────────────┐    HTTPS     ┌───────────────────────┐
+ │ unprivileged MCP adapter    │ ───────────► │ holds the ACS Ed25519 │
+ │ - no signing key            │ ◄─────────── │ private key, decides  │
+ │ - no local approval logic   │   signed     │ approval, signs the   │
+ │ - fails closed on any error │  acs.dc.v1   │ acs.dc.v1 capability  │
+ └─────────────┬───────────────┘  capability  └───────────────────────┘
+        │  stdio, _meta.acsCapability attached per call
+        ▼
+ Desktop Commander child (createLocalMcpRuntime, mode: 'managed')
+        - independent runtime-identity bootstrap handshake
+        - ManagedAcsGuard verifies signature, scopes, single-use nonce
+        - executes the tool only once every check passes
+```
+
+For every managed tool call (everything `isManagedAcsToolName()` covers —
+filesystem writes, process spawn, etc.; see `src/managed-acs.ts`) the bridge:
+
+1. Computes `computeDesktopCommanderInvocationHash(toolName, normalizedArguments)`
+   — the same hash function the managed child re-derives independently.
+2. POSTs a capability request to the configured issuer.
+3. Validates the response's shape and cross-checks that its `runtimeId`,
+   `toolName`, `invocationHash`, and `normalizedArguments` match the request
+   it just made — an issuer bug or a capability for the wrong call is
+   rejected before the child is ever touched.
+4. Calls the managed child with `_meta: { acsCapability }` set to exactly
+   what the issuer returned — nothing from the OpenClaw request's own
+   `_meta` is used or merged in.
+
+`get_runtime_identity` is the one exception: it carries no ACS scope in the
+managed child (see `src/managed-acs.ts`), so the bridge forwards it directly,
+exactly as the child itself already allows without a capability.
+
+### Issuer request/response contract
+
+The bridge sends only what the issuer needs to make and sign a decision —
+never a private key, never a pre-built capability:
+
+```jsonc
+// POST <OPENCLAW_ACS_ISSUER_URL>
+{
+  "version": "acs.dc.v1",
+  "requestId": "1f2e...",            // bridge-generated, for correlation/audit only
+  "requestedAt": "2026-01-01T00:00:00.000Z",
+  "runtimeId": "<managed child's runtime_id>",
+  "toolName": "read_file",
+  "normalizedArguments": { "path": "/abs/path" },
+  "invocationHash": "<sha256 hex, matches computeDesktopCommanderInvocationHash>"
+}
+```
+
+On approval the issuer returns the fully-formed, signed `acs.dc.v1`
+capability envelope (see `src/managed-acs.ts` for the exact field list the
+managed child enforces):
+
+```jsonc
+// 200 OK
+{
+  "capability": {
+    "keyId": "prod-key-1",
+    "signature": "<base64url ed25519 signature over the payload>",
+    "payload": {
+      "version": "acs.dc.v1",
+      "issuer": "acs",
+      "audience": "desktop-commander",
+      "runtimeId": "<matches the request>",
+      "workItemId": "...", "attemptId": "...", "leaseId": "...", "leaseEpoch": 1,
+      "toolName": "read_file",
+      "normalizedArguments": { "path": "/abs/path" },
+      "invocationHash": "<matches the request>",
+      "actionHash": "...", "requestHash": "...", "planHash": "...",
+      "scopes": ["fs.read"],
+      "issuedAt": "2026-01-01T00:00:00.000Z",
+      "expiresAt": "2026-01-01T00:00:30.000Z",
+      "nonce": "<32 random bytes, base64url, single-use>"
+    }
+  }
+}
+```
+
+Any non-2xx response, non-JSON body, or body that fails schema validation or
+does not match the request denies the call (`ISSUER_DENIED`,
+`ISSUER_MALFORMED_RESPONSE`, `ISSUER_CAPABILITY_MISMATCH`,
+`ISSUER_UNREACHABLE`, `ISSUER_TIMEOUT` — see `src/openclaw-bridge/issuer-client.ts`).
+The denial surfaces to OpenClaw as a normal MCP tool error with
+`_meta.acsAuthorization.decision: "denied"` and the code above; it is never
+silently retried into an allow.
+
+### Configuration
+
+| Variable | Required | Purpose |
+| --- | --- | --- |
+| `OPENCLAW_ACS_ISSUER_URL` | yes | Absolute `http(s)://` URL of the capability issuer. No default — there is no loopback address that is safe to assume for a signing authority. |
+| `OPENCLAW_ACS_ISSUER_TIMEOUT_MS` | no (default `8000`) | Per-request timeout, 100–60000ms. |
+| `OPENCLAW_ACS_ISSUER_TOKEN` | no | Optional bearer token, sent as `Authorization: Bearer <token>`. Read from the environment only; never logged, never written into any example or config file. |
+| `DESKTOP_COMMANDER_ACS_PUBLIC_KEY` | yes | The child's ACS Ed25519 verification key (same variable documented above). |
+| `DESKTOP_COMMANDER_ACS_KEY_ID` | yes | Must match the `keyId` the issuer signs with. |
+| `DESKTOP_COMMANDER_ACS_SCOPES` | no | Restricts the allowed scope vocabulary, same as the managed child. |
+| `DESKTOP_COMMANDER_STATE_DIR` | no | Forwarded to the managed child unchanged. |
+
+Missing or invalid required configuration exits the bridge process
+immediately with a non-zero code and a message on stderr — it never starts
+serving tools with a guessed or partial configuration.
+
+### OpenClaw configuration example
+
+Point `mcp.servers` at the bridge, never at `desktop-commander` directly —
+launching Desktop Commander itself from an untrusted MCP client would let
+that client send its own `_meta` straight to the managed child.
+
+```json
+{
+  "mcp": {
+    "servers": {
+      "desktop-commander": {
+        "command": "desktop-commander-openclaw-bridge",
+        "env": {
+          "OPENCLAW_ACS_ISSUER_URL": "https://acs.internal.example/desktop-commander/capabilities",
+          "DESKTOP_COMMANDER_ACS_PUBLIC_KEY": "<base64url SPKI Ed25519 public key>",
+          "DESKTOP_COMMANDER_ACS_KEY_ID": "prod-key-1"
+        }
+      }
+    }
+  }
+}
+```
+
+`OPENCLAW_ACS_ISSUER_TOKEN`, if the issuer requires one, belongs in the host's
+own secret store or environment — never hardcoded into this file or checked
+into version control.
+
+### Security limitations
+
+- **The bridge is a relay, not a policy engine.** It does not decide
+  approvals, cannot see or change ACS policy, and cannot be reconfigured by a
+  client to skip the issuer — every managed call requests a fresh capability,
+  every time, with no cache and no local override.
+- **A single-use capability is exactly that.** The bridge does not reuse or
+  batch capabilities across calls; a compromised issuer that replays its own
+  previous output is still caught by the managed child's nonce cache (see
+  `ManagedAcsGuard`), and that rejection is relayed to OpenClaw unchanged.
+- **Trust boundary is the issuer, not the network path to it.** Use HTTPS and
+  the optional bearer token in any deployment that isn't fully loopback/local;
+  the bridge does not pin certificates or otherwise harden transport beyond
+  what `fetch` and the configured URL scheme provide.
+- **A compromised bridge process can deny service but cannot forge
+  approval.** Since it never holds the signing key, the worst a compromised
+  bridge can do is request capabilities for tool calls, or refuse to serve
+  entirely; it cannot fabricate a capability that passes the managed child's
+  signature check.
+- **This does not replace review of the issuer itself.** The issuer's
+  approval logic, rate limiting, and audit trail are out of scope for this
+  repository — the bridge only documents and enforces the shape of the
+  contract on its side.
 
 ## How to install
 
@@ -1187,9 +1368,9 @@ Please create a [GitHub Issue](https://github.com/wonderwhy-er/DesktopCommanderM
 
 ## Data Collection & Privacy
 
-Desktop Commander collects limited, pseudonymous telemetry to improve the tool. We do not collect file contents, file paths, or command arguments.
+Desktop Commander telemetry is optional and **disabled by default**. No telemetry client ID or network request is created unless `telemetryEnabled` is explicitly set to the boolean `true` and an authenticated transport is configured. Missing or malformed values remain disabled; `DESKTOP_COMMANDER_DISABLE_TELEMETRY=1` is an additional kill switch.
 
-**Opt-out:** Ask Claude to "disable Desktop Commander telemetry" or set `"telemetryEnabled": false` in your config.
+**Opt out:** Set `"telemetryEnabled": false` in your config. Telemetry diagnostics redact paths and secret-bearing fields before transport.
 
 For complete details, see our [Privacy Policy](PRIVACY.md).
 

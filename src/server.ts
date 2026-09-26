@@ -14,10 +14,86 @@ import {
     type InitializeRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { zodToJsonSchema } from "zod-to-json-schema";
+import { preExecuteEnforcement, attestRequest, attestResult, requestHash, agentFromMeta, extractCapability, getApprovalStore, GATEWAY_TRANSPORT_VERIFIED } from './enforcement/pipeline.js';
+// Item #5: pending approval requests live in the pipeline-owned store until
+// an approver (Telegram hook, UI, or the ACS orchestrator) resolves them;
+// the enforcement gate consults the same store for approval re-execution.
+const approvalStore = getApprovalStore();
+import { runRecoveryCheckup } from './cancellation/executor-recovery.js';
+import { claimCanonicalExecutor, renewLease, releaseLease } from './executor-lock.js';
+import { checkBreakGlassStatus } from './break-glass.js';
 import { getSystemInfo, getOSSpecificGuidance, getPathGuidance, getDevelopmentToolGuidance } from './utils/system-info.js';
 
 // Get system information once at startup
 const SYSTEM_INFO = getSystemInfo();
+
+// Item #2: enforce the ONE canonical executor. The lease is claimed ONLY by
+// the canonical executor entrypoint (src/index.ts) via
+// ensureCanonicalExecutorLease() below — NOT at module init. Module-init
+// claiming made every process that merely IMPORTS this module (the remote
+// device supervisor loads utils/capture.js -> server.js for telemetry
+// context) consume the lease, so its spawned dist/index.js executor child
+// was correctly refused: a self-conflict. Ownership semantics: the process
+// that actually executes tools owns the lease; supervisors/relays/clients do
+// not. A second independent executor still fails closed at index.ts.
+let EXECUTOR_LEASE_CLAIMED = false;
+export function ensureCanonicalExecutorLease(): void {
+    if (process.env.DC_DISABLE_EXECUTOR_LEASE === '1') return;
+    if (EXECUTOR_LEASE_CLAIMED) return;
+
+    // Item #1: mutual exclusion with the UNMANAGED/BREAK_GLASS fallback. Fail
+    // closed on ambiguous state — an unreadable/malformed marker refuses
+    // startup exactly like a live one, since we cannot prove it is safe.
+    const breakGlass = checkBreakGlassStatus();
+    if (breakGlass.active) {
+        console.error(`[executor-lease] REFUSED to start: ${breakGlass.detail}. The managed executor will not start while the UNMANAGED/BREAK_GLASS fallback may be active. Stop it first (systemctl --user stop desktop-commander-remote.service) before starting the managed executor.`);
+        process.exit(1);
+    }
+
+    let claim;
+    try {
+        claim = claimCanonicalExecutor();
+    } catch (error) {
+        const blockedBy = (error as { blockedBy?: string })?.blockedBy ?? 'unknown';
+        console.error(`[executor-lease] REFUSED to start: canonical executor lease is held (blocked by: ${blockedBy}). Only one Desktop Commander executor may run. Set DC_DISABLE_EXECUTOR_LEASE=1 to explicitly bypass.`);
+        process.exit(1);
+    }
+    if (claim.ok) {
+        EXECUTOR_LEASE_CLAIMED = true;
+        console.error(`[executor-lease] claimed canonical executor lease (pid ${process.pid}${claim.tookOverStale ? ', took over stale lease' : ''})`);
+        // Red-team fix #1a: keep the lease alive. The lease TTL no longer
+        // makes a live holder takeable, but we still renew on an interval so
+        // the on-disk TTL stays meaningful and liveness stays observable.
+        const renewTimer = setInterval(() => {
+            try {
+                const renewed = renewLease();
+                if (!renewed.ok) console.error(`[executor-lease] renewal failed (${renewed.reason ?? 'unknown'})`);
+            } catch (err) {
+                console.error(`[executor-lease] renewal error: ${err instanceof Error ? err.message : String(err)}`);
+            }
+        }, 60 * 1000);
+        renewTimer.unref();
+        // Red-team fix #7: release the lease on shutdown so a restart is not
+        // locked out behind a dead-PID grace window. IMPORTANT: registering a
+        // SIGTERM/SIGINT listener disables Node's default terminate-on-signal,
+        // so the handler must also actually terminate the process after
+        // releasing — otherwise SIGTERM would merely drop the lease while the
+        // executor kept running (regression caught by the onboarding test).
+        const shutdownRelease = () => {
+            try { releaseLease(); } catch { /* best-effort */ }
+        };
+        const shutdownAndExit = (signal: string) => {
+            shutdownRelease();
+            process.exit(0);
+        };
+        process.once('SIGINT', () => shutdownAndExit('SIGINT'));
+        process.once('SIGTERM', () => shutdownAndExit('SIGTERM'));
+        process.once('exit', shutdownRelease);
+    } else {
+        console.error(`[executor-lease] REFUSED to start: canonical executor lease is held (blocked by: ${claim.blockedBy ?? 'unknown'}). Only one Desktop Commander executor may run. Set DC_DISABLE_EXECUTOR_LEASE=1 to explicitly bypass.`);
+        process.exit(1);
+    }
+}
 const OS_GUIDANCE = getOSSpecificGuidance(SYSTEM_INFO);
 const DEV_TOOL_GUIDANCE = getDevelopmentToolGuidance(SYSTEM_INFO);
 const PATH_GUIDANCE = `IMPORTANT: ${getPathGuidance(SYSTEM_INFO)} Relative paths may fail as they depend on the current working directory. Tilde paths (~/...) might not work in all contexts. Unless the user explicitly asks for relative paths, use absolute paths.`;
@@ -1447,6 +1523,91 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         }
     }
     const startTime = Date.now();
+    // Item #10 execution kernel: validate -> authorize -> execute -> observe ->
+    // attest. The enforcement gate runs after ACS authorization and is
+    // fail-closed: a presented capability must verify; policy-required
+    // approvals are returned to the caller as structured errors carrying the
+    // exact mutation scope.
+    const enforcementAgent = agentFromMeta(request.params._meta);
+    const reqHash = requestHash(name, toolArguments);
+    const cap = extractCapability(request.params._meta);
+    const gate = await preExecuteEnforcement({
+        tool: name,
+        args: toolArguments,
+        meta: request.params._meta,
+        transport: enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp',
+    });
+    // Trusted transport attribution: when an attestation key is configured,
+    // the audit trail trusts ONLY HMAC-verified gateway meta. Trusted
+    // requests record the verified transport string and carry gatewayActor
+    // (gateway-vetted sub/client_id). Everything else — including a
+    // self-reported _meta.agent on a direct client while gateway mode is on —
+    // stays untrusted: agent 'unknown', base transport.
+    const enforcementTransport = (gate.allowed && gate.gatewayTrusted)
+        ? GATEWAY_TRANSPORT_VERIFIED
+        : (enforcementAgent === 'local' ? 'mcp->local' : 'chatgpt->oauth-gateway->mcp');
+    const auditAgent = (process.env.DC_GATEWAY_ATTESTATION_KEY && !(gate.allowed && gate.gatewayTrusted))
+        ? 'unknown'
+        : enforcementAgent;
+    const attestAgent = auditAgent;
+    const attestGatewayActor = gate.allowed ? gate.gatewayActor : undefined;
+    if (!gate.allowed) {
+        // Red-team fix #8: record in the audit chain WHAT needed approval,
+        // keyed by its approvalId, before returning the block.
+        if (gate.kind === 'approval-required' && gate.approvalRequest) {
+            approvalStore.submit(gate.approvalRequest);
+            attestRequest({
+                requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
+                capabilityId: cap?.capabilityId, approvalId: gate.approvalRequest.approvalId,
+                commandClass: gate.classification.commandClass,
+                args: { approvalRequired: gate.code, command: gate.classification.command ?? null },
+            });
+        }
+        const blockedAttestOk = attestRequest({
+            requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
+            capabilityId: cap?.capabilityId, commandClass: gate.classification.commandClass,
+            args: { blocked: gate.code, message: gate.message },
+        });
+        // Red-team fix #8: honor the attest return value. With DC_AUDIT_STRICT=1
+        // a failed attest fails the tool call; otherwise log loudly.
+        if (!blockedAttestOk) {
+            if (process.env.DC_AUDIT_STRICT === '1') {
+                return {
+                    content: [{ type: "text", text: 'audit sink unavailable (DC_AUDIT_STRICT)' }],
+                    isError: true,
+                };
+            }
+            console.error(`[audit] attestRequest failed for request hash ${reqHash} (tool ${name})`);
+        }
+        return {
+            content: [{
+                type: "text",
+                text: `Blocked by execution-kernel policy (${gate.code}): ${gate.message}` +
+                    (gate.approvalRequest ? `\n\nAPPROVAL REQUIRED — mutation scope:\n${JSON.stringify(gate.approvalRequest, null, 2)}` : ''),
+            }],
+            isError: true,
+        };
+    }
+    const allowedAttestOk = attestRequest({
+        requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
+        capabilityId: gate.allowed && gate.acsCapability ? gate.acsCapability.capabilityId : cap?.capabilityId,
+        commandClass: gate.classification.commandClass, args: toolArguments,
+        ...(gate.allowed && gate.networkGuard ? { networkGuard: gate.networkGuard } : {}),
+        ...(attestGatewayActor ? { gatewayActor: attestGatewayActor } : {}),
+        ...(gate.allowed && gate.acsCapability ? {
+            workItemId: gate.acsCapability.workItemId,
+            attemptId: gate.acsCapability.attemptId,
+        } : {}),
+    });
+    if (!allowedAttestOk) {
+        if (process.env.DC_AUDIT_STRICT === '1') {
+            return {
+                content: [{ type: "text", text: 'audit sink unavailable (DC_AUDIT_STRICT)' }],
+                isError: true,
+            };
+        }
+        console.error(`[audit] attestRequest failed for request hash ${reqHash} (tool ${name})`);
+    }
     // Hoisted above the try so the finally block can read them when emitting the
     // server_call_tool completion event (duration + status), even on the crash path.
     let telemetryData: any = { tool_name: name };
@@ -1894,6 +2055,19 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         isError = true;
         const errorMessage = error instanceof Error ? error.message : String(error);
 
+        // Item #6: after a cancellation/timeout, verify the executor is
+        // recovered (child dead, descendants cleaned, environment usable)
+        // before answering, so a timed-out process cannot poison the
+        // transport or the next command.
+        if (/timeout|timed out|cancel|abort|kill|terminated/i.test(errorMessage)) {
+            try {
+                const recovery = await runRecoveryCheckup({});
+                console.error(`[recovery] post-cancellation checkup: ${JSON.stringify(recovery)}`);
+            } catch (recoveryError) {
+                console.error(`[recovery] checkup failed: ${recoveryError}`);
+            }
+        }
+
         // Track the failure
         await usageTracker.trackFailure(name);
 
@@ -1908,6 +2082,29 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
                 : {}),
         };
     } finally {
+        // Item #7 attest: hash-link the completion of every agent-driven tool
+        // call into the audit chain. Best-effort; never breaks the response.
+        try {
+            const resultAttestOk = attestResult({
+                requestHash: reqHash, tool: name, agent: attestAgent, transport: enforcementTransport,
+                // Same derived capability ID as the request-side audit: ACS
+                // envelopes carry no top-level capabilityId field, so the
+                // completion record must derive it from the gate attestation
+                // (or fall back to the local HMAC capability's id).
+                capabilityId: gate.allowed && gate.acsCapability ? gate.acsCapability.capabilityId : cap?.capabilityId,
+                isError, durationMs: Date.now() - startTime,
+                executorPid: process.pid,
+                error: isError ? `tool ${name} returned isError` : undefined,
+            });
+            // Red-team fix #8: never swallow a failed attest silently. (A
+            // finally block cannot retroactively fail the response; strict
+            // mode fails the pre-execution attest above.)
+            if (!resultAttestOk) {
+                console.error(`[audit] attestResult failed for request hash ${reqHash} (tool ${name})`);
+            }
+        } catch (attestError) {
+            console.error(`[audit] attestResult threw for request hash ${reqHash}: ${attestError instanceof Error ? attestError.message : String(attestError)}`);
+        }
         // Single tool-call telemetry event, fired AFTER execution so it can carry
         // timing. In a finally so it still fires on the hard-crash path (the catch
         // above). Only missed if a tool never returns or throws (a true hang).
