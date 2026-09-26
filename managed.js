@@ -45,6 +45,32 @@ export function managedModeFromEnv(env = process.env) {
   return { enabled: true, acsGatewayUrl, acsGatewayToken, timeoutMs: parseInt(env.ACS_ISSUANCE_TIMEOUT_MS || '5000', 10) };
 }
 
+/**
+ * Jace Commander (/jc/mcp) managed config. The jc lane is ALWAYS managed:
+ * enabling it without a dedicated ACS jc bridge credential refuses to start.
+ * It uses a separate ACS worker identity (acs-jc-bridge) and issue route, so a
+ * Desktop Commander bridge credential can never mint jc capabilities and vice
+ * versa (ACS enforces the identity per route).
+ */
+export function jcModeFromEnv(env = process.env) {
+  if (env.JC_ENABLED !== '1') return { enabled: false };
+  const acsGatewayUrl = (env.ACS_GATEWAY_URL || '').replace(/\/+$/, '');
+  const acsGatewayToken = env.ACS_JC_GATEWAY_TOKEN || '';
+  if (!acsGatewayUrl || !acsGatewayToken) {
+    throw new Error('JC_ENABLED=1 requires ACS_GATEWAY_URL and ACS_JC_GATEWAY_TOKEN; refusing to start');
+  }
+  if (acsGatewayToken === env.ACS_GATEWAY_TOKEN) {
+    throw new Error('ACS_JC_GATEWAY_TOKEN must differ from ACS_GATEWAY_TOKEN (separate ACS bridge identities); refusing to start');
+  }
+  return {
+    enabled: true,
+    acsGatewayUrl,
+    acsGatewayToken,
+    issuePath: '/jc/capability/issue',
+    timeoutMs: parseInt(env.ACS_ISSUANCE_TIMEOUT_MS || '5000', 10),
+  };
+}
+
 export function sortedScopes(raw) {
   const scopes = String(raw || 'fs.read,fs.write,process.exec,process.spawn')
     .split(',')
@@ -227,7 +253,7 @@ export function capabilityTransport(managed, { identity, requestId }) {
       throw Object.assign(new Error('managed mode requires authenticated subject and client_id'), { acsCode: 'identity_missing' });
     }
     const actor = subject.startsWith('chatgpt:') ? subject : `chatgpt:${subject}`;
-    const { status, json } = await acsPost(managed, '/dc/capability/issue', {
+    const { status, json } = await acsPost(managed, managed.issuePath || '/dc/capability/issue', {
       client_id: clientId,
       tool: toolName,
       argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
@@ -249,6 +275,7 @@ export function capabilityTransport(managed, { identity, requestId }) {
       if (json && typeof json.workItemId === 'string') acsApproval.workItemId = json.workItemId;
       if (json && typeof json.actionHash === 'string') acsApproval.actionHash = json.actionHash;
       if (json && typeof json.approvalInstructions === 'string') acsApproval.approvalInstructions = json.approvalInstructions;
+      if (json && json.approvalSummary && typeof json.approvalSummary === 'object') acsApproval.approvalSummary = json.approvalSummary;
       throw Object.assign(new Error(`ACS did not authorize this invocation (${code})`), { acsCode: code, acsApproval });
     }
     const envelope = json.capability;

@@ -28,10 +28,27 @@ const PORT = parseInt(process.env.BRIDGE_PORT || '8002', 10);
 // is refused outright (never silently stripped) so no legacy execution path
 // can exist on the managed lane.
 const MANAGED = process.env.ACS_MANAGED_MODE === '1';
+// BRIDGE_PROFILE=jace-commander runs the Jace Commander MCP child
+// (desktop-commander dist/jace-commander/cli.js) behind /jc/mcp instead of
+// Desktop Commander. It is always managed: the child rejects every call that
+// lacks an ACS acs.jc.v1 capability, and privileged_exec is re-verified by the
+// root helper regardless.
+const PROFILE = process.env.BRIDGE_PROFILE || 'desktop-commander';
+if (PROFILE !== 'desktop-commander' && PROFILE !== 'jace-commander') {
+  console.error(`bridge: unknown BRIDGE_PROFILE ${PROFILE}; refusing to start`);
+  process.exit(1);
+}
+const JC = PROFILE === 'jace-commander';
+if (JC && !MANAGED) {
+  console.error('bridge: BRIDGE_PROFILE=jace-commander requires ACS_MANAGED_MODE=1; refusing to start');
+  process.exit(1);
+}
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
-const DEFAULT_DC_ARGS = MANAGED
-  ? '/home/jacen/projects/desktop-commander/dist/index.js'
-  : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
+const DEFAULT_DC_ARGS = JC
+  ? '/home/jacen/projects/desktop-commander/dist/jace-commander/cli.js serve'
+  : MANAGED
+    ? '/home/jacen/projects/desktop-commander/dist/index.js'
+    : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
 const DC_ARGS = (process.env.DC_ARGS || DEFAULT_DC_ARGS).split(' ');
 if (MANAGED && DC_ARGS.includes('--standalone')) {
   console.error('bridge: managed mode refuses a --standalone executor; fix DC_ARGS');
@@ -47,6 +64,17 @@ const PIPELINE_ACS_KEY_ID = process.env.DC_ACS_CAPABILITY_KEY_ID || '';
 const ACS_DC_PUBLIC_KEY = process.env.ACS_DC_PUBLIC_KEY || '';
 const ACS_DC_KEY_ID = process.env.ACS_DC_KEY_ID || '';
 const ACS_DC_SCOPES = process.env.ACS_DC_RUNTIME_SCOPES || 'fs.read,fs.write,process.exec,process.spawn';
+// Jace Commander child configuration: public verification material and
+// integration endpoints only. Explicit allowlist; nothing else is inherited.
+const JC_CHILD_ENV_KEYS = [
+  'JC_ACS_PUBLIC_KEY', 'JC_ACS_KEY_ID', 'JC_RUNTIME_ID', 'JC_STATE_DIR', 'JC_PUBLIC_MCP_URL',
+  'JC_ACS_URL', 'JC_ACS_TOKEN', 'JC_SWARM_URL', 'JC_SWARM_TOKEN', 'JC_VISUALIZER_URL',
+  'JC_MISSION_ROUTER_DIR', 'JC_TRACE_ROOTS', 'JC_PRIVILEGED_HELPER', 'JC_SUDO_PATH', 'JC_REQUEST_TIMEOUT_MS',
+];
+if (JC && (!process.env.JC_ACS_PUBLIC_KEY || !process.env.JC_ACS_KEY_ID || !process.env.JC_RUNTIME_ID)) {
+  console.error('bridge: jace-commander profile requires JC_ACS_PUBLIC_KEY, JC_ACS_KEY_ID and JC_RUNTIME_ID; refusing to start');
+  process.exit(1);
+}
 const CHILD_ENV = {
   PATH: process.env.PATH || '',
   HOME: process.env.HOME || '',
@@ -62,7 +90,10 @@ const CHILD_ENV = {
     : {}),
   ...(process.env.DESKTOP_COMMANDER_STATE_DIR ? { DESKTOP_COMMANDER_STATE_DIR: process.env.DESKTOP_COMMANDER_STATE_DIR } : {}),
   ...(process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR ? { DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: process.env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR } : {}),
-  ...(MANAGED && ACS_DC_PUBLIC_KEY && ACS_DC_KEY_ID
+  ...(JC
+    ? Object.fromEntries(JC_CHILD_ENV_KEYS.filter((key) => process.env[key]).map((key) => [key, process.env[key]]))
+    : {}),
+  ...(!JC && MANAGED && ACS_DC_PUBLIC_KEY && ACS_DC_KEY_ID
     ? {
         DESKTOP_COMMANDER_ACS_PUBLIC_KEY: ACS_DC_PUBLIC_KEY,
         DESKTOP_COMMANDER_ACS_KEY_ID: ACS_DC_KEY_ID,
@@ -72,7 +103,7 @@ const CHILD_ENV = {
       }
     : {}),
 };
-if (MANAGED && (!ACS_DC_PUBLIC_KEY || !ACS_DC_KEY_ID)) {
+if (!JC && MANAGED && (!ACS_DC_PUBLIC_KEY || !ACS_DC_KEY_ID)) {
   console.error('bridge: managed mode requires ACS_DC_PUBLIC_KEY and ACS_DC_KEY_ID; refusing to start');
   process.exit(1);
 }
@@ -152,6 +183,9 @@ function attemptResultIdempotencyKey(attemptId) {
  * submission fails.
  */
 async function submitAcsResult(route, msg) {
+  // jc attempts have no ACS result contract yet; the root helper's audit chain
+  // is the execution evidence. Never post DC-shaped results for jc calls.
+  if (JC) return;
   if (!ACS_BASE_URL || !ACS_WORKER_TOKEN || !route?.capability) return;
   const payload = route.capability?.payload;
   if (!payload || typeof msg.result !== 'object' || msg.result === null) return;
