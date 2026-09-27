@@ -16,7 +16,7 @@ paths = [
   '''(^|/)docs/openai-compatible-inference\.md$''',
   # Desktop Commander fixtures: a random OAuth client UUID and the canonical
   # fake AWS key AKIAABCDEFGHIJKLMNOP used as secret_scan test input.
-  '''(^|/)vendor/desktop-commander/test/test-control-plane-pairing\.js$''',
+  '''(^|/)apps/dc-relay/test/test-control-plane-pairing\.js$''',
   '''(^|/)vendor/desktop-commander/test/test-execution-tools\.js$'''
 ]
 regexes = [

@@ -7,8 +7,8 @@
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import vm from 'node:vm';
-import { createControlPlaneServer } from '../dist/control-plane/server.js';
-import { InMemoryPairingStore } from '../dist/control-plane/pairing-store.js';
+import { createControlPlaneServer } from '../dist/server.js';
+import { InMemoryPairingStore } from '../dist/pairing-store.js';
 
 const config = {
   SUPABASE_URL: 'https://example.supabase.co',

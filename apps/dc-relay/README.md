@@ -1,15 +1,27 @@
-# Own-relay control plane
+# Own-relay control plane (`apps/dc-relay`)
+
+> Extracted from the Desktop Commander fork's `src/control-plane` (ADR 0019).
+> The device-side client stays in Desktop Commander
+> (`vendor/desktop-commander/src/remote-device/oauth-relay.ts`). The relay is a
+> transport: it routes calls to paired devices and never authorizes a
+> privileged action. Desktop Commander still verifies every ACS capability.
 
 The plane lets `desktop-commander remote --managed` pair with and run against your own Supabase project instead of `mcp.desktopcommander.app`. It never holds or returns a user or device token. During pairing it relays a single Supabase OAuth authorization code from the browser to the device that proved PKCE, and the device exchanges that code itself.
 
 ## Run
 
+From the monorepo root:
+
 ```text
-npm ci --ignore-scripts
-npm run control-plane:test
-set -a; . ~/.config/dc-relay/relay.env; set +a
-node dist/control-plane/server.js        # listens on 127.0.0.1:${PORT:-3100}
+npm ci
+npm run build                      # tsc -b builds apps/dc-relay/dist
+npm test -w apps/dc-relay          # relay test suite
+npm start -w apps/dc-relay         # sources ~/.config/dc-relay/relay.env; listens on 127.0.0.1:${PORT:-3100}
 ```
+
+The entrypoint moved from `<desktop-commander>/dist/control-plane/server.js`
+to `apps/dc-relay/dist/server.js`; a host service that starts the old path must
+be repointed during the systemd cutover.
 
 Port 3000 belongs to `acs-gateway`, and the server refuses to start on it. Expose the plane publicly only through Tailscale Funnel (`:8443 → 127.0.0.1:3100`), and only while you use it.
 

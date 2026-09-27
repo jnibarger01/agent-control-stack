@@ -1,3 +1,7 @@
+> Historical record written while this code lived in the Desktop Commander
+> fork (`src/control-plane`). Source paths were updated to `apps/dc-relay/src`;
+> repository-level commands and line references describe that repository.
+
 # Control-plane QA acceptance matrix
 
 Verdict: PARTIAL — local vertical-slice tests and the repository unit suite pass, but release acceptance is blocked by an unconfigured device flow, no non-production Supabase environment for RLS/Realtime verification, and two inherited integration failures caused by missing managed runtime identity.
@@ -5,8 +9,8 @@ Verdict: PARTIAL — local vertical-slice tests and the repository unit suite pa
 | Requirement | Evidence | Status |
 |---|---|---|
 | Ownership isolation | `test/test-control-plane.js` exercises a cross-user `getDevice` and expects `not_found`; scoped SQL selects and state-transition predicates bind rows to `auth.uid()` in `supabase/migrations/20260924204925_control_plane_v1.sql:39-40,46-47,55-56,64-69,76-79,87-89`. | PASS locally; hosted RLS unverified. |
-| Presence beats stale metadata | Broadcast-capable devices use `PresenceReader` in `src/control-plane/service.ts:61-69`; focused test changes Presence from true to false and observes online then offline. | PASS locally. |
-| Absent Presence blocks dispatch | Shared `getDevice` / effective-state check precedes dispatch at `src/control-plane/service.ts:104-110`; focused test expects `device_unavailable` when Presence is absent. | PASS locally. |
+| Presence beats stale metadata | Broadcast-capable devices use `PresenceReader` in `src/service.ts:61-69`; focused test changes Presence from true to false and observes online then offline. | PASS locally. |
+| Absent Presence blocks dispatch | Shared `getDevice` / effective-state check precedes dispatch at `src/service.ts:104-110`; focused test expects `device_unavailable` when Presence is absent. | PASS locally. |
 | Revocation | Resolver returns `revoked` before Presence and dispatch rejects non-online devices (`service.ts:61-69,104-110`); focused test verifies a fresh idempotency key cannot dispatch after revoke. | PASS locally. |
 | Duplicate dispatch and claim exclusion | SQL unique constraint and conditional claim update are in migration lines 31 and 73-80; focused parallel dispatch/claim test receives one durable call and exactly one successful claim. | PASS locally. |
 | List/get/dispatch state consistency | `resolveEffectiveDeviceState` is the only resolver used by `listDevices`, `getDevice`, and `dispatch` (`service.ts:61-69,81,86-90,104-110`). No distinct `ping` route exists in this slice; Presence is the liveness source. | PASS for local list/get/dispatch; ping API N/A. |

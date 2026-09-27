@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { createControlPlaneServer, mcpClientAllowed } from '../dist/control-plane/server.js';
-import { InMemoryPairingStore } from '../dist/control-plane/pairing-store.js';
-import { ControlPlaneError, ControlPlaneService, InMemoryControlPlaneStore } from '../dist/control-plane/service.js';
+import { createControlPlaneServer, mcpClientAllowed } from '../dist/server.js';
+import { InMemoryPairingStore } from '../dist/pairing-store.js';
+import { ControlPlaneError, ControlPlaneService, InMemoryControlPlaneStore } from '../dist/service.js';
 
 const USER = '22222222-2222-4222-8222-222222222222';
 const GENERATION = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';

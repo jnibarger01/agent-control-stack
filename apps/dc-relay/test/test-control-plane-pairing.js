@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { createControlPlaneServer } from '../dist/control-plane/server.js';
-import { InMemoryPairingStore } from '../dist/control-plane/pairing-store.js';
-import { signPairingState, verifyPairingState } from '../dist/control-plane/pairing-crypto.js';
-import { ControlPlaneError } from '../dist/control-plane/service.js';
+import { createControlPlaneServer } from '../dist/server.js';
+import { InMemoryPairingStore } from '../dist/pairing-store.js';
+import { signPairingState, verifyPairingState } from '../dist/pairing-crypto.js';
+import { ControlPlaneError } from '../dist/service.js';
 
 const verifier = 'pairing-verifier-012345678901234567890123456789012345678901234567';
 const challenge = crypto.createHash('sha256').update(verifier).digest('base64url');

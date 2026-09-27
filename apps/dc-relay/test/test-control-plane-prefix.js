@@ -6,9 +6,9 @@
  */
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
-import { basePath, createControlPlaneServer, routePath } from '../dist/control-plane/server.js';
-import { InMemoryPairingStore } from '../dist/control-plane/pairing-store.js';
-import { ControlPlaneError } from '../dist/control-plane/service.js';
+import { basePath, createControlPlaneServer, routePath } from '../dist/server.js';
+import { InMemoryPairingStore } from '../dist/pairing-store.js';
+import { ControlPlaneError } from '../dist/service.js';
 
 const ORIGIN = 'https://jacen-ubuntu.tailaa6d41.ts.net';
 const verifier = 'prefix-verifier-0123456789012345678901234567890123456789012345';

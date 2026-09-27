@@ -8,7 +8,7 @@ import {
   pkceMatches,
   signPairingState,
   verifyPairingState,
-} from '../dist/control-plane/pairing-crypto.js';
+} from '../dist/pairing-crypto.js';
 
 let failures = 0;
 function test(name, fn) {

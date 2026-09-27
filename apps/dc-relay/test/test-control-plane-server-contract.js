@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
-const source = await readFile(new URL('../src/control-plane/server.ts', import.meta.url), 'utf8');
+const source = await readFile(new URL('../src/server.ts', import.meta.url), 'utf8');
 let failures = 0;
 function test(name, fn) { try { fn(); console.log(`PASS  ${name}`); } catch (e) { failures++; console.error(`FAIL  ${name}\n  ${e.message}`); } }
 function assert(v, m) { if (!v) throw new Error(m); }

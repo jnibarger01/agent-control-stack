@@ -1,3 +1,7 @@
+> Historical record written while this code lived in the Desktop Commander
+> fork (`src/control-plane`). Source paths were updated to `apps/dc-relay/src`;
+> repository-level commands and line references describe that repository.
+
 # Jace control-plane architecture and protocol evidence
 
 Baseline: `19a130818a83c99458de899cbf63b450ac1d9bbc` (verified at inspection time)

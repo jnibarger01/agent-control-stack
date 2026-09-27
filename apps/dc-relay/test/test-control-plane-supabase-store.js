@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises';
-import { parseDevicePresenceState, deviceTopic } from '../dist/control-plane/supabase-store.js';
+import { parseDevicePresenceState, deviceTopic } from '../dist/supabase-store.js';
 
 let failures = 0;
 function test(name, fn) {
@@ -41,7 +41,7 @@ test('multiple live Presence payloads for one device fail closed as split-brain'
   assert(parsed.connectionGeneration === null, 'ambiguous live processes must not yield a dispatch generation');
 });
 
-const source = await readFile(new URL('../src/control-plane/supabase-store.ts', import.meta.url), 'utf8');
+const source = await readFile(new URL('../src/supabase-store.ts', import.meta.url), 'utf8');
 test('production adapter uses Supabase Realtime directly and no external Presence authority', () => {
   assert(source.includes('.presenceState()'), 'adapter must inspect live Supabase Presence state');
   assert(source.includes('private: true'), 'Presence channel must be private');

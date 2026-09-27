@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { ControlPlaneService, InMemoryControlPlaneStore } from '../dist/control-plane/service.js';
+import { ControlPlaneService, InMemoryControlPlaneStore } from '../dist/service.js';
 import { readFile } from 'node:fs/promises';
 
 let failures = 0;

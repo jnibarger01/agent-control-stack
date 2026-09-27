@@ -265,7 +265,7 @@ export function createControlPlaneServer(config = env(), options: ControlPlaneSe
   return createServer(async (req, res) => {
     const started = process.hrtime.bigint();
     res.once('finish', () => {
-      let path = '/';
+      let path: string;
       try { path = new URL(req.url ?? '/', 'http://localhost').pathname; } catch { path = '<unparseable>'; }
       try {
         accessLog({
