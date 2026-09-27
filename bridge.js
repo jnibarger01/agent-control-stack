@@ -86,7 +86,7 @@ const ACS_WORKER_TOKEN = process.env.ACS_WORKER_TOKEN || '';
 const ACS_WORKER_ID = process.env.ACS_WORKER_ID || 'acs-dc-bridge';
 const MAX_BODY = 2 * 1024 * 1024;
 
-let pair = null; // { upstream, sessions, routes, initResponse, initPromise }
+let pair = null; // { upstream, sessions, routes, initTail, initializedOnce }
 let spawnCount = 0;
 let lastDebug = { last_headers: null, last_upstream_message: null };
 let shuttingDown = false;
@@ -220,65 +220,86 @@ async function readJsonBody(req) {
 function failClosed(reason, target = pair) {
   console.error(`bridge: fail-closed upstream routing fault: ${reason}`);
   if (!target) return;
-  target.initReject?.(new Error(reason));
-  for (const session of target.sessions.values()) { session.closed = true; session.transport.close().catch(() => {}); }
+  for (const session of target.sessions.values()) {
+    session.initializeResolve?.(false);
+    session.closed = true;
+    session.transport.close().catch(() => {});
+  }
   target.sessions.clear(); target.routes.clear();
 }
 
 /**
- * The cached initialize response carries the child's proof for the challenge
- * that was injected when THIS child was initialized. When the gateway injects
- * a DIFFERENT (fresh ACS) challenge, that cached proof is stale — replaying it
- * makes ACS reject the attestation (proof/challenge mismatch). Never rewrite
- * the proof here: recycle the pair so the next initialize genuinely reaches a
- * fresh child, which derives a fresh proof from the new challenge itself.
+ * Every downstream session receives a fresh ACS bootstrap challenge. The stdio
+ * Desktop Commander server can process repeated initialize requests, so keep
+ * the canonical executor alive and serialize those handshakes through it.
+ * This preserves challenge freshness without invalidating already-live HTTP
+ * sessions or creating an executor recycle storm.
  */
-function recycleForStaleProof(reason) {
-  console.error(`bridge: recycling executor pair (${reason})`);
-  const target = pair;
-  if (!target) return;
-  try { target.upstream.close(); } catch { /* onclose handles teardown */ }
-}
-
-async function forward(session, msg, headers) {
+async function forwardInitialize(session, msg, outbound) {
   if (session.closed || !pair || pair !== session.pair) return;
-  const outbound = injectAttestation(structuredClone(msg), headers);
-  lastDebug = { last_headers: headers, last_upstream_message: outbound };
-
-  if (isInitialize(msg)) {
-    if (pair.initResponse) {
-      const injectedChallenge = msg?.params?._meta?.acsRuntimeBootstrap?.challenge;
-      const proofChallenge = pair.initResponse?.result?._meta?.acsRuntimeIdentity?.challenge;
-      if (injectedChallenge && proofChallenge && injectedChallenge !== proofChallenge) {
-        recycleForStaleProof('initialize challenge differs from cached child proof');
-        // This session belongs to the recycled pair; the client reconnects and
-        // its initialize lands on the fresh child.
-        session.closed = true;
-        try { await session.transport.close(); } catch { /* already closing */ }
-        return;
-      }
-      await session.transport.send({ ...pair.initResponse, id: msg.id });
-      return;
-    }
-    if (!pair.initPromise) {
-      pair.initPromise = new Promise((resolve, reject) => { pair.initResolve = resolve; pair.initReject = reject; });
-      pair.initPromise.catch(() => {});
-      const upstreamId = `gw-init-${randomUUID()}`;
-      pair.routes.set(upstreamId, { session, downstreamId: msg.id, initialize: true });
-      outbound.id = upstreamId;
-      session.pending.set(idKey(msg.id), upstreamId);
-      await pair.upstream.send(outbound);
-      return;
-    }
-    const response = await pair.initPromise;
-    if (!session.closed) await session.transport.send({ ...response, id: msg.id });
+  const target = pair;
+  const key = idKey(msg.id);
+  if (session.pending.has(key)) {
+    failClosed(`duplicate downstream initialize id in session ${session.id}`, target);
     return;
   }
 
+  const upstreamId = `gw-init-${randomUUID()}`;
+  const expectedChallenge = msg?.params?._meta?.acsRuntimeBootstrap?.challenge;
+  const completion = new Promise((resolve) => { session.initializeResolve = resolve; });
+  session.initializePromise = completion;
+
+  const run = async () => {
+    if (session.closed || target !== pair || session.pair !== target) {
+      session.initializeResolve?.(false);
+      return false;
+    }
+    target.routes.set(upstreamId, {
+      session,
+      downstreamId: msg.id,
+      initialize: true,
+      expectedChallenge,
+    });
+    session.pending.set(key, upstreamId);
+    outbound.id = upstreamId;
+    await target.startPromise;
+    if (session.closed || target !== pair || session.pair !== target) {
+      target.routes.delete(upstreamId);
+      session.pending.delete(key);
+      session.initializeResolve?.(false);
+      return false;
+    }
+    try {
+      await target.upstream.send(outbound);
+    } catch (error) {
+      target.routes.delete(upstreamId);
+      session.pending.delete(key);
+      session.initializeResolve?.(false);
+      throw error;
+    }
+    return completion;
+  };
+
+  const turn = target.initTail.then(run, run);
+  target.initTail = turn.catch(() => false);
+  return turn;
+}
+
+async function forward(session, msg, headers) {
+  if (session.closed) return;
+  if (isInitialize(msg)) {
+    const outbound = injectAttestation(structuredClone(msg), headers);
+    lastDebug = { last_headers: headers, last_upstream_message: outbound };
+    return forwardInitialize(session, msg, outbound);
+  }
+  if (!pair || pair !== session.pair) return;
+  const outbound = injectAttestation(structuredClone(msg), headers);
+  lastDebug = { last_headers: headers, last_upstream_message: outbound };
+
   if (isResponse(msg)) { failClosed(`downstream response has no deterministic server-request route (${String(msg.id)})`, session.pair); return; }
   if (!isRequest(msg) && !isNotification(msg)) { failClosed('malformed message after SDK validation', session.pair); return; }
-  if (pair.initPromise) await pair.initPromise;
-  if (!pair.initResponse || session.closed) return;
+  if (session.initializePromise) await session.initializePromise;
+  if (!session.upstreamInitialized || session.closed || pair !== session.pair) return;
   if (isNotification(msg)) { await pair.upstream.send(outbound); return; }
 
   const key = idKey(msg.id);
@@ -311,16 +332,54 @@ function spawnPair() {
     // verification material — never the full parent environment.
     env: CHILD_ENV,
   });
-  const next = { upstream, sessions: new Map(), routes: new Map(), initResponse: null, initPromise: null };
+  const next = {
+    upstream,
+    sessions: new Map(),
+    routes: new Map(),
+    initTail: Promise.resolve(),
+    initializedOnce: false,
+  };
   upstream.onmessage = async (msg) => {
     if (isResponse(msg)) {
       const route = next.routes.get(String(msg.id));
-      if (!route || !route.session || route.session.closed) return failClosed(`orphan upstream response ${String(msg.id)}`, next);
-      next.routes.delete(String(msg.id)); route.session.pending.delete(idKey(route.downstreamId));
+      if (!route || !route.session) return failClosed(`orphan upstream response ${String(msg.id)}`, next);
+      next.routes.delete(String(msg.id));
+      route.session.pending.delete(idKey(route.downstreamId));
+      if (route.session.closed) {
+        if (route.initialize) route.session.initializeResolve?.(false);
+        return;
+      }
+
       const response = { ...msg, id: route.downstreamId };
-      if (route.initialize) { next.initResponse = response; next.initResolve?.(response); }
+      if (route.initialize) {
+        const proofChallenge = response?.result?._meta?.acsRuntimeIdentity?.challenge;
+        if (route.expectedChallenge && proofChallenge !== route.expectedChallenge) {
+          console.error('bridge: managed initialize proof challenge mismatch; rejecting session without recycling executor');
+          try {
+            await route.session.transport.send({
+              jsonrpc: '2.0',
+              id: route.downstreamId,
+              error: { code: -32002, message: 'managed runtime identity challenge mismatch' },
+            });
+          } catch (error) {
+            failClosed(`downstream initialize rejection delivery failed: ${error.message}`, next);
+          }
+          route.session.initializeResolve?.(false);
+          return;
+        }
+        next.initializedOnce = true;
+      }
+
       try { await route.session.transport.send(response); }
-      catch (error) { failClosed(`downstream response delivery failed: ${error.message}`, next); }
+      catch (error) {
+        if (route.initialize) route.session.initializeResolve?.(false);
+        failClosed(`downstream response delivery failed: ${error.message}`, next);
+        return;
+      }
+      if (route.initialize && !route.session.closed) {
+        route.session.upstreamInitialized = true;
+        route.session.initializeResolve?.(true);
+      }
       if (route.capability) {
         submitAcsResult(route, msg).catch(() => {});
       }
@@ -337,9 +396,10 @@ function spawnPair() {
       if (!shuttingDown) spawnPair();
     }
   };
-  upstream.start().catch((e) => { console.error('bridge: upstream start failed:', e?.message); process.exit(1); });
+  next.startPromise = upstream.start().catch((e) => { console.error('bridge: upstream start failed:', e?.message); process.exit(1); });
   spawnCount++; pair = next;
   console.log(`bridge: Desktop Commander stdio executor started (spawn_count=${spawnCount})`);
+  return next;
 }
 
 function createSession(headers) {
@@ -350,6 +410,9 @@ function createSession(headers) {
     pending: new Map(),
     closed: false,
     initialized: false,
+    upstreamInitialized: false,
+    initializePromise: null,
+    initializeResolve: null,
     createdAt: Date.now(),
     lastActivityAt: Date.now(),
     metadata: { client: headers['user-agent'] || null },
@@ -363,6 +426,7 @@ function createSession(headers) {
     onsessionclosed: (sid) => {
       if (session.pair.sessions.get(sid) === session) session.pair.sessions.delete(sid);
       session.closed = true;
+      session.initializeResolve?.(false);
       for (const upstreamId of session.pending.values()) session.pair.routes.delete(upstreamId);
       session.pending.clear();
     },
@@ -372,7 +436,8 @@ function createSession(headers) {
     session.lastActivityAt = Date.now();
     const requestHeaders = extra?.requestInfo?.headers || headers;
     session.metadata.protocolVersion = msg.params?.protocolVersion || session.metadata.protocolVersion;
-    forward(session, msg, requestHeaders).catch((error) => { console.error('bridge: send->stdio failed:', error?.message); failClosed('upstream forwarding failure'); });
+    forward(session, msg, requestHeaders)
+      .catch((error) => { console.error('bridge: send->stdio failed:', error?.message); failClosed('upstream forwarding failure'); });
   };
   transport.onerror = (e) => console.error('bridge: downstream transport error:', e?.message);
   return session;
@@ -406,7 +471,7 @@ function leaseStatus(file, label) {
 function computeAuthority() {
   const executorLease = leaseStatus(path.join(dcStateDir(), 'executor.lock'), 'executor lease');
   const breakGlass = leaseStatus(path.join(dcStateDir(), 'break-glass.lock'), 'break-glass marker');
-  const initialized = !!(pair && pair.initResponse);
+  const initialized = !!(pair && pair.initializedOnce);
   let observedMode;
   if (breakGlass.active && executorLease.active) observedMode = 'ambiguous_conflict';
   else if (breakGlass.active) observedMode = 'break_glass';
