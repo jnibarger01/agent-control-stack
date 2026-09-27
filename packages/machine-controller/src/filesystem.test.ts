@@ -16,7 +16,10 @@ describe("fs.read line-range handling", () => {
         "single",
         "",
         "\n",
-        "a\r\nb"
+        "a\r\nb",
+        "value\r",       // lone trailing CR, no trailing newline
+        "a\rb",           // lone mid-line CR
+        "one\r\ntwo\r"    // CRLF lines followed by a lone trailing CR
       ];
       for (const [name, content] of cases.entries()) {
         const file = join(allowed, `case-${name}.txt`);
