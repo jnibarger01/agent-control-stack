@@ -54,6 +54,8 @@ try {
 let JC = { enabled: false };
 try {
   JC = jcModeFromEnv();
+  // Equal resources would make /mcp and /jc/mcp accept each other's tokens.
+  if (JC.enabled && JC_RESOURCE === RESOURCE) throw new Error('JC_RESOURCE must differ from RESOURCE; refusing to start');
   if (JC.enabled) console.log(`gateway: Jace Commander lane enabled at /jc/mcp (resource=${JC_RESOURCE}; ACS-managed only)`);
 } catch (e) {
   console.error(`gateway: ${e.message}`);
@@ -546,9 +548,9 @@ async function checkAcsIssuanceReady() {
     return { reachable: false, detail: `ACS gateway unreachable: ${e?.message || 'error'}` };
   }
 }
-async function fetchBridgeAuthority() {
+async function fetchBridgeAuthority(upstreamBase = UPSTREAM) {
   try {
-    const url = new URL('/authority', UPSTREAM);
+    const url = new URL('/authority', upstreamBase);
     const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
     if (!r.ok) return { ok: false, error: `bridge /authority HTTP ${r.status}` };
     return { ok: true, data: await r.json() };
@@ -573,19 +575,26 @@ const server = http.createServer(async (req, res) => {
     if (pathName === '/ready' || pathName === '/authority') {
       const acsIssuance = await checkAcsIssuanceReady();
       const bridgeAuthority = await fetchBridgeAuthority();
+      // The optional JC lane must never delay or gate the primary /ready probe.
+      // Report it on /authority only; /ready remains scoped to the primary DC lane.
+      const jcAuthority = pathName === '/authority' && JC.enabled ? await fetchBridgeAuthority(JC_UPSTREAM) : null;
       if (pathName === '/authority') {
         const body = {
           managedIssuance: { configured: MANAGED.enabled, ...acsIssuance },
           bridge: bridgeAuthority.ok ? bridgeAuthority.data : { reachable: false, error: bridgeAuthority.error },
+          ...(jcAuthority ? { jcBridge: jcAuthority.ok ? jcAuthority.data : { reachable: false, error: jcAuthority.error } } : {}),
         };
         log('GET', '/authority', 200);
         return send(res, 200, body);
       }
-      const bridgeReady = bridgeAuthority.ok && bridgeAuthority.data && bridgeAuthority.data.observedMode !== 'ambiguous_conflict' && bridgeAuthority.data.bridge?.hasUpstreamPair;
+      // A jc bridge on UPSTREAM is a misconfiguration, never a ready DC bridge.
+      const bridgeReady = bridgeAuthority.ok && bridgeAuthority.data && bridgeAuthority.data.variant !== 'jc' && bridgeAuthority.data.observedMode !== 'ambiguous_conflict' && bridgeAuthority.data.bridge?.hasUpstreamPair;
       const issuanceReady = !MANAGED.enabled || acsIssuance.reachable;
+      // /ready gates the primary DC route; the JC bridge is reported, not gating.
+      const jcBridgeReady = jcAuthority ? !!(jcAuthority.ok && jcAuthority.data?.variant === 'jc' && jcAuthority.data?.bridge?.hasUpstreamPair) : undefined;
       const ready = !!bridgeReady && !!issuanceReady;
       log('GET', '/ready', ready ? 200 : 503);
-      return send(res, ready ? 200 : 503, { ready, bridgeReady: !!bridgeReady, issuanceReady });
+      return send(res, ready ? 200 : 503, { ready, bridgeReady: !!bridgeReady, issuanceReady, ...(jcAuthority ? { jcBridgeReady } : {}) });
     }
 
     // ---- discovery (public, no secrets) ----
@@ -629,6 +638,14 @@ const server = http.createServer(async (req, res) => {
         const { isCall, parsed } = isToolsCall(body);
         if (isCall) {
           try {
+            // With the jc lane on, UPSTREAM may be swapped with JC_UPSTREAM:
+            // never issue or forward a DC capability to the jc bridge.
+            if (JC.enabled) {
+              const dcBridge = await fetchBridgeAuthority(UPSTREAM);
+              if (!dcBridge.ok || (dcBridge.data?.variant ?? 'dc') !== 'dc') {
+                throw Object.assign(new Error('/mcp upstream is not the Desktop Commander bridge'), { acsCode: 'dc_bridge_mismatch' });
+              }
+            }
             const rewrite = capabilityTransport(MANAGED, {
               identity: identityAttribution(auth),
               requestId: randId(),
@@ -686,9 +703,21 @@ const server = http.createServer(async (req, res) => {
       }
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
       if (req.method === 'POST') {
-        const { isCall, parsed } = isToolsCall(body);
+        const { isCall, parsed, hasBatchedCall } = isToolsCall(body);
+        if (hasBatchedCall) {
+          // Fail closed: a batch would bypass per-call ACS issuance and
+          // anti-spoof metadata stripping. Clients must send single requests.
+          log(req.method, '/jc/mcp', 503, 'managed fail-closed: batched_tools_call');
+          return send(res, 503, { error: 'managed_authorization_unavailable', code: 'batched_tools_call_rejected' });
+        }
         if (isCall) {
           try {
+            // Never issue or forward a JC capability to anything but the JC
+            // bridge (e.g. JC_UPSTREAM mistakenly pointed at the DC bridge).
+            const jcBridge = await fetchBridgeAuthority(JC_UPSTREAM);
+            if (!jcBridge.ok || jcBridge.data?.variant !== 'jc') {
+              throw Object.assign(new Error('jc upstream is not the Jace Commander bridge'), { acsCode: 'jc_bridge_mismatch' });
+            }
             const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth), requestId: randId() });
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {

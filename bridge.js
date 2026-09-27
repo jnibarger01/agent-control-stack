@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 /**
- * stdio -> Streamable HTTP MCP multiplexer for Desktop Commander.
+ * stdio -> Streamable HTTP MCP multiplexer for Desktop Commander, or (with
+ * BRIDGE_PROFILE=jace-commander) for Jace Commander (`dist/jace-commander/cli.js serve`).
  *
  * There is exactly one upstream StdioClientTransport (and therefore one
  * Desktop Commander executor). Each downstream HTTP client gets its own
@@ -18,6 +19,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 const ACS_CAPABILITY_META_KEY = 'capability';
+const ACS_GUARD_META_KEY = 'acsCapability';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
@@ -44,17 +46,24 @@ if (JC && !MANAGED) {
   process.exit(1);
 }
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
-const DEFAULT_DC_ARGS = JC
-  ? '/home/jacen/projects/desktop-commander/dist/jace-commander/cli.js serve'
-  : MANAGED
-    ? '/home/jacen/projects/desktop-commander/dist/index.js'
-    : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
-const DC_ARGS = (process.env.DC_ARGS || DEFAULT_DC_ARGS).split(' ');
+// Resolved once so a relative JC_DC_DIR is not applied twice (as cwd and
+// again inside the script path).
+const JC_DIR = path.resolve(process.env.JC_DC_DIR || '/home/jacen/projects/desktop-commander');
+const DEFAULT_DC_ARGS = MANAGED
+  ? '/home/jacen/projects/desktop-commander/dist/index.js'
+  : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
+// The JC default is built as an argv array so a JC_DC_DIR containing spaces
+// stays one argument (DC_ARGS is whitespace-split).
+const DC_ARGS = process.env.DC_ARGS
+  ? process.env.DC_ARGS.split(' ')
+  : JC
+    ? [path.join(JC_DIR, 'dist/jace-commander/cli.js'), 'serve']
+    : DEFAULT_DC_ARGS.split(' ');
 if (MANAGED && DC_ARGS.includes('--standalone')) {
   console.error('bridge: managed mode refuses a --standalone executor; fix DC_ARGS');
   process.exit(1);
 }
-const DC_CWD = process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
+const DC_CWD = JC ? JC_DIR : process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || '';
 const GATEWAY_ATTESTATION_KEY = process.env.DC_GATEWAY_ATTESTATION_KEY || '';
 const PIPELINE_ACS_PUBLIC_KEY = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY || '';
@@ -212,9 +221,9 @@ async function submitAcsResult(route, msg) {
     artifacts: [],
     ...(isError ? { error: summary.slice(0, 4000) } : {}),
     simulationMetadata: {
-      executionMode: 'desktop_commander',
+      executionMode: JC ? 'jace_commander' : 'desktop_commander',
       simulated: false,
-      backend: 'desktop-commander-mcp',
+      backend: JC ? 'jace-commander-mcp' : 'desktop-commander-mcp',
       toolName: payload.toolName,
       invocationFingerprint: payload.invocationHash,
       requestId: payload.attemptId,
@@ -340,8 +349,9 @@ async function forward(session, msg, headers) {
   if (session.pending.has(key)) { failClosed(`duplicate downstream request id in session ${session.id}`, session.pair); return; }
   const upstreamId = `gw-${randomUUID()}`;
   session.pending.set(key, upstreamId);
+  // JC capabilities travel only at _meta.acsCapability (acs.jc.v1).
   const governed = outbound.params && typeof outbound.params._meta === 'object' && outbound.params._meta !== null
-    ? outbound.params._meta[ACS_CAPABILITY_META_KEY]
+    ? outbound.params._meta[JC ? ACS_GUARD_META_KEY : ACS_CAPABILITY_META_KEY]
     : undefined;
   pair.routes.set(upstreamId, {
     session, downstreamId: msg.id, initialize: false,
@@ -432,7 +442,7 @@ function spawnPair() {
   };
   next.startPromise = upstream.start().catch((e) => { console.error('bridge: upstream start failed:', e?.message); process.exit(1); });
   spawnCount++; pair = next;
-  console.log(`bridge: Desktop Commander stdio executor started (spawn_count=${spawnCount})`);
+  console.log(`bridge: ${JC ? 'Jace Commander' : 'Desktop Commander'} stdio executor started (spawn_count=${spawnCount})`);
   return next;
 }
 
@@ -478,7 +488,7 @@ function createSession(headers) {
 }
 
 spawnPair();
-console.log(`bridge: executor mode: ${MANAGED ? 'managed (ACS-authorized capabilities only)' : 'standalone'}`);
+console.log(`bridge: profile=${PROFILE} executor mode: ${MANAGED ? 'managed (ACS-authorized capabilities only)' : JC ? 'unmanaged gateway (child still requires acs.jc.v1)' : 'standalone'}`);
 
 // --- /health, /ready, /authority (hardening item #2) -----------------------
 // Non-secret introspection only: no capability payloads, HMAC/Ed25519 key
@@ -502,7 +512,24 @@ function leaseStatus(file, label) {
   if (!isPidAlive(info.pid)) return { active: false, ambiguous: false, detail: `${label} stale (pid ${info.pid} not alive)` };
   return { active: true, ambiguous: false, pid: info.pid, detail: `${label} held by pid ${info.pid}` };
 }
+function computeJcAuthority() {
+  const initialized = !!(pair && pair.initializedOnce);
+  return {
+    variant: 'jc',
+    configuredExecutionMode: MANAGED ? 'managed' : 'unmanaged_gateway',
+    // The child is always started as `serve` (managed); there is no standalone path.
+    childMode: 'managed',
+    bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    enforcement: {
+      executionTokenConfigured: !!EXECUTION_TOKEN,
+      capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID),
+    },
+    authoritative: !!pair && initialized,
+  };
+}
+
 function computeAuthority() {
+  if (JC) return computeJcAuthority();
   const executorLease = leaseStatus(path.join(dcStateDir(), 'executor.lock'), 'executor lease');
   const breakGlass = leaseStatus(path.join(dcStateDir(), 'break-glass.lock'), 'break-glass marker');
   const initialized = !!(pair && pair.initializedOnce);
@@ -513,6 +540,7 @@ function computeAuthority() {
   else observedMode = 'none_active';
   const authoritative = observedMode === 'managed' && !!pair && initialized && !executorLease.ambiguous;
   return {
+    variant: 'dc',
     configuredExecutionMode: MANAGED ? 'managed' : 'standalone_config',
     observedMode,
     authorityOwner: executorLease.active ? `managed:pid:${executorLease.pid}`
@@ -532,7 +560,13 @@ function computeAuthority() {
 const httpServer = http.createServer(async (req, res) => {
   const path = req.url ? req.url.split('?')[0] : '/';
   if (path === '/healthz') { res.writeHead(200, { 'Content-Type': 'text/plain' }); res.end('ok'); return; }
-  if (path === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, pid: process.pid, service: 'desktop-commander-mcp-bridge' })); return; }
+  if (path === '/health') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, pid: process.pid, service: JC ? 'jace-commander-mcp-bridge' : 'desktop-commander-mcp-bridge' })); return; }
+  if (path === '/ready' && JC) {
+    const ready = !!pair;
+    res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ ready, variant: 'jc', hasUpstreamPair: !!pair }));
+    return;
+  }
   if (path === '/authority') { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(computeAuthority())); return; }
   if (path === '/ready') {
     const authority = computeAuthority();
