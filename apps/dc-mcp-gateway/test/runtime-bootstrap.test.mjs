@@ -275,6 +275,34 @@ test('C: ACS rejecting completion fails closed — initialize success never expo
   }
 });
 
+test('C2: a fail-closed initialize closes the bridge session the child already opened (no session leak)', async () => {
+  const { acs } = stubAcs({ completeStatus: 403 });
+  const seen = [];
+  const upstream = http.createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      seen.push({ method: req.method, session: req.headers['mcp-session-id'] });
+      if (req.method === 'DELETE') { res.writeHead(200); res.end(); return; }
+      res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 'sess-leak-1' });
+      res.end(CHILD_INIT_OK(GOOD_PROOF));
+    });
+  });
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const port = 18207;
+  const child = startServer(port, upstream.address().port, acs.address().port, makeStateDir());
+  await waitListening(child, port);
+  try {
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), INITIALIZE);
+    assert.equal(status, 503, text);
+    assert.equal(JSON.parse(text).code, 'runtime_bootstrap_rejected');
+    for (let i = 0; i < 50 && !seen.some((r) => r.method === 'DELETE'); i++) await new Promise((r) => setTimeout(r, 20));
+    assert.deepEqual(seen.filter((r) => r.method === 'DELETE'), [{ method: 'DELETE', session: 'sess-leak-1' }]);
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
 test('D: ordinary tools/call still uses the existing streaming proxy (no initialize buffering)', async () => {
   const { acs } = stubAcs();
   const acsCalls = [];

@@ -464,11 +464,24 @@ function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, 
     const upstream = new URL(UPSTREAM);
     headers.host = upstream.host;
     const opts = { protocol: upstream.protocol, hostname: upstream.hostname, port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80), path: url.pathname + url.search, method: req.method, headers };
+    // A failed attestation must not strand the bridge session the child's
+    // initialize already created: the client never learns its id, so it can
+    // never DELETE it, and the bridge does not evict idle sessions.
+    let upstreamSessionId;
+    const closeUpstreamSession = () => {
+      if (!upstreamSessionId) return;
+      const del = http.request({ ...opts, method: 'DELETE', headers: { ...headers, 'mcp-session-id': upstreamSessionId } }, (r) => r.resume());
+      del.on('error', () => {});
+      del.end();
+      upstreamSessionId = undefined;
+    };
     const fail = (acsCode) => {
+      closeUpstreamSession();
       const err = Object.assign(new Error(`managed initialize attestation failed: ${acsCode}`), { acsCode });
       reject(err);
     };
     const ureq = http.request(opts, (ures) => {
+      if (typeof ures.headers['mcp-session-id'] === 'string') upstreamSessionId = ures.headers['mcp-session-id'];
       const chunks = [];
       let size = 0;
       ures.on('data', (c) => { size += c.length; if (size > 4 * 1024 * 1024) { ures.destroy(); fail('initialize_response_too_large'); } else chunks.push(c); });
@@ -521,6 +534,7 @@ function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, 
           log(req.method, '/dc/runtime/bootstrap/complete', 204);
           resolve();
         } catch (e) {
+          closeUpstreamSession();
           reject(e && e.acsCode ? e : Object.assign(new Error('managed initialize attestation failed'), { acsCode: 'bootstrap_complete_failed' }));
         }
       });
@@ -529,7 +543,7 @@ function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, 
     ureq.on('error', () => fail('initialize_upstream_unreachable'));
     if (bodyBuf && bodyBuf.length) ureq.write(bodyBuf);
     ureq.end();
-    req.on('aborted', () => { ureq.destroy(); reject(Object.assign(new Error('client aborted during initialize'), { acsCode: 'initialize_client_aborted' })); });
+    req.on('aborted', () => { ureq.destroy(); closeUpstreamSession(); reject(Object.assign(new Error('client aborted during initialize'), { acsCode: 'initialize_client_aborted' })); });
   });
 }
 
