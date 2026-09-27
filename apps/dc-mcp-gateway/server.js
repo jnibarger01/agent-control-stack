@@ -175,7 +175,11 @@ const MANAGED_TOOL_ERRORS = Object.freeze({
 function managedToolErrorResponse(parsed, failure) {
   const acsCode = failure && typeof failure.acsCode === 'string' ? failure.acsCode : 'managed_fail_closed';
   const acsDecision = failure && typeof failure.acsDecision === 'string' ? failure.acsDecision : null;
-  const shape = acsCode === 'require_approval' || acsDecision === 'require_approval'
+  // ACS `decision` is authoritative per docs/protocol/dc-authorization-arguments.md:
+  // a deny stays a denial (-32001) even if the body carries a conflicting code,
+  // and a stray 'require_approval' code without a require_approval decision is
+  // malformed (-32003), not an approval challenge.
+  const shape = acsDecision === 'require_approval'
     ? MANAGED_TOOL_ERRORS.required
     : acsDecision === 'deny'
       ? MANAGED_TOOL_ERRORS.denied

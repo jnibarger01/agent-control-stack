@@ -333,6 +333,79 @@ test('managed mode returns a JSON-RPC denial without forwarding to Desktop Comma
   }
 });
 
+test('managed mode lets the ACS decision win over a conflicting code (deny beats require_approval code)', async () => {
+  // A contradictory ACS body must not surface a denial as an approval
+  // challenge: decision is authoritative per the normative error contract
+  // (docs/protocol/dc-authorization-arguments.md).
+  const { acs, upstream, upstreamRequests } = harness({
+    acsBehavior: () => ({ decision: 'deny', code: 'require_approval', reason: 'conflicting code' }),
+  });
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const acsPort = acs.address().port;
+  const upPort = upstream.address().port;
+  const port = 18125;
+  const child = startServer(port, {
+    ACS_MANAGED_MODE: '1',
+    ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
+    ACS_GATEWAY_TOKEN: 'svc-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  await waitListening(child, port);
+  try {
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'conflicting-code-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'conflicting-code-request');
+    assert.equal(body.error.code, -32001);
+    assert.equal(body.error.data.kind, 'managed_authorization_denied');
+    assert.equal(body.error.data.acsCode, 'require_approval');
+    assert.equal(body.error.data.retryable, false);
+    assert.equal(upstreamRequests.length, 0);
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
+test('managed mode treats a stray require_approval code without a decision as malformed', async () => {
+  // Malformed ACS bodies map to managed_authorization_unavailable, never to
+  // an approval challenge.
+  const { acs, upstream, upstreamRequests } = harness({
+    acsBehavior: () => ({ code: 'require_approval', reason: 'no decision field' }),
+  });
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const acsPort = acs.address().port;
+  const upPort = upstream.address().port;
+  const port = 18126;
+  const child = startServer(port, {
+    ACS_MANAGED_MODE: '1',
+    ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
+    ACS_GATEWAY_TOKEN: 'svc-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  await waitListening(child, port);
+  try {
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'stray-code-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'stray-code-request');
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+    assert.equal(body.error.data.acsCode, 'require_approval');
+    assert.equal(body.error.data.retryable, true);
+    assert.equal(upstreamRequests.length, 0);
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
 test('managed mode fails closed when ACS is unreachable', async () => {
   const { upstream, upstreamRequests } = harness();
   await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
