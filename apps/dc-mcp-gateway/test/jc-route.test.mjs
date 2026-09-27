@@ -385,8 +385,14 @@ test('/jc/mcp refuses to issue or forward when JC_UPSTREAM is not the jc bridge'
   const { gw, acs, dcUp, jcUp, close } = await lane({ jcVariant: 'dc' });
   try {
     const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
-    assert.equal(r.status, 503);
-    assert.equal((await r.json()).code, 'jc_bridge_mismatch');
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 1);
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+    assert.equal(body.error.data.acsCode, 'jc_bridge_mismatch');
+    assert.equal(body.error.data.retryable, true);
     assert.equal(acs.requests.length, 0, 'no capability issued');
     assert.equal(mcpRequests(jcUp).length, 0, 'nothing forwarded');
     assert.equal(dcUp.requests.length, 0);
@@ -416,8 +422,14 @@ test('with the jc lane on, /mcp refuses a UPSTREAM that is the jc bridge (swappe
   try {
     assert.equal(gw.exitCode, undefined, 'gateway failed to start');
     const r = await call(gw.port, '/mcp', token(`${ORIGIN}/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'start_process', arguments: { command: 'ls' } } });
-    assert.equal(r.status, 503);
-    assert.equal((await r.json()).code, 'dc_bridge_mismatch');
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 1);
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+    assert.equal(body.error.data.acsCode, 'dc_bridge_mismatch');
+    assert.equal(body.error.data.retryable, true);
     assert.equal(acs.requests.filter((q) => q.path === '/dc/capability/issue').length, 0, 'no DC capability issued');
     assert.equal(mcpRequests(swapped).length, 0, 'nothing forwarded');
     const ready = await (await fetch(`http://127.0.0.1:${gw.port}/ready`)).json();
