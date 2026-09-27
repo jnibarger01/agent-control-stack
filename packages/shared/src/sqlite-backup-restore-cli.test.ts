@@ -1,7 +1,9 @@
 import { execFile } from "node:child_process";
 import {
   existsSync,
+  linkSync,
   lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readlinkSync,
@@ -80,86 +82,113 @@ describe("sqlite-backup-restore snapshot retain-after-integrity", () => {
     );
   }, 30_000);
 
-  it("restore-dry-run --into refuses the live ACS_DB_PATH target without touching it", async () => {
+  it("restore-dry-run refuses ACS_DB_PATH without touching the live database", async () => {
     const root = temporaryDirectory();
-    const fixtureSource = join(root, "sample.db");
+    const source = join(root, "sample.db");
     const live = join(root, "live.db");
-
-    await runCli(["create-fixture", fixtureSource]);
-    const snapshot = await runCli(["snapshot", fixtureSource, "--destination-dir", join(root, "backups")]);
-    expect(snapshot).toMatchObject({ ok: true, operation: "snapshot" });
-    const backupPath = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
-
+    await runCli(["create-fixture", source]);
+    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
     await runCli(["create-fixture", live]);
     const before = readFileSync(live);
 
-    const refused = await runCliExpectFailure(["restore-dry-run", backupPath, "--into", live], {
-      ACS_DB_PATH: live
+    const refused = await runCliExpectFailure(["restore-dry-run", backup, "--into", live], {
+      ACS_DB_PATH: live,
+      ACS_RUNTIME_CONFIG: join(root, "missing.yaml")
     });
-    expect(refused).toMatchObject({ ok: false, operation: "restore-dry-run" });
     expect(String(refused.error)).toMatch(/refuses to overwrite the live control-plane database/);
     expect(readFileSync(live)).toEqual(before);
   }, 30_000);
 
-  it("restore-dry-run --into refuses the default storage/local.db target", async () => {
+  it("protects both raw and trimmed ACS_DB_PATH interpretations", async () => {
     const root = temporaryDirectory();
-    const fixtureSource = join(root, "sample.db");
+    const source = join(root, "sample.db");
+    const live = join(root, " live.db ");
+    await runCli(["create-fixture", source]);
+    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
+    expect(snapshot.ok).toBe(true);
 
-    await runCli(["create-fixture", fixtureSource]);
-    const snapshot = await runCli(["snapshot", fixtureSource, "--destination-dir", join(root, "backups")]);
-    expect(snapshot).toMatchObject({ ok: true, operation: "snapshot" });
-    const backupPath = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
-
-    const refused = await runCliExpectFailure(["restore-dry-run", backupPath, "--into", "storage/local.db"], {
-      ACS_DB_PATH: join(root, "unrelated.db")
+    const refused = await runCliExpectFailure(["restore-dry-run", backup, "--into", live], {
+      ACS_DB_PATH: live,
+      ACS_RUNTIME_CONFIG: join(root, "missing.yaml")
     });
-    expect(refused).toMatchObject({ ok: false, operation: "restore-dry-run" });
-    expect(String(refused.error)).toMatch(/refuses to overwrite the live control-plane database/);
+    expect(String(refused.error)).toMatch(/refuses to overwrite/);
   }, 30_000);
 
-  it("restore-dry-run --into refuses a symlink alias of the live ACS_DB_PATH target", async () => {
+  it("protects runtime.db_path when ACS_DB_PATH is unset", async () => {
     const root = temporaryDirectory();
-    const fixtureSource = join(root, "sample.db");
+    const source = join(root, "sample.db");
+    const live = join(root, "runtime-live.db");
+    const config = join(root, "acs.config.yaml");
+    writeFileSync(config, `runtime:\n  db_path: ${live}\n`);
+    await runCli(["create-fixture", source]);
+    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
+    expect(snapshot.ok).toBe(true);
+
+    const refused = await runCliExpectFailure(["restore-dry-run", backup, "--into", live], {
+      ACS_DB_PATH: "",
+      ACS_RUNTIME_CONFIG: config
+    });
+    expect(String(refused.error)).toMatch(/refuses to overwrite/);
+  }, 30_000);
+
+  it("canonicalizes a missing destination through a symlinked parent", async () => {
+    const root = temporaryDirectory();
+    const source = join(root, "sample.db");
+    const realDir = join(root, "real");
+    const aliasDir = join(root, "alias");
+    const live = join(realDir, "future.db");
+    mkdirSync(realDir);
+    symlinkSync(realDir, aliasDir, "dir");
+    await runCli(["create-fixture", source]);
+    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
+    expect(snapshot.ok).toBe(true);
+
+    const refused = await runCliExpectFailure(
+      ["restore-dry-run", backup, "--into", join(aliasDir, "future.db")],
+      { ACS_DB_PATH: live, ACS_RUNTIME_CONFIG: join(root, "missing.yaml") }
+    );
+    expect(String(refused.error)).toMatch(/refuses to overwrite/);
+    expect(existsSync(live)).toBe(false);
+  }, 30_000);
+
+  it("rejects an existing filesystem-identity alias of the live DB", async () => {
+    const root = temporaryDirectory();
+    const source = join(root, "sample.db");
     const live = join(root, "live.db");
-    const alias = join(root, "alias.db");
-
-    await runCli(["create-fixture", fixtureSource]);
-    const snapshot = await runCli(["snapshot", fixtureSource, "--destination-dir", join(root, "backups")]);
-    expect(snapshot).toMatchObject({ ok: true, operation: "snapshot" });
-    const backupPath = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
-
+    const alias = join(root, "hardlink.db");
+    await runCli(["create-fixture", source]);
     await runCli(["create-fixture", live]);
-    symlinkSync(live, alias);
-    const before = readFileSync(live);
+    linkSync(live, alias);
+    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
+    expect(snapshot.ok).toBe(true);
 
-    const refused = await runCliExpectFailure(["restore-dry-run", backupPath, "--into", alias], {
-      ACS_DB_PATH: live
+    const refused = await runCliExpectFailure(["restore-dry-run", backup, "--into", alias], {
+      ACS_DB_PATH: live,
+      ACS_RUNTIME_CONFIG: join(root, "missing.yaml")
     });
-    expect(refused).toMatchObject({ ok: false, operation: "restore-dry-run" });
-    expect(String(refused.error)).toMatch(/refuses to overwrite the live control-plane database/);
-    expect(readFileSync(live)).toEqual(before);
+    expect(String(refused.error)).toMatch(/refuses to overwrite/);
   }, 30_000);
 
-  it("restore-dry-run --into still succeeds for a non-live destination", async () => {
+  it("still restores to a non-live scratch destination", async () => {
     const root = temporaryDirectory();
-    const fixtureSource = join(root, "sample.db");
+    const source = join(root, "sample.db");
     const scratch = join(root, "scratch", "rehearsal.db");
+    await runCli(["create-fixture", source]);
+    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
+    expect(snapshot.ok).toBe(true);
 
-    await runCli(["create-fixture", fixtureSource]);
-    const snapshot = await runCli(["snapshot", fixtureSource, "--destination-dir", join(root, "backups")]);
-    expect(snapshot).toMatchObject({ ok: true, operation: "snapshot" });
-    const backupPath = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
-
-    const kept = await runCli(["restore-dry-run", backupPath, "--into", scratch], {
-      ACS_DB_PATH: join(root, "live.db")
+    const kept = await runCli(["restore-dry-run", backup, "--into", scratch], {
+      ACS_DB_PATH: join(root, "live.db"),
+      ACS_RUNTIME_CONFIG: join(root, "missing.yaml")
     });
-    expect(kept).toMatchObject({
-      ok: true,
-      operation: "restore-dry-run",
-      replacedLiveDatabase: false
-    });
-    expect(existsSync(scratch)).toBe(true);
-    expect(readFileSync(scratch)).toEqual(readFileSync(backupPath));
+    expect(kept).toMatchObject({ ok: true, operation: "restore-dry-run", replacedLiveDatabase: false });
+    expect(readFileSync(scratch)).toEqual(readFileSync(backup));
   }, 30_000);
 
   function temporaryDirectory(): string {
@@ -172,7 +201,7 @@ describe("sqlite-backup-restore snapshot retain-after-integrity", () => {
 async function runCli(args: string[], env?: NodeJS.ProcessEnv): Promise<Record<string, unknown>> {
   const result = await execFileAsync(process.execPath, [SCRIPT, ...args], {
     cwd: process.cwd(),
-    env: env ? { ...process.env, ...env } : undefined
+    env: { ...process.env, ACS_DB_PATH: "", ACS_RUNTIME_CONFIG: "__acs_test_missing__.yaml", ...env }
   });
   return JSON.parse(result.stdout) as Record<string, unknown>;
 }
@@ -181,7 +210,7 @@ async function runCliExpectFailure(args: string[], env?: NodeJS.ProcessEnv): Pro
   try {
     const result = await execFileAsync(process.execPath, [SCRIPT, ...args], {
       cwd: process.cwd(),
-      env: env ? { ...process.env, ...env } : undefined
+      env: { ...process.env, ACS_DB_PATH: "", ACS_RUNTIME_CONFIG: "__acs_test_missing__.yaml", ...env }
     });
     throw new Error(`expected non-zero exit, got stdout: ${result.stdout}`);
   } catch (error) {

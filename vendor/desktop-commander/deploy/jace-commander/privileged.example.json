@@ -1,0 +1,8 @@
+{
+  "acsPublicKey": "<base64url SPKI DER Ed25519 public key of the ACS acs.jc.v1 issuer>",
+  "acsKeyId": "<ACS key id, e.g. acs-jc-2026-09>",
+  "runtimeId": "<must equal JC_RUNTIME_ID of the jace-commander server, e.g. jc-jacen-ubuntu>",
+  "nonceDir": "/var/lib/jace-commander/nonces",
+  "auditPath": "/var/log/jace-commander/privileged-audit.jsonl",
+  "maxTimeoutMs": 600000
+}

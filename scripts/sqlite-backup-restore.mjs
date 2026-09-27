@@ -7,12 +7,14 @@ import {
   restoreControlPlaneDatabase,
   verifyControlPlaneDatabaseFile
 } from "@agent-control-stack/shared";
+import { parseConfigText } from "@agent-control-stack/machine-controller";
 import {
   chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readlinkSync,
   realpathSync,
   renameSync,
@@ -96,8 +98,8 @@ try {
     const temporaryRoot = into ? null : mkdtempSync(join(tmpdir(), "acs-restore-dry-run-"));
     const destination = resolve(into ?? join(temporaryRoot, "restored.db"));
     if (into) {
-      // The dry-run must stay a rehearsal: refuse --into targets that resolve to
-      // the live control-plane database instead of silently replacing it.
+      // A dry-run is rehearsal only. Check before mkdir/copy so even a not-yet-created
+      // live DB reached through a symlinked parent cannot be created by this command.
       assertNotLiveControlPlaneDatabase(destination);
       mkdirSync(dirname(destination), { recursive: true });
     }
@@ -114,7 +116,7 @@ try {
         health: result.health,
         safetyBackup: result.safetyBackup ?? null,
         note: into
-          ? "Restored to --into path only; the live ACS_DB_PATH control-plane database was not used as the destination."
+          ? "Restored to --into path only; no configured live control-plane database was used as the destination."
           : "Restored into a temporary directory; cleaned up after verification."
       });
     } finally {
@@ -211,22 +213,49 @@ function optionalFlag(args, name) {
   return value;
 }
 
-// Restore dry-runs are rehearsals: they must never replace the live
-// control-plane database. Real replacement belongs to db-ops restore with its
-// explicit --replace and --writers-stopped attestations.
+// Return every path that may name the live database. Direct gateway/worker entry points
+// consume ACS_DB_PATH verbatim, while the managed runtime trims it, so a whitespace-bearing
+// environment value protects both interpretations. The runtime config is also authoritative
+// when ACS_DB_PATH is unset.
 function liveControlPlaneDatabasePaths() {
-  const paths = new Set();
+  const paths = new Set([resolve("storage/local.db")]);
   const configured = process.env.ACS_DB_PATH;
-  if (configured && configured.trim() !== "") paths.add(resolve(configured.trim()));
-  paths.add(resolve("storage/local.db"));
+  if (typeof configured === "string" && configured !== "") {
+    paths.add(resolve(configured));
+    if (configured.trim() !== "") paths.add(resolve(configured.trim()));
+  }
+
+  const configPath = process.env.ACS_RUNTIME_CONFIG?.trim() || "acs.config.yaml";
+  if (existsSync(configPath)) {
+    const parsed = parseConfigText(readFileSync(configPath, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`cannot determine live database from invalid runtime config: ${configPath}`);
+    }
+    const runtime = parsed.runtime;
+    if (runtime !== undefined) {
+      if (runtime === null || typeof runtime !== "object" || Array.isArray(runtime)) {
+        throw new Error(`cannot determine live database from invalid runtime config: ${configPath}`);
+      }
+      const dbPath = runtime.db_path;
+      if (dbPath !== undefined) {
+        if (typeof dbPath !== "string" || dbPath.trim() === "") {
+          throw new Error(`cannot determine live database from invalid runtime.db_path: ${configPath}`);
+        }
+        paths.add(resolve(dbPath));
+      }
+    }
+  }
   return paths;
 }
 
 function assertNotLiveControlPlaneDatabase(destination) {
-  const resolved = canonicalPath(destination);
+  const canonicalDestination = canonicalPath(destination);
   for (const livePath of liveControlPlaneDatabasePaths()) {
     const canonicalLive = canonicalPath(livePath);
-    if (resolved === canonicalLive) {
+    if (
+      canonicalDestination === canonicalLive ||
+      sameExistingFile(destination, livePath)
+    ) {
       throw new Error(
         `restore-dry-run --into refuses to overwrite the live control-plane database: ${canonicalLive} ` +
           "(rehearse into a scratch path, or use db-ops.mjs restore with --replace --writers-stopped to replace it deliberately)"
@@ -235,15 +264,30 @@ function assertNotLiveControlPlaneDatabase(destination) {
   }
 }
 
-// Canonicalize through symlinks so an alias cannot sneak a --into destination
-// past the live-database guard; fall back to the lexical path when the file or
-// one of its parents does not exist yet.
+// Resolve symlinks in the deepest existing ancestor, then append missing path
+// components. This protects a live path that does not exist yet but is reachable
+// through a symlinked directory. Resolution errors fail closed.
 function canonicalPath(path) {
-  try {
-    return realpathSync(path);
-  } catch {
-    return resolve(path);
+  const absolute = resolve(path);
+  let existing = absolute;
+  const missing = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    missing.unshift(basename(existing));
+    existing = parent;
   }
+  const canonicalExisting = realpathSync(existing);
+  return resolve(canonicalExisting, ...missing);
+}
+
+// Canonical path strings do not collapse bind mounts or hard links. When both
+// paths exist, filesystem identity closes that alias class as well.
+function sameExistingFile(left, right) {
+  if (!existsSync(left) || !existsSync(right)) return false;
+  const a = statSync(left);
+  const b = statSync(right);
+  return a.dev === b.dev && a.ino === b.ino;
 }
 
 function sidecarSizes(database) {
@@ -277,6 +321,7 @@ function assertNoActiveWriter(destination) {
     db.close();
   }
 }
+
 
 function readLatestPointer(latestPath) {
   try {

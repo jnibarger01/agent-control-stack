@@ -1,4 +1,8 @@
 import { ControlStackError } from "@agent-control-stack/shared";
+import {
+  DC_TRANSPORT_METADATA_ARGUMENT_KEYS as MANIFEST_TRANSPORT_METADATA_ARGUMENT_KEYS,
+  DC_TRANSPORT_METADATA_VALUES
+} from "@agent-control-stack/dc-tool-manifest";
 
 /**
  * Canonical `authorizationArguments` contract (acs.dc.v1).
@@ -11,17 +15,16 @@ import { ControlStackError } from "@agent-control-stack/shared";
  *  - Transport-metadata keys (currently only `origin`) are NOT authorization
  *    arguments. They are validated, then removed, before ACS normalization and
  *    before Desktop Commander structural verification. Both sides use the same
- *    key list, pinned by contracts/desktop-commander/authorization-arguments.v1.json.
+ *    key list, owned by @agent-control-stack/dc-tool-manifest and projected into
+ *    contracts/desktop-commander/authorization-arguments.v1.json.
  *  - The delivered request carries the bound arguments verbatim (plus, at most,
  *    the transport-metadata keys the client supplied). ACS's semantic
  *    normalization (canonical realpath'd paths, fixed-dir executable resolution)
  *    is therefore what executes; Desktop Commander never re-derives it.
  */
 
-export const DC_TRANSPORT_METADATA_ARGUMENT_KEYS = Object.freeze(["origin"] as const);
-const TRANSPORT_METADATA_VALUES: Readonly<Record<string, readonly string[]>> = Object.freeze({
-  origin: Object.freeze(["ui", "llm"])
-});
+export const DC_TRANSPORT_METADATA_ARGUMENT_KEYS = MANIFEST_TRANSPORT_METADATA_ARGUMENT_KEYS;
+const TRANSPORT_METADATA_VALUES: Readonly<Record<string, readonly string[]>> = DC_TRANSPORT_METADATA_VALUES;
 
 export interface SplitToolArguments {
   /** Everything that is authorization-relevant; input to per-tool normalization. */

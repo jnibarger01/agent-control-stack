@@ -66,11 +66,12 @@ Optional keep output:
        node scripts/sqlite-backup-restore.mjs restore-dry-run "$BACKUP" --into storage/fixtures/restored-dry-run.db
        node scripts/sqlite-backup-restore.mjs verify storage/fixtures/restored-dry-run.db
 
-`--into` stays a rehearsal: the script refuses any destination that resolves to
-the live control-plane database (`ACS_DB_PATH`, or the `storage/local.db`
-default) and exits non-zero without touching it. Rehearse into a scratch path;
-deliberate replacement of the live database is `db-ops.mjs restore`'s job with
-`--replace --writers-stopped` (see Restore below).
+`restore-dry-run --into` is always a rehearsal. It refuses destinations that identify
+the live control-plane database through `ACS_DB_PATH`, `runtime.db_path` in the active
+`ACS_RUNTIME_CONFIG` (or `acs.config.yaml`), the `storage/local.db` default, symlinked
+parents, or an existing filesystem-identity alias. The refusal happens before destination
+directories or files are created. Deliberate live replacement belongs to
+`db-ops.mjs restore --replace --writers-stopped`.
 
 Each command prints one JSON object. ok:true means integrity, foreignKeys,
 migrations, and auditChain all passed.

@@ -16,7 +16,13 @@ export default defineConfig({
     }
   },
   test: {
-    include: ["packages/**/*.test.ts", "apps/**/*.test.ts", "harness/**/*.test.ts", "evals/**/*.test.ts"],
+    include: [
+      "packages/**/*.test.ts",
+      "apps/**/*.test.ts",
+      "harness/**/*.test.ts",
+      "evals/**/*.test.ts",
+      "tests/**/*.test.ts"
+    ],
     coverage: {
       provider: "v8",
       reporter: ["text", "json-summary", "json"],
