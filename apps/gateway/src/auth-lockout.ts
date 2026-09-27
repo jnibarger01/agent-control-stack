@@ -10,8 +10,19 @@ export interface AuthLockoutOptions {
   /**
    * Upper bound on concurrently tracked failure buckets. Device verification
    * records both an IP key and a user-code key, so capacities below two are
-   * invalid. Expired buckets are reclaimed first; capacity eviction may remove
-   * only a non-locked bucket. Defaults to 50_000.
+   * invalid. Expired buckets are reclaimed first. Live buckets — locked or
+   * still accumulating a failure streak — are NEVER evicted: when the map is
+   * full of live buckets, new keys fail closed until the earliest tracked
+   * bucket expires. Evicting a live bucket would hand its principal extra
+   * guesses before its window ends (a locked principal released early, or an
+   * in-progress streak reset to zero), so admission refuses instead of
+   * displacing. Defaults to 50_000.
+   *
+   * Fail-closed trade-off: saturating the map denies fresh authentication
+   * attempts until the earliest tracked window expires. That is inherent to
+   * bounding memory while refusing to grant extra guesses; the alternative
+   * (evicting live buckets) demonstrably weakens lockout, and the
+   * pre-capacity code grew memory without bound instead.
    */
   maxBuckets?: number;
 }
@@ -34,6 +45,16 @@ export const DEFAULT_AUTH_LOCKOUT_MAX_FAILURES = 5;
 export class AuthFailureLockout {
   private readonly buckets = new Map<string, FailureBucket>();
   private readonly maxBuckets: number;
+  /**
+   * Epoch-ms until which keys without a tracked bucket are treated as locked.
+   * Set when a new key cannot be admitted because every bucket is live;
+   * extends no further than the earliest expiry observed at saturation time.
+   * This O(1) marker is what keeps record-then-decide honest under capacity
+   * pressure: a saturated recordFailure returns a locked decision AND
+   * persists the state that decision implies, so the key's next isLocked
+   * check agrees instead of falling through to credential verification.
+   */
+  private overflowLockedUntil = 0;
 
   constructor(private readonly options: AuthLockoutOptions) {
     if (!Number.isInteger(options.windowMs) || options.windowMs <= 0) {
@@ -49,58 +70,79 @@ export class AuthFailureLockout {
   }
 
   isLocked(key: string, now = Date.now()): AuthLockoutDecision {
-    this.prune(now);
     const bucket = this.buckets.get(key);
-    if (!bucket || now - bucket.startedAt >= this.options.windowMs) {
-      return { locked: false, failures: 0, retryAfterSeconds: 0, justLocked: false };
+    if (bucket !== undefined) {
+      if (now - bucket.startedAt < this.options.windowMs) {
+        // Tracked state is authoritative, even during a saturation overflow.
+        return this.readDecision(bucket, now);
+      }
+      // Lazily drop the expired bucket; no full scan on the read path.
+      this.buckets.delete(key);
     }
-    this.touch(key, bucket);
-    if (bucket.count >= this.options.maxFailures) {
-      return {
-        locked: true,
-        failures: bucket.count,
-        retryAfterSeconds: retryAfter(bucket.startedAt, this.options.windowMs, now),
-        justLocked: false
-      };
+    if (now < this.overflowLockedUntil) {
+      return this.overflowDecision(now);
     }
-    return { locked: false, failures: bucket.count, retryAfterSeconds: 0, justLocked: false };
+    // Reclaim expired buckets only under capacity pressure so steady-state
+    // reads stay O(1). Without this, expired entries could pin the map at
+    // capacity and fail closed indefinitely after their windows end.
+    if (this.buckets.size >= this.maxBuckets) {
+      this.prune(now);
+    }
+    return { locked: false, failures: 0, retryAfterSeconds: 0, justLocked: false };
   }
 
   recordFailure(key: string, now = Date.now()): AuthLockoutDecision {
-    this.prune(now);
-    const current = this.buckets.get(key);
-    if (!current || now - current.startedAt >= this.options.windowMs) {
-      if (this.buckets.size >= this.maxBuckets && !this.evictOldestUnlocked()) {
-        // Every tracked bucket is already locked. Dropping one would reopen an
-        // authentication path before its window ends, so fail closed for this
-        // untracked key until at least one locked bucket expires.
-        return {
-          locked: true,
-          failures: this.options.maxFailures,
-          retryAfterSeconds: this.earliestTrackedExpiry(now),
-          justLocked: false
-        };
+    return this.recordFailures([key], now)[0];
+  }
+
+  /**
+   * Record one failure for each key. Admission of new buckets is atomic:
+   * either every new key gets a bucket or none does — a partial admission is
+   * never persisted. Device verification records an IP key and a user-code
+   * key together; admitting only one of the pair under capacity pressure
+   * would let the two buckets displace each other on later attempts so
+   * neither counter ever reaches maxFailures.
+   *
+   * Keys that already have a live bucket always have their streak
+   * incremented, even under capacity pressure: saturation never drops or
+   * freezes tracked state. When the new keys cannot all be admitted, each of
+   * them fails closed via the overflow marker while the tracked keys keep
+   * their real per-key decisions.
+   */
+  recordFailures(keys: string[], now = Date.now()): AuthLockoutDecision[] {
+    const unique = [...new Set(keys)];
+    const byKey = new Map<string, AuthLockoutDecision>();
+    const fresh: string[] = [];
+    for (const key of unique) {
+      const bucket = this.buckets.get(key);
+      if (bucket !== undefined && now - bucket.startedAt < this.options.windowMs) {
+        byKey.set(key, this.increment(bucket, now));
+      } else {
+        fresh.push(key);
       }
-      const bucket = { startedAt: now, count: 1 };
-      this.buckets.set(key, bucket);
-      const locked = 1 >= this.options.maxFailures;
-      return {
-        locked,
-        failures: 1,
-        retryAfterSeconds: locked ? retryAfter(now, this.options.windowMs, now) : 0,
-        justLocked: locked
-      };
     }
-    current.count += 1;
-    this.touch(key, current);
-    const locked = current.count >= this.options.maxFailures;
-    const justLocked = locked && current.count === this.options.maxFailures;
-    return {
-      locked,
-      failures: current.count,
-      retryAfterSeconds: locked ? retryAfter(current.startedAt, this.options.windowMs, now) : 0,
-      justLocked
-    };
+    if (fresh.length > 0) {
+      if (this.buckets.size + fresh.length <= this.maxBuckets) {
+        for (const key of fresh) byKey.set(key, this.insertFresh(key, now));
+      } else {
+        // Single prune pass: reclaims expired buckets and yields the
+        // earliest live expiry for the overflow marker in the same scan.
+        const earliestExpiry = this.prune(now);
+        if (this.buckets.size + fresh.length <= this.maxBuckets) {
+          for (const key of fresh) byKey.set(key, this.insertFresh(key, now));
+        } else {
+          // Every bucket is live. Evicting one would grant its principal
+          // extra guesses, so fail closed: persist the overflow marker and
+          // return locked decisions that isLocked will honor until the
+          // earliest tracked window expires.
+          const until =
+            earliestExpiry === Infinity ? now + this.options.windowMs : earliestExpiry;
+          if (until > this.overflowLockedUntil) this.overflowLockedUntil = until;
+          for (const key of fresh) byKey.set(key, this.overflowDecision(now));
+        }
+      }
+    }
+    return unique.map((key) => byKey.get(key) as AuthLockoutDecision);
   }
 
   clear(key: string): void {
@@ -109,36 +151,67 @@ export class AuthFailureLockout {
 
   clearAll(): void {
     this.buckets.clear();
+    this.overflowLockedUntil = 0;
   }
 
-  private touch(key: string, bucket: FailureBucket): void {
-    this.buckets.delete(key);
-    this.buckets.set(key, bucket);
+  private readDecision(bucket: FailureBucket, now: number): AuthLockoutDecision {
+    const locked = bucket.count >= this.options.maxFailures;
+    return {
+      locked,
+      failures: bucket.count,
+      retryAfterSeconds: locked ? retryAfter(bucket.startedAt, this.options.windowMs, now) : 0,
+      justLocked: false
+    };
   }
 
-  private prune(now: number): void {
+  private increment(bucket: FailureBucket, now: number): AuthLockoutDecision {
+    bucket.count += 1;
+    const locked = bucket.count >= this.options.maxFailures;
+    return {
+      locked,
+      failures: bucket.count,
+      retryAfterSeconds: locked ? retryAfter(bucket.startedAt, this.options.windowMs, now) : 0,
+      justLocked: locked && bucket.count === this.options.maxFailures
+    };
+  }
+
+  private insertFresh(key: string, now: number): AuthLockoutDecision {
+    this.buckets.set(key, { startedAt: now, count: 1 });
+    const locked = 1 >= this.options.maxFailures;
+    return {
+      locked,
+      failures: 1,
+      retryAfterSeconds: locked ? retryAfter(now, this.options.windowMs, now) : 0,
+      justLocked: locked
+    };
+  }
+
+  private overflowDecision(now: number): AuthLockoutDecision {
+    return {
+      locked: true,
+      failures: this.options.maxFailures,
+      retryAfterSeconds: Math.max(1, Math.ceil((this.overflowLockedUntil - now) / 1000)),
+      justLocked: false
+    };
+  }
+
+  /**
+   * Delete expired buckets in a single pass and return the earliest expiry
+   * (epoch ms) among the survivors, or Infinity when nothing survives.
+   * Deleting during Map iteration is safe and keeps saturated admissions to
+   * one scan instead of separate prune / evict / earliest-expiry passes.
+   */
+  private prune(now: number): number {
+    let earliest = Infinity;
     for (const [key, bucket] of this.buckets) {
-      if (now - bucket.startedAt >= this.options.windowMs) this.buckets.delete(key);
-    }
-  }
-
-  /** Evict the least-recently-checked non-locked bucket, never a locked one. */
-  private evictOldestUnlocked(): boolean {
-    for (const [key, bucket] of this.buckets) {
-      if (bucket.count < this.options.maxFailures) {
+      const expiresAt = bucket.startedAt + this.options.windowMs;
+      if (now >= expiresAt) {
         this.buckets.delete(key);
-        return true;
+      } else if (expiresAt < earliest) {
+        earliest = expiresAt;
       }
     }
-    return false;
-  }
-
-  private earliestTrackedExpiry(now: number): number {
-    let seconds = Math.ceil(this.options.windowMs / 1000);
-    for (const bucket of this.buckets.values()) {
-      seconds = Math.min(seconds, retryAfter(bucket.startedAt, this.options.windowMs, now));
-    }
-    return Math.max(1, seconds);
+    return earliest;
   }
 }
 

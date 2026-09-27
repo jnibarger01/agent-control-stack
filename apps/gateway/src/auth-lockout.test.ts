@@ -44,20 +44,21 @@ describe("AuthFailureLockout", () => {
     }
   });
 
-  it("evicts only the least-recently-checked non-locked bucket", () => {
-    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 2, maxBuckets: 2 });
-    lockout.recordFailure("locked", 0);
-    expect(lockout.recordFailure("locked", 1).locked).toBe(true);
-    lockout.recordFailure("candidate", 2);
+  it("never evicts live buckets under capacity pressure; new keys fail closed instead", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets: 2 });
+    lockout.recordFailure("a", 0);
+    lockout.recordFailure("b", 1);
 
-    // "locked" is older but security state must survive capacity churn.
-    lockout.recordFailure("new", 3);
-    expect(lockout.isLocked("locked", 4).locked).toBe(true);
-    expect(lockout.isLocked("candidate", 4)).toMatchObject({ locked: false, failures: 0 });
-    expect(lockout.isLocked("new", 4)).toMatchObject({ locked: false, failures: 1 });
+    const refused = lockout.recordFailure("c", 2);
+    expect(refused).toMatchObject({ locked: true, justLocked: false });
+    expect(refused.retryAfterSeconds).toBeGreaterThan(0);
+
+    // Tracked streaks are untouched by the refused admission.
+    expect(lockout.isLocked("a", 3)).toMatchObject({ locked: false, failures: 1 });
+    expect(lockout.isLocked("b", 3)).toMatchObject({ locked: false, failures: 1 });
   });
 
-  it("fails closed when capacity is entirely locked", () => {
+  it("fails closed when capacity is entirely locked, and stays consistent on re-check", () => {
     const lockout = new AuthFailureLockout({ windowMs: 1_000, maxFailures: 1, maxBuckets: 2 });
     expect(lockout.recordFailure("a", 0).locked).toBe(true);
     expect(lockout.recordFailure("b", 10).locked).toBe(true);
@@ -67,6 +68,10 @@ describe("AuthFailureLockout", () => {
     expect(refused.retryAfterSeconds).toBeGreaterThan(0);
     expect(lockout.isLocked("a", 20).locked).toBe(true);
     expect(lockout.isLocked("b", 20).locked).toBe(true);
+
+    // The refused decision is backed by persisted state: the key is still
+    // locked on its next request instead of reaching credential verification.
+    expect(lockout.isLocked("c", 21)).toMatchObject({ locked: true, justLocked: false });
 
     // Once the protected windows expire, capacity is reclaimed normally.
     expect(lockout.recordFailure("c", 1_100)).toMatchObject({ locked: true, failures: 1 });
@@ -82,4 +87,95 @@ describe("AuthFailureLockout", () => {
     expect(lockout.isLocked("c", 5_001)).toMatchObject({ locked: false, failures: 1 });
   });
 
+  it("keeps in-progress streaks alive through interleaved device-verification traffic", () => {
+    // Regression test for the evicted-streak finding: distinct device codes
+    // must not displace a login streak that has not reached maxFailures.
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets: 4 });
+    lockout.recordFailure("login:ip:1", 0);
+    lockout.recordFailure("login:ip:1", 1);
+
+    // Flood with distinct device-code keys until the map saturates; the
+    // overflow keys fail closed while tracked keys keep counting.
+    for (let i = 0; i < 10; i++) {
+      lockout.recordFailure(`device_verify:code:CODE-${i}`, 2 + i);
+    }
+
+    // The login streak was never evicted: its third failure locks it.
+    const third = lockout.recordFailure("login:ip:1", 20);
+    expect(third).toMatchObject({ locked: true, failures: 3, justLocked: true });
+    expect(lockout.isLocked("login:ip:1", 21).locked).toBe(true);
+  });
+
+  it("still records failures for tracked keys while saturated", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets: 2 });
+    lockout.recordFailure("a", 0);
+    lockout.recordFailure("b", 1);
+    expect(lockout.recordFailure("c", 2).locked).toBe(true);
+
+    expect(lockout.recordFailure("a", 3)).toMatchObject({ locked: false, failures: 2 });
+    expect(lockout.recordFailure("a", 4)).toMatchObject({ locked: true, failures: 3, justLocked: true });
+  });
+
+  it("records device-verification ip+code pairs atomically at small capacity", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 2, maxBuckets: 2 });
+    const ip = "device_verify:ip:9.9.9.9";
+    const code = "device_verify:code:AAAA-BBBB";
+
+    expect(lockout.recordFailures([ip, code], 0).map((d) => d.locked)).toEqual([false, false]);
+    const second = lockout.recordFailures([ip, code], 1);
+    expect(second).toMatchObject([
+      { locked: true, failures: 2, justLocked: true },
+      { locked: true, failures: 2, justLocked: true }
+    ]);
+    expect(lockout.isLocked(ip, 2).locked).toBe(true);
+    expect(lockout.isLocked(code, 2).locked).toBe(true);
+  });
+
+  it("fails the whole device pair closed when two slots cannot be retained", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 2, maxBuckets: 2 });
+    lockout.recordFailure("other", 0);
+    const ip = "device_verify:ip:9.9.9.9";
+    const code = "device_verify:code:AAAA-BBBB";
+
+    // Only one slot is free: admitting the pair partially would let the two
+    // buckets displace each other, so both fail closed instead.
+    const decisions = lockout.recordFailures([ip, code], 1);
+    expect(decisions.map((d) => d.locked)).toEqual([true, true]);
+    expect(decisions.every((d) => d.justLocked === false)).toBe(true);
+
+    // The pre-existing bucket is untouched.
+    expect(lockout.isLocked("other", 2)).toMatchObject({ locked: false, failures: 1 });
+
+    // No partial admission persisted: after the overflow window, neither key
+    // has a bucket of its own.
+    expect(lockout.isLocked(ip, 60_001)).toMatchObject({ locked: false, failures: 0 });
+    expect(lockout.isLocked(code, 60_001)).toMatchObject({ locked: false, failures: 0 });
+  });
+
+  it("a first failure under saturation returns a recorded locked decision, not a phantom 429", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 5, maxBuckets: 2 });
+    for (const key of ["a", "b"]) {
+      for (let i = 0; i < 5; i++) lockout.recordFailure(key, i);
+    }
+    expect(lockout.isLocked("a", 10).locked).toBe(true);
+
+    const first = lockout.recordFailure("new-key", 11);
+    expect(first).toMatchObject({ locked: true, justLocked: false });
+    expect(first.retryAfterSeconds).toBeGreaterThan(0);
+
+    // The decision is backed by the persisted overflow marker: a re-check
+    // agrees instead of behaving as if the key were never seen.
+    expect(lockout.isLocked("new-key", 12)).toMatchObject({ locked: true, justLocked: false });
+
+    // The overflow ends with the tracked windows; normal recording resumes.
+    expect(lockout.recordFailure("new-key", 60_001)).toMatchObject({ locked: false, failures: 1 });
+  });
+
+  it("recordFailures handles empty and duplicate key lists", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3 });
+    expect(lockout.recordFailures([], 0)).toEqual([]);
+    const decisions = lockout.recordFailures(["a", "a"], 1);
+    expect(decisions).toHaveLength(1);
+    expect(decisions[0]).toMatchObject({ failures: 1, locked: false });
+  });
 });
