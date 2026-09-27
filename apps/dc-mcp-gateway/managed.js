@@ -34,6 +34,10 @@ export const ACS_CAPABILITY_META_KEY = 'capability';
 /** Desktop Commander's managed guard transports the same envelope at this key. */
 export const ACS_GUARD_META_KEY = 'acsCapability';
 
+/** Jace Commander (acs.jc.v1) — a separate capability version/audience; never interchangeable with acs.dc.v1. */
+export const JC_CAPABILITY_VERSION = 'acs.jc.v1';
+export const JC_AUDIENCE = 'jace-commander';
+
 export function managedModeFromEnv(env = process.env) {
   const enabled = env.ACS_MANAGED_MODE === '1';
   if (!enabled) return { enabled: false };
@@ -252,12 +256,14 @@ export function capabilityTransport(managed, { identity, requestId }) {
       throw Object.assign(new Error('managed mode requires authenticated subject and client_id'), { acsCode: 'identity_missing' });
     }
     const actor = subject.startsWith('chatgpt:') ? subject : `chatgpt:${subject}`;
-    const { status, json } = await acsPost(managed, managed.issuePath || '/dc/capability/issue', {
+    const issuePath = managed.issuePath || '/dc/capability/issue';
+    const actorHeader = issuePath === '/jc/capability/issue' ? 'x-jc-actor' : 'x-dc-actor';
+    const { status, json } = await acsPost(managed, issuePath, {
       client_id: clientId,
       tool: toolName,
       argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
       correlationId: requestId,
-    }, { 'x-dc-actor': actor });
+    }, { [actorHeader]: actor });
     if (status !== 200 || !json || json.decision !== 'allow') {
       const code = json && typeof json.code === 'string'
         ? json.code
@@ -289,6 +295,20 @@ export function capabilityTransport(managed, { identity, requestId }) {
     ) {
       throw Object.assign(new Error('ACS returned a malformed capability envelope'), { acsCode: 'acs_malformed_capability' });
     }
+    // Route binding (fail closed): a capability minted for one executor must
+    // never be accepted on the other's route. The jc lane requires a positive
+    // acs.jc.v1 / jace-commander match; the dc lane rejects anything carrying
+    // jc version/audience markers.
+    {
+      const payload = envelope.payload || {};
+      const jcRoute = (managed.issuePath || '') === '/jc/capability/issue';
+      const wrongExecutor = jcRoute
+        ? (payload.version !== JC_CAPABILITY_VERSION || payload.audience !== JC_AUDIENCE)
+        : (payload.version === JC_CAPABILITY_VERSION || payload.audience === JC_AUDIENCE);
+      if (wrongExecutor) {
+        throw Object.assign(new Error('ACS returned a capability for a different executor'), { acsCode: 'acs_capability_wrong_audience' });
+      }
+    }
     return {
       ...parsed,
       params: {
@@ -316,6 +336,12 @@ export function capabilityTransport(managed, { identity, requestId }) {
 export function isToolsCall(bodyText) {
   try {
     const parsed = JSON.parse(bodyText.toString('utf8'));
+    if (Array.isArray(parsed)) {
+      // A JSON-RPC batch: the gateway cannot attribute ACS issuance or strip
+      // spoofed authority fields per element, so batches carrying tools/call
+      // are flagged for fail-closed rejection at the route handler.
+      return { isCall: false, parsed, hasBatchedCall: parsed.some((m) => m && m.method === 'tools/call') };
+    }
     return { isCall: parsed?.method === 'tools/call', parsed };
   } catch {
     return { isCall: false, parsed: null };
