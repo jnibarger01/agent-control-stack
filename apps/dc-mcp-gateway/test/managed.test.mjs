@@ -167,6 +167,38 @@ test('managed mode: spoofed _meta stripped, ACS-issued capability injected, iden
   }
 });
 
+test('managed mode rejects a batch containing tools/call before ACS issuance or upstream forwarding', async () => {
+  const { acs, acsRequests, upstream, upstreamRequests } = harness();
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const acsPort = acs.address().port;
+  const upPort = upstream.address().port;
+  const port = 18124;
+  const child = startServer(port, {
+    ACS_MANAGED_MODE: '1',
+    ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
+    ACS_GATEWAY_TOKEN: 'svc-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  await waitListening(child, port);
+  try {
+    const batch = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'start_process', arguments: { command: 'ls' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+    ];
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), batch);
+    assert.equal(status, 503, text);
+    assert.deepEqual(JSON.parse(text), {
+      error: 'managed_authorization_unavailable',
+      code: 'batched_tools_call_rejected',
+    });
+    assert.equal(acsRequests.length, 0, 'no ACS issuance for rejected batch');
+    assert.equal(upstreamRequests.length, 0, 'rejected batch must never reach Desktop Commander');
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
 for (const [name, decision] of [
   ['missing capability (ACS denies)', { ok: false, code: 'acs_not_authorized' }],
   ['forged/expired capability rejected by ACS', { ok: false, code: 'capability_expired' }],

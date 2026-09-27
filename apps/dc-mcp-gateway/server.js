@@ -698,7 +698,13 @@ const server = http.createServer(async (req, res) => {
       }
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
       if (MANAGED.enabled && req.method === 'POST') {
-        const { isCall, parsed } = isToolsCall(body);
+        const { isCall, parsed, hasBatchedCall } = isToolsCall(body);
+        if (hasBatchedCall) {
+          // Fail closed: a batch containing tools/call would otherwise bypass
+          // per-call ACS issuance and anti-spoof metadata stripping.
+          log(req.method, '/mcp', 503, 'managed fail-closed: batched_tools_call');
+          return send(res, 503, { error: 'managed_authorization_unavailable', code: 'batched_tools_call_rejected' });
+        }
         if (isCall) {
           try {
             // With the jc lane on, UPSTREAM may be swapped with JC_UPSTREAM:
