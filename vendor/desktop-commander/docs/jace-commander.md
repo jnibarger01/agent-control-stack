@@ -19,6 +19,7 @@ Source: `src/jace-commander/`. Deploy: `deploy/jace-commander/`. Tests:
 | LoopTrace chain (byte-compatible with ACS `agentos-contracts`) | Implemented. Pinned to a vector produced by the ACS reference code |
 | ACS issuing `acs.jc.v1` (`POST /jc/capability/issue`) | Implemented in `agent-control-stack` ([contract](https://github.com/jnibarger01/agent-control-stack/blob/main/docs/protocol/acs-jc-v1-capability-contract.md)) |
 | Gateway lane `https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp` | Implemented in `desktop-commander-mcp-gateway` (`JC_ENABLED=1`, own OAuth audience, `BRIDGE_PROFILE=jace-commander`) |
+| ACS ⇄ DC `acs.jc.v1` interop vector | Pinned byte-identically in both repos; verified by `test/test-jace-commander-acs-interop.js` |
 | Runtime identity bootstrap for jc (DC §7 equivalent) | Not implemented; runtime pinned by `JC_RUNTIME_ID` on all three sides |
 | ACS result submission for jc attempts | Not implemented; the helper's root audit chain is the execution evidence |
 
