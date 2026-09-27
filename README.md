@@ -57,7 +57,7 @@ with its own OAuth audience (`…/jc/mcp`) and is always ACS-managed through
 ```
 https://<host>/jc/mcp ─► server.js (Bearer <redacted> == JC_RESOURCE)
                           │ managed tools/call: POST ACS /jc/capability/issue
-                          │ (ACS_JC_GATEWAY_TOKEN, x-dc-actor) → acs.jc.v1 envelope
+                          │ (ACS_JC_GATEWAY_TOKEN, x-jc-actor) → acs.jc.v1 envelope
                           │ injected at params._meta.acsCapability
                           ▼
    bridge.js BRIDGE_PROFILE=jace-commander  127.0.0.1:8003  (jace-commander-mcp.service)

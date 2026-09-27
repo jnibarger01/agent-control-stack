@@ -257,12 +257,14 @@ export function capabilityTransport(managed, { identity, requestId }) {
       throw Object.assign(new Error('managed mode requires authenticated subject and client_id'), { acsCode: 'identity_missing' });
     }
     const actor = subject.startsWith('chatgpt:') ? subject : `chatgpt:${subject}`;
-    const { status, json } = await acsPost(managed, managed.issuePath || '/dc/capability/issue', {
+    const issuePath = managed.issuePath || '/dc/capability/issue';
+    const actorHeader = issuePath === '/jc/capability/issue' ? 'x-jc-actor' : 'x-dc-actor';
+    const { status, json } = await acsPost(managed, issuePath, {
       client_id: clientId,
       tool: toolName,
       argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
       correlationId: requestId,
-    }, { 'x-dc-actor': actor });
+    }, { [actorHeader]: actor });
     if (status !== 200 || !json || json.decision !== 'allow') {
       const code = json && typeof json.code === 'string'
         ? json.code

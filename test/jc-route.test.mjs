@@ -45,7 +45,7 @@ function recorder(handler) {
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       const text = Buffer.concat(chunks).toString('utf8');
-      requests.push({ path: req.url, auth: req.headers.authorization, actor: req.headers['x-dc-actor'], body: text ? JSON.parse(text) : null });
+      requests.push({ path: req.url, auth: req.headers.authorization, actor: req.headers['x-dc-actor'], jcActor: req.headers['x-jc-actor'], body: text ? JSON.parse(text) : null });
       const { status, body } = handler(requests.at(-1));
       res.writeHead(status, { 'content-type': 'application/json' });
       res.end(JSON.stringify(body));
@@ -204,7 +204,8 @@ test('tools/call: jc issue route + jc credential, spoofed meta stripped, forward
     assert.equal(acs.requests.length, 1);
     assert.equal(acs.requests[0].path, '/jc/capability/issue');
     assert.equal(acs.requests[0].auth, 'Bearer jc-bridge-token');
-    assert.equal(acs.requests[0].actor, 'chatgpt:jacen');
+    assert.equal(acs.requests[0].jcActor, 'chatgpt:jacen', 'jc route attributes via x-jc-actor');
+    assert.equal(acs.requests[0].actor, undefined, 'jc route never sends x-dc-actor');
     assert.equal(acs.requests[0].body.tool, 'acs_read');
     assert.equal(acs.requests[0].body.argsSummary, JSON.stringify({ view: 'health' }));
 
@@ -302,7 +303,7 @@ test('JSON-RPC batch without tools/call still proxies on /jc/mcp', async () => {
   } finally { close(); }
 });
 
-test('/authority and /ready read the jc bridge from JC_UPSTREAM, not the DC upstream', async () => {
+test('/authority reads the jc bridge from JC_UPSTREAM, not the DC upstream', async () => {
   const authorityFor = (variant) => (req) => (req.path === '/authority'
     ? { status: 200, body: { variant, bridge: { hasUpstreamPair: true } } }
     : { status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } });
@@ -318,7 +319,7 @@ test('/authority and /ready read the jc bridge from JC_UPSTREAM, not the DC upst
     assert.equal(authority.bridge.variant, 'dc');
     assert.equal(authority.jcBridge.variant, 'jc');
     const ready = await (await fetch(`http://127.0.0.1:${gw.port}/ready`)).json();
-    assert.equal(ready.jcBridgeReady, true);
+    assert.equal(ready.jcBridgeReady, undefined, '/ready is scoped to the primary lane');
     assert.ok(jcUp.requests.some((r) => r.path === '/authority'), 'jc upstream was queried');
   } finally {
     gw.child.kill('SIGKILL'); dcUp.server.close(); jcUp.server.close();
@@ -424,7 +425,7 @@ test('/ready is not delayed by an unresponsive jc bridge', async () => {
     const ready = await (await fetch(`http://127.0.0.1:${gw.port}/ready`)).json();
     const elapsed = Date.now() - started;
     assert.equal(ready.bridgeReady, true);
-    assert.equal(ready.jcBridgeReady, false);
+    assert.equal(ready.jcBridgeReady, undefined, 'jc bridge is not probed by /ready');
     assert.ok(elapsed < 1500, `/ready took ${elapsed}ms`);
   } finally {
     gw.child.kill('SIGKILL'); dcUp.server.close(); hung.closeAllConnections?.(); hung.close();

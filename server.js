@@ -30,7 +30,6 @@ const UPSTREAM = process.env.UPSTREAM || 'http://127.0.0.1:8002';
 // Jace Commander lane (/jc/mcp): its own OAuth audience and its own bridge.
 const JC_RESOURCE = process.env.JC_RESOURCE || `${PUBLIC_ORIGIN}/jc/mcp`;
 const JC_UPSTREAM = process.env.JC_UPSTREAM || 'http://127.0.0.1:8003';
-const JC_READY_TIMEOUT_MS = 500; // jc status in /ready and /authority is informational
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CONSENT_PASSPHRASE = process.env.CONSENT_PASSPHRASE || '';
 const SIGNING_KEY = process.env.SIGNING_KEY || ''; // hex
@@ -549,10 +548,10 @@ async function checkAcsIssuanceReady() {
     return { reachable: false, detail: `ACS gateway unreachable: ${e?.message || 'error'}` };
   }
 }
-async function fetchBridgeAuthority(upstreamBase = UPSTREAM, timeoutMs = 3000) {
+async function fetchBridgeAuthority(upstreamBase = UPSTREAM) {
   try {
     const url = new URL('/authority', upstreamBase);
-    const r = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
     if (!r.ok) return { ok: false, error: `bridge /authority HTTP ${r.status}` };
     return { ok: true, data: await r.json() };
   } catch (e) {
@@ -574,13 +573,11 @@ const server = http.createServer(async (req, res) => {
     // /ready and /authority (hardening item #2): non-secret structured state
     // only — never capability payloads, keys, tokens, or credentials.
     if (pathName === '/ready' || pathName === '/authority') {
-      // Probed concurrently; the optional jc bridge gets a short timeout so a
-      // jc-only outage cannot delay (and thereby gate) primary readiness.
-      const [acsIssuance, bridgeAuthority, jcAuthority] = await Promise.all([
-        checkAcsIssuanceReady(),
-        fetchBridgeAuthority(),
-        JC.enabled ? fetchBridgeAuthority(JC_UPSTREAM, JC_READY_TIMEOUT_MS) : null,
-      ]);
+      const acsIssuance = await checkAcsIssuanceReady();
+      const bridgeAuthority = await fetchBridgeAuthority();
+      // The optional JC lane must never delay or gate the primary /ready probe.
+      // Report it on /authority only; /ready remains scoped to the primary DC lane.
+      const jcAuthority = pathName === '/authority' && JC.enabled ? await fetchBridgeAuthority(JC_UPSTREAM) : null;
       if (pathName === '/authority') {
         const body = {
           managedIssuance: { configured: MANAGED.enabled, ...acsIssuance },
