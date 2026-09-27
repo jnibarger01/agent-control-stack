@@ -234,11 +234,14 @@ test('privileged_exec awaiting human approval fails closed and surfaces the ACS 
     const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), {
       jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'privileged_exec', arguments: { argv: ['/usr/bin/apt-get', 'update'] } },
     });
-    assert.equal(r.status, 503);
+    assert.equal(r.status, 200);
     const body = await r.json();
-    assert.equal(body.error, 'managed_authorization_required');
-    assert.equal(body.workItemId, 'wrk_1');
-    assert.deepEqual(body.approvalSummary.argv, ['/usr/bin/apt-get', 'update']);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 1);
+    assert.equal(body.error.code, -32002);
+    assert.equal(body.error.data.kind, 'managed_authorization_required');
+    assert.equal(body.error.data.workItemId, 'wrk_1');
+    assert.deepEqual(body.error.data.approvalSummary.argv, ['/usr/bin/apt-get', 'update']);
     assert.equal(mcpRequests(jcUp).length, 0);
   } finally { close(); }
 });
@@ -249,7 +252,9 @@ test('ACS unreachable fails closed on the jc lane', async () => {
   const gw = await startGateway({ JC_ENABLED: '1', JC_UPSTREAM: `http://127.0.0.1:${jcPort}`, ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token' });
   try {
     const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
-    assert.equal(r.status, 503);
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.error.code, -32003);
     assert.equal(mcpRequests(jcUp).length, 0);
   } finally { gw.child.kill('SIGKILL'); jcUp.server.close(); }
 });
@@ -268,8 +273,10 @@ test('wrong-audience envelope on the jc route fails closed (acs_capability_wrong
     const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), {
       jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'acs_read', arguments: { view: 'health' } },
     });
-    assert.equal(r.status, 503);
-    assert.equal((await r.json()).code, 'acs_capability_wrong_audience');
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.acsCode, 'acs_capability_wrong_audience');
     assert.equal(acs.requests.length, 1);
     assert.equal(mcpRequests(jcUp).length, 0);
   } finally { close(); }
@@ -367,8 +374,9 @@ test('/jc/mcp refuses to issue or forward when JC_UPSTREAM is not the jc bridge'
   const { gw, acs, dcUp, jcUp, close } = await lane({ jcVariant: 'dc' });
   try {
     const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
-    assert.equal(r.status, 503);
-    assert.equal((await r.json()).code, 'jc_bridge_mismatch');
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.error.data.acsCode, 'jc_bridge_mismatch');
     assert.equal(acs.requests.length, 0, 'no capability issued');
     assert.equal(mcpRequests(jcUp).length, 0, 'nothing forwarded');
     assert.equal(dcUp.requests.length, 0);
@@ -398,8 +406,9 @@ test('with the jc lane on, /mcp refuses a UPSTREAM that is the jc bridge (swappe
   try {
     assert.equal(gw.exitCode, undefined, 'gateway failed to start');
     const r = await call(gw.port, '/mcp', token(`${ORIGIN}/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'start_process', arguments: { command: 'ls' } } });
-    assert.equal(r.status, 503);
-    assert.equal((await r.json()).code, 'dc_bridge_mismatch');
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.error.data.acsCode, 'dc_bridge_mismatch');
     assert.equal(acs.requests.filter((q) => q.path === '/dc/capability/issue').length, 0, 'no DC capability issued');
     assert.equal(mcpRequests(swapped).length, 0, 'nothing forwarded');
     const ready = await (await fetch(`http://127.0.0.1:${gw.port}/ready`)).json();

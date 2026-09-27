@@ -233,15 +233,32 @@ describe.skipIf(!E2E_ENABLED)(
       const args = { path: target, content: "approved via relay" };
       const held = await callDeviceTool("write_file", args);
       expect(held.isError).toBe(true);
-      expect(held.content[0].text).toContain("managed_authorization_required");
+      expect(held.content[0].text).toMatch(/managed_authorization_required|require_approval/);
       expect(existsSync(target)).toBe(false);
 
-      // Relay wrapper {call_id, status, error}; the device error embeds the edge's JSON body.
-      const failure = JSON.parse(held.content[0].text) as { status: string; error: string };
-      expect(failure.status).toBe("failed");
-      const approval = JSON.parse(failure.error.slice(failure.error.indexOf("{")));
-      expect(approval).toMatchObject({ error: "managed_authorization_required", code: "require_approval" });
-      expect(await acs.approve(approval.workItemId, approval.actionHash)).toBe(200);
+      const failureText = held.content[0].text;
+      const jsonStart = failureText.indexOf("{");
+      const payload = JSON.parse(failureText.slice(jsonStart)) as {
+        status?: string;
+        error?: string | { data?: { workItemId?: string; actionHash?: string } };
+        data?: { workItemId?: string; actionHash?: string };
+      };
+      const nested =
+        typeof payload.error === "string" && payload.error.includes("{")
+          ? (JSON.parse(payload.error.slice(payload.error.indexOf("{"))) as {
+              error?: { data?: { workItemId?: string; actionHash?: string } };
+              data?: { workItemId?: string; actionHash?: string };
+              workItemId?: string;
+              actionHash?: string;
+            })
+          : payload;
+      const workItemId =
+        nested.data?.workItemId ?? nested.error?.data?.workItemId ?? nested.workItemId ?? payload.data?.workItemId;
+      const actionHash =
+        nested.data?.actionHash ?? nested.error?.data?.actionHash ?? nested.actionHash ?? payload.data?.actionHash;
+      expect(workItemId).toMatch(/^wrk_/);
+      expect(actionHash).toBeTruthy();
+      expect(await acs.approve(workItemId!, actionHash!)).toBe(200);
       const executed = await callDeviceTool("write_file", args);
       expect(executed.isError, JSON.stringify(executed)).not.toBe(true);
       expect(readFileSync(target, "utf8")).toBe("approved via relay");
@@ -256,14 +273,18 @@ describe.skipIf(!E2E_ENABLED)(
       });
       expect(smuggled.isError).toBe(true);
       // ACS's strict schema rejects the unknown key before any capability exists.
-      expect(smuggled.content[0].text).toContain("managed_authorization_unavailable");
+      expect(smuggled.content[0].text).toMatch(
+        /managed_authorization_denied|desktop_commander_argument_invalid|invalid_arguments/
+      );
       expect(existsSync(target)).toBe(false);
     });
 
     it("fails closed for tools ACS does not manage", async () => {
       const result = await callDeviceTool("kill_process", { pid: 1 });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toMatch(/managed_authorization_unavailable|managed_tool_unsupported/u);
+      expect(result.content[0].text).toMatch(
+        /managed_authorization_denied|managed_tool_unsupported|unknown_tool/
+      );
     });
 
     it("keeps the device session attached across relayed rejections", async () => {

@@ -91,11 +91,16 @@ describe.skipIf(!E2E_ENABLED)(
       const target = join(box.workspace, "approved.txt");
       const args = { path: target, content: "approved content" };
       const held = await client.call("write_file", args);
-      expect(held.status).toBe(503);
-      expect(held.body).toMatchObject({ error: "managed_authorization_required", code: "require_approval" });
+      expect(held.status).toBe(200);
+      expect(held.body.error.code).toBe(-32002);
+      expect(held.body.error.data).toMatchObject({
+        kind: "managed_authorization_required",
+        acsCode: "require_approval",
+        requiredScopes: ["fs.write"]
+      });
       expect(existsSync(target)).toBe(false);
 
-      expect(await acs.approve(held.body.workItemId, held.body.actionHash)).toBe(200);
+      expect(await acs.approve(held.body.error.data.workItemId, held.body.error.data.actionHash)).toBe(200);
       const executed = await client.call("write_file", args);
       expect(executed.status).toBe(200);
       expect(executed.body.result.isError, JSON.stringify(executed.body)).toBeUndefined();
@@ -106,24 +111,29 @@ describe.skipIf(!E2E_ENABLED)(
     it("does not let an approval for one argument set authorize different arguments", async () => {
       const target = join(box.workspace, "other.txt");
       const held = await client.call("write_file", { path: target, content: "A" });
-      expect(held.status).toBe(503);
-      expect(await acs.approve(held.body.workItemId, held.body.actionHash)).toBe(200);
+      expect(held.status).toBe(200);
+      expect(held.body.error.code).toBe(-32002);
+      expect(await acs.approve(held.body.error.data.workItemId, held.body.error.data.actionHash)).toBe(200);
       const different = await client.call("write_file", { path: target, content: "B" });
-      expect(different.status).toBe(503);
-      expect(different.body.code).toBe("require_approval");
+      expect(different.status).toBe(200);
+      expect(different.body.error.code).toBe(-32002);
+      expect(different.body.error.data.acsCode).toBe("require_approval");
       expect(existsSync(target)).toBe(false);
     });
 
     it("fails closed at ACS for unknown, unsupported, and out-of-containment requests", async () => {
       const unknown = await client.call("definitely_not_a_tool", {});
-      expect(unknown.status).toBe(503);
-      expect(unknown.body.error).toBe("managed_authorization_unavailable");
+      expect(unknown.status).toBe(200);
+      expect(unknown.body.error.code).toBe(-32001);
+      expect(unknown.body.error.data.kind).toBe("managed_authorization_denied");
 
       const unsupported = await client.call("kill_process", { pid: 1 });
-      expect(unsupported.status).toBe(503);
+      expect(unsupported.status).toBe(200);
+      expect(unsupported.body.error.code).toBe(-32001);
 
       const outside = await client.call("read_file", { path: "/etc/hostname" });
-      expect(outside.status).toBe(503);
+      expect(outside.status).toBe(200);
+      expect(outside.body.error.code).toBe(-32001);
     });
 
     it("strips a client-forged capability: it never substitutes for ACS authorization", async () => {
@@ -138,8 +148,9 @@ describe.skipIf(!E2E_ENABLED)(
         { path: target, content: "x" },
         { acsCapability: forged, capability: forged }
       );
-      expect(response.status).toBe(503);
-      expect(response.body.code).toBe("require_approval");
+      expect(response.status).toBe(200);
+      expect(response.body.error.code).toBe(-32002);
+      expect(response.body.error.data.acsCode).toBe("require_approval");
       expect(existsSync(target)).toBe(false);
     });
 

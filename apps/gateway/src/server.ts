@@ -1486,6 +1486,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             decision: "require_approval",
             workItemId: workItem.id,
             actionHash,
+            requiredScopes,
             approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
           });
         }
@@ -1501,6 +1502,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             decision: "require_approval",
             workItemId: workItem.id,
             actionHash,
+            requiredScopes,
             approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
           });
         }
@@ -1694,9 +1696,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             code: "jc_bridge_identity_required"
           });
         }
-        const jcActor = firstHeader(request.headers["x-dc-actor"]);
+        const jcActor =
+          firstHeader(request.headers["x-jc-actor"]) ?? firstHeader(request.headers["x-dc-actor"]);
         if (!jcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(jcActor)) {
-          return reply.code(400).send({ error: "x-dc-actor header is required", code: "jc_actor_invalid" });
+          return reply.code(400).send({ error: "x-jc-actor header is required", code: "jc_actor_invalid" });
         }
         const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
         if (!jcSigningConfig) {
@@ -1815,6 +1818,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             decision: "require_approval",
             workItemId: workItem.id,
             actionHash,
+            requiredScopes: [...toolPolicy.scopes],
             approvalSummary: jaceCommanderApprovalSummary(invocation),
             approvalInstructions: `A human must POST /work-items/${workItem.id}/approve with actionHash ${actionHash}, then retry the identical call`
           });
@@ -1831,6 +1835,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             decision: "require_approval",
             workItemId: workItem.id,
             actionHash,
+            requiredScopes: [...toolPolicy.scopes],
             approvalInstructions: `A human must POST /work-items/${workItem.id}/approve with actionHash ${actionHash}, then retry the identical call`
           });
         }

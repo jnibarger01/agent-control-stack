@@ -258,12 +258,18 @@ export function capabilityTransport(managed, { identity, requestId }) {
     const actor = subject.startsWith('chatgpt:') ? subject : `chatgpt:${subject}`;
     const issuePath = managed.issuePath || '/dc/capability/issue';
     const actorHeader = issuePath === '/jc/capability/issue' ? 'x-jc-actor' : 'x-dc-actor';
-    const { status, json } = await acsPost(managed, issuePath, {
-      client_id: clientId,
-      tool: toolName,
-      argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
-      correlationId: requestId,
-    }, { [actorHeader]: actor });
+    let status;
+    let json;
+    try {
+      ({ status, json } = await acsPost(managed, issuePath, {
+        client_id: clientId,
+        tool: toolName,
+        argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
+        correlationId: requestId,
+      }, { [actorHeader]: actor }));
+    } catch {
+      throw Object.assign(new Error('ACS issuance unreachable'), { acsCode: 'acs_http_unreachable' });
+    }
     if (status !== 200 || !json || json.decision !== 'allow') {
       const code = json && typeof json.code === 'string'
         ? json.code
@@ -281,6 +287,9 @@ export function capabilityTransport(managed, { identity, requestId }) {
       if (json && typeof json.actionHash === 'string') acsApproval.actionHash = json.actionHash;
       if (json && typeof json.approvalInstructions === 'string') acsApproval.approvalInstructions = json.approvalInstructions;
       if (json && json.approvalSummary && typeof json.approvalSummary === 'object') acsApproval.approvalSummary = json.approvalSummary;
+      if (json && Array.isArray(json.requiredScopes)) acsApproval.requiredScopes = json.requiredScopes;
+      if (json && typeof json.reason === 'string') acsApproval.reason = json.reason;
+      if (json && typeof json.detail === 'string') acsApproval.detail = json.detail;
       throw Object.assign(new Error(`ACS did not authorize this invocation (${code})`), { acsCode: code, acsApproval });
     }
     const envelope = json.capability;
@@ -330,6 +339,83 @@ export function capabilityTransport(managed, { identity, requestId }) {
         },
       },
     };
+  };
+}
+
+const ACS_REFUSAL_DATA_KEYS = Object.freeze([
+  "reason",
+  "detail",
+  "workItemId",
+  "actionHash",
+  "approvalInstructions",
+  "approvalSummary",
+  "requiredScopes",
+  "instructions"
+]);
+
+export const MANAGED_JSONRPC_DENIED = -32001;
+export const MANAGED_JSONRPC_APPROVAL_REQUIRED = -32002;
+export const MANAGED_JSONRPC_UNAVAILABLE = -32003;
+
+function isUnavailableAcsCode(acsCode) {
+  return (
+    acsCode === "managed_fail_closed" ||
+    acsCode === "acs_malformed_capability" ||
+    acsCode === "acs_capability_wrong_audience" ||
+    acsCode === "execution_authority_unavailable" ||
+    acsCode === "capability_issuance_unconfigured" ||
+    acsCode === "capability_signing_key_invalid" ||
+    acsCode === "batched_tools_call_rejected" ||
+    acsCode === "dc_bridge_mismatch" ||
+    acsCode === "jc_bridge_mismatch" ||
+    acsCode.startsWith("acs_http_")
+  );
+}
+
+/**
+ * Map an ACS tools/call refusal onto the JSON-RPC error contract in
+ * docs/protocol/dc-authorization-arguments.md. Policy refusals are not
+ * transport failures: the HTTP status is 200 and the original request id is
+ * preserved so MCP clients can surface workItemId/actionHash.
+ */
+export function jsonRpcManagedToolsCallError(parsed, err) {
+  const id = parsed && typeof parsed === "object" && !Array.isArray(parsed) && "id" in parsed
+    ? parsed.id
+    : null;
+  const acsCode = err && typeof err.acsCode === "string" && err.acsCode.length > 0
+    ? err.acsCode
+    : "managed_fail_closed";
+  const approval = err && err.acsApproval && typeof err.acsApproval === "object" ? err.acsApproval : {};
+  const kind = acsCode === "require_approval" && typeof approval.workItemId === "string"
+    ? "managed_authorization_required"
+    : isUnavailableAcsCode(acsCode)
+      ? "managed_authorization_unavailable"
+      : "managed_authorization_denied";
+  const code = kind === "managed_authorization_required"
+    ? MANAGED_JSONRPC_APPROVAL_REQUIRED
+    : kind === "managed_authorization_unavailable"
+      ? MANAGED_JSONRPC_UNAVAILABLE
+      : MANAGED_JSONRPC_DENIED;
+  const data = {
+    kind,
+    acsCode,
+    code: acsCode,
+    retryable: kind !== "managed_authorization_denied"
+  };
+  for (const key of ACS_REFUSAL_DATA_KEYS) {
+    if (approval[key] !== undefined) data[key] = approval[key];
+  }
+  if (typeof data.approvalInstructions === "string" && data.instructions === undefined) {
+    data.instructions = data.approvalInstructions;
+  }
+  return {
+    jsonrpc: "2.0",
+    id,
+    error: {
+      code,
+      message: kind.replaceAll("_", " "),
+      data
+    }
   };
 }
 

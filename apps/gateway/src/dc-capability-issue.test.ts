@@ -335,6 +335,7 @@ describe("POST /dc/capability/issue (lease-bound)", () => {
       expect(requested.statusCode).toBe(409);
       const firstBody = requested.json();
       expect(firstBody.decision).toBe("require_approval");
+      expect(firstBody.requiredScopes).toEqual(["fs.write"]);
       expect(firstBody.approvalInstructions).toContain(`POST /work-items/${firstBody.workItemId}/approve`);
 
       const pendingDetail = await ctx.app.inject({

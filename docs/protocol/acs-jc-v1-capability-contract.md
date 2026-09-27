@@ -90,7 +90,9 @@ These are enforced in three independent places.
 2. For `privileged_exec`, ACS creates a `needs_approval` work item (risk
    critical; title `ROOT: <argv>`, plus an `approvalSummary` with argv, cwd,
    timeout and stdin size). It returns `409 {decision: "require_approval",
-workItemId, actionHash, approvalSummary}`.
+   workItemId, actionHash, requiredScopes, approvalSummary}`. The MCP gateway
+   maps that to JSON-RPC `-32002` on HTTP 200 so clients do not treat it as a
+   transport failure.
 3. A human approves the exact `actionHash` through `POST /work-items/:id/approve`.
 4. The identical call is retried. ACS claims the item under a fresh lease,
    consumes the approval, records the issuance, appends

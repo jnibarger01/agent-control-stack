@@ -85,11 +85,17 @@ function gateway(configured = true) {
 }
 type Ctx = ReturnType<typeof gateway>;
 
-function issue(ctx: Ctx, tool: string, args: Record<string, unknown>, token = JC_BRIDGE_TOKEN) {
+function issue(
+  ctx: Ctx,
+  tool: string,
+  args: Record<string, unknown>,
+  token = JC_BRIDGE_TOKEN,
+  actorHeader: "x-jc-actor" | "x-dc-actor" = "x-jc-actor"
+) {
   return ctx.app.inject({
     method: "POST",
     url: "/jc/capability/issue",
-    headers: { authorization: `Bearer ${token}`, "x-dc-actor": ACTOR },
+    headers: { authorization: `Bearer ${token}`, [actorHeader]: ACTOR },
     payload: { client_id: "chatgpt", tool, argsSummary: JSON.stringify(args) }
   });
 }
@@ -152,6 +158,14 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(response.json().code).toBe("jc_bridge_identity_required");
     }));
 
+  it("accepts the jc-lane x-jc-actor header and still accepts x-dc-actor", () =>
+    withGateway(async (ctx) => {
+      const viaJc = await issue(ctx, "acs_read", { view: "health" }, JC_BRIDGE_TOKEN, "x-jc-actor");
+      expect(viaJc.statusCode).toBe(200);
+      const viaDc = await issue(ctx, "acs_read", { view: "health" }, JC_BRIDGE_TOKEN, "x-dc-actor");
+      expect(viaDc.statusCode).toBe(200);
+    }));
+
   it("issues a read capability without approval, audience jace-commander, exact args bound", () =>
     withGateway(async (ctx) => {
       const response = await issue(ctx, "acs_read", { view: "health" });
@@ -179,6 +193,9 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       const unknown = await issue(ctx, "run_command", { command: "id" });
       expect(unknown.statusCode).toBe(403);
       expect(unknown.json().reason).toBe("unknown_tool");
+      const writeFile = await issue(ctx, "write_file", { path: "/tmp/x", content: "x" });
+      expect(writeFile.statusCode).toBe(403);
+      expect(writeFile.json().reason).toBe("unknown_tool");
       for (const argv of [["apt-get", "update"], ["/usr/bin/../bin/id"], []]) {
         const bad = await issue(ctx, "privileged_exec", { argv });
         expect(bad.statusCode).toBe(400);
@@ -194,6 +211,7 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(first.statusCode).toBe(409);
       const pending = first.json();
       expect(pending.decision).toBe("require_approval");
+      expect(pending.requiredScopes).toEqual(["process.privileged"]);
       expect(pending.approvalSummary).toMatchObject({ runAs: "root", argv: PRIV_ARGS.argv, timeoutMs: 120000 });
 
       const detail = await ctx.app.inject({

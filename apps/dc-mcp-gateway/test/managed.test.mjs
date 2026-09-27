@@ -5,7 +5,7 @@
  * Proves at the gateway boundary:
  *  - spoofed client _meta.acsCapability is stripped and never reaches upstream
  *  - missing/forged/expired/wrong-scope/approval-mismatch/lease-mismatch ACS
- *    responses fail closed (503, nothing forwarded upstream)
+ *    responses fail closed as HTTP 200 JSON-RPC errors (nothing forwarded)
  *  - ACS unreachable fails closed
  *  - every tools/call fetches a fresh capability from ACS (no gateway-side
  *    replay/cache path exists)
@@ -197,9 +197,14 @@ for (const [name, decision] of [
     await waitListening(child, port);
     try {
       const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-      assert.equal(status, 503, text);
+      assert.equal(status, 200, text);
       const body = JSON.parse(text);
-      assert.equal(body.code, decision.code);
+      assert.equal(body.jsonrpc, '2.0');
+      assert.equal(body.id, TOOLS_CALL.id);
+      assert.equal(body.error.code, -32001);
+      assert.equal(body.error.data.kind, 'managed_authorization_denied');
+      assert.equal(body.error.data.acsCode, decision.code);
+      assert.equal(body.error.data.retryable, false);
       // FAIL CLOSED: nothing reached Desktop Commander
       assert.equal(upstreamRequests.length, 0);
     } finally {
@@ -237,14 +242,25 @@ test('managed mode preserves approval challenge metadata when ACS requires appro
   });
   await waitListening(child, port);
   try {
-    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-    assert.equal(status, 503, text);
+    const writeCall = {
+      jsonrpc: '2.0',
+      id: 'write-1',
+      method: 'tools/call',
+      params: { name: 'write_file', arguments: { path: '/home/jacen/projects/.jace-commander-write-test', content: 'x' } },
+    };
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), writeCall);
+    assert.equal(status, 200, text);
     const body = JSON.parse(text);
-    assert.equal(body.error, 'managed_authorization_required');
-    assert.equal(body.code, 'require_approval');
-    assert.equal(body.workItemId, 'wrk_test123');
-    assert.equal(body.actionHash, 'hash_abc');
-    assert.equal(body.approvalInstructions, 'POST /work-items/wrk_test123/approve with actionHash hash_abc');
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'write-1');
+    assert.equal(body.error.code, -32002);
+    assert.equal(body.error.data.kind, 'managed_authorization_required');
+    assert.equal(body.error.data.acsCode, 'require_approval');
+    assert.equal(body.error.data.retryable, true);
+    assert.equal(body.error.data.workItemId, 'wrk_test123');
+    assert.equal(body.error.data.actionHash, 'hash_abc');
+    assert.equal(body.error.data.approvalInstructions, 'POST /work-items/wrk_test123/approve with actionHash hash_abc');
+    assert.equal(body.error.data.instructions, body.error.data.approvalInstructions);
     // Still fail-closed: no capability was minted, nothing reached Desktop Commander.
     assert.equal(upstreamRequests.length, 0);
   } finally {
@@ -270,8 +286,11 @@ test('managed mode fails closed when ACS is unreachable', async () => {
   });
   await waitListening(child, port);
   try {
-    const { status } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-    assert.equal(status, 503);
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
     assert.equal(upstreamRequests.length, 0);
   } finally {
     child.kill('SIGKILL'); upstream.close();

@@ -36,9 +36,12 @@ ChatGPT/Claude ─► https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp
   * ACS failure or unreachability returns 503 and nothing is forwarded.
   * The DC upstream never sees jc traffic.
 * **Human approval surfaced, not bypassed.** For `privileged_exec`, ACS
-  answers 409 `require_approval`. The gateway returns
-  `503 {error: "managed_authorization_required", workItemId, actionHash, approvalSummary}`.
-  A human approves in ACS, then the client retries the identical call.
+  answers 409 `require_approval`. The gateway returns HTTP 200 JSON-RPC
+  error `-32002` (`managed_authorization_required`) with `workItemId`,
+  `actionHash`, and `approvalSummary` in `error.data`. A human approves in
+  ACS, then the client retries the identical call. Policy denials use
+  `-32001`; ACS/runtime unavailability uses `-32003`. The refused
+  `tools/call` is never forwarded.
 * **Bridge profile.**
   * `BRIDGE_PROFILE=jace-commander` requires `ACS_MANAGED_MODE=1` and
     `JC_ACS_PUBLIC_KEY`, `JC_ACS_KEY_ID`, `JC_RUNTIME_ID`.

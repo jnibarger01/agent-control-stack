@@ -15,7 +15,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
+import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, isToolsCall, jsonRpcManagedToolsCallError, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -666,17 +666,9 @@ const server = http.createServer(async (req, res) => {
             });
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
-            const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
-            const approval = e && e.acsApproval && typeof e.acsApproval === 'object' ? e.acsApproval : {};
-            // A require_approval response is not a failure the caller can do
-            // nothing about: surface the ACS work item so a human can approve
-            // it and the same call can be retried. Still fail-closed — the
-            // tools/call is never forwarded to Desktop Commander here.
-            const errorKind = code === 'require_approval' && approval.workItemId
-              ? 'managed_authorization_required'
-              : 'managed_authorization_unavailable';
-            log(req.method, '/mcp', 503, `managed fail-closed: ${code}`);
-            return send(res, 503, { error: errorKind, code, ...approval });
+            const refusal = jsonRpcManagedToolsCallError(parsed, e);
+            log(req.method, '/mcp', 200, `managed fail-closed: ${refusal.error.data.acsCode}`);
+            return send(res, 200, refusal);
           }
         } else if (parsed && parsed.method === 'initialize' && NATIVE_RUNTIME_BOOTSTRAP) {
           // Managed initialize: fetch an ACS runtime bootstrap challenge and
@@ -735,13 +727,9 @@ const server = http.createServer(async (req, res) => {
             const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth), requestId: randId() });
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
-            const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
-            const approval = e && e.acsApproval && typeof e.acsApproval === 'object' ? e.acsApproval : {};
-            const errorKind = code === 'require_approval' && approval.workItemId
-              ? 'managed_authorization_required'
-              : 'managed_authorization_unavailable';
-            log(req.method, '/jc/mcp', 503, `managed fail-closed: ${code}`);
-            return send(res, 503, { error: errorKind, code, ...approval });
+            const refusal = jsonRpcManagedToolsCallError(parsed, e);
+            log(req.method, '/jc/mcp', 200, `managed fail-closed: ${refusal.error.data.acsCode}`);
+            return send(res, 200, refusal);
           }
         }
       }
