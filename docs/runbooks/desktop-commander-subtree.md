@@ -8,6 +8,7 @@ test suite, so it can keep following upstream.
 | ---------------------- | ------------------------------------------------------------------------------------------------------------ |
 | Prefix                 | `vendor/desktop-commander`                                                                                   |
 | Imported from          | `jnibarger01/desktop-commander` `main` @ `99913e6931c89211a4fe1849b9ab20e5567cbdc4`                          |
+| Last subtree pull      | `jnibarger01/desktop-commander` `main` @ `a80865d` (PR #13); gateway `main` @ `72a9b06` (PRs #2, #4)         |
 | Import commit (ACS)    | `import(desktop-commander): add desktop-commander@99913e6 as a git subtree with full history`                |
 | Upstream of the fork   | `wonderwhy-er/DesktopCommanderMCP`                                                                           |
 | Fork-only code removed | `src/control-plane` (now `apps/dc-relay`), relay tests, relay Supabase migrations, `control-plane:*` scripts |
