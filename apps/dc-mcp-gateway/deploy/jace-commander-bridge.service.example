@@ -1,0 +1,29 @@
+# ~/.config/systemd/user/jace-commander-bridge.service
+# Second bridge instance for the /jc/mcp lane. Secrets live in the 0600 env file.
+[Unit]
+Description=Jace Commander MCP bridge (stdio <-> Streamable HTTP, 127.0.0.1:8003)
+After=network.target
+
+[Service]
+WorkingDirectory=%h/projects/desktop-commander-mcp-gateway
+EnvironmentFile=%h/projects/desktop-commander-mcp-gateway/.env.jc-bridge
+# .env.jc-bridge (0600):
+#   BRIDGE_PORT=8003
+#   BRIDGE_PROFILE=jace-commander
+#   ACS_MANAGED_MODE=1
+#   DC_CMD=/usr/bin/node
+#   DC_ARGS=/home/jacen/projects/desktop-commander/dist/jace-commander/cli.js serve
+#   DC_CWD=/home/jacen/projects/desktop-commander
+#   JC_ACS_PUBLIC_KEY=<base64url SPKI of ACS acs.jc.v1 key>
+#   JC_ACS_KEY_ID=<key id>
+#   JC_RUNTIME_ID=jc-jacen-ubuntu
+#   JC_ACS_URL=http://127.0.0.1:3000
+#   JC_SWARM_URL=http://127.0.0.1:9711
+ExecStart=/usr/bin/node bridge.js
+Restart=on-failure
+NoNewPrivileges=false
+# NoNewPrivileges must stay false: privileged_exec reaches root only through
+# `sudo -n jc-privileged-helper` (single pinned sudoers rule).
+
+[Install]
+WantedBy=default.target
