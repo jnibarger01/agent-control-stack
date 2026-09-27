@@ -46,7 +46,9 @@ if (JC && !MANAGED) {
   process.exit(1);
 }
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
-const JC_DIR = process.env.JC_DC_DIR || '/home/jacen/projects/desktop-commander';
+// Resolved once so a relative JC_DC_DIR is not applied twice (as cwd and
+// again inside the script path).
+const JC_DIR = path.resolve(process.env.JC_DC_DIR || '/home/jacen/projects/desktop-commander');
 const DEFAULT_DC_ARGS = MANAGED
   ? '/home/jacen/projects/desktop-commander/dist/index.js'
   : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';

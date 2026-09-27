@@ -7,7 +7,8 @@
 #           install -m 0600 ../jace-commander-bridge.env.example \
 #             ~/.config/desktop-commander-mcp-gateway/jc-bridge.env   # then fill in
 #           systemctl --user daemon-reload && systemctl --user enable --now jace-commander-mcp
-# Then set JC_UPSTREAM / ACS_JC_GATEWAY_TOKEN in gateway.env and restart
+# Then set JC_ENABLED=1, JC_UPSTREAM and ACS_JC_GATEWAY_TOKEN in gateway.env
+# (without JC_ENABLED=1 the lane stays off and /jc/mcp returns 404) and restart
 # desktop-commander-auth-proxy.service.
 [Unit]
 Description=Jace Commander MCP bridge (stdio -> Streamable HTTP, loopback only)

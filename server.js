@@ -585,7 +585,8 @@ const server = http.createServer(async (req, res) => {
         log('GET', '/authority', 200);
         return send(res, 200, body);
       }
-      const bridgeReady = bridgeAuthority.ok && bridgeAuthority.data && bridgeAuthority.data.observedMode !== 'ambiguous_conflict' && bridgeAuthority.data.bridge?.hasUpstreamPair;
+      // A jc bridge on UPSTREAM is a misconfiguration, never a ready DC bridge.
+      const bridgeReady = bridgeAuthority.ok && bridgeAuthority.data && bridgeAuthority.data.variant !== 'jc' && bridgeAuthority.data.observedMode !== 'ambiguous_conflict' && bridgeAuthority.data.bridge?.hasUpstreamPair;
       const issuanceReady = !MANAGED.enabled || acsIssuance.reachable;
       // /ready gates the primary DC route; the JC bridge is reported, not gating.
       const jcBridgeReady = jcAuthority ? !!(jcAuthority.ok && jcAuthority.data?.variant === 'jc' && jcAuthority.data?.bridge?.hasUpstreamPair) : undefined;
@@ -635,6 +636,14 @@ const server = http.createServer(async (req, res) => {
         const { isCall, parsed } = isToolsCall(body);
         if (isCall) {
           try {
+            // With the jc lane on, UPSTREAM may be swapped with JC_UPSTREAM:
+            // never issue or forward a DC capability to the jc bridge.
+            if (JC.enabled) {
+              const dcBridge = await fetchBridgeAuthority(UPSTREAM);
+              if (!dcBridge.ok || (dcBridge.data?.variant ?? 'dc') !== 'dc') {
+                throw Object.assign(new Error('/mcp upstream is not the Desktop Commander bridge'), { acsCode: 'dc_bridge_mismatch' });
+              }
+            }
             const rewrite = capabilityTransport(MANAGED, {
               identity: identityAttribution(auth),
               requestId: randId(),

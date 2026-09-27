@@ -325,37 +325,42 @@ test('/authority and /ready read the jc bridge from JC_UPSTREAM, not the DC upst
   }
 });
 
-test('jace-commander bridge runs <JC_DC_DIR>/dist/jace-commander/cli.js serve (path with spaces)', async () => {
-  const fs = await import('node:fs');
-  const os = await import('node:os');
-  const path = await import('node:path');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jc dcdir '));
-  const state = path.join(root, 'state');
-  fs.mkdirSync(path.join(root, 'dist/jace-commander'), { recursive: true });
-  fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}\n');
-  fs.copyFileSync(new URL('./stub-jc.mjs', import.meta.url), path.join(root, 'dist/jace-commander/cli.js'));
-  const port = nextPort++;
-  const bridge = spawn(process.execPath, ['bridge.js'], {
-    cwd: new URL('..', import.meta.url).pathname,
-    env: {
-      PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_PROFILE: 'jace-commander', BRIDGE_PORT: String(port),
-      ACS_MANAGED_MODE: '1', DC_CMD: process.execPath, JC_DC_DIR: root,
-      JC_ACS_PUBLIC_KEY: 'k', JC_ACS_KEY_ID: 'i', JC_RUNTIME_ID: 'jc-test', JC_STATE_DIR: state,
-    },
-    stdio: ['ignore', 'ignore', 'pipe'],
+for (const [label, relative] of [['absolute path with spaces', false], ['relative path', true]]) {
+  test(`jace-commander bridge runs <JC_DC_DIR>/dist/jace-commander/cli.js serve (${label})`, async () => {
+    const fs = await import('node:fs');
+    const os = await import('node:os');
+    const path = await import('node:path');
+    const repo = new URL('..', import.meta.url).pathname;
+    // The relative case nests the checkout under the bridge's cwd so a doubled
+    // path (cwd + relative script path) cannot resolve by accident.
+    const root = fs.mkdtempSync(path.join(relative ? repo : os.tmpdir(), relative ? '.jc-dcdir-test-' : 'jc dcdir '));
+    const state = path.join(root, 'state');
+    fs.mkdirSync(path.join(root, 'dist/jace-commander'), { recursive: true });
+    fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}\n');
+    fs.copyFileSync(new URL('./stub-jc.mjs', import.meta.url), path.join(root, 'dist/jace-commander/cli.js'));
+    const port = nextPort++;
+    const bridge = spawn(process.execPath, ['bridge.js'], {
+      cwd: repo,
+      env: {
+        PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_PROFILE: 'jace-commander', BRIDGE_PORT: String(port),
+        ACS_MANAGED_MODE: '1', DC_CMD: process.execPath, JC_DC_DIR: relative ? path.relative(repo, root) : root,
+        JC_ACS_PUBLIC_KEY: 'k', JC_ACS_KEY_ID: 'i', JC_RUNTIME_ID: 'jc-test', JC_STATE_DIR: state,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+    let stderr = '';
+    bridge.stderr.on('data', (d) => { stderr += d; });
+    try {
+      const argvFile = path.join(state, 'argv.json');
+      for (let i = 0; i < 50 && !fs.existsSync(argvFile); i += 1) await new Promise((r) => setTimeout(r, 100));
+      assert.ok(fs.existsSync(argvFile), `child from JC_DC_DIR never started: ${stderr}`);
+      assert.deepEqual(JSON.parse(fs.readFileSync(argvFile, 'utf8')).argv, ['serve']);
+    } finally {
+      bridge.kill('SIGKILL');
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
-  let stderr = '';
-  bridge.stderr.on('data', (d) => { stderr += d; });
-  try {
-    const argvFile = path.join(state, 'argv.json');
-    for (let i = 0; i < 50 && !fs.existsSync(argvFile); i += 1) await new Promise((r) => setTimeout(r, 100));
-    assert.ok(fs.existsSync(argvFile), `child from JC_DC_DIR never started: ${stderr}`);
-    assert.deepEqual(JSON.parse(fs.readFileSync(argvFile, 'utf8')).argv, ['serve']);
-  } finally {
-    bridge.kill('SIGKILL');
-    fs.rmSync(root, { recursive: true, force: true });
-  }
-});
+}
 
 test('/jc/mcp refuses to issue or forward when JC_UPSTREAM is not the jc bridge', async () => {
   const { gw, acs, dcUp, jcUp, close } = await lane({ jcVariant: 'dc' });
@@ -376,4 +381,29 @@ test('jc lane refuses to start when JC_RESOURCE equals RESOURCE', async () => {
   if (gw.exitCode === undefined) gw.child.kill('SIGKILL');
   assert.notEqual(gw.exitCode, undefined, 'gateway must not start');
   assert.match(typeof gw.stderr === 'function' ? gw.stderr() : gw.stderr, /JC_RESOURCE must differ from RESOURCE/);
+});
+
+test('with the jc lane on, /mcp refuses a UPSTREAM that is the jc bridge (swapped upstreams)', async () => {
+  const acs = recorder(() => ({ status: 200, body: { decision: 'allow' } }));
+  const swapped = recorder((req) => (req.path === '/authority'
+    ? { status: 200, body: { variant: 'jc', bridge: { hasUpstreamPair: true } } }
+    : { status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } }));
+  const [acsPort, upPort] = [await acs.listen(), await swapped.listen()];
+  const gw = await startGateway({
+    ACS_MANAGED_MODE: '1', ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`, ACS_GATEWAY_TOKEN: 'dc-bridge-token',
+    JC_ENABLED: '1', ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`, JC_UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  try {
+    assert.equal(gw.exitCode, undefined, 'gateway failed to start');
+    const r = await call(gw.port, '/mcp', token(`${ORIGIN}/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'start_process', arguments: { command: 'ls' } } });
+    assert.equal(r.status, 503);
+    assert.equal((await r.json()).code, 'dc_bridge_mismatch');
+    assert.equal(acs.requests.filter((q) => q.path === '/dc/capability/issue').length, 0, 'no DC capability issued');
+    assert.equal(mcpRequests(swapped).length, 0, 'nothing forwarded');
+    const ready = await (await fetch(`http://127.0.0.1:${gw.port}/ready`)).json();
+    assert.equal(ready.bridgeReady, false);
+  } finally {
+    gw.child.kill('SIGKILL'); acs.server.close(); swapped.server.close();
+  }
 });
