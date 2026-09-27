@@ -197,9 +197,14 @@ for (const [name, decision] of [
     await waitListening(child, port);
     try {
       const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-      assert.equal(status, 503, text);
+      assert.equal(status, 200, text);
       const body = JSON.parse(text);
-      assert.equal(body.code, decision.code);
+      assert.equal(body.jsonrpc, '2.0');
+      assert.equal(body.id, TOOLS_CALL.id);
+      assert.equal(body.error.code, -32003);
+      assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+      assert.equal(body.error.data.acsCode, decision.code);
+      assert.equal(body.error.data.retryable, true);
       // FAIL CLOSED: nothing reached Desktop Commander
       assert.equal(upstreamRequests.length, 0);
     } finally {
