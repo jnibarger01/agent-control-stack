@@ -13,6 +13,7 @@
     { "path": "packages/advisory" },
     { "path": "packages/evidence" },
     { "path": "packages/sandbox" },
+    { "path": "packages/dc-tool-manifest" },
     { "path": "packages/desktop-commander-adapter" },
     { "path": "packages/workspace-manager" },
     { "path": "packages/engine-adapter" },
