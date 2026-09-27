@@ -9,6 +9,11 @@ BASE_URL="${BASE_URL%/}"
 TIMEOUT_SEC="${ACS_HEALTHCHECK_TIMEOUT_SEC:-10}"
 READYZ_ATTEMPTS="${ACS_HEALTHCHECK_READYZ_ATTEMPTS:-10}"
 
+if [[ ! "${READYZ_ATTEMPTS}" =~ ^[1-9][0-9]*$ ]] || (( READYZ_ATTEMPTS > 60 )); then
+  echo "ACS_HEALTHCHECK_READYZ_ATTEMPTS must be an integer from 1 to 60" >&2
+  exit 2
+fi
+
 check() {
   local path="$1"
   echo "GET ${BASE_URL}${path}"
@@ -22,7 +27,7 @@ check /livez
 # migration). Retry /readyz a bounded number of times before failing the check.
 ready=0
 readyz_response=""
-for attempt in $(seq 1 "${READYZ_ATTEMPTS}"); do
+for ((attempt = 1; attempt <= READYZ_ATTEMPTS; attempt += 1)); do
   if readyz_response="$(curl -fsS --max-time "${TIMEOUT_SEC}" "${BASE_URL}/readyz" 2>/dev/null)"; then
     ready=1
     break
