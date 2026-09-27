@@ -1,5 +1,9 @@
 import type { IncomingHttpHeaders } from "node:http";
-import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
+import {
+  type createWorkItemTools,
+  maybeRunJevShadowAdvisory,
+  workItemToolNames
+} from "@agent-control-stack/policy-gate";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import type { LocalAgentEventType, WorkItemStore } from "@agent-control-stack/work-items";
 import { ZodError, z } from "zod";
@@ -358,6 +362,12 @@ async function handleToolsCall(input: {
     if (pending >= input.maxPendingWorkItems) {
       return jsonRpcError(input.id, -32029, "pending work-item limit reached", 429);
     }
+  }
+  // Shadow-mode Jev advisory (log-only, fire-and-forget). Inert unless
+  // ACS_JEV_ENABLED=1. NEVER affects policy, approval, or routing decisions;
+  // it only emits advisory probability telemetry for the mission intake.
+  if (parsed.data.name === "create_work_item") {
+    void maybeRunJevShadowAdvisory(parsed.data.arguments ?? {}).catch(() => {});
   }
   try {
     const localAgent =

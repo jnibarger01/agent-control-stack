@@ -22,6 +22,7 @@
     { "path": "./packages/recovery" },
     { "path": "./packages/publication" },
     { "path": "packages/verification" },
+    { "path": "packages/jev-advisor" },
     { "path": "packages/eval-harness" },
     { "path": "packages/moa-orchestrator" },
     { "path": "packages/vercel-bridge-contract" },
