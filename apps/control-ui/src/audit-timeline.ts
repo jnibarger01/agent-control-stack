@@ -8,6 +8,8 @@
 export const LIVE_TIMELINE_CAP = 200;
 /** Page size for "load older". */
 export const OLDER_EVENTS_PAGE = 50;
+/** Live events buffered while the timeline is paused, before the oldest are dropped. */
+export const LIVE_TIMELINE_BUFFER_CAP = 500;
 
 /** Relies on the dashboard client's `auditAttributesMarkup`, `fetchJson`, and `announce`. */
 export function auditTimelineClientSource(): string {
@@ -15,6 +17,8 @@ export function auditTimelineClientSource(): string {
 let timelinePaused = false;
 let timelineBuffer = [];
 let timelineCap = ${LIVE_TIMELINE_CAP};
+let timelineBufferCap = ${LIVE_TIMELINE_BUFFER_CAP};
+let timelineDropped = 0;
 let timelineLoadingOlder = false;
 
 function timelineList() {
@@ -47,15 +51,25 @@ function renderTimelineControls() {
   const pause = document.getElementById('events-pause');
   if (pause) {
     pause.setAttribute('aria-pressed', timelinePaused ? 'true' : 'false');
-    pause.textContent = timelinePaused
+    const label = timelinePaused
       ? 'Resume' + (timelineBuffer.length ? ' (' + timelineBuffer.length + ' new)' : '')
       : 'Pause';
+    pause.textContent = label;
+    if (timelinePaused && timelineDropped > 0) {
+      pause.title = timelineDropped + ' older buffered ' + (timelineDropped === 1 ? 'event' : 'events') + ' dropped to stay under the buffer cap';
+    } else {
+      pause.removeAttribute('title');
+    }
   }
 }
 
 function insertLiveTimelineEvent(data) {
   if (timelinePaused) {
     timelineBuffer.push(data);
+    while (timelineBuffer.length > timelineBufferCap) {
+      timelineBuffer.shift();
+      timelineDropped += 1;
+    }
     renderTimelineControls();
     return;
   }
@@ -70,6 +84,7 @@ function setTimelinePaused(paused) {
   if (!paused && timelineBuffer.length) {
     const buffered = timelineBuffer;
     timelineBuffer = [];
+    timelineDropped = 0;
     buffered.forEach(insertLiveTimelineEvent);
   }
   renderTimelineControls();

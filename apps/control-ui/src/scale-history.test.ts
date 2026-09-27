@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { JSDOM } from "jsdom";
 import {
+  LIVE_TIMELINE_BUFFER_CAP,
   LIVE_TIMELINE_CAP,
   PROBE_INTERVAL_MS,
   renderDashboard,
@@ -120,6 +121,27 @@ describe("audit history (#12)", () => {
     expect(names).toEqual(["work_item.running", "work_item.created", "work_item.created"]);
     expect(pause.textContent).toBe("Pause");
     expect(pause.getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("caps the pause buffer, dropping the oldest and surfacing the count", async () => {
+    const app = bootLive({ workItems: [], events: [], now: NOW });
+    app.open();
+    const pause = app.document.getElementById("events-pause") as HTMLButtonElement;
+    pause.click();
+    for (let index = 0; index < LIVE_TIMELINE_BUFFER_CAP + 25; index += 1)
+      app.emit("agent.heartbeat", { "agent.id": `a${index}` });
+    await app.flush();
+    expect(pause.textContent).toBe(`Resume (${LIVE_TIMELINE_BUFFER_CAP} new)`);
+    expect(pause.title).toBe("25 older buffered events dropped to stay under the buffer cap");
+
+    pause.click();
+    // All 500 buffered events were flushed; the DOM keeps only the live cap.
+    const names = [...app.document.querySelectorAll("#events-timeline li strong")].map((node) => node.textContent);
+    expect(names).toHaveLength(LIVE_TIMELINE_CAP);
+    // Oldest dropped: the first retained event is the cap-th emitted.
+    expect(names[0]).toBe("agent.heartbeat");
+    expect(names.at(-1)).toBe("agent.heartbeat");
+    expect(pause.title).toBe("");
   });
 
   it("loads older events below the current ones using the oldest sequence", async () => {

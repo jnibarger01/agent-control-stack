@@ -71,7 +71,7 @@ export {
   type DashboardFragmentName,
   type DashboardFragments
 } from "./live-dashboard.js";
-export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE } from "./audit-timeline.js";
+export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE, LIVE_TIMELINE_BUFFER_CAP } from "./audit-timeline.js";
 export { COMPOSER_PREVIEW_DEBOUNCE_MS, composerHtml, DEFAULT_ACTION_KIND } from "./composer.js";
 export {
   AUDIT_SUMMARY_KEYS,
