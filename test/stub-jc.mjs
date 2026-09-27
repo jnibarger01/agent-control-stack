@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Minimal Jace Commander stand-in for /jc/mcp tests (spawned by bridge.js
-// BRIDGE_VARIANT=jc as `stub-jc.mjs serve`). Records its argv and every
+// BRIDGE_PROFILE=jace-commander as `stub-jc.mjs serve`). Records its argv and every
 // JSON-RPC message it receives under $JC_STATE_DIR so tests can prove what
 // reached the executor, and echoes the transported capability on tools/call.
 import fs from 'node:fs';

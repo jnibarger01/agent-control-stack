@@ -6,7 +6,6 @@
  *   - OAuth 2.1 authorization server (PKCE S256, DCR + CIMD, RFC 8707 resource binding)
  *   - OAuth 2.0 Protected Resource Metadata (RFC 9728) + AS metadata (RFC 8414)
  *   - Authenticating reverse proxy:  /mcp  ->  http://127.0.0.1:8002/mcp
- *                                    /jc/mcp -> JC_UPSTREAM/mcp (Jace Commander; optional)
  *
  * Zero runtime dependencies (node:http / node:crypto only). Fails closed.
  * Never logs bearer tokens, codes, or MCP tool arguments.
@@ -16,7 +15,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { managedModeFromEnv, identityAttribution, capabilityTransport, jcCapabilityTransport, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
+import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -28,12 +27,9 @@ const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || ''; // e.g. https://jacen-ubu
 const RESOURCE = process.env.RESOURCE || `${PUBLIC_ORIGIN}/mcp`;
 const ISSUER = process.env.ISSUER || PUBLIC_ORIGIN;
 const UPSTREAM = process.env.UPSTREAM || 'http://127.0.0.1:8002';
-// Jace Commander: served at /jc/mcp only when its bridge is configured. It is a
-// separate OAuth protected resource, so a token minted for /mcp can never be
-// replayed against /jc/mcp (RFC 8707 audience binding) and vice versa.
-const JC_UPSTREAM = process.env.JC_UPSTREAM || '';
-const JC_RESOURCE = JC_UPSTREAM ? (process.env.JC_RESOURCE || `${PUBLIC_ORIGIN}/jc/mcp`) : '';
-const RESOURCES = JC_RESOURCE ? [RESOURCE, JC_RESOURCE] : [RESOURCE];
+// Jace Commander lane (/jc/mcp): its own OAuth audience and its own bridge.
+const JC_RESOURCE = process.env.JC_RESOURCE || `${PUBLIC_ORIGIN}/jc/mcp`;
+const JC_UPSTREAM = process.env.JC_UPSTREAM || 'http://127.0.0.1:8003';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CONSENT_PASSPHRASE = process.env.CONSENT_PASSPHRASE || '';
 const SIGNING_KEY = process.env.SIGNING_KEY || ''; // hex
@@ -55,7 +51,17 @@ try {
   console.error(`gateway: ${e.message}`);
   process.exit(1);
 }
-if (JC_RESOURCE && JC_RESOURCE === RESOURCE) { console.error('gateway: JC_RESOURCE must differ from RESOURCE; refusing to start'); process.exit(1); }
+let JC = { enabled: false };
+try {
+  JC = jcModeFromEnv();
+  if (JC.enabled) console.log(`gateway: Jace Commander lane enabled at /jc/mcp (resource=${JC_RESOURCE}; ACS-managed only)`);
+} catch (e) {
+  console.error(`gateway: ${e.message}`);
+  process.exit(1);
+}
+// RFC 8707: tokens are minted for exactly one of these resources and are
+// only accepted on that resource's route.
+const ALLOWED_RESOURCES = JC.enabled ? [RESOURCE, JC_RESOURCE] : [RESOURCE];
 if (!GATEWAY_EXECUTION_TOKEN) console.log('gateway: GATEWAY_EXECUTION_TOKEN not set; executor identity attestation disabled (log-once)');
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 
@@ -64,7 +70,11 @@ const META = {
   authorization_servers: [ISSUER],
   scopes_supported: ['mcp'],
 };
-const JC_META = JC_RESOURCE ? { ...META, resource: JC_RESOURCE } : null;
+const JC_META = {
+  resource: JC_RESOURCE,
+  authorization_servers: [ISSUER],
+  scopes_supported: ['mcp'],
+};
 
 const AS_META = () => ({
   issuer: ISSUER,
@@ -213,6 +223,10 @@ function consentPage(q) {
   const hidden = Object.entries(q)
     .filter(([k]) => ['client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource'].includes(k))
     .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('\n');
+  const requested = q.resource || RESOURCE;
+  const warning = requested === JC_RESOURCE
+    ? 'Jace Commander access: ACS/codex-swarm/visualizer reads, mission submission, and ROOT commands (each root command still needs a separate human approval in ACS). Only approve clients you trust.'
+    : 'Full Desktop Commander access (shell, filesystem). Only approve clients you trust.';
   return `<!doctype html><html><head><meta charset="utf-8"><title>Desktop Commander MCP - Authorization</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <style>body{font-family:system-ui,sans-serif;background:#111;color:#eee;display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0}
@@ -223,10 +237,8 @@ button{width:100%;padding:.7rem;border:0;border-radius:6px;background:#4f8cff;co
 .warn{color:#ffb454;font-size:.85rem}</style></head>
 <body><div class="card"><h1>Authorize MCP client?</h1>
 <p>Client <code>${esc(q.client_id || '?')}</code> requests scope <code>${esc(q.scope || 'mcp')}</code> for
-<code>${esc(q.resource || RESOURCE)}</code>.</p>
-<p class="warn">${q.resource && q.resource === JC_RESOURCE
-    ? 'Jace Commander access (ACS, swarm, visualizer reads; ACS-approved root commands). Only approve clients you trust.'
-    : 'Full Desktop Commander access (shell, filesystem). Only approve clients you trust.'}</p>
+<code>${esc(requested)}</code>.</p>
+<p class="warn">${esc(warning)}</p>
 <form method="POST" action="/authorize/consent">
 ${hidden}
 <label>Consent passphrase<input type="password" name="passphrase" autocomplete="off" required></label>
@@ -256,7 +268,7 @@ async function handleAuthorize(req, res, q) {
   if (!code_challenge || code_challenge_method !== 'S256') return fail('invalid_request', 'PKCE with S256 is required');
   if (/[^A-Za-z0-9\-._~]/.test(code_challenge) || code_challenge.length < 43 || code_challenge.length > 128)
     return fail('invalid_request', 'malformed code_challenge');
-  if (resource && !RESOURCES.includes(resource)) return fail('invalid_target', 'resource mismatch');
+  if (resource && !ALLOWED_RESOURCES.includes(resource)) return fail('invalid_target', 'resource mismatch');
   const reqScope = (scope || 'mcp').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
   if (reqScope.length === 0) return fail('invalid_scope', 'no permitted scope requested');
   return send(res, 200, consentPage(q), { 'Content-Type': 'text/html; charset=utf-8' });
@@ -272,7 +284,7 @@ async function handleConsent(req, res, body) {
   if (!passOk) return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const client = await resolveClient(client_id);
   if (!client || !validRedirect(client, redirect_uri)) return send(res, 400, denyPage('Invalid client/redirect.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  if (resource && !RESOURCES.includes(resource)) return send(res, 400, denyPage('Unknown resource.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (resource && !ALLOWED_RESOURCES.includes(resource)) return send(res, 400, denyPage('Unknown resource.'), { 'Content-Type': 'text/html; charset=utf-8' });
   const code = randId();
   codes.set(code, {
     client_id, redirect_uri, scope: scope || 'mcp', resource: resource || RESOURCE,
@@ -361,9 +373,10 @@ async function handleRegister(req, res, body) {
 // ---------------------------------------------------------------------------
 // Bearer validation for /mcp
 // ---------------------------------------------------------------------------
-const CHALLENGE = (resourcePath = '') => `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource${resourcePath}", scope="mcp"`;
+const CHALLENGE = () => `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource", scope="mcp"`;
+const JC_CHALLENGE = () => `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource/jc/mcp", scope="mcp"`;
 
-function checkAuth(req, resource = RESOURCE) {
+function checkAuth(req, expectedResource = RESOURCE) {
   const h = req.headers['authorization'] || '';
   const m = /^Bearer\s+(.+)$/i.exec(h);
   if (!m) return null;
@@ -371,7 +384,7 @@ function checkAuth(req, resource = RESOURCE) {
   if (!payload) return null;
   if (payload.iss !== ISSUER) return null;
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-  if (!aud.includes(resource)) return null; // audience/resource binding (RFC 8707)
+  if (!aud.includes(expectedResource)) return null; // audience/resource binding (RFC 8707)
   return payload;
 }
 
@@ -380,10 +393,9 @@ function checkAuth(req, resource = RESOURCE) {
 // ---------------------------------------------------------------------------
 const HOP = new Set(['host', 'connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'authorization', 'content-length', 'expect']);
 
-function proxyMcp(req, res, bodyBuf, auth, target = { upstream: UPSTREAM, route: '/mcp' }) {
-  const url = new URL(req.url, target.upstream);
-  // Every bridge serves its MCP endpoint at /mcp on its own loopback port.
-  url.pathname = '/mcp';
+function proxyMcp(req, res, bodyBuf, auth, target = { base: UPSTREAM, pathname: null }) {
+  const url = new URL(req.url, target.base);
+  if (target.pathname) url.pathname = target.pathname; // /jc/mcp -> upstream /mcp
   const headers = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const lk = k.toLowerCase();
@@ -403,7 +415,7 @@ function proxyMcp(req, res, bodyBuf, auth, target = { upstream: UPSTREAM, route:
       sub: auth.sub, client_id: auth.client_id, jti: auth.jti, iat, exp: iat + 60,
     });
   }
-  const upstream = new URL(target.upstream);
+  const upstream = new URL(target.base);
   headers.host = upstream.host;
   const opts = { protocol: upstream.protocol, hostname: upstream.hostname, port: upstream.port || (upstream.protocol === 'https:' ? 443 : 80), path: url.pathname + url.search, method: req.method, headers };
   const ureq = http.request(opts, (ures) => {
@@ -413,7 +425,7 @@ function proxyMcp(req, res, bodyBuf, auth, target = { upstream: UPSTREAM, route:
     ures.pipe(res); // stream: SSE / JSON both preserved, no buffering
   });
   ureq.setTimeout(15 * 60_000, () => ureq.destroy(new Error('upstream timeout')));
-  ureq.on('error', (e) => { if (!res.headersSent) { log(req.method, target.route, 502, 'upstream error'); send(res, 502, { error: 'upstream_unavailable' }); } else res.destroy(); });
+  ureq.on('error', (e) => { if (!res.headersSent) { log(req.method, target.pathname ? '/jc/mcp' : '/mcp', 502, 'upstream error'); send(res, 502, { error: 'upstream_unavailable' }); } else res.destroy(); });
   if (bodyBuf && bodyBuf.length) ureq.write(bodyBuf);
   ureq.end();
   req.on('aborted', () => ureq.destroy());
@@ -534,42 +546,15 @@ async function checkAcsIssuanceReady() {
     return { reachable: false, detail: `ACS gateway unreachable: ${e?.message || 'error'}` };
   }
 }
-async function fetchBridgeAuthority(upstreamBase = UPSTREAM) {
+async function fetchBridgeAuthority() {
   try {
-    const url = new URL('/authority', upstreamBase);
+    const url = new URL('/authority', UPSTREAM);
     const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
     if (!r.ok) return { ok: false, error: `bridge /authority HTTP ${r.status}` };
     return { ok: true, data: await r.json() };
   } catch (e) {
     return { ok: false, error: e?.message || 'bridge unreachable' };
   }
-}
-
-/**
- * Each route must reach its own bridge: the /mcp upstream may never be the
- * Jace Commander bridge, and the /jc/mcp upstream must identify as it.
- */
-async function bridgeVariantIs(upstreamBase, variant) {
-  const bridge = await fetchBridgeAuthority(upstreamBase);
-  if (!bridge.ok) return false;
-  const reported = bridge.data?.variant ?? 'dc';
-  return reported === variant;
-}
-
-/**
- * Managed tools/call fail-closed response. The call is never forwarded. A
- * require_approval response is not a failure the caller can do nothing about:
- * surface the ACS work item so a human can approve it and the same call can be
- * retried.
- */
-function sendManagedFailClosed(req, res, route, e) {
-  const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
-  const approval = e && e.acsApproval && typeof e.acsApproval === 'object' ? e.acsApproval : {};
-  const errorKind = code === 'require_approval' && approval.workItemId
-    ? 'managed_authorization_required'
-    : 'managed_authorization_unavailable';
-  log(req.method, route, 503, `managed fail-closed: ${code}`);
-  return send(res, 503, { error: errorKind, code, ...approval });
 }
 
 // ---------------------------------------------------------------------------
@@ -588,7 +573,7 @@ const server = http.createServer(async (req, res) => {
     if (pathName === '/ready' || pathName === '/authority') {
       const acsIssuance = await checkAcsIssuanceReady();
       const bridgeAuthority = await fetchBridgeAuthority();
-      const jcAuthority = JC_UPSTREAM ? await fetchBridgeAuthority(JC_UPSTREAM) : null;
+      const jcAuthority = JC.enabled ? await fetchBridgeAuthority(JC_UPSTREAM) : null;
       if (pathName === '/authority') {
         const body = {
           managedIssuance: { configured: MANAGED.enabled, ...acsIssuance },
@@ -601,8 +586,8 @@ const server = http.createServer(async (req, res) => {
       const bridgeReady = bridgeAuthority.ok && bridgeAuthority.data && bridgeAuthority.data.observedMode !== 'ambiguous_conflict' && bridgeAuthority.data.bridge?.hasUpstreamPair;
       const issuanceReady = !MANAGED.enabled || acsIssuance.reachable;
       // /ready gates the primary DC route; the JC bridge is reported, not gating.
-      const ready = !!bridgeReady && !!issuanceReady;
       const jcBridgeReady = jcAuthority ? !!(jcAuthority.ok && jcAuthority.data?.variant === 'jc' && jcAuthority.data?.bridge?.hasUpstreamPair) : undefined;
+      const ready = !!bridgeReady && !!issuanceReady;
       log('GET', '/ready', ready ? 200 : 503);
       return send(res, ready ? 200 : 503, { ready, bridgeReady: !!bridgeReady, issuanceReady, ...(jcAuthority ? { jcBridgeReady } : {}) });
     }
@@ -611,11 +596,10 @@ const server = http.createServer(async (req, res) => {
     if (pathName === '/.well-known/oauth-protected-resource' || pathName === '/.well-known/oauth-protected-resource/mcp') {
       log('GET', pathName, 200); return send(res, 200, META);
     }
-    if (JC_META && pathName === '/.well-known/oauth-protected-resource/jc/mcp') {
+    if (pathName === '/.well-known/oauth-protected-resource/jc/mcp' && JC.enabled) {
       log('GET', pathName, 200); return send(res, 200, JC_META);
     }
-    if (pathName === '/.well-known/oauth-authorization-server' || pathName === '/.well-known/oauth-authorization-server/mcp' || pathName === '/.well-known/openid-configuration' ||
-        (JC_META && (pathName === '/.well-known/oauth-authorization-server/jc/mcp' || pathName === '/.well-known/openid-configuration/jc/mcp'))) {
+    if (pathName === '/.well-known/oauth-authorization-server' || pathName === '/.well-known/oauth-authorization-server/mcp' || pathName === '/.well-known/openid-configuration') {
       log('GET', pathName, 200); return send(res, 200, AS_META());
     }
 
@@ -649,16 +633,23 @@ const server = http.createServer(async (req, res) => {
         const { isCall, parsed } = isToolsCall(body);
         if (isCall) {
           try {
-            if (JC_UPSTREAM && !await bridgeVariantIs(UPSTREAM, 'dc')) {
-              throw Object.assign(new Error('/mcp upstream is not the Desktop Commander bridge'), { acsCode: 'dc_bridge_mismatch' });
-            }
             const rewrite = capabilityTransport(MANAGED, {
               identity: identityAttribution(auth),
               requestId: randId(),
             });
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
-            return sendManagedFailClosed(req, res, '/mcp', e);
+            const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
+            const approval = e && e.acsApproval && typeof e.acsApproval === 'object' ? e.acsApproval : {};
+            // A require_approval response is not a failure the caller can do
+            // nothing about: surface the ACS work item so a human can approve
+            // it and the same call can be retried. Still fail-closed — the
+            // tools/call is never forwarded to Desktop Commander here.
+            const errorKind = code === 'require_approval' && approval.workItemId
+              ? 'managed_authorization_required'
+              : 'managed_authorization_unavailable';
+            log(req.method, '/mcp', 503, `managed fail-closed: ${code}`);
+            return send(res, 503, { error: errorKind, code, ...approval });
           }
         } else if (parsed && parsed.method === 'initialize' && NATIVE_RUNTIME_BOOTSTRAP) {
           // Managed initialize: fetch an ACS runtime bootstrap challenge and
@@ -690,32 +681,38 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // ---- Jace Commander MCP proxy (auth required; separate resource) ----
-    if (JC_UPSTREAM && pathName === '/jc/mcp') {
+    // ---- Jace Commander MCP proxy (auth required; ACS-managed only) ----
+    if (pathName === '/jc/mcp' && JC.enabled) {
       const auth = checkAuth(req, JC_RESOURCE);
       if (!auth) {
         log(req.method, '/jc/mcp', 401, 'auth required');
-        return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': CHALLENGE('/jc/mcp') });
+        return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': JC_CHALLENGE() });
       }
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
-      if (MANAGED.enabled && req.method === 'POST') {
-        const { isCall, parsed } = isToolsCall(body);
+      if (req.method === 'POST') {
+        const { isCall, parsed, hasBatchedCall } = isToolsCall(body);
+        if (hasBatchedCall) {
+          // Fail closed: a batch would bypass per-call ACS issuance and
+          // anti-spoof metadata stripping. Clients must send single requests.
+          log(req.method, '/jc/mcp', 503, 'managed fail-closed: batched_tools_call');
+          return send(res, 503, { error: 'managed_authorization_unavailable', code: 'batched_tools_call_rejected' });
+        }
         if (isCall) {
           try {
-            if (!await bridgeVariantIs(JC_UPSTREAM, 'jc')) {
-              throw Object.assign(new Error('jc upstream is not the Jace Commander bridge'), { acsCode: 'jc_bridge_mismatch' });
-            }
-            const rewrite = jcCapabilityTransport(MANAGED, {
-              identity: identityAttribution(auth),
-              requestId: randId(),
-            });
+            const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth), requestId: randId() });
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
-            return sendManagedFailClosed(req, res, '/jc/mcp', e);
+            const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
+            const approval = e && e.acsApproval && typeof e.acsApproval === 'object' ? e.acsApproval : {};
+            const errorKind = code === 'require_approval' && approval.workItemId
+              ? 'managed_authorization_required'
+              : 'managed_authorization_unavailable';
+            log(req.method, '/jc/mcp', 503, `managed fail-closed: ${code}`);
+            return send(res, 503, { error: errorKind, code, ...approval });
           }
         }
       }
-      proxyMcp(req, res, body, auth, { upstream: JC_UPSTREAM, route: '/jc/mcp' });
+      proxyMcp(req, res, body, auth, { base: JC_UPSTREAM, pathname: '/mcp' });
       log(req.method, '/jc/mcp', 200, 'proxied');
       return;
     }
@@ -736,6 +733,5 @@ server.keepAliveTimeout = 65_000;
 server.maxHeadersCount = 100;
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`gateway: listening on 127.0.0.1:${PORT}`);
-  console.log(`gateway: issuer=${ISSUER} resource=${RESOURCE} upstream=${UPSTREAM}`);
-  if (JC_UPSTREAM) console.log(`gateway: jace-commander resource=${JC_RESOURCE} upstream=${JC_UPSTREAM}`);
+  console.log(`gateway: issuer=${ISSUER} resource=${RESOURCE} upstream=${UPSTREAM}${JC.enabled ? ` jc_resource=${JC_RESOURCE} jc_upstream=${JC_UPSTREAM}` : ''}`);
 });

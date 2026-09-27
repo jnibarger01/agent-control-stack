@@ -45,32 +45,40 @@ ChatGPT ──HTTPS──► https://jacen-ubuntu.tailaa6d41.ts.net/mcp
     and existing sessions must re-initialize.
 - `test-e2e.sh` — end-to-end flow test (run against `GW=<url>`).
 
-## Jace Commander (`/jc/mcp`)
+## Jace Commander lane (`/jc/mcp`)
 
-Optional second MCP resource behind the same OAuth AS and consent passphrase:
+Optional second lane (`JC_ENABLED=1`). It serves the Jace Commander MCP server
+with its own OAuth audience (`…/jc/mcp`) and is always ACS-managed through
+`POST /jc/capability/issue` using a dedicated bridge credential
+(`ACS_JC_GATEWAY_TOKEN`, distinct from `ACS_GATEWAY_TOKEN`). Root commands
+(`privileged_exec`) need a human approval in ACS for each run. See
+[docs/jace-commander-lane.md](docs/jace-commander-lane.md).
 
 ```
-https://<host>/jc/mcp ─► server.js (bearer aud == JC_RESOURCE)
+https://<host>/jc/mcp ─► server.js (Bearer <redacted> == JC_RESOURCE)
                           │ managed tools/call: POST ACS /jc/capability/issue
-                          │ (ACS_JC_GATEWAY_TOKEN, x-jc-actor) → acs.jc.v1 envelope
+                          │ (ACS_JC_GATEWAY_TOKEN, x-dc-actor) → acs.jc.v1 envelope
                           │ injected at params._meta.acsCapability
                           ▼
-   bridge.js BRIDGE_VARIANT=jc  127.0.0.1:8003  (jace-commander-mcp.service)
+   bridge.js BRIDGE_PROFILE=jace-commander  127.0.0.1:8003  (jace-commander-mcp.service)
                           ▼ stdio
    node <dc>/dist/jace-commander/cli.js serve   (managed; never --standalone)
 ```
 
-- Enabled only when `JC_UPSTREAM` is set in the gateway env. `/jc/mcp` is a
-  separate RFC 8707 resource (`JC_RESOURCE`, default `${PUBLIC_ORIGIN}/jc/mcp`)
-  with its own metadata at `/.well-known/oauth-protected-resource/jc/mcp`, so
-  `/mcp` and `/jc/mcp` tokens are not interchangeable.
-- Managed mode requires `ACS_JC_GATEWAY_TOKEN` (a JC bridge worker identity,
-  distinct from `ACS_GATEWAY_TOKEN`) or the gateway refuses to start.
-- Same bearer check, hop/`x-dc-*` header stripping, identity attestation and
-  client `_meta.acs*`/`capability` stripping as `/mcp`. Any ACS failure, or an
+- `/jc/mcp` is a separate RFC 8707 resource (`JC_RESOURCE`, default
+  `${PUBLIC_ORIGIN}/jc/mcp`) with its own metadata at
+  `/.well-known/oauth-protected-resource/jc/mcp`, so `/mcp` and `/jc/mcp`
+  tokens are not interchangeable.
+- Same Bearer <redacted>, hop-header stripping, identity attestation and client
+  `_meta.acs*`/`capability` stripping as `/mcp`. Any ACS failure, or an
   envelope whose `version`/`audience` is not `acs.jc.v1`/`jace-commander`, is a
-  503 and nothing is forwarded. `/mcp` likewise rejects `acs.jc.v1` envelopes,
-  and each route checks its bridge's `/authority` `variant` before issuing.
+  503 and nothing is forwarded. `/mcp` likewise rejects `acs.jc.v1` envelopes.
+  A JSON-RPC batch containing `tools/call` is rejected fail-closed
+  (`batched_tools_call_rejected`): the gateway cannot attribute ACS issuance
+  or strip spoofed authority fields per batch element.
+- `/ready` reports the primary DC lane; the jc bridge is reported (not gating)
+  as `jcBridgeReady`, and `/authority` includes a `jcBridge` section when the
+  lane is enabled.
 - Unit and env template: `deploy/systemd/jace-commander-mcp.service`,
   `deploy/jace-commander-bridge.env.example`.
 
