@@ -43,6 +43,7 @@ function brokerWithEnv(
     onEvent: (event: SecretBrokerEvent) => void;
     now: () => Date;
     authorize: (request: LeaseRequest) => boolean;
+    maxLeases: number;
   }> = {}
 ): SecretBroker {
   const source = new EnvSecretSource({ openai: "TEST_OPENAI_API_KEY" }, { TEST_OPENAI_API_KEY: RAW_SECRET_VALUE });
@@ -406,5 +407,182 @@ describe("SecretBroker onEvent", () => {
     const broker = brokerWithEnv();
     const handle = await broker.lease(leaseRequest());
     await expect(broker.revoke(handle)).resolves.toBeUndefined();
+  });
+});
+
+describe("SecretBroker lease-table hygiene (bounds, sweeps, scrubbing)", () => {
+  /** White-box access to the in-memory lease table, for asserting scrubbing/bounds. */
+  function leaseTable(broker: SecretBroker): Map<string, { value: string }> {
+    return (broker as unknown as { leases: Map<string, { value: string }> }).leases;
+  }
+
+  it("sweeps expired leases on the next lease() so dead records do not accumulate", async () => {
+    const clock = mutableClock(1_000_000);
+    const events: SecretBrokerEvent[] = [];
+    const broker = brokerWithEnv({ now: clock.now, onEvent: (event) => events.push(event) });
+
+    const handleA = await broker.lease(leaseRequest({ ttlMs: 5_000 }));
+    clock.advance(6_000); // handleA is now expired
+    await broker.lease(leaseRequest());
+
+    const table = leaseTable(broker);
+    expect(table.size).toBe(1);
+    expect(table.has(handleA.handleId)).toBe(false);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "secret.lease_expired_swept", handleId: handleA.handleId, scope: "openai" })
+    );
+    expect(JSON.stringify(events)).not.toContain(RAW_SECRET_VALUE);
+  });
+
+  it("a lease whose record was already swept still reports secret_handle_expired, not unknown", async () => {
+    const clock = mutableClock(1_000_000);
+    const events: SecretBrokerEvent[] = [];
+    const broker = brokerWithEnv({ now: clock.now, onEvent: (event) => events.push(event) });
+
+    const handleA = await broker.lease(leaseRequest({ ttlMs: 1_000 }));
+    clock.advance(1_000);
+    await broker.lease(leaseRequest()); // sweeps handleA's record
+
+    const env: NodeJS.ProcessEnv = {};
+    expect(() => handleA.injectInto(env, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_expired" })
+    );
+    expect(env.openai).toBeUndefined();
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "secret.redemption_denied", handleId: handleA.handleId, reason: "expired" })
+    );
+  });
+
+  it("revocation scrubs the raw value from the lease table while keeping the revoked error code", async () => {
+    const broker = brokerWithEnv();
+    const handle = await broker.lease(leaseRequest());
+
+    await broker.revoke(handle);
+
+    const table = leaseTable(broker);
+    expect(table.get(handle.handleId)?.value).toBe("");
+
+    const env: NodeJS.ProcessEnv = {};
+    expect(() => handle.injectInto(env, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_revoked" })
+    );
+    expect(env.openai).toBeUndefined();
+  });
+
+  it("scrubs the raw value when a redemption is refused for expiry, before the next sweep", async () => {
+    const clock = mutableClock(1_000_000);
+    const broker = brokerWithEnv({ now: clock.now });
+    const handle = await broker.lease(leaseRequest({ ttlMs: 5_000 }));
+
+    clock.advance(5_000);
+    expect(() => handle.injectInto({}, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_expired" })
+    );
+
+    const table = leaseTable(broker);
+    expect(table.get(handle.handleId)?.value).toBe("");
+  });
+
+  it("scrubs the raw value after the final redemption, never before it", async () => {
+    const broker = brokerWithEnv();
+    const handle = await broker.lease(leaseRequest({ maxUses: 1 }));
+    const who = principal();
+
+    const env: NodeJS.ProcessEnv = {};
+    handle.injectInto(env, who);
+    expect(env.openai).toBe(RAW_SECRET_VALUE); // the final legitimate use still receives the secret
+
+    const table = leaseTable(broker);
+    expect(table.get(handle.handleId)?.value).toBe(""); // scrubbed only after delivery
+
+    const second: NodeJS.ProcessEnv = {};
+    expect(() => handle.injectInto(second, who)).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_uses_exhausted" })
+    );
+    expect(second.openai).toBeUndefined();
+  });
+
+  it("fails closed at maxLeases live leases rather than evicting one, and live leases keep working", async () => {
+    const events: SecretBrokerEvent[] = [];
+    const broker = brokerWithEnv({ onEvent: (event) => events.push(event), maxLeases: 2 });
+
+    const first = await broker.lease(leaseRequest({ principal: principal({ workItemId: "wrk_1" }) }));
+    const second = await broker.lease(leaseRequest({ principal: principal({ workItemId: "wrk_2" }) }));
+
+    await expect(broker.lease(leaseRequest({ principal: principal({ workItemId: "wrk_3" }) }))).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_lease_capacity_exceeded" })
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "secret.lease_denied", reason: "capacity_exceeded" })
+    );
+
+    // Neither live lease was disturbed by the refused third lease.
+    const envA: NodeJS.ProcessEnv = {};
+    first.injectInto(envA, principal({ workItemId: "wrk_1" }));
+    expect(envA.openai).toBe(RAW_SECRET_VALUE);
+    const envB: NodeJS.ProcessEnv = {};
+    second.injectInto(envB, principal({ workItemId: "wrk_2" }));
+    expect(envB.openai).toBe(RAW_SECRET_VALUE);
+  });
+
+  it("a capacity refusal never touches the secret source", async () => {
+    const { source, resolveCalls } = countingSource(
+      new EnvSecretSource({ openai: "TEST_OPENAI_API_KEY" }, { TEST_OPENAI_API_KEY: RAW_SECRET_VALUE })
+    );
+    const broker = new SecretBroker({
+      scopes: { openai: { maxTtlMs: 60_000 } },
+      source,
+      maxLeases: 1
+    });
+
+    await broker.lease(leaseRequest());
+    await expect(broker.lease(leaseRequest({ principal: principal({ workItemId: "wrk_2" }) }))).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_lease_capacity_exceeded" })
+    );
+
+    expect(resolveCalls).toHaveLength(1);
+  });
+
+  it("revocation frees a capacity slot immediately", async () => {
+    const broker = brokerWithEnv({ maxLeases: 1 });
+
+    const first = await broker.lease(leaseRequest());
+    await expect(broker.lease(leaseRequest())).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_lease_capacity_exceeded" })
+    );
+
+    await broker.revoke(first);
+    const second = await broker.lease(leaseRequest());
+    expect(second.handleId).not.toBe(first.handleId);
+    // The revoked record lingers (value-free) for error-code fidelity, the live lease is present too.
+    expect(leaseTable(broker).size).toBe(2);
+  });
+
+  it("expiry frees a capacity slot via the sweep", async () => {
+    const clock = mutableClock(1_000_000);
+    const broker = brokerWithEnv({ now: clock.now, maxLeases: 1 });
+
+    await broker.lease(leaseRequest({ ttlMs: 1_000 }));
+    await expect(broker.lease(leaseRequest())).rejects.toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_lease_capacity_exceeded" })
+    );
+
+    clock.advance(1_000);
+    const second = await broker.lease(leaseRequest());
+    expect(second).toBeDefined();
+    expect(leaseTable(broker).size).toBe(1);
+  });
+
+  it("rejects an invalid maxLeases at construction time", () => {
+    for (const invalid of [0, -1, 1.5, Number.NaN]) {
+      expect(
+        () =>
+          new SecretBroker({
+            scopes: { openai: { maxTtlMs: 60_000 } },
+            source: new EnvSecretSource({ openai: "TEST_OPENAI_API_KEY" }, { TEST_OPENAI_API_KEY: RAW_SECRET_VALUE }),
+            maxLeases: invalid
+          })
+      ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "secret_broker_invalid_max_leases" }));
+    }
   });
 });

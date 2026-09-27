@@ -15,6 +15,8 @@ const identifierSchema = z
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/u);
 
+const DEFAULT_MAX_LEASES = 1024;
+
 /**
  * Who a lease is issued to, and who may redeem it. Every field is required:
  * a lease bound to nothing is a lease anyone could claim. Redemption
@@ -98,7 +100,8 @@ export type SecretBrokerEvent =
         | "ttl_exceeds_max"
         | "invalid_max_uses"
         | "secret_unavailable"
-        | "not_authorized";
+        | "not_authorized"
+        | "capacity_exceeded";
     }
   | {
       type: "secret.redeemed";
@@ -118,12 +121,31 @@ export type SecretBrokerEvent =
       handleId: string;
       scope: string;
       reason: "explicit" | "already_inactive";
+    }
+  | {
+      type: "secret.lease_expired_swept";
+      handleId: string;
+      scope: string;
     };
 
 export interface SecretBrokerOptions {
   /** Deny-by-default allowlist: only scopes listed here can ever be leased. */
   scopes: Record<string, SecretScopeConfig>;
   source: SecretSource;
+  /**
+   * Upper bound on LIVE (unrevoked, unexpired) lease records, which are the
+   * only records still holding raw secret material. Before admitting a new
+   * lease the broker sweeps expired records; if live leases are still at
+   * capacity, lease() fails closed (secret_lease_capacity_exceeded) rather
+   * than evicting a live lease - evicting one would break a legitimate
+   * redemption to protect memory, the wrong trade for a credential broker.
+   * Revocation frees a capacity slot immediately (the scrubbed record lingers
+   * only for error-code fidelity until its TTL passes the next sweep).
+   * Every live lease expires within its scope's maxTtlMs, so capacity always
+   * self-frees without caller action. Must be a positive integer; defaults
+   * to 1024.
+   */
+  maxLeases?: number;
   /**
    * Optional authoritative authorization hook (e.g. backed by
    * packages/work-items' getCommandAuthority) - if supplied, a lease
@@ -166,6 +188,13 @@ const MAX_ALLOWED_USES = 1_000;
  * here; the equivalent discipline is enforced by SecretHandle never
  * exposing the raw value itself (see handle.ts) and by this broker being
  * the only thing that ever reads `LeaseRecord.value`.
+ *
+ * The lease table is bounded: lease() sweeps expired records before
+ * admitting a new lease, terminal revocations and exhausted redemptions
+ * scrub the raw value in place, and maxLeases caps live leases - under
+ * pressure the broker fails closed (secret_lease_capacity_exceeded) rather
+ * than evicting a live lease, so bounded memory never costs a lease its
+ * payload.
  */
 export class SecretBroker {
   private readonly scopes: ReadonlyMap<string, SecretScopeConfig>;
@@ -173,6 +202,7 @@ export class SecretBroker {
   private readonly authorize: (request: LeaseRequest) => boolean;
   private readonly onEvent: (event: SecretBrokerEvent) => void;
   private readonly now: () => Date;
+  private readonly maxLeases: number;
   private readonly leases = new Map<string, LeaseRecord>();
 
   constructor(options: SecretBrokerOptions) {
@@ -194,6 +224,7 @@ export class SecretBroker {
     this.authorize = options.authorize ?? (() => true);
     this.onEvent = options.onEvent ?? (() => undefined);
     this.now = options.now ?? (() => new Date());
+    this.maxLeases = normalizeMaxLeases(options.maxLeases);
   }
 
   async lease(request: LeaseRequest): Promise<SecretHandle> {
@@ -235,6 +266,21 @@ export class SecretBroker {
       );
     }
 
+    // Capacity check + expired-record sweep happen only after all request
+    // validation and authorization have passed, and before the source is
+    // touched - matching the existing invariant that an unconfigured,
+    // unauthorized, or invalid request never reads the source and never
+    // mutates lease state.
+    const liveLeases = this.sweepExpiredLeases();
+    if (liveLeases >= this.maxLeases) {
+      this.emit({ type: "secret.lease_denied", scope, principal, reason: "capacity_exceeded" });
+      throw new ControlStackError(
+        "secret_lease_capacity_exceeded",
+        `lease table holds ${liveLeases} live leases (maxLeases: ${this.maxLeases}); refusing to evict a live ` +
+          "lease - capacity frees itself as leases expire or are revoked, so retrying is safe"
+      );
+    }
+
     // Only reachable once scope, ttl, use count, and authorization are all
     // already valid - an unconfigured or unauthorized request never
     // touches the source.
@@ -273,7 +319,10 @@ export class SecretBroker {
       principal,
       purpose: request.purpose,
       maxUses,
-      inject: (env, redeemer) => this.injectHandle(handleId, env, redeemer)
+      // expiresAtMs travels with the closure so a handle whose record was
+      // already swept still reports secret_handle_expired (not
+      // secret_handle_unknown) when redeemed after its TTL.
+      inject: (env, redeemer) => this.injectHandle(handleId, scope, env, redeemer, expiresAt.getTime())
     });
 
     this.emit({
@@ -301,13 +350,33 @@ export class SecretBroker {
       this.emit({ type: "secret.revoked", handleId: handle.handleId, scope: handle.scope, reason: "already_inactive" });
       return;
     }
+    // Terminal state: flip the flag and drop the raw secret material. The
+    // record stays in the table so injectInto keeps reporting
+    // secret_handle_revoked (not secret_handle_unknown), but the plaintext
+    // it would have injected is unrecoverable from the moment revoke
+    // returns.
     record.revoked = true;
+    record.value = "";
     this.emit({ type: "secret.revoked", handleId: handle.handleId, scope: handle.scope, reason: "explicit" });
   }
 
-  private injectHandle(handleId: string, env: NodeJS.ProcessEnv, redeemer: LeasePrincipal): void {
+  private injectHandle(
+    handleId: string,
+    scope: string,
+    env: NodeJS.ProcessEnv,
+    redeemer: LeasePrincipal,
+    expiresAtMs: number
+  ): void {
     const record = this.leases.get(handleId);
     if (!record) {
+      // Only reachable for a swept (already expired) record or a handleId
+      // this broker never issued; the closure's expiry keeps genuine
+      // handles reporting the accurate code.
+      if (this.now().getTime() >= expiresAtMs) {
+        this.emit({ type: "secret.redemption_denied", handleId, scope, reason: "expired" });
+        throw new ControlStackError("secret_handle_expired", "secret handle has expired");
+      }
+      this.emit({ type: "secret.redemption_denied", handleId, scope, reason: "unknown" });
       throw new ControlStackError("secret_handle_unknown", "secret handle is not recognized by this broker");
     }
     if (record.revoked) {
@@ -315,6 +384,9 @@ export class SecretBroker {
       throw new ControlStackError("secret_handle_revoked", "secret handle has been revoked");
     }
     if (this.now().getTime() >= record.expiresAt.getTime()) {
+      // Terminal: nothing may legitimately read this value again - scrub it
+      // so the plaintext does not linger until the next sweep.
+      record.value = "";
       this.emit({ type: "secret.redemption_denied", handleId, scope: record.scope, reason: "expired" });
       throw new ControlStackError("secret_handle_expired", "secret handle has expired");
     }
@@ -339,6 +411,11 @@ export class SecretBroker {
     // interleaving window a concurrent redemption could land in.
     record.usesRemaining -= 1;
     env[record.injectAs] = record.value;
+    if (record.usesRemaining <= 0) {
+      // Terminal after this redemption: scrub the raw value only AFTER the
+      // caller has received it, so the final legitimate use still works.
+      record.value = "";
+    }
     this.emit({
       type: "secret.redeemed",
       handleId,
@@ -348,9 +425,45 @@ export class SecretBroker {
     });
   }
 
+  /**
+   * Drop expired lease records outright and return the number of remaining
+   * live (unrevoked, unexpired) leases. Sweeping expired records is safe
+   * because injectInto re-checks expiry against the record's own expiry via
+   * the handle's captured closure, so a swept genuine handle still reports
+   * secret_handle_expired rather than secret_handle_unknown. Revoked records
+   * are NOT swept before their own expiry: they are already value-free, and
+   * lingering briefly keeps their redemption reporting secret_handle_revoked.
+   */
+  private sweepExpiredLeases(): number {
+    const nowMs = this.now().getTime();
+    let liveLeases = 0;
+    for (const [handleId, record] of this.leases) {
+      if (nowMs >= record.expiresAt.getTime()) {
+        this.leases.delete(handleId);
+        this.emit({ type: "secret.lease_expired_swept", handleId, scope: record.scope });
+      } else if (!record.revoked) {
+        liveLeases += 1;
+      }
+    }
+    return liveLeases;
+  }
+
   private emit(event: SecretBrokerEvent): void {
     this.onEvent(event);
   }
+}
+
+function normalizeMaxLeases(maxLeases: number | undefined): number {
+  if (maxLeases === undefined) {
+    return DEFAULT_MAX_LEASES;
+  }
+  if (!Number.isInteger(maxLeases) || maxLeases < 1) {
+    throw new ControlStackError(
+      "secret_broker_invalid_max_leases",
+      `maxLeases must be a positive integer, got: ${maxLeases}`
+    );
+  }
+  return maxLeases;
 }
 
 function principalsEqual(a: LeasePrincipal, b: LeasePrincipal): boolean {
