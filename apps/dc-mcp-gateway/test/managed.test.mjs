@@ -25,7 +25,7 @@ import { isToolsCall } from '../managed.js';
 const b64u = (buf) => Buffer.from(buf).toString('base64url');
 const now = () => Math.floor(Date.now() / 1000);
 
-function harness({ acsBehavior, managedEnv = {} } = {}) {
+function harness({ acsBehavior } = {}) {
   // --- mock ACS issuer: the ONLY authority in this test ---
   const acsRequests = [];
   const acs = http.createServer((req, res) => {

@@ -48,6 +48,8 @@ const bridge = startBridge({
   BRIDGE_PORT: String(port),
   DC_CMD: process.execPath,
   DC_ARGS: path.join(ROOT, 'test', 'stub-dc.mjs'),
+  // Pin the stub's cwd; the bridge default is a host-specific checkout path.
+  DC_CWD: ROOT,
   DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR: stateDir,
 });
 

@@ -425,7 +425,7 @@ function proxyMcp(req, res, bodyBuf, auth, target = { base: UPSTREAM, pathname: 
     ures.pipe(res); // stream: SSE / JSON both preserved, no buffering
   });
   ureq.setTimeout(15 * 60_000, () => ureq.destroy(new Error('upstream timeout')));
-  ureq.on('error', (e) => { if (!res.headersSent) { log(req.method, target.pathname ? '/jc/mcp' : '/mcp', 502, 'upstream error'); send(res, 502, { error: 'upstream_unavailable' }); } else res.destroy(); });
+  ureq.on('error', () => { if (!res.headersSent) { log(req.method, target.pathname ? '/jc/mcp' : '/mcp', 502, 'upstream error'); send(res, 502, { error: 'upstream_unavailable' }); } else res.destroy(); });
   if (bodyBuf && bodyBuf.length) ureq.write(bodyBuf);
   ureq.end();
   req.on('aborted', () => ureq.destroy());
@@ -601,7 +601,7 @@ const server = http.createServer(async (req, res) => {
 
     // ---- OAuth endpoints ----
     if (pathName === '/authorize' && req.method === 'GET') {
-      const status = 200; const q = parseQuery(req.url);
+      const q = parseQuery(req.url);
       await handleAuthorize(req, res, q); log('GET', '/authorize', res.statusCode); return;
     }
     if (pathName === '/authorize/consent' && req.method === 'POST') {

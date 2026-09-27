@@ -12,11 +12,9 @@
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createRequire } from 'node:module';
 
 // Resolved by absolute path so the shim can run from any directory against the
 // real built artifacts of the agent-control-stack workspace.
-const require = createRequire(import.meta.url);
 const { buildGateway } = await import('file:///home/jacen/projects/agent-control-stack/apps/gateway/dist/index.js');
 const { SqliteWorkItemStore } = await import('file:///home/jacen/projects/agent-control-stack/packages/work-items/dist/index.js');
 

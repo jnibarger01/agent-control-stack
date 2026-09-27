@@ -1,11 +1,12 @@
 {
-  "name": "desktop-commander-mcp-gateway",
+  "name": "@agent-control-stack/dc-mcp-gateway",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "OAuth 2.1 authenticating edge proxy in front of Desktop Commander MCP (Supergateway streamable HTTP).",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0"

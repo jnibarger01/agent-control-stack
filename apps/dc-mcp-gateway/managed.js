@@ -189,7 +189,7 @@ export function acsPost(managed, pathname, body, extraHeaders = {}) {
         let size = 0;
         res.on('data', (c) => { size += c.length; if (size > 256 * 1024) { res.destroy(); reject(new Error('acs response too large')); } else chunks.push(c); });
         res.on('end', () => {
-          let json = null;
+          let json;
           try { json = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { json = null; }
           resolve({ status: res.statusCode, json });
         });
@@ -239,7 +239,6 @@ export function capabilityTransport(managed, { identity, requestId }) {
     }
     // Anti-spoof: drop every client-supplied ACS authority field.
     const clientMeta = typeof params._meta === 'object' && params._meta !== null ? params._meta : {};
-    const spoofed = Object.keys(clientMeta).filter((k) => k === 'capability' || k.startsWith('acs'));
     const cleanParams = { ...params };
     const strippedMeta = Object.fromEntries(
       Object.entries(clientMeta).filter(([k]) => k !== 'capability' && !k.startsWith('acs')),
