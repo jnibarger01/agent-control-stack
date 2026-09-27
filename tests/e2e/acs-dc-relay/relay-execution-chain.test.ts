@@ -262,15 +262,24 @@ describe.skipIf(!E2E_ENABLED)(
         acsCapability: { payload: { toolName: "write_file" }, keyId: "k", signature: "s" }
       });
       expect(smuggled.isError).toBe(true);
-      // ACS's strict schema rejects the unknown key before any capability exists.
-      expect(smuggled.content[0].text).toContain("managed_authorization_unavailable");
+      // ACS's strict schema rejects the unknown key as a deterministic denial.
+      expect(smuggled.content[0].text).toContain("ACS denied this tool call");
+      expect(smuggled.structuredContent).toMatchObject({
+        kind: "managed_authorization_denied",
+        acsCode: "desktop_commander_argument_invalid",
+        retryable: false
+      });
       expect(existsSync(target)).toBe(false);
     });
 
     it("fails closed for tools ACS does not manage", async () => {
       const result = await callDeviceTool("kill_process", { pid: 1 });
       expect(result.isError).toBe(true);
-      expect(result.content[0].text).toMatch(/managed_authorization_unavailable|managed_tool_unsupported/u);
+      expect(result.structuredContent).toMatchObject({
+        kind: "managed_authorization_denied",
+        acsCode: "managed_tool_unsupported",
+        retryable: false
+      });
     });
 
     it("keeps the device session attached across relayed rejections", async () => {
