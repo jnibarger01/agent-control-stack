@@ -12,6 +12,7 @@ export {
   handleApprovalActionClick
 } from "./approval-actions.js";
 export {
+  WORK_ITEM_RISK_VALUES,
   WORK_ITEM_STATUS_VALUES,
   type QueueFilter,
   emptyQueueFilter,

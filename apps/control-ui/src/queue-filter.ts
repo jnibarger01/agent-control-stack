@@ -20,9 +20,16 @@ export const WORK_ITEM_STATUS_VALUES = [
 
 const KNOWN_WORK_ITEM_STATUSES: ReadonlySet<string> = new Set(WORK_ITEM_STATUS_VALUES);
 
+/** Canonical work-item risk levels used by the queue filter risk chips. Unknown values are ignored (no-op). */
+export const WORK_ITEM_RISK_VALUES = ["low", "medium", "high", "critical"] as const;
+
+const KNOWN_WORK_ITEM_RISKS: ReadonlySet<string> = new Set(WORK_ITEM_RISK_VALUES);
+
 export type QueueFilter = {
   /** Status chips selected by the operator. Unknown entries are ignored when matching. */
   statuses: string[];
+  /** Risk chips selected by the operator. Unknown entries are ignored when matching. */
+  risks: string[];
   /** Optional agent / worker / target id (case-insensitive substring). */
   agentId: string;
   /** Free-text match against work-item title and id (case-insensitive substring). */
@@ -30,11 +37,21 @@ export type QueueFilter = {
 };
 
 export function emptyQueueFilter(): QueueFilter {
-  return { statuses: [], agentId: "", text: "" };
+  return { statuses: [], risks: [], agentId: "", text: "" };
 }
 
 export function isQueueFilterEmpty(filter: QueueFilter): boolean {
-  return filter.statuses.length === 0 && filter.agentId.trim() === "" && filter.text.trim() === "";
+  return (
+    filter.statuses.length === 0 &&
+    filter.risks.length === 0 &&
+    filter.agentId.trim() === "" &&
+    filter.text.trim() === ""
+  );
+}
+
+/** Risk chips that actually narrow the queue (lower-cased); unknown entries behave as a no-op. */
+function knownRiskChips(filter: QueueFilter): string[] {
+  return filter.risks.map((risk) => risk.trim().toLowerCase()).filter((risk) => KNOWN_WORK_ITEM_RISKS.has(risk));
 }
 
 /** Derive the agent/target id shown for queue filtering (target first, else latest worker). */
@@ -50,16 +67,16 @@ export function workItemAgentId(
   return lease?.workerId ?? attempt?.claimedByWorkerId ?? "";
 }
 
-function collectStatusParams(params: URLSearchParams): string[] {
-  const raw = [...params.getAll("status")];
+function collectCsvParams(params: URLSearchParams, key: string): string[] {
+  const raw = [...params.getAll(key)];
   const seen = new Set<string>();
   const out: string[] = [];
   for (const entry of raw) {
     for (const part of entry.split(",")) {
-      const status = part.trim();
-      if (!status || seen.has(status)) continue;
-      seen.add(status);
-      out.push(status);
+      const value = part.trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
     }
   }
   return out;
@@ -95,13 +112,14 @@ function paramsFromLocationLike(
   return new URLSearchParams();
 }
 
-/** Read queue filter from URL search params or hash (e.g. `?status=running&q=foo` or `#queue?status=running`). */
+/** Read queue filter from URL search params or hash (e.g. `?status=running&risk=high&q=foo` or `#queue?status=running`). */
 export function parseQueueFilter(
   source: string | URLSearchParams | { search?: string; hash?: string } = ""
 ): QueueFilter {
   const params = paramsFromLocationLike(source);
   return {
-    statuses: collectStatusParams(params),
+    statuses: collectCsvParams(params, "status"),
+    risks: collectCsvParams(params, "risk"),
     agentId: (params.get("agent") ?? "").trim(),
     text: (params.get("q") ?? params.get("text") ?? "").trim()
   };
@@ -112,6 +130,9 @@ export function serializeQueueFilter(filter: QueueFilter): URLSearchParams {
   for (const status of filter.statuses.map((value) => value.trim()).filter(Boolean)) {
     params.append("status", status);
   }
+  for (const risk of filter.risks.map((value) => value.trim()).filter(Boolean)) {
+    params.append("risk", risk);
+  }
   if (filter.agentId.trim()) params.set("agent", filter.agentId.trim());
   if (filter.text.trim()) params.set("q", filter.text.trim());
   return params;
@@ -121,6 +142,8 @@ export type QueueFilterableItem = {
   id: string;
   title: string;
   status: string;
+  /** Work-item risk level; compared case-insensitively against the risk chips. */
+  risk?: string;
   agentId?: string;
 };
 
@@ -128,12 +151,14 @@ export type QueueFilterableItem = {
 export function filterWorkItems<T extends QueueFilterableItem>(items: T[], filter: QueueFilter): T[] {
   const knownStatuses = filter.statuses.filter((status) => KNOWN_WORK_ITEM_STATUSES.has(status));
   // Unknown status chips are a no-op: they do not narrow (and do not error).
+  const knownRisks = knownRiskChips(filter);
   const text = filter.text.trim().toLowerCase();
   const agent = filter.agentId.trim().toLowerCase();
-  if (!knownStatuses.length && !text && !agent) return items;
+  if (!knownStatuses.length && !knownRisks.length && !text && !agent) return items;
 
   return items.filter((item) => {
     if (knownStatuses.length > 0 && !knownStatuses.includes(item.status)) return false;
+    if (knownRisks.length > 0 && !knownRisks.includes((item.risk ?? "").trim().toLowerCase())) return false;
     if (text) {
       const haystack = `${item.title} ${item.id}`.toLowerCase();
       if (!haystack.includes(text)) return false;
@@ -167,19 +192,20 @@ export function applyQueueFilterToDom(root: QueueFilterDomRoot, filter: QueueFil
     const id = el.getAttribute("data-work-item") ?? "";
     const title = el.getAttribute("data-title") ?? "";
     const status = el.getAttribute("data-status") ?? "";
+    const risk = el.getAttribute("data-risk") ?? "";
     const agentId = el.getAttribute("data-agent-id") ?? "";
-    const show = filterWorkItems([{ id, title, status, agentId }], filter).length > 0;
+    const show = filterWorkItems([{ id, title, status, risk, agentId }], filter).length > 0;
     if ("hidden" in el) el.hidden = !show;
     el.classList?.toggle("queue-item-filtered-out", !show);
     if (show) visible += 1;
   }
   const total = queueButtons.length;
-  // Treat "only unknown statuses" as empty for the count label.
+  // Treat chips that are all unknown (status or risk) as empty for the count label.
+  const unknownStatusesOnly = filter.statuses.every((status) => !KNOWN_WORK_ITEM_STATUSES.has(status));
+  const unknownRisksOnly = knownRiskChips(filter).length === 0;
   const effectivelyEmpty =
     isQueueFilterEmpty(filter) ||
-    (filter.statuses.every((status) => !KNOWN_WORK_ITEM_STATUSES.has(status)) &&
-      filter.agentId.trim() === "" &&
-      filter.text.trim() === "");
+    (unknownStatusesOnly && unknownRisksOnly && filter.agentId.trim() === "" && filter.text.trim() === "");
   const count = root.querySelector("#queue-filter-count");
   if (count) {
     count.textContent = effectivelyEmpty ? `${total} items` : `${visible} of ${total} items`;

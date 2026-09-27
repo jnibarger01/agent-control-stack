@@ -247,8 +247,8 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); display: grid; gap: 10px; }
 .queue-filter-row { display: grid; gap: 8px; }
 .queue-filter-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.queue-filter-statuses { margin: 0; padding: 0; border: 0; }
-.queue-filter-statuses legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
+.queue-filter-statuses, .queue-filter-risks { margin: 0; padding: 0; border: 0; }
+.queue-filter-statuses legend, .queue-filter-risks legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
 .queue-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--control-line); background: var(--control-bg); border-radius: 999px; padding: 4px 10px; font-size: 12px; color: var(--ink); cursor: pointer; }
 .queue-filter-chip:has(input:checked) { border-color: var(--control-hover-line); background: var(--hover); color: var(--accent); }

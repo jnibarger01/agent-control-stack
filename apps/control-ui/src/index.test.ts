@@ -388,53 +388,88 @@ describe("renderDashboard", () => {
 
 describe("queue filter", () => {
   const items = [
-    { id: "wrk_a", title: "Deploy gateway", status: "running", agentId: "codex-cli" },
-    { id: "wrk_b", title: "Inspect policy", status: "needs_approval", agentId: "policy-bot" },
-    { id: "wrk_c", title: "Blocked lease", status: "blocked", agentId: "codex-cli" }
+    { id: "wrk_a", title: "Deploy gateway", status: "running", risk: "low", agentId: "codex-cli" },
+    { id: "wrk_b", title: "Inspect policy", status: "needs_approval", risk: "high", agentId: "policy-bot" },
+    { id: "wrk_c", title: "Blocked lease", status: "blocked", risk: "critical", agentId: "codex-cli" }
   ];
 
   it("returns the full queue when the filter is empty", () => {
     expect(filterWorkItems(items, emptyQueueFilter())).toEqual(items);
-    expect(filterWorkItems(items, { statuses: [], agentId: "  ", text: "" })).toEqual(items);
+    expect(filterWorkItems(items, { statuses: [], risks: [], agentId: "  ", text: "" })).toEqual(items);
   });
 
   it("filters by status and updates the visible set", () => {
-    const filtered = filterWorkItems(items, { statuses: ["blocked", "running"], agentId: "", text: "" });
+    const filtered = filterWorkItems(items, { statuses: ["blocked", "running"], risks: [], agentId: "", text: "" });
     expect(filtered.map((item) => item.id)).toEqual(["wrk_a", "wrk_c"]);
   });
 
+  it("filters by risk chips and combines them with status chips", () => {
+    expect(
+      filterWorkItems(items, { statuses: [], risks: ["high"], agentId: "", text: "" }).map((item) => item.id)
+    ).toEqual(["wrk_b"]);
+    expect(
+      filterWorkItems(items, { statuses: [], risks: ["low", "critical"], agentId: "", text: "" }).map((item) => item.id)
+    ).toEqual(["wrk_a", "wrk_c"]);
+    // Cross-group filters intersect: status AND risk.
+    expect(
+      filterWorkItems(items, { statuses: ["blocked"], risks: ["high"], agentId: "", text: "" }).map((item) => item.id)
+    ).toEqual([]);
+    // Risk matching is case-insensitive and ignores unknown risk chips.
+    expect(
+      filterWorkItems(items, { statuses: [], risks: ["HIGH"], agentId: "", text: "" }).map((item) => item.id)
+    ).toEqual(["wrk_b"]);
+    expect(filterWorkItems(items, { statuses: [], risks: ["not-a-risk"], agentId: "", text: "" })).toEqual(items);
+  });
+
+  it("excludes items with an unset risk while a risk chip is active", () => {
+    const withoutRisk = [...items, { id: "wrk_d", title: "Untyped risk", status: "running", agentId: "" }];
+    expect(
+      filterWorkItems(withoutRisk, { statuses: [], risks: ["medium"], agentId: "", text: "" }).map((item) => item.id)
+    ).toEqual([]);
+  });
+
   it("filters by free-text on title and id", () => {
-    expect(filterWorkItems(items, { statuses: [], agentId: "", text: "policy" }).map((item) => item.id)).toEqual([
-      "wrk_b"
-    ]);
-    expect(filterWorkItems(items, { statuses: [], agentId: "", text: "wrk_c" }).map((item) => item.id)).toEqual([
-      "wrk_c"
-    ]);
+    expect(
+      filterWorkItems(items, { statuses: [], risks: [], agentId: "", text: "policy" }).map((item) => item.id)
+    ).toEqual(["wrk_b"]);
+    expect(
+      filterWorkItems(items, { statuses: [], risks: [], agentId: "", text: "wrk_c" }).map((item) => item.id)
+    ).toEqual(["wrk_c"]);
   });
 
   it("treats unknown status chips as a no-op", () => {
-    expect(filterWorkItems(items, { statuses: ["not-a-real-status"], agentId: "", text: "" })).toEqual(items);
+    expect(filterWorkItems(items, { statuses: ["not-a-real-status"], risks: [], agentId: "", text: "" })).toEqual(
+      items
+    );
     expect(
-      filterWorkItems(items, { statuses: ["not-a-real-status", "blocked"], agentId: "", text: "" }).map(
+      filterWorkItems(items, { statuses: ["not-a-real-status", "blocked"], risks: [], agentId: "", text: "" }).map(
         (item) => item.id
       )
     ).toEqual(["wrk_c"]);
   });
 
   it("parses and serializes filter state from URL search params and hash", () => {
-    expect(parseQueueFilter("?status=running&status=blocked&q=deploy&agent=codex")).toEqual({
+    expect(parseQueueFilter("?status=running&status=blocked&risk=high&q=deploy&agent=codex")).toEqual({
       statuses: ["running", "blocked"],
+      risks: ["high"],
       agentId: "codex",
       text: "deploy"
     });
-    expect(parseQueueFilter("#queue?status=failed&q=lease")).toEqual({
+    expect(parseQueueFilter("?risk=high,critical")).toEqual({
+      statuses: [],
+      risks: ["high", "critical"],
+      agentId: "",
+      text: ""
+    });
+    expect(parseQueueFilter("#queue?status=failed&risk=low&q=lease")).toEqual({
       statuses: ["failed"],
+      risks: ["low"],
       agentId: "",
       text: "lease"
     });
-    expect(serializeQueueFilter({ statuses: ["running"], agentId: "a1", text: "x" }).toString()).toBe(
-      "status=running&agent=a1&q=x"
-    );
+    expect(
+      serializeQueueFilter({ statuses: ["running"], risks: ["high", "critical"], agentId: "a1", text: "x" }).toString()
+    ).toBe("status=running&risk=high&risk=critical&agent=a1&q=x");
   });
 
   it("hides non-matching queue items and updates the visible count in the DOM", () => {
@@ -487,11 +522,13 @@ describe("queue filter", () => {
     expect(html).toContain('aria-live="polite"');
     expect(html).toContain('data-status="running"');
     expect(html).toContain('data-agent-id="codex-cli"');
+    expect(html).toContain('data-risk="high"');
+    expect(html).toContain('data-queue-risk="high"');
     expect(html).toContain("bindQueueFilter()");
 
     const dom = new JSDOM(html);
     const root = dom.window.document;
-    const visible = applyQueueFilterToDom(root, { statuses: ["blocked"], agentId: "", text: "" });
+    const visible = applyQueueFilterToDom(root, { statuses: ["blocked"], risks: [], agentId: "", text: "" });
     expect(visible).toBe(1);
     expect((root.querySelector('[data-work-item="wrk_c"]') as HTMLElement | null)?.hidden).toBe(false);
     expect((root.querySelector('[data-work-item="wrk_a"]') as HTMLElement | null)?.hidden).toBe(true);
@@ -499,17 +536,38 @@ describe("queue filter", () => {
     expect(root.querySelector("#queue-filter-count")?.textContent).toBe("1 of 3 items");
     expect(root.querySelector("#queue-filter-live")?.textContent).toBe("Showing 1 of 3 work items");
 
-    const byText = applyQueueFilterToDom(root, { statuses: [], agentId: "", text: "policy" });
+    const byText = applyQueueFilterToDom(root, { statuses: [], risks: [], agentId: "", text: "policy" });
     expect(byText).toBe(1);
     expect((root.querySelector('[data-work-item="wrk_b"]') as HTMLElement | null)?.hidden).toBe(false);
     expect(root.querySelector("#queue-filter-count")?.textContent).toBe("1 of 3 items");
+
+    const byRisk = applyQueueFilterToDom(root, { statuses: [], risks: ["high"], agentId: "", text: "" });
+    expect(byRisk).toBe(1);
+    expect((root.querySelector('[data-work-item="wrk_c"]') as HTMLElement | null)?.hidden).toBe(false);
+    expect((root.querySelector('[data-work-item="wrk_a"]') as HTMLElement | null)?.hidden).toBe(true);
+    expect(root.querySelector("#queue-filter-count")?.textContent).toBe("1 of 3 items");
+    expect(root.querySelector("#queue-filter-live")?.textContent).toBe("Showing 1 of 3 work items");
 
     const cleared = applyQueueFilterToDom(root, emptyQueueFilter());
     expect(cleared).toBe(3);
     expect(root.querySelector("#queue-filter-count")?.textContent).toBe("3 items");
 
-    const unknownOnly = applyQueueFilterToDom(root, { statuses: ["totally-unknown"], agentId: "", text: "" });
+    const unknownOnly = applyQueueFilterToDom(root, {
+      statuses: ["totally-unknown"],
+      risks: [],
+      agentId: "",
+      text: ""
+    });
     expect(unknownOnly).toBe(3);
+    expect(root.querySelector("#queue-filter-count")?.textContent).toBe("3 items");
+
+    const unknownRiskOnly = applyQueueFilterToDom(root, {
+      statuses: [],
+      risks: ["totally-unknown"],
+      agentId: "",
+      text: ""
+    });
+    expect(unknownRiskOnly).toBe(3);
     expect(root.querySelector("#queue-filter-count")?.textContent).toBe("3 items");
   });
 });

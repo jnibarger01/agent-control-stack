@@ -493,15 +493,24 @@ function knownQueueStatuses() {
   return new Set(['draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'cancelling', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected', 'unknown', 'quarantined']);
 }
 
+function knownQueueRisks() {
+  return new Set(['low', 'medium', 'high', 'critical']);
+}
+
 function readQueueFilterFromDom() {
   const statuses = [];
   document.querySelectorAll('[data-queue-status]').forEach(function (input) {
     if (input.checked) statuses.push(input.getAttribute('data-queue-status') || input.value || '');
   });
+  const risks = [];
+  document.querySelectorAll('[data-queue-risk]').forEach(function (input) {
+    if (input.checked) risks.push(input.getAttribute('data-queue-risk') || input.value || '');
+  });
   const agentInput = document.querySelector('#queue-filter-agent');
   const textInput = document.querySelector('#queue-filter-text');
   return {
     statuses: statuses.filter(Boolean),
+    risks: risks.filter(Boolean),
     agentId: agentInput ? String(agentInput.value || '').trim() : '',
     text: textInput ? String(textInput.value || '').trim() : ''
   };
@@ -509,7 +518,7 @@ function readQueueFilterFromDom() {
 
 function parseQueueFilterFromLocation() {
   const params = new URLSearchParams(location.search || '');
-  if (![...params.keys()].some(function (key) { return key === 'status' || key === 'q' || key === 'text' || key === 'agent'; })) {
+  if (![...params.keys()].some(function (key) { return key === 'status' || key === 'risk' || key === 'q' || key === 'text' || key === 'agent'; })) {
     const hash = String(location.hash || '').replace(/^#/, '');
     const query = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1)
       : hash.includes('=') ? hash.replace(/^[A-Za-z0-9_-]+&/, '')
@@ -526,8 +535,16 @@ function parseQueueFilterFromLocation() {
       if (status) statuses.push(status);
     });
   });
+  const risks = [];
+  params.getAll('risk').forEach(function (entry) {
+    String(entry).split(',').forEach(function (part) {
+      const risk = part.trim();
+      if (risk) risks.push(risk);
+    });
+  });
   return {
     statuses: statuses,
+    risks: risks,
     agentId: String(params.get('agent') || '').trim(),
     text: String(params.get('q') || params.get('text') || '').trim()
   };
@@ -536,11 +553,15 @@ function parseQueueFilterFromLocation() {
 function writeQueueFilterToLocation(filter) {
   const url = new URL(location.href);
   url.searchParams.delete('status');
+  url.searchParams.delete('risk');
   url.searchParams.delete('q');
   url.searchParams.delete('text');
   url.searchParams.delete('agent');
   filter.statuses.forEach(function (status) {
     if (status) url.searchParams.append('status', status);
+  });
+  (filter.risks || []).forEach(function (risk) {
+    if (risk) url.searchParams.append('risk', risk);
   });
   if (filter.agentId) url.searchParams.set('agent', filter.agentId);
   if (filter.text) url.searchParams.set('q', filter.text);
@@ -553,6 +574,11 @@ function syncQueueFilterControls(filter) {
     const status = input.getAttribute('data-queue-status') || input.value || '';
     input.checked = selected.has(status);
   });
+  const selectedRisks = new Set((filter.risks || []).map(function (risk) { return String(risk).trim().toLowerCase(); }));
+  document.querySelectorAll('[data-queue-risk]').forEach(function (input) {
+    const risk = String(input.getAttribute('data-queue-risk') || input.value || '').trim().toLowerCase();
+    input.checked = selectedRisks.has(risk);
+  });
   const agentInput = document.querySelector('#queue-filter-agent');
   const textInput = document.querySelector('#queue-filter-text');
   if (agentInput) agentInput.value = filter.agentId || '';
@@ -562,6 +588,7 @@ function syncQueueFilterControls(filter) {
 function applyQueueFilterClient(filter) {
   const known = knownQueueStatuses();
   const knownStatuses = filter.statuses.filter(function (status) { return known.has(status); });
+  const knownRisks = (filter.risks || []).map(function (risk) { return String(risk).trim().toLowerCase(); }).filter(function (risk) { return knownQueueRisks().has(risk); });
   const text = String(filter.text || '').trim().toLowerCase();
   const agent = String(filter.agentId || '').trim().toLowerCase();
   const buttons = Array.from(document.querySelectorAll('[data-work-item]'));
@@ -570,9 +597,11 @@ function applyQueueFilterClient(filter) {
     const id = el.getAttribute('data-work-item') || '';
     const title = el.getAttribute('data-title') || '';
     const status = el.getAttribute('data-status') || '';
+    const risk = String(el.getAttribute('data-risk') || '').trim().toLowerCase();
     const agentId = (el.getAttribute('data-agent-id') || '').toLowerCase();
     let show = true;
     if (knownStatuses.length && knownStatuses.indexOf(status) === -1) show = false;
+    if (show && knownRisks.length && knownRisks.indexOf(risk) === -1) show = false;
     if (show && text) {
       const hay = (title + ' ' + id).toLowerCase();
       if (hay.indexOf(text) === -1) show = false;
@@ -582,7 +611,7 @@ function applyQueueFilterClient(filter) {
     el.classList.toggle('queue-item-filtered-out', !show);
     if (show) visible += 1;
   });
-  const effectivelyEmpty = !knownStatuses.length && !text && !agent;
+  const effectivelyEmpty = !knownStatuses.length && !knownRisks.length && !text && !agent;
   const count = document.querySelector('#queue-filter-count');
   if (count) count.textContent = effectivelyEmpty ? (buttons.length + ' items') : (visible + ' of ' + buttons.length + ' items');
   const live = document.querySelector('#queue-filter-live');
@@ -604,7 +633,7 @@ function bindQueueFilter() {
     writeQueueFilterToLocation(filter);
     applyQueueFilterClient(filter);
   };
-  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
+  document.querySelectorAll('[data-queue-status], [data-queue-risk]').forEach(function (input) {
     input.addEventListener('change', applyFromDom);
   });
   const agentInput = document.querySelector('#queue-filter-agent');

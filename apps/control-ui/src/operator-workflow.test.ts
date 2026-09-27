@@ -318,3 +318,61 @@ describe("keyboard shortcuts (#13)", () => {
     expect(search).toBeDefined();
   });
 });
+
+describe("queue risk filter (#13 follow-up)", () => {
+  function boot(url = "https://acs.local/#queue") {
+    return bootLive(
+      {
+        workItems: [
+          item("wrk_a", { status: "running", risk: "low" }),
+          item("wrk_b", { status: "needs_approval", risk: "high" }),
+          item("wrk_c", { status: "running", risk: "critical" })
+        ],
+        events: [],
+        now: new Date(HARNESS_NOW)
+      },
+      {},
+      { url }
+    );
+  }
+
+  it("renders a risk chip per canonical risk level", async () => {
+    const app = boot();
+    await app.flush();
+    expect(
+      [...app.document.querySelectorAll("[data-queue-risk]")].map((node) => node.getAttribute("data-queue-risk"))
+    ).toEqual(["low", "medium", "high", "critical"]);
+  });
+
+  it("narrows the queue to the checked risk and records it in the URL", async () => {
+    const app = boot();
+    await app.flush();
+    const chip = app.document.querySelector('[data-queue-risk="high"]') as HTMLInputElement;
+    chip.checked = true;
+    chip.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    await app.flush();
+
+    expect(app.document.querySelector('[data-work-item="wrk_b"]')?.hasAttribute("hidden")).toBe(false);
+    expect(app.document.querySelector('[data-work-item="wrk_a"]')?.hasAttribute("hidden")).toBe(true);
+    expect(app.document.querySelector('[data-work-item="wrk_c"]')?.hasAttribute("hidden")).toBe(true);
+    expect(app.window.location.search).toBe("?risk=high");
+    expect(app.text("#queue-filter-count")).toBe("1 of 3 items");
+    expect(app.text("#queue-filter-live")).toBe("Showing 1 of 3 work items");
+  });
+
+  it("restores checked risk chips from a deep link and intersects with status chips", async () => {
+    const app = boot("https://acs.local/?risk=critical&status=running#queue");
+    await app.flush();
+    expect((app.document.querySelector('[data-queue-risk="critical"]') as HTMLInputElement).checked).toBe(true);
+    expect((app.document.querySelector('[data-queue-status="running"]') as HTMLInputElement).checked).toBe(true);
+    expect(app.document.querySelector('[data-work-item="wrk_c"]')?.hasAttribute("hidden")).toBe(false);
+    expect(app.document.querySelector('[data-work-item="wrk_a"]')?.hasAttribute("hidden")).toBe(true);
+
+    const low = app.document.querySelector('[data-queue-risk="low"]') as HTMLInputElement;
+    low.checked = true;
+    low.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    await app.flush();
+    expect(app.window.location.search).toBe("?status=running&risk=low&risk=critical");
+    expect(app.text("#queue-filter-count")).toBe("2 of 3 items");
+  });
+});
