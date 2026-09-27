@@ -5,7 +5,7 @@
  * Proves at the gateway boundary:
  *  - spoofed client _meta.acsCapability is stripped and never reaches upstream
  *  - missing/forged/expired/wrong-scope/approval-mismatch/lease-mismatch ACS
- *    responses fail closed (503, nothing forwarded upstream)
+ *    responses fail closed (JSON-RPC errors, nothing forwarded upstream)
  *  - ACS unreachable fails closed
  *  - every tools/call fetches a fresh capability from ACS (no gateway-side
  *    replay/cache path exists)
