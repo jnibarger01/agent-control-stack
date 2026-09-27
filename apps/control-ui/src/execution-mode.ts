@@ -26,21 +26,24 @@ function modeFromRecord(value: unknown): string | undefined {
  * Derive the execution mode from the persisted result: the top-level
  * `executionMode` (snake_case accepted), else `simulationMetadata.executionMode`.
  * Returns `unknown` when the result carries no recognizable mode.
+ *
+ * Fail-closed: persisted state is untrusted, so when two or more recognized
+ * mode fields disagree the result is `unknown` rather than a confident label
+ * for the first field in priority order. Priority order only decides between
+ * a recognized value and unrecognized/missing values.
  */
 export function resultExecutionMode(item: ResultBearingWorkItem): ResultExecutionMode {
   const result = item.result;
   if (!result || !hasExecutionResult(item)) return "unknown";
-  const candidates = [
-    result.executionMode,
-    result.execution_mode,
-    modeFromRecord(result.simulationMetadata)
-  ];
+  const candidates = [result.executionMode, result.execution_mode, modeFromRecord(result.simulationMetadata)];
+  const recognized = new Set<ResultExecutionMode>();
   for (const candidate of candidates) {
     if (candidate === "dry_run" || candidate === "desktop_commander") {
-      return candidate;
+      recognized.add(candidate);
     }
   }
-  return "unknown";
+  if (recognized.size !== 1) return "unknown";
+  return [...recognized][0];
 }
 
 /** True when the item has a persisted result, i.e. its mode must be visible. */
