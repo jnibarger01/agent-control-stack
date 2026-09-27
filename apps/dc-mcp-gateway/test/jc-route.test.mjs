@@ -280,8 +280,14 @@ test('wrong-audience envelope on the jc route fails closed (acs_capability_wrong
     const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), {
       jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'acs_read', arguments: { view: 'health' } },
     });
-    assert.equal(r.status, 503);
-    assert.equal((await r.json()).code, 'acs_capability_wrong_audience');
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 1);
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+    assert.equal(body.error.data.acsCode, 'acs_capability_wrong_audience');
+    assert.equal(body.error.data.retryable, true);
     assert.equal(acs.requests.length, 1);
     assert.equal(mcpRequests(jcUp).length, 0);
   } finally { close(); }
