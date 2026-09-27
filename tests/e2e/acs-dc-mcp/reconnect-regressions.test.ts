@@ -15,7 +15,7 @@
  *  - losing the executor fails its sessions closed; the bridge respawns one
  *    executor and a new session re-attests before any call executes;
  *  - the device-side managed client (DesktopCommanderIntegration) attaches
- *    once under concurrent initialize() calls and survives request-scoped 503s.
+ *    once under concurrent initialize() calls and survives request-scoped authorization errors.
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
