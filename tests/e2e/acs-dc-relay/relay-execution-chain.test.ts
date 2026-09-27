@@ -85,7 +85,13 @@ describe.skipIf(!E2E_ENABLED)(
         })
       });
       expect(response.status).toBe(200);
-      return ((await response.json()) as { result: { content: Array<{ text: string }>; isError?: boolean } }).result;
+      return ((await response.json()) as {
+        result: {
+          content: Array<{ text: string }>;
+          isError?: boolean;
+          structuredContent?: Record<string, unknown>;
+        };
+      }).result;
     };
 
     beforeAll(async () => {
@@ -233,14 +239,15 @@ describe.skipIf(!E2E_ENABLED)(
       const args = { path: target, content: "approved via relay" };
       const held = await callDeviceTool("write_file", args);
       expect(held.isError).toBe(true);
-      expect(held.content[0].text).toContain("managed_authorization_required");
+      expect(held.content[0].text).toContain("ACS approval required");
+      expect(held.structuredContent).toMatchObject({
+        kind: "managed_authorization_required",
+        acsCode: "require_approval",
+        retryable: true
+      });
       expect(existsSync(target)).toBe(false);
 
-      // Relay wrapper {call_id, status, error}; the device error embeds the edge's JSON body.
-      const failure = JSON.parse(held.content[0].text) as { status: string; error: string };
-      expect(failure.status).toBe("failed");
-      const approval = JSON.parse(failure.error.slice(failure.error.indexOf("{")));
-      expect(approval).toMatchObject({ error: "managed_authorization_required", code: "require_approval" });
+      const approval = held.structuredContent as { workItemId: string; actionHash: string };
       expect(await acs.approve(approval.workItemId, approval.actionHash)).toBe(200);
       const executed = await callDeviceTool("write_file", args);
       expect(executed.isError, JSON.stringify(executed)).not.toBe(true);
