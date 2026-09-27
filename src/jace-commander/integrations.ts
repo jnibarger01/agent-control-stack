@@ -31,6 +31,26 @@ export interface HttpResult {
   body: unknown;
 }
 
+/** Reads the body incrementally and aborts as soon as `limit` bytes are exceeded. */
+async function readBounded(response: Response, limit: number, controller: AbortController): Promise<string> {
+  if (!response.body) return '';
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > limit) {
+      controller.abort();
+      await reader.cancel().catch(() => {});
+      throw new IntegrationError('response_too_large', 'upstream response too large');
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
 export async function requestJson(
   url: string,
   init: { method?: 'GET' | 'POST'; token?: string; body?: unknown; timeoutMs: number; fetchImpl?: typeof fetch },
@@ -48,8 +68,7 @@ export async function requestJson(
       signal: controller.signal,
       redirect: 'error', // never follow a redirect off the configured origin
     });
-    const text = await response.text();
-    if (Buffer.byteLength(text, 'utf8') > MAX_RESPONSE_BYTES) throw new IntegrationError('response_too_large', 'upstream response too large');
+    const text = await readBounded(response, MAX_RESPONSE_BYTES, controller);
     let body: unknown = text;
     try {
       body = text.length > 0 ? JSON.parse(text) : null;

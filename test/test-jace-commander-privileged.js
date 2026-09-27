@@ -134,8 +134,8 @@ await test('timeout kills the process group and is reported', async () => {
   assert.ok(r.durationMs < 4000);
 });
 
-await test('spawn failure closes the audit intent record', async () => {
-  const args = { argv: ['/nonexistent/binary'] };
+await test('spawn failure of a root-controlled non-executable closes the audit intent record', async () => {
+  const args = { argv: ['/etc/passwd'] };
   const before = auditEvents().length;
   const r = await executePrivileged({ capability: issuer.mint('privileged_exec', args), arguments: args }, config, { envOverride: env });
   assert.deepEqual(r, { ok: false, code: 'PRIVILEGED_SPAWN_FAILED' });
@@ -143,6 +143,31 @@ await test('spawn failure closes the audit intent record', async () => {
   assert.equal(events.length, before + 2);
   assert.equal(events.at(-1).payload.spawnFailed, true);
   assert.equal(verifyChain(events).ok, true);
+});
+
+await test('approved executable that is not root-controlled is refused before anything runs (swap-after-approval)', async () => {
+  const before = auditEvents().length;
+  // A copy of echo in a world-writable dir: the agent could replace it after approval.
+  const copied = path.join(tmp, 'agent-writable-tool');
+  fs.copyFileSync(echoBin, copied);
+  fs.chmodSync(copied, 0o755);
+  const link = path.join(tmp, 'agent-link');
+  fs.symlinkSync(echoBin, link);
+  for (const argv of [[copied, 'x'], [link, 'x'], ['/nonexistent/binary']]) {
+    const args = { argv };
+    const r = await executePrivileged({ capability: issuer.mint('privileged_exec', args), arguments: args }, config, { envOverride: env });
+    assert.deepEqual(r, { ok: false, code: 'PRIVILEGED_EXECUTABLE_UNTRUSTED' }, argv[0]);
+  }
+  assert.equal(auditEvents().length, before, 'untrusted executables never reach the audit intent');
+});
+
+await test('omitted timeoutMs never exceeds the configured maxTimeoutMs ceiling', async () => {
+  const args = { argv: [sleepBin, '5'] };
+  const started = Date.now();
+  const r = await executePrivileged({ capability: issuer.mint('privileged_exec', args), arguments: args }, { ...config, maxTimeoutMs: 300 }, { envOverride: env });
+  assert.equal(r.ok, true);
+  assert.equal(r.timedOut, true);
+  assert.ok(Date.now() - started < 4000);
 });
 
 await test('root config ownership check rejects group/world-writable paths', async () => {

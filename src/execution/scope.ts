@@ -72,6 +72,20 @@ export async function assertExecutableNotBlocked(executable: string): Promise<vo
   }
 }
 
+/**
+ * Canonical target of a resolved executable (all symlinks followed). Callers
+ * check the blocklist against this path and spawn this path, so a symlink
+ * alias (e.g. /tmp/safe-name -> /usr/bin/dd) can neither dodge the check nor
+ * be re-pointed between the check and spawn().
+ */
+export async function realExecutable(executable: string): Promise<string> {
+  try {
+    return await fs.realpath(executable);
+  } catch (error) {
+    throw new DcToolError('DC_COMMAND_NOT_FOUND', `executable could not be resolved: ${executable}`, { stage: 'resolve', cause: error });
+  }
+}
+
 /** Resolve an executable like execvp would (no shell). Returns null if not found. */
 export async function whichExecutable(executable: string, baseDir?: string): Promise<string | null> {
   if (executable.includes('/') || executable.includes('\\')) {

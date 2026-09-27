@@ -77,4 +77,14 @@ await test('token selection: env wins; foreign ACS origin never gets our token; 
   assert.equal(loadCredentials(tmp).refreshToken, 'rt-2');
 });
 
+await test('token requests are time-bounded (abort signal attached)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-login-timeout-'));
+  const acs = fakeAcs();
+  const signals = [];
+  const fetchImpl = async (url, init) => { signals.push(init.signal); return acs.fetchImpl(url, init); };
+  await deviceLogin({ acsUrl: ACS, stateDir: dir, fetchImpl, sleep: async () => {} });
+  assert.ok(signals.length >= 2);
+  assert.ok(signals.every((signal) => signal instanceof AbortSignal));
+});
+
 console.log(`\njace-commander device login: ${passed} passed`);

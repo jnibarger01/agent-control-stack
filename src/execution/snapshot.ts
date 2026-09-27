@@ -48,6 +48,8 @@ export interface SnapshotManifest {
   totalBytes: number;
   skipped: { relPath: string; reason: string }[];
   entries: SnapshotEntry[];
+  /** Mode of the snapshotted directory itself (directory snapshots only). */
+  rootMode?: number;
 }
 
 export function snapshotRoot(): string {
@@ -72,6 +74,7 @@ interface Collected {
   skipped: { relPath: string; reason: string }[];
   totalBytes: number;
   files: Map<string, string>;
+  rootMode?: number;
 }
 
 async function collect(root: string, exclude: string): Promise<Collected | null> {
@@ -82,7 +85,10 @@ async function collect(root: string, exclude: string): Promise<Collected | null>
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
     throw error;
   }
-  const result: Collected = { kind: top.isDirectory() ? 'directory' : 'file', entries: [], skipped: [], totalBytes: 0, files: new Map() };
+  const result: Collected = {
+    kind: top.isDirectory() ? 'directory' : 'file', entries: [], skipped: [], totalBytes: 0, files: new Map(),
+    ...(top.isDirectory() ? { rootMode: top.mode & 0o7777 } : {}),
+  };
   const tooLarge = (why: string) => new DcToolError('DC_SNAPSHOT_TOO_LARGE', `snapshot rejected: ${why}`, { stage: 'validate', details: { ...SNAPSHOT_LIMITS } });
   const addFile = async (abs: string, relPath: string, stat: fs.Stats) => {
     if (stat.size > SNAPSHOT_LIMITS.maxFileBytes) throw tooLarge(`${relPath || path.basename(abs)} exceeds ${SNAPSHOT_LIMITS.maxFileBytes} bytes`);
@@ -175,6 +181,7 @@ async function writeSnapshot(originalPath: string, reason: string | null, collec
     totalBytes: collected.totalBytes,
     skipped: collected.skipped,
     entries: collected.entries,
+    ...(collected.rootMode !== undefined ? { rootMode: collected.rootMode } : {}),
   };
   const manifestBytes = Buffer.from(strictCanonicalJsonV1(manifest), 'utf8');
   const manifestSha = sha256Hex(manifestBytes);
@@ -241,6 +248,9 @@ export async function loadVerifiedSnapshot(snapshotId: unknown): Promise<{ manif
   }
   if (manifest.schema !== SNAPSHOT_SCHEMA || manifest.snapshotId !== snapshotId) throw invalid('schema or id mismatch');
   if (manifest.runtimeId !== await runtimeId()) throw invalid('snapshot was not created by this runtime');
+  if (manifest.rootMode !== undefined && (!Number.isInteger(manifest.rootMode) || manifest.rootMode < 0 || manifest.rootMode > 0o7777)) {
+    throw invalid('rootMode malformed');
+  }
   for (const entry of manifest.entries) {
     if (typeof entry.relPath !== 'string' || entry.relPath.split('/').some((seg) => seg === '..' || seg === '.')
       || entry.relPath.startsWith('/') || entry.relPath.includes('\0') || entry.relPath.includes('\\')) {
@@ -267,7 +277,7 @@ async function currentContentHash(target: string, kind: 'file' | 'directory'): P
   return kind === 'file' ? collected.entries[0].sha256! : treeContentHash(collected.entries);
 }
 
-async function materialize(manifest: SnapshotManifest, dir: string, staging: string): Promise<void> {
+async function materialize(manifest: SnapshotManifest, dir: string, staging: string, fallbackRootMode?: number): Promise<void> {
   const object = (sha: string) => path.join(dir, 'objects', sha);
   if (manifest.kind === 'file') {
     const entry = manifest.entries[0];
@@ -290,6 +300,11 @@ async function materialize(manifest: SnapshotManifest, dir: string, staging: str
   for (const entry of manifest.entries.filter((e) => e.type === 'directory')) {
     await fsp.chmod(path.join(staging, ...entry.relPath.split('/')), entry.mode & 0o7777);
   }
+  // The staging root was created 0700; restore the snapshotted root mode
+  // (older manifests lack it: keep the live target's mode rather than
+  // silently tightening an app/web root to 0700).
+  const rootMode = manifest.rootMode ?? fallbackRootMode;
+  if (rootMode !== undefined) await fsp.chmod(staging, rootMode & 0o7777);
 }
 
 export interface RestoreResult {
@@ -299,6 +314,11 @@ export interface RestoreResult {
   beforeSha256: string | null;
   afterSha256: string;
   preRestoreSnapshotId: string | null;
+  /** Uncapturable entries (sockets, FIFOs, DC state) moved from the old tree into the restored one. */
+  carriedOverUncapturable?: string[];
+  /** Set when an uncapturable entry collided with restored content: the old tree is kept, not deleted. */
+  displacedTreeKept?: string;
+  displacedConflicts?: string[];
 }
 
 export async function restoreSnapshot(input: { snapshotId: string; expectedCurrentSha256?: string }): Promise<RestoreResult> {
@@ -319,16 +339,23 @@ export async function restoreSnapshot(input: { snapshotId: string; expectedCurre
   }
   // Preserve divergent current data before replacing it.
   let preRestoreSnapshotId: string | null = null;
+  const current = before !== null && manifest.kind === 'directory' ? await collect(target.resolved, dcStateDirectory()) : null;
   if (before !== null && before !== manifest.contentSha256) {
-    const collected = await collect(target.resolved, dcStateDirectory());
+    const collected = current ?? await collect(target.resolved, dcStateDirectory());
     if (collected) preRestoreSnapshotId = (await writeSnapshot(target.resolved, `pre-restore of ${manifest.snapshotId}`, collected)).snapshotId;
   }
+  // Entries no snapshot can capture (sockets, FIFOs, the DC state area) are
+  // carried over from the displaced tree instead of being deleted with it.
+  const uncapturable = current?.skipped ?? [];
+  const carriedOver: string[] = [];
+  const keptDisplaced: string[] = [];
   const parent = path.dirname(target.resolved);
   const suffix = crypto.randomBytes(6).toString('hex');
   const staging = path.join(parent, `.${path.basename(target.resolved)}.dc-restore-${suffix}`);
   const displaced = path.join(parent, `.${path.basename(target.resolved)}.dc-displaced-${suffix}`);
   try {
-    await materialize(manifest, dir, staging);
+    const liveRootMode = current?.rootMode;
+    await materialize(manifest, dir, staging, liveRootMode);
     const staged = await collect(staging, dcStateDirectory());
     const stagedHash = staged ? (manifest.kind === 'file' ? staged.entries[0].sha256! : treeContentHash(staged.entries)) : null;
     if (stagedHash !== manifest.contentSha256) throw new DcToolError('DC_SNAPSHOT_INVALID', 'staged restore does not reproduce the snapshot content', { stage: 'commit' });
@@ -346,7 +373,21 @@ export async function restoreSnapshot(input: { snapshotId: string; expectedCurre
         await fsp.rename(displaced, target.resolved);
         throw error;
       }
-      await fsp.rm(displaced, { recursive: true, force: true });
+      for (const skipped of uncapturable) {
+        const from = path.join(displaced, ...skipped.relPath.split('/'));
+        const to = path.join(target.resolved, ...skipped.relPath.split('/'));
+        const exists = async (p: string) => fsp.lstat(p).then(() => true, () => false);
+        if (!(await exists(from))) continue;
+        if (await exists(to)) {
+          keptDisplaced.push(skipped.relPath);
+          continue;
+        }
+        await fsp.mkdir(path.dirname(to), { recursive: true });
+        await fsp.rename(from, to);
+        carriedOver.push(skipped.relPath);
+      }
+      // Never delete something we could not carry over.
+      if (keptDisplaced.length === 0) await fsp.rm(displaced, { recursive: true, force: true });
     }
   } catch (error) {
     await fsp.rm(staging, { recursive: true, force: true });
@@ -356,6 +397,10 @@ export async function restoreSnapshot(input: { snapshotId: string; expectedCurre
   if (after !== manifest.contentSha256) {
     throw new DcToolError('DC_INTERNAL_ERROR', 'post-restore content hash does not match the snapshot', { stage: 'observe' });
   }
-  recordEvidence({ results: { beforeSha256: before, afterSha256: after, preRestoreSnapshotId } });
-  return { snapshotId: manifest.snapshotId, target: target.resolved, kind: manifest.kind, beforeSha256: before, afterSha256: after, preRestoreSnapshotId };
+  recordEvidence({ results: { beforeSha256: before, afterSha256: after, preRestoreSnapshotId, carriedOver, keptDisplaced } });
+  return {
+    snapshotId: manifest.snapshotId, target: target.resolved, kind: manifest.kind, beforeSha256: before, afterSha256: after, preRestoreSnapshotId,
+    ...(carriedOver.length ? { carriedOverUncapturable: carriedOver } : {}),
+    ...(keptDisplaced.length ? { displacedTreeKept: displaced, displacedConflicts: keptDisplaced } : {}),
+  };
 }

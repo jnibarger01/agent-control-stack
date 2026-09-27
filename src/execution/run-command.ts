@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { terminateProcessTree, shouldSpawnAsProcessGroupLeader } from '../utils/process-tree.js';
 import { DcToolError } from './errors.js';
-import { assertExecutableNotBlocked, resolveAllowedDirectory, whichExecutable } from './scope.js';
+import { assertExecutableNotBlocked, realExecutable, resolveAllowedDirectory, whichExecutable } from './scope.js';
 import { requireHead } from './git.js';
 import { currentRequestContext, recordEvidence, sha256Hex } from './context.js';
 
@@ -106,12 +106,15 @@ export async function runCommand(input: RunCommandInput): Promise<RunCommandResu
   const cwd = await resolveAllowedDirectory(input.cwd, 'cwd');
 
   await assertExecutableNotBlocked(argv[0]);
-  const executable = await whichExecutable(argv[0], cwd.resolved);
-  if (!executable) {
+  const found = await whichExecutable(argv[0], cwd.resolved);
+  if (!found) {
     throw new DcToolError('DC_COMMAND_NOT_FOUND', `executable not found (no shell lookup is performed): ${argv[0]}`, { stage: 'resolve' });
   }
-  // The RESOLVED executable is re-checked so a path alias of a blocked name
-  // (e.g. /usr/bin/sudo) cannot slip through.
+  // The RESOLVED executable and its symlink-free real path are both checked,
+  // so neither a path alias nor a symlink to a blocked binary slips through;
+  // the real path is what gets spawned (argv0 keeps the caller's name).
+  await assertExecutableNotBlocked(found);
+  const executable = await realExecutable(found);
   await assertExecutableNotBlocked(executable);
 
   let headSha: string | undefined;
@@ -132,6 +135,7 @@ export async function runCommand(input: RunCommandInput): Promise<RunCommandResu
     let child;
     try {
       child = spawn(executable, argv.slice(1), {
+        argv0: argv[0],
         cwd: cwd.resolved,
         shell: false,
         detached: useGroup,

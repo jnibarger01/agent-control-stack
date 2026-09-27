@@ -62,9 +62,9 @@ const FS_WRITE_POLICY = Object.freeze({ scopes: ['fs.write'] as const, requiresA
 const PROCESS_READ_POLICY = Object.freeze({ scopes: ['process.exec'] as const, requiresApproval: false });
 const TOOL_POLICIES: Readonly<Record<string, ManagedToolPolicy>> = Object.freeze({
   get_config: FS_READ_POLICY,
-  // Mirrors ACS tool-policy (read_only, strict {} args, fs.read). Keep in
-  // lockstep with agent-control-stack desktop-commander-adapter scopeByTool.
-  get_runtime_identity: FS_READ_POLICY,
+  // Mirrors ACS desktop-commander-adapter scopeByTool (get_runtime_identity:
+  // "process.exec") and test/fixtures/acs-managed-tool-coverage.v1.json.
+  get_runtime_identity: PROCESS_READ_POLICY,
   get_file_info: FS_READ_POLICY,
   get_usage_stats: PROCESS_READ_POLICY,
   list_directory: FS_READ_POLICY,

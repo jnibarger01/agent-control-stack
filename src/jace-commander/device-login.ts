@@ -21,6 +21,7 @@ import path from 'node:path';
 export const ACS_DEVICE_CLIENT_ID = 'acs-cli';
 export const DEVICE_CODE_PROOF_DOMAIN = 'acs-device-code-proof-v1';
 const DEVICE_GRANT = 'urn:ietf:params:oauth:grant-type:device_code';
+export const TOKEN_REQUEST_TIMEOUT_MS = 15_000;
 
 export interface StoredCredentials {
   acsUrl: string;
@@ -71,6 +72,8 @@ async function postJson(fetchImpl: typeof fetch, url: string, body: Record<strin
     headers: { 'content-type': 'application/json', accept: 'application/json' },
     body: JSON.stringify(body),
     redirect: 'error',
+    // A silent ACS must not hang login or every token refresh.
+    signal: AbortSignal.timeout(TOKEN_REQUEST_TIMEOUT_MS),
   });
   let json: Record<string, unknown> = {};
   try {

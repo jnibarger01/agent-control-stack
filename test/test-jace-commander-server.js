@@ -89,6 +89,23 @@ await test('standalone: integration reads work without a capability; views are a
   assert.equal(parse(bad).error.code, 'invalid_argument');
 });
 
+await test('oversized upstream bodies are cut off while streaming, not after buffering', async () => {
+  let pulled = 0;
+  const huge = new ReadableStream({
+    pull(controller) {
+      pulled += 1;
+      if (pulled > 10_000) return controller.close();
+      controller.enqueue(new Uint8Array(64 * 1024));
+    },
+  });
+  const { requestJson } = await import('../dist/jace-commander/integrations.js');
+  await assert.rejects(
+    requestJson('http://127.0.0.1:1/x', { timeoutMs: 5000, fetchImpl: async () => new Response(huge, { status: 200 }) }),
+    (error) => error.code === 'response_too_large',
+  );
+  assert.ok(pulled < 100, `stopped reading after ~2 MiB (pulled ${pulled} chunks)`);
+});
+
 await test('visualizer requires an explicit loopback URL', async () => {
   const result = await standalone.callTool({ name: 'visualizer_read', arguments: { view: 'system-status' } });
   assert.equal(parse(result).error.code, 'not_configured');

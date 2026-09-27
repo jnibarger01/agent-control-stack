@@ -31,6 +31,9 @@
  */
 import { redactValue } from '../execution/secret-scan.js';
 import crypto from 'crypto';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { canonicalCapabilityPayload, signCapabilityPayload, verifyCapability, LocalCapabilityIssuer, type ExecutionCapability, type CommandClass, type NetworkProfile, type RejectionResult, type VerifyResult } from '../security/capability.js';
 import { classifyOperation, classificationCommand, buildApprovalRequest, getApprovalPolicy, InMemoryApprovalStore, type ClassifiedOperation, type ApprovalRequest, type ApprovalStore } from '../security/approval.js';
 import { checkNetworkBinaries, checkNetworkBinariesInRaw, networkGuardSummary, scrubEnvironmentForNoNetwork, type NetworkGuardSummary } from '../security/network-guard.js';
@@ -286,11 +289,25 @@ function isBase64urlSignature(value: unknown): value is string {
  * Consumed nonces are stored only as hashes and bounded to the 30s TTL ceiling.
  */
 const ACS_NONCE_TTL_CEILING_MS = 30_000;
+const ACS_NONCE_SKEW_MS = 5_000;
 const ACS_NONCE_STORE_MAX = 10_000;
 const consumedAcsNonces = new Map<string, number>();
 
+/**
+ * Persistent backing store: one O_EXCL marker file per nonce hash, so a nonce
+ * stays consumed across a restart inside its validity window and concurrent
+ * processes cannot both win. The in-memory map is only a fast path.
+ */
+function acsNonceStoreDir(): string {
+  const stateDir = process.env.DESKTOP_COMMANDER_STATE_DIR
+    ? path.resolve(process.env.DESKTOP_COMMANDER_STATE_DIR)
+    : path.join(os.homedir(), '.desktop-commander');
+  return path.join(stateDir, 'acs-pipeline-nonces');
+}
+
 export function resetConsumedAcsNoncesForTest(): void {
   consumedAcsNonces.clear();
+  fs.rmSync(acsNonceStoreDir(), { recursive: true, force: true });
 }
 
 export function isAcsNonceConsumedForTest(nonceHash: string): boolean {
@@ -300,18 +317,34 @@ export function isAcsNonceConsumedForTest(nonceHash: string): boolean {
 function consumeAcsNonceAtomic(nonce: string, now: number): boolean {
   const nonceHash = sha256Hex(`acs.dc.v1:nonce:${nonce}`);
   if (consumedAcsNonces.has(nonceHash)) return false;
-  consumedAcsNonces.set(nonceHash, now + ACS_NONCE_TTL_CEILING_MS);
-  if (consumedAcsNonces.size > ACS_NONCE_STORE_MAX) {
-    for (const [hash, expiry] of consumedAcsNonces) {
-      if (expiry <= now) consumedAcsNonces.delete(hash);
-      if (consumedAcsNonces.size <= ACS_NONCE_STORE_MAX) break;
-    }
-    while (consumedAcsNonces.size > ACS_NONCE_STORE_MAX) {
-      const oldest = consumedAcsNonces.keys().next().value;
-      if (oldest === undefined) break;
-      consumedAcsNonces.delete(oldest);
-    }
+  const retainUntil = now + ACS_NONCE_TTL_CEILING_MS + ACS_NONCE_SKEW_MS;
+  for (const [hash, expiry] of consumedAcsNonces) {
+    if (expiry <= now) consumedAcsNonces.delete(hash);
   }
+  const dir = acsNonceStoreDir();
+  try {
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    let retained = 0;
+    for (const entry of fs.readdirSync(dir)) {
+      if (!/^[a-f0-9]{64}$/.test(entry)) continue;
+      const entryPath = path.join(dir, entry);
+      const expiry = Number(fs.readFileSync(entryPath, 'utf8'));
+      if (Number.isSafeInteger(expiry) && expiry <= now) fs.rmSync(entryPath, { force: true });
+      else retained += 1;
+    }
+    // Never evict an unexpired nonce to make room: that would re-open replay.
+    if (retained >= ACS_NONCE_STORE_MAX) return false;
+    const fd = fs.openSync(path.join(dir, nonceHash), 'wx', 0o600);
+    try {
+      fs.writeFileSync(fd, String(retainUntil));
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // EEXIST (replay) and any store failure both fail closed.
+    return false;
+  }
+  consumedAcsNonces.set(nonceHash, retainUntil);
   return true;
 }
 
@@ -522,7 +555,11 @@ export async function preExecuteEnforcement(ctx: PreExecutionContext): Promise<E
   //     entirely in ACS mode.
   let acsCapability: AcsCapabilityAttestation | undefined;
   const acsMode = !!acsCapabilityPublicKeyEnv();
-  if (acsMode && !cap) {
+  // get_runtime_identity is the identity-discovery primitive gateways call
+  // BEFORE they can request a capability bound to the runtime ID (the server
+  // exempts it from ManagedAcsGuard for the same reason). A capability that IS
+  // presented for it is still fully verified below.
+  if (acsMode && !cap && ctx.tool !== 'get_runtime_identity') {
     return {
       allowed: false,
       kind: 'capability-rejected',

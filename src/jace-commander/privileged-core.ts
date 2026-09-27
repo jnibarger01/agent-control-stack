@@ -53,6 +53,7 @@ export type PrivilegedErrorCode =
   | 'PRIVILEGED_ARGUMENTS_INVALID'
   | 'PRIVILEGED_CONFIG_INVALID'
   | 'PRIVILEGED_AUDIT_UNAVAILABLE'
+  | 'PRIVILEGED_EXECUTABLE_UNTRUSTED'
   | 'PRIVILEGED_SPAWN_FAILED';
 
 export class PrivilegedError extends Error {
@@ -151,6 +152,46 @@ export function loadPrivilegedConfig(configPath: string, enforceRootOwnership: b
   return parsed as unknown as PrivilegedConfig;
 }
 
+/**
+ * The approved argv[0] must be root-controlled content: the path as written
+ * and its fully resolved target, plus every parent directory of both, must be
+ * root-owned, not group/world-writable, and the target a regular file.
+ * Otherwise the agent could swap the file (or a symlink in its path) after a
+ * human approved the exact argv and have different content run as root.
+ * Because nothing in the chain is writable by non-root, the check cannot be
+ * raced between here and spawn().
+ */
+export function assertRootControlledExecutable(executable: string): void {
+  const untrusted = (why: string): never => {
+    throw new PrivilegedError('PRIVILEGED_EXECUTABLE_UNTRUSTED', `argv[0] is not root-controlled: ${why}`);
+  };
+  const checkNode = (node: string) => {
+    const stat = fs.lstatSync(node);
+    if (stat.uid !== 0) untrusted(`${node} is not root-owned`);
+    // Symlink modes are meaningless; the link itself must still be root-owned.
+    if (!stat.isSymbolicLink() && (stat.mode & 0o022) !== 0) untrusted(`${node} is group/world-writable`);
+  };
+  const checkChain = (target: string) => {
+    let current = target;
+    for (;;) {
+      checkNode(current);
+      const parent = path.dirname(current);
+      if (parent === current) return;
+      current = parent;
+    }
+  };
+  let resolved: string;
+  try {
+    checkChain(executable);
+    resolved = fs.realpathSync(executable);
+    checkChain(resolved);
+  } catch (error) {
+    if (error instanceof PrivilegedError) throw error;
+    return untrusted('path does not exist or is unreadable');
+  }
+  if (!fs.statSync(resolved).isFile()) untrusted(`${resolved} is not a regular file`);
+}
+
 function assertRootOwnedChain(target: string): void {
   let current = path.resolve(target);
   for (;;) {
@@ -193,6 +234,7 @@ export async function executePrivileged(
       now: deps.now,
     });
     const auth = verifier.verify(PRIVILEGED_TOOL, request.arguments, request.capability);
+    assertRootControlledExecutable(args.argv[0]);
 
     const audit = new JsonlTraceChain(config.auditPath, 'jc-privileged-exec');
     const attribution = {
@@ -218,7 +260,7 @@ export async function executePrivileged(
         LANG: 'C.UTF-8',
         JC_WORK_ITEM_ID: auth.workItemId,
         JC_APPROVAL_ID: auth.approvalId ?? '',
-      });
+      }, config.maxTimeoutMs);
     } catch (error) {
       // Close the intent record so the chain never shows a dangling start.
       try {
@@ -276,7 +318,7 @@ interface ProcessOutcome {
   stderrTruncated: boolean;
 }
 
-function runProcess(args: PrivilegedArguments, env: NodeJS.ProcessEnv): Promise<ProcessOutcome> {
+function runProcess(args: PrivilegedArguments, env: NodeJS.ProcessEnv, maxTimeoutMs?: number): Promise<ProcessOutcome> {
   return new Promise((resolve, reject) => {
     const started = Date.now();
     const child = spawn(args.argv[0], args.argv.slice(1), {
@@ -310,7 +352,7 @@ function runProcess(args: PrivilegedArguments, env: NodeJS.ProcessEnv): Promise<
       } catch {
         child.kill('SIGKILL');
       }
-    }, args.timeoutMs ?? DEFAULT_TIMEOUT_MS);
+    }, args.timeoutMs ?? Math.min(DEFAULT_TIMEOUT_MS, maxTimeoutMs ?? DEFAULT_TIMEOUT_MS));
 
     child.on('error', (error) => {
       clearTimeout(timer);

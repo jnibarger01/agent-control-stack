@@ -46,7 +46,17 @@ async function repoRoot(dir: string): Promise<string> {
   if (top.code !== 0) {
     throw new DcToolError('DC_NOT_A_GIT_REPOSITORY', `not inside a git work tree: ${dir}`, { stage: 'resolve' });
   }
-  return top.stdout.trim();
+  const root = top.stdout.trim();
+  // The discovered top-level may lie ABOVE the validated directory (an allowed
+  // subdirectory of a repository rooted outside allowedDirectories). Repo-wide
+  // status/stash output would then leak paths outside scope, so the root
+  // itself must pass the same allowed-directory check.
+  try {
+    await resolveAllowedPath(root, 'repoRoot');
+  } catch (error) {
+    throw new DcToolError('DC_PATH_OUTSIDE_ALLOWED_SCOPE', `git repository root is outside the allowed directories: ${root}`, { stage: 'resolve', cause: error });
+  }
+  return root;
 }
 
 async function headSha(root: string): Promise<string | null> {
