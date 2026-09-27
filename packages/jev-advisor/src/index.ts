@@ -250,11 +250,21 @@ export async function classifyJev(
 
   return {
     classifierVersion: JEV_CLASSIFIER_VERSION,
-    model: typeof body.model === "string" ? body.model : null,
+    model: typeof body.model === "string" ? sanitizeModelName(body.model) : null,
     latencyMs: elapsed(),
     signals,
     degraded: false
   };
+}
+
+/**
+ * The `model` string originates from the remote engine and is echoed into
+ * consumer-visible output (CLI stdout, logs). Restrict it to a safe charset
+ * and length so it can never carry newlines, control characters, or
+ * prompt-injection payloads; anything else is treated as absent (null).
+ */
+function sanitizeModelName(model: string): string | null {
+  return /^[\w.:/+-]{1,64}$/.test(model) ? model : null;
 }
 
 function readNumberEnv(name: string): number | undefined {
