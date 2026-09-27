@@ -237,15 +237,59 @@ test('managed mode preserves approval challenge metadata when ACS requires appro
   });
   await waitListening(child, port);
   try {
-    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-    assert.equal(status, 503, text);
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'approval-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
     const body = JSON.parse(text);
-    assert.equal(body.error, 'managed_authorization_required');
-    assert.equal(body.code, 'require_approval');
-    assert.equal(body.workItemId, 'wrk_test123');
-    assert.equal(body.actionHash, 'hash_abc');
-    assert.equal(body.approvalInstructions, 'POST /work-items/wrk_test123/approve with actionHash hash_abc');
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'approval-request');
+    assert.equal(body.error.code, -32002);
+    assert.match(body.error.message, /approval required/i);
+    assert.deepEqual(body.error.data, {
+      kind: 'managed_authorization_required',
+      acsCode: 'require_approval',
+      retryable: true,
+      workItemId: 'wrk_test123',
+      actionHash: 'hash_abc',
+      approvalInstructions: 'POST /work-items/wrk_test123/approve with actionHash hash_abc',
+    });
     // Still fail-closed: no capability was minted, nothing reached Desktop Commander.
+    assert.equal(upstreamRequests.length, 0);
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
+test('managed mode returns a JSON-RPC denial without forwarding to Desktop Commander', async () => {
+  const { acs, upstream, upstreamRequests } = harness({
+    acsBehavior: () => ({ decision: 'deny', code: 'managed_tool_unsupported', reason: 'tool is not managed' }),
+  });
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const acsPort = acs.address().port;
+  const upPort = upstream.address().port;
+  const port = 18123;
+  const child = startServer(port, {
+    ACS_MANAGED_MODE: '1',
+    ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
+    ACS_GATEWAY_TOKEN: 'svc-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  await waitListening(child, port);
+  try {
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'deny-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'deny-request');
+    assert.equal(body.error.code, -32001);
+    assert.equal(body.error.data.kind, 'managed_authorization_denied');
+    assert.equal(body.error.data.acsCode, 'managed_tool_unsupported');
+    assert.equal(body.error.data.retryable, false);
+    assert.equal(body.error.data.reason, 'tool is not managed');
     assert.equal(upstreamRequests.length, 0);
   } finally {
     child.kill('SIGKILL'); acs.close(); upstream.close();
@@ -270,8 +314,16 @@ test('managed mode fails closed when ACS is unreachable', async () => {
   });
   await waitListening(child, port);
   try {
-    const { status } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-    assert.equal(status, 503);
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'unreachable-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'unreachable-request');
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+    assert.equal(body.error.data.retryable, true);
     assert.equal(upstreamRequests.length, 0);
   } finally {
     child.kill('SIGKILL'); upstream.close();
