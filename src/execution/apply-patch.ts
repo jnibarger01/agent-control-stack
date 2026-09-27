@@ -132,7 +132,14 @@ function matchesAt(fileLines: string[], expected: string[], at: number): boolean
 /** Apply strictly: exact content match, at the stated line or a UNIQUE other location. */
 export function applyHunks(original: string, hunks: Hunk[]): { text: string; offsets: number[]; added: number; removed: number } {
   const endsWithNewline = original.endsWith('\n');
-  const fileLines = original.length === 0 ? [] : (endsWithNewline ? original.slice(0, -1) : original).split('\n');
+  let fileLines = original.length === 0 ? [] : (endsWithNewline ? original.slice(0, -1) : original).split('\n');
+  // The patch is parsed with CRLF normalized to LF. For a uniformly CRLF
+  // target, match against its lines without the CR and re-emit CRLF, so
+  // ordinary unified diffs of CRLF files apply (mixed endings stay exact).
+  const terminated = endsWithNewline ? fileLines : fileLines.slice(0, -1);
+  const crlf = terminated.length > 0 && terminated.every((line) => line.endsWith('\r'));
+  if (crlf) fileLines = fileLines.map((line) => (line.endsWith('\r') ? line.slice(0, -1) : line));
+  const eol = crlf ? '\r\n' : '\n';
   const out: string[] = [];
   let cursor = 0;
   let added = 0;
@@ -165,7 +172,7 @@ export function applyHunks(original: string, hunks: Hunk[]): { text: string; off
   }
   out.push(...fileLines.slice(cursor));
   const trailingNewline = finalNoNewline === null ? endsWithNewline : !finalNoNewline;
-  const text = out.length === 0 ? '' : out.join('\n') + (trailingNewline ? '\n' : '');
+  const text = out.length === 0 ? '' : out.join(eol) + (trailingNewline ? eol : '');
   return { text, offsets, added, removed };
 }
 

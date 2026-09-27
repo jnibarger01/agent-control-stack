@@ -339,7 +339,7 @@ export async function restoreSnapshot(input: { snapshotId: string; expectedCurre
   }
   // Preserve divergent current data before replacing it.
   let preRestoreSnapshotId: string | null = null;
-  const current = before !== null && manifest.kind === 'directory' ? await collect(target.resolved, dcStateDirectory()) : null;
+  const current = before !== null ? await collect(target.resolved, dcStateDirectory()) : null;
   if (before !== null && before !== manifest.contentSha256) {
     const collected = current ?? await collect(target.resolved, dcStateDirectory());
     if (collected) preRestoreSnapshotId = (await writeSnapshot(target.resolved, `pre-restore of ${manifest.snapshotId}`, collected)).snapshotId;
@@ -350,11 +350,31 @@ export async function restoreSnapshot(input: { snapshotId: string; expectedCurre
   const carriedOver: string[] = [];
   const keptDisplaced: string[] = [];
   const parent = path.dirname(target.resolved);
+  // Pin the validated parent: an ancestor renamed and replaced by a symlink
+  // after resolveAllowedPath() would otherwise redirect every path-based step
+  // below outside allowedDirectories. Node has no renameat/openat, so this
+  // re-verifies identity immediately before EACH mutation (narrowing the
+  // window to microseconds) rather than claiming an fd-relative guarantee.
+  const pinnedParent = await fsp.stat(parent);
+  const assertParentPinned = async () => {
+    let real: string;
+    let now: fs.Stats;
+    try {
+      real = await fsp.realpath(parent);
+      now = await fsp.stat(parent);
+    } catch (error) {
+      throw new DcToolError('DC_PATH_CHANGED', 'restore target parent disappeared; nothing overwritten', { stage: 'commit', cause: error });
+    }
+    if (real !== parent || now.dev !== pinnedParent.dev || now.ino !== pinnedParent.ino) {
+      throw new DcToolError('DC_PATH_CHANGED', 'restore target parent changed identity (possible symlink swap); nothing overwritten', { stage: 'commit' });
+    }
+  };
   const suffix = crypto.randomBytes(6).toString('hex');
   const staging = path.join(parent, `.${path.basename(target.resolved)}.dc-restore-${suffix}`);
   const displaced = path.join(parent, `.${path.basename(target.resolved)}.dc-displaced-${suffix}`);
   try {
     const liveRootMode = current?.rootMode;
+    await assertParentPinned();
     await materialize(manifest, dir, staging, liveRootMode);
     const staged = await collect(staging, dcStateDirectory());
     const stagedHash = staged ? (manifest.kind === 'file' ? staged.entries[0].sha256! : treeContentHash(staged.entries)) : null;
@@ -363,9 +383,12 @@ export async function restoreSnapshot(input: { snapshotId: string; expectedCurre
     if ((await currentContentHash(target.resolved, manifest.kind)) !== before) {
       throw new DcToolError('DC_PATH_CHANGED', 'target changed during restore; not overwritten', { stage: 'commit' });
     }
-    if (manifest.kind === 'file' || before === null) {
+    await assertParentPinned();
+    if (before === null) {
       await fsp.rename(staging, target.resolved);
     } else {
+      // Any existing target (including a directory where a file snapshot
+      // belongs) is displaced first; rename() cannot replace a directory.
       await fsp.rename(target.resolved, displaced);
       try {
         await fsp.rename(staging, target.resolved);
@@ -373,7 +396,12 @@ export async function restoreSnapshot(input: { snapshotId: string; expectedCurre
         await fsp.rename(displaced, target.resolved);
         throw error;
       }
-      for (const skipped of uncapturable) {
+      if (manifest.kind !== 'directory' && uncapturable.length > 0) {
+        // Nowhere to carry them into a file; never delete what we cannot restore.
+        keptDisplaced.push(...uncapturable.map((entry) => entry.relPath));
+      }
+      for (const skipped of manifest.kind === 'directory' ? uncapturable : []) {
+        await assertParentPinned();
         const from = path.join(displaced, ...skipped.relPath.split('/'));
         const to = path.join(target.resolved, ...skipped.relPath.split('/'));
         const exists = async (p: string) => fsp.lstat(p).then(() => true, () => false);

@@ -37,10 +37,17 @@ export async function handleStartSearch(args: unknown): Promise<ServerResult> {
       literalSearch: parsed.data.literalSearch,
     });
 
+    // A search the engine already rejected (e.g. malformed regex) must not
+    // read as a completed search with zero matches.
+    if (result.isError && result.errorCode === 'DC_INVALID_ARGUMENT') {
+      return errorResult(new DcToolError('DC_INVALID_ARGUMENT', `search pattern rejected by the search engine: ${(result.error ?? '').split('\n').slice(0, 3).join(' ')}`, { stage: 'validate' }));
+    }
+
     if (parsed.data.structured) {
       return jsonResult({
         sessionId: result.sessionId,
-        status: result.isComplete ? 'completed' : 'running',
+        status: result.isError ? 'failed' : result.isComplete ? 'completed' : 'running',
+        error: result.isError ? { code: result.errorCode ?? 'DC_INTERNAL_ERROR', message: result.error?.slice(0, 500) ?? null } : null,
         searchType: parsed.data.searchType,
         path: parsed.data.path,
         runtimeMs: Math.round(result.runtime),

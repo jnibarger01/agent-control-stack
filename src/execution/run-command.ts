@@ -4,6 +4,7 @@ import { DcToolError } from './errors.js';
 import { assertExecutableNotBlocked, realExecutable, resolveAllowedDirectory, whichExecutable } from './scope.js';
 import { requireHead } from './git.js';
 import { currentRequestContext, recordEvidence, sha256Hex } from './context.js';
+import { buildSandboxCommand } from '../security/network-guard.js';
 
 /**
  * run_command: bounded, non-interactive argv execution.
@@ -128,20 +129,42 @@ export async function runCommand(input: RunCommandInput): Promise<RunCommandResu
   const stderr = new BoundedBuffer(maxStderr);
   const started = Date.now();
   const useGroup = shouldSpawnAsProcessGroupLeader();
+  // Windows has no process groups; the tree helper uses taskkill /T there.
+  const killTree = useGroup || process.platform === 'win32';
+
+  // DC_NETWORK_PROFILE=none: scrubbed env always; `unshare -n` when usable.
+  const isolation = currentRequestContext()?.networkIsolation;
+  let spawnFile = executable;
+  let spawnArgs = argv.slice(1);
+  let spawnArgv0: string | undefined = argv[0];
+  let spawnEnv: NodeJS.ProcessEnv = process.env;
+  if (isolation) {
+    spawnEnv = isolation.env;
+    let isolated = false;
+    if (isolation.sandboxAvailable) {
+      const wrapped = await buildSandboxCommand([executable, ...argv.slice(1)], { allowsSandbox: true });
+      if (wrapped.wrapped) {
+        [spawnFile, ...spawnArgs] = wrapped.argv;
+        spawnArgv0 = undefined;
+        isolated = true;
+      }
+    }
+    recordEvidence({ network: { profile: 'none', netnsIsolated: isolated, envScrubbed: true, degraded: !isolated } });
+  }
 
   const outcome = await new Promise<{ exitCode: number | null; signal: string | null; timedOut: boolean }>((resolve, reject) => {
     let timedOut = false;
     let settled = false;
     let child;
     try {
-      child = spawn(executable, argv.slice(1), {
-        argv0: argv[0],
+      child = spawn(spawnFile, spawnArgs, {
+        ...(spawnArgv0 ? { argv0: spawnArgv0 } : {}),
         cwd: cwd.resolved,
         shell: false,
         detached: useGroup,
         windowsHide: true,
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: process.env,
+        env: spawnEnv,
       });
     } catch (error) {
       reject(new DcToolError('DC_COMMAND_NOT_FOUND', `failed to spawn ${argv[0]}`, { stage: 'execute', cause: error }));
@@ -152,9 +175,9 @@ export async function runCommand(input: RunCommandInput): Promise<RunCommandResu
     const timer = setTimeout(() => {
       timedOut = true;
       if (pid) {
-        useGroup ? terminateProcessTree(pid, 'SIGTERM') : child.kill('SIGTERM');
+        killTree ? terminateProcessTree(pid, 'SIGTERM') : child.kill('SIGTERM');
         killTimer = setTimeout(() => {
-          useGroup ? terminateProcessTree(pid, 'SIGKILL') : child.kill('SIGKILL');
+          killTree ? terminateProcessTree(pid, 'SIGKILL') : child.kill('SIGKILL');
         }, RUN_COMMAND_LIMITS.killGraceMs);
       }
     }, timeoutMs);

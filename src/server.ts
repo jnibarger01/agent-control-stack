@@ -1920,6 +1920,14 @@ async function handleCallToolRequest(request: CallToolRequest): Promise<ServerRe
         }
         console.error(`[audit] attestRequest failed for request hash ${reqHash} (tool ${name})`);
     }
+    // Hand the gate's no-network decision to the spawning tools; computing it
+    // and then spawning with the ambient environment would be a silent bypass.
+    if (gate.allowed && gate.networkGuard?.profile === 'none' && gate.spawnEnvOverride) {
+        const context = currentRequestContext();
+        if (context) {
+            context.networkIsolation = { profile: 'none', env: gate.spawnEnvOverride, sandboxAvailable: gate.networkGuard.sandboxAvailable };
+        }
+    }
     // Hoisted above the try so the finally block can read them when emitting the
     // server_call_tool completion event (duration + status), even on the crash path.
     let telemetryData: any = { tool_name: name };

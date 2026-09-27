@@ -17,6 +17,12 @@ export interface RequestContext {
   startedAt: number;
   /** ACS attribution relayed from a VERIFIED capability (never self-asserted). */
   acs?: { workItemId: string; attemptId: string; leaseId: string };
+  /**
+   * Set by the enforcement gate when DC_NETWORK_PROFILE=none: the scrubbed
+   * spawn environment and whether `unshare -n` isolation is usable. Tools
+   * that spawn processes MUST honour it.
+   */
+  networkIsolation?: { profile: 'none'; env: Record<string, string>; sandboxAvailable: boolean };
   /** Tool-specific evidence merged into the execution event. */
   evidence: Record<string, unknown>;
 }

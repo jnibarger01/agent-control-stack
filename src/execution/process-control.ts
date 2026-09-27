@@ -1,3 +1,4 @@
+import vm from 'node:vm';
 import { terminalManager } from '../terminal-manager.js';
 import { isProcessAlive } from '../utils/process-identity.js';
 import { DcToolError } from './errors.js';
@@ -72,7 +73,28 @@ function parseCondition(until: WaitForProcessInput['until']): { condition: WaitC
   }
 }
 
+/** Per-evaluation budget for a caller-supplied pattern (catastrophic backtracking guard). */
+export const PATTERN_EVAL_BUDGET_MS = 100;
+
+class PatternTimeout extends Error {}
+
+/**
+ * Runs regex.exec inside a vm context with a hard timeout. V8 interrupts the
+ * backtracking engine when the budget is exceeded, so a pattern like (a+)+$
+ * can no longer block the event loop (and with it the whole MCP runtime).
+ */
+function boundedExec(regex: RegExp, text: string): RegExpExecArray | null {
+  try {
+    return vm.runInNewContext('regex.exec(text)', { regex, text }, { timeout: PATTERN_EVAL_BUDGET_MS }) as RegExpExecArray | null;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') throw new PatternTimeout();
+    throw error;
+  }
+}
+
 function tail(text: string, lines: number): string {
+  // slice(-0) === slice(0) would return everything; zero means "no output".
+  if (lines === 0) return '';
   const parts = text.split('\n');
   return parts.slice(-lines - (parts[parts.length - 1] === '' ? 1 : 0)).join('\n');
 }
@@ -102,6 +124,7 @@ export async function waitForProcess(input: WaitForProcessInput): Promise<WaitFo
   const started = Date.now();
   let matched: WaitForProcessResult['matched'] = null;
   let timedOut = false;
+  let patternTimedOut = false;
 
   await new Promise<void>((resolve) => {
     let done = false;
@@ -120,7 +143,14 @@ export async function waitForProcess(input: WaitForProcessInput): Promise<WaitFo
       if (eventPid !== pid || !regex || !streamWanted(condition, stream)) return;
       const state = terminalManager.getStreamState(pid);
       const text = stream === 'stdout' ? state?.stdoutTail ?? '' : state?.stderrTail ?? '';
-      const m = regex.exec(text);
+      let m: RegExpExecArray | null;
+      try {
+        m = boundedExec(regex, text);
+      } catch {
+        patternTimedOut = true;
+        finish();
+        return;
+      }
       if (m) {
         matched = { stream, text: m[0].slice(0, 200), alreadyPresent: false };
         finish();
@@ -137,7 +167,14 @@ export async function waitForProcess(input: WaitForProcessInput): Promise<WaitFo
     if (regex && state) {
       for (const stream of ['stdout', 'stderr'] as const) {
         if (!streamWanted(condition, stream)) continue;
-        const m = regex.exec(stream === 'stdout' ? state.stdoutTail : state.stderrTail);
+        let m: RegExpExecArray | null;
+        try {
+          m = boundedExec(regex, stream === 'stdout' ? state.stdoutTail : state.stderrTail);
+        } catch {
+          patternTimedOut = true;
+          finish();
+          return;
+        }
         if (m) {
           matched = { stream, text: m[0].slice(0, 200), alreadyPresent: true };
           finish();
@@ -161,6 +198,9 @@ export async function waitForProcess(input: WaitForProcessInput): Promise<WaitFo
     }, timeoutMs);
   });
 
+  if (patternTimedOut) {
+    throw new DcToolError('DC_INVALID_ARGUMENT', `until.pattern exceeded its ${PATTERN_EVAL_BUDGET_MS}ms evaluation budget (catastrophic backtracking); use a simpler pattern`, { stage: 'execute', ruleId: 'wait_for_process.pattern_budget' });
+  }
   const final = terminalManager.getOwnedSessionStatus(pid);
   const streams = terminalManager.getStreamState(pid);
   const exited = final ? final.exited : (initial.ownership === 'recovered' ? !isProcessAlive(pid) : true);

@@ -145,8 +145,114 @@ try {
     assert.deepEqual(restored.json.carriedOverUncapturable, ['control.fifo']);
     assert.deepEqual(fs.readdirSync(root).filter((e) => e.includes('dc-displaced')), [], 'displaced tree cleaned up');
   });
+
+  // ---- Codex review round 2 ----------------------------------------------
+  await test('apply_patch applies an ordinary unified diff to a CRLF file and keeps CRLF', async () => {
+    const file = path.join(root, 'crlf.txt');
+    const before = 'one\r\ntwo\r\nthree\r\n';
+    fs.writeFileSync(file, before);
+    const patch = '--- a/crlf.txt\n+++ b/crlf.txt\n@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n';
+    const r = await call('apply_patch', { path: file, patch, expectedSha256: crypto.createHash('sha256').update(before).digest('hex') });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(fs.readFileSync(file, 'utf8'), 'one\r\nTWO\r\nthree\r\n');
+  });
+
+  await test('secret_scan diff: an added line whose content starts with "++" is still scanned', async () => {
+    const token = `ghp_${'A1b2C3d4'.repeat(5)}`;
+    const patch = `--- a/x\n+++ b/x\n@@ -0,0 +1,2 @@\n+normal line\n+++ ${token}\n`;
+    const r = await call('secret_scan', { target: 'diff', patch });
+    assert.equal(r.isError, false, r.text);
+    assert.equal(r.json.clean, false, 'token on a "+++"-prefixed added line must be found');
+    assert.doesNotMatch(r.text, new RegExp(token));
+  });
+
+  await test('restore of a file snapshot succeeds when the path is currently a directory', async () => {
+    const target = path.join(root, 'was-a-file');
+    fs.writeFileSync(target, 'original');
+    const snap = await call('snapshot_path', { path: target });
+    assert.equal(snap.isError, false, snap.text);
+    fs.rmSync(target);
+    fs.mkdirSync(target);
+    fs.writeFileSync(path.join(target, 'inner.txt'), 'dir content');
+    const restored = await call('restore_snapshot', { snapshotId: snap.json.snapshotId });
+    assert.equal(restored.isError, false, restored.text);
+    assert.equal(fs.readFileSync(target, 'utf8'), 'original');
+    assert.ok(restored.json.preRestoreSnapshotId, 'divergent directory preserved in a pre-restore snapshot');
+  });
+
+  await test('start_search surfaces an engine-rejected pattern as an error, not an empty success', async () => {
+    fs.writeFileSync(path.join(root, 'searchme.txt'), 'hello');
+    const r = await call('start_search', { path: root, pattern: '(unclosed', searchType: 'content', structured: true });
+    if (!r.isError) {
+      // Slow engines may not have failed within the first poll; then it must not claim completion.
+      assert.notEqual(r.json.status, 'completed', r.text);
+    } else {
+      assert.match(r.text, /DC_INVALID_ARGUMENT/);
+    }
+  });
+
+  await test('wait_for_process: catastrophic pattern is interrupted (runtime stays responsive); tailLines 0 returns no output', async () => {
+    const started = await call('start_process', { command: `printf '${'a'.repeat(40)}!'; sleep 30`, timeout_ms: 1500 });
+    const pid = Number(/PID (\d+)/.exec(started.text)?.[1]);
+    assert.ok(pid > 0, started.text);
+    const t0 = Date.now();
+    const redos = await call('wait_for_process', { pid, until: { type: 'stdout_pattern', pattern: '(a+)+$' }, timeoutMs: 5000 });
+    assert.equal(redos.isError, true, redos.text);
+    assert.match(redos.text, /evaluation budget/);
+    assert.ok(Date.now() - t0 < 4000, 'did not block the event loop');
+    const tail = await call('wait_for_process', { pid, until: { type: 'stdout_pattern', pattern: 'a!' }, timeoutMs: 2000, tailLines: 0 });
+    assert.equal(tail.isError, false, tail.text);
+    assert.equal(tail.json.stdoutTail ?? tail.json.tail?.stdout ?? '', '');
+    await call('terminate_process', { pid, force: true });
+  });
+
+  await test('service_status http probe honours an absolute deadline against a trickling endpoint', async () => {
+    const http = await import('node:http');
+    const server = http.createServer((req, res) => {
+      res.writeHead(200);
+      const tick = setInterval(() => res.write('.'), 50);
+      req.on('close', () => clearInterval(tick));
+    });
+    await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const t0 = Date.now();
+      const r = await call('service_status', { checks: [{ type: 'http', url: `http://127.0.0.1:${server.address().port}/` }], timeoutMs: 500 });
+      assert.ok(Date.now() - t0 < 3000, `probe returned in ${Date.now() - t0}ms`);
+      assert.match(r.text, /DC_TIMEOUT|down/);
+    } finally {
+      server.close();
+      server.closeAllConnections?.();
+    }
+  });
 } finally {
   await client.close();
+}
+
+
+// ---- DC_NETWORK_PROFILE=none: run_command gets the scrubbed environment --------
+{
+  const netTransport = new StdioClientTransport({
+    command: process.execPath,
+    args: [path.join(repo, 'dist', 'index.js'), '--standalone'],
+    cwd: root,
+    env: { PATH: process.env.PATH, HOME: home, LANG: 'C.UTF-8', DC_UNMATCHED_COMMAND_POLICY: 'auto', DC_NETWORK_PROFILE: 'none', HTTPS_PROXY: 'http://sentinel-proxy.invalid:1' },
+    stderr: 'ignore',
+  });
+  const netClient = new Client({ name: 'pr12-net', version: '0' }, { capabilities: {} });
+  await netClient.connect(netTransport);
+  try {
+    await test('run_command under DC_NETWORK_PROFILE=none runs with the scrubbed environment', async () => {
+      const probe = path.join(root, 'net-probe.cjs');
+      fs.writeFileSync(probe, "console.log('proxy=' + (process.env.HTTPS_PROXY ?? 'unset') + ' no_proxy=' + process.env.NO_PROXY)\n");
+      const result = await netClient.callTool({ name: 'run_command', arguments: { argv: [process.execPath, probe], cwd: root } });
+      const text = (result.content ?? []).map((c) => c.text ?? '').join('\n');
+      assert.equal(!!result.isError, false, text);
+      assert.doesNotMatch(text, /sentinel-proxy/, 'proxy variables are scrubbed before spawn');
+      assert.match(text, /proxy=unset no_proxy=\*/);
+    });
+  } finally {
+    await netClient.close();
+  }
 }
 
 console.log(`\nPR #12 review fixes: ${passed} passed`);

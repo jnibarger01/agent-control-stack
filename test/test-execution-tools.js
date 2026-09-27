@@ -412,7 +412,10 @@ try {
     assert.ok(regex.json.totalMatches > 0);
     const literal = await drain((await call('start_search', { path: corpus, pattern: 'fo(o', searchType: 'content', literalSearch: true, structured: true })).json.sessionId);
     assert.ok(literal.json.totalMatches > 0);
-    const bad = await drain((await call('start_search', { path: corpus, pattern: 'fo(o', searchType: 'content', structured: true })).json.sessionId);
+    // Rejected either immediately by start_search (engine failed within the
+    // first poll) or at the next read; never reported as an empty success.
+    const started = await call('start_search', { path: corpus, pattern: 'fo(o', searchType: 'content', structured: true });
+    const bad = started.isError ? started : await drain(started.json.sessionId);
     expectCode(bad, 'DC_INVALID_ARGUMENT', 'invalid regex');
   });
   await check('search: symlinks are not followed and scope is enforced', async () => {

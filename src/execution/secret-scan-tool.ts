@@ -13,6 +13,44 @@ import { sha256Hex } from './context.js';
 const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 const MAX_FILE_BYTES = 4 * 1024 * 1024;
 
+/**
+ * Keeps only added-line content (line numbering preserved). Inside a hunk,
+ * EVERY '+' line is content, including one whose text itself starts with
+ * '++' (encoded as '+++…'); only a '+++ ' line directly after a '--- ' line
+ * outside a hunk is a file header. Hunk extents come from the @@ counts.
+ */
+function addedLinesOnly(patch: string): string {
+  const lines = patch.split('\n');
+  const out: string[] = [];
+  let oldLeft = 0;
+  let newLeft = 0;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].replace(/\r$/, '');
+    const inHunk = oldLeft > 0 || newLeft > 0;
+    if (inHunk) {
+      if (line.startsWith('\\')) { out.push(''); continue; }
+      const op = line[0];
+      if (op === '+') { newLeft -= 1; out.push(line.slice(1)); continue; }
+      if (op === '-') { oldLeft -= 1; out.push(''); continue; }
+      oldLeft -= 1;
+      newLeft -= 1;
+      out.push('');
+      continue;
+    }
+    const header = /^@@ -\d+(?:,(\d+))? \+\d+(?:,(\d+))? @@/.exec(line);
+    if (header) {
+      oldLeft = header[1] === undefined ? 1 : Number(header[1]);
+      newLeft = header[2] === undefined ? 1 : Number(header[2]);
+      out.push('');
+      continue;
+    }
+    const isFileHeader = line.startsWith('+++ ') && (lines[i - 1] ?? '').startsWith('--- ');
+    // Outside any hunk (headerless fragments), still scan '+' lines.
+    out.push(line.startsWith('+') && !isFileHeader ? line.slice(1) : '');
+  }
+  return out.join('\n');
+}
+
 export interface SecretScanInput {
   target: 'text' | 'file' | 'diff';
   text?: string;
@@ -40,7 +78,7 @@ export async function secretScan(input: SecretScanInput) {
     if (typeof input.patch !== 'string') throw new DcToolError('DC_INVALID_ARGUMENT', 'patch is required for target=diff', { stage: 'validate' });
     if (Buffer.byteLength(input.patch) > MAX_TEXT_BYTES) throw new DcToolError('DC_INVALID_ARGUMENT', `patch exceeds ${MAX_TEXT_BYTES} bytes`, { stage: 'validate' });
     // Keep line numbering aligned with the patch; blank out non-added lines.
-    text = input.patch.split('\n').map((line) => (line.startsWith('+') && !line.startsWith('+++') ? line.slice(1) : '')).join('\n');
+    text = addedLinesOnly(input.patch);
     subject = { target: 'diff', bytes: Buffer.byteLength(input.patch), scanned: 'added_lines_only' };
   } else {
     throw new DcToolError('DC_INVALID_ARGUMENT', 'target must be text, file, or diff', { stage: 'validate' });

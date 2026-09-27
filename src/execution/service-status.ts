@@ -139,7 +139,20 @@ async function httpCheck(rawUrl: string, expectStatus: number | undefined, timeo
   const hostname = url.hostname.replace(/^\[|\]$/g, '');
   const { address, family } = await resolveSafeHost(hostname);
   const client = url.protocol === 'https:' ? https : http;
-  const outcome = await new Promise<{ statusCode?: number; contentType?: string; body?: string; code?: string }>((resolve) => {
+  const outcome = await new Promise<{ statusCode?: number; contentType?: string; body?: string; code?: string }>((resolveOnce) => {
+    // `timeout` below is only a socket-INACTIVITY timeout: a trickling body
+    // keeps resetting it. The absolute deadline bounds the whole probe.
+    let settled = false;
+    const resolve = (value: { statusCode?: number; contentType?: string; body?: string; code?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      resolveOnce(value);
+    };
+    const deadline = setTimeout(() => {
+      req.destroy();
+      resolve({ code: 'DC_TIMEOUT' });
+    }, timeoutMs);
     const req = client.request({
       method: 'GET',
       host: hostname,

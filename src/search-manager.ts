@@ -77,6 +77,8 @@ export interface SearchSessionOptions {
     sessionId: string;
     isComplete: boolean;
     isError: boolean;
+    errorCode?: string;
+    error?: string;
     results: SearchResult[];
     totalResults: number;
     runtime: number;
@@ -240,6 +242,7 @@ export interface SearchSessionOptions {
       sessionId,
       isComplete: session.isComplete,
       isError: session.isError,
+      ...(session.isError ? { errorCode: session.errorCode, error: session.error?.trim() || undefined } : {}),
       results: [...session.results],
       totalResults: session.totalMatches,
       runtime: Date.now() - session.startTime
