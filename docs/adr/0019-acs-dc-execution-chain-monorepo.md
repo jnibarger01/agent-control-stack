@@ -138,6 +138,57 @@ Revisit this once DC can consume workspace packages without losing the
 upstream merge path. Even after extraction, DC must import and run the
 validation in-process.
 
+## Relay path and the relay boundary
+
+The relay (`apps/dc-relay`) routes a remote `call_device_tool` to a paired
+device over Supabase Realtime/RPC. It never calls ACS and never executes
+anything. On the device, Desktop Commander's managed client
+(`src/remote-device/desktop-commander-integration.ts`) attaches only through
+the OAuth/ACS edge (it refuses the raw bridge port), so a relayed call follows
+the same chain as the MCP path from the edge onward:
+
+```text
+remote client -> dc-relay -> device -> dc-mcp-gateway edge -> ACS -> capability -> bridge -> DC validates -> executor
+```
+
+The relay protocol (the `/api/mcp-info` contract and the claim/complete RPCs)
+is a real shared boundary with Desktop Commander's device client. It is not
+extracted into a package in phase one, for the same reason as the capability
+primitives: DC is built outside the workspace graph. The root E2E suite covers
+it instead.
+
+## Implementation status (phase-one PR)
+
+| Item                                                            | State                                                                           |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------- |
+| `apps/dc-mcp-gateway` with history                              | Done (`git subtree`, 22 upstream commits).                                      |
+| `vendor/desktop-commander` with history                         | Done (`git subtree`, 647 upstream commits).                                     |
+| `apps/dc-relay` extraction                                      | Done (`git mv`, then an npm workspace built by `tsc -b`).                       |
+| `@agent-control-stack/dc-tool-manifest`                         | Done. ACS consumes it directly; DC and the gateway are drift-tested against it. |
+| Capability-primitive extraction                                 | Deferred (see above).                                                           |
+| Root E2E: MCP path, DC final enforcement, relay path, reconnect | Done (`tests/e2e`, `ACS_DC_E2E=1`, CI job `dc-execution-chain`).                |
+| Relay↔device Supabase pipe in E2E                               | Simulated with the same store transitions; no live Supabase in CI.              |
+
+Findings recorded while implementing:
+
+- ACS keeps one outstanding runtime-bootstrap challenge per runtime (issuing a
+  challenge expires pending ones). Truly concurrent managed session attaches
+  therefore race; the losers fail closed with `runtime_bootstrap_rejected` and
+  succeed on retry. This is safe but an availability race. Changing it is a
+  security decision for a separate ADR.
+- Each fail-closed managed initialize leaked one bridge session, because the
+  bridge does not evict idle sessions. Fixed in the edge, which now closes the
+  upstream session on every fail-closed initialize path.
+- After an executor crash, DC refuses to take over the dead holder's lease for
+  10 s (PID-reuse grace), and the bridge respawns without backoff during that
+  window. Recovery is bounded; the respawn loop is noisy.
+- Desktop Commander's `test-managed-authorization-contract.js` cross-component
+  block expects a gateway fixture and `DC_TRANSPORT_METADATA_ARGUMENT_KEYS` /
+  `deliveredArguments` exports that no GitHub revision of the gateway has ever
+  contained. Either unpushed gateway work exists on the host, or the test
+  anticipated a change that never landed. The root drift test now covers that
+  chain against the committed gateway.
+
 ## Migration phases
 
 - **Phase one (this ADR):** ACS, DC MCP gateway, relay, Desktop Commander,
