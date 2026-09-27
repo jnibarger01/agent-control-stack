@@ -9,6 +9,7 @@
   "references": [
     { "path": "../shared" },
     { "path": "../dc-tool-manifest" },
+    { "path": "../jc-tool-manifest" },
     { "path": "../work-items" },
     { "path": "../policy-gate" },
     { "path": "../machine-controller" }
