@@ -12,7 +12,11 @@
  * not exported.
  */
 
-export { desktopCommanderAdapterConfigFromEnv, desktopCommanderContainmentFromEnv } from "./config.js";
+export {
+  desktopCommanderAdapterConfigFromEnv,
+  desktopCommanderContainmentFromEnv,
+  jaceCommanderContainmentFromEnv
+} from "./config.js";
 export type { DesktopCommanderAdapterConfig } from "./config.js";
 
 export {
@@ -104,6 +108,7 @@ export {
   JACE_COMMANDER_PRIVILEGED_TOOL,
   PRIVILEGED_EXEC_ACTION_KIND,
   authorizeJaceCommanderExecution,
+  containJaceCommanderInvocation,
   jaceCommanderApprovalSummary,
   jaceCommanderInvocationHash,
   jaceCommanderNonceHash,

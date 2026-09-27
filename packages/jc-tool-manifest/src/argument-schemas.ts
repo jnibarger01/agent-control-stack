@@ -19,6 +19,20 @@ const ABSOLUTE = z
   .max(4096)
   .refine((value) => isAbsolute(value) && !value.includes("\0"), "must be an absolute path");
 
+/** Upper bounds shared by schema validation and the JC runtime's own output caps. */
+export const JC_FS_LIMITS = Object.freeze({
+  /** Max lines one read_file call may return. */
+  maxReadLines: 10_000,
+  /** Largest positive line offset; negative offsets read from the end (tail). */
+  maxReadOffset: 10_000_000,
+  /** Max files one read_multiple_files call may read. */
+  maxMultipleFiles: 20,
+  /** Max recursion depth for list_directory. */
+  maxListDepth: 5,
+  /** Max entries list_directory returns before truncating. */
+  maxListEntries: 2_000
+});
+
 export const JC_TOOL_NAMES = Object.freeze([
   "jc_status",
   "acs_read",
@@ -27,7 +41,11 @@ export const JC_TOOL_NAMES = Object.freeze([
   "visualizer_read",
   "mission_router_list",
   "looptrace_verify",
-  "privileged_exec"
+  "privileged_exec",
+  "list_directory",
+  "get_file_info",
+  "read_file",
+  "read_multiple_files"
 ] as const);
 export type JcToolName = (typeof JC_TOOL_NAMES)[number];
 
@@ -75,5 +93,22 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
       .string()
       .max(64 * 1024)
       .optional()
+  }),
+  // Filesystem (read-only, fs.read). Paths must already be absolute: the
+  // caller (CLI or MCP client) resolves `~` and relative paths before the
+  // call, so the exact string ACS signs is the exact string JC contains and
+  // reads. ACS and JC both check containment; neither trusts the other.
+  list_directory: z.strictObject({
+    path: ABSOLUTE,
+    depth: z.number().int().min(1).max(JC_FS_LIMITS.maxListDepth).optional()
+  }),
+  get_file_info: z.strictObject({ path: ABSOLUTE }),
+  read_file: z.strictObject({
+    path: ABSOLUTE,
+    offset: z.number().int().min(-JC_FS_LIMITS.maxReadOffset).max(JC_FS_LIMITS.maxReadOffset).optional(),
+    length: z.number().int().min(1).max(JC_FS_LIMITS.maxReadLines).optional()
+  }),
+  read_multiple_files: z.strictObject({
+    paths: z.array(ABSOLUTE).min(1).max(JC_FS_LIMITS.maxMultipleFiles)
   })
 });

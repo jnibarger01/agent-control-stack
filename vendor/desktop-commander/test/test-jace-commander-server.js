@@ -11,6 +11,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { loadJcConfig } from '../dist/jace-commander/config.js';
 import { createJcServer } from '../dist/jace-commander/server.js';
+import { JC_TOOL_POLICIES } from '../dist/jace-commander/contract.js';
+import { JC_MANIFEST } from '../dist/jace-commander/manifest.generated.js';
 import { buildEvent, GENESIS_HASH } from '../dist/jace-commander/looptrace.js';
 import { makeIssuer } from './fixtures/jc-mint.js';
 
@@ -57,11 +59,15 @@ const test = async (name, fn) => { await fn(); passed += 1; console.log(`  ✓ $
 const managed = await connect('managed');
 const standalone = await connect('standalone');
 
-await test('lists exactly the governed tool set', async () => {
+await test('lists exactly the governed tool set (derived from the generated manifest)', async () => {
   const { tools } = await managed.listTools();
-  assert.deepEqual(tools.map((t) => t.name).sort(), [
-    'acs_read', 'acs_submit_mission', 'jc_status', 'looptrace_verify', 'mission_router_list', 'privileged_exec', 'swarm_read', 'visualizer_read',
-  ]);
+  const expected = JC_MANIFEST.tools.map((t) => t.name).sort();
+  assert.deepEqual(tools.map((t) => t.name).sort(), expected);
+  assert.deepEqual(Object.keys(JC_TOOL_POLICIES).sort(), expected);
+  // The original control-plane tools are still served (compatibility).
+  for (const legacy of ['acs_read', 'acs_submit_mission', 'jc_status', 'looptrace_verify', 'mission_router_list', 'privileged_exec', 'swarm_read', 'visualizer_read']) {
+    assert.ok(expected.includes(legacy), `${legacy} must remain available`);
+  }
 });
 
 await test('managed: a call without a capability is rejected before any upstream request', async () => {

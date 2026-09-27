@@ -38,6 +38,8 @@ import {
   type VisualizerView,
 } from './integrations.js';
 import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
+import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleFiles, type JcFsPolicy } from './filesystem.js';
+import { JC_MANIFEST } from './manifest.generated.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
 import { VERSION } from '../version.js';
 
@@ -52,99 +54,39 @@ export interface JcServerDeps {
 
 const str = (description: string) => ({ type: 'string', description });
 
-export const JC_TOOLS = [
-  {
-    name: 'jc_status',
-    description: 'Report Jace Commander mode, configured endpoints, reachability of ACS / codex-swarm / visualizer, and whether the privileged helper is installed.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
-    name: 'acs_read',
-    description: 'Read from the Agent Control Stack gateway: health, work-items (optionally by status), or one work-item with its events, attempts and leases.',
-    inputSchema: {
-      type: 'object',
-      properties: { view: { type: 'string', enum: [...ACS_VIEWS] }, id: str('Work item id (view=work-item)'), status: str('Status filter (view=work-items)') },
-      required: ['view'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'acs_submit_mission',
-    description: 'Submit a mission to ACS as a governed work item. ACS policy decides allow / deny / require_approval; nothing executes here.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        title: str('Short title'),
-        intent: str('What should happen and why'),
-        target: { type: 'object', description: 'ACS target {repo?, cwd?, files?, services?}' },
-        requestedActions: { type: 'array', items: { type: 'object' } },
-        risk: { type: 'string', enum: ['low', 'medium', 'high', 'critical'] },
-        correlationId: str('Caller correlation id'),
-      },
-      required: ['title', 'intent', 'target'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'swarm_read',
-    description: 'Read-only codex-swarm views: health, mission-control, runs, status (by taskId), task (by taskId).',
-    inputSchema: {
-      type: 'object',
-      properties: { view: { type: 'string', enum: [...SWARM_VIEWS] }, taskId: str('codex-swarm task id') },
-      required: ['view'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'visualizer_read',
-    description: 'Read-only Agent Workflow Visualizer views (loopback, same OS user): system-status, runtimes, executions, approvals, alerts, agents.',
-    inputSchema: {
-      type: 'object',
-      properties: { view: { type: 'string', enum: [...VISUALIZER_VIEWS] } },
-      required: ['view'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'mission_router_list',
-    description: 'List retired Mission Router local state (~/.mission-router): mission ids/states only, plus LoopTrace chain verification of its JSONL audit files.',
-    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-  },
-  {
-    name: 'looptrace_verify',
-    description: 'Verify a LoopTrace JSONL hash chain under an allowed trace root. Returns event count and the first tamper point, if any.',
-    inputSchema: {
-      type: 'object',
-      properties: { path: str('Absolute path to a .jsonl trace') },
-      required: ['path'],
-      additionalProperties: false,
-    },
-  },
-  {
-    name: 'privileged_exec',
-    description: 'Run ONE exact command as root via the jc-privileged-helper. Requires an ACS acs.jc.v1 capability carrying a human approvalId bound to this exact argv/cwd/timeoutMs/stdin. The first call returns an ACS approval challenge (workItemId, actionHash, argv); after a human approves it in ACS, retry the identical call. Each approval authorizes one run. No shell: argv[0] must be an absolute path.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        argv: { type: 'array', items: { type: 'string' }, minItems: 1 },
-        cwd: str('Absolute working directory (default /)'),
-        timeoutMs: { type: 'integer', minimum: 1, maximum: 600000 },
-        stdin: str('Optional stdin (<= 64 KiB)'),
-      },
-      required: ['argv'],
-      additionalProperties: false,
-    },
-  },
-] as const;
+/**
+ * The MCP tools/list surface, derived from the generated manifest (the only
+ * tool list in this package). Adding a tool means adding it to
+ * packages/jc-tool-manifest and regenerating, plus a handler below.
+ */
+export const JC_TOOLS: ReadonlyArray<{ name: string; description: string; inputSchema: Readonly<Record<string, unknown>> }> = Object.freeze(
+  JC_MANIFEST.tools.map(({ name, description, inputSchema }) => Object.freeze({ name, description, inputSchema })),
+);
 
-type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean; _meta?: Record<string, unknown> };
+type ToolResult = {
+  content: Array<{ type: 'text'; text: string }>;
+  structuredContent?: Record<string, unknown>;
+  isError?: boolean;
+  _meta?: Record<string, unknown>;
+};
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
 
 function ok(value: unknown, meta?: Record<string, unknown>): ToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(value, null, 2) }], ...(meta ? { _meta: meta } : {}) };
+  return {
+    content: [{ type: 'text', text: JSON.stringify(value, null, 2) }],
+    // Machine-readable copy: the CLI's --json and MCP clients read this
+    // instead of parsing the text block.
+    ...(isPlainRecord(value) ? { structuredContent: value } : {}),
+    ...(meta ? { _meta: meta } : {}),
+  };
 }
 
 function fail(code: string, message: string, meta?: Record<string, unknown>): ToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify({ error: { code, message } }) }], isError: true, ...(meta ? { _meta: meta } : {}) };
+  const error = { code, message };
+  return { content: [{ type: 'text', text: JSON.stringify({ error }) }], structuredContent: { error }, isError: true, ...(meta ? { _meta: meta } : {}) };
 }
 
 function argsHash(args: unknown): string {
@@ -156,6 +98,15 @@ export function assertToolPolicyCoverage(): void {
   const governed = Object.keys(JC_TOOL_POLICIES).sort();
   if (registered.join(',') !== governed.join(',')) {
     throw new Error(`jace-commander tool/policy drift: tools=[${registered}] policies=[${governed}]`);
+  }
+}
+
+/** Every manifest tool must have exactly one handler, and nothing else may. */
+export function assertHandlerCoverage(handlerNames: readonly string[]): void {
+  const expected = JC_TOOLS.map((tool) => tool.name).sort();
+  const actual = [...handlerNames].sort();
+  if (expected.join(',') !== actual.join(',')) {
+    throw new Error(`jace-commander tool/handler drift: tools=[${expected}] handlers=[${actual}]`);
   }
 }
 
@@ -223,50 +174,62 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     return { ...result, _meta: { ...(result._meta ?? {}), ...meta } };
   });
 
+  type Handler = (args: Record<string, unknown>, capability: unknown) => Promise<ToolResult>;
+  const fsPolicy: JcFsPolicy = {
+    roots: config.fsRoots,
+    deniedRoots: [...defaultDeniedRoots(config.stateDir, config.homeDir), ...config.fsDeniedRoots],
+  };
+
+  // One handler per manifest tool. The same handlers serve every caller:
+  // MCP clients and the jace-commander CLI (itself an MCP client of /jc/mcp).
+  const handlers: Readonly<Record<string, Handler>> = Object.freeze({
+    jc_status: async () => ok(await status()),
+    acs_read: async (args) => {
+      const response = await acsGet(acsReadUrl(config, args.view as AcsView, args.id as string | undefined, args.status as string | undefined));
+      return response.status < 400 ? ok(response.body) : fail(`acs_http_${response.status}`, 'ACS rejected the request', { upstream: response.body });
+    },
+    acs_submit_mission: async (args) => {
+      const token = await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl);
+      if (!token) return fail('acs_not_logged_in', 'no ACS credential: run `jace-commander login` or set JC_ACS_TOKEN');
+      const response = await requestJson(`${config.acsUrl}/work-items`, {
+        method: 'POST', token, body: missionWorkItemBody(args as unknown as MissionInput), timeoutMs: config.requestTimeoutMs, fetchImpl,
+      });
+      return response.status < 400 ? ok(response.body) : fail(`acs_http_${response.status}`, 'ACS rejected the mission', { upstream: response.body });
+    },
+    swarm_read: async (args) => {
+      const response = await requestJson(swarmReadUrl(config, args.view as SwarmView, args.taskId as string | undefined), {
+        token: swarmToken, timeoutMs: config.requestTimeoutMs, fetchImpl,
+      });
+      return response.status < 400 ? ok(response.body) : fail(`swarm_http_${response.status}`, 'codex-swarm rejected the request');
+    },
+    visualizer_read: async (args) => {
+      const response = await requestJson(visualizerReadUrl(config, args.view as VisualizerView), { timeoutMs: config.requestTimeoutMs, fetchImpl });
+      return response.status < 400 ? ok(response.body) : fail(`visualizer_http_${response.status}`, 'visualizer rejected the request');
+    },
+    mission_router_list: async () => ok(listMissionRouterState(config.missionRouterDir)),
+    looptrace_verify: async (args) => {
+      const file = resolveTracePath(args.path, config.traceRoots);
+      const parsed = readTraceFile(file);
+      if (parsed.parseError) return ok({ path: file, ok: false, reason: `invalid JSON at line ${parsed.parseError.line}`, events: parsed.events.length });
+      return ok({ path: file, events: parsed.events.length, ...verifyChain(parsed.events) });
+    },
+    privileged_exec: async (args, capability) => {
+      if (capability === undefined) {
+        return fail('JC_CAPABILITY_MISSING', 'privileged_exec requires an ACS acs.jc.v1 capability with a human approvalId; call it through the managed gateway (/jc/mcp), have a human approve the returned ACS work item, then retry the identical call');
+      }
+      const verdict = await invokeHelper({ capability, arguments: args }, helperOptions);
+      return verdict.ok === true ? ok(verdict) : fail(String(verdict.code ?? 'PRIVILEGED_REJECTED'), 'privileged execution rejected; nothing ran');
+    },
+    list_directory: async (args) => ok(await listDirectory(args, fsPolicy)),
+    get_file_info: async (args) => ok(await getFileInfo(args, fsPolicy)),
+    read_file: async (args) => ok(await readFile(args, fsPolicy)),
+    read_multiple_files: async (args) => ok(await readMultipleFiles(args, fsPolicy)),
+  });
+  assertHandlerCoverage(Object.keys(handlers));
+
   async function dispatch(name: string, args: Record<string, unknown>, capability: unknown): Promise<ToolResult> {
-    switch (name) {
-      case 'jc_status':
-        return ok(await status());
-      case 'acs_read': {
-        const response = await acsGet(acsReadUrl(config, args.view as AcsView, args.id as string | undefined, args.status as string | undefined));
-        return response.status < 400 ? ok(response.body) : fail(`acs_http_${response.status}`, 'ACS rejected the request', { upstream: response.body });
-      }
-      case 'acs_submit_mission': {
-        const token = await acsAccessToken(config.acsUrl, config.stateDir, process.env, fetchImpl);
-        if (!token) return fail('acs_not_logged_in', 'no ACS credential: run `jace-commander login` or set JC_ACS_TOKEN');
-        const response = await requestJson(`${config.acsUrl}/work-items`, {
-          method: 'POST', token, body: missionWorkItemBody(args as unknown as MissionInput), timeoutMs: config.requestTimeoutMs, fetchImpl,
-        });
-        return response.status < 400 ? ok(response.body) : fail(`acs_http_${response.status}`, 'ACS rejected the mission', { upstream: response.body });
-      }
-      case 'swarm_read': {
-        const response = await requestJson(swarmReadUrl(config, args.view as SwarmView, args.taskId as string | undefined), {
-          token: swarmToken, timeoutMs: config.requestTimeoutMs, fetchImpl,
-        });
-        return response.status < 400 ? ok(response.body) : fail(`swarm_http_${response.status}`, 'codex-swarm rejected the request');
-      }
-      case 'visualizer_read': {
-        const response = await requestJson(visualizerReadUrl(config, args.view as VisualizerView), { timeoutMs: config.requestTimeoutMs, fetchImpl });
-        return response.status < 400 ? ok(response.body) : fail(`visualizer_http_${response.status}`, 'visualizer rejected the request');
-      }
-      case 'mission_router_list':
-        return ok(listMissionRouterState(config.missionRouterDir));
-      case 'looptrace_verify': {
-        const file = resolveTracePath(args.path, config.traceRoots);
-        const parsed = readTraceFile(file);
-        if (parsed.parseError) return ok({ path: file, ok: false, reason: `invalid JSON at line ${parsed.parseError.line}`, events: parsed.events.length });
-        return ok({ path: file, events: parsed.events.length, ...verifyChain(parsed.events) });
-      }
-      case 'privileged_exec': {
-        if (capability === undefined) {
-          return fail('JC_CAPABILITY_MISSING', 'privileged_exec requires an ACS acs.jc.v1 capability with a human approvalId; call it through the managed gateway (/jc/mcp), have a human approve the returned ACS work item, then retry the identical call');
-        }
-        const verdict = await invokeHelper({ capability, arguments: args }, helperOptions);
-        return verdict.ok === true ? ok(verdict) : fail(String(verdict.code ?? 'PRIVILEGED_REJECTED'), 'privileged execution rejected; nothing ran');
-      }
-      default:
-        return fail('unknown_tool', `unknown tool: ${name}`);
-    }
+    const handler = Object.prototype.hasOwnProperty.call(handlers, name) ? handlers[name] : undefined;
+    return handler ? handler(args, capability) : fail('unknown_tool', `unknown tool: ${name}`);
   }
 
   async function status(): Promise<Record<string, unknown>> {

@@ -1,5 +1,6 @@
 import type { z } from "zod";
-import { JC_TOOL_ARGUMENT_SCHEMAS, JC_TOOL_NAMES, type JcToolName } from "./argument-schemas.js";
+import { createHash } from "node:crypto";
+import { JC_FS_LIMITS, JC_TOOL_ARGUMENT_SCHEMAS, JC_TOOL_NAMES, type JcToolName } from "./argument-schemas.js";
 
 /**
  * Canonical Jace Commander tool contract for ACS-managed execution
@@ -48,6 +49,18 @@ export type JcActionKind = (typeof JC_ACTION_KINDS)[number];
 
 export type JcRiskClass = "low" | "medium" | "critical";
 
+/** Capability group; drives `jace-commander --help` sections and docs. */
+export const JC_TOOL_GROUPS = Object.freeze([
+  "system",
+  "filesystem",
+  "acs",
+  "mission",
+  "swarm",
+  "visualizer",
+  "privileged"
+] as const);
+export type JcToolGroup = (typeof JC_TOOL_GROUPS)[number];
+
 export interface JcToolContract {
   readonly name: JcToolName;
   readonly description: string;
@@ -61,9 +74,20 @@ export interface JcToolContract {
   /** Strict argument schema; unknown keys are rejected. */
   readonly argsSchema: z.ZodTypeAny;
   readonly reason: string;
+  readonly group: JcToolGroup;
+  /**
+   * Arguments holding filesystem paths that ACS itself must contain to its
+   * configured Jace Commander roots before issuing a capability (a string
+   * argument, or an array of strings). Jace Commander contains them again at
+   * execution time against its own roots. Empty: no ACS path containment.
+   */
+  readonly pathArguments: readonly string[];
+  /** `jace-commander` CLI verbs that invoke this tool (empty: MCP only). */
+  readonly cliCommands: readonly string[];
 }
 
-type ToolRow = Omit<JcToolContract, "name" | "argsSchema">;
+type ToolRow = Omit<JcToolContract, "name" | "argsSchema" | "group" | "pathArguments" | "cliCommands">;
+type SurfaceRow = Pick<JcToolContract, "group" | "pathArguments" | "cliCommands">;
 
 function row(
   description: string,
@@ -202,20 +226,116 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "critical",
     true,
     "root execution; approval is re-verified by a root-owned helper, not this process"
+  ),
+  list_directory: row(
+    "List a directory under an allowed filesystem root. Returns structured entries (name, relative path, type, size), recursing up to `depth` levels (default 1, max 5). Output is capped; `truncated` reports when entries were omitted.",
+    {
+      type: "object",
+      properties: {
+        path: str("Absolute directory path"),
+        depth: { type: "integer", minimum: 1, maximum: JC_FS_LIMITS.maxListDepth, description: "Recursion depth (default 1)" }
+      },
+      required: ["path"],
+      additionalProperties: false
+    },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "read-only; contained to allowed roots by ACS and again by Jace Commander"
+  ),
+  get_file_info: row(
+    "Return metadata for one file or directory under an allowed filesystem root: type, size, timestamps, permissions and, for text files, line count.",
+    { type: "object", properties: { path: str("Absolute path") }, required: ["path"], additionalProperties: false },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "read-only metadata; contained to allowed roots"
+  ),
+  read_file: row(
+    "Read a file under an allowed filesystem root. Text is returned by line window: `offset` is the 0-based start line (negative reads from the end), `length` the max lines (default 1000, max 10000). Returns content plus totalLines and whether more remains.",
+    {
+      type: "object",
+      properties: {
+        path: str("Absolute file path"),
+        offset: { type: "integer", description: "Start line (0-based); negative reads the last N lines" },
+        length: { type: "integer", minimum: 1, maximum: JC_FS_LIMITS.maxReadLines, description: "Max lines to return" }
+      },
+      required: ["path"],
+      additionalProperties: false
+    },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "read-only; contained to allowed roots; bounded output"
+  ),
+  read_multiple_files: row(
+    "Read up to 20 files under allowed filesystem roots in one call. Each result reports its own success or error; one failure does not fail the others.",
+    {
+      type: "object",
+      properties: {
+        paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: JC_FS_LIMITS.maxMultipleFiles }
+      },
+      required: ["paths"],
+      additionalProperties: false
+    },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "read-only; every path contained to allowed roots; bounded output"
   )
+};
+
+const surface = (group: JcToolGroup, pathArguments: readonly string[], cliCommands: readonly string[]): SurfaceRow => ({
+  group,
+  pathArguments,
+  cliCommands
+});
+
+/**
+ * Grouping, ACS path containment and CLI verbs per tool. The CLI verbs here
+ * are the contract the `jace-commander` command table must implement; the
+ * root drift test fails if either side has a verb the other lacks.
+ */
+const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
+  jc_status: surface("system", [], ["status"]),
+  acs_read: surface("acs", [], ["acs read"]),
+  acs_submit_mission: surface("acs", [], ["acs submit"]),
+  swarm_read: surface("swarm", [], ["swarm read"]),
+  visualizer_read: surface("visualizer", [], ["visualizer read"]),
+  mission_router_list: surface("mission", [], ["mission list"]),
+  // LoopTrace paths are contained by Jace Commander to its trace roots; ACS
+  // has no view of those roots, so it does not contain them (unchanged).
+  looptrace_verify: surface("mission", [], ["looptrace verify"]),
+  privileged_exec: surface("privileged", [], ["sudo"]),
+  list_directory: surface("filesystem", ["path"], ["ls"]),
+  get_file_info: surface("filesystem", ["path"], ["stat"]),
+  read_file: surface("filesystem", ["path"], ["read", "cat"]),
+  read_multiple_files: surface("filesystem", ["paths"], [])
 };
 
 function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {
   const entries = new Map<JcToolName, JcToolContract>();
+  const verbs = new Set<string>();
   for (const name of JC_TOOL_NAMES) {
-    entries.set(
+    const entry = Object.freeze({
       name,
-      Object.freeze({
-        name,
-        argsSchema: JC_TOOL_ARGUMENT_SCHEMAS[name],
-        ...TOOL_ROWS[name]
-      })
-    );
+      argsSchema: JC_TOOL_ARGUMENT_SCHEMAS[name],
+      ...TOOL_ROWS[name],
+      ...TOOL_SURFACE[name]
+    });
+    for (const arg of entry.pathArguments) {
+      const properties = entry.inputSchema.properties as Record<string, unknown> | undefined;
+      if (!properties || !(arg in properties)) throw new Error(`jc-tool-manifest: ${name} pathArgument ${arg} is not a declared argument`);
+    }
+    for (const verb of entry.cliCommands) {
+      if (verbs.has(verb)) throw new Error(`jc-tool-manifest: CLI verb "${verb}" mapped to two tools`);
+      verbs.add(verb);
+    }
+    entries.set(name, entry);
   }
   return entries;
 }
@@ -246,4 +366,51 @@ export function jcMcpToolDescriptors(): Array<{
     description,
     inputSchema: { ...inputSchema }
   }));
+}
+
+/** JSON-safe projection of one tool: everything except the zod schema. */
+export interface JcPortableToolContract {
+  readonly name: string;
+  readonly description: string;
+  readonly inputSchema: Record<string, unknown>;
+  readonly scopes: readonly JcScope[];
+  readonly actionKind: JcActionKind;
+  readonly risk: JcRiskClass;
+  readonly requiresApproval: boolean;
+  readonly group: JcToolGroup;
+  readonly pathArguments: readonly string[];
+  readonly cliCommands: readonly string[];
+}
+
+export interface JcPortableManifest {
+  readonly version: typeof JC_CAPABILITY_VERSION;
+  /** sha256 over the canonical JSON of `tools`; changes whenever any tool contract changes. */
+  readonly manifestHash: string;
+  readonly scopes: readonly JcScope[];
+  readonly tools: readonly JcPortableToolContract[];
+}
+
+/**
+ * The manifest as data Jace Commander embeds (it cannot import this package:
+ * vendor/desktop-commander is built outside the npm workspace graph).
+ * scripts/jc-tool-manifest.ts writes it to
+ * vendor/desktop-commander/src/jace-commander/manifest.generated.ts.
+ */
+export function jcPortableManifest(): JcPortableManifest {
+  const tools = jcToolContracts().map(
+    ({ name, description, inputSchema, scopes, actionKind, risk, requiresApproval, group, pathArguments, cliCommands }) => ({
+      name,
+      description,
+      inputSchema: JSON.parse(JSON.stringify(inputSchema)) as Record<string, unknown>,
+      scopes: [...scopes],
+      actionKind,
+      risk,
+      requiresApproval,
+      group,
+      pathArguments: [...pathArguments],
+      cliCommands: [...cliCommands]
+    })
+  );
+  const manifestHash = createHash("sha256").update(JSON.stringify(tools), "utf8").digest("hex");
+  return { version: JC_CAPABILITY_VERSION, manifestHash, scopes: [...JC_SCOPES], tools };
 }

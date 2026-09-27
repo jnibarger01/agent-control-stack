@@ -15,6 +15,7 @@ import {
   type JcScope
 } from "@agent-control-stack/jc-tool-manifest";
 import type { z } from "zod";
+import { containPath, type ContainmentConfig } from "./containment.js";
 
 /**
  * acs.jc.v1 — ACS-issued capabilities for the Jace Commander MCP server
@@ -49,6 +50,8 @@ export interface JaceCommanderToolPolicy {
   readonly requiresApproval: boolean;
   readonly actionKind: JaceCommanderActionKind;
   readonly risk: "low" | "medium" | "critical";
+  /** Arguments ACS must contain to its Jace Commander roots before signing. */
+  readonly pathArguments: readonly string[];
 }
 
 const ARGUMENT_SCHEMAS: Readonly<Record<string, z.ZodType>> = JC_TOOL_ARGUMENT_SCHEMAS;
@@ -61,8 +64,36 @@ export function jaceCommanderToolPolicy(toolName: string): JaceCommanderToolPoli
     scopes: entry.scopes,
     requiresApproval: entry.requiresApproval,
     actionKind: entry.actionKind,
-    risk: entry.risk
+    risk: entry.risk,
+    pathArguments: entry.pathArguments
   });
+}
+
+/**
+ * ACS-side containment for path-bearing Jace Commander tools. Checks every
+ * manifest-declared path argument against the ACS roots; never rewrites the
+ * arguments (the capability binds the caller's exact strings, and Jace
+ * Commander contains them again at execution time).
+ */
+export function containJaceCommanderInvocation(
+  invocation: JaceCommanderInvocation,
+  containment: ContainmentConfig
+): void {
+  for (const name of invocation.policy.pathArguments) {
+    const value = invocation.arguments[name];
+    const paths = Array.isArray(value) ? value : [value];
+    for (const requested of paths) {
+      try {
+        containPath(containment, requested as string);
+      } catch (error) {
+        const code = error instanceof ControlStackError ? error.code : "desktop_commander_path_invalid";
+        throw new ControlStackError(
+          code.replace(/^desktop_commander_/u, "jace_commander_"),
+          error instanceof Error ? error.message : "path is not allowed"
+        );
+      }
+    }
+  }
 }
 
 export function jaceCommanderToolNames(): string[] {

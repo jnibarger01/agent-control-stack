@@ -15,6 +15,8 @@ import path from 'node:path';
 export const DEFAULT_TAILNET_HOST = 'jacen-ubuntu.tailaa6d41.ts.net';
 
 export interface JcConfig {
+  /** Home of the user JC runs as (env HOME, else the OS account home). */
+  homeDir: string;
   stateDir: string;
   publicMcpUrl: string;
   acsUrl: string;
@@ -22,6 +24,10 @@ export interface JcConfig {
   visualizerUrl: string | undefined;
   missionRouterDir: string;
   traceRoots: string[];
+  /** Filesystem roots the fs.read tools may touch (JC_FS_ROOTS). Empty: fs tools fail closed. */
+  fsRoots: string[];
+  /** Extra denied roots (JC_FS_DENIED_ROOTS), on top of the built-in credential/state denials. */
+  fsDeniedRoots: string[];
   runtimeId: string;
   acsPublicKey: string | undefined;
   acsKeyId: string | undefined;
@@ -42,6 +48,14 @@ function httpUrl(raw: string, name: string): string {
   return url.toString().replace(/\/$/, '');
 }
 
+function splitRoots(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return raw.split(path.delimiter).filter(Boolean).map((root) => {
+    if (!path.isAbsolute(root)) throw new Error(`filesystem roots must be absolute paths: ${root}`);
+    return path.resolve(root);
+  });
+}
+
 export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
   const home = os.homedir();
   const stateDir = path.resolve(env.JC_STATE_DIR ?? path.join(home, '.jace-commander'));
@@ -49,6 +63,7 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
   if (!Number.isInteger(timeout) || timeout < 100 || timeout > 60_000) throw new Error('JC_REQUEST_TIMEOUT_MS must be an integer in [100, 60000]');
   const runtimeId = env.JC_RUNTIME_ID ?? `jc-${os.hostname().replace(/[^A-Za-z0-9._:-]/g, '-')}`.slice(0, 128);
   return {
+    homeDir: env.HOME ? path.resolve(env.HOME) : home,
     stateDir,
     publicMcpUrl: httpUrl(env.JC_PUBLIC_MCP_URL ?? `https://${DEFAULT_TAILNET_HOST}/jc/mcp`, 'JC_PUBLIC_MCP_URL'),
     acsUrl: httpUrl(env.JC_ACS_URL ?? 'http://127.0.0.1:3000', 'JC_ACS_URL'),
@@ -61,6 +76,8 @@ export function loadJcConfig(env: NodeJS.ProcessEnv = process.env): JcConfig {
       path.join(home, '.mission-router'),
       path.join(stateDir, 'traces'),
     ].join(path.delimiter)).split(path.delimiter).filter(Boolean).map((root) => path.resolve(root)),
+    fsRoots: splitRoots(env.JC_FS_ROOTS),
+    fsDeniedRoots: splitRoots(env.JC_FS_DENIED_ROOTS),
     runtimeId,
     acsPublicKey: env.JC_ACS_PUBLIC_KEY,
     acsKeyId: env.JC_ACS_KEY_ID,

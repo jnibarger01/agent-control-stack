@@ -14,6 +14,8 @@ import {
   signPreparedJaceCommanderCapability,
   SqliteJaceCommanderIssuanceRegistry,
   validateJaceCommanderInvocation,
+  containJaceCommanderInvocation,
+  jaceCommanderContainmentFromEnv,
   validateJaceCommanderSigningConfig,
   type JaceCommanderExecutionAuthorization,
   type JaceCommanderInvocation,
@@ -266,6 +268,12 @@ export interface GatewayOptions {
    * Must be a different key from the acs.dc.v1 key.
    */
   jaceCommanderCapability?: JaceCommanderSigningConfig | false;
+  /**
+   * Containment roots for path-bearing Jace Commander tools. Defaults to
+   * ACS_JACE_COMMANDER_ALLOWED_ROOTS / _DENIED_ROOTS; `false` or absent config
+   * makes every path-bearing JC tool fail closed (503) at issuance.
+   */
+  jaceCommanderContainment?: ContainmentConfig | false;
   /** Containment roots for the gateway-side Phase 6-8 re-authorization. */
   desktopCommanderContainment?: ContainmentConfig;
   /**
@@ -346,6 +354,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
   const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
+  const jcContainment = resolveJcContainment(options.jaceCommanderContainment);
   const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
   /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
   function recordLeaseAuthorizedExecutionEvent(
@@ -1694,9 +1703,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             code: "jc_bridge_identity_required"
           });
         }
-        const jcActor = firstHeader(request.headers["x-dc-actor"]);
+        // The edge's /jc/mcp lane attests the requester as `x-jc-actor`
+        // (apps/dc-mcp-gateway/managed.js); `x-dc-actor` is still accepted for
+        // older callers. Both are honored only from the authenticated
+        // acs-jc-bridge identity checked above; if both are sent they must agree.
+        const jcActorHeader = firstHeader(request.headers["x-jc-actor"]);
+        const legacyActorHeader = firstHeader(request.headers["x-dc-actor"]);
+        if (jcActorHeader && legacyActorHeader && jcActorHeader !== legacyActorHeader) {
+          return reply.code(400).send({ error: "conflicting actor headers", code: "jc_actor_invalid" });
+        }
+        const jcActor = jcActorHeader ?? legacyActorHeader;
         if (!jcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(jcActor)) {
-          return reply.code(400).send({ error: "x-dc-actor header is required", code: "jc_actor_invalid" });
+          return reply.code(400).send({ error: "x-jc-actor header is required", code: "jc_actor_invalid" });
         }
         const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
         if (!jcSigningConfig) {
@@ -1729,6 +1747,28 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         }
 
         const toolPolicy = invocation.policy;
+        if (toolPolicy.pathArguments.length > 0) {
+          // ACS is the containment authority for filesystem tools: no roots
+          // configured means no filesystem capability is ever signed.
+          if (!jcContainment) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied");
+            return reply.code(503).send({
+              error: "jace-commander filesystem containment not configured",
+              code: "jace_commander_containment_unconfigured"
+            });
+          }
+          try {
+            containJaceCommanderInvocation(invocation, jcContainment);
+          } catch (error) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied");
+            return reply.code(403).send({
+              decision: "deny",
+              reason: "path_not_allowed",
+              code: error instanceof ControlStackError ? error.code : "jace_commander_path_invalid",
+              ...(error instanceof ControlStackError ? { detail: error.message.slice(0, 512) } : {})
+            });
+          }
+        }
         const bindingHash = stableHash({
           contract: "acs.jc.v1",
           tool: invocation.toolName,
@@ -2556,6 +2596,17 @@ function resolveCapabilitySigningConfig(
   } catch {
     // Partially/incorrectly configured Desktop Commander capability env must
     // not crash gateway startup; the endpoint fails closed with 503 instead.
+    return undefined;
+  }
+}
+
+function resolveJcContainment(override: ContainmentConfig | false | undefined): ContainmentConfig | undefined {
+  if (override === false) return undefined;
+  if (override) return override;
+  try {
+    return jaceCommanderContainmentFromEnv();
+  } catch {
+    // Invalid roots: fail closed for filesystem tools, keep the rest serving.
     return undefined;
   }
 }

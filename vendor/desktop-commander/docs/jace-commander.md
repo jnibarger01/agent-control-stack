@@ -70,8 +70,68 @@ which asks ACS to create a governed work item.
 | `mission_router_list` | `fs.read` | no | Mission ids/states plus JSONL chain verification. Goals are never returned |
 | `looptrace_verify` | `fs.read` | no | Verify a LoopTrace chain under an allowed root |
 | `privileged_exec` | `process.privileged` | **yes** | Run one exact argv as root |
+| `list_directory` | `fs.read` | no | Sorted entries, depth 1..5, max 2000, never follows symlinks, omits denied roots |
+| `get_file_info` | `fs.read` | no | Type, symlink flag, size, times, permissions, line count |
+| `read_file` | `fs.read` | no | Line window (`offset` ±10M, `length` ≤ 10000), 1 MiB cap, `hasMore`/`totalLines` |
+| `read_multiple_files` | `fs.read` | no | Up to 20 files, per-file `ok`/`code` |
 
 Views are fixed allowlists. Callers cannot supply upstream paths.
+
+The tool list, argument schemas, scopes, CLI verbs and path arguments come
+from one manifest (`packages/jc-tool-manifest` in ACS). This server uses a
+generated copy (`src/jace-commander/manifest.generated.ts`,
+`npm run jc-contracts:generate` at the ACS root; `jc-contracts:check` fails CI
+on drift).
+
+### Filesystem containment
+
+Filesystem tools are contained twice:
+
+* **ACS**, before it signs, checks every `pathArguments` value against
+  `ACS_JACE_COMMANDER_ALLOWED_ROOTS` / `_DENIED_ROOTS`. If no roots are
+  configured, the call gets 503 `jace_commander_containment_unconfigured`. A
+  path outside the roots gets 403 `path_not_allowed`.
+* **Jace Commander**, after verifying the capability, realpaths the path
+  and checks it against `JC_FS_ROOTS` / `JC_FS_DENIED_ROOTS`. It also always
+  denies built-in roots: the state dir, `/etc/jace-commander`, `~/.ssh`,
+  `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`, `.config/gcloud`, the DC
+  gateway and relay config, and `.desktop-commander`. Credential-looking
+  basenames (`.env*`, keys, and so on) are refused too. If `JC_FS_ROOTS` is
+  unset, every filesystem call fails closed with `fs_roots_unconfigured`.
+
+## CLI (`jace-commander`, alias `jc`)
+
+The CLI is an **MCP client of `/jc/mcp`**, the same path ChatGPT uses:
+OAuth edge → ACS `/jc/capability/issue` → bridge → `jace-commander serve`. It
+has no local execution path and no authority of its own. Every tool command is
+one `tools/call`, so CLI and MCP results come from the same handler. When ACS
+is unreachable the call fails closed.
+
+```bash
+jc connect                 # OAuth (PKCE, loopback) against /jc/mcp; token 0600 in $JC_STATE_DIR
+jc ls ~/project --depth 2
+jc stat src/app.ts         # relative paths resolve against the CLI's cwd before ACS signs
+jc read src/app.ts --offset -20 --json
+jc sudo -- /usr/bin/apt-get update   # prints APPROVAL REQUIRED + work item; re-run after approval
+jc tools --remote          # tools/list from the server
+jc --help                  # grouped help with the exit-code table
+```
+
+| Exit | Meaning |
+| --- | --- |
+| 0 | success |
+| 1 | tool failure (for example `not_found`) |
+| 2 | invalid arguments (nothing is sent) |
+| 3 | denied by ACS or by the JC verifier/containment |
+| 4 | approval required. `--json` prints `{ok:false, kind:"managed_authorization_required", workItemId, actionHash, retryable}` |
+| 5 | authorization unavailable (ACS down or unconfigured). Fails closed |
+| 6 | not connected (no token, expired, or wrong audience). Run `jc connect` |
+
+Both refusal transports classify identically: today's edge HTTP 503
+`managed_authorization_*` body, and the JSON-RPC `-32001/-32002/-32003`
+errors from ACS PR #204. `JC_MCP_URL` overrides the endpoint
+(default `JC_PUBLIC_MCP_URL`). `JC_MCP_TOKEN` supplies a token directly, for
+services.
 
 ## The sudo flow
 
@@ -185,6 +245,8 @@ This is implemented in `agent-control-stack`. See
 | `JC_RUNTIME_ID` | `jc-<hostname>` |
 | `JC_ACS_PUBLIC_KEY`, `JC_ACS_KEY_ID` | required for `serve` in managed mode |
 | `JC_PRIVILEGED_HELPER`, `JC_SUDO_PATH` | `/usr/local/libexec/jace-commander/jc-privileged-helper`, `/usr/bin/sudo` |
+| `JC_FS_ROOTS`, `JC_FS_DENIED_ROOTS` | unset, so filesystem tools fail closed. `:`-separated absolute paths |
+| `JC_MCP_URL`, `JC_MCP_TOKEN` | CLI only: `/jc/mcp` endpoint override and a token override |
 
 The helper does **not** read these. It reads only `/etc/jace-commander/privileged.json`.
 

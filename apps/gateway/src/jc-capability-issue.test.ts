@@ -1,6 +1,6 @@
 import { createPrivateKey, createPublicKey, generateKeyPairSync, verify } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
@@ -69,7 +69,7 @@ function keys() {
   return { privateKey: pair.privateKey.export({ format: "der", type: "pkcs8" }).toString("base64url") };
 }
 
-function gateway(configured = true) {
+function gateway(configured = true, fsRoots?: (root: string) => string[]) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-jc-capability-")));
   const signing = keys();
   const app = buildGateway({
@@ -79,7 +79,8 @@ function gateway(configured = true) {
     jaceCommanderCapability: configured
       ? { runtimeId: RUNTIME_ID, keyId: "jc-test-key", privateKey: signing.privateKey, ttlMs: 29_000 }
       : false,
-    readManagedAuthority: () => healthyAuthority
+    readManagedAuthority: () => healthyAuthority,
+    jaceCommanderContainment: fsRoots ? { allowedRoots: fsRoots(root), deniedRoots: [] } : false
   });
   return { root, signing, app, dbPath: join(root, "control.db") };
 }
@@ -115,8 +116,12 @@ function signatureValid(ctx: Ctx, capability: { payload: unknown; signature: str
   );
 }
 
-async function withGateway(fn: (ctx: Ctx) => Promise<void>, configured = true): Promise<void> {
-  const ctx = gateway(configured);
+async function withGateway(
+  fn: (ctx: Ctx) => Promise<void>,
+  configured = true,
+  fsRoots?: (root: string) => string[]
+): Promise<void> {
+  const ctx = gateway(configured, fsRoots);
   try {
     await fn(ctx);
   } finally {
@@ -275,5 +280,116 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(response.statusCode).toBe(403);
       expect(response.json().code).toBe("jace_commander_self_approval_denied");
       expect(response.json().capability).toBeUndefined();
+    }));
+});
+
+describe("POST /jc/capability/issue: filesystem tools (fs.read, ACS containment)", () => {
+  const workspace = (root: string) => {
+    const dir = join(root, "workspace");
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "index.ts"), "export {};\n");
+    return [dir];
+  };
+
+  it("issues fs.read capabilities without approval for paths inside the ACS roots", () =>
+    withGateway(
+      async (ctx) => {
+        const file = join(ctx.root, "workspace", "src", "index.ts");
+        for (const [tool, args] of [
+          ["read_file", { path: file, offset: 0, length: 20 }],
+          ["get_file_info", { path: file }],
+          ["list_directory", { path: join(ctx.root, "workspace"), depth: 2 }],
+          ["read_multiple_files", { paths: [file] }]
+        ] as const) {
+          const response = await issue(ctx, tool, args);
+          expect(response.statusCode, `${tool}: ${response.body}`).toBe(200);
+          const { payload } = response.json().capability;
+          expect(payload).toMatchObject({ toolName: tool, normalizedArguments: args, scopes: ["fs.read"] });
+          expect(payload.approvalId).toBeUndefined();
+        }
+      },
+      true,
+      workspace
+    ));
+
+  it("denies a path outside the ACS roots before any work item or signature", () =>
+    withGateway(
+      async (ctx) => {
+        const response = await issue(ctx, "read_file", { path: "/etc/hostname" });
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toMatchObject({
+          decision: "deny",
+          reason: "path_not_allowed",
+          code: "jace_commander_path_outside_allow_root"
+        });
+        const many = await issue(ctx, "read_multiple_files", {
+          paths: [join(ctx.root, "workspace", "src", "index.ts"), "/etc/hostname"]
+        });
+        expect(many.statusCode).toBe(403);
+      },
+      true,
+      workspace
+    ));
+
+  it("denies credential paths even inside the ACS roots", () =>
+    withGateway(
+      async (ctx) => {
+        writeFileSync(join(ctx.root, "workspace", ".env"), "SECRET=1\n");
+        const response = await issue(ctx, "read_file", { path: join(ctx.root, "workspace", ".env") });
+        expect(response.statusCode).toBe(403);
+        expect(response.json().code).toBe("jace_commander_path_credential");
+      },
+      true,
+      workspace
+    ));
+
+  it("fails closed (503) for every filesystem tool when no JC containment roots are configured", () =>
+    withGateway(async (ctx) => {
+      const response = await issue(ctx, "read_file", { path: join(ctx.root, "x") });
+      expect(response.statusCode).toBe(503);
+      expect(response.json().code).toBe("jace_commander_containment_unconfigured");
+      // Non-filesystem tools are unaffected.
+      expect((await issue(ctx, "acs_read", { view: "health" })).statusCode).toBe(200);
+    }));
+
+  it("rejects relative and home-relative paths at schema validation (the caller must resolve them)", () =>
+    withGateway(
+      async (ctx) => {
+        for (const path of ["src/index.ts", "~/x", "./x"]) {
+          const response = await issue(ctx, "read_file", { path });
+          expect(response.statusCode).toBe(400);
+          expect(response.json().code).toBe("jace_commander_argument_invalid");
+        }
+      },
+      true,
+      workspace
+    ));
+});
+
+describe("POST /jc/capability/issue: requester attribution header", () => {
+  const post = (ctx: Ctx, headers: Record<string, string>) =>
+    ctx.app.inject({
+      method: "POST",
+      url: "/jc/capability/issue",
+      headers: { authorization: `Bearer ${JC_BRIDGE_TOKEN}`, ...headers },
+      payload: { client_id: "chatgpt", tool: "acs_read", argsSummary: JSON.stringify({ view: "health" }) }
+    });
+
+  it("accepts x-jc-actor, the header the /jc/mcp edge actually sends (regression: it was ignored)", () =>
+    withGateway(async (ctx) => {
+      const response = await post(ctx, { "x-jc-actor": ACTOR });
+      expect(response.statusCode, response.body).toBe(200);
+      expect(response.json().capability.payload.toolName).toBe("acs_read");
+    }));
+
+  it("still accepts the legacy x-dc-actor, and rejects conflicting or missing attribution", () =>
+    withGateway(async (ctx) => {
+      expect((await post(ctx, { "x-dc-actor": ACTOR })).statusCode).toBe(200);
+      const conflicting = await post(ctx, { "x-jc-actor": ACTOR, "x-dc-actor": "chatgpt:someone-else" });
+      expect(conflicting.statusCode).toBe(400);
+      expect(conflicting.json().code).toBe("jc_actor_invalid");
+      const missing = await post(ctx, {});
+      expect(missing.statusCode).toBe(400);
+      expect(missing.json().code).toBe("jc_actor_invalid");
     }));
 });

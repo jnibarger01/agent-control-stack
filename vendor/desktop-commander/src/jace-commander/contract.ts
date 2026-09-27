@@ -19,43 +19,39 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { strictCanonicalJsonV1 } from '../managed-acs.js';
+import { JC_MANIFEST } from './manifest.generated.js';
 
 export const JC_CAPABILITY_VERSION = 'acs.jc.v1' as const;
 export const JC_AUDIENCE = 'jace-commander' as const;
 export const JC_INVOCATION_DOMAIN = 'acs:jace-commander-invocation:v1';
 
-export const JC_SCOPES = Object.freeze([
-  'fs.read',
-  'integration.read',
-  'integration.write',
-  'process.privileged',
-] as const);
-export type JcScope = typeof JC_SCOPES[number];
+/**
+ * Scope vocabulary and per-tool policy come from the generated copy of the
+ * canonical manifest (packages/jc-tool-manifest in agent-control-stack; see
+ * manifest.generated.ts). ACS signs from the same manifest, so a tool, scope
+ * or approval rule can no longer be added to one side and not the other.
+ */
+export const JC_SCOPES: readonly string[] = Object.freeze([...JC_MANIFEST.scopes]);
+export type JcScope = string;
 
 export interface JcToolPolicy {
   scopes: readonly JcScope[];
   requiresApproval: boolean;
 }
 
-const policy = (scopes: readonly JcScope[], requiresApproval: boolean): JcToolPolicy =>
-  Object.freeze({ scopes: Object.freeze([...scopes]), requiresApproval });
-
 /**
  * Every tool the server registers MUST appear here; server.ts asserts it at
- * startup. `privileged_exec` is the only approval-gated tool: submitting a
- * mission to ACS is itself a request for ACS policy/approval, so gating the
- * submission behind a second approval would be circular.
+ * startup. Approval requirements are the manifest's: today `privileged_exec`
+ * is the only approval-gated tool.
  */
-export const JC_TOOL_POLICIES: Readonly<Record<string, JcToolPolicy>> = Object.freeze({
-  jc_status: policy(['integration.read'], false),
-  acs_read: policy(['integration.read'], false),
-  acs_submit_mission: policy(['integration.write'], false),
-  swarm_read: policy(['integration.read'], false),
-  visualizer_read: policy(['integration.read'], false),
-  mission_router_list: policy(['fs.read'], false),
-  looptrace_verify: policy(['fs.read'], false),
-  privileged_exec: policy(['process.privileged'], true),
-});
+export const JC_TOOL_POLICIES: Readonly<Record<string, JcToolPolicy>> = Object.freeze(
+  Object.fromEntries(
+    JC_MANIFEST.tools.map((tool) => [
+      tool.name,
+      Object.freeze({ scopes: Object.freeze([...tool.scopes]), requiresApproval: tool.requiresApproval }),
+    ]),
+  ),
+);
 
 export type JcRejectionCode =
   | 'JC_CAPABILITY_MISSING'
