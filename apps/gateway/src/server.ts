@@ -83,6 +83,8 @@ import {
   type RegistryAgentDetail,
   type RegistryStatus,
   type StoredAuditEvent,
+  type ExecutionAttempt,
+  type ExecutionPlanRecord,
   type WorkItem
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
@@ -274,6 +276,23 @@ export interface GatewayOptions {
   readManagedAuthority?: () => ManagedAuthorityObservation;
   /** Shared shutdown gate; tests may inject one to assert claim drain behavior. */
   shutdownController?: ShutdownController;
+}
+
+/**
+ * Attach each attempt's own persisted execution plan so operator surfaces can
+ * render a per-attempt execution-mode chip from attempt-local evidence.
+ *
+ * The plan is resolved by the attempt's own planId — never inferred from the
+ * work item's final result or current plan head, which may reflect a later
+ * replan. A missing plan stays absent and the UI fails closed (no chip)
+ * instead of guessing.
+ */
+function withAttemptPlan(
+  store: Pick<SqliteWorkItemStore, "getExecutionPlan">,
+  attempt: ExecutionAttempt
+): ExecutionAttempt & { plan?: ExecutionPlanRecord } {
+  const plan = store.getExecutionPlan(attempt.planId);
+  return plan ? { ...attempt, plan } : attempt;
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
@@ -1072,7 +1091,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return {
         workItem,
         events: workItems.readEvents(eventReadOptions(request.query, { workItemId: request.params.id })),
-        executionAttempts: executionReads.listExecutionAttempts(request.params.id),
+        executionAttempts: executionReads
+          .listExecutionAttempts(request.params.id)
+          .map((attempt) => withAttemptPlan(workItems, attempt)),
         attemptLeases: executionReads.listAttemptLeases(request.params.id).map(toMissionControlAttemptLease)
       };
     } catch (error) {

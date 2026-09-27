@@ -138,7 +138,6 @@ jobs:
                                     name
                                     status
                                     conclusion
-                                    app { slug }
                                   }
                                   ... on StatusContext {
                                     context

@@ -237,6 +237,10 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .agent-row:hover, .agent-row.selected { background: var(--hover); }
 .empty { padding: 18px; color: var(--muted); }
 .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: var(--pill-bg); color: var(--pill-ink); border: 1px solid var(--pill-line); white-space: nowrap; }
+.pill.execution-mode { font-weight: 700; letter-spacing: 0.04em; }
+.execution-mode-dry_run { color: var(--amber); border-color: var(--warn-line); background: var(--warn-bg); border-style: dashed; }
+.execution-mode-desktop_commander { color: var(--red); border-color: var(--bad-line); background: var(--bad-bg); }
+.execution-mode-unknown { color: var(--muted); border-style: dotted; }
 .online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: var(--ok-line); background: var(--ok-bg); }
 .stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: var(--warn-line); background: var(--warn-bg); }
 .offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: var(--bad-line); background: var(--bad-bg); }
@@ -461,10 +465,10 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
     </label>
   </div>
   <p id="queue-filter-live" class="queue-filter-live" aria-live="polite">Showing all work items</p>
-</div><div class="queue" id="queue-list"><button class="queue-item attention" data-work-item="wrk_approve" data-status="needs_approval" data-title="Approve me" data-agent-id="/repo"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Approve me</strong><small>verify rendering</small></button><button class="queue-item attention" data-work-item="wrk_blocked" data-status="blocked" data-title="Blocked task" data-agent-id="/repo"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Blocked task</strong><small>verify rendering</small><small class="error-line">worker lease expired token=[redacted]</small></button><button class="queue-item" data-work-item="wrk_running" data-status="running" data-title="Running task" data-agent-id="/repo"><span><span class="pill running">running</span> <span class="pill low">low</span></span><strong>Running task</strong><small>verify rendering</small><small class="plan-status plan-admitted">Execution plan admitted &middot; requires approval</small><small class="execution-status">Attempt #1 &middot; leased &middot; worker-1 &middot; lease active</small></button><button class="queue-item attention" data-work-item="wrk_quarantined" data-status="quarantined" data-title="Quarantined task" data-agent-id="/repo"><span><span class="pill quarantined">quarantined</span> <span class="pill low">low</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Quarantined task</strong><small>verify rendering</small></button><button class="queue-item" data-work-item="wrk_done" data-status="succeeded" data-title="Finished task" data-agent-id="/repo"><span><span class="pill succeeded">succeeded</span> <span class="pill medium">medium</span></span><strong>Finished task</strong><small>verify rendering</small></button></div><div id="queue-footer" class="queue-footer"><p class="queue-footer-note">Showing the 1 most recent of 7 finished items. Active items are always shown.</p><button type="button" class="load-more" data-load-more-finished data-shown="1" data-step="50">Show 6 more finished</button></div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section></article>
+</div><div class="queue" id="queue-list"><button class="queue-item attention" data-work-item="wrk_approve" data-status="needs_approval" data-title="Approve me" data-agent-id="/repo"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Approve me</strong><small>verify rendering</small></button><button class="queue-item attention" data-work-item="wrk_blocked" data-status="blocked" data-title="Blocked task" data-agent-id="/repo"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Blocked task</strong><small>verify rendering</small><small class="error-line">worker lease expired token=[redacted]</small></button><button class="queue-item" data-work-item="wrk_running" data-status="running" data-title="Running task" data-agent-id="/repo"><span><span class="pill running">running</span> <span class="pill low">low</span> </span><strong>Running task</strong><small>verify rendering</small><small class="plan-status plan-admitted">Execution plan admitted &middot; requires approval</small><small class="execution-status">Attempt #1 &middot; leased &middot; worker-1 &middot; lease active</small></button><button class="queue-item attention" data-work-item="wrk_quarantined" data-status="quarantined" data-title="Quarantined task" data-agent-id="/repo"><span><span class="pill quarantined">quarantined</span> <span class="pill low">low</span> <span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Quarantined task</strong><small>verify rendering</small></button><button class="queue-item" data-work-item="wrk_done" data-status="succeeded" data-title="Finished task" data-agent-id="/repo"><span><span class="pill succeeded">succeeded</span> <span class="pill medium">medium</span> </span><strong>Finished task</strong><small>verify rendering</small></button></div><div id="queue-footer" class="queue-footer"><p class="queue-footer-note">Showing the 1 most recent of 7 finished items. Active items are always shown.</p><button type="button" class="load-more" data-load-more-finished data-shown="1" data-step="50">Show 6 more finished</button></div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section></article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-action-hash="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" data-action-kind="fs.read" data-risk="high" aria-label="Approve fs.read: inspect source (hash dddddddd…) for Approve me" aria-describedby="reason-wrk_approve" title="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd">Approve fs.read <code class="hash-prefix">dddddddd…</code></button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
+        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-action-hash="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" data-action-kind="fs.read" data-risk="high" aria-label="Approve fs.read: inspect source (hash dddddddd…) for Approve me" aria-describedby="reason-wrk_approve" title="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd">Approve fs.read <code class="hash-prefix">dddddddd…</code></button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body"><div class="operator-metrics"><dl>
@@ -947,6 +951,8 @@ setInterval(renderLiveStatus, 1000);
 let timelinePaused = false;
 let timelineBuffer = [];
 let timelineCap = 200;
+let timelineBufferCap = 500;
+let timelineDropped = 0;
 let timelineLoadingOlder = false;
 
 function timelineList() {
@@ -979,15 +985,25 @@ function renderTimelineControls() {
   const pause = document.getElementById('events-pause');
   if (pause) {
     pause.setAttribute('aria-pressed', timelinePaused ? 'true' : 'false');
-    pause.textContent = timelinePaused
+    const label = timelinePaused
       ? 'Resume' + (timelineBuffer.length ? ' (' + timelineBuffer.length + ' new)' : '')
       : 'Pause';
+    pause.textContent = label;
+    if (timelinePaused && timelineDropped > 0) {
+      pause.title = timelineDropped + ' older buffered ' + (timelineDropped === 1 ? 'event' : 'events') + ' dropped to stay under the buffer cap';
+    } else {
+      pause.removeAttribute('title');
+    }
   }
 }
 
 function insertLiveTimelineEvent(data) {
   if (timelinePaused) {
     timelineBuffer.push(data);
+    while (timelineBuffer.length > timelineBufferCap) {
+      timelineBuffer.shift();
+      timelineDropped += 1;
+    }
     renderTimelineControls();
     return;
   }
@@ -1002,6 +1018,7 @@ function setTimelinePaused(paused) {
   if (!paused && timelineBuffer.length) {
     const buffered = timelineBuffer;
     timelineBuffer = [];
+    timelineDropped = 0;
     buffered.forEach(insertLiveTimelineEvent);
   }
   renderTimelineControls();
@@ -1714,7 +1731,7 @@ function renderExecutionAuthority(executionAttempts, attemptLeases) {
           detailRow('Max expiry', formatClientTime(lease.maxExpiresAt)) +
         '</dl></div>'
       : '<p class="muted">No lease recorded for this attempt.</p>';
-    return '<article class="execution-card"><div class="execution-head"><div><strong>Attempt #' + escapeClient(attempt.attemptNumber) + '</strong><small>' + escapeClient(attempt.attemptId) + '</small></div>' + pillMarkup(attempt.status || 'unknown') + '</div><dl class="detail-grid compact">' +
+    return '<article class="execution-card"><div class="execution-head"><div><strong>Attempt #' + escapeClient(attempt.attemptNumber) + '</strong><small>' + escapeClient(attempt.attemptId) + '</small></div>' + pillMarkup(attempt.status || 'unknown') + attemptExecutionModeChipClient(attempt) + '</div><dl class="detail-grid compact">' +
       detailRow('Worker', worker) +
       detailRow('Fencing epoch', String(attempt.currentFencingEpoch ?? 0)) +
       detailRow('Plan', attempt.planId) +
@@ -1727,6 +1744,64 @@ function renderExecutionAuthority(executionAttempts, attemptLeases) {
   }).join('') + '</div></div>';
 }
 
+var EXECUTION_MODE_LABELS_CLIENT = { dry_run: 'DRY RUN', desktop_commander: 'LIVE EXECUTION', unknown: 'MODE UNKNOWN' };
+
+function recognizedExecutionModesClient(candidates) {
+  var seen = {};
+  var distinct = [];
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = candidates[i];
+    if ((candidate === 'dry_run' || candidate === 'desktop_commander') && !seen[candidate]) {
+      seen[candidate] = true;
+      distinct.push(candidate);
+    }
+  }
+  return distinct;
+}
+
+function resultExecutionModeClient(workItem) {
+  var result = workItem && workItem.result;
+  if (!result || typeof result !== 'object') return 'none';
+  var sim = result.simulationMetadata;
+  var modes = recognizedExecutionModesClient([result.executionMode, result.execution_mode, sim && typeof sim === 'object' ? sim.executionMode : undefined]);
+  // Fail closed: conflicting mode metadata must not produce a confident label.
+  if (modes.length !== 1) return 'unknown';
+  return modes[0];
+}
+
+function executionModeChipClient(workItem) {
+  var mode = resultExecutionModeClient(workItem);
+  if (mode === 'none') return '';
+  return ' <span class="pill execution-mode execution-mode-' + escapeClient(mode) + '" data-execution-mode="' + escapeClient(mode) + '">' + EXECUTION_MODE_LABELS_CLIENT[mode] + '</span>';
+}
+
+function attemptExecutionModeClient(attempt) {
+  // An attempt's mode comes from its own persisted data — its per-attempt
+  // result or its bound plan's constraints — never from the work item's final
+  // persisted result, which may reflect a later replanned execution.
+  if (!attempt || typeof attempt !== 'object') return 'none';
+  var result = attempt.result;
+  var plan = attempt.plan;
+  var planConstraints = plan && plan.definition && plan.definition.constraints;
+  var sim = result && typeof result === 'object' ? result.simulationMetadata : undefined;
+  var modes = recognizedExecutionModesClient([
+    result && typeof result === 'object' ? result.executionMode : undefined,
+    result && typeof result === 'object' ? result.execution_mode : undefined,
+    sim && typeof sim === 'object' ? sim.executionMode : undefined,
+    planConstraints && typeof planConstraints === 'object' ? planConstraints.executionMode : undefined
+  ]);
+  if (modes.length === 0) return 'none';
+  // Fail closed on conflicting evidence, same as the work-item derivation.
+  if (modes.length !== 1) return 'unknown';
+  return modes[0];
+}
+
+function attemptExecutionModeChipClient(attempt) {
+  var mode = attemptExecutionModeClient(attempt);
+  if (mode === 'none') return '';
+  return ' <span class="pill execution-mode execution-mode-' + escapeClient(mode) + '" data-execution-mode="' + escapeClient(mode) + '">' + EXECUTION_MODE_LABELS_CLIENT[mode] + '</span>';
+}
+
 function renderWorkDetail(target, workItem, events, executionAttempts, attemptLeases) {
   if (!workItem) {
     target.innerHTML = '<div class="detail-error">Work item not found.</div>';
@@ -1734,7 +1809,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
   }
   const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
   target.setAttribute('aria-labelledby', 'work-detail-title');
-  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
+  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + executionModeChipClient(workItem) + '</div></div>' +
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +

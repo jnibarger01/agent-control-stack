@@ -398,7 +398,7 @@ function renderExecutionAuthority(executionAttempts, attemptLeases) {
           detailRow('Max expiry', formatClientTime(lease.maxExpiresAt)) +
         '</dl></div>'
       : '<p class="muted">No lease recorded for this attempt.</p>';
-    return '<article class="execution-card"><div class="execution-head"><div><strong>Attempt #' + escapeClient(attempt.attemptNumber) + '</strong><small>' + escapeClient(attempt.attemptId) + '</small></div>' + pillMarkup(attempt.status || 'unknown') + '</div><dl class="detail-grid compact">' +
+    return '<article class="execution-card"><div class="execution-head"><div><strong>Attempt #' + escapeClient(attempt.attemptNumber) + '</strong><small>' + escapeClient(attempt.attemptId) + '</small></div>' + pillMarkup(attempt.status || 'unknown') + attemptExecutionModeChipClient(attempt) + '</div><dl class="detail-grid compact">' +
       detailRow('Worker', worker) +
       detailRow('Fencing epoch', String(attempt.currentFencingEpoch ?? 0)) +
       detailRow('Plan', attempt.planId) +
@@ -411,6 +411,64 @@ function renderExecutionAuthority(executionAttempts, attemptLeases) {
   }).join('') + '</div></div>';
 }
 
+var EXECUTION_MODE_LABELS_CLIENT = { dry_run: 'DRY RUN', desktop_commander: 'LIVE EXECUTION', unknown: 'MODE UNKNOWN' };
+
+function recognizedExecutionModesClient(candidates) {
+  var seen = {};
+  var distinct = [];
+  for (var i = 0; i < candidates.length; i++) {
+    var candidate = candidates[i];
+    if ((candidate === 'dry_run' || candidate === 'desktop_commander') && !seen[candidate]) {
+      seen[candidate] = true;
+      distinct.push(candidate);
+    }
+  }
+  return distinct;
+}
+
+function resultExecutionModeClient(workItem) {
+  var result = workItem && workItem.result;
+  if (!result || typeof result !== 'object') return 'none';
+  var sim = result.simulationMetadata;
+  var modes = recognizedExecutionModesClient([result.executionMode, result.execution_mode, sim && typeof sim === 'object' ? sim.executionMode : undefined]);
+  // Fail closed: conflicting mode metadata must not produce a confident label.
+  if (modes.length !== 1) return 'unknown';
+  return modes[0];
+}
+
+function executionModeChipClient(workItem) {
+  var mode = resultExecutionModeClient(workItem);
+  if (mode === 'none') return '';
+  return ' <span class="pill execution-mode execution-mode-' + escapeClient(mode) + '" data-execution-mode="' + escapeClient(mode) + '">' + EXECUTION_MODE_LABELS_CLIENT[mode] + '</span>';
+}
+
+function attemptExecutionModeClient(attempt) {
+  // An attempt's mode comes from its own persisted data — its per-attempt
+  // result or its bound plan's constraints — never from the work item's final
+  // persisted result, which may reflect a later replanned execution.
+  if (!attempt || typeof attempt !== 'object') return 'none';
+  var result = attempt.result;
+  var plan = attempt.plan;
+  var planConstraints = plan && plan.definition && plan.definition.constraints;
+  var sim = result && typeof result === 'object' ? result.simulationMetadata : undefined;
+  var modes = recognizedExecutionModesClient([
+    result && typeof result === 'object' ? result.executionMode : undefined,
+    result && typeof result === 'object' ? result.execution_mode : undefined,
+    sim && typeof sim === 'object' ? sim.executionMode : undefined,
+    planConstraints && typeof planConstraints === 'object' ? planConstraints.executionMode : undefined
+  ]);
+  if (modes.length === 0) return 'none';
+  // Fail closed on conflicting evidence, same as the work-item derivation.
+  if (modes.length !== 1) return 'unknown';
+  return modes[0];
+}
+
+function attemptExecutionModeChipClient(attempt) {
+  var mode = attemptExecutionModeClient(attempt);
+  if (mode === 'none') return '';
+  return ' <span class="pill execution-mode execution-mode-' + escapeClient(mode) + '" data-execution-mode="' + escapeClient(mode) + '">' + EXECUTION_MODE_LABELS_CLIENT[mode] + '</span>';
+}
+
 function renderWorkDetail(target, workItem, events, executionAttempts, attemptLeases) {
   if (!workItem) {
     target.innerHTML = '<div class="detail-error">Work item not found.</div>';
@@ -418,7 +476,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
   }
   const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
   target.setAttribute('aria-labelledby', 'work-detail-title');
-  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
+  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + ' · <a class="permalink" href="' + escapeClient(workItemPermalink(workItem.id)) + '">Permalink</a></small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + executionModeChipClient(workItem) + '</div></div>' +
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +

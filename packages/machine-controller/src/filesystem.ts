@@ -50,14 +50,16 @@ export function readTextFile(config: MachineControllerConfig, input: unknown) {
     throw new ControlStackError("fs_binary_refused", `binary file reads are refused: ${parsed.path}`);
   }
 
-  const lines = buffer.toString("utf8").split(/\r?\n/);
+  const text = buffer.toString("utf8");
   const start = parsed.start_line;
-  const end = parsed.end_line ?? lines.length;
-  const selected = lines.slice(start - 1, end).map((line, index) => redactLine(`${start + index}: ${line}`));
+  const end = parsed.end_line ?? Number.MAX_SAFE_INTEGER;
+  const lines = extractLineRange(text, start, end);
+  const totalLines = countLines(text);
+  const selected = lines.map((line, index) => redactLine(`${start + index}: ${line}`));
   return {
     path: safe.realPath,
     startLine: start,
-    endLine: Math.min(end, lines.length),
+    endLine: Math.min(end, totalLines),
     text: selected.join("\n")
   };
 }
@@ -112,6 +114,53 @@ function describePath(path: string) {
     size: stat.size,
     modifiedAt: stat.mtime.toISOString()
   };
+}
+
+/**
+ * Extracts lines in the 1-based inclusive range [startLine, endLine] without
+ * allocating an array for every line in the file (unlike text.split(/\r?\n/)).
+ * Line-splitting semantics match /:\r?\n/ — "\n" separates lines and a
+ * "\r" is dropped only when immediately followed by "\n", and a trailing
+ * newline yields a final empty line.
+ */
+function extractLineRange(text: string, startLine: number, endLine: number): string[] {
+  const selected: string[] = [];
+  let position = 0;
+  let index = 0;
+  while (index < endLine) {
+    if (position >= text.length) {
+      // Match split(/\r?\n/): an empty file, or one ending in "\n", has a final empty line.
+      if (position === text.length && (text.length === 0 || text.endsWith("\n"))) {
+        if (index >= startLine - 1) {
+          selected.push("");
+        }
+      }
+      break;
+    }
+    const separatorIndex = text.indexOf("\n", position);
+    const isLastLine = separatorIndex === -1;
+    let line = text.slice(position, isLastLine ? text.length : separatorIndex);
+    // Only strip "\r" when it is followed by "\n" (separatorIndex !== -1), matching
+    // split(/\r?\n/): a lone trailing "\r" on the final line is preserved as-is.
+    if (separatorIndex !== -1 && line.endsWith("\r")) {
+      line = line.slice(0, -1);
+    }
+    if (index >= startLine - 1) {
+      selected.push(line);
+    }
+    position = isLastLine ? text.length + 1 : separatorIndex + 1;
+    index += 1;
+  }
+  return selected;
+}
+
+/** Counts lines exactly as `text.split(/\r?\n/).length` would, without building the array. */
+function countLines(text: string): number {
+  let count = 1;
+  for (let position = text.indexOf("\n"); position !== -1; position = text.indexOf("\n", position + 1)) {
+    count += 1;
+  }
+  return count;
 }
 
 function isBinary(buffer: Buffer): boolean {
