@@ -29,6 +29,13 @@ export { renderDashboardFragments } from "./render/fragments.js";
 export { renderDashboard } from "./render/page.js";
 export { type WorkItemDetailView, renderWorkItemDetailHtml } from "./render/work-detail.js";
 export {
+  executionModeChip,
+  executionModeChipHtml,
+  hasExecutionResult,
+  resultExecutionMode,
+  type ResultExecutionMode
+} from "./execution-mode.js";
+export {
   type SseConnectionRoot,
   type SseConnectionElement,
   type SseConnectionButton,
@@ -71,7 +78,7 @@ export {
   type DashboardFragmentName,
   type DashboardFragments
 } from "./live-dashboard.js";
-export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE } from "./audit-timeline.js";
+export { LIVE_TIMELINE_CAP, OLDER_EVENTS_PAGE, LIVE_TIMELINE_BUFFER_CAP } from "./audit-timeline.js";
 export { COMPOSER_PREVIEW_DEBOUNCE_MS, composerHtml, DEFAULT_ACTION_KIND } from "./composer.js";
 export {
   AUDIT_SUMMARY_KEYS,

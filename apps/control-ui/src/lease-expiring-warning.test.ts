@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { bootLive } from "./live-harness.test-support.js";
 import type { MissionControlViewModel } from "./index.js";
 
-const CLOCK_START_MS = 1_800_000_000_000; // fixed clock the live harness starts at
+const CLOCK_START_MS = 1_800_000_000_000;
 
 const item = {
   id: "wrk_lease_warn",
@@ -32,8 +32,7 @@ const attempt = {
   updatedAt: new Date(CLOCK_START_MS - 30_000).toISOString()
 };
 
-function leaseWith(expiresInMs: number, ttlMs = 5 * 60_000, overrides: Record<string, unknown> = {}) {
-  const expiresAt = new Date(CLOCK_START_MS + expiresInMs).toISOString();
+function leaseWith(expiresInMs: number, overrides: Record<string, unknown> = {}) {
   return {
     leaseId: "lease_1",
     attemptId: attempt.attemptId,
@@ -46,9 +45,9 @@ function leaseWith(expiresInMs: number, ttlMs = 5 * 60_000, overrides: Record<st
     protocolVersion: "acs.worker.v2" as const,
     policyVersion: "acs.policy.v1",
     policyDecisionHash: "c".repeat(64),
-    issuedAt: new Date(CLOCK_START_MS + expiresInMs - ttlMs).toISOString(),
-    expiresAt,
-    maxExpiresAt: expiresAt,
+    issuedAt: new Date(CLOCK_START_MS - 4 * 60_000).toISOString(),
+    expiresAt: new Date(CLOCK_START_MS + expiresInMs).toISOString(),
+    maxExpiresAt: new Date(CLOCK_START_MS + expiresInMs).toISOString(),
     lastRenewedAt: new Date(CLOCK_START_MS - 30_000).toISOString(),
     status: "active" as const,
     ...overrides
@@ -59,15 +58,17 @@ function initial(): MissionControlViewModel {
   return { workItems: [item], events: [], executionAttemptsByWorkItem: { [item.id]: [attempt] } };
 }
 
-async function openDetail(lease: ReturnType<typeof leaseWith> | undefined) {
+async function openDetail(lease: ReturnType<typeof leaseWith>, serverOffsetMs = 0) {
+  const serverDate = new Date(CLOCK_START_MS + serverOffsetMs).toUTCString();
   const app = bootLive(initial(), {
     [`/work-items/${item.id}`]: () => ({
       status: 200,
+      headers: { Date: serverDate },
       body: {
         workItem: item,
         events: [],
         executionAttempts: [attempt],
-        attemptLeases: lease ? [lease] : []
+        attemptLeases: [lease]
       }
     })
   });
@@ -78,36 +79,48 @@ async function openDetail(lease: ReturnType<typeof leaseWith> | undefined) {
   return app;
 }
 
-describe("lease expiring-soon warning (wave-2 item #5, presentation only)", () => {
-  it("warns when less than 20% of the observed TTL remains", async () => {
-    // TTL 5 min -> threshold max(60s, 60s) = 60s; 30s remaining warns.
-    const app = await openDetail(leaseWith(30_000));
-    expect(app.text(".lease-block .lease-head")).toContain("expiring soon — warning only");
+function warningText(app: Awaited<ReturnType<typeof openDetail>>) {
+  return app.text(".lease-expiry-warning");
+}
+
+describe("lease expiring-soon warning", () => {
+  it("uses lastRenewedAt as the current TTL start", async () => {
+    const lease = leaseWith(4 * 60_000, {
+      issuedAt: new Date(CLOCK_START_MS - 20 * 60_000).toISOString(),
+      lastRenewedAt: new Date(CLOCK_START_MS - 60_000).toISOString()
+    });
+    const app = await openDetail(lease);
+    expect(warningText(app)).toBe("");
   });
 
-  it("does not warn while ample TTL remains", async () => {
-    const app = await openDetail(leaseWith(4 * 60_000));
-    expect(app.text(".lease-block .lease-head")).not.toContain("expiring soon");
+  it("reevaluates while the detail remains open and clears after expiry", async () => {
+    const app = await openDetail(
+      leaseWith(70_000, { lastRenewedAt: new Date(CLOCK_START_MS - 230_000).toISOString() })
+    );
+    expect(warningText(app)).toBe("");
+
+    await app.advance(15_000);
+    expect(warningText(app)).toContain("expiring soon");
+
+    await app.advance(60_000);
+    expect(warningText(app)).toBe("");
   });
 
-  it("does not warn for an already-expired or non-active lease", async () => {
-    const app = await openDetail(leaseWith(-10_000));
-    expect(app.text(".lease-block .lease-head")).not.toContain("expiring soon");
-
-    const released = await openDetail(leaseWith(30_000, 5 * 60_000, { status: "released" }));
-    expect(released.text(".lease-block .lease-head")).not.toContain("expiring soon");
+  it("uses the HTTP Date header to correct a skewed browser clock", async () => {
+    // Server is two minutes ahead. The server sees only 30s remaining even
+    // though the browser's local clock would incorrectly see 150s.
+    const app = await openDetail(
+      leaseWith(150_000, { lastRenewedAt: new Date(CLOCK_START_MS - 150_000).toISOString() }),
+      120_000
+    );
+    expect(warningText(app)).toContain("expiring soon");
   });
 
-  it("uses the 60-second floor for short leases and renders nothing without lease data", async () => {
-    // TTL 3 min -> threshold max(60s, 36s) = 60s; 50s remaining warns.
-    const short = await openDetail(leaseWith(50_000, 3 * 60_000));
-    expect(short.text(".lease-block .lease-head")).toContain("expiring soon — warning only");
+  it("does not warn for an expired or non-active lease", async () => {
+    const expired = await openDetail(leaseWith(-10_000));
+    expect(warningText(expired)).toBe("");
 
-    // TTL 3 min -> 90s remaining is above the 60s floor: no warning.
-    const mid = await openDetail(leaseWith(90_000, 3 * 60_000));
-    expect(mid.text(".lease-block .lease-head")).not.toContain("expiring soon");
-
-    const none = await openDetail(undefined);
-    expect(none.document.querySelector(".lease-block")).toBeNull();
+    const released = await openDetail(leaseWith(30_000, { status: "released" }));
+    expect(warningText(released)).toBe("");
   });
 });

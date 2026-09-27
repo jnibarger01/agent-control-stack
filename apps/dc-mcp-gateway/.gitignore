@@ -1,0 +1,6 @@
+data/
+.env
+CONSENT_PASSPHRASE.txt
+node_modules/
+.env.bridge
+.env.bak-*

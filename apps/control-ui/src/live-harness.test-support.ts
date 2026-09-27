@@ -79,9 +79,20 @@ export function bootLive(
         }
         const extra = extraRoutes[path];
         if (extra) {
-          const result = extra(url) as { status?: number; body?: unknown } | undefined;
+          const result = extra(url) as { status?: number; body?: unknown; headers?: Record<string, string> } | undefined;
           const status = result?.status ?? 200;
-          return { ok: status < 400, status, json: async () => result?.body ?? {} };
+          const headers = result?.headers ?? {};
+          return {
+            ok: status < 400,
+            status,
+            headers: {
+              get(name: string) {
+                const key = Object.keys(headers).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
+                return key ? headers[key] ?? null : null;
+              }
+            },
+            json: async () => result?.body ?? {}
+          };
         }
         if (method === "POST") {
           return { ok: postResponse.status < 400, status: postResponse.status, json: async () => postResponse.body };

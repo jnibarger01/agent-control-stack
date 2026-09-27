@@ -1,3 +1,4 @@
+import { executionModeChipHtml, type ResultExecutionMode } from "../execution-mode.js";
 import { nanoToIso, pill, time } from "../format.js";
 import { escapeHtml } from "../html.js";
 import { redactSecrets, redactedAttributesJson } from "../redaction.js";
@@ -13,6 +14,8 @@ export interface WorkItemDetailView {
   target?: unknown;
   createdAt?: string;
   requestedActions?: Array<{ kind: string; description?: string }>;
+  /** Execution mode chip source: omitted (or `"none"`) when the item has no persisted result. */
+  executionMode?: ResultExecutionMode | "none";
 }
 
 /** Markup for the work-item detail panel (axe smoke + client parity). */
@@ -40,5 +43,5 @@ export function renderWorkItemDetailHtml(
         })
         .join("")}</ol>`
     : `<p class="muted">No matching events.</p>`;
-  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)} · <a class="permalink" href="?item=${escapeHtml(encodeURIComponent(workItem.id))}#queue">Permalink</a></small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div>${workItemControlsHtml(workItem)}<div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
+  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)} · <a class="permalink" href="?item=${escapeHtml(encodeURIComponent(workItem.id))}#queue">Permalink</a></small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}${executionModeChipHtml(workItem.executionMode)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div>${workItemControlsHtml(workItem)}<div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
 }

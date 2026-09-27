@@ -17,3 +17,5 @@ storage/*.db*
 runs
 reviews
 agentos
+# Desktop Commander is built and shipped separately; never part of the ACS image.
+vendor
