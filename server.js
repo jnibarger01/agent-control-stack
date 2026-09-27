@@ -575,7 +575,9 @@ const server = http.createServer(async (req, res) => {
     if (pathName === '/ready' || pathName === '/authority') {
       const acsIssuance = await checkAcsIssuanceReady();
       const bridgeAuthority = await fetchBridgeAuthority();
-      const jcAuthority = JC.enabled ? await fetchBridgeAuthority(JC_UPSTREAM) : null;
+      // The optional JC lane must never delay or gate the primary /ready probe.
+      // Report it on /authority only; /ready remains scoped to the primary DC lane.
+      const jcAuthority = pathName === '/authority' && JC.enabled ? await fetchBridgeAuthority(JC_UPSTREAM) : null;
       if (pathName === '/authority') {
         const body = {
           managedIssuance: { configured: MANAGED.enabled, ...acsIssuance },
