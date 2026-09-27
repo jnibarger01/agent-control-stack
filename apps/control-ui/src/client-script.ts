@@ -373,6 +373,21 @@ function shortHash(value) {
   return text.length > 16 ? text.slice(0, 12) + '…' : text;
 }
 
+// Presentation-only "expiring soon" signal (wave-2 plan item #5): a lease is
+// flagged when less than max(60s, 20% of its observed TTL) remains and it is
+// still active. This changes no state and is never an authority decision.
+function leaseExpiringSoon(lease, nowMs) {
+  if (!lease || lease.status !== 'active') return false;
+  const expiresAtMs = Date.parse(lease.expiresAt || '');
+  if (!Number.isFinite(expiresAtMs)) return false;
+  const currentMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  if (expiresAtMs <= currentMs) return false;
+  const issuedAtMs = Date.parse(lease.issuedAt || '');
+  const observedTtlMs = Number.isFinite(issuedAtMs) ? Math.max(0, expiresAtMs - issuedAtMs) : 0;
+  const thresholdMs = Math.max(60 * 1000, 0.2 * observedTtlMs);
+  return expiresAtMs - currentMs < thresholdMs;
+}
+
 function renderExecutionAuthority(executionAttempts, attemptLeases) {
   const attempts = Array.isArray(executionAttempts) ? executionAttempts.slice() : [];
   const leases = Array.isArray(attemptLeases) ? attemptLeases : [];
@@ -385,7 +400,7 @@ function renderExecutionAuthority(executionAttempts, attemptLeases) {
     const lease = matching[0];
     const worker = (lease && lease.workerId) || attempt.claimedByWorkerId || '—';
     const leaseMarkup = lease
-      ? '<div class="lease-block"><div class="lease-head"><strong>Lease ' + escapeClient(lease.leaseId) + '</strong>' + pillMarkup(lease.status || 'unknown') + '</div><dl class="detail-grid compact">' +
+      ? '<div class="lease-block"><div class="lease-head"><strong>Lease ' + escapeClient(lease.leaseId) + '</strong>' + pillMarkup(lease.status || 'unknown') + (leaseExpiringSoon(lease) ? '<span class="pill warning" role="status">expiring soon — warning only</span>' : '') + '</div><dl class="detail-grid compact">' +
           detailRow('Worker', worker) +
           detailRow('Fencing epoch', String(lease.fencingEpoch ?? attempt.currentFencingEpoch ?? 0)) +
           detailRow('Admission', lease.admissionId) +
