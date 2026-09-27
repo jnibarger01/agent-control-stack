@@ -67,6 +67,21 @@ describe("Desktop Commander enforcement architecture", () => {
     expect(DC_CAPABILITY_OPTIONAL_DISCOVERY_TOOLS).toHaveLength(1);
   });
 
+  it("keeps the relay a transport: no ACS capability handling, issuance, or OS execution in apps/dc-relay", () => {
+    const relayRoot = new URL("../../apps/dc-relay/src/", import.meta.url).pathname;
+    for (const file of sourceFiles(relayRoot)) {
+      const source = readFileSync(file, "utf8");
+      for (const forbidden of [
+        /acsCapability/iu,
+        /capability\/issue/u,
+        /node:child_process|from 'child_process'/u,
+        /\bspawn\(|\bexecSync\(|\bexecFile\(/u
+      ]) {
+        expect(forbidden.test(source), `${relative(relayRoot, file)} matches ${forbidden}`).toBe(false);
+      }
+    }
+  });
+
   it("has no other tools/call entry point that could bypass the managed guard", () => {
     // Known additional MCP servers shipped in the DC package. Each delegates
     // to a managed child or enforces its own ACS contract; a new one must be
