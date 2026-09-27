@@ -166,6 +166,55 @@ const redirect = (res, url) => send(res, 302, '', { Location: url });
 const jsonError = (res, status, code, desc, extraHeaders = {}) =>
   send(res, status, { error: code, error_description: desc }, extraHeaders);
 
+const MANAGED_TOOL_ERRORS = Object.freeze({
+  denied: Object.freeze({ code: -32001, kind: 'managed_authorization_denied', retryable: false }),
+  required: Object.freeze({ code: -32002, kind: 'managed_authorization_required', retryable: true }),
+  unavailable: Object.freeze({ code: -32003, kind: 'managed_authorization_unavailable', retryable: true }),
+});
+
+function managedToolErrorResponse(parsed, failure) {
+  const acsCode = failure && typeof failure.acsCode === 'string' ? failure.acsCode : 'managed_fail_closed';
+  const acsDecision = failure && typeof failure.acsDecision === 'string' ? failure.acsDecision : null;
+  const shape = acsCode === 'require_approval' || acsDecision === 'require_approval'
+    ? MANAGED_TOOL_ERRORS.required
+    : acsDecision === 'deny'
+      ? MANAGED_TOOL_ERRORS.denied
+      : MANAGED_TOOL_ERRORS.unavailable;
+  const details = {
+    kind: shape.kind,
+    acsCode,
+    retryable: shape.retryable,
+  };
+  const sources = [failure?.acsDetails, failure?.acsApproval];
+  for (const key of ['reason', 'detail', 'workItemId', 'actionHash', 'approvalInstructions']) {
+    for (const source of sources) {
+      if (source && typeof source[key] === 'string') {
+        details[key] = source[key];
+        break;
+      }
+    }
+  }
+  const message = shape === MANAGED_TOOL_ERRORS.required
+    ? details.workItemId
+      ? `ACS approval required: work item ${details.workItemId}. Approve it in ACS, then retry the identical call.`
+      : 'ACS approval required. Approve the work item in ACS, then retry the identical call.'
+    : shape === MANAGED_TOOL_ERRORS.denied
+      ? details.reason
+        ? `ACS denied this tool call: ${details.reason}`
+        : 'ACS denied this tool call.'
+      : 'ACS authorization unavailable; retry after ACS recovers.';
+  const id = parsed && Object.prototype.hasOwnProperty.call(parsed, 'id') ? parsed.id : null;
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: {
+      code: shape.code,
+      message,
+      data: details,
+    },
+  };
+}
+
 function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
     const chunks = []; let size = 0;
@@ -667,16 +716,12 @@ const server = http.createServer(async (req, res) => {
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
-            const approval = e && e.acsApproval && typeof e.acsApproval === 'object' ? e.acsApproval : {};
-            // A require_approval response is not a failure the caller can do
-            // nothing about: surface the ACS work item so a human can approve
-            // it and the same call can be retried. Still fail-closed — the
-            // tools/call is never forwarded to Desktop Commander here.
-            const errorKind = code === 'require_approval' && approval.workItemId
-              ? 'managed_authorization_required'
-              : 'managed_authorization_unavailable';
-            log(req.method, '/mcp', 503, `managed fail-closed: ${code}`);
-            return send(res, 503, { error: errorKind, code, ...approval });
+            // A parsed single tools/call refusal is an MCP application error,
+            // not an HTTP transport failure. Keep the call fail-closed — it is
+            // never forwarded — while preserving the request id and ACS
+            // approval metadata for the caller.
+            log(req.method, '/mcp', 200, `managed fail-closed: ${code}`);
+            return send(res, 200, managedToolErrorResponse(parsed, e));
           }
         } else if (parsed && parsed.method === 'initialize' && NATIVE_RUNTIME_BOOTSTRAP) {
           // Managed initialize: fetch an ACS runtime bootstrap challenge and
@@ -736,12 +781,8 @@ const server = http.createServer(async (req, res) => {
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
-            const approval = e && e.acsApproval && typeof e.acsApproval === 'object' ? e.acsApproval : {};
-            const errorKind = code === 'require_approval' && approval.workItemId
-              ? 'managed_authorization_required'
-              : 'managed_authorization_unavailable';
-            log(req.method, '/jc/mcp', 503, `managed fail-closed: ${code}`);
-            return send(res, 503, { error: errorKind, code, ...approval });
+            log(req.method, '/jc/mcp', 200, `managed fail-closed: ${code}`);
+            return send(res, 200, managedToolErrorResponse(parsed, e));
           }
         }
       }
