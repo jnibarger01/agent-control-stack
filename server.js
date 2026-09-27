@@ -546,9 +546,9 @@ async function checkAcsIssuanceReady() {
     return { reachable: false, detail: `ACS gateway unreachable: ${e?.message || 'error'}` };
   }
 }
-async function fetchBridgeAuthority() {
+async function fetchBridgeAuthority(upstreamBase = UPSTREAM) {
   try {
-    const url = new URL('/authority', UPSTREAM);
+    const url = new URL('/authority', upstreamBase);
     const r = await fetch(url, { signal: AbortSignal.timeout(3000) });
     if (!r.ok) return { ok: false, error: `bridge /authority HTTP ${r.status}` };
     return { ok: true, data: await r.json() };

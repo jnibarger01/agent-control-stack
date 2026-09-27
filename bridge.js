@@ -46,8 +46,9 @@ if (JC && !MANAGED) {
   process.exit(1);
 }
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
+const JC_DIR = process.env.JC_DC_DIR || '/home/jacen/projects/desktop-commander';
 const DEFAULT_DC_ARGS = JC
-  ? '/home/jacen/projects/desktop-commander/dist/jace-commander/cli.js serve'
+  ? `${path.join(JC_DIR, 'dist/jace-commander/cli.js')} serve`
   : MANAGED
     ? '/home/jacen/projects/desktop-commander/dist/index.js'
     : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
@@ -56,7 +57,6 @@ if (MANAGED && DC_ARGS.includes('--standalone')) {
   console.error('bridge: managed mode refuses a --standalone executor; fix DC_ARGS');
   process.exit(1);
 }
-const JC_DIR = process.env.JC_DC_DIR || '/home/jacen/projects/desktop-commander';
 const DC_CWD = JC ? JC_DIR : process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || '';
 const GATEWAY_ATTESTATION_KEY = process.env.DC_GATEWAY_ATTESTATION_KEY || '';

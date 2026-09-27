@@ -92,7 +92,7 @@ https://<host>/jc/mcp ─► server.js (Bearer <redacted> == JC_RESOURCE)
 
 - `desktop-commander-mcp.service` → `node bridge.js` (loopback 8002)
 - `desktop-commander-auth-proxy.service` → `node server.js` (loopback 8010)
-- `jace-commander-mcp.service` → `BRIDGE_VARIANT=jc node bridge.js` (loopback 8003; optional)
+- `jace-commander-mcp.service` → `BRIDGE_PROFILE=jace-commander node bridge.js` (loopback 8003; optional)
 
 ## Connect from ChatGPT
 

@@ -297,3 +297,58 @@ test('JSON-RPC batch without tools/call still proxies on /jc/mcp', async () => {
     assert.equal(acs.requests.length, 0);
   } finally { close(); }
 });
+
+test('/authority and /ready read the jc bridge from JC_UPSTREAM, not the DC upstream', async () => {
+  const authorityFor = (variant) => (req) => (req.path === '/authority'
+    ? { status: 200, body: { variant, bridge: { hasUpstreamPair: true } } }
+    : { status: 200, body: { jsonrpc: '2.0', id: 1, result: {} } });
+  const dcUp = recorder(authorityFor('dc'));
+  const jcUp = recorder(authorityFor('jc'));
+  const [dcPort, jcPort] = [await dcUp.listen(), await jcUp.listen()];
+  const gw = await startGateway({
+    UPSTREAM: `http://127.0.0.1:${dcPort}`, JC_ENABLED: '1', JC_UPSTREAM: `http://127.0.0.1:${jcPort}`,
+    ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token',
+  });
+  try {
+    const authority = await (await fetch(`http://127.0.0.1:${gw.port}/authority`)).json();
+    assert.equal(authority.bridge.variant, 'dc');
+    assert.equal(authority.jcBridge.variant, 'jc');
+    const ready = await (await fetch(`http://127.0.0.1:${gw.port}/ready`)).json();
+    assert.equal(ready.jcBridgeReady, true);
+    assert.ok(jcUp.requests.some((r) => r.path === '/authority'), 'jc upstream was queried');
+  } finally {
+    gw.child.kill('SIGKILL'); dcUp.server.close(); jcUp.server.close();
+  }
+});
+
+test('jace-commander bridge runs <JC_DC_DIR>/dist/jace-commander/cli.js serve', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-dcdir-'));
+  const state = path.join(root, 'state');
+  fs.mkdirSync(path.join(root, 'dist/jace-commander'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}\n');
+  fs.copyFileSync(new URL('./stub-jc.mjs', import.meta.url), path.join(root, 'dist/jace-commander/cli.js'));
+  const port = nextPort++;
+  const bridge = spawn(process.execPath, ['bridge.js'], {
+    cwd: new URL('..', import.meta.url).pathname,
+    env: {
+      PATH: process.env.PATH, HOME: process.env.HOME, BRIDGE_PROFILE: 'jace-commander', BRIDGE_PORT: String(port),
+      ACS_MANAGED_MODE: '1', DC_CMD: process.execPath, JC_DC_DIR: root,
+      JC_ACS_PUBLIC_KEY: 'k', JC_ACS_KEY_ID: 'i', JC_RUNTIME_ID: 'jc-test', JC_STATE_DIR: state,
+    },
+    stdio: ['ignore', 'ignore', 'pipe'],
+  });
+  let stderr = '';
+  bridge.stderr.on('data', (d) => { stderr += d; });
+  try {
+    const argvFile = path.join(state, 'argv.json');
+    for (let i = 0; i < 50 && !fs.existsSync(argvFile); i += 1) await new Promise((r) => setTimeout(r, 100));
+    assert.ok(fs.existsSync(argvFile), `child from JC_DC_DIR never started: ${stderr}`);
+    assert.deepEqual(JSON.parse(fs.readFileSync(argvFile, 'utf8')).argv, ['serve']);
+  } finally {
+    bridge.kill('SIGKILL');
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
