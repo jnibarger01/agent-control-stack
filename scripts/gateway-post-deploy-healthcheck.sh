@@ -26,9 +26,11 @@ check /livez
 # Readiness can lag liveness briefly after a deploy (dependency warm-up, store
 # migration). Retry /readyz a bounded number of times before failing the check.
 ready=0
-readyz_response=""
+readyz_response_file="$(mktemp)"
+trap 'rm -f "${readyz_response_file}"' EXIT
 for ((attempt = 1; attempt <= READYZ_ATTEMPTS; attempt += 1)); do
-  if readyz_response="$(curl -fsS --max-time "${TIMEOUT_SEC}" "${BASE_URL}/readyz" 2>/dev/null)"; then
+  : >"${readyz_response_file}"
+  if curl -fsS --max-time "${TIMEOUT_SEC}" --max-filesize 65536 -o "${readyz_response_file}" "${BASE_URL}/readyz" 2>/dev/null; then
     ready=1
     break
   fi
@@ -47,6 +49,6 @@ fi
 # un-retried request, which could flap (503 -> 200 -> 503) and falsely
 # fail the deployment.
 echo "GET ${BASE_URL}/readyz"
-printf '%s\n' "${readyz_response}"
-echo
+cat "${readyz_response_file}"
+printf '\n'
 echo "gateway post-deploy healthcheck OK"
