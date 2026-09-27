@@ -1,0 +1,95 @@
+{
+  "schema": "acs.dc.v1.golden-vector",
+  "schemaVersion": 1,
+  "keyId": "test-key-1",
+  "testOnlyPrivateSeedHex": "9d61b19deffd5a60ba844af492ec2cc44449c5697b326919703bac031cae7f60",
+  "publicKeyRawBase64Url": "11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo",
+  "publicKeySpkiDerBase64Url": "MCowBQYDK2VwAyEA11qYAYqXEKt9VP3TyWEHOg7c-lqMyWvAhpo9wdRGGg",
+  "invocationDomain": "acs:desktop-commander-invocation:v1",
+  "invocationDomainSeparatorHex": "0a",
+  "invocationHash": "6af81e88c93e386faa99e6632a2ae5ffddc020bce94fe328457333cb2b5d065c",
+  "canonicalPayload": "{\"actionHash\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"approvalId\":\"approval_01\",\"attemptId\":\"attempt_01\",\"audience\":\"desktop-commander\",\"expiresAt\":\"2026-01-01T00:00:30.000Z\",\"invocationHash\":\"6af81e88c93e386faa99e6632a2ae5ffddc020bce94fe328457333cb2b5d065c\",\"issuedAt\":\"2026-01-01T00:00:00.000Z\",\"issuer\":\"acs\",\"leaseEpoch\":7,\"leaseId\":\"lease_01\",\"nonce\":\"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\",\"normalizedArguments\":{\"path\":\"/safe/example.txt\"},\"planHash\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"requestHash\":\"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\"runtimeId\":\"runtime_01\",\"scopes\":[\"fs.read\"],\"toolName\":\"read_file\",\"version\":\"acs.dc.v1\",\"workItemId\":\"work_01\"}",
+  "payload": {
+    "actionHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "approvalId": "approval_01",
+    "attemptId": "attempt_01",
+    "audience": "desktop-commander",
+    "expiresAt": "2026-01-01T00:00:30.000Z",
+    "invocationHash": "6af81e88c93e386faa99e6632a2ae5ffddc020bce94fe328457333cb2b5d065c",
+    "issuedAt": "2026-01-01T00:00:00.000Z",
+    "issuer": "acs",
+    "leaseEpoch": 7,
+    "leaseId": "lease_01",
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "normalizedArguments": {
+      "path": "/safe/example.txt"
+    },
+    "planHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "requestHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "runtimeId": "runtime_01",
+    "scopes": [
+      "fs.read"
+    ],
+    "toolName": "read_file",
+    "version": "acs.dc.v1",
+    "workItemId": "work_01"
+  },
+  "signature": "AuwuJGjaMYpo6aQ9rJwGAzNZ3sYD2qfFETKavOk5kYOMVFpfFXven56q3eBdczDI-GSl7ujzqKDuxURqOwp5BA",
+  "envelope": {
+    "payload": {
+      "actionHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "approvalId": "approval_01",
+      "attemptId": "attempt_01",
+      "audience": "desktop-commander",
+      "expiresAt": "2026-01-01T00:00:30.000Z",
+      "invocationHash": "6af81e88c93e386faa99e6632a2ae5ffddc020bce94fe328457333cb2b5d065c",
+      "issuedAt": "2026-01-01T00:00:00.000Z",
+      "issuer": "acs",
+      "leaseEpoch": 7,
+      "leaseId": "lease_01",
+      "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "normalizedArguments": {
+        "path": "/safe/example.txt"
+      },
+      "planHash": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "requestHash": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "runtimeId": "runtime_01",
+      "scopes": [
+        "fs.read"
+      ],
+      "toolName": "read_file",
+      "version": "acs.dc.v1",
+      "workItemId": "work_01"
+    },
+    "signature": "AuwuJGjaMYpo6aQ9rJwGAzNZ3sYD2qfFETKavOk5kYOMVFpfFXven56q3eBdczDI-GSl7ujzqKDuxURqOwp5BA",
+    "keyId": "test-key-1"
+  },
+  "bootstrap": {
+    "request": {
+      "schemaVersion": 1,
+      "runtimeId": "runtime_01",
+      "challenge": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "scopes": [
+        "fs.read",
+        "fs.write",
+        "network.read",
+        "network.write",
+        "process.exec",
+        "process.spawn"
+      ]
+    },
+    "reply": {
+      "schemaVersion": 1,
+      "runtimeId": "runtime_01",
+      "challenge": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc",
+      "scopes": [
+        "fs.read",
+        "fs.write",
+        "network.read",
+        "network.write",
+        "process.exec",
+        "process.spawn"
+      ]
+    }
+  }
+}

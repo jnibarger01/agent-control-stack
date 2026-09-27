@@ -1,0 +1,100 @@
+# ACS / Desktop Commander execution chain (ADR 0019).
+#
+# `check.yml` already builds and tests ACS, apps/dc-mcp-gateway, apps/dc-relay,
+# the dc-tool-manifest drift gate and the enforcement architecture gate.
+# This workflow adds what needs the vendored Desktop Commander build:
+#   - Desktop Commander's own suite, exactly as its former repository ran it;
+#   - the root execution-chain E2E tests (ACS_DC_E2E=1).
+name: dc-execution-chain
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dc-execution-chain-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # @vscode/ripgrep's postinstall queries api.github.com; unauthenticated calls
+  # rate-limit on shared runner IPs.
+  GITHUB_TOKEN: ${{ github.token }}
+
+jobs:
+  desktop-commander:
+    name: Desktop Commander suite (vendor/desktop-commander)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: vendor/desktop-commander
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          # Matches the Node version Desktop Commander's own CI and release use.
+          node-version: 22
+          cache: npm
+          cache-dependency-path: vendor/desktop-commander/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate tool definitions
+        run: npm run validate:tools
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Integration tests
+        run: npm run test:integration
+
+      - name: Dependency audit
+        run: npm audit --audit-level=high
+
+  execution-chain-e2e:
+    name: Execution-chain E2E (ACS -> gateway/relay -> DC)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24.16.0
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            vendor/desktop-commander/package-lock.json
+
+      - name: Pin npm
+        run: npm install --global npm@11.17.0
+
+      - name: Install and build ACS workspaces
+        run: |
+          npm ci
+          npm run build
+
+      - name: Install and build Desktop Commander
+        working-directory: vendor/desktop-commander
+        run: |
+          npm ci
+          npm run build
+
+      - name: DC tool-contract artifacts are generated from the manifest
+        run: npm run dc-contracts:check
+
+      - name: Execution-chain E2E
+        env:
+          ACS_DC_E2E: "1"
+        run: npx vitest run tests/e2e

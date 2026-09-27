@@ -1,0 +1,16 @@
+{
+  "name": "@agent-control-stack/dc-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted Desktop Commander relay / control plane (extracted from the Desktop Commander fork, ADR 0019).",
+  "main": "./dist/server.js",
+  "scripts": {
+    "start": "bash -c 'set -a; source \"$HOME/.config/dc-relay/relay.env\"; set +a; exec node dist/server.js'",
+    "test": "node test/test-control-plane.js && node test/test-control-plane-pairing-crypto.js && node test/test-control-plane-pairing.js && node test/test-control-plane-mcp.js && node test/test-control-plane-consent.js && node test/test-control-plane-prefix.js && node test/test-control-plane-server-contract.js && node test/test-control-plane-supabase-store.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.90.0",
+    "zod": "^3.24.1"
+  }
+}

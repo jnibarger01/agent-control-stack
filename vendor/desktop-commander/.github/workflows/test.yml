@@ -1,0 +1,71 @@
+# Pull-request gate. Until this existed the 65-file test suite only ran during
+# a release, so a regression was not discoverable until someone cut a version.
+name: Test
+
+on:
+  # Deliberately unfiltered by base branch: this repo's integration branch has
+  # moved before (main -> work/...), and a gate that silently stops running
+  # because a branch was renamed is worse than one that runs slightly too often.
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # @vscode/ripgrep's postinstall queries api.github.com; unauthenticated calls
+  # rate-limit on shared runner IPs.
+  GITHUB_TOKEN: ${{ github.token }}
+
+jobs:
+  test:
+    name: Build and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          # Matches the version the release workflow publishes from.
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Catches tool definitions that drift out of sync with their handlers.
+      - name: Validate tool definitions
+        run: npm run validate:tools
+
+      # `npm test` builds first, so this covers compilation too. The PDF tests
+      # launch Chrome, so the browser download is deliberately NOT skipped here.
+      - name: Unit tests
+        run: npm test
+
+      - name: Integration tests
+        run: npm run test:integration
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      # Audits the declared tree; no install and no postinstall scripts needed.
+      - name: Audit production and dev dependencies
+        run: npm audit --audit-level=high

@@ -13,7 +13,11 @@ paths = [
   '''(^|/)packages/agentos-contracts/test/trace\.test\.js$''',
   '''(^|/)packages/work-items/src/validation\.test\.ts$''',
   '''(^|/)scripts/test_autonomous_agent\.py$''',
-  '''(^|/)docs/openai-compatible-inference\.md$'''
+  '''(^|/)docs/openai-compatible-inference\.md$''',
+  # Desktop Commander fixtures: a random OAuth client UUID and the canonical
+  # fake AWS key AKIAABCDEFGHIJKLMNOP used as secret_scan test input.
+  '''(^|/)apps/dc-relay/test/test-control-plane-pairing\.js$''',
+  '''(^|/)vendor/desktop-commander/test/test-execution-tools\.js$'''
 ]
 regexes = [
   '''(?i)authorization:\s*bearer\s+(?:change-me-local-dev|local-dev-token)''',
