@@ -415,8 +415,13 @@ function refreshLeaseExpiryWarnings(root) {
     const warning = node.querySelector('[data-lease-expiry-warning]');
     if (!warning) return;
     const show = leaseExpiringSoon(lease);
-    warning.hidden = !show;
-    warning.textContent = show ? 'expiring soon — warning only' : '';
+    const message = show ? 'expiring soon — warning only' : '';
+    // Only touch the live region when the warning state actually transitions:
+    // rewriting textContent on every tick re-announces the same warning.
+    if (warning.hidden === show || warning.textContent !== message) {
+      warning.hidden = !show;
+      warning.textContent = message;
+    }
   });
 }
 

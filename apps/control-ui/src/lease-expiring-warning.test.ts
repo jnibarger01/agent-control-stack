@@ -137,4 +137,21 @@ describe("lease expiring-soon warning", () => {
       .join("\n");
     expect(css).toMatch(/\.lease-expiry-warning\[hidden\]\s*\{\s*display:\s*none/);
   });
+
+  it("does not rewrite the live region while the warning state is unchanged", async () => {
+    const app = await openDetail(
+      leaseWith(50_000, { lastRenewedAt: new Date(CLOCK_START_MS - 250_000).toISOString() })
+    );
+    const warning = app.document.querySelector(".lease-expiry-warning") as HTMLElement;
+    expect(warning.hidden).toBe(false);
+    const mutations: string[] = [];
+    const observer = new app.window.MutationObserver((records) => {
+      for (const record of records) mutations.push(record.type);
+    });
+    observer.observe(warning, { attributes: true, characterData: true, childList: true, subtree: true });
+    await app.advance(15_000);
+    await app.flush();
+    observer.disconnect();
+    expect(mutations).toEqual([]);
+  });
 });
