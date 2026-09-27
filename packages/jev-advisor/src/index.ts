@@ -8,8 +8,22 @@
  * `degraded: true`, empty signals, and no fabricated probabilities.
  */
 
+import {
+  LOCAL_BINARY_CAPABILITY,
+  checkCapability,
+  checkObservedCapability,
+  observeCapability,
+  type JevCapability
+} from "./contracts/capability.js";
 import { JEV_CLASSIFIER_VERSION } from "./telemetry.js";
 export * from "./telemetry.js";
+export {
+  LOCAL_BINARY_CAPABILITY,
+  checkCapability,
+  checkObservedCapability,
+  observeCapability
+} from "./contracts/capability.js";
+export type { JevCapability, JevCapabilityObservation } from "./contracts/capability.js";
 export const DEFAULT_JEV_URL = "http://127.0.0.1:8017/v1/systemone";
 export const DEFAULT_JEV_TIMEOUT_MS = 750;
 export const JEV_ENABLED_ENV = "ACS_JEV_ENABLED";
@@ -35,12 +49,16 @@ export type ClassifiedSignal = {
   lowThreshold: number;
 };
 
+export type JevFailureReason = "NO_ADVICE" | "TIMEOUT" | "UNAVAILABLE" | "INCOMPATIBLE_MODEL";
+
 export type JevResult = {
   classifierVersion: typeof JEV_CLASSIFIER_VERSION;
   model: string | null;
   latencyMs: number;
   signals: Record<string, ClassifiedSignal>;
   degraded: boolean;
+  /** Present only when the call did not produce usable advisory answers. */
+  failureReason?: JevFailureReason;
 };
 
 /** `[low, high]` pair. Overridable per signal. */
@@ -75,6 +93,12 @@ export type ClassifyJevOptions = {
   fetchImpl?: typeof fetch;
   /** Per-signal threshold overrides. */
   thresholds?: JevThresholdOverrides;
+  /**
+   * Full capability profile validated once before the request.
+   * Defaults to the local binary contract. Decision responses are not used
+   * to fill this in.
+   */
+  capabilityProfile?: JevCapability;
 };
 
 function readEnv(name: string): string | undefined {
@@ -115,13 +139,14 @@ export function classifyProbability(p: number, thresholds: JevThresholdPair): "y
   return "unknown";
 }
 
-function degradedResult(latencyMs: number): JevResult {
+function degradedResult(latencyMs: number, failureReason: JevFailureReason = "NO_ADVICE"): JevResult {
   return {
     classifierVersion: JEV_CLASSIFIER_VERSION,
     model: null,
     latencyMs,
     signals: {},
-    degraded: true
+    degraded: true,
+    failureReason
   };
 }
 
@@ -169,8 +194,14 @@ export async function classifyJev(
 
   const enabled = options.enabled ?? isJevEnabled();
   if (!enabled) {
-    // Inert by default: no network call, no fabricated data.
-    return degradedResult(elapsed());
+    // Inert by default: no network call, no fabricated data, no failure reason.
+    return {
+      classifierVersion: JEV_CLASSIFIER_VERSION,
+      model: null,
+      latencyMs: elapsed(),
+      signals: {},
+      degraded: true
+    };
   }
 
   const signalNames = Object.keys(questions);
@@ -182,6 +213,13 @@ export async function classifyJev(
   const url = options.url ?? readEnv("ACS_JEV_URL") ?? DEFAULT_JEV_URL;
   const timeoutMs = options.timeoutMs ?? readNumberEnv("ACS_JEV_TIMEOUT_MS") ?? DEFAULT_JEV_TIMEOUT_MS;
   const doFetch = options.fetchImpl ?? fetch;
+  const profile = options.capabilityProfile ?? LOCAL_BINARY_CAPABILITY;
+  // The configured profile must be satisfiable by the local binary contract.
+  // This runs once, before any decision request, and does not read the response.
+  const profileCheck = checkCapability(LOCAL_BINARY_CAPABILITY, profile);
+  if (!profileCheck.ok) {
+    return degradedResult(elapsed(), "INCOMPATIBLE_MODEL");
+  }
 
   let response: Response;
   try {
@@ -203,21 +241,24 @@ export async function classifyJev(
     } finally {
       clearTimeout(timer);
     }
-  } catch {
-    return degradedResult(elapsed());
+  } catch (error) {
+    const timedOut = error instanceof Error && error.name === "AbortError";
+    return degradedResult(elapsed(), timedOut ? "TIMEOUT" : "UNAVAILABLE");
   }
-  if (!response.ok) return degradedResult(elapsed());
+  if (!response.ok) return degradedResult(elapsed(), "UNAVAILABLE");
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(await response.text());
   } catch {
-    return degradedResult(elapsed());
+    return degradedResult(elapsed(), "NO_ADVICE");
   }
 
   const body = parsed as JevResponseShape;
+  const observed = checkObservedCapability(observeCapability(body), profile);
+  if (!observed.ok) return degradedResult(elapsed(), "INCOMPATIBLE_MODEL");
   const answers = body?.answers;
-  if (answers === null || typeof answers !== "object") return degradedResult(elapsed());
+  if (answers === null || typeof answers !== "object") return degradedResult(elapsed(), "NO_ADVICE");
 
   const signals: Record<string, ClassifiedSignal> = {};
   for (const name of signalNames) {
@@ -234,7 +275,7 @@ export async function classifyJev(
       probability < 0 ||
       probability > 1
     ) {
-      return degradedResult(elapsed());
+      return degradedResult(elapsed(), "NO_ADVICE");
     }
     const pair = thresholds[name as JevSignal] ?? [
       DEFAULT_JEV_THRESHOLDS.actionable[0],

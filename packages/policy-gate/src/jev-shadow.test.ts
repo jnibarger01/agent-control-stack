@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { classifierEvidenceHash, type ClassifierEvidence } from "@agent-control-stack/work-items";
 import { classifyMissionIntake, MISSION_CLASSIFIER_VERSION } from "./mission-classifier.js";
+import { runJevIntake } from "../../jev-advisor/src/intake.js";
 import { JEV_RISK_SIGNALS, JEV_ROUTING_SIGNALS, maybeRunJevShadowAdvisory } from "./jev-shadow.js";
 
 const INTAKE = {
@@ -169,5 +170,37 @@ describe("advisory output never feeds authoritative behavior (differential)", ()
     // evidence schema contains no advisory fields at all.
     expect(JSON.stringify(Object.keys(baseline)).toLowerCase()).not.toContain("jev");
     expect(withAdvisor.classifier.version).toBe(MISSION_CLASSIFIER_VERSION);
+  });
+
+  it.each([
+    ["UNAVAILABLE", async () => { throw new TypeError("fetch failed"); }],
+    [
+      "TIMEOUT",
+      (_url: unknown, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            const error = new Error("aborted");
+            error.name = "AbortError";
+            reject(error);
+          });
+        })
+    ],
+    ["NO_ADVICE", async () => new Response(JSON.stringify({ model: "m", answers: {} }), { status: 200 })],
+    [
+      "INCOMPATIBLE_MODEL",
+      async () => new Response(JSON.stringify({ model: "m", supportsNoul: false, answers: {} }), { status: 200 })
+    ]
+  ] as const)("%s shadow intake does not change authoritative classification", async (status, fetchImpl) => {
+    const before = classifyMissionIntake(INTAKE, CONTEXT);
+    const intake = await runJevIntake(INTAKE.goal, before, {
+      fetchImpl: fetchImpl as typeof fetch,
+      enabled: true,
+      timeoutMs: 20
+    });
+    const after = classifyMissionIntake(INTAKE, CONTEXT);
+    expect(intake.status).toBe(status);
+    expect(authoritativeFields(after)).toEqual(authoritativeFields(before));
+    expect(classifierEvidenceHash(after)).toBe(classifierEvidenceHash(before));
+    expect(after).toEqual(before);
   });
 });
