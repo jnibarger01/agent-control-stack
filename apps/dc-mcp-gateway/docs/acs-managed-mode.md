@@ -62,9 +62,12 @@ the ACS process boundary.
   per-call capability transport. Client-supplied `_meta.acs*` metadata is
   always stripped before the ACS round-trip (anti-spoof) and the forwarded
   request carries only the ACS-issued envelope.
-- `server.js` `ACS_MANAGED_MODE=1`: on each `tools/call`, request capability
-  from ACS → inject → forward; any failure → 503 `{error:
-  managed_authorization_unavailable, code}`, nothing reaches DC.
+- `server.js` `ACS_MANAGED_MODE=1`: on each single `tools/call`, request
+  a capability from ACS → inject → forward. A refusal is returned as HTTP 200
+  with a JSON-RPC error preserving the request `id`: `-32001` denied,
+  `-32002` approval required, or `-32003` authorization unavailable.
+  Nothing reaches DC on any refusal. Managed initialize failures and rejected
+  batched tool calls remain HTTP 503 transport failures.
 - `bridge.js` `ACS_MANAGED_MODE=1`: spawns DC without `--standalone` while
   preserving the multi-session router; `/healthz` remains the stable `ok`
   response for existing MCP health checks.
