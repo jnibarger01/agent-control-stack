@@ -88,6 +88,13 @@ describe("jev shadow advisory", () => {
     expect(lines).toEqual([]);
   });
 
+  it("honors explicit options.enabled=false even when the env gate is on (red-team #2)", async () => {
+    process.env.ACS_JEV_ENABLED = "1";
+    const lines: string[] = [];
+    await maybeRunJevShadowAdvisory(INTAKE, { enabled: false, sink: (line) => lines.push(line) });
+    expect(lines).toEqual([]);
+  });
+
   it("swallows sink and jev failures (shadow must never break the request path)", async () => {
     process.env.ACS_JEV_ENABLED = "1";
     const impl: typeof fetch = async () => {

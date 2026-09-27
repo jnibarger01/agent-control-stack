@@ -81,6 +81,8 @@ export async function runJevShadowAdvisory(state: string, options: JevShadowOpti
  */
 export async function maybeRunJevShadowAdvisory(intakeInput: unknown, options: JevShadowOptions = {}): Promise<void> {
   try {
+    // Explicit opt-out via options must always win, even when the env gate is on.
+    if (options.enabled === false) return;
     const explicitlyEnabled = options.enabled === true;
     if (!explicitlyEnabled && !isJevEnabled()) return;
     const parsed = missionIntakeSchema.safeParse(intakeInput);

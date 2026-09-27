@@ -126,9 +126,12 @@ Events contain probabilities only — state text and secrets are never included.
 `packages/policy-gate/src/jev-shadow.ts` (`maybeRunJevShadowAdvisory`) emits
 two batched calls (6 routing signals, then 4 risk signals) and writes
 telemetry lines to stderr. It is wired fire-and-forget at the gateway MCP
-`create_work_item` boundary in `apps/gateway/src/mcp.ts`. It is **not**
-wired into `classifyMissionIntake`, policy evaluation, or any approval path,
-and produces no authoritative fields. Planned (not implemented): consumption
+`create_work_item` boundary in `apps/gateway/src/mcp.ts` — fired ONLY after
+the policy-gated tool call succeeds, so rejected intakes never send goal
+text to the advisory engine (state text is otherwise sent unauthenticated
+to the loopback endpoint by design). It is **not** wired into
+`classifyMissionIntake`, policy evaluation, or any approval path, and
+produces no authoritative fields. Planned (not implemented): consumption
 of the advisory data by any decision path — none will be added without a
 spec change.
 

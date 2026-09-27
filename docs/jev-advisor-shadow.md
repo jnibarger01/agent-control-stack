@@ -30,8 +30,9 @@ enabled. The evidence schema carries no Jev fields.
 - Shadow wiring: `packages/policy-gate/src/jev-shadow.ts` emits TWO batched
   calls (6 routing signals, then 4 risk signals) as stderr telemetry lines,
   fired-and-forgotten at the gateway MCP `create_work_item` boundary
-  (`apps/gateway/src/mcp.ts`). Not wired into `classifyMissionIntake`,
-  policy, approval, or routing paths.
+  (`apps/gateway/src/mcp.ts`) — only after the policy-gated tool call
+  succeeds, so rejected intakes never reach the advisory engine. Not wired
+  into `classifyMissionIntake`, policy, approval, or routing paths.
 - CLI: `acs-jev classify --state-file <path> --signal name="..." ... [--json] [--strict]`
   prints the JevResult JSON plus an explicit machine-readable `decision`
   field (`"skip" | "continue" | "duplicate_check_required" | "degraded"`;
