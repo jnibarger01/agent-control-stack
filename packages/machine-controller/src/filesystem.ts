@@ -120,7 +120,8 @@ function describePath(path: string) {
  * Extracts lines in the 1-based inclusive range [startLine, endLine] without
  * allocating an array for every line in the file (unlike text.split(/\r?\n/)).
  * Line-splitting semantics match /:\r?\n/ — "\n" separates lines and a
- * preceding "\r" is dropped, and a trailing newline yields a final empty line.
+ * "\r" is dropped only when immediately followed by "\n", and a trailing
+ * newline yields a final empty line.
  */
 function extractLineRange(text: string, startLine: number, endLine: number): string[] {
   const selected: string[] = [];
@@ -139,7 +140,9 @@ function extractLineRange(text: string, startLine: number, endLine: number): str
     const separatorIndex = text.indexOf("\n", position);
     const isLastLine = separatorIndex === -1;
     let line = text.slice(position, isLastLine ? text.length : separatorIndex);
-    if (line.endsWith("\r")) {
+    // Only strip "\r" when it is followed by "\n" (separatorIndex !== -1), matching
+    // split(/\r?\n/): a lone trailing "\r" on the final line is preserved as-is.
+    if (separatorIndex !== -1 && line.endsWith("\r")) {
       line = line.slice(0, -1);
     }
     if (index >= startLine - 1) {
