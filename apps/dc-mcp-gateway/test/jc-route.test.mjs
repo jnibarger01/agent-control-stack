@@ -291,7 +291,7 @@ test('JSON-RPC batch containing tools/call is rejected fail-closed on /jc/mcp', 
 });
 
 test('JSON-RPC batch without tools/call still proxies on /jc/mcp', async () => {
-  const { gw, acs, jcUp, close } = await lane();
+  const { gw, acs, close } = await lane();
   try {
     const batch = [
       { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} },
