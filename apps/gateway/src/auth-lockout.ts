@@ -8,11 +8,10 @@ export interface AuthLockoutOptions {
   windowMs: number;
   maxFailures: number;
   /**
-   * Upper bound on concurrently tracked failure buckets. Bounds memory when
-   * keys have unbounded cardinality (e.g. attacker-sprayed unique principals
-   * on unauthenticated endpoints). When the bound is hit, expired buckets are
-   * reclaimed first; if none are expired the least-recently-checked bucket is
-   * evicted. Defaults to 50_000.
+   * Upper bound on concurrently tracked failure buckets. Device verification
+   * records both an IP key and a user-code key, so capacities below two are
+   * invalid. Expired buckets are reclaimed first; capacity eviction may remove
+   * only a non-locked bucket. Defaults to 50_000.
    */
   maxBuckets?: number;
 }
@@ -43,8 +42,8 @@ export class AuthFailureLockout {
     if (!Number.isInteger(options.maxFailures) || options.maxFailures <= 0) {
       throw new Error("auth-lockout maxFailures must be positive");
     }
-    if (options.maxBuckets !== undefined && (!Number.isInteger(options.maxBuckets) || options.maxBuckets <= 0)) {
-      throw new Error("auth-lockout maxBuckets must be positive");
+    if (options.maxBuckets !== undefined && (!Number.isInteger(options.maxBuckets) || options.maxBuckets < 2)) {
+      throw new Error("auth-lockout maxBuckets must be an integer of at least 2");
     }
     this.maxBuckets = options.maxBuckets ?? DEFAULT_MAX_BUCKETS;
   }
@@ -55,9 +54,7 @@ export class AuthFailureLockout {
     if (!bucket || now - bucket.startedAt >= this.options.windowMs) {
       return { locked: false, failures: 0, retryAfterSeconds: 0, justLocked: false };
     }
-    // Refresh insertion order so "least-recently-checked" eviction reflects activity.
-    this.buckets.delete(key);
-    this.buckets.set(key, bucket);
+    this.touch(key, bucket);
     if (bucket.count >= this.options.maxFailures) {
       return {
         locked: true,
@@ -73,9 +70,19 @@ export class AuthFailureLockout {
     this.prune(now);
     const current = this.buckets.get(key);
     if (!current || now - current.startedAt >= this.options.windowMs) {
-      // Re-check capacity only on insertion so non-inserting paths stay allocation-free.
-      if (this.buckets.size >= this.maxBuckets) this.evictOne();
-      this.buckets.set(key, { startedAt: now, count: 1 });
+      if (this.buckets.size >= this.maxBuckets && !this.evictOldestUnlocked()) {
+        // Every tracked bucket is already locked. Dropping one would reopen an
+        // authentication path before its window ends, so fail closed for this
+        // untracked key until at least one locked bucket expires.
+        return {
+          locked: true,
+          failures: this.options.maxFailures,
+          retryAfterSeconds: this.earliestTrackedExpiry(now),
+          justLocked: false
+        };
+      }
+      const bucket = { startedAt: now, count: 1 };
+      this.buckets.set(key, bucket);
       const locked = 1 >= this.options.maxFailures;
       return {
         locked,
@@ -85,9 +92,7 @@ export class AuthFailureLockout {
       };
     }
     current.count += 1;
-    // Refresh insertion order so "least-recently-checked" eviction reflects activity.
-    this.buckets.delete(key);
-    this.buckets.set(key, current);
+    this.touch(key, current);
     const locked = current.count >= this.options.maxFailures;
     const justLocked = locked && current.count === this.options.maxFailures;
     return {
@@ -106,22 +111,34 @@ export class AuthFailureLockout {
     this.buckets.clear();
   }
 
+  private touch(key: string, bucket: FailureBucket): void {
+    this.buckets.delete(key);
+    this.buckets.set(key, bucket);
+  }
+
   private prune(now: number): void {
     for (const [key, bucket] of this.buckets) {
       if (now - bucket.startedAt >= this.options.windowMs) this.buckets.delete(key);
     }
   }
 
-  /**
-   * Capacity fallback after expired buckets were reclaimed. Evicts the oldest
-   * Map entry (least-recently checked, since reads and increments refresh
-   * order); a bounded eviction of an unconfirmed attacker key beats unbounded
-   * memory growth under key churn.
-   */
-  private evictOne(): void {
-    if (this.buckets.size === 0) return;
-    const oldest = this.buckets.keys().next();
-    if (!oldest.done) this.buckets.delete(oldest.value);
+  /** Evict the least-recently-checked non-locked bucket, never a locked one. */
+  private evictOldestUnlocked(): boolean {
+    for (const [key, bucket] of this.buckets) {
+      if (bucket.count < this.options.maxFailures) {
+        this.buckets.delete(key);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private earliestTrackedExpiry(now: number): number {
+    let seconds = Math.ceil(this.options.windowMs / 1000);
+    for (const bucket of this.buckets.values()) {
+      seconds = Math.min(seconds, retryAfter(bucket.startedAt, this.options.windowMs, now));
+    }
+    return Math.max(1, seconds);
   }
 }
 

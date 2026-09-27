@@ -36,36 +36,50 @@ describe("AuthFailureLockout", () => {
     expect(lockout.recordFailure("b", 1).justLocked).toBe(true);
   });
 
-  it("rejects non-positive maxBuckets", () => {
-    expect(() => new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets: 0 })).toThrow(
-      "auth-lockout maxBuckets must be positive"
-    );
-    expect(() => new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets: 1.5 })).toThrow(
-      "auth-lockout maxBuckets must be positive"
-    );
+  it("rejects capacities below the two buckets required by device verification", () => {
+    for (const maxBuckets of [0, 1, 1.5]) {
+      expect(
+        () => new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets })
+      ).toThrow("auth-lockout maxBuckets must be an integer of at least 2");
+    }
   });
 
-  it("evicts the least-recently-checked bucket when capacity is exhausted", () => {
-    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets: 2 });
-    lockout.recordFailure("a", 0);
-    lockout.recordFailure("b", 1);
-    // Touch "a" so it becomes most-recently-checked; "b" is now oldest.
-    lockout.isLocked("a", 2);
-    // Inserting "c" at capacity evicts "b" (oldest), not "a".
-    lockout.recordFailure("c", 3);
-    expect(lockout.isLocked("b", 4)).toMatchObject({ locked: false, failures: 0 });
-    expect(lockout.isLocked("a", 4)).toMatchObject({ locked: false, failures: 1 });
-    expect(lockout.isLocked("c", 4)).toMatchObject({ locked: false, failures: 1 });
+  it("evicts only the least-recently-checked non-locked bucket", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 2, maxBuckets: 2 });
+    lockout.recordFailure("locked", 0);
+    expect(lockout.recordFailure("locked", 1).locked).toBe(true);
+    lockout.recordFailure("candidate", 2);
+
+    // "locked" is older but security state must survive capacity churn.
+    lockout.recordFailure("new", 3);
+    expect(lockout.isLocked("locked", 4).locked).toBe(true);
+    expect(lockout.isLocked("candidate", 4)).toMatchObject({ locked: false, failures: 0 });
+    expect(lockout.isLocked("new", 4)).toMatchObject({ locked: false, failures: 1 });
   });
 
-  it("prefers reclaiming expired buckets over evicting live ones", () => {
+  it("fails closed when capacity is entirely locked", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 1_000, maxFailures: 1, maxBuckets: 2 });
+    expect(lockout.recordFailure("a", 0).locked).toBe(true);
+    expect(lockout.recordFailure("b", 10).locked).toBe(true);
+
+    const refused = lockout.recordFailure("c", 20);
+    expect(refused).toMatchObject({ locked: true, failures: 1, justLocked: false });
+    expect(refused.retryAfterSeconds).toBeGreaterThan(0);
+    expect(lockout.isLocked("a", 20).locked).toBe(true);
+    expect(lockout.isLocked("b", 20).locked).toBe(true);
+
+    // Once the protected windows expire, capacity is reclaimed normally.
+    expect(lockout.recordFailure("c", 1_100)).toMatchObject({ locked: true, failures: 1 });
+  });
+
+  it("reclaims expired buckets before applying capacity pressure", () => {
     const lockout = new AuthFailureLockout({ windowMs: 1_000, maxFailures: 3, maxBuckets: 2 });
     lockout.recordFailure("a", 0);
     lockout.recordFailure("b", 10);
-    // Both entries expired by now; inserting "c" should reclaim them, not evict live state.
     lockout.recordFailure("c", 5_000);
     expect(lockout.isLocked("a", 5_001)).toMatchObject({ locked: false, failures: 0 });
     expect(lockout.isLocked("b", 5_001)).toMatchObject({ locked: false, failures: 0 });
     expect(lockout.isLocked("c", 5_001)).toMatchObject({ locked: false, failures: 1 });
   });
+
 });
