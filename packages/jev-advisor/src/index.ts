@@ -264,7 +264,7 @@ export async function classifyJev(
  * prompt-injection payloads; anything else is treated as absent (null).
  */
 function sanitizeModelName(model: string): string | null {
-  return /^[\w.:/+-]{1,64}$/.test(model) ? model : null;
+  return /^[A-Za-z0-9._-]{1,64}$/.test(model) ? model : null;
 }
 
 function readNumberEnv(name: string): number | undefined {

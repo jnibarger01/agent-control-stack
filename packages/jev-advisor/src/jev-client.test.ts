@@ -243,18 +243,18 @@ describe("degrade-never-fail", () => {
 });
 
 describe("threshold overrides", () => {
-  it("rejects low >= high and out-of-range pairs", () => {
+  it("rejects low >= high and out-of-range pairs", async () => {
     process.env.ACS_JEV_ENABLED = "1";
     const { impl } = mockFetch(answerBody({ actionable: 0.5 }));
-    expect(
+    await expect(
       classifyJev("s", { actionable: "q" }, { fetchImpl: impl, thresholds: { actionable: [0.8, 0.2] } })
     ).rejects.toThrow();
     const second = mockFetch(answerBody({ actionable: 0.5 }));
-    expect(
+    await expect(
       classifyJev("s", { actionable: "q" }, { fetchImpl: second.impl, thresholds: { actionable: [0.5, 0.5] } })
     ).rejects.toThrow();
     const third = mockFetch(answerBody({ actionable: 0.5 }));
-    expect(
+    await expect(
       classifyJev("s", { actionable: "q" }, { fetchImpl: third.impl, thresholds: { actionable: [-0.1, 0.9] } })
     ).rejects.toThrow();
   });
