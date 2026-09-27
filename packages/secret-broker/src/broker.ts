@@ -137,6 +137,15 @@ export interface SecretBrokerOptions {
   onEvent?: (event: SecretBrokerEvent) => void;
   /** Clock injection for deterministic TTL/expiry tests. Defaults to the real clock. */
   now?: () => Date;
+  /**
+   * How many inactive (revoked, expired, or uses-exhausted) lease records the
+   * broker retains before evicting the oldest ones. This broker holds raw
+   * secret material, so terminal records must not accumulate for the whole
+   * process lifetime: a long-lived caller that revokes every handle in a
+   * finally block would otherwise pin every credential it ever leased in
+   * memory. Active records are never evicted. Defaults to 1024.
+   */
+  maxRetainedLeases?: number;
 }
 
 interface LeaseRecord {
@@ -153,6 +162,8 @@ interface LeaseRecord {
 }
 
 const MAX_ALLOWED_USES = 1_000;
+
+const DEFAULT_MAX_RETAINED_LEASES = 1_024;
 
 /**
  * Scoped credential leasing. Mirrors packages/work-items' lease model
@@ -174,6 +185,7 @@ export class SecretBroker {
   private readonly onEvent: (event: SecretBrokerEvent) => void;
   private readonly now: () => Date;
   private readonly leases = new Map<string, LeaseRecord>();
+  private readonly maxRetainedLeases: number;
 
   constructor(options: SecretBrokerOptions) {
     const entries = Object.entries(options.scopes);
@@ -194,6 +206,14 @@ export class SecretBroker {
     this.authorize = options.authorize ?? (() => true);
     this.onEvent = options.onEvent ?? (() => undefined);
     this.now = options.now ?? (() => new Date());
+    const maxRetainedLeases = options.maxRetainedLeases ?? DEFAULT_MAX_RETAINED_LEASES;
+    if (!Number.isInteger(maxRetainedLeases) || maxRetainedLeases < 0) {
+      throw new ControlStackError(
+        "secret_broker_invalid_retention",
+        `maxRetainedLeases must be a non-negative integer, got: ${maxRetainedLeases}`
+      );
+    }
+    this.maxRetainedLeases = maxRetainedLeases;
   }
 
   async lease(request: LeaseRequest): Promise<SecretHandle> {
@@ -252,6 +272,7 @@ export class SecretBroker {
     const expiresAt = new Date(issuedAt.getTime() + ttlMs);
     const injectAs = config.injectAs ?? scope;
 
+    this.pruneInactiveLeases();
     this.leases.set(handleId, {
       handleId,
       scope,
@@ -303,6 +324,24 @@ export class SecretBroker {
     }
     record.revoked = true;
     this.emit({ type: "secret.revoked", handleId: handle.handleId, scope: handle.scope, reason: "explicit" });
+    this.pruneInactiveLeases();
+  }
+
+  /**
+   * Drops the oldest inactive lease records once more than `maxRetainedLeases`
+   * of them are held, so raw secret material is not retained for the process
+   * lifetime. Records that are still redeemable (neither revoked, expired, nor
+   * uses-exhausted) are never evicted - evicting one would silently invalidate
+   * a live handle.
+   */
+  private pruneInactiveLeases(): void {
+    if (this.leases.size <= this.maxRetainedLeases) return;
+    const nowMs = this.now().getTime();
+    for (const [handleId, record] of this.leases) {
+      if (this.leases.size <= this.maxRetainedLeases) break;
+      const inactive = record.revoked || record.usesRemaining <= 0 || nowMs >= record.expiresAt.getTime();
+      if (inactive) this.leases.delete(handleId);
+    }
   }
 
   private injectHandle(handleId: string, env: NodeJS.ProcessEnv, redeemer: LeasePrincipal): void {

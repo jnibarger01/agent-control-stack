@@ -1,6 +1,7 @@
 import { ControlStackError } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { SecretBroker, type LeasePrincipal, type LeaseRequest, type SecretBrokerEvent } from "./broker.js";
+import type { SecretHandle } from "./handle.js";
 import { EnvSecretSource, type SecretSource } from "./source.js";
 
 const RAW_SECRET_VALUE = "sk-super-secret-do-not-log-me";
@@ -406,5 +407,77 @@ describe("SecretBroker onEvent", () => {
     const broker = brokerWithEnv();
     const handle = await broker.lease(leaseRequest());
     await expect(broker.revoke(handle)).resolves.toBeUndefined();
+  });
+});
+
+describe("SecretBroker lease retention", () => {
+  function retentionBroker(maxRetainedLeases: number, now?: () => Date): SecretBroker {
+    const source = new EnvSecretSource({ openai: "TEST_OPENAI_API_KEY" }, { TEST_OPENAI_API_KEY: RAW_SECRET_VALUE });
+    return new SecretBroker({
+      scopes: { openai: { maxTtlMs: 60_000 } },
+      source,
+      maxRetainedLeases,
+      ...(now ? { now } : {})
+    });
+  }
+
+  it("evicts a revoked handle once the retention bound is exceeded, so its raw secret is not pinned in memory", async () => {
+    const broker = retentionBroker(0);
+    const revoked = await broker.lease(leaseRequest());
+    await broker.revoke(revoked);
+
+    const env: NodeJS.ProcessEnv = {};
+    expect(() => revoked.injectInto(env, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_unknown" })
+    );
+
+    // The bound only ever drops inactive records: a freshly issued handle still redeems.
+    const live = await broker.lease(leaseRequest());
+    live.injectInto(env, principal());
+    expect(env.openai).toBe(RAW_SECRET_VALUE);
+  });
+
+  it("sweeps a handle that expired on its own when the next lease is issued", async () => {
+    const clock = mutableClock(3_000_000);
+    const broker = retentionBroker(0, clock.now);
+    const expired = await broker.lease(leaseRequest({ ttlMs: 1_000 }));
+
+    clock.advance(1_000);
+    const live = await broker.lease(leaseRequest());
+
+    const liveEnv: NodeJS.ProcessEnv = {};
+    live.injectInto(liveEnv, principal());
+    expect(liveEnv.openai).toBe(RAW_SECRET_VALUE);
+
+    const env: NodeJS.ProcessEnv = {};
+    expect(() => expired.injectInto(env, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_unknown" })
+    );
+  });
+
+  it("retains no more than maxRetainedLeases inactive records, evicting the oldest first", async () => {
+    const broker = retentionBroker(2);
+    const handles: SecretHandle[] = [];
+    for (let index = 0; index < 6; index += 1) {
+      const handle = await broker.lease(leaseRequest());
+      await broker.revoke(handle);
+      handles.push(handle);
+    }
+
+    const env: NodeJS.ProcessEnv = {};
+    expect(() => handles[0].injectInto(env, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_unknown" })
+    );
+    expect(() => handles[handles.length - 1].injectInto(env, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_revoked" })
+    );
+  });
+
+  it("refuses a negative or non-integer maxRetainedLeases at construction time", () => {
+    for (const invalid of [-1, 1.5, Number.NaN]) {
+      expect(() => retentionBroker(invalid)).toThrowError(
+        expect.objectContaining<Partial<ControlStackError>>({ code: "secret_broker_invalid_retention" })
+      );
+    }
   });
 });
