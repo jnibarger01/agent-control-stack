@@ -19,6 +19,7 @@ let sseConnected = false;
 let sseReconnectAt = 0;
 let serverClockOffsetMs = 0;
 let leaseWarningTimer = null;
+let leaseWarningRoot = null;
 // Largest round trip for which an HTTP Date sample is trusted. Slower
 // responses may have been queued in transit, so their Date header no longer
 // reflects the observation time; adopting it would drag the projected server
@@ -440,20 +441,53 @@ function refreshLeaseExpiryWarnings(root) {
   });
 }
 
-function stopLeaseExpiryWarningRefresh() {
+function clearLeaseWarningTimer() {
   if (leaseWarningTimer) {
     clearInterval(leaseWarningTimer);
     leaseWarningTimer = null;
   }
 }
 
+function stopLeaseExpiryWarningRefresh() {
+  clearLeaseWarningTimer();
+  leaseWarningRoot = null;
+}
+
+function leaseWarningTick() {
+  if (!leaseWarningRoot || !leaseWarningRoot.isConnected) {
+    stopLeaseExpiryWarningRefresh();
+    return;
+  }
+  refreshLeaseExpiryWarnings(leaseWarningRoot);
+}
+
+// The work-item detail panel is only visible while the queue or execution
+// view is active. Pause the refresh while it is hidden and resume on return
+// so an off-screen detail never keeps refreshing.
+function leaseWarningViewActive() {
+  const view = document.body.dataset.activeView;
+  return (view === 'queue' || view === 'execution') && document.visibilityState !== 'hidden';
+}
+
+function syncLeaseExpiryWarningRefresh() {
+  if (!leaseWarningRoot || !leaseWarningRoot.isConnected || !leaseWarningRoot.querySelector('[data-lease-expiry]')) {
+    stopLeaseExpiryWarningRefresh();
+    return;
+  }
+  if (leaseWarningViewActive()) {
+    if (!leaseWarningTimer) {
+      leaseWarningTick();
+      leaseWarningTimer = setInterval(leaseWarningTick, 5000);
+    }
+  } else {
+    clearLeaseWarningTimer();
+  }
+}
+
 function scheduleLeaseExpiryWarningRefresh(root) {
   stopLeaseExpiryWarningRefresh();
-  refreshLeaseExpiryWarnings(root);
-  if (!root || !root.querySelector('[data-lease-expiry]')) return;
-  leaseWarningTimer = setInterval(function () {
-    refreshLeaseExpiryWarnings(root);
-  }, 5000);
+  leaseWarningRoot = root || null;
+  syncLeaseExpiryWarningRefresh();
 }
 
 function renderExecutionAuthority(executionAttempts, attemptLeases) {
@@ -884,7 +918,9 @@ function showView(name) {
   });
   syncSystemProbes();
   syncMetricsPolling();
+  syncLeaseExpiryWarningRefresh();
 }
+document.addEventListener('visibilitychange', syncLeaseExpiryWarningRefresh);
 document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');
   if (!link) return;

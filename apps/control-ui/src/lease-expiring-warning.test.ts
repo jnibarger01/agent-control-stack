@@ -75,6 +75,10 @@ async function openDetail(lease: ReturnType<typeof leaseWith>, serverOffsetMs = 
   });
   app.open();
   await app.advance(2_000);
+  // The detail panel (and its 5s warning refresh) is only live while the
+  // queue or execution view is active.
+  (app.document.querySelector('a[data-nav="queue"]') as HTMLElement).click();
+  await app.flush();
   (app.document.querySelector(`[data-work-item="${item.id}"]`) as HTMLElement).click();
   await app.flush();
   return app;
@@ -174,5 +178,29 @@ describe("lease expiring-soon warning", () => {
     await app.flush();
     observer.disconnect();
     expect(mutations).toEqual([]);
+  });
+
+  it("pauses the refresh while the detail view is hidden and resumes on return", async () => {
+    const app = await openDetail(
+      leaseWith(50_000, { lastRenewedAt: new Date(CLOCK_START_MS - 250_000).toISOString() })
+    );
+    expect(warningText(app)).toContain("expiring soon");
+
+    // Leave the queue view: the 5s refresh must stop, so the hidden detail is
+    // never updated again until the operator returns.
+    (app.document.querySelector('a[data-nav="agents"]') as HTMLElement).click();
+    await app.flush();
+    expect(app.document.body.dataset.activeView).toBe("agents");
+
+    // Advance past the lease expiry: with the refresh paused, the off-screen
+    // warning keeps its last rendered state instead of being cleared.
+    await app.advance(60_000);
+    await app.flush();
+    expect(warningText(app)).toContain("expiring soon");
+
+    // Return to the queue view: the refresh resumes and clears the warning.
+    (app.document.querySelector('a[data-nav="queue"]') as HTMLElement).click();
+    await app.flush();
+    expect(warningText(app)).toBe("");
   });
 });
