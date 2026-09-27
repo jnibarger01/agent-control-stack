@@ -25,6 +25,41 @@ const managedHttpAgent = new Agent({
     pipelining: 0,
 });
 
+const MANAGED_AUTHORIZATION_ERROR_CODES = new Set([-32001, -32002, -32003]);
+const MANAGED_AUTHORIZATION_KINDS = new Set([
+    'managed_authorization_denied',
+    'managed_authorization_required',
+    'managed_authorization_unavailable',
+]);
+
+function managedAuthorizationToolResult(error: unknown) {
+    if (!error || typeof error !== 'object') return null;
+    const candidate = error as { code?: unknown; data?: unknown; message?: unknown };
+    if (typeof candidate.code !== 'number' || !MANAGED_AUTHORIZATION_ERROR_CODES.has(candidate.code)) return null;
+    if (!candidate.data || typeof candidate.data !== 'object' || Array.isArray(candidate.data)) return null;
+    const data = candidate.data as Record<string, unknown>;
+    if (typeof data.kind !== 'string' || !MANAGED_AUTHORIZATION_KINDS.has(data.kind)) return null;
+
+    const structuredContent: Record<string, unknown> = {
+        kind: data.kind,
+        jsonRpcCode: candidate.code,
+    };
+    if (typeof data.acsCode === 'string') structuredContent.acsCode = data.acsCode;
+    if (typeof data.retryable === 'boolean') structuredContent.retryable = data.retryable;
+    for (const key of ['reason', 'detail', 'workItemId', 'actionHash', 'approvalInstructions']) {
+        if (typeof data[key] === 'string') structuredContent[key] = data[key];
+    }
+
+    const text = typeof candidate.message === 'string'
+        ? candidate.message
+        : `Managed authorization error (${data.kind})`;
+    return {
+        isError: true,
+        content: [{ type: 'text', text }],
+        structuredContent,
+    };
+}
+
 interface McpConfig {
     command: string;
     args: string[];
@@ -296,11 +331,10 @@ export class DesktopCommanderIntegration {
                 this.handleLocalDisconnect('managed HTTP transport closed');
             };
 
-            // StreamableHTTPClientTransport calls onerror for every failed POST,
-            // including ACS fail-closed HTTP 503s. Those are one request, not a
-            // dead session. Treating them as transport loss marks the device
-            // offline before the result is written, so the remote caller waits
-            // until timeout.
+            // Non-2xx transport failures are one-request failures, not proof
+            // that the managed session died. Normal ACS tools/call refusals now
+            // arrive as HTTP-200 JSON-RPC errors and are converted to structured
+            // tool errors in callClientTool without touching this transport.
             transport.onerror = (error: Error) => this.handleManagedTransportError(error);
 
             console.log(' - 🔌 Attached to managed Desktop Commander MCP');
@@ -453,12 +487,19 @@ export class DesktopCommanderIntegration {
                 console.debug('[DEBUG] Tool call successful:', toolName);
                 return result;
             } catch (error) {
-                if (this.managedMcpUrl && this.isManagedRequestTimeout(error)) {
-                    console.error(` - ⚠️ Managed MCP request timed out without a proxy POST; replacing session and retrying once: ${toolName}`);
-                    await this.replaceManagedTransport();
-                    const result = await invoke();
-                    console.debug('[DEBUG] Tool call successful after session replace:', toolName);
-                    return result;
+                if (this.managedMcpUrl) {
+                    const authorizationError = managedAuthorizationToolResult(error);
+                    if (authorizationError) {
+                        console.warn(` - ⚠️ Managed MCP authorization refused without dropping the session: ${toolName}`);
+                        return authorizationError;
+                    }
+                    if (this.isManagedRequestTimeout(error)) {
+                        console.error(` - ⚠️ Managed MCP request timed out without a proxy POST; replacing session and retrying once: ${toolName}`);
+                        await this.replaceManagedTransport();
+                        const result = await invoke();
+                        console.debug('[DEBUG] Tool call successful after session replace:', toolName);
+                        return result;
+                    }
                 }
                 throw error;
             }
