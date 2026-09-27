@@ -123,4 +123,18 @@ describe("lease expiring-soon warning", () => {
     const released = await openDetail(leaseWith(30_000, { status: "released" }));
     expect(warningText(released)).toBe("");
   });
+
+  it("keeps an author rule that hides inactive warning pills", async () => {
+    const app = await openDetail(leaseWith(4 * 60_000));
+    const warning = app.document.querySelector(".lease-expiry-warning") as HTMLElement;
+    expect(warning.hidden).toBe(true);
+    // The .pill author rule sets display:inline-flex, which overrides the
+    // hidden attribute in real browsers and shows an empty amber pill.
+    // jsdom applies the UA [hidden] rule regardless, so guard the author
+    // rule itself rather than the computed style.
+    const css = Array.from(app.document.querySelectorAll("style"))
+      .map((style) => style.textContent ?? "")
+      .join("\n");
+    expect(css).toMatch(/\.lease-expiry-warning\[hidden\]\s*\{\s*display:\s*none/);
+  });
 });
