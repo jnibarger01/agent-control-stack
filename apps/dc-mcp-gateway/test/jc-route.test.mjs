@@ -232,13 +232,19 @@ test('privileged_exec awaiting human approval fails closed and surfaces the ACS 
   });
   try {
     const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), {
-      jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'privileged_exec', arguments: { argv: ['/usr/bin/apt-get', 'update'] } },
+      jsonrpc: '2.0', id: 'jc-approval', method: 'tools/call', params: { name: 'privileged_exec', arguments: { argv: ['/usr/bin/apt-get', 'update'] } },
     });
-    assert.equal(r.status, 503);
+    assert.equal(r.status, 200);
     const body = await r.json();
-    assert.equal(body.error, 'managed_authorization_required');
-    assert.equal(body.workItemId, 'wrk_1');
-    assert.deepEqual(body.approvalSummary.argv, ['/usr/bin/apt-get', 'update']);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'jc-approval');
+    assert.equal(body.error.code, -32002);
+    assert.match(body.error.message, /approval required/i);
+    assert.equal(body.error.data.kind, 'managed_authorization_required');
+    assert.equal(body.error.data.acsCode, 'require_approval');
+    assert.equal(body.error.data.retryable, true);
+    assert.equal(body.error.data.workItemId, 'wrk_1');
+    assert.equal(body.error.data.actionHash, 'a'.repeat(64));
     assert.equal(mcpRequests(jcUp).length, 0);
   } finally { close(); }
 });
@@ -248,8 +254,14 @@ test('ACS unreachable fails closed on the jc lane', async () => {
   const jcPort = await jcUp.listen();
   const gw = await startGateway({ JC_ENABLED: '1', JC_UPSTREAM: `http://127.0.0.1:${jcPort}`, ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token' });
   try {
-    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
-    assert.equal(r.status, 503);
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 'jc-unreachable', method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'jc-unreachable');
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+    assert.equal(body.error.data.retryable, true);
     assert.equal(mcpRequests(jcUp).length, 0);
   } finally { gw.child.kill('SIGKILL'); jcUp.server.close(); }
 });
