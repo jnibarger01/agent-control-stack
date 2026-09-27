@@ -58,12 +58,13 @@ function initial(): MissionControlViewModel {
   return { workItems: [item], events: [], executionAttemptsByWorkItem: { [item.id]: [attempt] } };
 }
 
-async function openDetail(lease: ReturnType<typeof leaseWith>, serverOffsetMs = 0) {
+async function openDetail(lease: ReturnType<typeof leaseWith>, serverOffsetMs = 0, responseDelayMs = 0) {
   const serverDate = new Date(CLOCK_START_MS + serverOffsetMs).toUTCString();
   const app = bootLive(initial(), {
     [`/work-items/${item.id}`]: () => ({
       status: 200,
       headers: { Date: serverDate },
+      responseDelayMs,
       body: {
         workItem: item,
         events: [],
@@ -112,6 +113,26 @@ describe("lease expiring-soon warning", () => {
     const app = await openDetail(
       leaseWith(150_000, { lastRenewedAt: new Date(CLOCK_START_MS - 150_000).toISOString() }),
       120_000
+    );
+    expect(warningText(app)).toContain("expiring soon");
+  });
+
+  it("ignores a stale Date header from a transit-delayed response", async () => {
+    // The response was delayed 30s in transit, so its Date header is 30s
+    // stale. Adopting it would project the server clock 30s into the past and
+    // hide a warning the operator should see (43s genuinely remaining, below
+    // the 60s threshold).
+    const app = await openDetail(leaseWith(75_000), 0, 30_000);
+    expect(warningText(app)).toContain("expiring soon");
+  });
+
+  it("still corrects skew from a fast response via midpoint compensation", async () => {
+    // Server two minutes ahead, response delayed 4s in transit: the midpoint
+    // estimate keeps the correction within 2s of truth.
+    const app = await openDetail(
+      leaseWith(150_000, { lastRenewedAt: new Date(CLOCK_START_MS - 150_000).toISOString() }),
+      120_000,
+      4_000
     );
     expect(warningText(app)).toContain("expiring soon");
   });

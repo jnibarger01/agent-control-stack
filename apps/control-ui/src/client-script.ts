@@ -19,6 +19,11 @@ let sseConnected = false;
 let sseReconnectAt = 0;
 let serverClockOffsetMs = 0;
 let leaseWarningTimer = null;
+// Largest round trip for which an HTTP Date sample is trusted. Slower
+// responses may have been queued in transit, so their Date header no longer
+// reflects the observation time; adopting it would drag the projected server
+// clock backwards by the delay.
+const SERVER_CLOCK_MAX_RTT_MS = 10000;
 const sseEventNames = [
   'work_item.created',
   'work_item.pending_policy',
@@ -179,10 +184,19 @@ function pillMarkup(value) {
   return '<span class="pill ' + safe + '">' + safe + '</span>';
 }
 
-function observeServerClock(res) {
+function observeServerClock(res, requestStartedMs) {
   const raw = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('date') : null;
   const serverMs = Date.parse(raw || '');
-  if (Number.isFinite(serverMs)) serverClockOffsetMs = serverMs - Date.now();
+  if (!Number.isFinite(serverMs)) return;
+  const receivedMs = Date.now();
+  const startMs = Number.isFinite(requestStartedMs) && requestStartedMs <= receivedMs ? requestStartedMs : receivedMs;
+  const roundTripMs = receivedMs - startMs;
+  // A stale sample is worse than none: keep the previous offset (which starts
+  // at the local clock) instead of adopting a Date header that arrived late.
+  if (roundTripMs > SERVER_CLOCK_MAX_RTT_MS) return;
+  // Assume the server stamped Date halfway through the request so a slow (but
+  // still trusted) response cannot skew the projection by the full round trip.
+  serverClockOffsetMs = serverMs - startMs - roundTripMs / 2;
 }
 
 function serverNowMs() {
@@ -190,8 +204,9 @@ function serverNowMs() {
 }
 
 function fetchJson(url) {
+  const requestStartedMs = Date.now();
   return fetch(url, { headers: { accept: 'application/json' } }).then(async function (res) {
-    observeServerClock(res);
+    observeServerClock(res, requestStartedMs);
     const body = await res.json().catch(function () { return {}; });
     if (!res.ok) {
       throw new Error(body.error || body.code || ('HTTP ' + res.status));

@@ -79,16 +79,21 @@ export function bootLive(
         }
         const extra = extraRoutes[path];
         if (extra) {
-          const result = extra(url) as { status?: number; body?: unknown; headers?: Record<string, string> } | undefined;
+          const result = extra(url) as
+            { status?: number; body?: unknown; headers?: Record<string, string>; responseDelayMs?: number } | undefined;
           const status = result?.status ?? 200;
           const headers = result?.headers ?? {};
+          // Simulate a slow/transit-delayed response on the page clock so
+          // Date-header staleness handling can be exercised deterministically.
+          const responseDelayMs = result?.responseDelayMs ?? 0;
+          if (responseDelayMs > 0) now += responseDelayMs;
           return {
             ok: status < 400,
             status,
             headers: {
               get(name: string) {
                 const key = Object.keys(headers).find((candidate) => candidate.toLowerCase() === name.toLowerCase());
-                return key ? headers[key] ?? null : null;
+                return key ? (headers[key] ?? null) : null;
               }
             },
             json: async () => result?.body ?? {}
