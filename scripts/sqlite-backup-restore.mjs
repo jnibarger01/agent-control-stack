@@ -14,6 +14,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -94,7 +95,12 @@ try {
     const into = optionalFlag(rest, "--into");
     const temporaryRoot = into ? null : mkdtempSync(join(tmpdir(), "acs-restore-dry-run-"));
     const destination = resolve(into ?? join(temporaryRoot, "restored.db"));
-    if (into) mkdirSync(dirname(destination), { recursive: true });
+    if (into) {
+      // The dry-run must stay a rehearsal: refuse --into targets that resolve to
+      // the live control-plane database instead of silently replacing it.
+      assertNotLiveControlPlaneDatabase(destination);
+      mkdirSync(dirname(destination), { recursive: true });
+    }
     try {
       const healthBefore = verifyControlPlaneDatabaseFile(backupPath);
       const result = await restoreControlPlaneDatabase(backupPath, destination, { writersStopped: true });
@@ -108,7 +114,7 @@ try {
         health: result.health,
         safetyBackup: result.safetyBackup ?? null,
         note: into
-          ? "Restored to --into path only; live ACS_DB_PATH was not touched."
+          ? "Restored to --into path only; the live ACS_DB_PATH control-plane database was not used as the destination."
           : "Restored into a temporary directory; cleaned up after verification."
       });
     } finally {
@@ -205,6 +211,41 @@ function optionalFlag(args, name) {
   return value;
 }
 
+// Restore dry-runs are rehearsals: they must never replace the live
+// control-plane database. Real replacement belongs to db-ops restore with its
+// explicit --replace and --writers-stopped attestations.
+function liveControlPlaneDatabasePaths() {
+  const paths = new Set();
+  const configured = process.env.ACS_DB_PATH;
+  if (configured && configured.trim() !== "") paths.add(resolve(configured.trim()));
+  paths.add(resolve("storage/local.db"));
+  return paths;
+}
+
+function assertNotLiveControlPlaneDatabase(destination) {
+  const resolved = canonicalPath(destination);
+  for (const livePath of liveControlPlaneDatabasePaths()) {
+    const canonicalLive = canonicalPath(livePath);
+    if (resolved === canonicalLive) {
+      throw new Error(
+        `restore-dry-run --into refuses to overwrite the live control-plane database: ${canonicalLive} ` +
+          "(rehearse into a scratch path, or use db-ops.mjs restore with --replace --writers-stopped to replace it deliberately)"
+      );
+    }
+  }
+}
+
+// Canonicalize through symlinks so an alias cannot sneak a --into destination
+// past the live-database guard; fall back to the lexical path when the file or
+// one of its parents does not exist yet.
+function canonicalPath(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
 function sidecarSizes(database) {
   const sizes = { database: existsSync(database) ? statSync(database).size : 0 };
   for (const suffix of ["-wal", "-shm"]) {
@@ -236,7 +277,6 @@ function assertNoActiveWriter(destination) {
     db.close();
   }
 }
-
 
 function readLatestPointer(latestPath) {
   try {
