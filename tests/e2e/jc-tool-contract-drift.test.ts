@@ -4,18 +4,31 @@
  * The bug class this exists for: one layer accepts a tool that another layer
  * does not recognize (or maps to a different scope / approval rule) — the
  * same class of bug tests/e2e/dc-tool-contract-drift.test.ts guards against
- * for Desktop Commander. Every layer is compared against
+ * for Desktop Commander. Two layers are compared against
  * @agent-control-stack/jc-tool-manifest:
  *
  *   ACS  packages/desktop-commander-adapter/src/jace-commander.ts (issuer: policy, schemas)
  *   JC   vendor/desktop-commander/src/jace-commander/contract.ts  (enforcer: scopes, policy table)
- *   JC   vendor/desktop-commander/src/jace-commander/server.ts    (MCP surface: JC_TOOLS)
  *
- * and then exercised end to end in-process: a locally generated Ed25519 key
- * mints an acs.jc.v1 capability for a non-approval and an approval-gated
- * tool, and Jace Commander's own real JcCapabilityVerifier must accept or
- * reject it exactly as the manifest says it should — behavioral parity, not
- * just data parity.
+ * Deliberately NOT imported here: vendor/desktop-commander/src/jace-commander/server.ts
+ * (JC_TOOLS, the MCP tools/list surface). It pulls in @modelcontextprotocol/sdk,
+ * which is only installed under vendor/desktop-commander's own node_modules —
+ * a separate CI job installs those, but this root-level test file's job does
+ * not (vendor/desktop-commander is a subtree, not an npm workspace member).
+ * dc-tool-contract-drift.test.ts follows the same rule (it imports
+ * managed-acs.ts, never Desktop Commander's server.ts) for the same reason.
+ * JC_TOOLS vs. JC_TOOL_POLICIES name-set consistency is instead enforced by
+ * vendor/desktop-commander's own assertToolPolicyCoverage(), which runs
+ * every time its server starts and is exercised in its own test suite
+ * (test/test-jace-commander-*.js, run where the SDK is installed);
+ * transitively, that plus this file's manifest<->JC_TOOL_POLICIES check
+ * covers manifest<->JC_TOOLS too.
+ *
+ * Exercised end to end in-process: a locally generated Ed25519 key mints an
+ * acs.jc.v1 capability for a non-approval and an approval-gated tool, and
+ * Jace Commander's own real JcCapabilityVerifier must accept or reject it
+ * exactly as the manifest says it should — behavioral parity, not just data
+ * parity.
  */
 import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -27,12 +40,10 @@ import {
   JC_AUDIENCE,
   JC_CAPABILITY_VERSION,
   JC_SCOPES,
-  jcMcpToolDescriptors,
   jcToolContracts
 } from "@agent-control-stack/jc-tool-manifest";
 import { jaceCommanderToolNames, jaceCommanderToolPolicy } from "@agent-control-stack/desktop-commander-adapter";
 import * as jcContract from "../../vendor/desktop-commander/src/jace-commander/contract.ts";
-import { JC_TOOLS } from "../../vendor/desktop-commander/src/jace-commander/server.ts";
 import { strictCanonicalJsonV1 } from "../../vendor/desktop-commander/src/managed-acs.ts";
 
 const KEY_ID = "drift-jc-key-1";
@@ -83,13 +94,12 @@ function mint(
 }
 
 describe("jc-tool-manifest drift gate", () => {
-  it("lists the same tool set in the manifest, ACS's adapter, DC's policy table and DC's MCP surface", () => {
+  it("lists the same tool set in the manifest, ACS's adapter, and DC's policy table", () => {
     const manifestNames = jcToolContracts()
       .map((entry) => entry.name)
       .sort();
     expect(jaceCommanderToolNames().sort()).toEqual(manifestNames);
     expect(Object.keys(jcContract.JC_TOOL_POLICIES).sort()).toEqual(manifestNames);
-    expect(JC_TOOLS.map((tool) => tool.name).sort()).toEqual(manifestNames);
   });
 
   it("agrees on scopes and approval requirement for every tool, across the manifest, ACS and DC", () => {
@@ -111,20 +121,9 @@ describe("jc-tool-manifest drift gate", () => {
     }
   });
 
-  it("agrees on the exact MCP tools/list descriptor DC advertises", () => {
-    const advertised = new Map(JC_TOOLS.map((tool) => [tool.name, tool]));
-    for (const descriptor of jcMcpToolDescriptors()) {
-      const actual = advertised.get(descriptor.name);
-      expect(actual, `DC does not advertise ${descriptor.name}`).toBeDefined();
-      expect(actual!.description).toBe(descriptor.description);
-      expect(actual!.inputSchema).toEqual(descriptor.inputSchema);
-    }
-  });
-
-  it("has no schema for a tool the manifest doesn't define, and vice versa", () => {
+  it("has no DC policy for a tool the manifest doesn't define, and vice versa", () => {
     const manifestNames = new Set(jcToolContracts().map((entry) => entry.name));
     expect(new Set(Object.keys(jcContract.JC_TOOL_POLICIES))).toEqual(manifestNames);
-    expect(new Set(JC_TOOLS.map((tool) => tool.name))).toEqual(manifestNames);
   });
 
   describe("behavioral parity: DC's real verifier enforces exactly what the manifest says", () => {
