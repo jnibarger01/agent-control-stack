@@ -531,3 +531,18 @@ export function dcRejection(response: any): string | undefined {
     ? response.result._meta.acsAuthorization.code
     : undefined;
 }
+
+export interface BridgeAuthority {
+  bridge: { hasUpstreamPair: boolean; initialized: boolean; spawnCount: number; sessionCount: number };
+}
+
+/** Non-secret bridge introspection (spawn count, live downstream sessions). */
+export async function bridgeAuthority(bridge: ServiceProcess): Promise<BridgeAuthority> {
+  const response = await fetch(`http://127.0.0.1:${bridge.port}/authority`);
+  return (await response.json()) as BridgeAuthority;
+}
+
+/** Count of managed initializes the edge completed (each one is an ACS-attested session attach). */
+export function attestedInitializes(edge: ServiceProcess): number {
+  return (edge.output().match(/initialize attested \+ proxied/gu) ?? []).length;
+}
