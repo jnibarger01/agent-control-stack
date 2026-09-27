@@ -126,6 +126,11 @@ try {
       throw new Error(`unsupported wal-checkpoint mode: ${modeRaw} (use PASSIVE|FULL|RESTART|TRUNCATE)`);
     }
     if (!existsSync(database)) throw new Error(`database not found: ${database}`);
+    // PASSIVE is allowed with live writers by design; FULL/RESTART/TRUNCATE need a
+    // quiet window, so fail closed like `vacuum` when a writer still holds the DB.
+    if (mode !== "PASSIVE") {
+      assertNoActiveWriter(database);
+    }
     const sizeBefore = sidecarSizes(database);
     const db = new DatabaseSync(database);
     let checkpoint;
@@ -226,7 +231,7 @@ function assertNoActiveWriter(destination) {
         // Preserve the original lock error.
       }
     }
-    throw new Error(`active database writer or lock prevents vacuum: ${destination}`, { cause: error });
+    throw new Error(`active database writer or lock prevents the operation: ${destination}`, { cause: error });
   } finally {
     db.close();
   }
