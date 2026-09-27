@@ -106,9 +106,12 @@ deploy to Vercel or change `ignoreCommand`.
    docker compose -f compose.production.yml logs --tail=100 gateway
    ```
 
-   The healthcheck script probes `/livez` then `/readyz` (same contract as the
-   curls below). Prefer it so operators share one post-deploy check. Manual
-   equivalent:
+   The healthcheck script probes `/livez` once, then retries `/readyz` up to
+   `ACS_HEALTHCHECK_READYZ_ATTEMPTS` times (default 10, allowed range 1-60),
+   sleeping one second between failed readiness attempts. Each request uses
+   `ACS_HEALTHCHECK_TIMEOUT_SEC` (default 10 seconds). Prefer the script so
+   operators share the same bounded post-deploy readiness policy. A single
+   manual probe is:
 
    ```sh
    curl -fsS http://127.0.0.1:3000/livez
