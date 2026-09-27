@@ -86,10 +86,12 @@ async function startGateway(env) {
   return { port, child, exitCode: code, stderr };
 }
 
-async function lane({ acsHandler = allowCapability } = {}) {
+async function lane({ acsHandler = allowCapability, jcVariant = 'jc' } = {}) {
   const acs = recorder(acsHandler);
   const dcUp = recorder(() => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'dc' } } }));
-  const jcUp = recorder(() => ({ status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'jc' } } }));
+  const jcUp = recorder((req) => (req.path === '/authority'
+    ? { status: 200, body: { variant: jcVariant } }
+    : { status: 200, body: { jsonrpc: '2.0', id: 1, result: { lane: 'jc' } } }));
   const [acsPort, dcPort, jcPort] = [await acs.listen(), await dcUp.listen(), await jcUp.listen()];
   const gw = await startGateway({
     UPSTREAM: `http://127.0.0.1:${dcPort}`,
@@ -102,6 +104,8 @@ async function lane({ acsHandler = allowCapability } = {}) {
   const close = () => { gw.child.kill('SIGKILL'); acs.server.close(); dcUp.server.close(); jcUp.server.close(); };
   return { gw, acs, dcUp, jcUp, close };
 }
+
+const mcpRequests = (rec) => rec.requests.filter((r) => r.path !== '/authority');
 
 const call = (port, path, bearer, body) => fetch(`http://127.0.0.1:${port}${path}`, {
   method: 'POST',
@@ -141,8 +145,8 @@ test('RFC 8707 audience separation between /mcp and /jc/mcp', async () => {
     const ok = await call(gw.port, '/jc/mcp', jcToken, listTools);
     assert.equal(ok.status, 200);
     assert.deepEqual((await ok.json()).result, { lane: 'jc' });
-    assert.equal(jcUp.requests.length, 1);
-    assert.equal(jcUp.requests[0].path, '/mcp');
+    assert.equal(mcpRequests(jcUp).length, 1);
+    assert.equal(mcpRequests(jcUp)[0].path, '/mcp');
     assert.equal(dcUp.requests.length, 0);
 
     const meta = await (await fetch(`http://127.0.0.1:${gw.port}/.well-known/oauth-protected-resource/jc/mcp`)).json();
@@ -205,8 +209,8 @@ test('tools/call: jc issue route + jc credential, spoofed meta stripped, forward
     assert.equal(acs.requests[0].body.argsSummary, JSON.stringify({ view: 'health' }));
 
     assert.equal(dcUp.requests.length, 0);
-    assert.equal(jcUp.requests.length, 1);
-    const forwarded = jcUp.requests[0].body;
+    assert.equal(mcpRequests(jcUp).length, 1);
+    const forwarded = mcpRequests(jcUp)[0].body;
     assert.equal(forwarded.params._meta.acsCapability.signature, 'acs-sig');
     assert.equal(forwarded.params._meta.acsCapability.payload.forged, undefined);
     assert.equal(forwarded.params._meta.progressToken, 'p1');
@@ -234,7 +238,7 @@ test('privileged_exec awaiting human approval fails closed and surfaces the ACS 
     assert.equal(body.error, 'managed_authorization_required');
     assert.equal(body.workItemId, 'wrk_1');
     assert.deepEqual(body.approvalSummary.argv, ['/usr/bin/apt-get', 'update']);
-    assert.equal(jcUp.requests.length, 0);
+    assert.equal(mcpRequests(jcUp).length, 0);
   } finally { close(); }
 });
 
@@ -245,7 +249,7 @@ test('ACS unreachable fails closed on the jc lane', async () => {
   try {
     const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
     assert.equal(r.status, 503);
-    assert.equal(jcUp.requests.length, 0);
+    assert.equal(mcpRequests(jcUp).length, 0);
   } finally { gw.child.kill('SIGKILL'); jcUp.server.close(); }
 });
 
@@ -266,7 +270,7 @@ test('wrong-audience envelope on the jc route fails closed (acs_capability_wrong
     assert.equal(r.status, 503);
     assert.equal((await r.json()).code, 'acs_capability_wrong_audience');
     assert.equal(acs.requests.length, 1);
-    assert.equal(jcUp.requests.length, 0);
+    assert.equal(mcpRequests(jcUp).length, 0);
   } finally { close(); }
 });
 
@@ -281,7 +285,7 @@ test('JSON-RPC batch containing tools/call is rejected fail-closed on /jc/mcp', 
     assert.equal(r.status, 503);
     assert.equal((await r.json()).code, 'batched_tools_call_rejected');
     assert.equal(acs.requests.length, 0, 'no ACS issuance for a rejected batch');
-    assert.equal(jcUp.requests.length, 0, 'nothing forwarded upstream');
+    assert.equal(mcpRequests(jcUp).length, 0, 'nothing forwarded upstream');
   } finally { close(); }
 });
 
@@ -321,11 +325,11 @@ test('/authority and /ready read the jc bridge from JC_UPSTREAM, not the DC upst
   }
 });
 
-test('jace-commander bridge runs <JC_DC_DIR>/dist/jace-commander/cli.js serve', async () => {
+test('jace-commander bridge runs <JC_DC_DIR>/dist/jace-commander/cli.js serve (path with spaces)', async () => {
   const fs = await import('node:fs');
   const os = await import('node:os');
   const path = await import('node:path');
-  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jc-dcdir-'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'jc dcdir '));
   const state = path.join(root, 'state');
   fs.mkdirSync(path.join(root, 'dist/jace-commander'), { recursive: true });
   fs.writeFileSync(path.join(root, 'package.json'), '{"type":"module"}\n');
@@ -351,4 +355,25 @@ test('jace-commander bridge runs <JC_DC_DIR>/dist/jace-commander/cli.js serve', 
     bridge.kill('SIGKILL');
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+test('/jc/mcp refuses to issue or forward when JC_UPSTREAM is not the jc bridge', async () => {
+  const { gw, acs, dcUp, jcUp, close } = await lane({ jcVariant: 'dc' });
+  try {
+    const r = await call(gw.port, '/jc/mcp', token(`${ORIGIN}/jc/mcp`), { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'jc_status', arguments: {} } });
+    assert.equal(r.status, 503);
+    assert.equal((await r.json()).code, 'jc_bridge_mismatch');
+    assert.equal(acs.requests.length, 0, 'no capability issued');
+    assert.equal(mcpRequests(jcUp).length, 0, 'nothing forwarded');
+    assert.equal(dcUp.requests.length, 0);
+  } finally {
+    close();
+  }
+});
+
+test('jc lane refuses to start when JC_RESOURCE equals RESOURCE', async () => {
+  const gw = await startGateway({ JC_ENABLED: '1', ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token', JC_RESOURCE: `${ORIGIN}/mcp` });
+  if (gw.exitCode === undefined) gw.child.kill('SIGKILL');
+  assert.notEqual(gw.exitCode, undefined, 'gateway must not start');
+  assert.match(typeof gw.stderr === 'function' ? gw.stderr() : gw.stderr, /JC_RESOURCE must differ from RESOURCE/);
 });

@@ -47,12 +47,16 @@ if (JC && !MANAGED) {
 }
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
 const JC_DIR = process.env.JC_DC_DIR || '/home/jacen/projects/desktop-commander';
-const DEFAULT_DC_ARGS = JC
-  ? `${path.join(JC_DIR, 'dist/jace-commander/cli.js')} serve`
-  : MANAGED
-    ? '/home/jacen/projects/desktop-commander/dist/index.js'
-    : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
-const DC_ARGS = (process.env.DC_ARGS || DEFAULT_DC_ARGS).split(' ');
+const DEFAULT_DC_ARGS = MANAGED
+  ? '/home/jacen/projects/desktop-commander/dist/index.js'
+  : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
+// The JC default is built as an argv array so a JC_DC_DIR containing spaces
+// stays one argument (DC_ARGS is whitespace-split).
+const DC_ARGS = process.env.DC_ARGS
+  ? process.env.DC_ARGS.split(' ')
+  : JC
+    ? [path.join(JC_DIR, 'dist/jace-commander/cli.js'), 'serve']
+    : DEFAULT_DC_ARGS.split(' ');
 if (MANAGED && DC_ARGS.includes('--standalone')) {
   console.error('bridge: managed mode refuses a --standalone executor; fix DC_ARGS');
   process.exit(1);

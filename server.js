@@ -54,6 +54,8 @@ try {
 let JC = { enabled: false };
 try {
   JC = jcModeFromEnv();
+  // Equal resources would make /mcp and /jc/mcp accept each other's tokens.
+  if (JC.enabled && JC_RESOURCE === RESOURCE) throw new Error('JC_RESOURCE must differ from RESOURCE; refusing to start');
   if (JC.enabled) console.log(`gateway: Jace Commander lane enabled at /jc/mcp (resource=${JC_RESOURCE}; ACS-managed only)`);
 } catch (e) {
   console.error(`gateway: ${e.message}`);
@@ -699,6 +701,12 @@ const server = http.createServer(async (req, res) => {
         }
         if (isCall) {
           try {
+            // Never issue or forward a JC capability to anything but the JC
+            // bridge (e.g. JC_UPSTREAM mistakenly pointed at the DC bridge).
+            const jcBridge = await fetchBridgeAuthority(JC_UPSTREAM);
+            if (!jcBridge.ok || jcBridge.data?.variant !== 'jc') {
+              throw Object.assign(new Error('jc upstream is not the Jace Commander bridge'), { acsCode: 'jc_bridge_mismatch' });
+            }
             const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth), requestId: randId() });
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
