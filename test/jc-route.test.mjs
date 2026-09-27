@@ -407,3 +407,26 @@ test('with the jc lane on, /mcp refuses a UPSTREAM that is the jc bridge (swappe
     gw.child.kill('SIGKILL'); acs.server.close(); swapped.server.close();
   }
 });
+
+test('/ready is not delayed by an unresponsive jc bridge', async () => {
+  const dcUp = recorder((req) => (req.path === '/authority'
+    ? { status: 200, body: { variant: 'dc', bridge: { hasUpstreamPair: true } } }
+    : { status: 200, body: {} }));
+  // Accepts connections but never answers.
+  const hung = http.createServer(() => {});
+  const [dcPort, hungPort] = [await dcUp.listen(), await new Promise((r) => hung.listen(0, '127.0.0.1', () => r(hung.address().port)))];
+  const gw = await startGateway({
+    UPSTREAM: `http://127.0.0.1:${dcPort}`, JC_ENABLED: '1', JC_UPSTREAM: `http://127.0.0.1:${hungPort}`,
+    ACS_GATEWAY_URL: 'http://127.0.0.1:1', ACS_JC_GATEWAY_TOKEN: 'jc-bridge-token',
+  });
+  try {
+    const started = Date.now();
+    const ready = await (await fetch(`http://127.0.0.1:${gw.port}/ready`)).json();
+    const elapsed = Date.now() - started;
+    assert.equal(ready.bridgeReady, true);
+    assert.equal(ready.jcBridgeReady, false);
+    assert.ok(elapsed < 1500, `/ready took ${elapsed}ms`);
+  } finally {
+    gw.child.kill('SIGKILL'); dcUp.server.close(); hung.closeAllConnections?.(); hung.close();
+  }
+});
