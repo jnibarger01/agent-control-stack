@@ -12,5 +12,6 @@ export * from "./scheduler-firing.js";
 export * from "./liveness.js";
 export * from "./state-machine.js";
 export * from "./store.js";
+export { relayTraceOutbox } from "./trace-outbox.js";
 export * from "./work-item.js";
 export * from "./worker-identity.js";

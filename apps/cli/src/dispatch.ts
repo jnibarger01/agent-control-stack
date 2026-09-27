@@ -9,8 +9,10 @@ import {
   verifyAuditChainFromDatabaseFile,
   verifyAuditChainJsonl
 } from "@agent-control-stack/shared";
-import { DEFAULT_HEARTBEAT_TTL_MS, SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { DEFAULT_HEARTBEAT_TTL_MS, SqliteWorkItemStore, relayTraceOutbox } from "@agent-control-stack/work-items";
 import { readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { runWorkerOnce } from "@agent-control-stack/worker";
 import { listAvailableActors } from "./available-actors.js";
 import { discoverLocalActors as runLocalActorDiscovery } from "./discover-actors.js";
@@ -90,6 +92,10 @@ function defaultDbPath(explicit?: string): string {
   return explicit ?? process.env.ACS_DB_PATH ?? "storage/local.db";
 }
 
+function defaultSpool(explicit?: string): string {
+  return explicit ?? process.env.LOOPTRACE_SPOOL_DIR ?? join(homedir(), ".local", "state", "looptrace", "spool");
+}
+
 export function formatExecutionModeStatus(dbPath = defaultDbPath()): { text: string; ok: boolean } {
   const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
   try {
@@ -111,7 +117,10 @@ export function formatExecutionModeStatus(dbPath = defaultDbPath()): { text: str
   }
 }
 
-export function setExecutionModeFromCli(mode: "strict" | "admin", dbPath = defaultDbPath()): { text: string; ok: boolean } {
+export function setExecutionModeFromCli(
+  mode: "strict" | "admin",
+  dbPath = defaultDbPath()
+): { text: string; ok: boolean } {
   const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
   try {
     store.setExecutionMode({ mode, updatedBy: "acs-cli", reason: `acs mode ${mode}` });
@@ -234,6 +243,17 @@ async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapt
         io.stdout.write(jsonl);
       }
       return 0;
+    }
+    case "trace-relay": {
+      try {
+        const result = relayTraceOutbox(defaultDbPath(command.dbPath), defaultSpool(command.spoolDir));
+        io.stdout.write(`shipped=${result.shipped}\n`);
+        return 0;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "trace relay failed";
+        io.stderr.write(`trace relay failed: ${message}\n`);
+        return 1;
+      }
     }
     case "audit-verify": {
       const verification = command.filePath
