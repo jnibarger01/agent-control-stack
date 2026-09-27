@@ -283,15 +283,16 @@ export function capabilityTransport(managed, { identity, requestId }) {
           : decision
             ? decision
             : `acs_http_${status || 'unreachable'}`;
-      // Preserve only the bounded fields the edge is allowed to surface back
-      // to MCP callers. ApprovalSummary remains internal to the edge because
-      // the normative JSON-RPC contract exposes string metadata only.
+      // Preserve only the bounded string fields the edge is allowed to surface
+      // back to MCP callers (docs/protocol/dc-authorization-arguments.md).
+      // Anything else ACS attaches — e.g. the approvalSummary object — is
+      // deliberately dropped so internal detail cannot leak into JSON-RPC
+      // error data.
       const acsDetails = {};
       for (const key of ['reason', 'detail', 'workItemId', 'actionHash', 'approvalInstructions']) {
         if (json && typeof json[key] === 'string') acsDetails[key] = json[key];
       }
       const acsApproval = { ...acsDetails };
-      if (json && json.approvalSummary && typeof json.approvalSummary === 'object') acsApproval.approvalSummary = json.approvalSummary;
       throw Object.assign(new Error(`ACS did not authorize this invocation (${code})`), {
         acsCode: code,
         acsDecision: decision,
