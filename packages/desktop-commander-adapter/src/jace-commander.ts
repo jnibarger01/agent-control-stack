@@ -1,5 +1,4 @@
 import { createHash, createPrivateKey, randomBytes, sign } from "node:crypto";
-import { isAbsolute, normalize } from "node:path";
 import { ControlStackError, strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import {
   executionActionHash,
@@ -8,7 +7,14 @@ import {
   type ClaimedWorkItem,
   type WorkItem
 } from "@agent-control-stack/work-items";
-import { z } from "zod";
+import {
+  JC_TOOL_ARGUMENT_SCHEMAS,
+  jcToolContract,
+  jcToolNames,
+  type JcActionKind,
+  type JcScope
+} from "@agent-control-stack/jc-tool-manifest";
+import type { z } from "zod";
 
 /**
  * acs.jc.v1 — ACS-issued capabilities for the Jace Commander MCP server
@@ -30,8 +36,12 @@ export const JACE_COMMANDER_PRIVILEGED_TOOL = "privileged_exec" as const;
 /** Policy action kind for privileged_exec; policy-gate always requires human approval for it. */
 export const PRIVILEGED_EXEC_ACTION_KIND = "privileged.exec" as const;
 
-export type JaceCommanderScope = "fs.read" | "integration.read" | "integration.write" | "process.privileged";
-export type JaceCommanderActionKind = "jc.integration.read" | "jc.integration.write" | "jc.fs.read" | "privileged.exec";
+// Scope, action-kind, argument-schema and policy data now live in the single
+// canonical @agent-control-stack/jc-tool-manifest package (imported above).
+// These type aliases and the policy lookup below keep this module's existing
+// exported names and shapes unchanged for callers.
+export type JaceCommanderScope = JcScope;
+export type JaceCommanderActionKind = JcActionKind;
 
 export interface JaceCommanderToolPolicy {
   readonly name: string;
@@ -41,93 +51,22 @@ export interface JaceCommanderToolPolicy {
   readonly risk: "low" | "medium" | "critical";
 }
 
-const ID = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/u);
-const ABSOLUTE = z
-  .string()
-  .min(1)
-  .max(4096)
-  .refine((value) => isAbsolute(value) && !value.includes("\0"), "must be an absolute path");
-
-const ARGUMENT_SCHEMAS: Readonly<Record<string, z.ZodType>> = Object.freeze({
-  jc_status: z.strictObject({}),
-  acs_read: z.strictObject({
-    view: z.enum(["health", "work-items", "work-item"]),
-    id: ID.optional(),
-    status: z.string().min(1).max(64).optional()
-  }),
-  acs_submit_mission: z.strictObject({
-    title: z.string().min(1).max(200),
-    intent: z.string().min(1).max(8000),
-    target: z.record(z.string(), z.unknown()),
-    requestedActions: z.array(z.record(z.string(), z.unknown())).max(32).optional(),
-    risk: z.enum(["low", "medium", "high", "critical"]).optional(),
-    correlationId: ID.optional()
-  }),
-  swarm_read: z.strictObject({
-    view: z.enum(["health", "mission-control", "runs", "status", "task"]),
-    taskId: ID.optional()
-  }),
-  visualizer_read: z.strictObject({
-    view: z.enum(["system-status", "runtimes", "executions", "approvals", "alerts", "agents"])
-  }),
-  mission_router_list: z.strictObject({}),
-  looptrace_verify: z.strictObject({ path: ABSOLUTE }),
-  privileged_exec: z.strictObject({
-    argv: z
-      .array(
-        z
-          .string()
-          .max(8192)
-          .refine((value) => !value.includes("\0"), "argv entries must not contain NUL")
-      )
-      .min(1)
-      .max(256)
-      .refine(
-        (argv) => isAbsolute(argv[0]!) && normalize(argv[0]!) === argv[0],
-        "argv[0] must be a normalized absolute path"
-      ),
-    cwd: ABSOLUTE.optional(),
-    timeoutMs: z.number().int().min(1).max(600_000).optional(),
-    stdin: z
-      .string()
-      .max(64 * 1024)
-      .optional()
-  })
-});
-
-const policy = (
-  name: string,
-  scopes: JaceCommanderScope[],
-  requiresApproval: boolean,
-  actionKind: JaceCommanderActionKind,
-  risk: JaceCommanderToolPolicy["risk"]
-): JaceCommanderToolPolicy =>
-  Object.freeze({ name, scopes: Object.freeze(scopes), requiresApproval, actionKind, risk });
-
-/** Must equal JC_TOOL_POLICIES in desktop-commander src/jace-commander/contract.ts. */
-const TOOL_POLICIES: Readonly<Record<string, JaceCommanderToolPolicy>> = Object.freeze({
-  jc_status: policy("jc_status", ["integration.read"], false, "jc.integration.read", "low"),
-  acs_read: policy("acs_read", ["integration.read"], false, "jc.integration.read", "low"),
-  acs_submit_mission: policy("acs_submit_mission", ["integration.write"], false, "jc.integration.write", "low"),
-  swarm_read: policy("swarm_read", ["integration.read"], false, "jc.integration.read", "low"),
-  visualizer_read: policy("visualizer_read", ["integration.read"], false, "jc.integration.read", "low"),
-  mission_router_list: policy("mission_router_list", ["fs.read"], false, "jc.fs.read", "low"),
-  looptrace_verify: policy("looptrace_verify", ["fs.read"], false, "jc.fs.read", "low"),
-  privileged_exec: policy(
-    JACE_COMMANDER_PRIVILEGED_TOOL,
-    ["process.privileged"],
-    true,
-    PRIVILEGED_EXEC_ACTION_KIND,
-    "critical"
-  )
-});
+const ARGUMENT_SCHEMAS: Readonly<Record<string, z.ZodType>> = JC_TOOL_ARGUMENT_SCHEMAS;
 
 export function jaceCommanderToolPolicy(toolName: string): JaceCommanderToolPolicy | undefined {
-  return Object.prototype.hasOwnProperty.call(TOOL_POLICIES, toolName) ? TOOL_POLICIES[toolName] : undefined;
+  const entry = jcToolContract(toolName);
+  if (!entry) return undefined;
+  return Object.freeze({
+    name: entry.name,
+    scopes: Object.freeze([...entry.scopes]),
+    requiresApproval: entry.requiresApproval,
+    actionKind: entry.actionKind,
+    risk: entry.risk
+  });
 }
 
 export function jaceCommanderToolNames(): string[] {
-  return Object.keys(TOOL_POLICIES).sort();
+  return jcToolNames();
 }
 
 export interface JaceCommanderInvocation {
