@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { workItemRiskSchema } from "@agent-control-stack/work-items";
 import { JSDOM } from "jsdom";
 import {
   applyQueueFilterToDom,
@@ -14,6 +15,7 @@ import {
   renderDashboard,
   requestApprovalConfirm,
   serializeQueueFilter,
+  WORK_ITEM_RISK_VALUES,
   type MissionControlViewModel
 } from "./index.js";
 
@@ -470,6 +472,7 @@ describe("queue filter", () => {
     expect(
       serializeQueueFilter({ statuses: ["running"], risks: ["high", "critical"], agentId: "a1", text: "x" }).toString()
     ).toBe("status=running&risk=high&risk=critical&agent=a1&q=x");
+    expect(WORK_ITEM_RISK_VALUES).toEqual(workItemRiskSchema.options);
   });
 
   it("hides non-matching queue items and updates the visible count in the DOM", () => {
@@ -525,6 +528,10 @@ describe("queue filter", () => {
     expect(html).toContain('data-risk="high"');
     expect(html).toContain('data-queue-risk="high"');
     expect(html).toContain("bindQueueFilter()");
+    expect(html).toContain('return new Set(["low","medium","high","critical"]);');
+    expect(html).toContain("const filterKeys = ['status', 'risk', 'q', 'text', 'agent'];");
+    expect(html).toContain("filterKeys.forEach(function (key) { hashParams.delete(key); });");
+    expect(html).toContain("url.hash = '#' + anchor + (remainingHashParams ? delimiter + remainingHashParams : '');");
 
     const dom = new JSDOM(html);
     const root = dom.window.document;
