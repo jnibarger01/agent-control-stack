@@ -24,12 +24,18 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "1ad684a24894321146846acc45d7985e50ce329262c85673b85138b8e78c4ad8",
+  "manifestHash": "01b2523db492695af29694bca1f71a7073484f8aeb249694d78a384dc3c62c46",
   "scopes": [
     "fs.read",
+    "fs.write",
     "integration.read",
     "integration.write",
-    "process.privileged"
+    "process.read",
+    "process.exec",
+    "process.privileged",
+    "git.read",
+    "git.write",
+    "git.network"
   ],
   "tools": [
     {
@@ -130,6 +136,99 @@ export const JC_MANIFEST: JcManifest = {
       ]
     },
     {
+      "name": "create_directory",
+      "description": "Create a directory under an allowed root.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute directory path"
+          },
+          "recursive": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.write"
+      ],
+      "actionKind": "jc.fs.write",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "filesystem",
+      "pathArguments": [
+        "path"
+      ],
+      "cliCommands": [
+        "mkdir"
+      ]
+    },
+    {
+      "name": "edit_block",
+      "description": "Replace one exact occurrence of old text in a file under an allowed root.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute file"
+          },
+          "old": {
+            "type": "string",
+            "description": "Text to replace, exactly once"
+          },
+          "new": {
+            "type": "string",
+            "description": "Replacement text"
+          }
+        },
+        "required": [
+          "path",
+          "old",
+          "new"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.write"
+      ],
+      "actionKind": "jc.fs.write",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "filesystem",
+      "pathArguments": [
+        "path"
+      ],
+      "cliCommands": [
+        "edit"
+      ]
+    },
+    {
+      "name": "get_config",
+      "description": "Non-secret JC configuration: urls, roots, tool count, manifest hash.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "actionKind": "jc.integration.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "system",
+      "pathArguments": [],
+      "cliCommands": [
+        "config"
+      ]
+    },
+    {
       "name": "get_file_info",
       "description": "Return metadata for one file or directory under an allowed filesystem root: type, size, timestamps, permissions and, for text files, line count.",
       "inputSchema": {
@@ -193,6 +292,338 @@ export const JC_MANIFEST: JcManifest = {
       ]
     },
     {
+      "name": "git_add",
+      "description": "Stage explicit relative paths. Does not stage everything.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "paths": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 50
+          }
+        },
+        "required": [
+          "repo",
+          "paths"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.write"
+      ],
+      "actionKind": "jc.git.write",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git add"
+      ]
+    },
+    {
+      "name": "git_branch",
+      "description": "Local branch names.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "actionKind": "jc.git.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git branch"
+      ]
+    },
+    {
+      "name": "git_commit",
+      "description": "Commit whatever is already staged. Does not run git add.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "message": {
+            "type": "string",
+            "description": "Commit message"
+          }
+        },
+        "required": [
+          "repo",
+          "message"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.write"
+      ],
+      "actionKind": "jc.git.write",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git commit"
+      ]
+    },
+    {
+      "name": "git_diff",
+      "description": "git diff for a contained repository. Optional path is relative.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "staged": {
+            "type": "boolean"
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative path"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "actionKind": "jc.git.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git diff"
+      ]
+    },
+    {
+      "name": "git_fetch",
+      "description": "Fetch one named remote. Does not merge.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "remote": {
+            "type": "string",
+            "description": "Remote name"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.network"
+      ],
+      "actionKind": "jc.git.network",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git fetch"
+      ]
+    },
+    {
+      "name": "git_log",
+      "description": "Recent commits as sha and subject.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "actionKind": "jc.git.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git log"
+      ]
+    },
+    {
+      "name": "git_push",
+      "description": "Push the current branch to a remote. Detached HEAD and force push are refused.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "remote": {
+            "type": "string",
+            "description": "Remote name"
+          },
+          "branch": {
+            "type": "string",
+            "description": "Must match the current branch"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.network"
+      ],
+      "actionKind": "jc.git.network",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git push"
+      ]
+    },
+    {
+      "name": "git_show",
+      "description": "Show HEAD or one full commit SHA.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          },
+          "rev": {
+            "type": "string",
+            "description": "HEAD or 40-hex sha"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "actionKind": "jc.git.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git show"
+      ]
+    },
+    {
+      "name": "git_status",
+      "description": "Structured git status for a repository inside an allowed root.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "Absolute git working tree"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "git.read"
+      ],
+      "actionKind": "jc.git.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "git",
+      "pathArguments": [
+        "repo"
+      ],
+      "cliCommands": [
+        "git status"
+      ]
+    },
+    {
+      "name": "jc_doctor",
+      "description": "Report JC version, manifest size, filesystem roots, ACS reachability, git, and whether this process looks like a legacy checkout. No secrets.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "actionKind": "jc.integration.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "system",
+      "pathArguments": [],
+      "cliCommands": [
+        "doctor"
+      ]
+    },
+    {
       "name": "jc_status",
       "description": "Report Jace Commander mode, configured endpoints, reachability of ACS / codex-swarm / visualizer, and whether the privileged helper is installed.",
       "inputSchema": {
@@ -210,6 +641,34 @@ export const JC_MANIFEST: JcManifest = {
       "pathArguments": [],
       "cliCommands": [
         "status"
+      ]
+    },
+    {
+      "name": "kill_process",
+      "description": "Terminate a process this server started.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "pid": {
+            "type": "integer"
+          }
+        },
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.exec"
+      ],
+      "actionKind": "jc.process.exec",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "process",
+      "pathArguments": [],
+      "cliCommands": [
+        "kill"
       ]
     },
     {
@@ -249,6 +708,26 @@ export const JC_MANIFEST: JcManifest = {
       ]
     },
     {
+      "name": "list_processes",
+      "description": "List processes this server started, including exit codes.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.read"
+      ],
+      "actionKind": "jc.process.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "process",
+      "pathArguments": [],
+      "cliCommands": [
+        "ps"
+      ]
+    },
+    {
       "name": "list_searches",
       "description": "List in-process searches and whether each is done, truncated, or cancelled. Does not return hit contents.",
       "inputSchema": {
@@ -266,6 +745,26 @@ export const JC_MANIFEST: JcManifest = {
       "pathArguments": [],
       "cliCommands": [
         "search-status"
+      ]
+    },
+    {
+      "name": "list_sessions",
+      "description": "List processes this server started.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.read"
+      ],
+      "actionKind": "jc.process.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "process",
+      "pathArguments": [],
+      "cliCommands": [
+        "sessions"
       ]
     },
     {
@@ -314,6 +813,62 @@ export const JC_MANIFEST: JcManifest = {
       "pathArguments": [],
       "cliCommands": [
         "mission list"
+      ]
+    },
+    {
+      "name": "move_file",
+      "description": "Rename a file or directory inside allowed roots. Does not overwrite.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "Absolute source"
+          },
+          "to": {
+            "type": "string",
+            "description": "Absolute destination"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.write"
+      ],
+      "actionKind": "jc.fs.write",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "filesystem",
+      "pathArguments": [
+        "from",
+        "to"
+      ],
+      "cliCommands": [
+        "mv"
+      ]
+    },
+    {
+      "name": "ping",
+      "description": "Liveness plus a short ACS /health probe.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "integration.read"
+      ],
+      "actionKind": "jc.integration.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "system",
+      "pathArguments": [],
+      "cliCommands": [
+        "ping"
       ]
     },
     {
@@ -432,6 +987,82 @@ export const JC_MANIFEST: JcManifest = {
         "paths"
       ],
       "cliCommands": []
+    },
+    {
+      "name": "read_process_output",
+      "description": "Read buffered stdout and stderr for a process this server started.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "sessionId": {
+            "type": "string",
+            "description": "Session id"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0
+          }
+        },
+        "required": [
+          "sessionId"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.read"
+      ],
+      "actionKind": "jc.process.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "process",
+      "pathArguments": [],
+      "cliCommands": [
+        "output"
+      ]
+    },
+    {
+      "name": "start_process",
+      "description": "Start one executable with an argv array and a contained cwd. Shells and sudo are refused.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "maxItems": 32
+          },
+          "cwd": {
+            "type": "string",
+            "description": "Absolute working directory"
+          },
+          "timeoutMs": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 600000
+          }
+        },
+        "required": [
+          "argv",
+          "cwd"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "process.exec"
+      ],
+      "actionKind": "jc.process.exec",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "process",
+      "pathArguments": [
+        "cwd"
+      ],
+      "cliCommands": [
+        "start"
+      ]
     },
     {
       "name": "start_search",
@@ -590,6 +1221,44 @@ export const JC_MANIFEST: JcManifest = {
       "pathArguments": [],
       "cliCommands": [
         "visualizer read"
+      ]
+    },
+    {
+      "name": "write_file",
+      "description": "Write a UTF-8 file under an allowed root. Existing files are replaced only when overwrite is true. Symlinks are refused.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute file path"
+          },
+          "content": {
+            "type": "string",
+            "description": "File contents, at most 256 KiB"
+          },
+          "overwrite": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "path",
+          "content"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.write"
+      ],
+      "actionKind": "jc.fs.write",
+      "risk": "medium",
+      "requiresApproval": true,
+      "group": "filesystem",
+      "pathArguments": [
+        "path"
+      ],
+      "cliCommands": [
+        "write"
       ]
     }
   ]

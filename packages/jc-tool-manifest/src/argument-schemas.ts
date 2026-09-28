@@ -49,7 +49,28 @@ export const JC_TOOL_NAMES = Object.freeze([
   "start_search",
   "get_more_search_results",
   "list_searches",
-  "stop_search"
+  "stop_search",
+  "write_file",
+  "create_directory",
+  "move_file",
+  "edit_block",
+  "start_process",
+  "read_process_output",
+  "list_sessions",
+  "kill_process",
+  "list_processes",
+  "git_status",
+  "git_diff",
+  "git_log",
+  "git_branch",
+  "git_show",
+  "git_add",
+  "git_commit",
+  "git_fetch",
+  "git_push",
+  "jc_doctor",
+  "ping",
+  "get_config"
 ] as const);
 export type JcToolName = (typeof JC_TOOL_NAMES)[number];
 
@@ -129,5 +150,52 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
     limit: z.number().int().min(1).max(100).optional()
   }),
   list_searches: z.strictObject({}),
-  stop_search: z.strictObject({ searchId: ID })
+  stop_search: z.strictObject({ searchId: ID }),
+  write_file: z.strictObject({
+    path: ABSOLUTE,
+    content: z.string().max(256 * 1024),
+    overwrite: z.boolean().optional()
+  }),
+  create_directory: z.strictObject({ path: ABSOLUTE, recursive: z.boolean().optional() }),
+  move_file: z.strictObject({ from: ABSOLUTE, to: ABSOLUTE }),
+  edit_block: z.strictObject({
+    path: ABSOLUTE,
+    old: z.string().min(1).max(8192),
+    new: z.string().max(8192)
+  }),
+  start_process: z.strictObject({
+    argv: z.array(z.string().min(1).max(1024)).min(1).max(32),
+    cwd: ABSOLUTE,
+    timeoutMs: z.number().int().min(1).max(600_000).optional()
+  }),
+  read_process_output: z.strictObject({
+    sessionId: ID,
+    offset: z.number().int().min(0).optional()
+  }),
+  list_sessions: z.strictObject({}),
+  list_processes: z.strictObject({}),
+  kill_process: z.strictObject({ sessionId: ID.optional(), pid: z.number().int().positive().optional() }),
+  git_status: z.strictObject({ repo: ABSOLUTE }),
+  git_diff: z.strictObject({
+    repo: ABSOLUTE,
+    staged: z.boolean().optional(),
+    path: z.string().min(1).max(1024).optional()
+  }),
+  git_log: z.strictObject({ repo: ABSOLUTE, limit: z.number().int().min(1).max(100).optional() }),
+  git_branch: z.strictObject({ repo: ABSOLUTE }),
+  git_show: z.strictObject({
+    repo: ABSOLUTE,
+    rev: z.union([z.literal("HEAD"), z.string().regex(/^[a-f0-9]{40}$/u)]).optional()
+  }),
+  git_add: z.strictObject({ repo: ABSOLUTE, paths: z.array(z.string().min(1).max(1024)).min(1).max(50) }),
+  git_commit: z.strictObject({ repo: ABSOLUTE, message: z.string().min(1).max(500) }),
+  git_fetch: z.strictObject({ repo: ABSOLUTE, remote: z.string().min(1).max(128).optional() }),
+  git_push: z.strictObject({
+    repo: ABSOLUTE,
+    remote: z.string().min(1).max(128).optional(),
+    branch: z.string().min(1).max(128).optional()
+  }),
+  jc_doctor: z.strictObject({}),
+  ping: z.strictObject({}),
+  get_config: z.strictObject({})
 });

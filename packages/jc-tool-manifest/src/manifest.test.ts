@@ -33,10 +33,24 @@ describe("jc-tool-manifest", () => {
     }
   });
 
-  it("gates only privileged_exec behind approval", () => {
+  it("requires human approval for mutations and not for reads", () => {
+    const approval = new Set([
+      "privileged_exec",
+      "write_file",
+      "create_directory",
+      "move_file",
+      "edit_block",
+      "start_process",
+      "kill_process",
+      "git_add",
+      "git_commit",
+      "git_fetch",
+      "git_push"
+    ]);
     for (const entry of jcToolContracts()) {
-      expect(entry.requiresApproval).toBe(entry.name === "privileged_exec");
+      expect(entry.requiresApproval, entry.name).toBe(approval.has(entry.name));
     }
+    expect(jcToolContracts().length).toBeGreaterThanOrEqual(30);
   });
 
   it("privileged_exec is the only critical-risk, process.privileged tool", () => {
@@ -60,11 +74,11 @@ describe("jc-tool-manifest", () => {
   it("puts every tool in a known group and gives filesystem tools ACS path containment", () => {
     for (const entry of jcToolContracts()) {
       expect(JC_TOOL_GROUPS).toContain(entry.group);
-      if (entry.group === "filesystem") {
-        expect(entry.scopes).toEqual(["fs.read"]);
-        expect(entry.actionKind).toBe("jc.fs.read");
+      if (entry.group === "filesystem" || entry.group === "git") {
         expect(entry.pathArguments.length, `${entry.name} must declare its path arguments`).toBeGreaterThan(0);
       }
+      if (entry.scopes.includes("fs.read")) expect(entry.actionKind).toBe("jc.fs.read");
+      if (entry.scopes.includes("fs.write")) expect(entry.actionKind).toBe("jc.fs.write");
     }
   });
 
@@ -85,7 +99,9 @@ describe("jc-tool-manifest", () => {
     expect(read.safeParse({ path: "/tmp/x", offset: -5 }).success).toBe(true);
     const many = jcToolContract("read_multiple_files")!.argsSchema;
     expect(many.safeParse({ paths: [] }).success).toBe(false);
-    expect(many.safeParse({ paths: Array.from({ length: JC_FS_LIMITS.maxMultipleFiles + 1 }, (_, i) => `/f${i}`) }).success).toBe(false);
+    expect(
+      many.safeParse({ paths: Array.from({ length: JC_FS_LIMITS.maxMultipleFiles + 1 }, (_, i) => `/f${i}`) }).success
+    ).toBe(false);
     const ls = jcToolContract("list_directory")!.argsSchema;
     expect(ls.safeParse({ path: "/tmp", depth: JC_FS_LIMITS.maxListDepth + 1 }).success).toBe(false);
   });

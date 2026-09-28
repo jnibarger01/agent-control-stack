@@ -58,10 +58,12 @@ function insert(db: DatabaseSync, values: Record<string, unknown>): void {
 describe("migration 029: jace_commander tool allowlist", () => {
   it("seeds every known tool and makes the allowlist append-only", () => {
     const db = migrated();
-    const tools = (db.prepare("SELECT tool_name FROM jace_commander_tools ORDER BY tool_name").all() as Array<{
-      tool_name: string;
-    }>).map((entry) => entry.tool_name);
-    expect(tools).toHaveLength(16);
+    const tools = (
+      db.prepare("SELECT tool_name FROM jace_commander_tools ORDER BY tool_name").all() as Array<{
+        tool_name: string;
+      }>
+    ).map((entry) => entry.tool_name);
+    expect(tools).toHaveLength(37);
     expect(tools).toContain("privileged_exec");
     expect(tools).toContain("read_multiple_files");
     expect(tools).toContain("start_search");
@@ -117,7 +119,11 @@ describe("migration 029: jace_commander tool allowlist", () => {
     ).map((entry) => entry.tool_name);
     expect(tools).toEqual(["acs_read", "jc_status"]);
     expect(
-      db.prepare("SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'jace_commander_capability_issuances__pre029'").get()
+      db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM sqlite_master WHERE name LIKE 'jace_commander_capability_issuances__pre029'"
+        )
+        .get()
     ).toEqual({ n: 0 });
     db.close();
   });

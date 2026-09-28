@@ -56,6 +56,15 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
       "approval:privileged-exec"
     ]);
   }
+  if (JC_APPROVAL_KINDS.has(context.action.kind)) {
+    if (context.operation === "approve" && context.actor === ACS_ADMIN_APPROVER) {
+      return risk("forbidden", "Jace Commander mutations require a human approver", ["deny:jc-admin-approval"]);
+    }
+    if (context.operation === "approve" && context.actor === context.requester) {
+      return risk("forbidden", "Jace Commander mutations cannot be self-approved", ["deny:self-approval"]);
+    }
+    return risk("requires_approval", "Jace Commander mutation requires human approval", ["approval:jc-mutation"]);
+  }
   if (JC_READ_KINDS.has(context.action.kind) && context.write !== true && context.destructive !== true) {
     return risk("read_only", "Jace Commander read-only integration view is allowed", ["allow:jc-read"]);
   }
@@ -186,11 +195,28 @@ export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
   "jc.integration.read",
   "jc.integration.write",
   "jc.fs.read",
+  "jc.fs.write",
+  "jc.process.read",
+  "jc.process.exec",
+  "jc.git.read",
+  "jc.git.write",
+  "jc.git.network",
   "privileged.exec"
 ]);
 
 const PRIVILEGED_EXEC_KIND = "privileged.exec";
-const JC_READ_KINDS: ReadonlySet<string> = new Set(["jc.integration.read", "jc.fs.read"]);
+const JC_READ_KINDS: ReadonlySet<string> = new Set([
+  "jc.integration.read",
+  "jc.fs.read",
+  "jc.process.read",
+  "jc.git.read"
+]);
+const JC_APPROVAL_KINDS: ReadonlySet<string> = new Set([
+  "jc.fs.write",
+  "jc.process.exec",
+  "jc.git.write",
+  "jc.git.network"
+]);
 
 function isSupportedAction(kind: string): boolean {
   return SUPPORTED_ACTION_KINDS.includes(kind);

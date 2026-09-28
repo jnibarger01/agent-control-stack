@@ -32,9 +32,15 @@ export const JC_INVOCATION_DOMAIN = "acs:jace-commander-invocation:v1";
 /** The complete acs.jc.v1 scope vocabulary (issuer and verifier must agree). */
 export const JC_SCOPES = Object.freeze([
   "fs.read",
+  "fs.write",
   "integration.read",
   "integration.write",
-  "process.privileged"
+  "process.read",
+  "process.exec",
+  "process.privileged",
+  "git.read",
+  "git.write",
+  "git.network"
 ] as const);
 export type JcScope = (typeof JC_SCOPES)[number];
 
@@ -43,6 +49,12 @@ export const JC_ACTION_KINDS = Object.freeze([
   "jc.integration.read",
   "jc.integration.write",
   "jc.fs.read",
+  "jc.fs.write",
+  "jc.process.read",
+  "jc.process.exec",
+  "jc.git.read",
+  "jc.git.write",
+  "jc.git.network",
   "privileged.exec"
 ] as const);
 export type JcActionKind = (typeof JC_ACTION_KINDS)[number];
@@ -54,6 +66,8 @@ export const JC_TOOL_GROUPS = Object.freeze([
   "system",
   "filesystem",
   "search",
+  "process",
+  "git",
   "acs",
   "mission",
   "swarm",
@@ -234,7 +248,12 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
       type: "object",
       properties: {
         path: str("Absolute directory path"),
-        depth: { type: "integer", minimum: 1, maximum: JC_FS_LIMITS.maxListDepth, description: "Recursion depth (default 1)" }
+        depth: {
+          type: "integer",
+          minimum: 1,
+          maximum: JC_FS_LIMITS.maxListDepth,
+          description: "Recursion depth (default 1)"
+        }
       },
       required: ["path"],
       additionalProperties: false
@@ -349,6 +368,293 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "low",
     false,
     "cancels a local search; no filesystem mutation"
+  ),
+  write_file: row(
+    "Write a UTF-8 file under an allowed root. Existing files are replaced only when overwrite is true. Symlinks are refused.",
+    {
+      type: "object",
+      properties: {
+        path: str("Absolute file path"),
+        content: str("File contents, at most 256 KiB"),
+        overwrite: { type: "boolean" }
+      },
+      required: ["path", "content"],
+      additionalProperties: false
+    },
+    ["fs.write"],
+    "jc.fs.write",
+    "medium",
+    true,
+    "mutation; human approval required; contained"
+  ),
+  create_directory: row(
+    "Create a directory under an allowed root.",
+    {
+      type: "object",
+      properties: { path: str("Absolute directory path"), recursive: { type: "boolean" } },
+      required: ["path"],
+      additionalProperties: false
+    },
+    ["fs.write"],
+    "jc.fs.write",
+    "medium",
+    true,
+    "mutation; human approval required; contained"
+  ),
+  move_file: row(
+    "Rename a file or directory inside allowed roots. Does not overwrite.",
+    {
+      type: "object",
+      properties: { from: str("Absolute source"), to: str("Absolute destination") },
+      required: ["from", "to"],
+      additionalProperties: false
+    },
+    ["fs.write"],
+    "jc.fs.write",
+    "medium",
+    true,
+    "mutation; human approval required; both paths contained"
+  ),
+  edit_block: row(
+    "Replace one exact occurrence of old text in a file under an allowed root.",
+    {
+      type: "object",
+      properties: {
+        path: str("Absolute file"),
+        old: str("Text to replace, exactly once"),
+        new: str("Replacement text")
+      },
+      required: ["path", "old", "new"],
+      additionalProperties: false
+    },
+    ["fs.write"],
+    "jc.fs.write",
+    "medium",
+    true,
+    "mutation; human approval required; contained"
+  ),
+  start_process: row(
+    "Start one executable with an argv array and a contained cwd. Shells and sudo are refused.",
+    {
+      type: "object",
+      properties: {
+        argv: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 32 },
+        cwd: str("Absolute working directory"),
+        timeoutMs: { type: "integer", minimum: 1, maximum: 600000 }
+      },
+      required: ["argv", "cwd"],
+      additionalProperties: false
+    },
+    ["process.exec"],
+    "jc.process.exec",
+    "medium",
+    true,
+    "execution; human approval required; no shell"
+  ),
+  read_process_output: row(
+    "Read buffered stdout and stderr for a process this server started.",
+    {
+      type: "object",
+      properties: { sessionId: str("Session id"), offset: { type: "integer", minimum: 0 } },
+      required: ["sessionId"],
+      additionalProperties: false
+    },
+    ["process.read"],
+    "jc.process.read",
+    "low",
+    false,
+    "read-only output of a managed process"
+  ),
+  list_sessions: row(
+    "List processes this server started.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["process.read"],
+    "jc.process.read",
+    "low",
+    false,
+    "read-only"
+  ),
+  list_processes: row(
+    "List processes this server started, including exit codes.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["process.read"],
+    "jc.process.read",
+    "low",
+    false,
+    "read-only"
+  ),
+  kill_process: row(
+    "Terminate a process this server started.",
+    {
+      type: "object",
+      properties: { sessionId: str("Session id"), pid: { type: "integer" } },
+      additionalProperties: false
+    },
+    ["process.exec"],
+    "jc.process.exec",
+    "medium",
+    true,
+    "termination of a managed process; human approval required"
+  ),
+  git_status: row(
+    "Structured git status for a repository inside an allowed root.",
+    {
+      type: "object",
+      properties: { repo: str("Absolute git working tree") },
+      required: ["repo"],
+      additionalProperties: false
+    },
+    ["git.read"],
+    "jc.git.read",
+    "low",
+    false,
+    "read-only git"
+  ),
+  git_diff: row(
+    "git diff for a contained repository. Optional path is relative.",
+    {
+      type: "object",
+      properties: { repo: str("Absolute git working tree"), staged: { type: "boolean" }, path: str("Relative path") },
+      required: ["repo"],
+      additionalProperties: false
+    },
+    ["git.read"],
+    "jc.git.read",
+    "low",
+    false,
+    "read-only git"
+  ),
+  git_log: row(
+    "Recent commits as sha and subject.",
+    {
+      type: "object",
+      properties: { repo: str("Absolute git working tree"), limit: { type: "integer", minimum: 1, maximum: 100 } },
+      required: ["repo"],
+      additionalProperties: false
+    },
+    ["git.read"],
+    "jc.git.read",
+    "low",
+    false,
+    "read-only git"
+  ),
+  git_branch: row(
+    "Local branch names.",
+    {
+      type: "object",
+      properties: { repo: str("Absolute git working tree") },
+      required: ["repo"],
+      additionalProperties: false
+    },
+    ["git.read"],
+    "jc.git.read",
+    "low",
+    false,
+    "read-only git"
+  ),
+  git_show: row(
+    "Show HEAD or one full commit SHA.",
+    {
+      type: "object",
+      properties: { repo: str("Absolute git working tree"), rev: str("HEAD or 40-hex sha") },
+      required: ["repo"],
+      additionalProperties: false
+    },
+    ["git.read"],
+    "jc.git.read",
+    "low",
+    false,
+    "read-only git"
+  ),
+  git_add: row(
+    "Stage explicit relative paths. Does not stage everything.",
+    {
+      type: "object",
+      properties: {
+        repo: str("Absolute git working tree"),
+        paths: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 50 }
+      },
+      required: ["repo", "paths"],
+      additionalProperties: false
+    },
+    ["git.write"],
+    "jc.git.write",
+    "medium",
+    true,
+    "stages named paths only; human approval required"
+  ),
+  git_commit: row(
+    "Commit whatever is already staged. Does not run git add.",
+    {
+      type: "object",
+      properties: { repo: str("Absolute git working tree"), message: str("Commit message") },
+      required: ["repo", "message"],
+      additionalProperties: false
+    },
+    ["git.write"],
+    "jc.git.write",
+    "medium",
+    true,
+    "creates a commit; human approval required"
+  ),
+  git_fetch: row(
+    "Fetch one named remote. Does not merge.",
+    {
+      type: "object",
+      properties: { repo: str("Absolute git working tree"), remote: str("Remote name") },
+      required: ["repo"],
+      additionalProperties: false
+    },
+    ["git.network"],
+    "jc.git.network",
+    "medium",
+    true,
+    "network read of a remote; human approval required"
+  ),
+  git_push: row(
+    "Push the current branch to a remote. Detached HEAD and force push are refused.",
+    {
+      type: "object",
+      properties: {
+        repo: str("Absolute git working tree"),
+        remote: str("Remote name"),
+        branch: str("Must match the current branch")
+      },
+      required: ["repo"],
+      additionalProperties: false
+    },
+    ["git.network"],
+    "jc.git.network",
+    "medium",
+    true,
+    "updates a remote branch; human approval required; no force"
+  ),
+  jc_doctor: row(
+    "Report JC version, manifest size, filesystem roots, ACS reachability, git, and whether this process looks like a legacy checkout. No secrets.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["integration.read"],
+    "jc.integration.read",
+    "low",
+    false,
+    "read-only diagnosis"
+  ),
+  ping: row(
+    "Liveness plus a short ACS /health probe.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["integration.read"],
+    "jc.integration.read",
+    "low",
+    false,
+    "read-only"
+  ),
+  get_config: row(
+    "Non-secret JC configuration: urls, roots, tool count, manifest hash.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["integration.read"],
+    "jc.integration.read",
+    "low",
+    false,
+    "read-only; tokens are omitted"
   )
 };
 
@@ -381,7 +687,28 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   start_search: surface("search", ["path"], ["search"]),
   get_more_search_results: surface("search", [], ["search-results"]),
   list_searches: surface("search", [], ["search-status"]),
-  stop_search: surface("search", [], ["search-stop"])
+  stop_search: surface("search", [], ["search-stop"]),
+  write_file: surface("filesystem", ["path"], ["write"]),
+  create_directory: surface("filesystem", ["path"], ["mkdir"]),
+  move_file: surface("filesystem", ["from", "to"], ["mv"]),
+  edit_block: surface("filesystem", ["path"], ["edit"]),
+  start_process: surface("process", ["cwd"], ["start"]),
+  read_process_output: surface("process", [], ["output"]),
+  list_sessions: surface("process", [], ["sessions"]),
+  list_processes: surface("process", [], ["ps"]),
+  kill_process: surface("process", [], ["kill"]),
+  git_status: surface("git", ["repo"], ["git status"]),
+  git_diff: surface("git", ["repo"], ["git diff"]),
+  git_log: surface("git", ["repo"], ["git log"]),
+  git_branch: surface("git", ["repo"], ["git branch"]),
+  git_show: surface("git", ["repo"], ["git show"]),
+  git_add: surface("git", ["repo"], ["git add"]),
+  git_commit: surface("git", ["repo"], ["git commit"]),
+  git_fetch: surface("git", ["repo"], ["git fetch"]),
+  git_push: surface("git", ["repo"], ["git push"]),
+  jc_doctor: surface("system", [], ["doctor"]),
+  ping: surface("system", [], ["ping"]),
+  get_config: surface("system", [], ["config"])
 };
 
 function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {
@@ -396,7 +723,8 @@ function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {
     });
     for (const arg of entry.pathArguments) {
       const properties = entry.inputSchema.properties as Record<string, unknown> | undefined;
-      if (!properties || !(arg in properties)) throw new Error(`jc-tool-manifest: ${name} pathArgument ${arg} is not a declared argument`);
+      if (!properties || !(arg in properties))
+        throw new Error(`jc-tool-manifest: ${name} pathArgument ${arg} is not a declared argument`);
     }
     for (const verb of entry.cliCommands) {
       if (verbs.has(verb)) throw new Error(`jc-tool-manifest: CLI verb "${verb}" mapped to two tools`);
@@ -465,7 +793,18 @@ export interface JcPortableManifest {
  */
 export function jcPortableManifest(): JcPortableManifest {
   const tools = jcToolContracts().map(
-    ({ name, description, inputSchema, scopes, actionKind, risk, requiresApproval, group, pathArguments, cliCommands }) => ({
+    ({
+      name,
+      description,
+      inputSchema,
+      scopes,
+      actionKind,
+      risk,
+      requiresApproval,
+      group,
+      pathArguments,
+      cliCommands
+    }) => ({
       name,
       description,
       inputSchema: JSON.parse(JSON.stringify(inputSchema)) as Record<string, unknown>,

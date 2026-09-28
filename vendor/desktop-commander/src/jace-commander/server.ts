@@ -38,7 +38,11 @@ import {
   type VisualizerView,
 } from './integrations.js';
 import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
+import { jcConfigView, jcDoctor, jcPing } from './doctor.js';
 import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleFiles, type JcFsPolicy } from './filesystem.js';
+import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitShow, gitStatus } from './git-ops.js';
+import { createDirectory, editBlock, moveFile, writeFile } from './mutations.js';
+import { createProcessRegistry } from './processes.js';
 import { createSearchRegistry } from './search.js';
 import { JC_MANIFEST } from './manifest.generated.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
@@ -184,6 +188,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
   // One handler per manifest tool. The same handlers serve every caller:
   // MCP clients and the jace-commander CLI (itself an MCP client of /jc/mcp).
   const search = createSearchRegistry();
+  const processes = createProcessRegistry();
   const handlers: Readonly<Record<string, Handler>> = Object.freeze({
     jc_status: async () => ok(await status()),
     acs_read: async (args) => {
@@ -230,6 +235,27 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     get_more_search_results: async (args) => ok(search.more(args)),
     list_searches: async () => ok(search.list()),
     stop_search: async (args) => ok(search.stop(args)),
+    write_file: async (args) => ok(await writeFile(args, fsPolicy)),
+    create_directory: async (args) => ok(await createDirectory(args, fsPolicy)),
+    move_file: async (args) => ok(await moveFile(args, fsPolicy)),
+    edit_block: async (args) => ok(await editBlock(args, fsPolicy)),
+    start_process: async (args) => ok(processes.start(args, fsPolicy)),
+    read_process_output: async (args) => ok(processes.output(args)),
+    list_sessions: async () => ok(processes.list()),
+    list_processes: async () => ok(processes.list()),
+    kill_process: async (args) => ok(processes.kill(args)),
+    git_status: async (args) => ok(await gitStatus(args, fsPolicy)),
+    git_diff: async (args) => ok(await gitDiff(args, fsPolicy)),
+    git_log: async (args) => ok(await gitLog(args, fsPolicy)),
+    git_branch: async (args) => ok(await gitBranch(args, fsPolicy)),
+    git_show: async (args) => ok(await gitShow(args, fsPolicy)),
+    git_add: async (args) => ok(await gitAdd(args, fsPolicy)),
+    git_commit: async (args) => ok(await gitCommit(args, fsPolicy)),
+    git_fetch: async (args) => ok(await gitFetch(args, fsPolicy)),
+    git_push: async (args) => ok(await gitPush(args, fsPolicy)),
+    jc_doctor: async () => ok(await jcDoctor(config)),
+    ping: async () => ok(await jcPing(config)),
+    get_config: async () => ok(jcConfigView(config)),
   });
   assertHandlerCoverage(Object.keys(handlers));
 

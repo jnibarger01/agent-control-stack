@@ -217,6 +217,224 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
     render: (result) => asJson(result),
   },
   {
+    verb: 'write',
+    tool: 'write_file',
+    usage: 'write <path> --content TEXT [--overwrite]',
+    summary: 'Write a file (approval required)',
+    booleanFlags: ['overwrite'],
+    toArguments: (args) => ({
+      path: absolutePath(requirePositional(args, 0, 'path')),
+      content: flag(args, 'content') ?? '',
+      ...(args.flags.get('overwrite') === true ? { overwrite: true } : {}),
+    }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'mkdir',
+    tool: 'create_directory',
+    usage: 'mkdir <path> [--recursive]',
+    summary: 'Create a directory (approval required)',
+    booleanFlags: ['recursive'],
+    toArguments: (args) => ({
+      path: absolutePath(requirePositional(args, 0, 'path')),
+      ...(args.flags.get('recursive') === true ? { recursive: true } : {}),
+    }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'mv',
+    tool: 'move_file',
+    usage: 'mv <from> <to>',
+    summary: 'Move a file inside the allowed roots (approval required)',
+    toArguments: (args) => ({
+      from: absolutePath(requirePositional(args, 0, 'from')),
+      to: absolutePath(requirePositional(args, 1, 'to')),
+    }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'edit',
+    tool: 'edit_block',
+    usage: 'edit <path> --old TEXT --new TEXT',
+    summary: 'Replace one exact text span (approval required)',
+    toArguments: (args) => ({
+      path: absolutePath(requirePositional(args, 0, 'path')),
+      old: flag(args, 'old') ?? '',
+      new: flag(args, 'new') ?? '',
+    }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'start',
+    tool: 'start_process',
+    usage: 'start --cwd DIR -- /abs/executable [args...]',
+    summary: 'Start a non-shell process (approval required)',
+    toArguments: (args) => {
+      const argv = args.positionals;
+      if (!argv[0] || !path.isAbsolute(argv[0])) throw new CliUsageError('argv[0] must be an absolute executable');
+      const cwd = flag(args, 'cwd');
+      if (!cwd) throw new CliUsageError('--cwd is required');
+      const timeoutMs = intFlag(args, 'timeout');
+      return { argv, cwd: absolutePath(cwd), ...(timeoutMs !== undefined ? { timeoutMs } : {}) };
+    },
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'output',
+    tool: 'read_process_output',
+    usage: 'output <session-id> [--offset N]',
+    summary: 'Read output from a managed process',
+    toArguments: (args) => {
+      const offset = intFlag(args, 'offset');
+      return { sessionId: requirePositional(args, 0, 'session-id'), ...(offset !== undefined ? { offset } : {}) };
+    },
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'sessions',
+    tool: 'list_sessions',
+    usage: 'sessions',
+    summary: 'List managed processes',
+    toArguments: () => ({}),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'ps',
+    tool: 'list_processes',
+    usage: 'ps',
+    summary: 'List managed processes',
+    toArguments: () => ({}),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'kill',
+    tool: 'kill_process',
+    usage: 'kill <session-id>',
+    summary: 'Terminate a managed process (approval required)',
+    toArguments: (args) => ({ sessionId: requirePositional(args, 0, 'session-id') }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'git status',
+    tool: 'git_status',
+    usage: 'git status [--repo PATH]',
+    summary: 'Structured git status',
+    toArguments: (args) => ({ repo: absolutePath(flag(args, 'repo') ?? '.') }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'git diff',
+    tool: 'git_diff',
+    usage: 'git diff [--repo PATH] [--staged] [--path REL]',
+    summary: 'git diff',
+    booleanFlags: ['staged'],
+    toArguments: (args) => ({
+      repo: absolutePath(flag(args, 'repo') ?? '.'),
+      ...(args.flags.get('staged') === true ? { staged: true } : {}),
+      ...(flag(args, 'path') ? { path: flag(args, 'path') } : {}),
+    }),
+    render: (result) => String(result?.diff ?? ''),
+  },
+  {
+    verb: 'git log',
+    tool: 'git_log',
+    usage: 'git log [--repo PATH] [--limit N]',
+    summary: 'Recent commits',
+    toArguments: (args) => {
+      const limit = intFlag(args, 'limit');
+      return { repo: absolutePath(flag(args, 'repo') ?? '.'), ...(limit !== undefined ? { limit } : {}) };
+    },
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'git branch',
+    tool: 'git_branch',
+    usage: 'git branch [--repo PATH]',
+    summary: 'Local branches',
+    toArguments: (args) => ({ repo: absolutePath(flag(args, 'repo') ?? '.') }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'git show',
+    tool: 'git_show',
+    usage: 'git show [--repo PATH] [--rev HEAD|SHA]',
+    summary: 'Show HEAD or a full commit SHA',
+    toArguments: (args) => ({
+      repo: absolutePath(flag(args, 'repo') ?? '.'),
+      ...(flag(args, 'rev') ? { rev: flag(args, 'rev') } : {}),
+    }),
+    render: (result) => String(result?.text ?? ''),
+  },
+  {
+    verb: 'git add',
+    tool: 'git_add',
+    usage: 'git add [--repo PATH] -- <relative> [more...]',
+    summary: 'Stage explicit paths (approval required)',
+    toArguments: (args) => ({
+      repo: absolutePath(flag(args, 'repo') ?? '.'),
+      paths: args.positionals,
+    }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'git commit',
+    tool: 'git_commit',
+    usage: 'git commit [--repo PATH] -m MESSAGE',
+    summary: 'Commit the index only (approval required)',
+    toArguments: (args) => {
+      const inline = args.positionals.indexOf('-m');
+      const message = flag(args, 'message') ?? (inline >= 0 ? args.positionals[inline + 1] : undefined) ?? '';
+      return { repo: absolutePath(flag(args, 'repo') ?? '.'), message };
+    },
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'git fetch',
+    tool: 'git_fetch',
+    usage: 'git fetch [--repo PATH] [--remote NAME]',
+    summary: 'Fetch a remote (approval required)',
+    toArguments: (args) => ({
+      repo: absolutePath(flag(args, 'repo') ?? '.'),
+      ...(flag(args, 'remote') ? { remote: flag(args, 'remote') } : {}),
+    }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'git push',
+    tool: 'git_push',
+    usage: 'git push [--repo PATH] [--remote NAME]',
+    summary: 'Push the current branch (approval required, no force)',
+    toArguments: (args) => ({
+      repo: absolutePath(flag(args, 'repo') ?? '.'),
+      ...(flag(args, 'remote') ? { remote: flag(args, 'remote') } : {}),
+    }),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'doctor',
+    tool: 'jc_doctor',
+    usage: 'doctor',
+    summary: 'Diagnose this JC process',
+    toArguments: () => ({}),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'ping',
+    tool: 'ping',
+    usage: 'ping',
+    summary: 'Liveness and ACS probe',
+    toArguments: () => ({}),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'config',
+    tool: 'get_config',
+    usage: 'config',
+    summary: 'Non-secret configuration',
+    toArguments: () => ({}),
+    render: (result) => asJson(result),
+  },
+  {
     verb: 'acs read',
     tool: 'acs_read',
     usage: 'acs read <health|work-items|work-item> [--id ID] [--status STATUS]',
@@ -324,6 +542,8 @@ const GROUP_TITLES: Record<string, string> = {
   system: 'System',
   filesystem: 'Filesystem',
   search: 'Search',
+  process: 'Processes',
+  git: 'Git',
   acs: 'ACS',
   mission: 'Mission Router / LoopTrace',
   swarm: 'Swarm',
