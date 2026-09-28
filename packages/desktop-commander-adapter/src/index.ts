@@ -115,6 +115,7 @@ export {
   jaceCommanderApprovalSummaryText,
   jaceCommanderWorkItemIntent,
   jaceCommanderWorkItemTitle,
+  redactJaceCommanderArgv,
   redactJaceCommanderPreview,
   jaceCommanderInvocationHash,
   jaceCommanderNonceHash,

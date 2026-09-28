@@ -49,6 +49,26 @@ await test('approved exact argv runs, returns output, and is audited as intent +
   assert.equal(JSON.stringify(events).includes('hello-root\\n'), false, 'output content is not audited');
 });
 
+await test('secrets on the privileged command line are redacted in the audit chain (review round 1, item 1)', async () => {
+  // Fake values assembled at runtime so the repository secret scanner never sees them.
+  const fake = (...parts) => parts.join('');
+  const secrets = [fake('fakeTok', 'EqValue', '21'), fake('fakePw', 'Spaced', '22'), fake('fakeBearer', 'Header', '23'),
+    fake('AbC9', 'dEf8', 'GhI7', 'jKl6', 'MnO5', 'pQr4', 'StU3', 'vWx2'), fake('fakeBearer', 'Split', '24')];
+  const args = { argv: [echoBin, `--token=${secrets[0]}`, '--password', secrets[1], '-H', `Authorization: Bearer ${secrets[2]}`,
+    secrets[3], 'Authorization:', 'Bearer', secrets[4]] };
+  const before = auditEvents().length;
+  const result = await executePrivileged({ capability: issuer.mint('privileged_exec', args), arguments: args }, config, { envOverride: env });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  const events = auditEvents().slice(before);
+  assert.equal(events[0].type, 'tool_call_started');
+  assert.equal(events[0].payload.argv[0], echoBin);
+  assert.equal(events[0].payload.argvCount, args.argv.length);
+  assert.equal(events[0].payload.invocationHash, result.authorization.invocationHash);
+  const text = JSON.stringify(events);
+  for (const secret of secrets) assert.equal(text.includes(secret), false, `audit leaked ${secret.slice(0, 8)}…`);
+  assert.equal(verifyChain(auditEvents()).ok, true);
+});
+
 const marker = path.join(tmp, 'marker');
 const touchArgs = { argv: [touchBin, marker] };
 const assertNothingRan = (before) => {

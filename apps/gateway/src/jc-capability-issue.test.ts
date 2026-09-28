@@ -293,7 +293,9 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
 describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval, B3 approval summary)", () => {
   const GATED = jaceCommanderToolNames().filter((name) => jaceCommanderToolPolicy(name)?.requiresApproval === true);
   const head = "0123456789abcdef0123456789abcdef01234567";
-  const argsFor = (root: string): Record<string, { args: Record<string, unknown>; fields: Record<string, unknown> }> => {
+  const argsFor = (
+    root: string
+  ): Record<string, { args: Record<string, unknown>; fields: Record<string, unknown> }> => {
     const ws = join(root, "workspace");
     return {
       privileged_exec: { args: PRIV_ARGS, fields: { runAs: "root", argv: PRIV_ARGS.argv, timeoutMs: 120000 } },
@@ -316,7 +318,10 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       },
       kill_process: { args: { sessionId: "proc_1" }, fields: { sessionId: "proc_1" } },
       git_add: { args: { repo: ws, paths: ["src/index.ts"] }, fields: { repo: ws, paths: ["src/index.ts"] } },
-      git_commit: { args: { repo: ws, message: "chore: approver-visible" }, fields: { repo: ws, message: "chore: approver-visible" } },
+      git_commit: {
+        args: { repo: ws, message: "chore: approver-visible" },
+        fields: { repo: ws, message: "chore: approver-visible" }
+      },
       git_fetch: { args: { repo: ws, remote: "origin" }, fields: { repo: ws, remote: "origin" } },
       git_push: {
         args: { repo: ws, remote: "origin", branch: "main", expectedHead: head },
@@ -396,7 +401,9 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         const db = new DatabaseSync(ctx.dbPath);
         try {
           const approvers = db
-            .prepare("SELECT DISTINCT approved_by_actor_id AS actor FROM jace_commander_capability_issuances WHERE approval_id IS NOT NULL")
+            .prepare(
+              "SELECT DISTINCT approved_by_actor_id AS actor FROM jace_commander_capability_issuances WHERE approval_id IS NOT NULL"
+            )
             .all() as Array<{ actor: string }>;
           expect(approvers.map((row) => row.actor)).toEqual(["user"]);
         } finally {
@@ -517,4 +524,64 @@ describe("POST /jc/capability/issue: requester attribution header", () => {
       expect(missing.statusCode).toBe(400);
       expect(missing.json().code).toBe("jc_actor_invalid");
     }));
+});
+
+// PR #213 review round 1, item 1: a secret on the command line of an
+// approval-gated exec tool never reaches the approval challenge, the work-item
+// title, intent or stored approval summary. Fake values assembled at runtime.
+describe("POST /jc/capability/issue: argv secrets are redacted on every approver surface", () => {
+  const fake = (...parts: string[]) => parts.join("");
+  const secrets = [
+    fake("fakeTok", "EqValue", "11"),
+    fake("fakePw", "Spaced", "12"),
+    fake("fakeBearer", "Header", "13"),
+    fake("AbC9", "dEf8", "GhI7", "jKl6", "MnO5", "pQr4", "StU3", "vWx2")
+  ];
+  const argvWithSecrets = (executable: string) => [
+    executable,
+    `--token=${secrets[0]}`,
+    "--password",
+    secrets[1]!,
+    "-H",
+    `Authorization: Bearer ${secrets[2]}`,
+    secrets[3]!
+  ];
+
+  it("privileged_exec and start_process: challenge, title, intent and params never contain the secret", () =>
+    withGateway(
+      async (ctx) => {
+        const ws = join(ctx.root, "workspace");
+        const cases: Array<[string, Record<string, unknown>]> = [
+          ["privileged_exec", { argv: argvWithSecrets("/usr/bin/curl"), timeoutMs: 1000 }],
+          ["start_process", { argv: argvWithSecrets("/usr/bin/curl"), cwd: ws, timeoutMs: 1000 }]
+        ];
+        for (const [tool, args] of cases) {
+          const held = await issue(ctx, tool, args);
+          expect(held.statusCode, `${tool}: ${held.body}`).toBe(409);
+          const detail = await ctx.app.inject({
+            method: "GET",
+            url: `/work-items/${held.json().workItemId}`,
+            headers: { authorization: `Bearer ${OP_TOKEN}` }
+          });
+          const item = detail.json().workItem;
+          for (const [surface, text] of Object.entries({
+            challenge: held.body,
+            title: item.title,
+            intent: item.intent,
+            params: JSON.stringify(item.requestedActions)
+          })) {
+            for (const secret of secrets) expect(text, `${tool} ${surface}`).not.toContain(secret);
+          }
+          expect(held.json().approvalSummary.argv[0]).toBe("/usr/bin/curl");
+          expect(held.json().approvalSummary.invocationHash).toBe(jaceCommanderInvocationHash(tool, args));
+          if (tool === "privileged_exec") expect(item.title.startsWith("ROOT: /usr/bin/curl ")).toBe(true);
+        }
+      },
+      true,
+      (root) => {
+        const dir = join(root, "workspace");
+        mkdirSync(dir, { recursive: true });
+        return [dir];
+      }
+    ));
 });
