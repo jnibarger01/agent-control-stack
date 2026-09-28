@@ -473,6 +473,48 @@ describe("SecretBroker lease retention", () => {
     );
   });
 
+  it("counts only inactive records against the retention quota even when many live leases exist", async () => {
+    const broker = retentionBroker(1);
+    const retained = await broker.lease(leaseRequest());
+    await broker.revoke(retained);
+
+    // Live records must not consume the inactive-record quota or evict the retained tombstone.
+    await broker.lease(leaseRequest({ principal: principal({ workerId: "worker_2" }) }));
+    await broker.lease(leaseRequest({ principal: principal({ workerId: "worker_3" }) }));
+    await broker.lease(leaseRequest({ principal: principal({ workerId: "worker_4" }) }));
+
+    expect(() => retained.injectInto({}, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_revoked" })
+    );
+  });
+
+  it("prunes a use-exhausted record immediately and still audits a later redemption denial", async () => {
+    const events: SecretBrokerEvent[] = [];
+    const source = new EnvSecretSource({ openai: "TEST_OPENAI_API_KEY" }, { TEST_OPENAI_API_KEY: RAW_SECRET_VALUE });
+    const broker = new SecretBroker({
+      scopes: { openai: { maxTtlMs: 60_000 } },
+      source,
+      maxRetainedLeases: 0,
+      onEvent: (event) => events.push(event)
+    });
+    const handle = await broker.lease(leaseRequest());
+
+    handle.injectInto({}, principal());
+    events.length = 0;
+
+    expect(() => handle.injectInto({}, principal())).toThrowError(
+      expect.objectContaining<Partial<ControlStackError>>({ code: "secret_handle_unknown" })
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "secret.redemption_denied",
+        handleId: handle.handleId,
+        scope: "openai",
+        reason: "unknown"
+      })
+    ]);
+  });
+
   it("refuses a negative or non-integer maxRetainedLeases at construction time", () => {
     for (const invalid of [-1, 1.5, Number.NaN]) {
       expect(() => retentionBroker(invalid)).toThrowError(
