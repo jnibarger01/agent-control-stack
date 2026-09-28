@@ -84,6 +84,8 @@ const JC_CHILD_ENV_KEYS = [
   'JC_ACS_PUBLIC_KEY', 'JC_ACS_KEY_ID', 'JC_RUNTIME_ID', 'JC_STATE_DIR', 'JC_PUBLIC_MCP_URL',
   'JC_ACS_URL', 'JC_ACS_TOKEN', 'JC_SWARM_URL', 'JC_SWARM_TOKEN', 'JC_VISUALIZER_URL',
   'JC_MISSION_ROUTER_DIR', 'JC_TRACE_ROOTS', 'JC_PRIVILEGED_HELPER', 'JC_SUDO_PATH', 'JC_REQUEST_TIMEOUT_MS',
+  // Release identity for the served child (immutable release deployments).
+  'JC_RELEASE_SHA',
   // Filesystem containment roots for the fs.read tools (defence in depth
   // behind ACS's own roots); without them every filesystem tool fails closed.
   'JC_FS_ROOTS', 'JC_FS_DENIED_ROOTS',
