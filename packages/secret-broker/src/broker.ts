@@ -186,6 +186,10 @@ export class SecretBroker {
   private readonly now: () => Date;
   private readonly leases = new Map<string, LeaseRecord>();
   private readonly maxRetainedLeases: number;
+  /** Earliest expiry among currently redeemable records; avoids rescanning a large all-live map on every lease. */
+  private nextExpiryAtMs = Number.POSITIVE_INFINITY;
+  /** Set by revoke/use exhaustion or once the earliest known expiry has elapsed. */
+  private inactiveTransitionPending = false;
 
   constructor(options: SecretBrokerOptions) {
     const entries = Object.entries(options.scopes);
@@ -272,7 +276,8 @@ export class SecretBroker {
     const expiresAt = new Date(issuedAt.getTime() + ttlMs);
     const injectAs = config.injectAs ?? scope;
 
-    this.pruneInactiveLeases();
+    if (issuedAt.getTime() >= this.nextExpiryAtMs) this.inactiveTransitionPending = true;
+    this.pruneInactiveLeases(issuedAt.getTime());
     this.leases.set(handleId, {
       handleId,
       scope,
@@ -285,6 +290,7 @@ export class SecretBroker {
       expiresAt,
       revoked: false
     });
+    this.nextExpiryAtMs = Math.min(this.nextExpiryAtMs, expiresAt.getTime());
 
     const handle = new SecretHandle({
       handleId,
@@ -294,7 +300,7 @@ export class SecretBroker {
       principal,
       purpose: request.purpose,
       maxUses,
-      inject: (env, redeemer) => this.injectHandle(handleId, env, redeemer)
+      inject: (env, redeemer) => this.injectHandle(handleId, scope, env, redeemer)
     });
 
     this.emit({
@@ -324,6 +330,7 @@ export class SecretBroker {
     }
     record.revoked = true;
     this.emit({ type: "secret.revoked", handleId: handle.handleId, scope: handle.scope, reason: "explicit" });
+    this.inactiveTransitionPending = true;
     this.pruneInactiveLeases();
   }
 
@@ -334,19 +341,39 @@ export class SecretBroker {
    * uses-exhausted) are never evicted - evicting one would silently invalidate
    * a live handle.
    */
-  private pruneInactiveLeases(): void {
-    if (this.leases.size <= this.maxRetainedLeases) return;
-    const nowMs = this.now().getTime();
+  private pruneInactiveLeases(nowMs = this.now().getTime()): void {
+    if (!this.inactiveTransitionPending && nowMs < this.nextExpiryAtMs) return;
+
+    const inactive: string[] = [];
+    let nextExpiryAtMs = Number.POSITIVE_INFINITY;
     for (const [handleId, record] of this.leases) {
-      if (this.leases.size <= this.maxRetainedLeases) break;
-      const inactive = record.revoked || record.usesRemaining <= 0 || nowMs >= record.expiresAt.getTime();
-      if (inactive) this.leases.delete(handleId);
+      const isInactive = record.revoked || record.usesRemaining <= 0 || nowMs >= record.expiresAt.getTime();
+      if (isInactive) {
+        inactive.push(handleId);
+      } else {
+        nextExpiryAtMs = Math.min(nextExpiryAtMs, record.expiresAt.getTime());
+      }
     }
+
+    const excess = Math.max(0, inactive.length - this.maxRetainedLeases);
+    for (let index = 0; index < excess; index += 1) {
+      this.leases.delete(inactive[index]!);
+    }
+    this.nextExpiryAtMs = nextExpiryAtMs;
+    this.inactiveTransitionPending = false;
   }
 
-  private injectHandle(handleId: string, env: NodeJS.ProcessEnv, redeemer: LeasePrincipal): void {
+  private injectHandle(
+    handleId: string,
+    issuedScope: string,
+    env: NodeJS.ProcessEnv,
+    redeemer: LeasePrincipal
+  ): void {
     const record = this.leases.get(handleId);
     if (!record) {
+      // issuedScope is captured in the broker-created SecretHandle closure; retaining it here
+      // preserves denial audit after raw-secret record eviction without keeping a tombstone.
+      this.emit({ type: "secret.redemption_denied", handleId, scope: issuedScope, reason: "unknown" });
       throw new ControlStackError("secret_handle_unknown", "secret handle is not recognized by this broker");
     }
     if (record.revoked) {
@@ -355,6 +382,8 @@ export class SecretBroker {
     }
     if (this.now().getTime() >= record.expiresAt.getTime()) {
       this.emit({ type: "secret.redemption_denied", handleId, scope: record.scope, reason: "expired" });
+      this.inactiveTransitionPending = true;
+      this.pruneInactiveLeases();
       throw new ControlStackError("secret_handle_expired", "secret handle has expired");
     }
     const parsedRedeemer = leasePrincipalSchema.parse(redeemer);
@@ -385,6 +414,10 @@ export class SecretBroker {
       principal: record.principal,
       usesRemaining: record.usesRemaining
     });
+    if (record.usesRemaining <= 0) {
+      this.inactiveTransitionPending = true;
+      this.pruneInactiveLeases();
+    }
   }
 
   private emit(event: SecretBrokerEvent): void {
