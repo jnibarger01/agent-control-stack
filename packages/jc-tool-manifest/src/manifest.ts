@@ -205,6 +205,14 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
   )
 };
 
+function deepFreezeJson<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreezeJson(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {
   const entries = new Map<JcToolName, JcToolContract>();
   for (const name of JC_TOOL_NAMES) {
@@ -215,6 +223,7 @@ function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {
         name,
         argsSchema: JC_TOOL_ARGUMENT_SCHEMAS[name],
         ...source,
+        inputSchema: deepFreezeJson(source.inputSchema),
         // Do not expose TOOL_ROWS' mutable array through the public contract.
         // Policy consumers retain these objects for the process lifetime, so
         // nested policy values must be immutable too.
