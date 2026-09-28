@@ -796,6 +796,10 @@
                     "type": "string",
                     "minLength": 1
                   },
+                  "requesterSubject": {
+                    "type": "string",
+                    "minLength": 1
+                  },
                   "risk": {
                     "type": "string",
                     "enum": [
