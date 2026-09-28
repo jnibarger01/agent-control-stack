@@ -87,7 +87,8 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-1: read-only filesystem via /jc/mcp (MCP +
   it("jc ls / stat / read / cat work against contained paths", async () => {
     const ls = await runJc(["ls", project, "--json"], cliEnv);
     expect(ls.code, ls.stderr).toBe(0);
-    expect(ls.json().entries.map((entry: { path: string }) => entry.path)).toEqual([".env", "package.json", "src"]);
+    // .env is omitted entirely: credential files are not even named in listings.
+    expect(ls.json().entries.map((entry: { path: string }) => entry.path)).toEqual(["package.json", "src"]);
 
     const human = await runJc(["ls", project, "--depth", "2"], cliEnv);
     expect(human.code, human.stderr).toBe(0);

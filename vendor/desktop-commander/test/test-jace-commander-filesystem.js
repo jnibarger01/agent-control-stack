@@ -15,6 +15,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { loadJcConfig } from '../dist/jace-commander/config.js';
 import { createJcServer } from '../dist/jace-commander/server.js';
+import { JC_FS_RUNTIME_LIMITS, setJcFsRaceHookForTests } from '../dist/jace-commander/filesystem.js';
 import { makeIssuer } from './fixtures/jc-mint.js';
 
 const tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'jc-fs-')));
@@ -31,6 +32,16 @@ fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside\n');
 fs.writeFileSync(path.join(stateDir, 'credentials.json'), '{}\n');
 fs.symlinkSync(outside, path.join(root, 'escape'));
 fs.symlinkSync(path.join(outside, 'secret.txt'), path.join(root, 'escape-file.txt'));
+fs.mkdirSync(path.join(root, 'app', '.git'));
+fs.writeFileSync(path.join(root, 'app', '.git', 'config'), '[remote]\nurl = https://user:token@example\n');
+fs.writeFileSync(path.join(root, 'app', 'token.json'), '{"token":"t"}\n');
+const big = path.join(root, 'big');
+fs.mkdirSync(big);
+// One 3 MiB line: the case a line-oriented reader would materialize whole.
+fs.writeFileSync(path.join(big, 'one-line.txt'), 'x'.repeat(3 * 1024 * 1024));
+fs.writeFileSync(path.join(big, 'huge.png'), Buffer.alloc(JC_FS_RUNTIME_LIMITS.maxImageBytes + 1));
+fs.writeFileSync(path.join(big, 'tiny.png'), Buffer.from('89504e470d0a1a0a', 'hex'));
+fs.copyFileSync(new URL('./samples/01_sample_simple.pdf', import.meta.url), path.join(big, 'sample.pdf'));
 
 const issuer = makeIssuer();
 const baseEnv = {
@@ -65,7 +76,8 @@ await test('list_directory returns structured, sorted entries and recurses to de
   const shallow = await call(managed, 'list_directory', { path: path.join(root, 'app') });
   assert.equal(shallow.isError, undefined);
   const names = shallow.structuredContent.entries.map((e) => e.path);
-  assert.deepEqual(names, ['.env', 'package.json', 'relay.env', 'src']);
+  // Credential files are omitted entirely: not even their names or sizes leak.
+  assert.deepEqual(names, ['.git', 'package.json', 'src']);
   assert.equal(shallow.structuredContent.entries.find((e) => e.name === 'src').type, 'directory');
   assert.equal(shallow.structuredContent.entries.find((e) => e.name === 'package.json').size, 15);
   const deep = await call(managed, 'list_directory', { path: path.join(root, 'app'), depth: 2 });
@@ -171,6 +183,75 @@ await test('managed: no capability, or one for different arguments, never reache
   });
   assert.equal(errorCode(swapped), 'JC_CAPABILITY_ARGUMENTS_MISMATCH');
   assert.ok(!JSON.stringify(swapped).includes('outside\\n'));
+});
+
+await test('ACS canonical credential paths are denied in JC too (.git/config, token.json)', async () => {
+  assert.equal(errorCode(await call(managed, 'read_file', { path: path.join(root, 'app', '.git', 'config') })), 'path_denied');
+  assert.equal(errorCode(await call(managed, 'read_file', { path: path.join(root, 'app', 'token.json') })), 'path_denied');
+  const listed = await call(managed, 'list_directory', { path: path.join(root, 'app'), depth: 2 });
+  assert.ok(!listed.structuredContent.entries.some((e) => e.path === path.join('.git', 'config')));
+});
+
+await test('a single enormous line is read within the byte cap, head and tail', async () => {
+  const file = path.join(big, 'one-line.txt');
+  const head = await call(managed, 'read_file', { path: file, length: 1 });
+  assert.equal(head.isError, undefined);
+  assert.equal(head.structuredContent.truncatedBytes, true);
+  assert.equal(Buffer.byteLength(head.structuredContent.content), JC_FS_RUNTIME_LIMITS.maxReadBytes);
+  assert.equal(head.structuredContent.totalLines, 1);
+  const tail = await call(managed, 'read_file', { path: file, offset: -1 });
+  assert.equal(tail.structuredContent.truncatedBytes, true);
+  assert.ok(Buffer.byteLength(tail.structuredContent.content) <= JC_FS_RUNTIME_LIMITS.maxReadBytes);
+});
+
+await test('images: small ones are returned whole, oversized ones are refused (never truncated)', async () => {
+  const tiny = await call(managed, 'read_file', { path: path.join(big, 'tiny.png') });
+  assert.equal(tiny.structuredContent.mimeType, 'image/png');
+  assert.equal(Buffer.from(tiny.structuredContent.content, 'base64').toString('hex'), '89504e470d0a1a0a');
+  assert.equal(errorCode(await call(managed, 'read_file', { path: path.join(big, 'huge.png') })), 'file_too_large');
+});
+
+await test('PDF text is returned as content, not dropped', async () => {
+  const pdf = await call(managed, 'read_file', { path: path.join(big, 'sample.pdf') });
+  assert.equal(pdf.isError, undefined, JSON.stringify(pdf));
+  assert.equal(pdf.structuredContent.mimeType, 'application/pdf');
+  assert.ok(pdf.structuredContent.content.trim().length > 0);
+  assert.ok(pdf.structuredContent.pages.length > 0);
+});
+
+await test('TOCTOU: swapping the checked file for a symlink before the open is refused', async () => {
+  const victim = path.join(root, 'app', 'swap.txt');
+  fs.writeFileSync(victim, 'safe\n');
+  setJcFsRaceHookForTests((checked) => {
+    if (checked !== victim) return;
+    fs.rmSync(victim);
+    fs.symlinkSync(path.join(outside, 'secret.txt'), victim);
+  });
+  try {
+    const result = await call(managed, 'read_file', { path: victim });
+    assert.equal(errorCode(result), 'path_not_allowed');
+    assert.ok(!JSON.stringify(result).includes('outside\\n')); // the secret's content
+  } finally {
+    setJcFsRaceHookForTests(undefined);
+  }
+});
+
+await test('TOCTOU: swapping a parent directory for a symlink out of the root is refused', async () => {
+  const dir = path.join(root, 'swapdir');
+  fs.mkdirSync(dir);
+  fs.writeFileSync(path.join(dir, 'secret.txt'), 'safe\n');
+  setJcFsRaceHookForTests((checked) => {
+    if (checked !== path.join(dir, 'secret.txt')) return;
+    fs.renameSync(dir, `${dir}.moved`);
+    fs.symlinkSync(outside, dir); // outside/secret.txt exists: only the fd re-check can catch this
+  });
+  try {
+    const result = await call(managed, 'read_file', { path: path.join(dir, 'secret.txt') });
+    assert.equal(errorCode(result), 'path_not_allowed');
+    assert.ok(!JSON.stringify(result).includes('outside\\n')); // the secret's content
+  } finally {
+    setJcFsRaceHookForTests(undefined);
+  }
 });
 
 fs.rmSync(tmp, { recursive: true, force: true });

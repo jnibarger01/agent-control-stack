@@ -89,4 +89,39 @@ await test('main(): --json prints the structured refusal; nothing is sent withou
   assert.equal(JSON.parse(out[0]).kind, 'not_connected');
 });
 
+await test('--json after `--` belongs to the invoked program and reaches ACS unchanged', async () => {
+  const sent = [];
+  const fake = async (_url, init) => {
+    const body = JSON.parse(init.body);
+    sent.push(body);
+    const result = body.method === 'initialize'
+      ? { protocolVersion: '2025-03-26', capabilities: {}, serverInfo: { name: 'fake', version: '1' } }
+      : { content: [{ type: 'text', text: '{}' }], structuredContent: {} };
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = fake;
+  try {
+    const out = [];
+    const code = await main(['sudo', '--json', '--', '/usr/bin/printf', '--json', 'x'],
+      { HOME: '/tmp', JC_STATE_DIR: '/tmp/jc-cli-test-state', JC_MCP_URL: 'http://edge.test/jc/mcp', JC_MCP_TOKEN: 't' },
+      { stdout: (t) => out.push(t), stderr: () => {} });
+    assert.equal(code, JC_EXIT.ok);
+    const call = sent.find((body) => body.method === 'tools/call');
+    assert.deepEqual(call.params.arguments.argv, ['/usr/bin/printf', '--json', 'x']);
+    assert.doesNotThrow(() => JSON.parse(out[0])); // the leading --json still selected JSON output
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+await test('unknown options and surplus positionals are usage errors (exit 2), never silently dropped', async () => {
+  const env = { HOME: '/tmp', JC_STATE_DIR: '/tmp/jc-cli-test-state', JC_MCP_URL: 'http://127.0.0.1:9/jc/mcp' };
+  const quiet = { stdout: () => {}, stderr: () => {} };
+  assert.equal(await main(['ls', '--bogus', 'a'], env, quiet), JC_EXIT.invalidArguments);
+  assert.equal(await main(['ls', 'a', 'b'], env, quiet), JC_EXIT.invalidArguments);
+  assert.equal(await main(['sudo', '/usr/bin/ls', '--all'], env, quiet), JC_EXIT.invalidArguments);
+  assert.throws(() => parseArgs(['--bogus', 'a'], [], ['depth']), /unknown option --bogus/);
+});
+
 console.log(`\njace-commander cli: ${passed} passed`);

@@ -65,8 +65,10 @@ the monorepo's own `vendor/desktop-commander`, resolved relative to
 running. `JC_FS_ROOTS` / `JC_FS_DENIED_ROOTS` are forwarded to the child.
 
 ACS: set `ACS_JACE_COMMANDER_CAPABILITY_PRIVATE_KEY`, `…_KEY_ID`,
-`ACS_JACE_COMMANDER_RUNTIME_ID`, and a worker credential whose actor id is
-`acs-jc-bridge`.
+`ACS_JACE_COMMANDER_RUNTIME_ID`, `ACS_JACE_COMMANDER_ALLOWED_ROOTS` (the
+filesystem tools answer 503 `jace_commander_containment_unconfigured` without
+it; use the same or narrower roots than the bridge's `JC_FS_ROOTS`), and a
+worker credential whose actor id is `acs-jc-bridge`.
 
 ## Tests
 

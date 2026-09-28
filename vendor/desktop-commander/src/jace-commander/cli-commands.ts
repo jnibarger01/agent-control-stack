@@ -20,8 +20,12 @@ export interface ParsedArgs {
   flags: Map<string, string | true>;
 }
 
-/** --flag value | --flag=value | boolean --flag; `--` ends flag parsing. */
-export function parseArgs(argv: readonly string[], booleanFlags: readonly string[] = []): ParsedArgs {
+/**
+ * --flag value | --flag=value | boolean --flag; `--` ends flag parsing.
+ * When `valueFlags` is given, any other flag is a usage error rather than
+ * silently swallowing the next argument as its value.
+ */
+export function parseArgs(argv: readonly string[], booleanFlags: readonly string[] = [], valueFlags?: readonly string[]): ParsedArgs {
   const positionals: string[] = [];
   const flags = new Map<string, string | true>();
   for (let index = 0; index < argv.length; index += 1) {
@@ -33,6 +37,9 @@ export function parseArgs(argv: readonly string[], booleanFlags: readonly string
     if (arg.startsWith('--')) {
       const eq = arg.indexOf('=');
       const name = arg.slice(2, eq === -1 ? undefined : eq);
+      if (valueFlags && !booleanFlags.includes(name) && !valueFlags.includes(name)) {
+        throw new CliUsageError(`unknown option --${name}`);
+      }
       if (eq !== -1) flags.set(name, arg.slice(eq + 1));
       else if (booleanFlags.includes(name)) flags.set(name, true);
       else {
@@ -79,6 +86,10 @@ export interface CliCommand {
   usage: string;
   summary: string;
   booleanFlags?: readonly string[];
+  /** Value-taking options this command accepts; anything else is a usage error. */
+  options: readonly string[];
+  /** Positional arguments accepted; more is a usage error, never silently ignored. */
+  maxPositionals: number;
   toArguments(args: ParsedArgs): Record<string, unknown>;
   /** Human rendering of a successful structured result. */
   render(result: Record<string, unknown> | undefined, text: string | undefined): string;
@@ -100,6 +111,8 @@ function renderListing(result: Record<string, unknown> | undefined): string {
 export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   {
     verb: 'status',
+    options: [],
+    maxPositionals: 0,
     tool: 'jc_status',
     usage: 'status',
     summary: 'Runtime status reported by the Jace Commander server (via /jc/mcp)',
@@ -108,6 +121,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'ls',
+    options: ['depth'],
+    maxPositionals: 1,
     tool: 'list_directory',
     usage: 'ls [path] [--depth N]',
     summary: 'List a directory (default: current directory)',
@@ -119,6 +134,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'stat',
+    options: [],
+    maxPositionals: 1,
     tool: 'get_file_info',
     usage: 'stat <path>',
     summary: 'File or directory metadata',
@@ -129,6 +146,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'read',
+    options: ['offset', 'length'],
+    maxPositionals: 1,
     tool: 'read_file',
     usage: 'read <path> [--offset N] [--length N]',
     summary: 'Read a line window of a file (negative --offset reads from the end)',
@@ -150,6 +169,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'cat',
+    options: [],
+    maxPositionals: 1,
     tool: 'read_file',
     usage: 'cat <path>',
     summary: 'Print a file (up to 10000 lines; use `read` to page further)',
@@ -158,6 +179,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'acs read',
+    options: ['id', 'status'],
+    maxPositionals: 1,
     tool: 'acs_read',
     usage: 'acs read <health|work-items|work-item> [--id ID] [--status STATUS]',
     summary: 'Read ACS health or work items',
@@ -170,6 +193,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'acs submit',
+    options: ['title', 'intent', 'target', 'actions', 'risk'],
+    maxPositionals: 0,
     tool: 'acs_submit_mission',
     usage: 'acs submit --title T --intent I --target JSON [--actions JSON] [--risk low|medium|high|critical]',
     summary: 'Submit a mission to ACS as a governed work item',
@@ -198,6 +223,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'swarm read',
+    options: ['task'],
+    maxPositionals: 1,
     tool: 'swarm_read',
     usage: 'swarm read <health|mission-control|runs|status|task> [--task ID]',
     summary: 'Read-only codex-swarm views',
@@ -209,6 +236,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'visualizer read',
+    options: [],
+    maxPositionals: 1,
     tool: 'visualizer_read',
     usage: 'visualizer read <system-status|runtimes|executions|approvals|alerts|agents>',
     summary: 'Read-only Agent Workflow Visualizer views',
@@ -217,6 +246,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'mission list',
+    options: [],
+    maxPositionals: 0,
     tool: 'mission_router_list',
     usage: 'mission list',
     summary: 'List Mission Router state (ids/states only)',
@@ -225,6 +256,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'looptrace verify',
+    options: [],
+    maxPositionals: 1,
     tool: 'looptrace_verify',
     usage: 'looptrace verify <trace.jsonl>',
     summary: 'Verify a LoopTrace hash chain',
@@ -233,6 +266,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'sudo',
+    options: ['cwd', 'timeout'],
+    maxPositionals: Number.POSITIVE_INFINITY,
     tool: 'privileged_exec',
     usage: 'sudo [--cwd DIR] [--timeout MS] -- /abs/path/to/program [args...]',
     summary: 'Run ONE exact command as root after a human approves it in ACS',
