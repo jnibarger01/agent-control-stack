@@ -76,8 +76,10 @@ export class AuthFailureLockout {
         // Tracked state is authoritative, even during a saturation overflow.
         return this.readDecision(bucket, now);
       }
-      // Lazily drop the expired bucket; no full scan on the read path.
+      // Lazily drop the expired bucket; freeing capacity also ends the
+      // saturation-only lock for untracked keys.
       this.buckets.delete(key);
+      this.clearOverflowIfCapacityAvailable();
     }
     if (now < this.overflowLockedUntil) {
       return this.overflowDecision(now);
@@ -146,7 +148,7 @@ export class AuthFailureLockout {
   }
 
   clear(key: string): void {
-    this.buckets.delete(key);
+    if (this.buckets.delete(key)) this.clearOverflowIfCapacityAvailable();
   }
 
   clearAll(): void {
@@ -211,7 +213,12 @@ export class AuthFailureLockout {
         earliest = expiresAt;
       }
     }
+    this.clearOverflowIfCapacityAvailable();
     return earliest;
+  }
+
+  private clearOverflowIfCapacityAvailable(): void {
+    if (this.buckets.size < this.maxBuckets) this.overflowLockedUntil = 0;
   }
 }
 
