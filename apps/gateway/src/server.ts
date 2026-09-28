@@ -10,6 +10,7 @@ import {
   authorizeJaceCommanderExecution,
   jaceCommanderApprovalSummary,
   jaceCommanderSigningConfigFromEnv,
+  jaceCommanderToolPolicy,
   jaceCommanderWorkItemIntent,
   jaceCommanderWorkItemTitle,
   prepareJaceCommanderCapability,
@@ -2121,17 +2122,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!workItem) {
         return reply.code(404).send({ error: "work item not found" });
       }
-      const dcTool =
-        typeof workItem.requestedActions[0]?.params?.tool === "string"
-          ? workItem.requestedActions[0].params.tool
-          : undefined;
-      if (
-        workItem.requesterSubject === actor &&
-        dcTool &&
-        desktopCommanderToolPolicy(dcTool)?.requiresApproval === true
-      ) {
+      const toolParams = workItem.requestedActions[0]?.params;
+      const dcTool = typeof toolParams?.tool === "string" ? toolParams.tool : undefined;
+      // Jace Commander (acs.jc.v1) items carry their contract; every tool the
+      // JC manifest marks requiresApproval is covered, not only the tools that
+      // also happen to have a Desktop Commander policy.
+      const approvalGatedTool =
+        dcTool !== undefined &&
+        (toolParams?.contract === "acs.jc.v1"
+          ? jaceCommanderToolPolicy(dcTool)?.requiresApproval === true
+          : desktopCommanderToolPolicy(dcTool)?.requiresApproval === true);
+      if (workItem.requesterSubject === actor && approvalGatedTool) {
         return reply.code(403).send({
-          error: "requester cannot approve its own Desktop Commander operation",
+          error:
+            toolParams?.contract === "acs.jc.v1"
+              ? "requester cannot approve its own Jace Commander operation"
+              : "requester cannot approve its own Desktop Commander operation",
           code: "approval_self_denied"
         });
       }

@@ -4,7 +4,11 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
-import { jaceCommanderInvocationHash } from "@agent-control-stack/desktop-commander-adapter";
+import {
+  jaceCommanderInvocationHash,
+  jaceCommanderToolNames,
+  jaceCommanderToolPolicy
+} from "@agent-control-stack/desktop-commander-adapter";
 import type { ManagedAuthorityObservation } from "@agent-control-stack/policy-gate";
 import { describe, expect, it } from "vitest";
 import { buildGateway, type GatewayCredential } from "./server.js";
@@ -271,16 +275,137 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(response.json().capability).toBeUndefined();
     }));
 
-  it("self-approval by the requesting subject is rejected before signing", () =>
+  it("self-approval by the requesting subject is rejected at /approve and nothing is signed", () =>
     withGateway(async (ctx) => {
       const first = (await issue(ctx, "privileged_exec", PRIV_ARGS)).json();
       const approval = await approve(ctx, first.workItemId, first.actionHash, SELF_TOKEN);
-      expect(approval.statusCode).toBe(200);
+      expect(approval.statusCode).toBe(403);
+      expect(approval.json().code).toBe("approval_self_denied");
       const response = await issue(ctx, "privileged_exec", PRIV_ARGS);
-      expect(response.statusCode).toBe(403);
-      expect(response.json().code).toBe("jace_commander_self_approval_denied");
+      expect(response.statusCode).toBe(409);
       expect(response.json().capability).toBeUndefined();
     }));
+});
+
+// PR #212 review B2/B3: every approval-gated JC tool (derived from the
+// manifest), not only privileged_exec, refuses self-approval and admin
+// auto-approval, and its approval challenge shows the approver what runs.
+describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval, B3 approval summary)", () => {
+  const GATED = jaceCommanderToolNames().filter((name) => jaceCommanderToolPolicy(name)?.requiresApproval === true);
+  const head = "0123456789abcdef0123456789abcdef01234567";
+  const argsFor = (root: string): Record<string, { args: Record<string, unknown>; fields: Record<string, unknown> }> => {
+    const ws = join(root, "workspace");
+    return {
+      privileged_exec: { args: PRIV_ARGS, fields: { runAs: "root", argv: PRIV_ARGS.argv, timeoutMs: 120000 } },
+      write_file: {
+        args: { path: join(ws, "new.txt"), content: "hello approver\n", overwrite: false },
+        fields: { path: join(ws, "new.txt"), bytes: 15, overwrite: false, preview: "hello approver\n" }
+      },
+      create_directory: { args: { path: join(ws, "made") }, fields: { path: join(ws, "made") } },
+      move_file: {
+        args: { from: join(ws, "src", "index.ts"), to: join(ws, "src", "moved.ts") },
+        fields: { from: join(ws, "src", "index.ts"), to: join(ws, "src", "moved.ts") }
+      },
+      edit_block: {
+        args: { path: join(ws, "src", "index.ts"), old: "export {};", new: "export const x = 1;" },
+        fields: { path: join(ws, "src", "index.ts"), oldPreview: "export {};", newPreview: "export const x = 1;" }
+      },
+      start_process: {
+        args: { argv: ["/usr/bin/node", "--version"], cwd: ws, timeoutMs: 5000 },
+        fields: { argv: ["/usr/bin/node", "--version"], cwd: ws, timeoutMs: 5000 }
+      },
+      kill_process: { args: { sessionId: "proc_1" }, fields: { sessionId: "proc_1" } },
+      git_add: { args: { repo: ws, paths: ["src/index.ts"] }, fields: { repo: ws, paths: ["src/index.ts"] } },
+      git_commit: { args: { repo: ws, message: "chore: approver-visible" }, fields: { repo: ws, message: "chore: approver-visible" } },
+      git_fetch: { args: { repo: ws, remote: "origin" }, fields: { repo: ws, remote: "origin" } },
+      git_push: {
+        args: { repo: ws, remote: "origin", branch: "main", expectedHead: head },
+        fields: { repo: ws, remote: "origin", branch: "main", expectedHead: head }
+      }
+    };
+  };
+  const workspace = (root: string) => {
+    const dir = join(root, "workspace");
+    mkdirSync(join(dir, "src"), { recursive: true });
+    writeFileSync(join(dir, "src", "index.ts"), "export {};\n");
+    return [dir];
+  };
+
+  it("the gated list is the manifest's (11 tools) and every one has fixtures", () => {
+    expect(GATED).toHaveLength(11);
+    const fixtures = argsFor("/tmp/x");
+    for (const tool of GATED) expect(fixtures[tool], tool).toBeDefined();
+  });
+
+  it("the requester's own approval is refused for every gated tool; the challenge shows the arguments", () =>
+    withGateway(
+      async (ctx) => {
+        const fixtures = argsFor(ctx.root);
+        for (const tool of GATED) {
+          const { args, fields } = fixtures[tool]!;
+          const held = await issue(ctx, tool, args);
+          expect(held.statusCode, `${tool}: ${held.body}`).toBe(409);
+          const pending = held.json();
+          expect(pending.approvalSummary, tool).toMatchObject({ tool, ...fields });
+          expect(pending.approvalSummary.invocationHash).toBe(jaceCommanderInvocationHash(tool, args));
+          const detail = await ctx.app.inject({
+            method: "GET",
+            url: `/work-items/${pending.workItemId}`,
+            headers: { authorization: `Bearer ${OP_TOKEN}` }
+          });
+          const item = detail.json().workItem;
+          expect(item.requestedActions[0].params.approvalSummary).toMatchObject({ tool, ...fields });
+          if (tool !== "privileged_exec") {
+            expect(item.title.startsWith(`Jace Commander ${tool} `), item.title).toBe(true);
+            expect(item.intent).toContain("Approve exactly:");
+          }
+
+          const self = await approve(ctx, pending.workItemId, pending.actionHash, SELF_TOKEN);
+          expect(self.statusCode, `${tool}: ${self.body}`).toBe(403);
+          expect(self.json().code).toBe("approval_self_denied");
+          const retry = await issue(ctx, tool, args);
+          expect(retry.statusCode, tool).toBe(409);
+          expect(retry.json().capability).toBeUndefined();
+        }
+      },
+      true,
+      workspace
+    ));
+
+  it("admin execution mode never auto-approves any gated tool; a different human's approval is signed", () =>
+    withGateway(
+      async (ctx) => {
+        const switched = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${OP_TOKEN}` },
+          payload: { mode: "admin", reason: "jc admin-mode negative test (all gated tools)" }
+        });
+        expect(switched.statusCode).toBe(200);
+        const fixtures = argsFor(ctx.root);
+        for (const tool of GATED) {
+          const { args } = fixtures[tool]!;
+          const held = await issue(ctx, tool, args);
+          expect(held.statusCode, `${tool}: ${held.body}`).toBe(409);
+          expect(held.json().capability).toBeUndefined();
+          expect((await approve(ctx, held.json().workItemId, held.json().actionHash)).statusCode, tool).toBe(200);
+          const issued = await issue(ctx, tool, args);
+          expect(issued.statusCode, `${tool}: ${issued.body}`).toBe(200);
+          expect(typeof issued.json().capability.payload.approvalId).toBe("string");
+        }
+        const db = new DatabaseSync(ctx.dbPath);
+        try {
+          const approvers = db
+            .prepare("SELECT DISTINCT approved_by_actor_id AS actor FROM jace_commander_capability_issuances WHERE approval_id IS NOT NULL")
+            .all() as Array<{ actor: string }>;
+          expect(approvers.map((row) => row.actor)).toEqual(["user"]);
+        } finally {
+          db.close();
+        }
+      },
+      true,
+      workspace
+    ));
 });
 
 describe("POST /jc/capability/issue: filesystem tools (fs.read, ACS containment)", () => {
