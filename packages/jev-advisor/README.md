@@ -168,3 +168,44 @@ promotion.
 CLI --signal questions are explicitly wrapped as Noul questions. The default
 exit code remains 0 on Jev degradation; --strict exists for testing only and
 must not be used as an ACS authority gate.
+
+## Canonical LoopTrace shadow classification
+
+JEV-3 consumes **canonical LoopTrace `trace-event/1` events only**. Jace
+Commander private JSONL is verified and normalized by
+`@agent-control-stack/desktop-commander-adapter` before it can reach the Jev
+projection. LoopTrace remains observational evidence; no trace state is read
+back as authorization state.
+
+`projectCanonicalTraceForJev()` is deterministic and model-free. It:
+
+- requires one canonical `trace_id` and strictly increasing sequence
+- prioritizes recent failure, verification, tool-outcome, and promotion evidence
+- caps event count, detail keys/string lengths, and total serialized state
+- reapplies the shared ACS secret redactor and drops raw argv/arguments
+- preserves event kind, ordering, source, outcome-relevant detail, and canonical
+  work-item/trace correlation when available
+
+Trace question set `jev-trace@1` is:
+
+| Question              | Primitive |
+| --------------------- | --------- |
+| `failure_mode`        | Choice    |
+| `should_escalate`     | Noul      |
+| `needs_maker_checker` | Noul      |
+| `context_rot`         | Noul      |
+| `recovery_urgency`    | Score     |
+
+The failure-mode Choice is limited to `healthy`, `tool_loop`,
+`budget_burn`, `instruction_drift`, `verifier_fail`, `stagnation`,
+`hallucination`, `policy_denied`, `worktree_collision`, and `other`.
+
+Because the deployed runtime is Noul-only, the complete trace question set is
+currently reported as `INCOMPATIBLE_MODEL` without a network request. It is
+not converted into independent fake Choice/Score answers. Tests inject a
+future full-capability profile to validate the mixed typed path.
+
+`classifyJevTrace()` and `runJevTraceShadow()` emit only correlated
+`jev-advisory-event/2` telemetry. The latter catches projector, transport, and
+telemetry-sink failures. Neither function is wired into policy, approvals,
+capability issuance, retry/termination, verification, or promotion.

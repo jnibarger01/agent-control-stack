@@ -2,11 +2,20 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteWorkItemStore, classifierEvidenceHash, type ClassifierEvidence } from "@agent-control-stack/work-items";
+import {
+  CANONICAL_TRACE_EVENT_SCHEMA_VERSION,
+  CANONICAL_TRACE_GENESIS_HASH,
+  SqliteWorkItemStore,
+  canonicalTracePayloadHash,
+  classifierEvidenceHash,
+  type CanonicalTraceEvent,
+  type ClassifierEvidence
+} from "@agent-control-stack/work-items";
 import { createPolicyEngine } from "./policy.js";
 import { createWorkItemTools } from "./tools.js";
 import { previewWorkItemPolicy } from "./preview.js";
 import { classifyMissionIntake, MISSION_CLASSIFIER_VERSION } from "./mission-classifier.js";
+import { classifyJevTrace } from "../../jev-advisor/src/index.js";
 import { runJevIntake } from "../../jev-advisor/src/intake.js";
 import { JEV_RISK_SIGNALS, JEV_ROUTING_SIGNALS, maybeRunJevShadowAdvisory } from "./jev-shadow.js";
 
@@ -29,6 +38,26 @@ const INTAKE = {
 };
 
 const CONTEXT = { evidenceId: "ev-000000", generatedAt: "2026-09-26T00:00:00.000Z" };
+
+function canonicalTraceEvent(workItemId: string): CanonicalTraceEvent {
+  const payload = { status: "completed" };
+  return {
+    schema_version: CANONICAL_TRACE_EVENT_SCHEMA_VERSION,
+    event_id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+    trace_id: "ab".repeat(16),
+    span_id: "cd".repeat(8),
+    source: { system: "dc", component: "jace-commander", instance: "jc-test", release_sha: "unreleased" },
+    class: "evidence",
+    kind: "run.completed",
+    actor: { id: "jace-commander", type: "system" },
+    subject: { work_item_id: workItemId },
+    seq: 1,
+    prev_hash: CANONICAL_TRACE_GENESIS_HASH,
+    ts: "2026-09-28T12:00:00.000Z",
+    payload,
+    payload_hash: canonicalTracePayloadHash(payload)
+  };
+}
 
 afterEach(() => {
   delete process.env.ACS_JEV_ENABLED;
@@ -150,6 +179,37 @@ describe("jev shadow advisory", () => {
       })
     ).resolves.toBeUndefined();
   });
+
+  it("joins intake and trace advisory telemetry through the canonical work-item identity", async () => {
+    process.env.ACS_JEV_ENABLED = "1";
+    const lines: string[] = [];
+    const impl: typeof fetch = async (_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return new Response(
+        JSON.stringify({
+          model: "jevos-q4_k_m",
+          answers: Object.fromEntries(Object.keys(body.questions).map((name) => [name, { type: "noul", noul: 0.5 }]))
+        }),
+        { status: 200 }
+      );
+    };
+    await maybeRunJevShadowAdvisory(INTAKE, {
+      fetchImpl: impl,
+      correlation: { workItemId: "wi-shadow-join" },
+      sink: (line) => lines.push(line)
+    });
+    const intakeEvent = JSON.parse(lines[0]);
+    const traceAdvisory = await classifyJevTrace([canonicalTraceEvent("wi-shadow-join")], { enabled: true });
+    expect(intakeEvent.correlation.work_item_id).toBe("wi-shadow-join");
+    expect(traceAdvisory.telemetry.correlation).toEqual({
+      work_item_id: "wi-shadow-join",
+      trace_id: "ab".repeat(16)
+    });
+    expect(traceAdvisory.result).toMatchObject({
+      degraded: true,
+      failureReason: "INCOMPATIBLE_MODEL"
+    });
+  });
 });
 
 describe("advisory output never feeds authoritative behavior (differential)", () => {
@@ -232,6 +292,64 @@ describe("advisory output never feeds authoritative behavior (differential)", ()
     await maybeRunJevShadowAdvisory(INTAKE, { fetchImpl: jevDown, sink: () => {} });
     const degraded = await policyApprovalCapabilitySnapshot();
     expect(degraded).toEqual(baseline);
+  });
+
+  it("trace shadow classification cannot change policy, approval, or capability behavior", async () => {
+    const baseline = await policyApprovalCapabilitySnapshot();
+    const capability = {
+      promptVersion: "typed-v1",
+      supportsNoul: true,
+      supportsChoice: true,
+      supportsScore: true,
+      fingerprint: "policy-differential"
+    };
+    const probabilities = {
+      healthy: 0.05,
+      tool_loop: 0.05,
+      budget_burn: 0.05,
+      instruction_drift: 0.05,
+      verifier_fail: 0.5,
+      stagnation: 0.05,
+      hallucination: 0.05,
+      policy_denied: 0.05,
+      worktree_collision: 0.05,
+      other: 0.1
+    };
+    const healthyFetch: typeof fetch = async () =>
+      new Response(
+        JSON.stringify({
+          model: "jev-typed",
+          answers: {
+            failure_mode: { type: "choice", choice: "verifier_fail", probabilities, confidence: 0.5 },
+            should_escalate: { type: "noul", noul: 0.9 },
+            needs_maker_checker: { type: "noul", noul: 0.8 },
+            context_rot: { type: "noul", noul: 0.2 },
+            recovery_urgency: {
+              type: "score",
+              score: 3.5,
+              probabilities: { "0": 0.02, "1": 0.03, "2": 0.1, "3": 0.15, "4": 0.7 },
+              confidence: 0.7
+            }
+          }
+        }),
+        { status: 200 }
+      );
+
+    await classifyJevTrace([canonicalTraceEvent("wi-trace-authority")], {
+      enabled: true,
+      capabilityProfile: capability,
+      fetchImpl: healthyFetch
+    });
+    expect(await policyApprovalCapabilitySnapshot()).toEqual(baseline);
+
+    await classifyJevTrace([canonicalTraceEvent("wi-trace-authority")], {
+      enabled: true,
+      capabilityProfile: capability,
+      fetchImpl: async () => {
+        throw new TypeError("trace observer offline");
+      }
+    });
+    expect(await policyApprovalCapabilitySnapshot()).toEqual(baseline);
   });
 
   it("authoritative evidence is identical with Jev disabled, unavailable, degraded, and ignored", async () => {

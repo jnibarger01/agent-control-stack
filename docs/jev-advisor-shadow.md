@@ -109,3 +109,37 @@ check.
 
 Any future promotion of Jev evidence into an authoritative decision requires
 a separate design/ADR and evidence review.
+
+## JEV-3 canonical trace observation
+
+JEV-3 extends the same advisory-only boundary to execution evidence. ACS now
+vendors the canonical LoopTrace lifecycle schema from LoopTrace commit
+`49aca302a1c5f0d12813c73ca4149f2fc7afefd4`; ACS does not maintain a
+private schema fork.
+
+The lifecycle vocabulary adds source-neutral evidence kinds for run start/end,
+classification and route evidence, approval request/decision, executor start,
+tool start/finish, verification start/finish, promotion block/completion, run
+failure/completion, and replay divergence. Existing
+`acs.approval.granted`/`acs.approval.consumed` remain valid and
+source-bound to ACS.
+
+Jace Commander's private trace is never sent directly to Jev. The desktop
+commander adapter first verifies the JC private hash chain and maps lifecycle
+events into canonical `trace-event/1` events. A supplied canonical ACS
+`trace_id`/`work_item_id` is reused; otherwise only observational trace
+correlation is derived. Raw argv, credential/token/capability material, and
+secret-shaped values are removed before canonical payload hashing.
+
+The deterministic canonical projection is bounded and re-redacted before
+transport. Question set `jev-trace@1` uses Choice for the primary failure
+taxonomy, Noul for escalation/maker-checker/context-rot questions, and Score
+for recovery urgency. The current Noul-only runtime therefore marks the mixed
+trace classifier incompatible/degraded without fetching. A future runtime
+must explicitly declare complete Choice/Score capability before this path can
+execute.
+
+Trace telemetry reuses the canonical work-item and trace identities and records
+the deterministic observed outcome when one is present. This data is for
+offline calibration/comparison only. No production decision path consumes the
+trace advisory result.
