@@ -138,3 +138,4 @@ export type {
 } from "./jace-commander.js";
 export { SqliteJaceCommanderIssuanceRegistry } from "./jace-commander-registry.js";
 export type { JaceCommanderIssuanceBinding } from "./jace-commander-registry.js";
+export * from "./jc-looptrace-normalizer.js";
