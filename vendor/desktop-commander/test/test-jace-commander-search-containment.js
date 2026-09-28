@@ -30,14 +30,15 @@ const write = (file, text) => {
   fs.writeFileSync(file, text);
 };
 
-// Secrets that must never surface (names or content). All fake.
-write(path.join(home, '.ssh', 'id_ed25519'), '-----BEGIN OPENSSH PRIVATE KEY----- FAKE_SECRET_SSH\n');
+// Secrets that must never surface (names or content). All fake, and deliberately not
+// PEM-shaped so the repository secret scanner does not flag the fixture.
+write(path.join(home, '.ssh', 'id_ed25519'), 'FAKE OPENSSH PRIVATE KEY FAKE_SECRET_SSH\n');
 write(path.join(home, '.aws', 'credentials'), 'aws_secret_access_key = FAKE_SECRET_AWS\n');
 write(path.join(project, '.env'), 'API_TOKEN=FAKE_SECRET_ENV\n');
 write(path.join(project, 'credentials.json'), '{"secret":"FAKE_SECRET_CREDS"}\n');
 write(path.join(stateDir, 'credentials.json'), '{"refresh_token":"FAKE_SECRET_JC_CREDS"}\n');
 write(path.join(stateDir, 'mcp-token.json'), '{"access_token":"FAKE_SECRET_JC_MCP"}\n');
-write(path.join(stateDir, 'device-key.pem'), '-----BEGIN PRIVATE KEY----- FAKE_SECRET_JC_DEVICE\n');
+write(path.join(stateDir, 'device-key.pem'), 'FAKE PRIVATE KEY FAKE_SECRET_JC_DEVICE\n');
 // Outside every root, reachable only through symlinks.
 write(path.join(outside, 'loot.txt'), 'FAKE_SECRET_OUTSIDE\n');
 fs.symlinkSync(path.join(outside, 'loot.txt'), path.join(project, 'escape-file.txt'));
