@@ -9,7 +9,13 @@ import {
   type StoredAuditEvent,
   type WorkItem
 } from "@agent-control-stack/work-items";
-import { redactSecrets, redactedAttributesJson, redactionClientSource } from "./redaction.js";
+import { redactSecrets, redactedAttributesJson } from "./redaction.js";
+
+import { clientScript } from "./client.js";
+import { styles } from "./styles.js";
+import { approvalActionHashPrefix } from "./client-shared.js";
+
+export { approvalActionHashPrefix, isElevatedApprovalRisk, nextSseReconnectDelayMs } from "./client-shared.js";
 
 export {
   isSecretAttributeKey,
@@ -79,6 +85,8 @@ export interface MissionControlViewModel {
   attemptLeasesByWorkItem?: Record<string, MissionControlAttemptLease[]>;
   /** Explicit worker backend label, when the gateway knows it. Never a secret. */
   executionBackend?: string;
+  /** Authenticated dashboard actor display value, when supplied by the gateway. */
+  operatorDisplayName?: string;
   /** Canonical execution mode. Absent when the row is missing or corrupt. */
   executionMode?: "strict" | "admin";
   executionModeProblem?: "missing" | "corrupt";
@@ -284,250 +292,6 @@ export function applyQueueFilterToDom(root: QueueFilterDomRoot, filter: QueueFil
   return visible;
 }
 
-export type SseConnectionRoot = {
-  querySelector(selectors: string): SseConnectionElement | null;
-  querySelectorAll(selectors: string): ArrayLike<SseConnectionButton>;
-};
-
-export type SseConnectionElement = {
-  hidden: boolean;
-  classList: { toggle(token: string, force?: boolean): unknown };
-  innerHTML: string;
-};
-
-export type SseConnectionButton = {
-  disabled: boolean;
-  getAttribute(name: string): string | null;
-};
-
-/** Exponential backoff for EventSource reconnect: 1s, 2s, 4s, 8s, 16s, then 30s cap. */
-export function nextSseReconnectDelayMs(attempt: number): number {
-  const n = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
-  return Math.min(30_000, 1_000 * 2 ** Math.min(n, 5));
-}
-
-/** Show/hide the stale-stream banner and disable approve/deny/unblock while disconnected. */
-export function applySseConnectionState(root: SseConnectionRoot, connected: boolean): void {
-  const banner = root.querySelector("#sse-stale-banner");
-  if (banner) banner.hidden = connected;
-  const live = root.querySelector(".live");
-  if (live) {
-    live.classList.toggle("disconnected", !connected);
-    live.innerHTML = connected
-      ? `<span aria-hidden="true"></span> Live`
-      : `<span aria-hidden="true"></span> Disconnected`;
-  }
-  for (const button of Array.from(root.querySelectorAll("[data-approve],[data-reject],[data-unblock]"))) {
-    const approveWithoutHash = button.getAttribute("data-approve") !== null && !button.getAttribute("data-action-hash");
-    button.disabled = !connected || approveWithoutHash;
-  }
-}
-
-/** High/critical risk (elevated require_approval) needs a second confirm before POST. */
-export function isElevatedApprovalRisk(risk: string): boolean {
-  const normalized = String(risk ?? "")
-    .trim()
-    .toLowerCase();
-  return normalized === "high" || normalized === "critical";
-}
-
-/** Short prefix of an action hash for confirm dialog copy (full hash stays on the button). */
-export function approvalActionHashPrefix(hash: string, maxLen = 12): string {
-  const text = String(hash ?? "");
-  if (!text) return "";
-  return text.length > maxLen ? `${text.slice(0, maxLen)}…` : text;
-}
-
-export type ApprovalConfirmRequest = {
-  workItemId: string;
-  action: "approve" | "reject";
-  actionHash?: string;
-  /** Requested action kind the hash approves, when known. */
-  actionKind?: string;
-  risk: string;
-};
-
-export type ApprovalConfirmDocument = {
-  body: { appendChild(node: HTMLElement): unknown };
-  createElement(tagName: string): HTMLElement;
-  addEventListener(type: string, listener: (event: KeyboardEvent) => void): void;
-  removeEventListener(type: string, listener: (event: KeyboardEvent) => void): void;
-  getElementById(id: string): HTMLElement | null;
-  activeElement?: { focus?(): void } | null;
-};
-
-/**
- * Modal confirm for elevated-risk approve/deny.
- * Esc or Cancel resolves false without side effects; Confirm resolves true.
- * Initial focus is on Cancel (confirm is never the default focused control).
- */
-export function requestApprovalConfirm(
-  doc: ApprovalConfirmDocument,
-  request: ApprovalConfirmRequest
-): Promise<boolean> {
-  return new Promise((resolve) => {
-    const existing = doc.getElementById("approval-confirm-dialog");
-    if (existing) existing.remove();
-
-    const overlay = doc.createElement("div");
-    overlay.id = "approval-confirm-dialog";
-    overlay.setAttribute("role", "dialog");
-    overlay.setAttribute("aria-modal", "true");
-    overlay.setAttribute("aria-labelledby", "approval-confirm-title");
-    overlay.className = "approval-confirm-overlay";
-
-    const actionLabel = request.action === "approve" ? "Approve" : "Deny";
-    const hashPrefix = approvalActionHashPrefix(request.actionHash ?? "");
-    const hashLine = hashPrefix
-      ? `<p class="approval-confirm-hash">Action hash: <code>${escapeHtml(hashPrefix)}</code></p>`
-      : "";
-    const kindLine = request.actionKind
-      ? `<p class="approval-confirm-kind">Action: <code>${escapeHtml(request.actionKind)}</code></p>`
-      : "";
-
-    overlay.innerHTML = `<div class="approval-confirm-card">
-  <h3 id="approval-confirm-title">${escapeHtml(actionLabel)} high-risk work item?</h3>
-  <p class="approval-confirm-id">Work item: <code>${escapeHtml(request.workItemId)}</code></p>
-  <p class="approval-confirm-risk">Risk: <strong>${escapeHtml(request.risk)}</strong></p>
-  ${kindLine}
-  ${hashLine}
-  <div class="approval-confirm-actions">
-    <button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>
-    <button type="button" id="approval-confirm-ok" data-approval-confirm-ok>${escapeHtml(actionLabel)}</button>
-  </div>
-</div>`;
-
-    const finish = (confirmed: boolean) => {
-      doc.removeEventListener("keydown", onKeyDown);
-      overlay.remove();
-      resolve(confirmed);
-    };
-
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        finish(false);
-      }
-    };
-
-    doc.body.appendChild(overlay);
-    doc.addEventListener("keydown", onKeyDown);
-
-    const cancelBtn = overlay.querySelector("#approval-confirm-cancel") as HTMLElement | null;
-    const okBtn = overlay.querySelector("#approval-confirm-ok") as HTMLElement | null;
-    cancelBtn?.addEventListener("click", () => finish(false));
-    okBtn?.addEventListener("click", () => finish(true));
-    // Confirm must not be the initially focused control.
-    cancelBtn?.focus?.();
-  });
-}
-
-export type ApprovalPostResult = {
-  posted: boolean;
-  confirmed?: boolean;
-  cancelled?: boolean;
-  status?: number;
-  error?: string;
-};
-
-export type ApprovalActionClickOptions = {
-  document: ApprovalConfirmDocument & {
-    querySelector(selectors: string): { value?: string; focus?(): void; textContent?: string | null } | null;
-  };
-  button: {
-    dataset: {
-      approve?: string;
-      reject?: string;
-      unblock?: string;
-      actionHash?: string;
-      actionKind?: string;
-      risk?: string;
-    };
-    getAttribute?(name: string): string | null;
-  };
-  connected: boolean;
-  fetchImpl: (
-    input: string,
-    init: { method: string; headers: Record<string, string>; body: string }
-  ) => Promise<{
-    ok: boolean;
-    status: number;
-    json(): Promise<{ error?: string; code?: string }>;
-  }>;
-  /** Optional override for tests; defaults to requestApprovalConfirm. */
-  requestConfirm?: (doc: ApprovalConfirmDocument, request: ApprovalConfirmRequest) => Promise<boolean>;
-};
-
-/**
- * Shared approve/deny/unblock click path used by Mission Control (and component tests).
- * Elevated risk requires a confirm step before POST; Cancel/Esc leaves state unchanged.
- */
-export async function handleApprovalActionClick(options: ApprovalActionClickOptions): Promise<ApprovalPostResult> {
-  const { button, connected, fetchImpl } = options;
-  const doc = options.document;
-  const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
-  if (!id) return { posted: false, error: "missing work item id" };
-  const action = button.dataset.approve ? "approve" : button.dataset.reject ? "reject" : "unblock";
-  const risk =
-    button.dataset.risk || (typeof button.getAttribute === "function" ? button.getAttribute("data-risk") : null) || "";
-  const output = doc.querySelector("#approval-result-" + id);
-  if (!connected) {
-    if (output) output.textContent = "Disconnected: actions disabled until reconnect";
-    return { posted: false, error: "disconnected" };
-  }
-  const reasonInput = doc.querySelector('[data-reason="' + id + '"]');
-  const reason = reasonInput && typeof reasonInput.value === "string" ? reasonInput.value.trim() : "";
-  if (action !== "unblock" && !reason) {
-    if (output) output.textContent = "Reason required";
-    reasonInput?.focus?.();
-    return { posted: false, error: "reason required" };
-  }
-
-  if ((action === "approve" || action === "reject") && isElevatedApprovalRisk(risk)) {
-    if (doc.getElementById("approval-confirm-dialog")) {
-      // Another confirm is already open — do not POST.
-      return { posted: false, cancelled: true };
-    }
-    const confirmFn = options.requestConfirm ?? requestApprovalConfirm;
-    const confirmed = await confirmFn(doc, {
-      workItemId: id,
-      action,
-      actionHash: button.dataset.actionHash,
-      actionKind: button.dataset.actionKind,
-      risk
-    });
-    if (!confirmed) {
-      return { posted: false, cancelled: true, confirmed: false };
-    }
-  }
-
-  const headers = { "content-type": "application/json" };
-  const payload: Record<string, string> = action === "unblock" ? {} : { reason };
-  if (action === "approve") {
-    const actionHash = button.dataset.actionHash;
-    if (!actionHash) {
-      if (output) output.textContent = "Approval action hash unavailable";
-      return { posted: false, error: "action hash unavailable" };
-    }
-    payload.actionHash = actionHash;
-  }
-  const res = await fetchImpl("/work-items/" + id + "/" + action, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload)
-  });
-  const body = await res.json();
-  if (output) {
-    output.textContent = res.ok ? action + " accepted" : "Rejected: " + (body.error || body.code || res.status);
-  }
-  return {
-    posted: true,
-    confirmed: true,
-    status: res.status,
-    error: res.ok ? undefined : body.error || body.code || String(res.status)
-  };
-}
-
 const OPERATOR_ATTENTION_STATUSES: ReadonlySet<WorkItem["status"]> = new Set([
   "blocked",
   "needs_approval",
@@ -575,7 +339,7 @@ export function renderWorkItemDetailHtml(
         })
         .join("")}</ol>`
     : `<p class="muted">No matching events.</p>`;
-  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk)}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div><div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
+  return `<div class="detail-head"><div><h3 id="work-detail-title">${escapeHtml(workItem.title)}</h3><small>${escapeHtml(workItem.id)}</small></div><div>${pill(workItem.status)} ${pill(workItem.risk, "Risk")}</div></div><dl class="detail-grid"><div><dt>Requester</dt><dd>${escapeHtml(workItem.requester || "—")}</dd></div><div><dt>Intent</dt><dd>${escapeHtml(redactSecrets(workItem.intent || "—"))}</dd></div><div><dt>Target</dt><dd>${escapeHtml(workItem.target ? redactedAttributesJson(workItem.target) : "—")}</dd></div><div><dt>Created</dt><dd>${workItem.createdAt ? time(workItem.createdAt) : "—"}</dd></div></dl><div class="detail-section"><h4>Requested Actions</h4>${actionList}</div><div class="detail-section"><h4>Timeline</h4>${eventItems}</div>`;
 }
 
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
@@ -589,6 +353,14 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
   const executionPlanAdmissionsByWorkItem = model.executionPlanAdmissionsByWorkItem ?? {};
   const executionAttemptsByWorkItem = model.executionAttemptsByWorkItem ?? {};
   const attemptLeasesByWorkItem = model.attemptLeasesByWorkItem ?? {};
+  const dashboardNow = model.now ?? new Date();
+  const operatorDisplayName = model.operatorDisplayName?.trim() || "Operator";
+  const operatorParts = operatorDisplayName.split(/[^A-Za-z0-9]+/u).filter(Boolean);
+  const operatorInitials = (
+    operatorParts.length > 1
+      ? `${operatorParts[0]?.[0] ?? ""}${operatorParts[1]?.[0] ?? ""}`
+      : (operatorParts[0]?.slice(0, 2) ?? "OP")
+  ).toUpperCase();
 
   return `<!doctype html>
 <html lang="en">
@@ -598,58 +370,101 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     <title>ACS Mission Control</title>
     <style>${styles()}</style>
   </head>
-  <body data-active-view="overview">
+  <body data-active-view="overview" data-snapshot="mission-control" data-confirmed-mode="${model.executionMode ?? ""}">
     <a class="skip-link" href="#main-content">Skip to main content</a>
+    <div class="mission-topbar">
+      <div class="topbar-brand">
+        <span class="acs-mark" aria-hidden="true"><i></i><b></b></span>
+        <div><strong>ACS</strong><span>Mission Control<small>Secure Agents. Real Progress.</small></span></div>
+      </div>
+      <div class="mode-status-chip ${model.executionMode === "admin" ? "admin" : model.executionMode === "strict" ? "strict" : "unavailable"}">
+        <span class="mode-shield" aria-hidden="true">◆</span>
+        <div><strong id="mode-badge-label">${model.executionMode === "admin" ? "Admin Mode" : model.executionMode === "strict" ? "Strict Mode" : "Mode Unavailable"}</strong><small>${model.executionMode === "admin" ? "Eligible approvals automated" : model.executionMode === "strict" ? "Manual approval required" : "Fail closed"}</small></div>
+      </div>
+      <div class="topbar-statuses">
+        <div class="status-cluster"><span class="top-status-dot stream-status-dot pending"></span><div><strong>Stream</strong><small class="live" role="status"><span aria-hidden="true"></span> Connecting</small></div></div>
+        <div class="status-cluster"><span class="top-status-dot data-status-dot pending"></span><div><strong>Data</strong><small id="data-current-status">Awaiting refresh</small></div></div>
+      </div>
+      <label class="global-search" for="global-search"><span aria-hidden="true">⌕</span><input id="global-search" type="search" autocomplete="off" spellcheck="false" placeholder="Search work items…" /><kbd>⌘ K</kbd></label>
+      <div class="operator-chip"><span class="operator-avatar">${escapeHtml(operatorInitials)}</span><div><strong>${escapeHtml(operatorDisplayName)}</strong><small>Operator</small></div></div>
+    </div>
+
     <aside aria-label="Mission control navigation">
-      <div class="brand">ACS<span>MISSION CONTROL</span></div>
       <nav aria-label="Primary">
-        <a href="#overview" class="active" data-nav="overview">Overview</a>
-        <a href="#queue" data-nav="queue">Work Queue</a>
-        <a href="#queue" data-nav="execution">Execution</a>
-        <a href="#approvals" data-nav="approvals">Approvals</a>
-        <a href="#agents" data-nav="agents">Agents</a>
-        <a href="#connectors" data-nav="connectors">Connectors</a>
-        <a href="#operator-metrics" data-nav="metrics">Metrics</a>
-        <a href="#events" data-nav="audit">Audit</a>
-        <a href="#policy" data-nav="policy">Policy</a>
-        <a href="#system" data-nav="system">System</a>
+        <a href="#overview" class="active" data-nav="overview"><span aria-hidden="true">⌂</span>Overview</a>
+        <a href="#queue" data-nav="queue"><span aria-hidden="true">▣</span>Work Queue</a>
+        <a href="#execution" data-nav="execution"><span aria-hidden="true">▷</span>Execution</a>
+        <a href="#visualizer" data-nav="visualizer"><span aria-hidden="true">◇</span>Visualizer<b class="nav-health-dot" id="visualizer-nav-health" aria-label="Visualizer status unknown"></b></a>
+        <a href="#agents" data-nav="agents"><span aria-hidden="true">◉</span>Agents</a>
+        <a href="#approvals" data-nav="approvals"><span aria-hidden="true">✓</span>Approvals${stats.approvals ? `<b class="nav-count">${stats.approvals}</b>` : ""}</a>
+        <a href="#system" data-nav="system"><span aria-hidden="true">⚙</span>System</a>
+        <a href="#events" data-nav="audit"><span aria-hidden="true">≣</span>Audit</a>
+        <div class="nav-divider"></div>
+        <a href="#connectors" data-nav="connectors"><span aria-hidden="true">↔</span>Connectors</a>
+        <a href="#operator-metrics" data-nav="metrics"><span aria-hidden="true">∿</span>Metrics</a>
+        <a href="#policy" data-nav="policy"><span aria-hidden="true">⌁</span>Policy</a>
       </nav>
-      <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream.</p>
+      <a href="#dispatch" data-nav="dispatch" class="new-work-link"><span aria-hidden="true">＋</span>New Work Item</a>
+      <div class="sidebar-footer"><div><span class="top-status-dot acs-status-dot pending"></span><strong id="acs-online-status">ACS Connecting</strong></div><small>Mission Control · local-first</small><a href="#system" data-nav="system">System status</a></div>
     </aside>
+
     <main id="main-content" tabindex="-1">
-      <header>
-        <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
-        <div class="header-controls">
-          <fieldset class="execution-mode" id="execution-mode-control">
+      <header class="page-header">
+        <div><h1 id="view-heading" tabindex="-1">Overview</h1><p id="view-description">What needs your attention?</p></div>
+        <div class="page-meta"><span>${time(dashboardNow.toISOString())}</span><button type="button" data-refresh>Refresh</button></div>
+      </header>
+      <div id="admin-mode-banner" class="admin-mode-banner" role="status"${model.executionMode === "admin" ? "" : " hidden"}>Admin active — ACS records eligible approvals automatically. Policy, managed authority, and capability checks remain enforced.</div>
+      <div id="execution-mode-problem" class="admin-mode-banner" role="alert"${model.executionModeProblem ? "" : " hidden"}>${model.executionModeProblem ? `Execution mode ${model.executionModeProblem} — fail closed` : ""}</div>
+      <div id="sse-stale-banner" class="stale-banner" role="status">Connecting. Displayed work items may be stale. Sensitive actions wait for authoritative reconciliation.</div>
+      <p id="state-result" role="status"></p>
+
+      <section id="overview" class="overview-shell" data-view-panel="overview">
+        <div class="cards overview-cards">${overviewCards(stats)}</div>
+        <div class="overview-grid overview-grid-top">
+          <article class="panel overview-approvals">${overviewApprovals(approvalItems)}</article>
+          <article class="panel overview-health">${overviewHealth(stats, model.executionMode, model.executionBackend)}</article>
+          <article class="panel overview-agents">${overviewAgentSummary(agents)}</article>
+        </div>
+        <div class="overview-grid overview-grid-bottom">
+          <article class="panel overview-queue">${overviewQueue(model.workItems, executionAttemptsByWorkItem, attemptLeasesByWorkItem, dashboardNow)}</article>
+          <article class="panel overview-activity">${overviewAgentActivity(agents)}</article>
+          <article class="panel overview-recent-events">${overviewEvents(events)}</article>
+        </div>
+        <article class="panel overview-mode-panel">
+          <div class="mode-panel-icon" aria-hidden="true">⬡</div>
+          <fieldset class="execution-mode" id="execution-mode-control" aria-describedby="execution-mode-help">
             <legend>Execution Mode</legend>
-            <label><input type="radio" name="executionMode" value="strict" data-execution-mode="strict"${model.executionMode === "strict" ? " checked" : ""}> Strict</label>
-            <label><input type="radio" name="executionMode" value="admin" data-execution-mode="admin"${model.executionMode === "admin" ? " checked" : ""}> Admin / YOLO</label>
+            <label><input type="radio" name="executionMode" value="strict" data-execution-mode="strict"${model.executionMode === "strict" ? " checked" : ""}> <span><strong>Strict</strong><small>Manual approval required</small></span></label>
+            <label><input type="radio" name="executionMode" value="admin" data-execution-mode="admin"${model.executionMode === "admin" ? " checked" : ""}> <span><strong>Admin — automatic approval</strong><small>Automatically approve eligible actions</small></span></label>
+            <button type="button" id="execution-mode-apply" disabled>Apply mode</button>
             <p id="execution-mode-result" role="status"></p>
           </fieldset>
-          <div class="live" aria-live="polite"><span aria-hidden="true"></span> SSE ready</div>
-        </div>
-      </header>
-      ${model.executionMode === "admin" ? `<div id="admin-mode-banner" class="admin-mode-banner" role="alert">ACS ADMIN MODE -- human approval disabled</div>` : ""}
-      ${model.executionModeProblem ? `<div id="execution-mode-problem" class="admin-mode-banner" role="alert">ACS execution mode ${escapeHtml(model.executionModeProblem)} -- fail closed</div>` : ""}
-      <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve and deny are disabled until the live stream reconnects.</div>
-      <section id="overview" class="cards" data-view-panel="overview">${overviewCards(stats)}</section>
-      <section class="grid">
-        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
-        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, executionAttemptsByWorkItem, attemptLeasesByWorkItem)}</article>
+          <div class="mode-current"><small>Current mode (server confirmed)</small><strong id="execution-mode-active">${model.executionMode ?? "Unavailable — fail closed"}</strong><p>All approvals remain audited.</p></div>
+          <p id="execution-mode-help" class="mode-safety-note">Policy denials and managed-authority requirements remain enforced in every mode.</p>
+        </article>
       </section>
-      <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${approvalsPanel(approvalItems, approvalOptionsByWorkItem(model))}</article>
+
+      <section class="grid" data-view-section="agents queue execution">
+        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div>${freshness("agents")}<div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
+        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2 id="queue-heading">Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${freshness("work")}<p id="execution-help" hidden>Execution view emphasizes admitted plans, attempts, and lease authority. Select a work item for full execution details.</p>${queueFilterStrip()}${workQueue(model.workItems, executionPlansByWorkItem, executionPlanAdmissionsByWorkItem, executionAttemptsByWorkItem, attemptLeasesByWorkItem)}</article>
       </section>
-      <section class="grid lower">
-        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div>${operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, model.now ?? new Date())}</article>
-        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div>${eventTimeline([...events].reverse())}</article>
-        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div>${systemPanel(stats, model.executionBackend)}</article>
+
+      <section class="grid visualizer-grid" data-view-section="visualizer">
+        <article id="visualizer" class="panel visualizer-panel" data-view-panel="visualizer">${visualizerPanel()}</article>
       </section>
-      <section class="grid lower">
-        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
+
+      <section class="grid approvals-grid" data-view-section="approvals">
+        <article id="approvals" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span>${approvalItems.length} waiting</span></div>${freshness("approvals")}<a class="view-all" href="#approvals" data-nav="approvals">View all ${approvalItems.length} items</a>${approvalsPanel(approvalItems, approvalOptionsByWorkItem(model))}</article>
+      </section>
+      <section class="grid lower" data-view-section="metrics audit system">
+        <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · 429s</span></div>${operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, dashboardNow)}</article>
+        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span>append-only</span></div><div class="audit-controls"><label><input type="checkbox" id="audit-follow" checked> Follow live</label><button id="audit-new" type="button" hidden>0 new events</button><span>Recent window: up to 100 events; not complete audit history.</span></div>${eventTimeline([...events].reverse().slice(0, 100))}</article>
+        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div>${freshness("system")}<button type="button" id="system-refresh">Refresh readiness</button>${systemPanel(stats, model.executionBackend)}<details class="safety-help"><summary>Authority and safety</summary><p>Approve and reject require a reason and authenticated backend checks. Approvals bind to the exact action hash. Unknown or stale state cannot authorize an action. Cancel, retry, and clone are not exposed here. Bulk approval is not exposed. Displayed values are redacted.</p></details></article>
+      </section>
+      <section class="grid lower" data-view-section="dispatch connectors policy">
+        <article id="dispatch" class="panel composer" data-view-panel="dispatch"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div>${composer()}</article>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>${agents.filter((agent) => /connector|tunnel/i.test(agent.kind)).length} observed</span></div>${connectorsPanel(agents, model.executionBackend)}</article>
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>audit</span></div>${policyPanel(events)}</article>
-        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone are not exposed here. Bulk approval is not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
       </section>
     </main>
     <script>${clientScript()}</script>
@@ -779,38 +594,158 @@ function finalizeAgent(agent: MissionControlAgent, now: Date): MissionControlAge
   return { ...agent, status, health };
 }
 
+function freshness(section: string): string {
+  return `<p class="freshness" data-freshness="${section}" data-state="stale">Stale — awaiting authoritative refresh</p>`;
+}
+
 function summarize(workItems: WorkItem[], agents: MissionControlAgent[]) {
   return {
     totalAgents: agents.length,
     onlineAgents: agents.filter((agent) => agent.status === "online").length,
     running: workItems.filter((item) => item.status === "running").length,
     approvals: workItems.filter((item) => item.status === "needs_approval").length,
-    failed: workItems.filter((item) => item.status === "failed" || item.status === "blocked").length
+    failed: workItems.filter((item) => item.status === "failed").length,
+    blocked: workItems.filter((item) => item.status === "blocked").length,
+    quarantined: workItems.filter((item) => item.status === "quarantined").length,
+    unavailableAgents: agents.filter((agent) => agent.status !== "online" || agent.health !== "healthy").length
   };
 }
 
 function overviewCards(stats: ReturnType<typeof summarize>): string {
   const cards = [
-    ["Total Agents", stats.totalAgents, "Observed from persisted connector, tunnel, worker, and target events"],
-    ["Online Agents", stats.onlineAgents, "Only recent heartbeats count as online"],
-    ["Running Tasks", stats.running, "Lease-bound work currently running"],
-    ["Pending Approvals", stats.approvals, "Policy-gated work waiting on a human"],
-    ["Failed / Blocked", stats.failed, "Items that need operator attention"]
+    ["Pending Approvals", stats.approvals, "Human decision required", "approvals", "needs_approval", "danger"],
+    [
+      "Blocked Work",
+      stats.blocked,
+      stats.quarantined ? `${stats.quarantined} quarantined` : "Awaiting resolution",
+      "queue",
+      "blocked",
+      "warning"
+    ],
+    ["Failed", stats.failed, "Current failure window", "queue", "failed", "danger"],
+    ["Running", stats.running, "Lease-bound execution", "execution", "running", "info"],
+    ["Agents Online", stats.onlineAgents, `${stats.totalAgents} observed`, "agents", "", "success"]
   ];
   return cards
     .map(
-      ([label, value, help]) =>
-        `<article class="card"><span>${label}</span><strong>${value}</strong><p>${help}</p></article>`
+      ([label, value, help, view, status, tone]) =>
+        `<a class="card overview-stat tone-${tone}" href="${status ? `?status=${status}` : ""}#${view}" data-count-nav="${view}" data-count-status="${status}"><span class="stat-icon" aria-hidden="true"></span><strong>${value}</strong><b>${label}</b><p>${help}</p><span class="stat-arrow" aria-hidden="true">→</span></a>`
     )
     .join("");
 }
 
+function overviewApprovals(items: WorkItem[]): string {
+  const rows = [...items]
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .slice(0, 3)
+    .map((item) => {
+      const action = item.requestedActions[0]?.kind ?? "—";
+      return `<tr><td><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(item.id)}</small></td><td>${escapeHtml(action)}</td><td>${pill(item.risk, "Risk")}</td><td>${time(item.updatedAt)}</td><td>${pill(item.status)}</td></tr>`;
+    })
+    .join("");
+  return `<div class="panel-head"><h2>Recent Approvals</h2><a href="#approvals" data-nav="approvals">View all →</a></div><div class="table-wrap compact-table"><table><thead><tr><th>Work item</th><th>Action</th><th>Risk</th><th>Requested</th><th>Status</th></tr></thead><tbody>${rows || `<tr><td colspan="5" class="muted">No approvals waiting.</td></tr>`}</tbody></table></div>`;
+}
+
+function overviewHealth(
+  stats: ReturnType<typeof summarize>,
+  executionMode: MissionControlViewModel["executionMode"],
+  executionBackend?: string
+): string {
+  const mode = executionMode ?? "Unavailable";
+  const backend = executionBackend ?? "Not reported";
+  return `<div class="panel-head"><h2>System Health</h2><a href="#system" data-nav="system">View details →</a></div>
+  <dl class="health-list">
+    <div><dt>Control Plane</dt><dd><span class="health-dot ok"></span>Serving</dd></div>
+    <div><dt>Event Stream</dt><dd><span class="health-dot live-dot"></span><span data-overview-stream>Connecting</span></dd></div>
+    <div><dt>Policy Engine</dt><dd><span class="health-dot ok"></span>${escapeHtml(mode)}</dd></div>
+    <div><dt>Execution Backend</dt><dd>${escapeHtml(backend)}</dd></div>
+    <div><dt>Visualizer</dt><dd id="overview-visualizer-health"><span class="health-dot visualizer-health-dot"></span><span data-visualizer-health>Checking</span></dd></div>
+    <div><dt>Agents Online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div>
+  </dl>`;
+}
+
+function overviewAgentSummary(agents: MissionControlAgent[]): string {
+  const online = agents.filter((agent) => agent.status === "online").length;
+  const stale = agents.filter((agent) => agent.status === "stale").length;
+  const observed = agents.filter((agent) => agent.status === "observed").length;
+  const offline = agents.filter((agent) => agent.status === "offline").length;
+  const total = agents.length;
+  const onlineEnd = total ? Math.round((online / total) * 100) : 0;
+  const observedEnd = total ? Math.round(((online + observed) / total) * 100) : 0;
+  const staleEnd = total ? Math.round(((online + observed + stale) / total) * 100) : 0;
+  return `<div class="panel-head"><h2>Agents</h2><a href="#agents" data-nav="agents">View all →</a></div>
+  <div class="agent-summary"><div class="agent-donut" style="--online-end:${onlineEnd}%;--observed-end:${observedEnd}%;--stale-end:${staleEnd}%"><span><strong>${total}</strong><small>Total</small></span></div>
+  <dl><div><dt><span class="legend-dot online-dot"></span>Online</dt><dd>${online}</dd></div><div><dt><span class="legend-dot observed-dot"></span>Observed</dt><dd>${observed}</dd></div><div><dt><span class="legend-dot stale-dot"></span>Stale</dt><dd>${stale}</dd></div><div><dt><span class="legend-dot offline-dot"></span>Offline</dt><dd>${offline}</dd></div></dl></div>`;
+}
+
+function overviewQueue(
+  items: WorkItem[],
+  attemptsByWorkItem: Record<string, ExecutionAttempt[]>,
+  leasesByWorkItem: Record<string, MissionControlAttemptLease[]>,
+  now: Date
+): string {
+  const rows = [...items]
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    .slice(0, 5)
+    .map((item) => {
+      const worker = workItemAgentId(item, attemptsByWorkItem[item.id] ?? [], leasesByWorkItem[item.id] ?? []);
+      const age = formatDuration(Math.max(0, now.getTime() - Date.parse(item.updatedAt)));
+      return `<tr><td><strong>${escapeHtml(item.id)}</strong></td><td>${escapeHtml(item.title)}</td><td>${pill(item.risk)}</td><td>${pill(item.status)}</td><td>${escapeHtml(worker || "—")}</td><td>${age}</td></tr>`;
+    })
+    .join("");
+  return `<div class="panel-head"><h2>Work Queue</h2><a href="#queue" data-nav="queue">View all →</a></div><div class="table-wrap compact-table"><table><thead><tr><th>ID</th><th>Task</th><th>Risk</th><th>Status</th><th>Agent</th><th>Age</th></tr></thead><tbody>${rows || `<tr><td colspan="6" class="muted">No work items.</td></tr>`}</tbody></table></div>`;
+}
+
+function overviewAgentActivity(agents: MissionControlAgent[]): string {
+  const rows = agents
+    .slice(0, 5)
+    .map(
+      (agent) =>
+        `<tr><td><strong>${escapeHtml(agent.displayName)}</strong></td><td>${pill(agent.status)}</td><td>${escapeHtml(agent.currentTask ?? "—")}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td></tr>`
+    )
+    .join("");
+  return `<div class="panel-head"><h2>Agent Activity</h2><a href="#agents" data-nav="agents">View all →</a></div><div class="table-wrap compact-table"><table><thead><tr><th>Agent</th><th>Status</th><th>Current Task</th><th>Heartbeat</th></tr></thead><tbody>${rows || `<tr><td colspan="4" class="muted">No agent activity observed.</td></tr>`}</tbody></table></div>`;
+}
+
+function overviewEvents(events: StoredAuditEvent[]): string {
+  const rows = [...events]
+    .reverse()
+    .slice(0, 5)
+    .map((event) => {
+      const attrs = event.attributes ?? {};
+      const resource = attrs["work_item.id"] || attrs["agent.id"] || attrs["connector.id"] || "System";
+      return `<li><span class="event-dot"></span><div><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(String(resource))}</small></div><time>${time(nanoToIso(event.timeUnixNano))}</time></li>`;
+    })
+    .join("");
+  return `<div class="panel-head"><h2>Recent Events</h2><a href="#audit" data-nav="audit">View all →</a></div><ol class="overview-events">${rows || `<li class="muted">No recent events.</li>`}</ol>`;
+}
+
+function visualizerPanel(): string {
+  const runtimeOptions = ["codex", "hermes", "openclaw", "opencode", "claude", "pi"]
+    .map((runtime) => `<option value="${runtime}">${runtime}</option>`)
+    .join("");
+  return `<div class="visualizer-toolbar"><div><strong>Canonical Execution Graph</strong><p>Read-only projection from the Visualizer durable graph store. ACS remains authoritative.</p></div><div class="viz-source-controls"><span class="viz-source-status" id="visualizer-source-status" role="status">Not loaded</span><button type="button" id="visualizer-refresh">Refresh projection</button></div></div>
+  <div class="viz-health-strip" id="visualizer-health-strip"><span class="health-dot visualizer-page-health-dot"></span><strong>Visualizer</strong><span id="visualizer-health-state">Checking status</span><span id="visualizer-health-detail"></span></div>
+  <div class="viz-summary" id="visualizer-summary" hidden>
+    <div><strong id="viz-summary-canonical">0</strong><span>Canonical</span></div>
+    <div><strong id="viz-summary-active">0</strong><span>Active</span></div>
+    <div><strong id="viz-summary-not-projected">0</strong><span>Not projected</span></div>
+    <div><strong id="viz-summary-unavailable">0</strong><span>Unavailable</span></div>
+  </div>
+  <div class="viz-filter" role="search" aria-label="Filter Visualizer projection">
+    <label for="visualizer-filter-text">Search<input id="visualizer-filter-text" type="search" autocomplete="off" spellcheck="false" placeholder="work item, execution, or node" /></label>
+    <label for="visualizer-filter-runtime">Runtime<select id="visualizer-filter-runtime"><option value="">All runtimes</option>${runtimeOptions}</select></label>
+    <label for="visualizer-filter-state">Projection<select id="visualizer-filter-state"><option value="">All states</option><option value="available">Canonical</option><option value="not_projected">Not projected</option><option value="unavailable">Unavailable</option></select></label>
+    <span id="visualizer-filter-live" aria-live="polite">No projection loaded</span>
+  </div>
+  <div class="visualizer-canvas" id="visualizer-canvas" aria-live="polite"><p class="empty">Open this view to load the canonical Visualizer projection.</p></div>`;
+}
 function agentTable(agents: MissionControlAgent[]): string {
   if (!agents.length) return `<div class="table-wrap"><p class="empty">No agents or connectors observed.</p></div>`;
   return `<div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">${agents
     .map(
       (agent) =>
-        `<tr class="agent-row" tabindex="0" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(redactSecrets(agent.lastError)) : "—"}</td></tr>`
+        `<tr class="agent-row" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"><td><button type="button" class="agent-name" aria-pressed="false">${escapeHtml(agent.displayName)}</button><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(redactSecrets(agent.lastError)) : "—"}</td></tr>`
     )
     .join("")}</tbody></table></div>`;
 }
@@ -852,8 +787,7 @@ function workQueue(
   executionAttemptsByWorkItem: Record<string, ExecutionAttempt[]>,
   attemptLeasesByWorkItem: Record<string, MissionControlAttemptLease[]>
 ): string {
-  if (!workItems.length) return `<p class="empty">No work items.</p>`;
-  return `<div class="queue">${workItems
+  return `<p id="queue-empty" class="empty"${workItems.length ? " hidden" : ""}>No work items.</p><p id="queue-no-matches" class="empty" hidden>No matching work items — <button type="button" data-clear-filters>Clear filters</button></p><div class="queue">${workItems
     .map((item) => {
       const attention = needsOperatorAttention(item.status);
       const plan = executionPlansByWorkItem[item.id];
@@ -861,11 +795,11 @@ function workQueue(
       const attempts = executionAttemptsByWorkItem[item.id] ?? [];
       const leases = attemptLeasesByWorkItem[item.id] ?? [];
       const agentId = workItemAgentId(item, attempts, leases);
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}" data-has-execution="${Boolean(plan || attempts.length)}"><span>${pill(item.status)} ${pill(item.risk, "Risk")}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small class="queue-intent">${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
     .join(
       ""
-    )}</div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section>`;
+    )}</div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Select a work item to inspect its timeline and execution authority.</p></div></section>`;
 }
 
 function attentionBadge(): string {
@@ -900,7 +834,8 @@ function approvalOptionsByWorkItem(model: MissionControlViewModel): Record<strin
 }
 
 function approvalsPanel(items: WorkItem[], approvalActionsByWorkItem: Record<string, ApprovalActionOption[]>): string {
-  if (!items.length) return `<p class="empty">No approvals or blocked work.</p>`;
+  if (!items.length)
+    return `<p class="empty">No pending approvals or blocked work.</p><div class="approvals-list" role="list"></div>`;
   return `<div class="approvals-list" role="list">${items
     .map((item) => {
       const actions = item.requestedActions.map((action) => action.kind).join(", ") || "none";
@@ -911,13 +846,13 @@ function approvalsPanel(items: WorkItem[], approvalActionsByWorkItem: Record<str
       const error = workItemResultError(item);
       const reasonId = `reason-${escapeHtml(item.id)}`;
       const resultId = `approval-result-${escapeHtml(item.id)}`;
-      const reason = `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="${reasonId}" data-reason="${escapeHtml(item.id)}" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label>`;
+      const reason = `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">${item.status === "blocked" ? "(required for Reject only)" : "(required)"}</span></span><input id="${reasonId}" data-reason="${escapeHtml(item.id)}" aria-describedby="${resultId}" placeholder="Reason for approval or rejection" autocomplete="off" /></label>`;
       const outcome = `<output id="${resultId}" class="approval-result" aria-live="polite"></output>`;
       const approvalButtons = approvalButtonsFor(item, approvalActionsByWorkItem[item.id] ?? [], reasonId);
       if (item.status === "blocked") {
-        return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+        return `<article class="approval-item" role="listitem" data-approval-item="${escapeHtml(item.id)}" data-actions="${escapeHtml(actions)}" data-updated-at="${escapeHtml(item.updatedAt)}" data-target="${escapeHtml(redactedAttributesJson(item.target))}" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk, "Risk")}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<p id="unblock-help-${escapeHtml(item.id)}" class="muted">Unblock re-evaluates policy; no reason is recorded for Unblock.</p><div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" disabled data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="unblock-help-${escapeHtml(item.id)}">Unblock</button><button type="button" disabled data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article class="approval-item" role="listitem" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk)}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(redactSecrets(approvalSummary))}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+      return `<article class="approval-item" role="listitem" data-approval-item="${escapeHtml(item.id)}" data-actions="${escapeHtml(actions)}" data-updated-at="${escapeHtml(item.updatedAt)}" data-target="${escapeHtml(redactedAttributesJson(item.target))}" data-risk="${escapeHtml(item.risk)}"><span>${pill(item.status)} ${pill(item.risk, "Risk")}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(redactSecrets(approvalSummary))}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" disabled data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
 }
@@ -932,7 +867,7 @@ function approvalButtonsFor(item: WorkItem, options: ApprovalActionOption[], rea
       const kind = option.kind ? ` ${escapeHtml(option.kind)}` : ` ${index + 1}`;
       const described = option.description ? `: ${redactSecrets(option.description)}` : "";
       const ariaLabel = `Approve ${option.kind || `action ${index + 1}`}${described} (hash ${hashPrefix}) for ${item.title}`;
-      return `<button type="button" data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(option.actionHash)}"${option.kind ? ` data-action-kind="${escapeHtml(option.kind)}"` : ""} data-risk="${escapeHtml(item.risk)}" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${reasonId}" title="${escapeHtml(option.actionHash)}">Approve${kind} <code class="hash-prefix">${escapeHtml(hashPrefix)}</code></button>`;
+      return `<button type="button" disabled data-approve="${escapeHtml(item.id)}" data-action-hash="${escapeHtml(option.actionHash)}"${option.kind ? ` data-action-kind="${escapeHtml(option.kind)}"` : ""} data-risk="${escapeHtml(item.risk)}" aria-label="${escapeHtml(ariaLabel)}" aria-describedby="${reasonId}" title="${escapeHtml(option.actionHash)}">Approve${kind} <code class="hash-prefix">${escapeHtml(hashPrefix)}</code></button>`;
     })
     .join("");
 }
@@ -997,7 +932,7 @@ function formatDuration(ageMs: number | undefined): string {
 
 function systemPanel(stats: ReturnType<typeof summarize>, executionBackend?: string): string {
   const backend = executionBackend ? escapeHtml(executionBackend) : "unset";
-  return `<div class="system-panel"><dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl><div id="system-probes" class="system-probes"></div></div>`;
+  return `<div class="system-panel"><dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed / blocked / quarantined</dt><dd>${stats.failed} / ${stats.blocked} / ${stats.quarantined}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl><div id="system-probes" class="system-probes" aria-live="polite">Readiness not checked yet.</div></div>`;
 }
 
 function connectorsPanel(agents: MissionControlAgent[], executionBackend?: string): string {
@@ -1007,7 +942,7 @@ function connectorsPanel(agents: MissionControlAgent[], executionBackend?: strin
     ? `<div class="table-wrap"><table><thead><tr><th>Connector</th><th>Status</th><th>Last event</th></tr></thead><tbody>${connectors
         .map(
           (agent) =>
-            `<tr><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${pill(agent.status)}</td><td>${agent.lastEventAt ? time(agent.lastEventAt) : "—"}</td></tr>`
+            `<tr><td><button type="button" class="agent-name" aria-pressed="false">${escapeHtml(agent.displayName)}</button><small>${escapeHtml(agent.id)}</small></td><td>${pill(agent.status)}</td><td>${agent.lastEventAt ? time(agent.lastEventAt) : "—"}</td></tr>`
         )
         .join("")}</tbody></table></div>`
     : `<p class="empty">No connectors observed.</p>`;
@@ -1021,12 +956,14 @@ function policyPanel(events: StoredAuditEvent[]): string {
 }
 
 function eventTimeline(events: StoredAuditEvent[]): string {
-  if (!events.length) return `<p class="empty">No audit events recorded.</p>`;
-  return `<ol class="timeline">${events
-    .map(
-      (event) =>
-        `<li><time>${time(nanoToIso(event.timeUnixNano))}</time><strong>${escapeHtml(event.name)}</strong><small>${escapeHtml(redactedAttributesJson(event.attributes))}</small></li>`
-    )
+  return `${events.length ? "" : `<p class="empty">No audit events in the current window.</p>`}<ol class="timeline">${events
+    .map((event) => {
+      const attrs = event.attributes ?? {};
+      const resource = attrs["work_item.id"] || attrs["agent.id"] || attrs["connector.id"] || "System";
+      const outcome = attrs.status || attrs.outcome || attrs.decision || event.name.split(".").at(-1) || "Event";
+      const iso = nanoToIso(event.timeUnixNano);
+      return `<li data-event-key="${escapeHtml(event.id || `${event.timeUnixNano}:${event.name}`)}"><strong>${escapeHtml(event.name)}</strong><p>${escapeHtml(String(resource))} · ${escapeHtml(String(outcome))}</p><time datetime="${escapeHtml(iso)}">${time(iso)}</time><details><summary>Event attributes</summary><pre>${escapeHtml(redactedAttributesJson(attrs))}</pre></details></li>`;
+    })
     .join("")}</ol>`;
 }
 
@@ -1034,740 +971,20 @@ function composer(): string {
   return `<form id="task-form">
     <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
     <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
-    <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
-    <label>Requested action kind<input name="actionKind" placeholder="agent.prompt, fs.read, fs.write, shell" /></label>
-    <label>Requested action description<input name="actionDescription" placeholder="Defaults to prompt dispatch when blank" /></label>
-    <button type="submit">Create Work Item</button><output id="task-result"></output>
+    <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" aria-describedby="service-help" placeholder="Service identifier" /></label></div>
+    <p id="service-help">Leave target service blank for no service constraint. This form creates a work item; it does not guarantee dispatch.</p><label>Requested action kind<input name="actionKind" aria-describedby="action-help" placeholder="agent.prompt" /></label><p id="action-help">Default action: agent.prompt. Every request is evaluated by ACS policy.</p>
+    <label>Requested action description<input name="actionDescription" aria-describedby="description-help" /></label><p id="description-help">Default description: Dispatch prompt to selected agent. The description does not override routing or policy.</p>
+    <button type="submit">Create Work Item</button><output id="task-result" role="status"></output>
   </form>`;
 }
 
-function clientScript(): string {
-  return `
-let sseSource = null;
-let sseReconnectAttempt = 0;
-let sseReconnectTimer = null;
-let sseEverOpened = false;
-let sseConnected = false;
-const sseEventNames = [
-  'work_item.created',
-  'work_item.needs_approval',
-  'work_item.approved',
-  'work_item.running',
-  'work_item.blocked',
-  'work_item.failed',
-  'work_item.succeeded',
-  'work_item.cancelled',
-  'work_item.rejected',
-  'agent.created',
-  'agent.updated',
-  'agent.heartbeat',
-  'agent.capabilities_replaced',
-  'acp.initialized',
-  'acp.disconnected',
-  'acp.error',
-  'tunnel_session.heartbeat'
-];
-
-function nextSseReconnectDelayMs(attempt) {
-  const n = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
-  return Math.min(30000, 1000 * Math.pow(2, Math.min(n, 5)));
-}
-
-function applySseConnectionState(root, connected) {
-  sseConnected = connected;
-  const banner = root.querySelector('#sse-stale-banner');
-  if (banner) banner.hidden = connected;
-  const live = root.querySelector('.live');
-  if (live) {
-    live.classList.toggle('disconnected', !connected);
-    live.innerHTML = connected
-      ? '<span aria-hidden="true"></span> Live'
-      : '<span aria-hidden="true"></span> Disconnected';
-  }
-  root.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach(function (button) {
-    const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
-    button.disabled = !connected || approveWithoutHash;
-  });
-}
-
-function connectSse() {
-  if (sseReconnectTimer) {
-    clearTimeout(sseReconnectTimer);
-    sseReconnectTimer = null;
-  }
-  if (sseSource) {
-    sseSource.close();
-    sseSource = null;
-  }
-  sseSource = new EventSource('/events');
-  sseSource.addEventListener('open', function () {
-    const shouldRefresh = sseEverOpened && !sseConnected;
-    sseReconnectAttempt = 0;
-    applySseConnectionState(document, true);
-    sseEverOpened = true;
-    if (shouldRefresh) location.assign(location.href);
-  });
-  sseSource.addEventListener('error', function () {
-    applySseConnectionState(document, false);
-    if (sseSource) {
-      sseSource.close();
-      sseSource = null;
-    }
-    if (sseReconnectTimer) return;
-    const delay = nextSseReconnectDelayMs(sseReconnectAttempt);
-    sseReconnectAttempt += 1;
-    sseReconnectTimer = setTimeout(function () {
-      sseReconnectTimer = null;
-      connectSse();
-    }, delay);
-  });
-  sseEventNames.forEach(function (name) {
-    sseSource.addEventListener(name, appendAuditEvent);
-  });
-}
-
-function appendAuditEvent(event) {
-  let data;
-  try {
-    data = JSON.parse(event.data);
-  } catch {
-    return;
-  }
-  const panel = document.querySelector('#events');
-  if (!panel) return;
-  panel.querySelector('.empty')?.remove();
-  let list = panel.querySelector('.timeline');
-  if (!list) {
-    list = document.createElement('ol');
-    list.className = 'timeline';
-    panel.appendChild(list);
-  }
-  const item = document.createElement('li');
-  const time = document.createElement('time');
-  const name = document.createElement('strong');
-  const attrs = document.createElement('small');
-  const nanos = Number(data.timeUnixNano);
-  time.textContent = Number.isFinite(nanos) ? new Date(Math.floor(nanos / 1000000)).toLocaleString() : '';
-  name.textContent = data.name || event.type;
-  attrs.textContent = redactedAttributesJsonClient(data.attributes || {});
-  item.append(time, name, attrs);
-  list.prepend(item);
-  while (list.children.length > 10) list.lastElementChild?.remove();
-  const eventName = String(data.name || event.type || '');
-  if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
-    refreshAgentRoster();
-    if (selectedAgentId) loadAgentDetail(selectedAgentId);
-  }
-}
-
-let selectedAgentId = null;
-
-function escapeClient(value) {
-  return String(value ?? '').replace(/[&<>"']/g, function (char) {
-    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] || char;
-  });
-}
-
-${redactionClientSource()}
-function formatClientTime(value) {
-  if (!value) return '—';
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? redactClient(value) : date.toLocaleString();
-}
-
-function pillMarkup(value) {
-  const safe = escapeClient(value || 'unknown');
-  return '<span class="pill ' + safe + '">' + safe + '</span>';
-}
-
-function fetchJson(url) {
-  return fetch(url, { headers: { accept: 'application/json' } }).then(async function (res) {
-    const body = await res.json().catch(function () { return {}; });
-    if (!res.ok) {
-      throw new Error(body.error || body.code || ('HTTP ' + res.status));
-    }
-    return body;
-  });
-}
-
-function bindWorkItems() {
-  document.querySelectorAll('[data-work-item]').forEach(function (button) {
-    button.addEventListener('click', async function () {
-      const target = document.querySelector('#work-detail');
-      if (!target) return;
-      document.querySelectorAll('[data-work-item]').forEach(function (candidate) { candidate.classList.remove('selected'); candidate.removeAttribute('aria-current'); });
-      button.classList.add('selected');
-      button.setAttribute('aria-current', 'true');
-      target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
-      try {
-        const body = await fetchJson('/work-items/' + encodeURIComponent(button.dataset.workItem));
-        renderWorkDetail(target, body.workItem, body.events || [], body.executionAttempts || [], body.attemptLeases || []);
-        target.focus({ preventScroll: false });
-      } catch (error) {
-        target.innerHTML = '<div class="detail-error" role="alert">' + escapeClient(error.message) + '</div>';
-        target.focus({ preventScroll: false });
-      }
-    });
-  });
-}
-
-function agentRowsMarkup(agents) {
-  return agents.map(function (agent) {
-    const id = escapeClient(agent.id);
-    const name = escapeClient(agent.displayName || agent.name || agent.id);
-    return '<tr class="agent-row" tabindex="0" data-agent="' + id + '" data-agent-id="' + id + '">' +
-      '<td><strong>' + name + '</strong><small>' + id + '</small></td>' +
-      '<td>' + escapeClient(agent.kind || 'observed') + '</td>' +
-      '<td>' + pillMarkup(agent.status || agent.effectiveStatus || 'observed') + '</td>' +
-      '<td>' + pillMarkup(agent.health || 'unknown') + '</td>' +
-      '<td>' + escapeClient(agent.currentTask || '—') + '</td>' +
-      '<td>' + escapeClient(formatClientTime(agent.lastHeartbeatAt)) + '</td>' +
-      '<td>' + escapeClient(redactClient(agent.lastError || '—')) + '</td>' +
-    '</tr>';
-  }).join('');
-}
-
-function renderAgentTable(agents) {
-  const wrap = document.querySelector('#agents .table-wrap');
-  if (!wrap) return;
-  if (!agents.length) {
-    wrap.innerHTML = '<p class="empty">No agents or connectors observed.</p>';
-    return;
-  }
-  wrap.innerHTML = '<table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">' + agentRowsMarkup(agents) + '</tbody></table>';
-  bindAgentRows();
-}
-
-function bindAgentRows() {
-  document.querySelectorAll('[data-agent]').forEach(function (row) {
-    const activate = function () {
-      selectedAgentId = row.dataset.agent;
-      document.querySelectorAll('[data-agent]').forEach(function (candidate) { candidate.classList.remove('selected'); });
-      row.classList.add('selected');
-      loadAgentDetail(selectedAgentId);
-    };
-    row.addEventListener('click', activate);
-    row.addEventListener('keydown', function (event) {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        activate();
-      }
-    });
-  });
-}
-
-async function refreshAgentRoster() {
-  try {
-    const body = await fetchJson('/agents');
-    const agents = Array.isArray(body.agents) ? body.agents : [];
-    const count = document.querySelector('#agent-count');
-    if (count) count.textContent = agents.length + ' observed';
-    renderAgentTable(agents);
-    if (selectedAgentId && agents.some(function (agent) { return agent.id === selectedAgentId; })) {
-      document.querySelectorAll('[data-agent]').forEach(function (row) {
-        if (row.dataset.agent === selectedAgentId) row.classList.add('selected');
-      });
-    }
-  } catch (error) {
-    const detail = document.querySelector('#agent-detail');
-    if (detail && !selectedAgentId) {
-      detail.innerHTML = '<div class="detail-error">Agent backend unavailable: ' + escapeClient(error.message) + '</div>';
-    }
-  }
-}
-
-async function loadAgentDetail(id) {
-  const target = document.querySelector('#agent-detail');
-  if (!target || !id) return;
-  target.innerHTML = '<div class="detail-loading">Loading agent detail...</div>';
-  try {
-    const projected = await fetchJson('/agents/' + encodeURIComponent(id) + '?limit=8');
-    const registry = await fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8').catch(function () { return null; });
-    const capabilities = await fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities').catch(function () { return null; });
-    renderAgentDetail(target, {
-      projected: projected.agent,
-      registry: registry && registry.agent,
-      adapterStatus: (registry && registry.adapterStatus) || projected.adapterStatus,
-      events: (registry && registry.events && registry.events.length ? registry.events : projected.events) || [],
-      capabilities: (capabilities && capabilities.capabilities) || (registry && registry.agent && registry.agent.capabilities) || []
-    });
-  } catch (error) {
-    target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
-  }
-}
-
-function capabilityNames(input) {
-  return (Array.isArray(input) ? input : [])
-    .map(function (capability) { return typeof capability === 'string' ? capability : capability && capability.name; })
-    .filter(Boolean);
-}
-
-function renderAgentDetail(target, detail) {
-  const agent = detail.projected || detail.registry || {};
-  const registry = detail.registry || {};
-  const capabilities = capabilityNames(detail.capabilities).concat(capabilityNames(agent.capabilities || []));
-  const uniqueCapabilities = Array.from(new Set(capabilities)).sort();
-  const adapter = detail.adapterStatus ? (detail.adapterStatus.state || detail.adapterStatus.status || 'connected') : 'not configured';
-  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.displayName || registry.name || agent.id) + '</h3><small>' + escapeClient(agent.id || registry.id || '') + '</small></div><div>' + pillMarkup(agent.status || registry.effectiveStatus || registry.status || 'observed') + ' ' + pillMarkup(agent.health || 'unknown') + '</div></div>' +
-    '<dl class="detail-grid">' +
-      detailRow('Type', agent.kind || registry.kind) +
-      detailRow('Provider', registry.provider) +
-      detailRow('Model', registry.model) +
-      detailRow('Endpoint', registry.endpoint ? redactClient(registry.endpoint) : undefined) +
-      detailRow('Current task', agent.currentTask) +
-      detailRow('Current work item', agent.currentWorkItemId) +
-      detailRow('Heartbeat', formatClientTime(agent.lastHeartbeatAt || registry.lastHeartbeatAt)) +
-      detailRow('Adapter', adapter) +
-    '</dl>' +
-    '<div class="detail-section"><h4>Capabilities</h4>' + capabilityList(uniqueCapabilities) + '</div>' +
-    '<div class="detail-section"><h4>Recent Events</h4>' + eventList(detail.events || []) + '</div>';
-}
-
-function detailRow(label, value) {
-  return '<div><dt>' + escapeClient(label) + '</dt><dd>' + escapeClient(redactClient(value || '—')) + '</dd></div>';
-}
-
-function capabilityList(capabilities) {
-  if (!capabilities.length) return '<p class="muted">No capabilities recorded.</p>';
-  return '<div class="chip-list">' + capabilities.map(function (name) {
-    return '<span class="chip">' + escapeClient(name) + '</span>';
-  }).join('') + '</div>';
-}
-
-function eventList(events) {
-  if (!events.length) return '<p class="muted">No matching events.</p>';
-  return '<ol class="detail-events">' + events.slice(0, 8).map(function (event) {
-    const attrs = event.attributes || {};
-    const ref = attrs['work_item.id'] || attrs['agent.id'] || attrs['connector.id'] || '';
-    return '<li><time>' + escapeClient(eventClientTime(event)) + '</time><strong>' + escapeClient(event.name || 'event') + '</strong><small>' + escapeClient(redactClient(ref)) + '</small></li>';
-  }).join('') + '</ol>';
-}
-
-function eventClientTime(event) {
-  const nanos = Number(event && event.timeUnixNano);
-  return Number.isFinite(nanos) ? formatClientTime(new Date(Math.floor(nanos / 1000000)).toISOString()) : '—';
-}
-
-function shortHash(value) {
-  const text = String(value || '');
-  return text.length > 16 ? text.slice(0, 12) + '…' : text;
-}
-
-function renderExecutionAuthority(executionAttempts, attemptLeases) {
-  const attempts = Array.isArray(executionAttempts) ? executionAttempts.slice() : [];
-  const leases = Array.isArray(attemptLeases) ? attemptLeases : [];
-  if (!attempts.length) {
-    return '<div class="detail-section"><h4>Execution Authority</h4><p class="muted">No execution attempts recorded.</p></div>';
-  }
-  attempts.sort(function (left, right) { return Number(right.attemptNumber || 0) - Number(left.attemptNumber || 0); });
-  return '<div class="detail-section"><h4>Execution Authority</h4><div class="execution-stack">' + attempts.map(function (attempt) {
-    const matching = leases.filter(function (lease) { return lease.attemptId === attempt.attemptId; }).sort(function (left, right) { return Number(right.fencingEpoch || 0) - Number(left.fencingEpoch || 0); });
-    const lease = matching[0];
-    const worker = (lease && lease.workerId) || attempt.claimedByWorkerId || '—';
-    const leaseMarkup = lease
-      ? '<div class="lease-block"><div class="lease-head"><strong>Lease ' + escapeClient(lease.leaseId) + '</strong>' + pillMarkup(lease.status || 'unknown') + '</div><dl class="detail-grid compact">' +
-          detailRow('Worker', worker) +
-          detailRow('Fencing epoch', String(lease.fencingEpoch ?? attempt.currentFencingEpoch ?? 0)) +
-          detailRow('Admission', lease.admissionId) +
-          detailRow('Approval', lease.approvalId || 'not required / not bound') +
-          detailRow('Policy', lease.policyVersion) +
-          detailRow('Policy decision', shortHash(lease.policyDecisionHash)) +
-          detailRow('Issued', formatClientTime(lease.issuedAt)) +
-          detailRow('Expires', formatClientTime(lease.expiresAt)) +
-          detailRow('Last renewed', formatClientTime(lease.lastRenewedAt)) +
-          detailRow('Max expiry', formatClientTime(lease.maxExpiresAt)) +
-        '</dl></div>'
-      : '<p class="muted">No lease recorded for this attempt.</p>';
-    return '<article class="execution-card"><div class="execution-head"><div><strong>Attempt #' + escapeClient(attempt.attemptNumber) + '</strong><small>' + escapeClient(attempt.attemptId) + '</small></div>' + pillMarkup(attempt.status || 'unknown') + '</div><dl class="detail-grid compact">' +
-      detailRow('Worker', worker) +
-      detailRow('Fencing epoch', String(attempt.currentFencingEpoch ?? 0)) +
-      detailRow('Plan', attempt.planId) +
-      detailRow('Plan hash', shortHash(attempt.planHash)) +
-      detailRow('Input hash', shortHash(attempt.inputHash)) +
-      detailRow('Protocol', attempt.protocolVersion) +
-      detailRow('Started', formatClientTime(attempt.startedAt)) +
-      detailRow('Updated', formatClientTime(attempt.updatedAt)) +
-    '</dl>' + leaseMarkup + '</article>';
-  }).join('') + '</div></div>';
-}
-
-function renderWorkDetail(target, workItem, events, executionAttempts, attemptLeases) {
-  if (!workItem) {
-    target.innerHTML = '<div class="detail-error">Work item not found.</div>';
-    return;
-  }
-  const actions = Array.isArray(workItem.requestedActions) ? workItem.requestedActions : [];
-  target.setAttribute('aria-labelledby', 'work-detail-title');
-  target.innerHTML = '<div class="detail-head"><div><h3 id="work-detail-title">' + escapeClient(workItem.title) + '</h3><small>' + escapeClient(workItem.id) + '</small></div><div>' + pillMarkup(workItem.status) + ' ' + pillMarkup(workItem.risk) + '</div></div>' +
-    '<dl class="detail-grid">' +
-      detailRow('Requester', workItem.requester) +
-      detailRow('Intent', workItem.intent) +
-      detailRow('Target', workItem.target ? redactedAttributesJsonClient(workItem.target) : '—') +
-      detailRow('Created', formatClientTime(workItem.createdAt)) +
-    '</dl>' +
-    '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(redactClient(action.description)) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
-    renderExecutionAuthority(executionAttempts, attemptLeases) +
-    '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
-}
-
-function knownQueueStatuses() {
-  return new Set(['draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'cancelling', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected', 'unknown', 'quarantined']);
-}
-
-function readQueueFilterFromDom() {
-  const statuses = [];
-  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
-    if (input.checked) statuses.push(input.getAttribute('data-queue-status') || input.value || '');
-  });
-  const agentInput = document.querySelector('#queue-filter-agent');
-  const textInput = document.querySelector('#queue-filter-text');
-  return {
-    statuses: statuses.filter(Boolean),
-    agentId: agentInput ? String(agentInput.value || '').trim() : '',
-    text: textInput ? String(textInput.value || '').trim() : ''
-  };
-}
-
-function parseQueueFilterFromLocation() {
-  const params = new URLSearchParams(location.search || '');
-  if (![...params.keys()].some(function (key) { return key === 'status' || key === 'q' || key === 'text' || key === 'agent'; })) {
-    const hash = String(location.hash || '').replace(/^#/, '');
-    const query = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1)
-      : hash.includes('=') ? hash.replace(/^[A-Za-z0-9_-]+&/, '')
-      : '';
-    if (query) {
-      const hashParams = new URLSearchParams(query);
-      hashParams.forEach(function (value, key) { params.append(key, value); });
-    }
-  }
-  const statuses = [];
-  params.getAll('status').forEach(function (entry) {
-    String(entry).split(',').forEach(function (part) {
-      const status = part.trim();
-      if (status) statuses.push(status);
-    });
-  });
-  return {
-    statuses: statuses,
-    agentId: String(params.get('agent') || '').trim(),
-    text: String(params.get('q') || params.get('text') || '').trim()
-  };
-}
-
-function writeQueueFilterToLocation(filter) {
-  const url = new URL(location.href);
-  url.searchParams.delete('status');
-  url.searchParams.delete('q');
-  url.searchParams.delete('text');
-  url.searchParams.delete('agent');
-  filter.statuses.forEach(function (status) {
-    if (status) url.searchParams.append('status', status);
-  });
-  if (filter.agentId) url.searchParams.set('agent', filter.agentId);
-  if (filter.text) url.searchParams.set('q', filter.text);
-  history.replaceState(null, '', url.pathname + url.search + url.hash);
-}
-
-function syncQueueFilterControls(filter) {
-  const selected = new Set(filter.statuses);
-  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
-    const status = input.getAttribute('data-queue-status') || input.value || '';
-    input.checked = selected.has(status);
-  });
-  const agentInput = document.querySelector('#queue-filter-agent');
-  const textInput = document.querySelector('#queue-filter-text');
-  if (agentInput) agentInput.value = filter.agentId || '';
-  if (textInput) textInput.value = filter.text || '';
-}
-
-function applyQueueFilterClient(filter) {
-  const known = knownQueueStatuses();
-  const knownStatuses = filter.statuses.filter(function (status) { return known.has(status); });
-  const text = String(filter.text || '').trim().toLowerCase();
-  const agent = String(filter.agentId || '').trim().toLowerCase();
-  const buttons = Array.from(document.querySelectorAll('[data-work-item]'));
-  let visible = 0;
-  buttons.forEach(function (el) {
-    const id = el.getAttribute('data-work-item') || '';
-    const title = el.getAttribute('data-title') || '';
-    const status = el.getAttribute('data-status') || '';
-    const agentId = (el.getAttribute('data-agent-id') || '').toLowerCase();
-    let show = true;
-    if (knownStatuses.length && knownStatuses.indexOf(status) === -1) show = false;
-    if (show && text) {
-      const hay = (title + ' ' + id).toLowerCase();
-      if (hay.indexOf(text) === -1) show = false;
-    }
-    if (show && agent && agentId.indexOf(agent) === -1) show = false;
-    el.hidden = !show;
-    el.classList.toggle('queue-item-filtered-out', !show);
-    if (show) visible += 1;
-  });
-  const effectivelyEmpty = !knownStatuses.length && !text && !agent;
-  const count = document.querySelector('#queue-filter-count');
-  if (count) count.textContent = effectivelyEmpty ? (buttons.length + ' items') : (visible + ' of ' + buttons.length + ' items');
-  const live = document.querySelector('#queue-filter-live');
-  if (live) {
-    live.textContent = effectivelyEmpty
-      ? ('Showing all ' + buttons.length + ' work items')
-      : ('Showing ' + visible + ' of ' + buttons.length + ' work items');
-  }
-  return visible;
-}
-
-function bindQueueFilter() {
-  if (!document.querySelector('#queue-filter')) return;
-  const initial = parseQueueFilterFromLocation();
-  syncQueueFilterControls(initial);
-  applyQueueFilterClient(initial);
-  const applyFromDom = function () {
-    const filter = readQueueFilterFromDom();
-    writeQueueFilterToLocation(filter);
-    applyQueueFilterClient(filter);
-  };
-  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
-    input.addEventListener('change', applyFromDom);
-  });
-  const agentInput = document.querySelector('#queue-filter-agent');
-  const textInput = document.querySelector('#queue-filter-text');
-  if (agentInput) agentInput.addEventListener('input', applyFromDom);
-  if (textInput) textInput.addEventListener('input', applyFromDom);
-  window.addEventListener('popstate', function () {
-    const filter = parseQueueFilterFromLocation();
-    syncQueueFilterControls(filter);
-    applyQueueFilterClient(filter);
-  });
-}
-
-bindQueueFilter();
-bindWorkItems();
-bindAgentRows();
-refreshAgentRoster();
-connectSse();
-
-function isElevatedApprovalRisk(risk) {
-  const normalized = String(risk || '').trim().toLowerCase();
-  return normalized === 'high' || normalized === 'critical';
-}
-
-function approvalActionHashPrefix(hash, maxLen) {
-  const text = String(hash || '');
-  const limit = typeof maxLen === 'number' ? maxLen : 12;
-  if (!text) return '';
-  return text.length > limit ? text.slice(0, limit) + '\u2026' : text;
-}
-
-function escapeClientHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, function (char) {
-    return ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char] || char;
-  });
-}
-
-function requestApprovalConfirm(request) {
-  return new Promise(function (resolve) {
-    const existing = document.getElementById('approval-confirm-dialog');
-    if (existing) existing.remove();
-    const overlay = document.createElement('div');
-    overlay.id = 'approval-confirm-dialog';
-    overlay.setAttribute('role', 'dialog');
-    overlay.setAttribute('aria-modal', 'true');
-    overlay.setAttribute('aria-labelledby', 'approval-confirm-title');
-    overlay.className = 'approval-confirm-overlay';
-    const actionLabel = request.action === 'approve' ? 'Approve' : 'Deny';
-    const hashPrefix = approvalActionHashPrefix(request.actionHash || '');
-    const hashLine = hashPrefix
-      ? '<p class="approval-confirm-hash">Action hash: <code>' + escapeClientHtml(hashPrefix) + '</code></p>'
-      : '';
-    const kindLine = request.actionKind
-      ? '<p class="approval-confirm-kind">Action: <code>' + escapeClientHtml(request.actionKind) + '</code></p>'
-      : '';
-    overlay.innerHTML = '<div class="approval-confirm-card">' +
-      '<h3 id="approval-confirm-title">' + escapeClientHtml(actionLabel) + ' high-risk work item?</h3>' +
-      '<p class="approval-confirm-id">Work item: <code>' + escapeClientHtml(request.workItemId) + '</code></p>' +
-      '<p class="approval-confirm-risk">Risk: <strong>' + escapeClientHtml(request.risk) + '</strong></p>' +
-      kindLine +
-      hashLine +
-      '<div class="approval-confirm-actions">' +
-        '<button type="button" id="approval-confirm-cancel" data-approval-confirm-cancel>Cancel</button>' +
-        '<button type="button" id="approval-confirm-ok" data-approval-confirm-ok>' + escapeClientHtml(actionLabel) + '</button>' +
-      '</div></div>';
-    function finish(confirmed) {
-      document.removeEventListener('keydown', onKeyDown);
-      overlay.remove();
-      resolve(confirmed);
-    }
-    function onKeyDown(event) {
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        finish(false);
-      }
-    }
-    document.body.appendChild(overlay);
-    document.addEventListener('keydown', onKeyDown);
-    const cancelBtn = overlay.querySelector('#approval-confirm-cancel');
-    const okBtn = overlay.querySelector('#approval-confirm-ok');
-    cancelBtn?.addEventListener('click', function () { finish(false); });
-    okBtn?.addEventListener('click', function () { finish(true); });
-    cancelBtn?.focus();
-  });
-}
-
-document.querySelectorAll('[data-execution-mode]').forEach((input) => {
-  input.addEventListener('change', async () => {
-    if (!input.checked) return;
-    const output = document.querySelector('#execution-mode-result');
-    const headers = { 'content-type': 'application/json' };
-    const res = await fetch('/execution-mode', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ mode: input.value, reason: 'operator set ' + input.value + ' from mission control' })
-    });
-    const body = await res.json().catch(() => ({}));
-    if (output) output.textContent = res.ok ? 'mode ' + body.executionMode : 'Rejected: ' + (body.error || body.code || res.status);
-    if (res.ok) setTimeout(() => location.assign(location.href), 300);
-  });
-});
-
-document.querySelectorAll('[data-approve],[data-reject],[data-unblock]').forEach((button) => {
-  button.addEventListener('click', async () => {
-    const id = button.dataset.approve || button.dataset.reject || button.dataset.unblock;
-    const action = button.dataset.approve ? 'approve' : button.dataset.reject ? 'reject' : 'unblock';
-    const risk = button.dataset.risk || '';
-    if (!sseConnected) {
-      const output = document.querySelector('#approval-result-' + id);
-      if (output) output.textContent = 'Disconnected: actions disabled until reconnect';
-      return;
-    }
-    const reasonInput = document.querySelector('[data-reason="' + id + '"]');
-    const reason = reasonInput ? reasonInput.value.trim() : '';
-    const output = document.querySelector('#approval-result-' + id);
-    if (action !== 'unblock' && !reason) {
-      output.textContent = 'Reason required';
-      if (reasonInput) reasonInput.focus();
-      return;
-    }
-    if ((action === 'approve' || action === 'reject') && isElevatedApprovalRisk(risk)) {
-      if (document.getElementById('approval-confirm-dialog')) {
-        return;
-      }
-      const confirmed = await requestApprovalConfirm({
-        workItemId: id,
-        action: action,
-        actionHash: button.dataset.actionHash,
-        actionKind: button.dataset.actionKind,
-        risk: risk
-      });
-      if (!confirmed) return;
-    }
-    const headers = { 'content-type': 'application/json' };
-    const payload = action === 'unblock' ? {} : { reason };
-    if (action === 'approve') {
-      if (!button.dataset.actionHash) {
-        output.textContent = 'Approval action hash unavailable';
-        return;
-      }
-      payload.actionHash = button.dataset.actionHash;
-    }
-    const res = await fetch('/work-items/' + id + '/' + action, { method: 'POST', headers, body: JSON.stringify(payload) });
-    const body = await res.json();
-    output.textContent = res.ok ? action + ' accepted' : 'Rejected: ' + (body.error || body.code || res.status);
-    if (res.ok) setTimeout(() => location.assign(location.href), 500);
-  });
-});
-
-
-document.querySelector('#task-form')?.addEventListener('submit', async (event) => {
-  event.preventDefault();
-  const form = new FormData(event.currentTarget);
-  const actionKind = String(form.get('actionKind') || '').trim();
-  const actionDescription = String(form.get('actionDescription') || '').trim();
-  const service = String(form.get('service') || '').trim();
-  const payload = {
-    title: String(form.get('title') || ''),
-    intent: String(form.get('intent') || ''),
-    risk: String(form.get('risk') || 'medium'),
-    target: service ? { services: [service] } : {},
-    requestedActions: [{
-      kind: actionKind || 'agent.prompt',
-      description: actionDescription || 'Dispatch prompt to selected agent',
-      params: {}
-    }]
-  };
-  const headers = { 'content-type': 'application/json' };
-  const res = await fetch('/work-items', { method: 'POST', headers, body: JSON.stringify(payload) });
-  const body = await res.json();
-  document.querySelector('#task-result').textContent = res.ok ? 'Created ' + body.id : 'Rejected: ' + (body.error || res.status);
-  if (res.ok) setTimeout(() => location.assign(location.href), 500);
-});
-
-const viewAliases = {
-  overview: 'overview',
-  queue: 'queue',
-  execution: 'execution',
-  approvals: 'approvals',
-  agents: 'agents',
-  connectors: 'connectors',
-  'operator-metrics': 'metrics',
-  metrics: 'metrics',
-  events: 'audit',
-  audit: 'audit',
-  policy: 'policy',
-  system: 'system',
-  dispatch: 'overview'
-};
-let systemProbeLoaded = false;
-async function probePath(path) {
-  const started = performance.now();
-  try {
-    const res = await fetch(path, { headers: { accept: 'application/json' } });
-    return { path, status: res.status, ms: Math.round(performance.now() - started) };
-  } catch {
-    return { path, status: 0, ms: Math.round(performance.now() - started) };
-  }
-}
-async function loadSystemProbe() {
-  if (systemProbeLoaded) return;
-  const probeRoot = document.querySelector('#system-probes');
-  if (!probeRoot) return;
-  systemProbeLoaded = true;
-  const row = await probePath('/readyz');
-  probeRoot.replaceChildren();
-  const list = document.createElement('dl');
-  const item = document.createElement('div');
-  const term = document.createElement('dt');
-  const value = document.createElement('dd');
-  term.textContent = row.path;
-  value.textContent = (row.status || 'down') + ' · ' + row.ms + 'ms';
-  item.append(term, value);
-  list.append(item);
-  probeRoot.append(list);
-}
-function showView(name) {
-  const view = viewAliases[name] || 'overview';
-  document.body.dataset.activeView = view;
-  document.querySelectorAll('nav a[data-nav]').forEach((link) => {
-    link.classList.toggle('active', link.dataset.nav === view);
-  });
-  if (view === 'system') void loadSystemProbe();
-}
-document.querySelector('aside nav')?.addEventListener('click', (event) => {
-  const link = event.target.closest('a[data-nav]');
-  if (!link) return;
-  event.preventDefault();
-  showView(link.dataset.nav);
-  const href = link.getAttribute('href') || '#overview';
-  history.replaceState(null, '', href);
-});
-showView((location.hash || '#overview').replace('#', ''));`;
-}
-
-function pill(value: string): string {
-  return `<span class="pill ${escapeHtml(value)}">${escapeHtml(value)}</span>`;
+function pill(value: string, label?: string): string {
+  return `<span class="pill ${escapeHtml(value)}">${label ? `${label}: ` : ""}${escapeHtml(value)}</span>`;
 }
 
 function time(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? escapeHtml(value) : date.toLocaleString();
+  return Number.isNaN(date.getTime()) ? escapeHtml(value) : date.toLocaleString(undefined, { timeZoneName: "short" });
 }
 
 function nanoToIso(value: string): string {
@@ -1794,231 +1011,8 @@ function registryStatus(status: RegistryAgentDetail["status"]): Pick<MissionCont
   return { status: "observed", health: "unknown" };
 }
 
-function styles(): string {
-  return `
-:root {
-  color-scheme: dark;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
-  background: #0e1116;
-  color: #e8edf4;
-  --bg: #0e1116;
-  --surface: #171b22;
-  --surface-2: #1e242e;
-  --ink: #e8edf4;
-  --muted: #8b97a8;
-  --line: #2a3342;
-  --side: #10141a;
-  --side-muted: #8b97a8;
-  --accent: #3b82f6;
-  --green: #3ddc97;
-  --amber: #f5b942;
-  --red: #ff6b6b;
-}
-* { box-sizing: border-box; }
-body { margin: 0; min-height: 100vh; background: var(--bg); display: grid; grid-template-columns: 216px minmax(0, 1fr); }
-aside { border-right: 1px solid #252a30; padding: 22px 16px; background: var(--side); position: sticky; top: 0; height: 100vh; }
-.brand { color: #f8fafc; font-size: 20px; font-weight: 800; }
-.brand span { display: block; color: var(--side-muted); font-size: 11px; margin-top: 4px; font-weight: 700; }
-nav { display: grid; gap: 4px; margin-top: 30px; }
-nav a { color: #c1c8d0; text-decoration: none; padding: 10px 12px; border-radius: 8px; }
-nav a.active, nav a:hover { background: #27313b; color: #ffffff; }
-.rail-note { color: var(--side-muted); font-size: 12px; line-height: 1.45; position: absolute; bottom: 24px; left: 16px; right: 16px; }
-main { padding: 22px 24px 40px; min-width: 0; }
-header { display: flex; justify-content: space-between; align-items: start; gap: 16px; margin-bottom: 18px; }
-h1 { margin: 0; font-size: 26px; color: var(--ink); }
-p { color: var(--muted); margin: 6px 0 0; }
-.live { border: 1px solid var(--line); border-radius: 999px; padding: 8px 12px; color: var(--muted); background: var(--surface); white-space: nowrap; }
-.live span { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--green); margin-right: 8px; }
-.live.disconnected span { background: var(--red); }
-.stale-banner { margin-bottom: 14px; padding: 10px 14px; border: 1px solid #f1d18a; background: #fff8e6; color: var(--amber); border-radius: 8px; font-weight: 600; }
-.stale-banner[hidden] { display: none; }
-.header-controls { display: flex; gap: 12px; align-items: start; }
-.execution-mode { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--surface); }
-.execution-mode legend { font-size: 12px; font-weight: 700; padding: 0 4px; }
-.execution-mode label { display: block; margin-top: 4px; }
-.admin-mode-banner { margin: 0 0 14px; padding: 12px 14px; border: 2px solid #ffb020; background: #3a2508; color: #ffd27a; border-radius: 8px; font-weight: 800; letter-spacing: .02em; }
-.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
-.card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px rgba(23, 32, 42, .06); }
-.card { padding: 15px; min-height: 108px; }
-.card span, .panel-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; }
-.card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
-.card p { font-size: 12px; line-height: 1.35; }
-.grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
-.lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-.panel { min-width: 0; overflow: hidden; }
-.panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: #fbfcfd; }
-.panel-head p { font-size: 12px; margin-top: 3px; }
-h2 { margin: 0; font-size: 16px; color: var(--ink); }
-table { width: 100%; border-collapse: collapse; }
-th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid #edf1f5; vertical-align: top; font-size: 13px; }
-th { color: var(--muted); font-size: 11px; text-transform: uppercase; background: #fbfcfd; position: sticky; top: 0; z-index: 1; }
-td small { display: block; color: var(--muted); margin-top: 2px; }
-.table-wrap { overflow: auto; max-height: 430px; }
-.agent-row { cursor: pointer; }
-.agent-row:hover, .agent-row.selected { background: #eef4ff; }
-.empty { padding: 18px; color: var(--muted); }
-.pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: #eef2f6; color: #45515f; border: 1px solid #d7dfe8; white-space: nowrap; }
-.online, .healthy, .succeeded, .approved, .low { color: var(--green); border-color: #a8d8bd; background: #eef9f2; }
-.stale, .warning, .needs_approval, .medium, .blocked, .quarantined { color: var(--amber); border-color: #f1d18a; background: #fff8e6; }
-.offline, .unhealthy, .failed, .critical, .high, .cancelled, .rejected { color: var(--red); border-color: #f0b8b2; background: #fff1ef; }
-.queue-item.attention { border-left: 3px solid var(--red); background: #fff8f7; }
-.attention-badge { color: var(--red); font-weight: 700; margin-left: 6px; font-size: 11px; }
-.plan-status, .execution-status { display: block; margin-top: 4px; }
-.plan-pending { color: var(--amber); }
-.plan-admitted { color: var(--green); }
-.execution-status { color: #43536a !important; }
-.queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: #fbfcfd; display: grid; gap: 10px; }
-.queue-filter-row { display: grid; gap: 8px; }
-.queue-filter-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.queue-filter-statuses { margin: 0; padding: 0; border: 0; }
-.queue-filter-statuses legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
-.queue-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
-.queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid #ccd6e2; background: #ffffff; border-radius: 999px; padding: 4px 10px; font-size: 12px; color: #344256; cursor: pointer; }
-.queue-filter-chip:has(input:checked) { border-color: #9db7d7; background: #eef4ff; color: var(--accent); }
-.queue-filter-chip input { width: auto; margin: 0; accent-color: var(--accent); }
-.queue-filter-field { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
-.queue-filter-live { margin: 0; color: var(--muted); font-size: 12px; }
-.queue-item-filtered-out, .queue-item[hidden] { display: none !important; }
-.queue { display: grid; }
-.queue-item { text-align: left; background: transparent; color: var(--ink); border: 0; border-bottom: 1px solid #edf1f5; padding: 12px 14px; cursor: pointer; }
-.queue-item:hover, .queue-item.selected { background: #f4f8ff; }
-.queue-item.selected { box-shadow: inset 3px 0 0 var(--accent); }
-.approval-item > button { text-align: left; background: transparent; color: inherit; border: 0; cursor: pointer; }
-.approval-actions { display: flex; gap: 8px; }
-.approval-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
-.approval-actions button:hover { background: #f4f8ff; border-color: #9db7d7; }
-.approval-actions button:last-child { color: var(--red); border-color: #f0b8b2; }
-.system-panel { padding: 18px; display: grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: start; }
-.system-panel strong { font-size: 44px; color: var(--green); }
-.system-panel span { color: var(--muted); margin-top: 52px; margin-left: -130px; }
-.system-panel dl { margin: 0; display: grid; gap: 8px; }
-.system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
-.system-panel dt { color: var(--muted); }
-.system-panel dd { margin: 0; color: var(--ink); }
-.operator-metrics { padding: 18px; display: grid; gap: 14px; }
-.operator-metrics dl { margin: 0; display: grid; gap: 8px; }
-.operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid #edf1f5; padding-bottom: 7px; }
-.operator-metrics dt { color: var(--muted); }
-.operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
-.metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
-.metrics-scrape code { font-size: 12px; }
-.queue-item strong, .queue-item small { display: block; margin-top: 6px; }
-.queue-item small { color: var(--muted); }
-.error-line { color: var(--red) !important; }
-.approvals-grid { grid-template-columns: 1fr; }
-.approval-controls { padding: 14px; border-bottom: 1px solid var(--line); }
-.approvals-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; padding: 14px; }
-.approval-item { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 12px; display: grid; gap: 9px; }
-.approval-item strong, .approval-item small { display: block; }
-.agent-layout { display: grid; }
-.detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: #fbfcfd; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
-.detail-empty, .detail-loading, .detail-error { color: var(--muted); }
-.detail-error { color: var(--red); }
-.detail-head { display: flex; justify-content: space-between; gap: 12px; align-items: start; border-bottom: 1px solid #e6ecf2; padding-bottom: 12px; margin-bottom: 12px; }
-.detail-head h3 { margin: 0; font-size: 16px; }
-.detail-head small { color: var(--muted); }
-.detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px 14px; margin: 0; }
-.detail-grid.compact { margin-top: 10px; }
-.detail-grid div { min-width: 0; }
-.detail-grid dt { color: var(--muted); font-size: 11px; text-transform: uppercase; }
-.detail-grid dd { margin: 2px 0 0; overflow-wrap: anywhere; }
-.detail-section { margin-top: 14px; }
-.detail-section h4 { margin: 0 0 8px; font-size: 13px; color: var(--ink); }
-.execution-stack { display: grid; gap: 10px; }
-.execution-card { border: 1px solid #dbe4ee; background: #ffffff; border-radius: 8px; padding: 10px; }
-.execution-head, .lease-head { display: flex; justify-content: space-between; align-items: start; gap: 10px; }
-.execution-head small { display: block; color: var(--muted); margin-top: 2px; }
-.lease-block { border-top: 1px solid #e6ecf2; margin-top: 10px; padding-top: 10px; }
-.lease-head strong { font-size: 12px; }
-.chip-list { display: flex; flex-wrap: wrap; gap: 6px; }
-.chip { border: 1px solid #ccd6e2; background: #ffffff; border-radius: 999px; padding: 4px 8px; font-size: 12px; color: #344256; }
-.detail-events { list-style: none; display: grid; gap: 8px; margin: 0; padding: 0; }
-.detail-events li { border-left: 2px solid var(--accent); padding-left: 10px; }
-.detail-events time, .detail-events small { display: block; color: var(--muted); font-size: 11px; }
-.action-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.action-list li { border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px; background: #ffffff; }
-.action-list small { display: block; color: var(--muted); margin-top: 2px; }
-.muted { color: var(--muted); font-size: 13px; }
-form { display: grid; gap: 11px; padding: 14px; }
-label { display: grid; gap: 5px; color: var(--muted); font-size: 12px; }
-input, textarea, select { width: 100%; background: #ffffff; color: var(--ink); border: 1px solid #cbd5e1; border-radius: 8px; padding: 10px; }
-.form-row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; }
-button[type=submit] { background: #2563eb; color: white; border: 0; border-radius: 9px; padding: 11px 14px; font-weight: 700; cursor: pointer; }
-output { color: var(--accent); min-height: 20px; }
-.timeline { list-style: none; margin: 0; padding: 10px 14px 14px; display: grid; gap: 10px; }
-.timeline li { border-left: 2px solid #2563eb; padding-left: 10px; }
-.timeline time, .timeline small { display: block; color: var(--muted); font-size: 11px; word-break: break-word; }
-.skip-link { position: absolute; left: -9999px; top: 0; z-index: 1000; background: #2563eb; color: #fff; padding: 10px 14px; border-radius: 8px; font-weight: 700; }
-.skip-link:focus { left: 12px; top: 12px; }
-:focus { outline: none; }
-:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.reason-field { display: grid; gap: 5px; }
-.reason-label { color: var(--muted); font-size: 12px; }
-.reason-label .req { color: var(--red); font-weight: 600; }
-.approval-result { display: block; min-height: 1.25em; }
-.approval-actions button:disabled { opacity: .55; cursor: not-allowed; }
-.approval-actions button .hash-prefix { font-size: 11px; opacity: .8; margin-left: 4px; }
-.approval-confirm-overlay { position: fixed; inset: 0; z-index: 2000; background: rgba(17, 20, 23, .45); display: grid; place-items: center; padding: 16px; }
-.approval-confirm-card { width: min(420px, 100%); background: #ffffff; border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 18px 40px rgba(23, 32, 42, .22); padding: 18px; display: grid; gap: 10px; color: var(--ink); }
-.approval-confirm-card h3 { margin: 0; font-size: 16px; }
-.approval-confirm-card p { margin: 0; color: var(--muted); font-size: 13px; }
-.approval-confirm-card code { color: var(--ink); font-size: 12px; }
-.approval-confirm-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 6px; }
-.approval-confirm-actions button { border: 1px solid #cbd5e1; background: #ffffff; color: var(--ink); border-radius: 8px; padding: 8px 12px; cursor: pointer; min-height: 40px; }
-.approval-confirm-actions button:hover { background: #f4f8ff; border-color: #9db7d7; }
-#approval-confirm-ok { background: #fff1ef; color: var(--red); border-color: #f0b8b2; font-weight: 700; }
-#approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
-@media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
-@media (max-width: 767px) {
-  body { grid-template-columns: 1fr; }
-  aside { position: static; height: auto; padding: 12px 14px; }
-  nav { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 14px; }
-  nav a { padding: 8px 10px; font-size: 13px; }
-  .rail-note { display: none; }
-  main { padding: 14px 12px 28px; }
-  header { display: grid; gap: 10px; }
-  .cards { grid-template-columns: 1fr; }
-  .grid, .lower, .detail-grid, .form-row, .system-panel { grid-template-columns: 1fr; }
-  .system-panel span { margin: 0; }
-  .approvals-list { grid-template-columns: 1fr; padding: 12px; }
-  .approval-actions { flex-direction: column; }
-  .approval-actions button { width: 100%; min-height: 44px; font-size: 15px; }
-  .table-wrap { max-height: none; }
-  .agent-table th:nth-child(n+5), .agent-table td:nth-child(n+5) { display: none; }
-  .queue-filter-fields { grid-template-columns: 1fr; }
-  .queue-filter-chip { min-height: 44px; }
-  .queue-item { padding: 14px 12px; min-height: 44px; }
-  .detail-panel { margin: 8px; max-height: none; }
-  .live { justify-self: start; }
-}
-body[data-active-view] [data-view-panel] { display: none; }
-body[data-active-view="overview"] [data-view-panel~="overview"],
-body[data-active-view="queue"] [data-view-panel~="queue"],
-body[data-active-view="execution"] [data-view-panel~="execution"],
-body[data-active-view="approvals"] [data-view-panel~="approvals"],
-body[data-active-view="agents"] [data-view-panel~="agents"],
-body[data-active-view="connectors"] [data-view-panel~="connectors"],
-body[data-active-view="metrics"] [data-view-panel~="metrics"],
-body[data-active-view="audit"] [data-view-panel~="audit"],
-body[data-active-view="policy"] [data-view-panel~="policy"],
-body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
-.panel-head, th, .queue-filter, .detail-panel, .execution-card, .approval-item, .approval-actions button, .queue-filter-chip, input, textarea, select, .approval-confirm-card, .chip, .action-list li { background: var(--surface); color: var(--ink); border-color: var(--line); }
-.stale-banner { background: #2a2416; color: var(--amber); border-color: #6b5420; }
-.agent-row:hover, .agent-row.selected, .queue-item:hover, .queue-item.selected { background: #243044; }
-.queue-item.attention { background: #2a1c1c; }
-nav a.active, nav a:hover { background: #243044; color: #ffffff; }
-.system-probes { padding: 0 18px 16px; }
-.system-probes dl { margin: 0; display: grid; gap: 8px; }
-.system-probes div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
-.system-probes dt { color: var(--muted); }
-.system-probes dd { margin: 0; }
-`;
-}
-
 function escapeHtml(value: string): string {
-  return value.replace(/[&<>"']/g, (char) => {
+  return redactSecrets(value).replace(/[&<>"']/g, (char) => {
     const escapes: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
     return escapes[char] ?? char;
   });

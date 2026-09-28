@@ -108,6 +108,7 @@ function classifyTool(
       };
     }
     case "get_config":
+    case "get_runtime_identity":
     case "list_sessions":
     case "list_processes":
     case "get_usage_stats":

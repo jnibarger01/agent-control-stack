@@ -19,6 +19,8 @@ export const policyContextSchema = z.object({
   actor: z.string().min(1),
   operation: policyOperationSchema,
   requester: z.string().min(1),
+  /** The requesting principal's subject, when the work item carries one. */
+  requesterSubject: z.string().min(1).optional(),
   risk: z.enum(["low", "medium", "high", "critical"]),
   action: z.object({
     kind: z.string().min(1),
@@ -81,6 +83,7 @@ export function policyContextFromAction(
     actor,
     operation,
     requester: workItem.requester,
+    ...(workItem.requesterSubject ? { requesterSubject: workItem.requesterSubject } : {}),
     risk: workItem.risk,
     action: canonicalAction(action),
     ...normalizeAction(workItem, action)
@@ -130,10 +133,7 @@ function booleanValue(value: unknown): boolean | undefined {
 
 const NAMED_RESOURCE_PATH_KEYS = ["sourcePath", "destinationPath", "targetPath", "outputPath", "templatePath"] as const;
 
-function unionResourcePaths(
-  params: Record<string, unknown>,
-  fallback: string[] | undefined
-): string[] | undefined {
+function unionResourcePaths(params: Record<string, unknown>, fallback: string[] | undefined): string[] | undefined {
   const explicit = stringArray(params.paths) ?? [];
   const named = NAMED_RESOURCE_PATH_KEYS.map((key) => stringValue(params[key])).filter(
     (value): value is string => typeof value === "string"

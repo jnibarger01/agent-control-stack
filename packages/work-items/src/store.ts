@@ -6114,7 +6114,9 @@ function isTerminalStatus(status: WorkItemStatus): boolean {
   return status === "succeeded" || status === "failed" || status === "cancelled" || status === "rejected";
 }
 
-function resultPayloadHash(input: PersistedResultInput): string {
+export function resultPayloadHash(
+  input: Omit<StoredExecutionResult, "resultId" | "payloadHash" | "createdAt">
+): string {
   return stableHash({
     domain: "acs.execution-result",
     workItemId: input.workItemId,

@@ -1,5 +1,6 @@
 import { accessSync, constants, existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { visualizerBaseUrl } from "./visualizer-projection.js";
 
 export interface ProductionConfigIssue {
   key: string;
@@ -40,6 +41,7 @@ export function validateProductionConfig(env: NodeJS.ProcessEnv = process.env): 
   validateBindHostAuth(env, issues);
   validateDbPathWritable(env, issues);
   validateForbiddenLocalDevOpts(env, issues);
+  validateVisualizerProjection(env, issues);
 
   if (issues.length > 0) {
     throw new ProductionConfigError(issues);
@@ -190,6 +192,19 @@ function validateForbiddenLocalDevOpts(env: NodeJS.ProcessEnv, issues: Productio
     issues.push({
       key: "ACS_ENABLE_TEST_AGENT_RUN_FOR_LOCAL_DEVELOPMENT",
       message: "must not be enabled when NODE_ENV=production or ACS_STRICT_CONFIG=1"
+    });
+  }
+}
+
+function validateVisualizerProjection(env: NodeJS.ProcessEnv, issues: ProductionConfigIssue[]): void {
+  const raw = env.ACS_VISUALIZER_URL?.trim();
+  if (!raw) return;
+  try {
+    visualizerBaseUrl(raw);
+  } catch {
+    issues.push({
+      key: "ACS_VISUALIZER_URL",
+      message: "must be a credential-free http://127.0.0.1:<port> origin"
     });
   }
 }

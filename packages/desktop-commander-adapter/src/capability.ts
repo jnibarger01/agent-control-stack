@@ -77,6 +77,7 @@ export function desktopCommanderRequiredScopes(toolName: string): string[] {
   // process authority even though their arguments have no filesystem path.
   const scopeByTool: Readonly<Record<string, string>> = {
     get_config: "fs.read",
+    get_runtime_identity: "fs.read",
     get_file_info: "fs.read",
     list_directory: "fs.read",
     read_file: "fs.read",

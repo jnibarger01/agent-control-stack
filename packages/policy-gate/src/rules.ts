@@ -55,7 +55,7 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     return risk("forbidden", "paths outside project root are denied", ["deny:path-escape"]);
   }
   if (isSelfApproval(context)) {
-    return risk("forbidden", "high-risk self-approval is denied", ["deny:self-approval"]);
+    return risk("forbidden", "self-approval is denied", ["deny:self-approval"]);
   }
   if (requiresRiskApproval(context)) {
     return risk("requires_approval", `${context.risk} risk work requires approval`, ["approval:risk"]);
@@ -260,8 +260,28 @@ function isLongRunning(context: PolicyContext): boolean {
   return context.action.params.longRunning === true || timeoutMs > 120_000;
 }
 
+/**
+ * An approval that grants execution authority must come from a principal other
+ * than the requester: a single actor cannot both request and authorize a write,
+ * destructive action, or high/critical-risk action. Separation is enforced on
+ * the requesting subject (requesterSubject) when the work item carries one, so a
+ * credential cannot authorize its own mutating work by using the same identity
+ * under a different coarse requester type; it falls back to the requester type
+ * (user|agent|system) otherwise.
+ */
 function isSelfApproval(context: PolicyContext): boolean {
-  return context.operation === "approve" && requiresRiskApproval(context) && context.actor === context.requester;
+  if (context.operation !== "approve") {
+    return false;
+  }
+  const grantsExecutionAuthority =
+    context.write === true || context.destructive === true || requiresRiskApproval(context);
+  if (!grantsExecutionAuthority) {
+    return false;
+  }
+  if (context.requesterSubject !== undefined) {
+    return context.actor === context.requesterSubject;
+  }
+  return context.actor === context.requester;
 }
 
 function requiresRiskApproval(context: PolicyContext): boolean {
