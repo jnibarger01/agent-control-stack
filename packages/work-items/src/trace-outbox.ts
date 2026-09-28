@@ -149,10 +149,12 @@ export function rawTraceProducerConfig(
  * Trace identities must match the trace-event id grammar. Actor ids come from real
  * identity providers (`jace@example.com`, `auth0|123`), so an id outside the grammar is
  * replaced with a deterministic, non-reversible `h:` + 32-hex sha256 prefix instead of
- * failing the approval. The canonical audit log keeps the raw approver.
+ * failing the approval. The `h:` prefix is reserved: a raw id that starts with `h:` is
+ * always hashed too, so a raw id can never collide with a hashed one. The canonical
+ * audit log keeps the raw approver.
  */
 export function normalizeTraceActorId(id: string): string {
-  if (ID_RE.test(id)) return id;
+  if (ID_RE.test(id) && !id.startsWith("h:")) return id;
   return `h:${sha256(String(id)).slice(0, 32)}`;
 }
 

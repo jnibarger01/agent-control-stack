@@ -190,6 +190,20 @@ describe("trace outbox", () => {
     expect(normalizeTraceActorId("")).toMatch(/^h:[a-f0-9]{32}$/);
   });
 
+  it("reserves the h: prefix: a raw id starting with h: is hashed, so it cannot collide with a hashed id", () => {
+    const hashed = normalizeTraceActorId("jace@example.com");
+    expect(hashed).toMatch(/^h:[a-f0-9]{32}$/);
+    // Presenting the hashed form as a raw id does not pass through as that identity.
+    expect(normalizeTraceActorId(hashed)).not.toBe(hashed);
+    expect(normalizeTraceActorId(hashed)).toMatch(/^h:[a-f0-9]{32}$/);
+    expect(normalizeTraceActorId("h:operator")).toBe(
+      `h:${createHash("sha256").update("h:operator").digest("hex").slice(0, 32)}`
+    );
+    // Other grammar-valid ids, including ones merely containing "h:", pass through.
+    expect(normalizeTraceActorId("ch:operator")).toBe("ch:operator");
+    expect(normalizeTraceActorId("H:operator")).toBe("H:operator");
+  });
+
   it.each([
     [{ releaseSha: "1c8dc83" }, /ACS_RELEASE_SHA/],
     [{ releaseSha: "1C8DC8334972680EE4520F416922AE58D78CBAB8" }, /ACS_RELEASE_SHA/],
