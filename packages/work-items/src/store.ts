@@ -36,6 +36,7 @@ import {
   type WorkItemRisk,
   type WorkItemStatus
 } from "./work-item.js";
+import { enqueueApprovalTraceEvent } from "./trace-outbox.js";
 import {
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
@@ -891,6 +892,8 @@ export interface SqliteWorkItemStoreOptions {
   leaseMs?: number;
   heartbeatTtlMs?: number;
   onEvent?: (event: StoredAuditEvent) => void;
+  traceInstance?: string;
+  releaseSha?: string;
 }
 
 export interface WorkItemStore {
@@ -1117,6 +1120,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
   private auditChainValid = true;
+  private readonly traceInstance: string;
+  private readonly releaseSha: string;
 
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -1124,6 +1129,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     this.onEvent = options.onEvent ?? (() => undefined);
+    this.traceInstance = options.traceInstance ?? process.env.ACS_TRACE_INSTANCE ?? `acs-${process.pid}`;
+    this.releaseSha = options.releaseSha ?? process.env.ACS_RELEASE_SHA ?? "unreleased";
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
@@ -4303,6 +4310,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
+      enqueueApprovalTraceEvent(this.db, {
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: input.workItemId,
+        actionHash: input.actionHash,
+        requestHash,
+        actorId: input.approvedBy,
+        actorType: "human",
+        kind: "acs.approval.granted",
+        reason,
+        status: "granted"
+      });
       return {
         value: {
           workItemId: input.workItemId,
@@ -4379,6 +4398,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
+      enqueueApprovalTraceEvent(this.db, {
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId,
+        actionHash,
+        requestHash: row.request_hash,
+        actorId: "system",
+        actorType: "system",
+        kind: "acs.approval.consumed",
+        reason: "consumed",
+        status: "consumed"
+      });
       return { value: event, events: [event] };
     });
   }
