@@ -13,6 +13,16 @@ import { TRACE_CHAIN_PRODUCER_KEY, relayTraceOutbox, utcSpoolDay } from "./trace
 const SCHEMA_PIN = "2c783e16c1c5056a20d4d71160e02569dd8ee00416ad6e8b78084b7652f787e5";
 const dirs: string[] = [];
 
+// The end-to-end replay test drives the real LoopTrace CLI, which lives in a
+// separate checkout. Point LOOPTRACE_CLI at it, or rely on the sibling
+// `looptrace-trace-spine` checkout; the test skips (like the other external-CLI
+// interoperability tests in this repo) when neither is present rather than
+// failing on a missing external repo.
+const LOOPTRACE_CLI =
+  process.env.LOOPTRACE_CLI ??
+  join(fileURLToPath(new URL(".", import.meta.url)), "../../../../looptrace-trace-spine/packages/cli/src/main.mjs");
+const HAS_LOOPTRACE_CLI = existsSync(LOOPTRACE_CLI);
+
 function tempDir(): string {
   const dir = mkdtempSync(join(tmpdir(), "acs-trace-"));
   dirs.push(dir);
@@ -117,7 +127,7 @@ describe("trace outbox", () => {
     }
   });
 
-  it("replays a crash between spool fsync and the shipped mark as one stored event", () => {
+  it.skipIf(!HAS_LOOPTRACE_CLI)("replays a crash between spool fsync and the shipped mark as one stored event", () => {
     const dir = tempDir();
     const dbPath = join(dir, "control.db");
     const spool = join(dir, "spool");
@@ -132,8 +142,7 @@ describe("trace outbox", () => {
     ).toBe(1);
     midway.close();
     expect(relayTraceOutbox(dbPath, spool).shipped).toBe(1);
-    const loopRoot = join(fileURLToPath(new URL(".", import.meta.url)), "../../../../looptrace-trace-spine");
-    const cli = join(loopRoot, "packages/cli/src/main.mjs");
+    const cli = LOOPTRACE_CLI;
     const storeDir = join(dir, "looptrace");
     const ingested = spawnSync(process.execPath, [cli, "ingest", "--once", "--spool", spool, "--store", storeDir], {
       encoding: "utf8"
