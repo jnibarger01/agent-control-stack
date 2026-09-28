@@ -8,10 +8,17 @@
  * Authorization:
  *   managed (default)  every tools/call must carry an ACS-issued acs.jc.v1
  *                      capability at params._meta.acsCapability.
- *   --standalone       local development: no per-call capability for the
- *                      integration tools.
- *   privileged_exec    in BOTH modes the capability is verified by the root
- *                      helper, not here; this process cannot grant sudo.
+ *   --standalone       local development, no ACS: ONLY read-only tools are
+ *                      registered, listed and dispatched (manifest tools that
+ *                      are not approval-gated and whose every scope is a
+ *                      `*.read` scope; see jcStandaloneToolAllowed). Writes,
+ *                      process/git mutation, acs_submit_mission and
+ *                      privileged_exec are refused before any handler runs.
+ *   privileged_exec    managed mode only; the capability is verified by the
+ *                      root helper, not here; this process cannot grant sudo.
+ *                      It is excluded from standalone even though the helper
+ *                      would still verify an ACS capability: standalone has no
+ *                      ACS in front of it, so there is nothing to approve with.
  */
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -103,6 +110,23 @@ export function assertHandlerCoverage(handlerNames: readonly string[]): void {
   }
 }
 
+/**
+ * Whether `name` may be served in standalone mode (no ACS capability, no
+ * approval). Fail closed: unknown tools, approval-gated tools, and any tool
+ * with a non-read scope (fs.write, process.exec, git.write, git.network,
+ * integration.write, process.privileged) are refused.
+ */
+export function jcStandaloneToolAllowed(name: string): boolean {
+  const policy = Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name) ? JC_TOOL_POLICIES[name] : undefined;
+  if (!policy || policy.requiresApproval || policy.scopes.length === 0) return false;
+  return policy.scopes.every((scope) => scope.endsWith('.read'));
+}
+
+/** Tool names served in standalone mode, derived from the manifest. */
+export const JC_STANDALONE_TOOL_NAMES: readonly string[] = Object.freeze(
+  JC_TOOLS.map((tool) => tool.name).filter((name) => jcStandaloneToolAllowed(name)),
+);
+
 export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDeps = {}): Server {
   assertToolPolicyCoverage();
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -130,13 +154,25 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
 
   const server = new Server({ name: 'jace-commander', version: VERSION }, { capabilities: { tools: {} } });
 
-  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: JC_TOOLS.map((tool) => ({ ...tool })) as any }));
+  // Standalone registers (lists) only the read-only subset; managed lists the manifest.
+  const listed = mode === 'standalone' ? JC_TOOLS.filter((tool) => jcStandaloneToolAllowed(tool.name)) : JC_TOOLS;
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listed.map((tool) => ({ ...tool })) as any }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const name = request.params.name;
     const args = (request.params.arguments ?? {}) as Record<string, unknown>;
     const capability = (request.params._meta as Record<string, unknown> | undefined)?.acsCapability;
     if (!Object.prototype.hasOwnProperty.call(JC_TOOL_POLICIES, name)) return fail('unknown_tool', `unknown tool: ${name}`);
+    if (mode === 'standalone' && !jcStandaloneToolAllowed(name)) {
+      // No capability exists in standalone mode, so nothing that writes,
+      // executes or needs approval may run. Refused before any handler.
+      recordTrace(trace, name, args, { ok: false, code: 'JC_STANDALONE_TOOL_REFUSED' });
+      return fail(
+        'JC_STANDALONE_TOOL_REFUSED',
+        `${name} is not available in standalone mode (read-only tools only); run managed behind ACS to use it`,
+        { jaceCommanderMode: mode, acsAuthorization: { decision: 'refused-standalone' } },
+      );
+    }
 
     let authorization: JcAuthorization | undefined;
     if (verifier && name !== 'privileged_exec') {
@@ -274,7 +310,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
       publicMcpUrl: config.publicMcpUrl,
       managedAuthorization: mode === 'managed'
         ? { contract: 'acs.jc.v1', keyConfigured: Boolean(config.acsPublicKey && config.acsKeyId) }
-        : { contract: 'none (standalone)' },
+        : { contract: 'none (standalone)', tools: 'read-only only', served: JC_STANDALONE_TOOL_NAMES.length },
       acs: { url: config.acsUrl, ...(await probe(`${config.acsUrl}/health`)) },
       swarm: { url: config.swarmUrl, ...(await probe(`${config.swarmUrl}/api/v1/health`, swarmToken)) },
       visualizer: { url: config.visualizerUrl ?? null, ...(await probe(config.visualizerUrl ? `${config.visualizerUrl}/healthz` : undefined)) },
