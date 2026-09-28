@@ -10,6 +10,8 @@ import {
   authorizeJaceCommanderExecution,
   jaceCommanderApprovalSummary,
   jaceCommanderSigningConfigFromEnv,
+  jaceCommanderWorkItemIntent,
+  jaceCommanderWorkItemTitle,
   prepareJaceCommanderCapability,
   signPreparedJaceCommanderCapability,
   SqliteJaceCommanderIssuanceRegistry,
@@ -1801,11 +1803,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           existing ??
           tools.create_work_item(
             createWorkItemSchema.parse({
-              title:
-                invocation.toolName === "privileged_exec"
-                  ? `ROOT: ${String((invocation.arguments.argv as string[]).join(" ")).slice(0, 180)}`
-                  : `Jace Commander capability: ${invocation.toolName}`,
-              intent: `ACS-issued acs.jc.v1 capability for Jace Commander tool ${invocation.toolName} requested by ${jcActor}`,
+              // Approvers see what they approve: title and intent carry the
+              // bounded, redacted argument summary for approval-gated tools.
+              title: jaceCommanderWorkItemTitle(invocation),
+              intent: jaceCommanderWorkItemIntent(invocation, jcActor),
               requester: "agent",
               requesterSubject: jcActor,
               target: {},
@@ -1871,6 +1872,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             decision: "require_approval",
             workItemId: workItem.id,
             actionHash,
+            approvalSummary: jaceCommanderApprovalSummary(invocation),
             approvalInstructions: `A human must POST /work-items/${workItem.id}/approve with actionHash ${actionHash}, then retry the identical call`
           });
         }
