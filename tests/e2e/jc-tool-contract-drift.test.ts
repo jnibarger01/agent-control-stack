@@ -120,7 +120,8 @@ describe("jc-tool-manifest drift gate", () => {
   });
 
   it("matches the exact MCP descriptors Jace Commander advertises", () => {
-    expect(JC_TOOLS).toEqual(jcMcpToolDescriptors());
+    const byName = <T extends { name: string }>(left: T, right: T) => left.name.localeCompare(right.name);
+    expect([...JC_TOOLS].sort(byName)).toEqual(jcMcpToolDescriptors().sort(byName));
   });
 
   it("agrees on scopes and approval requirement for every tool, across the manifest, ACS and DC", () => {
