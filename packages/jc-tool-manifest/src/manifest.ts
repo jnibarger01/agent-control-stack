@@ -434,7 +434,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "mutation; human approval required; contained"
   ),
   start_process: row(
-    "Start one executable with an argv array and a contained cwd. Shells and sudo are refused.",
+    "Start one executable with an argv array and a contained cwd, with an allowlisted environment. Approval binds the exact argv; shells and privilege tools are refused.",
     {
       type: "object",
       properties: {
@@ -464,15 +464,6 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "low",
     false,
     "read-only output of a managed process"
-  ),
-  list_sessions: row(
-    "List processes this server started.",
-    { type: "object", properties: {}, additionalProperties: false },
-    ["process.read"],
-    "jc.process.read",
-    "low",
-    false,
-    "read-only"
   ),
   list_processes: row(
     "List processes this server started, including exit codes.",
@@ -601,7 +592,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "Fetch one named remote. Does not merge.",
     {
       type: "object",
-      properties: { repo: str("Absolute git working tree"), remote: str("Remote name") },
+      properties: { repo: str("Absolute git working tree"), remote: str("Configured remote name") },
       required: ["repo"],
       additionalProperties: false
     },
@@ -612,22 +603,23 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "network read of a remote; human approval required"
   ),
   git_push: row(
-    "Push the current branch to a remote. Detached HEAD and force push are refused.",
+    "Push exactly expectedHead to the current branch on a configured remote after a secret scan. Detached HEAD, a moved HEAD, and force push are refused.",
     {
       type: "object",
       properties: {
         repo: str("Absolute git working tree"),
-        remote: str("Remote name"),
+        expectedHead: str("Full 40-hex commit the approver saw; must equal HEAD"),
+        remote: str("Configured remote name"),
         branch: str("Must match the current branch")
       },
-      required: ["repo"],
+      required: ["repo", "expectedHead"],
       additionalProperties: false
     },
     ["git.network"],
     "jc.git.network",
     "medium",
     true,
-    "updates a remote branch; human approval required; no force"
+    "updates a remote branch to an approved commit; human approval required; secret-scanned; no force"
   ),
   jc_doctor: row(
     "Report JC version, manifest size, filesystem roots, ACS reachability, git, and whether this process looks like a legacy checkout. No secrets.",
@@ -694,7 +686,6 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   edit_block: surface("filesystem", ["path"], ["edit"]),
   start_process: surface("process", ["cwd"], ["start"]),
   read_process_output: surface("process", [], ["output"]),
-  list_sessions: surface("process", [], ["sessions"]),
   list_processes: surface("process", [], ["ps"]),
   kill_process: surface("process", [], ["kill"]),
   git_status: surface("git", ["repo"], ["git status"]),

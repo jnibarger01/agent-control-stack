@@ -13,6 +13,8 @@ import { z } from "zod";
  */
 
 const ID = z.string().regex(/^[A-Za-z0-9._:-]{1,128}$/u);
+// A configured remote name; never a URL, path, or option.
+const GIT_REMOTE = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u);
 const ABSOLUTE = z
   .string()
   .min(1)
@@ -56,7 +58,6 @@ export const JC_TOOL_NAMES = Object.freeze([
   "edit_block",
   "start_process",
   "read_process_output",
-  "list_sessions",
   "kill_process",
   "list_processes",
   "git_status",
@@ -172,7 +173,6 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
     sessionId: ID,
     offset: z.number().int().min(0).optional()
   }),
-  list_sessions: z.strictObject({}),
   list_processes: z.strictObject({}),
   kill_process: z.strictObject({ sessionId: ID.optional(), pid: z.number().int().positive().optional() }),
   git_status: z.strictObject({ repo: ABSOLUTE }),
@@ -189,11 +189,15 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
   }),
   git_add: z.strictObject({ repo: ABSOLUTE, paths: z.array(z.string().min(1).max(1024)).min(1).max(50) }),
   git_commit: z.strictObject({ repo: ABSOLUTE, message: z.string().min(1).max(500) }),
-  git_fetch: z.strictObject({ repo: ABSOLUTE, remote: z.string().min(1).max(128).optional() }),
+  git_fetch: z.strictObject({ repo: ABSOLUTE, remote: GIT_REMOTE.optional() }),
   git_push: z.strictObject({
     repo: ABSOLUTE,
-    remote: z.string().min(1).max(128).optional(),
-    branch: z.string().min(1).max(128).optional()
+    expectedHead: z.string().regex(/^[a-f0-9]{40}$/u),
+    remote: GIT_REMOTE.optional(),
+    branch: z
+      .string()
+      .regex(/^[A-Za-z0-9][A-Za-z0-9._/-]{0,127}$/u)
+      .optional()
   }),
   jc_doctor: z.strictObject({}),
   ping: z.strictObject({}),

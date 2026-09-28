@@ -1,7 +1,9 @@
 /**
  * Bounded filesystem mutations (fs.write). ACS must have approved the exact
  * arguments before the managed server reaches these handlers. Containment is
- * checked again here. Symlinks are never written through.
+ * checked again here. Symlinks are never written through, and nothing under a
+ * .git directory can be written: an approved file write must not be able to
+ * plant a hook or config that a later unapproved git read would run.
  */
 import { randomBytes } from 'node:crypto';
 import fs from 'node:fs/promises';
@@ -12,6 +14,31 @@ import { IntegrationError } from './integrations.js';
 const MAX_WRITE_BYTES = 256 * 1024;
 const MAX_EDIT_BYTES = 1024 * 1024;
 
+function refuseGitMetadata(...paths: string[]): void {
+  if (paths.some((item) => item.split(/[/\\]/).includes('.git'))) {
+    throw new IntegrationError('path_denied', 'git metadata (.git) cannot be modified through filesystem tools');
+  }
+}
+
+function refuseRoot(target: string, policy: JcFsPolicy): void {
+  if (policy.roots.map((root) => path.resolve(root)).includes(path.resolve(target))) {
+    throw new IntegrationError('path_denied', 'a configured filesystem root cannot be moved');
+  }
+}
+
+async function replaceAtomically(dest: string, content: string, mode?: number): Promise<void> {
+  const tmp = path.join(path.dirname(dest), `.jc-write-${randomBytes(6).toString('hex')}`);
+  await fs.writeFile(tmp, content, { flag: 'wx' });
+  try {
+    // Keep the replaced file's permission bits.
+    if (mode !== undefined) await fs.chmod(tmp, mode & 0o7777);
+    await fs.rename(tmp, dest);
+  } catch (error) {
+    await fs.rm(tmp, { force: true });
+    throw new IntegrationError('write_failed', error instanceof Error ? error.message : 'rename failed');
+  }
+}
+
 async function destination(requested: unknown, policy: JcFsPolicy): Promise<string> {
   if (typeof requested !== 'string' || !path.isAbsolute(requested)) {
     throw new IntegrationError('invalid_argument', 'path must be an absolute path');
@@ -21,6 +48,7 @@ async function destination(requested: unknown, policy: JcFsPolicy): Promise<stri
   const base = path.basename(requested);
   if (!base || base === '.' || base === '..') throw new IntegrationError('invalid_argument', 'path basename is invalid');
   const dest = path.join(parentReal, base);
+  refuseGitMetadata(requested, dest);
   try {
     const link = await fs.lstat(dest);
     if (link.isSymbolicLink()) throw new IntegrationError('path_denied', 'refusing to write through a symlink');
@@ -39,21 +67,15 @@ export async function writeFile(args: Record<string, unknown>, policy: JcFsPolic
   }
   const dest = await destination(args.path, policy);
   let exists = false;
+  let mode: number | undefined;
   try {
-    await fs.lstat(dest);
+    mode = (await fs.lstat(dest)).mode;
     exists = true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw new IntegrationError('write_failed', 'cannot inspect destination');
   }
   if (exists && args.overwrite !== true) throw new IntegrationError('already_exists', 'destination exists; pass overwrite true');
-  const tmp = path.join(path.dirname(dest), `.jc-write-${randomBytes(6).toString('hex')}`);
-  await fs.writeFile(tmp, args.content, { flag: 'wx' });
-  try {
-    await fs.rename(tmp, dest);
-  } catch (error) {
-    await fs.rm(tmp, { force: true });
-    throw new IntegrationError('write_failed', error instanceof Error ? error.message : 'rename failed');
-  }
+  await replaceAtomically(dest, args.content, mode);
   return { path: dest, bytes: Buffer.byteLength(args.content), overwritten: exists };
 }
 
@@ -66,6 +88,8 @@ export async function createDirectory(args: Record<string, unknown>, policy: JcF
 
 export async function moveFile(args: Record<string, unknown>, policy: JcFsPolicy): Promise<Record<string, unknown>> {
   const from = containJcPath(args.from, policy);
+  refuseGitMetadata(String(args.from), from);
+  refuseRoot(from, policy);
   const fromStat = await fs.lstat(from);
   if (fromStat.isSymbolicLink()) throw new IntegrationError('path_denied', 'refusing to move a symlink');
   const to = await destination(args.to, policy);
@@ -88,6 +112,7 @@ export async function editBlock(args: Record<string, unknown>, policy: JcFsPolic
     throw new IntegrationError('invalid_argument', 'old and new are limited to 8 KiB');
   }
   const file = containJcPath(args.path, policy);
+  refuseGitMetadata(String(args.path), file);
   const stat = await fs.lstat(file);
   if (stat.isSymbolicLink() || !stat.isFile()) throw new IntegrationError('invalid_argument', 'edit target must be a regular file');
   if (stat.size > MAX_EDIT_BYTES) throw new IntegrationError('invalid_argument', 'file is larger than 1 MiB');
@@ -98,6 +123,6 @@ export async function editBlock(args: Record<string, unknown>, policy: JcFsPolic
     throw new IntegrationError('ambiguous_edit', 'old text matched more than once');
   }
   const next = text.slice(0, first) + args.new + text.slice(first + args.old.length);
-  await fs.writeFile(file, next);
+  await replaceAtomically(file, next, stat.mode);
   return { path: file, bytes: Buffer.byteLength(next) };
 }

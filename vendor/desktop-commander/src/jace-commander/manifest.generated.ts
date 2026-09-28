@@ -24,7 +24,7 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "01b2523db492695af29694bca1f71a7073484f8aeb249694d78a384dc3c62c46",
+  "manifestHash": "d4b99b53ac434d7d2a5697080af5ee10031ed01f7a831b77c66552fb70d75d52",
   "scopes": [
     "fs.read",
     "fs.write",
@@ -444,7 +444,7 @@ export const JC_MANIFEST: JcManifest = {
           },
           "remote": {
             "type": "string",
-            "description": "Remote name"
+            "description": "Configured remote name"
           }
         },
         "required": [
@@ -503,7 +503,7 @@ export const JC_MANIFEST: JcManifest = {
     },
     {
       "name": "git_push",
-      "description": "Push the current branch to a remote. Detached HEAD and force push are refused.",
+      "description": "Push exactly expectedHead to the current branch on a configured remote after a secret scan. Detached HEAD, a moved HEAD, and force push are refused.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -511,9 +511,13 @@ export const JC_MANIFEST: JcManifest = {
             "type": "string",
             "description": "Absolute git working tree"
           },
+          "expectedHead": {
+            "type": "string",
+            "description": "Full 40-hex commit the approver saw; must equal HEAD"
+          },
           "remote": {
             "type": "string",
-            "description": "Remote name"
+            "description": "Configured remote name"
           },
           "branch": {
             "type": "string",
@@ -521,7 +525,8 @@ export const JC_MANIFEST: JcManifest = {
           }
         },
         "required": [
-          "repo"
+          "repo",
+          "expectedHead"
         ],
         "additionalProperties": false
       },
@@ -745,26 +750,6 @@ export const JC_MANIFEST: JcManifest = {
       "pathArguments": [],
       "cliCommands": [
         "search-status"
-      ]
-    },
-    {
-      "name": "list_sessions",
-      "description": "List processes this server started.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {},
-        "additionalProperties": false
-      },
-      "scopes": [
-        "process.read"
-      ],
-      "actionKind": "jc.process.read",
-      "risk": "low",
-      "requiresApproval": false,
-      "group": "process",
-      "pathArguments": [],
-      "cliCommands": [
-        "sessions"
       ]
     },
     {
@@ -1022,7 +1007,7 @@ export const JC_MANIFEST: JcManifest = {
     },
     {
       "name": "start_process",
-      "description": "Start one executable with an argv array and a contained cwd. Shells and sudo are refused.",
+      "description": "Start one executable with an argv array and a contained cwd, with an allowlisted environment. Approval binds the exact argv; shells and privilege tools are refused.",
       "inputSchema": {
         "type": "object",
         "properties": {

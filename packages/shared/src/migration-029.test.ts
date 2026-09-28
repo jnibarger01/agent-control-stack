@@ -63,7 +63,7 @@ describe("migration 029: jace_commander tool allowlist", () => {
         tool_name: string;
       }>
     ).map((entry) => entry.tool_name);
-    expect(tools).toHaveLength(37);
+    expect(tools).toHaveLength(36);
     expect(tools).toContain("privileged_exec");
     expect(tools).toContain("read_multiple_files");
     expect(tools).toContain("start_search");

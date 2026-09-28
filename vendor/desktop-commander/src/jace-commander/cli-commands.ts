@@ -291,14 +291,6 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
     render: (result) => asJson(result),
   },
   {
-    verb: 'sessions',
-    tool: 'list_sessions',
-    usage: 'sessions',
-    summary: 'List managed processes',
-    toArguments: () => ({}),
-    render: (result) => asJson(result),
-  },
-  {
     verb: 'ps',
     tool: 'list_processes',
     usage: 'ps',
@@ -402,12 +394,17 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   {
     verb: 'git push',
     tool: 'git_push',
-    usage: 'git push [--repo PATH] [--remote NAME]',
-    summary: 'Push the current branch (approval required, no force)',
-    toArguments: (args) => ({
-      repo: absolutePath(flag(args, 'repo') ?? '.'),
-      ...(flag(args, 'remote') ? { remote: flag(args, 'remote') } : {}),
-    }),
+    usage: 'git push --head SHA [--repo PATH] [--remote NAME]',
+    summary: 'Push the approved commit on the current branch (approval required, no force)',
+    toArguments: (args) => {
+      const expectedHead = flag(args, 'head');
+      if (!expectedHead) throw new CliUsageError('git push needs --head <40-hex sha> (see `git status` for HEAD)');
+      return {
+        repo: absolutePath(flag(args, 'repo') ?? '.'),
+        expectedHead,
+        ...(flag(args, 'remote') ? { remote: flag(args, 'remote') } : {}),
+      };
+    },
     render: (result) => asJson(result),
   },
   {

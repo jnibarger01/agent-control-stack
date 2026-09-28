@@ -107,11 +107,15 @@ test('no key configured fails closed', () => {
   rejects(() => verifier({ keyId: undefined }).verify('acs_read', readArgs, issuer.mint('acs_read', readArgs)), 'JC_CAPABILITY_KEY_UNKNOWN');
   rejects(() => verifier({ publicKey: undefined }).verify('acs_read', readArgs, issuer.mint('acs_read', readArgs)), 'JC_CAPABILITY_KEY_UNKNOWN');
 });
-test('every registered tool has a policy and only privileged_exec requires approval', () => {
+test('every registered tool has a policy and exactly the mutating tools require approval', () => {
   assertToolPolicyCoverage();
   assert.equal(JC_TOOLS.length, Object.keys(JC_TOOL_POLICIES).length);
-  const approvalTools = Object.entries(JC_TOOL_POLICIES).filter(([, p]) => p.requiresApproval).map(([n]) => n);
-  assert.deepEqual(approvalTools, ['privileged_exec']);
+  const approvalTools = Object.entries(JC_TOOL_POLICIES).filter(([, p]) => p.requiresApproval).map(([n]) => n).sort();
+  // Changing this list is a policy change: update migration 031's CHECK too.
+  assert.deepEqual(approvalTools, [
+    'create_directory', 'edit_block', 'git_add', 'git_commit', 'git_fetch', 'git_push',
+    'kill_process', 'move_file', 'privileged_exec', 'start_process', 'write_file',
+  ]);
   const privilegedTools = Object.entries(JC_TOOL_POLICIES).filter(([, p]) => p.scopes.includes('process.privileged')).map(([n]) => n);
   assert.deepEqual(privilegedTools, ['privileged_exec']);
 });

@@ -229,7 +229,6 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     edit_block: async (args) => ok(await editBlock(args, fsPolicy)),
     start_process: async (args) => ok(processes.start(args, fsPolicy)),
     read_process_output: async (args) => ok(processes.output(args)),
-    list_sessions: async () => ok(processes.list()),
     list_processes: async () => ok(processes.list()),
     kill_process: async (args) => ok(processes.kill(args)),
     git_status: async (args) => ok(await gitStatus(args, fsPolicy)),

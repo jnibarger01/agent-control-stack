@@ -91,9 +91,7 @@ function mint(
     fencingEpoch: 1,
     actionHash,
     invocation,
-    ...(invocation.policy.requiresApproval
-      ? { approvalId: "appr-drift-1", approvalActionHash: actionHash }
-      : {})
+    ...(invocation.policy.requiresApproval ? { approvalId: "appr-drift-1", approvalActionHash: actionHash } : {})
   } as Parameters<typeof prepareJaceCommanderCapability>[0];
   const config = { runtimeId: RUNTIME_ID, keyId: KEY_ID, privateKey, ttlMs: 20_000 };
   const prepared = prepareJaceCommanderCapability(authorization, config, new Date());
@@ -162,7 +160,9 @@ describe("jc-tool-manifest drift gate", () => {
   });
 
   it("the CLI command table implements exactly the manifest's CLI verbs, each bound to its tool", () => {
-    const fromManifest = jcToolContracts().flatMap((entry) => entry.cliCommands.map((verb) => `${verb} -> ${entry.name}`));
+    const fromManifest = jcToolContracts().flatMap((entry) =>
+      entry.cliCommands.map((verb) => `${verb} -> ${entry.name}`)
+    );
     const fromCli = CLI_COMMANDS.map((command) => `${command.verb} -> ${command.tool}`);
     expect([...fromCli].sort()).toEqual([...fromManifest].sort());
   });
@@ -171,10 +171,16 @@ describe("jc-tool-manifest drift gate", () => {
     const db = new DatabaseSync(":memory:");
     try {
       applyControlPlaneMigrations(db);
-      const known = (db.prepare("SELECT tool_name FROM jace_commander_tools ORDER BY tool_name").all() as Array<{
-        tool_name: string;
-      }>).map((entry) => entry.tool_name);
-      expect(known).toEqual(jcToolContracts().map((entry) => entry.name).sort());
+      const known = (
+        db.prepare("SELECT tool_name FROM jace_commander_tools ORDER BY tool_name").all() as Array<{
+          tool_name: string;
+        }>
+      ).map((entry) => entry.tool_name);
+      expect(known).toEqual(
+        jcToolContracts()
+          .map((entry) => entry.name)
+          .sort()
+      );
     } finally {
       db.close();
     }

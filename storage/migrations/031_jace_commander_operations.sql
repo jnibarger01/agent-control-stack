@@ -9,7 +9,6 @@ INSERT OR IGNORE INTO jace_commander_tools (tool_name, added_in_migration) VALUE
   ('edit_block', 31),
   ('start_process', 31),
   ('read_process_output', 31),
-  ('list_sessions', 31),
   ('kill_process', 31),
   ('list_processes', 31),
   ('git_status', 31),
