@@ -208,12 +208,17 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
 function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {
   const entries = new Map<JcToolName, JcToolContract>();
   for (const name of JC_TOOL_NAMES) {
+    const source = TOOL_ROWS[name];
     entries.set(
       name,
       Object.freeze({
         name,
         argsSchema: JC_TOOL_ARGUMENT_SCHEMAS[name],
-        ...TOOL_ROWS[name]
+        ...source,
+        // Do not expose TOOL_ROWS' mutable array through the public contract.
+        // Policy consumers retain these objects for the process lifetime, so
+        // nested policy values must be immutable too.
+        scopes: Object.freeze([...source.scopes])
       })
     );
   }
