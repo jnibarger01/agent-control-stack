@@ -17,6 +17,14 @@ let sseReconnectTimer = null;
 let sseEverOpened = false;
 let sseConnected = false;
 let sseReconnectAt = 0;
+let serverClockOffsetMs = 0;
+let leaseWarningTimer = null;
+let leaseWarningRoot = null;
+// Largest round trip for which an HTTP Date sample is trusted. Slower
+// responses may have been queued in transit, so their Date header no longer
+// reflects the observation time; adopting it would drag the projected server
+// clock backwards by the delay.
+const SERVER_CLOCK_MAX_RTT_MS = 10000;
 const sseEventNames = [
   'work_item.created',
   'work_item.pending_policy',
@@ -177,8 +185,29 @@ function pillMarkup(value) {
   return '<span class="pill ' + safe + '">' + safe + '</span>';
 }
 
+function observeServerClock(res, requestStartedMs) {
+  const raw = res && res.headers && typeof res.headers.get === 'function' ? res.headers.get('date') : null;
+  const serverMs = Date.parse(raw || '');
+  if (!Number.isFinite(serverMs)) return;
+  const receivedMs = Date.now();
+  const startMs = Number.isFinite(requestStartedMs) && requestStartedMs <= receivedMs ? requestStartedMs : receivedMs;
+  const roundTripMs = receivedMs - startMs;
+  // A stale sample is worse than none: keep the previous offset (which starts
+  // at the local clock) instead of adopting a Date header that arrived late.
+  if (roundTripMs > SERVER_CLOCK_MAX_RTT_MS) return;
+  // Assume the server stamped Date halfway through the request so a slow (but
+  // still trusted) response cannot skew the projection by the full round trip.
+  serverClockOffsetMs = serverMs - startMs - roundTripMs / 2;
+}
+
+function serverNowMs() {
+  return Date.now() + serverClockOffsetMs;
+}
+
 function fetchJson(url) {
+  const requestStartedMs = Date.now();
   return fetch(url, { headers: { accept: 'application/json' } }).then(async function (res) {
+    observeServerClock(res, requestStartedMs);
     const body = await res.json().catch(function () { return {}; });
     if (!res.ok) {
       throw new Error(body.error || body.code || ('HTTP ' + res.status));
@@ -208,7 +237,10 @@ async function loadWorkDetail(id, options) {
   const outputText = output ? output.textContent : '';
   const active = document.activeElement;
   const activeId = preserve && active && active.id && target.contains(active) ? active.id : null;
-  if (!preserve) target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
+  if (!preserve) {
+    stopLeaseExpiryWarningRefresh();
+    target.innerHTML = '<div class="detail-loading">Loading work item...</div>';
+  }
   try {
     const body = await fetchJson('/work-items/' + encodeURIComponent(id));
     // Drop responses superseded by a newer load, even for the same item.
@@ -373,6 +405,91 @@ function shortHash(value) {
   return text.length > 16 ? text.slice(0, 12) + '…' : text;
 }
 
+// Presentation-only signal. Lease authority remains server-side; this only
+// projects the persisted timestamps using the latest observed server clock.
+function leaseExpiringSoon(lease, nowMs) {
+  if (!lease || lease.status !== 'active') return false;
+  const expiresAtMs = Date.parse(lease.expiresAt || '');
+  if (!Number.isFinite(expiresAtMs)) return false;
+  const currentMs = Number.isFinite(nowMs) ? nowMs : serverNowMs();
+  if (expiresAtMs <= currentMs) return false;
+  const ttlStartMs = Date.parse(lease.lastRenewedAt || lease.issuedAt || '');
+  const observedTtlMs = Number.isFinite(ttlStartMs) ? Math.max(0, expiresAtMs - ttlStartMs) : 0;
+  const thresholdMs = Math.max(60 * 1000, 0.2 * observedTtlMs);
+  return expiresAtMs - currentMs < thresholdMs;
+}
+
+function refreshLeaseExpiryWarnings(root) {
+  if (!root) return;
+  root.querySelectorAll('[data-lease-expiry]').forEach(function (node) {
+    const lease = {
+      status: node.dataset.leaseStatus || '',
+      issuedAt: node.dataset.leaseIssuedAt || '',
+      lastRenewedAt: node.dataset.leaseLastRenewedAt || '',
+      expiresAt: node.dataset.leaseExpiresAt || ''
+    };
+    const warning = node.querySelector('[data-lease-expiry-warning]');
+    if (!warning) return;
+    const show = leaseExpiringSoon(lease);
+    const message = show ? 'expiring soon — warning only' : '';
+    // Only touch the live region when the warning state actually transitions:
+    // rewriting textContent on every tick re-announces the same warning.
+    if (warning.hidden === show || warning.textContent !== message) {
+      warning.hidden = !show;
+      warning.textContent = message;
+    }
+  });
+}
+
+function clearLeaseWarningTimer() {
+  if (leaseWarningTimer) {
+    clearInterval(leaseWarningTimer);
+    leaseWarningTimer = null;
+  }
+}
+
+function stopLeaseExpiryWarningRefresh() {
+  clearLeaseWarningTimer();
+  leaseWarningRoot = null;
+}
+
+function leaseWarningTick() {
+  if (!leaseWarningRoot || !leaseWarningRoot.isConnected) {
+    stopLeaseExpiryWarningRefresh();
+    return;
+  }
+  refreshLeaseExpiryWarnings(leaseWarningRoot);
+}
+
+// The work-item detail panel is only visible while the queue or execution
+// view is active. Pause the refresh while it is hidden and resume on return
+// so an off-screen detail never keeps refreshing.
+function leaseWarningViewActive() {
+  const view = document.body.dataset.activeView;
+  return (view === 'queue' || view === 'execution') && document.visibilityState !== 'hidden';
+}
+
+function syncLeaseExpiryWarningRefresh() {
+  if (!leaseWarningRoot || !leaseWarningRoot.isConnected || !leaseWarningRoot.querySelector('[data-lease-expiry]')) {
+    stopLeaseExpiryWarningRefresh();
+    return;
+  }
+  if (leaseWarningViewActive()) {
+    if (!leaseWarningTimer) {
+      leaseWarningTick();
+      leaseWarningTimer = setInterval(leaseWarningTick, 5000);
+    }
+  } else {
+    clearLeaseWarningTimer();
+  }
+}
+
+function scheduleLeaseExpiryWarningRefresh(root) {
+  stopLeaseExpiryWarningRefresh();
+  leaseWarningRoot = root || null;
+  syncLeaseExpiryWarningRefresh();
+}
+
 function renderExecutionAuthority(executionAttempts, attemptLeases) {
   const attempts = Array.isArray(executionAttempts) ? executionAttempts.slice() : [];
   const leases = Array.isArray(attemptLeases) ? attemptLeases : [];
@@ -384,8 +501,10 @@ function renderExecutionAuthority(executionAttempts, attemptLeases) {
     const matching = leases.filter(function (lease) { return lease.attemptId === attempt.attemptId; }).sort(function (left, right) { return Number(right.fencingEpoch || 0) - Number(left.fencingEpoch || 0); });
     const lease = matching[0];
     const worker = (lease && lease.workerId) || attempt.claimedByWorkerId || '—';
+    const expiring = leaseExpiringSoon(lease);
+    const warning = '<span class="pill warning lease-expiry-warning" role="status" data-lease-expiry-warning' + (expiring ? '' : ' hidden') + '>' + (expiring ? 'expiring soon — warning only' : '') + '</span>';
     const leaseMarkup = lease
-      ? '<div class="lease-block"><div class="lease-head"><strong>Lease ' + escapeClient(lease.leaseId) + '</strong>' + pillMarkup(lease.status || 'unknown') + '</div><dl class="detail-grid compact">' +
+      ? '<div class="lease-block" data-lease-expiry data-lease-status="' + escapeClient(lease.status || '') + '" data-lease-issued-at="' + escapeClient(lease.issuedAt || '') + '" data-lease-last-renewed-at="' + escapeClient(lease.lastRenewedAt || '') + '" data-lease-expires-at="' + escapeClient(lease.expiresAt || '') + '"><div class="lease-head"><strong>Lease ' + escapeClient(lease.leaseId) + '</strong>' + pillMarkup(lease.status || 'unknown') + warning + '</div><dl class="detail-grid compact">' +
           detailRow('Worker', worker) +
           detailRow('Fencing epoch', String(lease.fencingEpoch ?? attempt.currentFencingEpoch ?? 0)) +
           detailRow('Admission', lease.admissionId) +
@@ -471,6 +590,7 @@ function attemptExecutionModeChipClient(attempt) {
 
 function renderWorkDetail(target, workItem, events, executionAttempts, attemptLeases) {
   if (!workItem) {
+    stopLeaseExpiryWarningRefresh();
     target.innerHTML = '<div class="detail-error">Work item not found.</div>';
     return;
   }
@@ -487,6 +607,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
     renderExecutionAuthority(executionAttempts, attemptLeases) +
     workItemControlsMarkup(workItem, sseConnected) +
     '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
+  scheduleLeaseExpiryWarningRefresh(target);
 }
 
 function knownQueueStatuses() {
@@ -797,7 +918,9 @@ function showView(name) {
   });
   syncSystemProbes();
   syncMetricsPolling();
+  syncLeaseExpiryWarningRefresh();
 }
+document.addEventListener('visibilitychange', syncLeaseExpiryWarningRefresh);
 document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');
   if (!link) return;

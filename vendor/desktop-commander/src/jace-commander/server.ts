@@ -21,10 +21,7 @@ import type { JcConfig } from './config.js';
 import { FileNonceStore, JC_TOOL_POLICIES, JcAuthorizationError, JcCapabilityVerifier, type JcAuthorization } from './contract.js';
 import { acsAccessToken } from './device-login.js';
 import {
-  ACS_VIEWS,
   IntegrationError,
-  SWARM_VIEWS,
-  VISUALIZER_VIEWS,
   acsReadUrl,
   listMissionRouterState,
   missionWorkItemBody,
@@ -44,8 +41,9 @@ import { gitAdd, gitBranch, gitCommit, gitDiff, gitFetch, gitLog, gitPush, gitSh
 import { createDirectory, editBlock, moveFile, writeFile } from './mutations.js';
 import { createProcessRegistry } from './processes.js';
 import { createSearchRegistry } from './search.js';
-import { JC_MANIFEST } from './manifest.generated.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
+import { JC_TOOLS } from './tool-descriptors.js';
+export { JC_TOOLS };
 import { VERSION } from '../version.js';
 
 export type JcMode = 'managed' | 'standalone';
@@ -57,16 +55,6 @@ export interface JcServerDeps {
   now?: () => number;
 }
 
-const str = (description: string) => ({ type: 'string', description });
-
-/**
- * The MCP tools/list surface, derived from the generated manifest (the only
- * tool list in this package). Adding a tool means adding it to
- * packages/jc-tool-manifest and regenerating, plus a handler below.
- */
-export const JC_TOOLS: ReadonlyArray<{ name: string; description: string; inputSchema: Readonly<Record<string, unknown>> }> = Object.freeze(
-  JC_MANIFEST.tools.map(({ name, description, inputSchema }) => Object.freeze({ name, description, inputSchema })),
-);
 
 type ToolResult = {
   content: Array<{ type: 'text'; text: string }>;
