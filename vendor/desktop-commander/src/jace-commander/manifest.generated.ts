@@ -24,7 +24,7 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "c95381a5d08c72a9ba9433694a0fc9a9521a27a0fdfa642752ac230ac7e4e6fa",
+  "manifestHash": "1ad684a24894321146846acc45d7985e50ce329262c85673b85138b8e78c4ad8",
   "scopes": [
     "fs.read",
     "integration.read",
@@ -160,6 +160,39 @@ export const JC_MANIFEST: JcManifest = {
       ]
     },
     {
+      "name": "get_more_search_results",
+      "description": "Return the next page of a search started by start_search.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "searchId": {
+            "type": "string",
+            "description": "Search id returned by start_search"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "searchId"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "actionKind": "jc.fs.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "search",
+      "pathArguments": [],
+      "cliCommands": [
+        "search-results"
+      ]
+    },
+    {
       "name": "jc_status",
       "description": "Report Jace Commander mode, configured endpoints, reachability of ACS / codex-swarm / visualizer, and whether the privileged helper is installed.",
       "inputSchema": {
@@ -213,6 +246,26 @@ export const JC_MANIFEST: JcManifest = {
       ],
       "cliCommands": [
         "ls"
+      ]
+    },
+    {
+      "name": "list_searches",
+      "description": "List in-process searches and whether each is done, truncated, or cancelled. Does not return hit contents.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "actionKind": "jc.fs.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "search",
+      "pathArguments": [],
+      "cliCommands": [
+        "search-status"
       ]
     },
     {
@@ -379,6 +432,92 @@ export const JC_MANIFEST: JcManifest = {
         "paths"
       ],
       "cliCommands": []
+    },
+    {
+      "name": "start_search",
+      "description": "Search filenames or file contents under an allowed root. Returns the first page of bounded hits and a searchId for further pages. Skips node_modules, .git, and symlinks.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Absolute directory to search"
+          },
+          "pattern": {
+            "type": "string",
+            "description": "Literal text, or a regular expression when regex is true"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "filename",
+              "content"
+            ]
+          },
+          "regex": {
+            "type": "boolean"
+          },
+          "caseSensitive": {
+            "type": "boolean"
+          },
+          "fileFilter": {
+            "type": "string",
+            "description": "Basename glob, for example *.ts"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 100
+          }
+        },
+        "required": [
+          "path",
+          "pattern",
+          "mode"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "actionKind": "jc.fs.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "search",
+      "pathArguments": [
+        "path"
+      ],
+      "cliCommands": [
+        "search"
+      ]
+    },
+    {
+      "name": "stop_search",
+      "description": "Cancel a search. Further pages return no new hits.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "searchId": {
+            "type": "string",
+            "description": "Search id returned by start_search"
+          }
+        },
+        "required": [
+          "searchId"
+        ],
+        "additionalProperties": false
+      },
+      "scopes": [
+        "fs.read"
+      ],
+      "actionKind": "jc.fs.read",
+      "risk": "low",
+      "requiresApproval": false,
+      "group": "search",
+      "pathArguments": [],
+      "cliCommands": [
+        "search-stop"
+      ]
     },
     {
       "name": "swarm_read",

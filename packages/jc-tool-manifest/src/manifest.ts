@@ -53,6 +53,7 @@ export type JcRiskClass = "low" | "medium" | "critical";
 export const JC_TOOL_GROUPS = Object.freeze([
   "system",
   "filesystem",
+  "search",
   "acs",
   "mission",
   "swarm",
@@ -286,6 +287,68 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "low",
     false,
     "read-only; every path contained to allowed roots; bounded output"
+  ),
+  start_search: row(
+    "Search filenames or file contents under an allowed root. Returns the first page of bounded hits and a searchId for further pages. Skips node_modules, .git, and symlinks.",
+    {
+      type: "object",
+      properties: {
+        path: str("Absolute directory to search"),
+        pattern: str("Literal text, or a regular expression when regex is true"),
+        mode: { type: "string", enum: ["filename", "content"] },
+        regex: { type: "boolean" },
+        caseSensitive: { type: "boolean" },
+        fileFilter: str("Basename glob, for example *.ts"),
+        limit: { type: "integer", minimum: 1, maximum: 100 }
+      },
+      required: ["path", "pattern", "mode"],
+      additionalProperties: false
+    },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "read-only; contained to allowed roots; bounded scan and output"
+  ),
+  get_more_search_results: row(
+    "Return the next page of a search started by start_search.",
+    {
+      type: "object",
+      properties: {
+        searchId: str("Search id returned by start_search"),
+        limit: { type: "integer", minimum: 1, maximum: 100 }
+      },
+      required: ["searchId"],
+      additionalProperties: false
+    },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "read-only page of an existing bounded search"
+  ),
+  list_searches: row(
+    "List in-process searches and whether each is done, truncated, or cancelled. Does not return hit contents.",
+    { type: "object", properties: {}, additionalProperties: false },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "read-only search metadata"
+  ),
+  stop_search: row(
+    "Cancel a search. Further pages return no new hits.",
+    {
+      type: "object",
+      properties: { searchId: str("Search id returned by start_search") },
+      required: ["searchId"],
+      additionalProperties: false
+    },
+    ["fs.read"],
+    "jc.fs.read",
+    "low",
+    false,
+    "cancels a local search; no filesystem mutation"
   )
 };
 
@@ -314,7 +377,11 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   list_directory: surface("filesystem", ["path"], ["ls"]),
   get_file_info: surface("filesystem", ["path"], ["stat"]),
   read_file: surface("filesystem", ["path"], ["read", "cat"]),
-  read_multiple_files: surface("filesystem", ["paths"], [])
+  read_multiple_files: surface("filesystem", ["paths"], []),
+  start_search: surface("search", ["path"], ["search"]),
+  get_more_search_results: surface("search", [], ["search-results"]),
+  list_searches: surface("search", [], ["search-status"]),
+  stop_search: surface("search", [], ["search-stop"])
 };
 
 function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {

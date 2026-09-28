@@ -157,6 +157,66 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
     render: (result) => String(result?.content ?? ''),
   },
   {
+    verb: 'search',
+    tool: 'start_search',
+    usage: 'search <pattern> [path] [--files] [--content] [--regex] [--ignore-case] [--filter GLOB] [--limit N]',
+    summary: 'Search file contents (default) or names under a directory',
+    booleanFlags: ['files', 'content', 'regex', 'ignore-case'],
+    toArguments: (args) => {
+      if (args.flags.get('files') === true && args.flags.get('content') === true) {
+        throw new CliUsageError('pass only one of --files or --content');
+      }
+      const limit = intFlag(args, 'limit');
+      return {
+        pattern: requirePositional(args, 0, 'pattern'),
+        path: absolutePath(args.positionals[1] ?? '.'),
+        mode: args.flags.get('files') === true ? 'filename' : 'content',
+        ...(args.flags.get('regex') === true ? { regex: true } : {}),
+        ...(args.flags.get('ignore-case') === true ? { caseSensitive: false } : {}),
+        ...(flag(args, 'filter') ? { fileFilter: flag(args, 'filter') } : {}),
+        ...(limit !== undefined ? { limit } : {}),
+      };
+    },
+    render: (result) => {
+      const hits = (result?.results ?? []) as Array<{ path: string; line?: number; text?: string }>;
+      const lines = hits.map((hit) => (hit.line ? `${hit.path}:${hit.line}: ${hit.text ?? ''}` : hit.path));
+      const tail = `search ${String(result?.searchId)}  matched ${String(result?.matched)}  scanned ${String(result?.scanned)}` +
+        (result?.hasMore ? '  (more: search-results)' : '') +
+        (result?.truncated ? '  truncated' : '');
+      return [...lines, tail].join('\n');
+    },
+  },
+  {
+    verb: 'search-results',
+    tool: 'get_more_search_results',
+    usage: 'search-results <search-id> [--limit N]',
+    summary: 'Next page of a search',
+    toArguments: (args) => {
+      const limit = intFlag(args, 'limit');
+      return { searchId: requirePositional(args, 0, 'search-id'), ...(limit !== undefined ? { limit } : {}) };
+    },
+    render: (result) => {
+      const hits = (result?.results ?? []) as Array<{ path: string; line?: number; text?: string }>;
+      return hits.map((hit) => (hit.line ? `${hit.path}:${hit.line}: ${hit.text ?? ''}` : hit.path)).join('\n');
+    },
+  },
+  {
+    verb: 'search-status',
+    tool: 'list_searches',
+    usage: 'search-status',
+    summary: 'List searches without their hit contents',
+    toArguments: () => ({}),
+    render: (result) => asJson(result),
+  },
+  {
+    verb: 'search-stop',
+    tool: 'stop_search',
+    usage: 'search-stop <search-id>',
+    summary: 'Cancel a search',
+    toArguments: (args) => ({ searchId: requirePositional(args, 0, 'search-id') }),
+    render: (result) => asJson(result),
+  },
+  {
     verb: 'acs read',
     tool: 'acs_read',
     usage: 'acs read <health|work-items|work-item> [--id ID] [--status STATUS]',
@@ -263,6 +323,7 @@ export function resolveCommand(argv: readonly string[]): { command: CliCommand; 
 const GROUP_TITLES: Record<string, string> = {
   system: 'System',
   filesystem: 'Filesystem',
+  search: 'Search',
   acs: 'ACS',
   mission: 'Mission Router / LoopTrace',
   swarm: 'Swarm',

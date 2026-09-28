@@ -39,6 +39,7 @@ import {
 } from './integrations.js';
 import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
 import { defaultDeniedRoots, getFileInfo, listDirectory, readFile, readMultipleFiles, type JcFsPolicy } from './filesystem.js';
+import { createSearchRegistry } from './search.js';
 import { JC_MANIFEST } from './manifest.generated.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
 import { VERSION } from '../version.js';
@@ -182,6 +183,7 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
 
   // One handler per manifest tool. The same handlers serve every caller:
   // MCP clients and the jace-commander CLI (itself an MCP client of /jc/mcp).
+  const search = createSearchRegistry();
   const handlers: Readonly<Record<string, Handler>> = Object.freeze({
     jc_status: async () => ok(await status()),
     acs_read: async (args) => {
@@ -224,6 +226,10 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     get_file_info: async (args) => ok(await getFileInfo(args, fsPolicy)),
     read_file: async (args) => ok(await readFile(args, fsPolicy)),
     read_multiple_files: async (args) => ok(await readMultipleFiles(args, fsPolicy)),
+    start_search: async (args) => ok(await search.start(args, fsPolicy)),
+    get_more_search_results: async (args) => ok(search.more(args)),
+    list_searches: async () => ok(search.list()),
+    stop_search: async (args) => ok(search.stop(args)),
   });
   assertHandlerCoverage(Object.keys(handlers));
 

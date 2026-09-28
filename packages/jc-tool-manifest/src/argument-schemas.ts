@@ -45,7 +45,11 @@ export const JC_TOOL_NAMES = Object.freeze([
   "list_directory",
   "get_file_info",
   "read_file",
-  "read_multiple_files"
+  "read_multiple_files",
+  "start_search",
+  "get_more_search_results",
+  "list_searches",
+  "stop_search"
 ] as const);
 export type JcToolName = (typeof JC_TOOL_NAMES)[number];
 
@@ -110,5 +114,20 @@ export const JC_TOOL_ARGUMENT_SCHEMAS: Readonly<Record<JcToolName, z.ZodType>> =
   }),
   read_multiple_files: z.strictObject({
     paths: z.array(ABSOLUTE).min(1).max(JC_FS_LIMITS.maxMultipleFiles)
-  })
+  }),
+  start_search: z.strictObject({
+    path: ABSOLUTE,
+    pattern: z.string().min(1).max(256),
+    mode: z.enum(["filename", "content"]),
+    regex: z.boolean().optional(),
+    caseSensitive: z.boolean().optional(),
+    fileFilter: z.string().min(1).max(128).optional(),
+    limit: z.number().int().min(1).max(100).optional()
+  }),
+  get_more_search_results: z.strictObject({
+    searchId: ID,
+    limit: z.number().int().min(1).max(100).optional()
+  }),
+  list_searches: z.strictObject({}),
+  stop_search: z.strictObject({ searchId: ID })
 });

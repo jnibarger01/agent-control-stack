@@ -56,14 +56,16 @@ function insert(db: DatabaseSync, values: Record<string, unknown>): void {
 }
 
 describe("migration 029: jace_commander tool allowlist", () => {
-  it("seeds the 12 known tools and makes the allowlist append-only", () => {
+  it("seeds every known tool and makes the allowlist append-only", () => {
     const db = migrated();
     const tools = (db.prepare("SELECT tool_name FROM jace_commander_tools ORDER BY tool_name").all() as Array<{
       tool_name: string;
     }>).map((entry) => entry.tool_name);
-    expect(tools).toHaveLength(12);
+    expect(tools).toHaveLength(16);
     expect(tools).toContain("privileged_exec");
     expect(tools).toContain("read_multiple_files");
+    expect(tools).toContain("start_search");
+    expect(tools).toContain("stop_search");
     expect(() => db.prepare("DELETE FROM jace_commander_tools WHERE tool_name = 'read_file'").run()).toThrow(
       /append-only/
     );
