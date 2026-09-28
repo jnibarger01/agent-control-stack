@@ -3,6 +3,7 @@ import { auditTimelineClientSource } from "./audit-timeline.js";
 import { composerClientSource } from "./composer.js";
 import { liveDashboardClientSource } from "./live-dashboard.js";
 import { operatorWorkflowClientSource } from "./operator-workflow.js";
+import { WORK_ITEM_RISK_VALUES } from "./queue-filter.js";
 import { redactionClientSource } from "./redaction.js";
 import { systemProbesClientSource } from "./system-probes.js";
 import { ADMIN_MODE_BANNER_TEXT } from "./types.js";
@@ -494,7 +495,7 @@ function knownQueueStatuses() {
 }
 
 function knownQueueRisks() {
-  return new Set(['low', 'medium', 'high', 'critical']);
+  return new Set(${JSON.stringify(WORK_ITEM_RISK_VALUES)});
 }
 
 function readQueueFilterFromDom() {
@@ -552,11 +553,44 @@ function parseQueueFilterFromLocation() {
 
 function writeQueueFilterToLocation(filter) {
   const url = new URL(location.href);
-  url.searchParams.delete('status');
-  url.searchParams.delete('risk');
-  url.searchParams.delete('q');
-  url.searchParams.delete('text');
-  url.searchParams.delete('agent');
+  const filterKeys = ['status', 'risk', 'q', 'text', 'agent'];
+  filterKeys.forEach(function (key) { url.searchParams.delete(key); });
+
+  // Hash deep links are accepted on read (for example #queue?risk=high), so
+  // remove the same filter keys there before writing canonical query params.
+  // Otherwise a cleared filter reappears after reload when parsing the stale hash.
+  const rawHash = String(url.hash || '').replace(/^#/, '');
+  if (rawHash) {
+    const question = rawHash.indexOf('?');
+    const firstAmp = rawHash.indexOf('&');
+    const firstEq = rawHash.indexOf('=');
+    let anchor = '';
+    let delimiter = '';
+    let hashQuery = '';
+    if (question >= 0) {
+      anchor = rawHash.slice(0, question);
+      delimiter = '?';
+      hashQuery = rawHash.slice(question + 1);
+    } else if (firstAmp >= 0 && firstEq > firstAmp) {
+      anchor = rawHash.slice(0, firstAmp);
+      delimiter = '&';
+      hashQuery = rawHash.slice(firstAmp + 1);
+    } else if (firstEq >= 0) {
+      hashQuery = rawHash;
+    }
+
+    if (hashQuery) {
+      const hashParams = new URLSearchParams(hashQuery);
+      filterKeys.forEach(function (key) { hashParams.delete(key); });
+      const remainingHashParams = hashParams.toString();
+      if (anchor) {
+        url.hash = '#' + anchor + (remainingHashParams ? delimiter + remainingHashParams : '');
+      } else {
+        url.hash = remainingHashParams ? '#' + remainingHashParams : '';
+      }
+    }
+  }
+
   filter.statuses.forEach(function (status) {
     if (status) url.searchParams.append('status', status);
   });
