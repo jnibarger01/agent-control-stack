@@ -5,6 +5,5 @@
     "outDir": "dist",
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
-  "include": ["src/**/*.ts"],
-  "references": [{ "path": "../shared" }, { "path": "../work-items" }, { "path": "../advisory" }, { "path": "../jev-advisor" }]
+  "include": ["src/**/*.ts"]
 }
