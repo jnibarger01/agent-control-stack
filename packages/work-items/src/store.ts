@@ -36,7 +36,12 @@ import {
   type WorkItemRisk,
   type WorkItemStatus
 } from "./work-item.js";
-import { enqueueApprovalTraceEvent, resolveTraceProducerConfig, type ApprovalTraceInput } from "./trace-outbox.js";
+import {
+  enqueueApprovalTraceEvent,
+  rawTraceProducerConfig,
+  validateTraceProducerConfig,
+  type ApprovalTraceInput
+} from "./trace-outbox.js";
 import {
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
@@ -895,6 +900,17 @@ export interface SqliteWorkItemStoreOptions {
   traceInstance?: string;
   releaseSha?: string;
   /**
+   * When the trace producer identity (traceInstance / ACS_TRACE_INSTANCE,
+   * releaseSha / ACS_RELEASE_SHA) is validated.
+   * - "lazy" (default): the store always opens; the identity is checked only when an
+   *   approval trace is produced, and a bad value is a counted, reported trace
+   *   failure. The approval still commits (ADR 0021). CLI, worker, scheduler and
+   *   evidence readers keep working with a bad trace env.
+   * - "eager": the constructor throws trace_config_invalid before opening the
+   *   database. The gateway opts in so a bad deployment refuses to boot.
+   */
+  traceConfigValidation?: "lazy" | "eager";
+  /**
    * Called inside the approval transaction, after the trace savepoint rolled back, when
    * an approval trace event could not be enqueued. Trace is
    * observational (ADR 0021), so the approval still commits. Must not throw; a throw is
@@ -1138,11 +1154,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private readonly releaseSha: string;
   private readonly onTraceFailure: (failure: TraceEnqueueFailure) => void;
   private traceEnqueueFailures = 0;
+  /** Memoized lazy validation result: undefined = not checked yet, null = valid. */
+  private traceConfigError: ControlStackError | null | undefined;
 
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
-    // Validate the trace producer identity before touching the database: a bad
-    // ACS_TRACE_INSTANCE / ACS_RELEASE_SHA refuses to boot instead of failing approvals.
-    const traceProducer = resolveTraceProducerConfig(options);
+    // Trace producer identity: validated lazily at trace time by default (a bad value
+    // never stops the store from opening, and never fails an approval); "eager" refuses
+    // before the database is opened (the gateway opts in, so it refuses to boot).
+    const traceProducer = rawTraceProducerConfig(options);
+    if (options.traceConfigValidation === "eager") validateTraceProducerConfig(traceProducer);
     this.traceInstance = traceProducer.instance;
     this.releaseSha = traceProducer.releaseSha;
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -5942,6 +5962,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
    * without its approval.
    */
   private enqueueApprovalTraceNonBlocking(input: ApprovalTraceInput): void {
+    // Lazy producer-identity check, before any trace SQL. A bad ACS_TRACE_INSTANCE /
+    // ACS_RELEASE_SHA skips the trace and is counted and reported; it never throws here.
+    const configError = this.checkTraceConfig();
+    if (configError) {
+      this.reportTraceFailure(input, configError.code, configError.message);
+      return;
+    }
     this.db.exec("SAVEPOINT acs_trace_enqueue");
     try {
       enqueueApprovalTraceEvent(this.db, input);
@@ -5952,18 +5979,41 @@ export class SqliteWorkItemStore implements WorkItemStore {
       // throw and fail the write rather than commit a partially written trace.
       this.db.exec("ROLLBACK TO SAVEPOINT acs_trace_enqueue");
       this.db.exec("RELEASE SAVEPOINT acs_trace_enqueue");
-      this.traceEnqueueFailures += 1;
-      const failure: TraceEnqueueFailure = {
-        kind: input.kind,
-        workItemId: input.workItemId,
-        code: error instanceof ControlStackError ? error.code : "trace_enqueue_failed",
-        message: error instanceof Error ? error.message.slice(0, 200) : "trace enqueue failed"
-      };
+      this.reportTraceFailure(
+        input,
+        error instanceof ControlStackError ? error.code : "trace_enqueue_failed",
+        error instanceof Error ? error.message : "trace enqueue failed"
+      );
+    }
+  }
+
+  private checkTraceConfig(): ControlStackError | null {
+    if (this.traceConfigError === undefined) {
       try {
-        this.onTraceFailure(failure);
-      } catch {
-        // Reporting is best effort and must never affect the approval.
+        validateTraceProducerConfig({ instance: this.traceInstance, releaseSha: this.releaseSha });
+        this.traceConfigError = null;
+      } catch (error) {
+        this.traceConfigError =
+          error instanceof ControlStackError
+            ? error
+            : new ControlStackError("trace_config_invalid", "trace producer config is invalid");
       }
+    }
+    return this.traceConfigError;
+  }
+
+  private reportTraceFailure(input: ApprovalTraceInput, code: string, message: string): void {
+    this.traceEnqueueFailures += 1;
+    const failure: TraceEnqueueFailure = {
+      kind: input.kind,
+      workItemId: input.workItemId,
+      code,
+      message: message.slice(0, 200)
+    };
+    try {
+      this.onTraceFailure(failure);
+    } catch {
+      // Reporting is best effort and must never affect the approval.
     }
   }
 

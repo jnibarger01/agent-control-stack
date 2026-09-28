@@ -131,10 +131,18 @@ export function resolveTraceProducerConfig(
   options: { traceInstance?: string; releaseSha?: string } = {},
   env: NodeJS.ProcessEnv = process.env
 ): TraceProducerConfig {
-  return validateTraceProducerConfig({
+  return validateTraceProducerConfig(rawTraceProducerConfig(options, env));
+}
+
+/** Resolves the producer identity (options, then environment, then defaults) WITHOUT validating it. */
+export function rawTraceProducerConfig(
+  options: { traceInstance?: string; releaseSha?: string } = {},
+  env: NodeJS.ProcessEnv = process.env
+): TraceProducerConfig {
+  return {
     instance: options.traceInstance ?? env.ACS_TRACE_INSTANCE ?? `acs-${process.pid}`,
     releaseSha: options.releaseSha ?? env.ACS_RELEASE_SHA ?? "unreleased"
-  });
+  };
 }
 
 /**

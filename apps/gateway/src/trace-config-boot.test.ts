@@ -49,6 +49,18 @@ describe("gateway trace producer config (PR #212 B4)", () => {
     expect(existsSync(dbPath)).toBe(false);
   });
 
+  it("only the gateway refuses: a non-gateway store on the same env and path still opens", () => {
+    vi.stubEnv("ACS_RELEASE_SHA", "1c8dc83");
+    const dbPath = join(tempDir(), "control.db");
+    expect((bootError(dbPath) as { code?: string }).code).toBe("trace_config_invalid");
+    const store = new SqliteWorkItemStore(dbPath);
+    try {
+      expect(store.list()).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("boots with a full release sha and a grammar-valid instance", async () => {
     vi.stubEnv("ACS_RELEASE_SHA", "1c8dc8334972680ee4520f416922ae58d78cbab8");
     vi.stubEnv("ACS_TRACE_INSTANCE", "acs-prod");

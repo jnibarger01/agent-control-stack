@@ -14,6 +14,7 @@ export * from "./state-machine.js";
 export * from "./store.js";
 export {
   normalizeTraceActorId,
+  rawTraceProducerConfig,
   relayTraceOutbox,
   resolveTraceProducerConfig,
   validateTraceProducerConfig

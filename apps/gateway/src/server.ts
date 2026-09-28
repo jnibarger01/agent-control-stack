@@ -322,7 +322,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const sseClientsPerPrincipal = new Map<string, number>();
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
-    heartbeatTtlMs
+    heartbeatTtlMs,
+    // The gateway is the one process that refuses to boot on a bad trace config.
+    traceConfigValidation: "eager"
   });
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);

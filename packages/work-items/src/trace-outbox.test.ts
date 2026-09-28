@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SqliteWorkItemStore, type TraceEnqueueFailure } from "./store.js";
 import {
   TRACE_CHAIN_PRODUCER_KEY,
@@ -195,12 +195,17 @@ describe("trace outbox", () => {
     [{ releaseSha: "1C8DC8334972680EE4520F416922AE58D78CBAB8" }, /ACS_RELEASE_SHA/],
     [{ traceInstance: "acs prod" }, /ACS_TRACE_INSTANCE/],
     [{ traceInstance: "" }, /ACS_TRACE_INSTANCE/]
-  ])("refuses to construct the store with invalid trace config %o", (options, message) => {
+  ])("eager validation (opt-in, used by the gateway) refuses to open with %o", (options, message) => {
     const dir = tempDir();
     const dbPath = join(dir, "control.db");
     let thrown: unknown;
     try {
-      new SqliteWorkItemStore(dbPath, { traceInstance: "acs-test", releaseSha: "unreleased", ...options }).close();
+      new SqliteWorkItemStore(dbPath, {
+        traceInstance: "acs-test",
+        releaseSha: "unreleased",
+        traceConfigValidation: "eager",
+        ...options
+      }).close();
     } catch (error) {
       thrown = error;
     }
@@ -209,6 +214,86 @@ describe("trace outbox", () => {
     expect((thrown as Error).message).toMatch(message);
     // Refused before opening the database.
     expect(existsSync(dbPath)).toBe(false);
+  });
+
+  describe("lazy validation (default): a bad trace env never stops ordinary store use", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+    });
+
+    it.each([
+      ["ACS_RELEASE_SHA", "1c8dc83"],
+      ["ACS_TRACE_INSTANCE", "acs prod"]
+    ])("opens and serves basic operations with %s=%j", (name, value) => {
+      vi.stubEnv(name, value);
+      const dbPath = join(tempDir(), "control.db");
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        const item = workItem(store);
+        expect(store.get(item.id)?.title).toBe("Trace approval");
+        expect(store.list().map((entry) => entry.id)).toContain(item.id);
+        expect(store.readEvents().map((event) => event.name)).toContain("work_item.created");
+        expect(store.getTraceEnqueueFailureCount()).toBe(0);
+      } finally {
+        store.close();
+      }
+    });
+
+    it.each([
+      ["ACS_RELEASE_SHA", "1c8dc83"],
+      ["ACS_TRACE_INSTANCE", "acs prod"]
+    ])("an approval with %s=%j still commits; the skipped trace is counted and reported", (name, value) => {
+      vi.stubEnv(name, value);
+      const dbPath = join(tempDir(), "control.db");
+      const failures: TraceEnqueueFailure[] = [];
+      const store = new SqliteWorkItemStore(dbPath, { onTraceFailure: (failure) => failures.push(failure) });
+      try {
+        const item = workItem(store);
+        const grant = store.recordApproval({ workItemId: item.id, actionHash: "hash_test", approvedBy: "user" });
+        store.consumeApproval(item.id, "hash_test", { requestHash: grant.requestHash });
+        expect(store.getTraceEnqueueFailureCount()).toBe(2);
+      } finally {
+        store.close();
+      }
+      expect(failures.map((failure) => [failure.kind, failure.code])).toEqual([
+        ["acs.approval.granted", "trace_config_invalid"],
+        ["acs.approval.consumed", "trace_config_invalid"]
+      ]);
+      expect(failures[0]?.message).toContain(name);
+      const check = new DatabaseSync(dbPath);
+      try {
+        expect(check.prepare(`SELECT status FROM approval_records`).all()).toEqual([{ status: "consumed" }]);
+        expect((check.prepare(`SELECT count(*) AS n FROM trace_outbox`).get() as { n: number }).n).toBe(0);
+        expect((check.prepare(`SELECT count(*) AS n FROM trace_missions`).get() as { n: number }).n).toBe(0);
+      } finally {
+        check.close();
+      }
+    });
+
+    it("the default reporter logs one JSON warning line to stderr per skipped trace", () => {
+      vi.stubEnv("ACS_RELEASE_SHA", "1c8dc83");
+      const writes: string[] = [];
+      const spy = vi.spyOn(process.stderr, "write").mockImplementation((chunk: string | Uint8Array) => {
+        writes.push(String(chunk));
+        return true;
+      });
+      const store = new SqliteWorkItemStore(join(tempDir(), "control.db"));
+      try {
+        const item = workItem(store);
+        store.recordApproval({ workItemId: item.id, actionHash: "hash_test", approvedBy: "user" });
+      } finally {
+        store.close();
+        spy.mockRestore();
+      }
+      const lines = writes.filter((line) => line.includes("trace_outbox_enqueue_failed"));
+      expect(lines).toHaveLength(1);
+      expect(JSON.parse(lines[0]!)).toMatchObject({
+        level: "warn",
+        event: "trace_outbox_enqueue_failed",
+        kind: "acs.approval.granted",
+        code: "trace_config_invalid"
+      });
+    });
   });
 
   it("validates ACS_TRACE_INSTANCE / ACS_RELEASE_SHA from the environment", () => {
