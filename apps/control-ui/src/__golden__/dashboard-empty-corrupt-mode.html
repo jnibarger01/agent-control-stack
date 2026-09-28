@@ -284,6 +284,7 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
 .operator-metrics dt { color: var(--muted); }
 .operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+.operator-metrics div.overdue dt, .operator-metrics div.overdue dd { color: var(--amber); font-weight: 600; }
 .metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .metrics-scrape code { font-size: 12px; }
 .queue-item strong, .queue-item small { display: block; margin-top: 6px; }
@@ -477,6 +478,7 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
     <div><dt>Oldest lease age</dt><dd>—</dd></div>
     <div><dt>Pending approvals</dt><dd>0</dd></div>
     <div><dt>Oldest approval wait</dt><dd>—</dd></div>
+    <div><dt>Approvals over SLA</dt><dd>0 of 0</dd></div>
   </dl>
   </div></div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>
         <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline"><p class="empty">No audit events recorded.</p></div><button type="button" id="events-load-older" class="load-more" disabled>Load older</button></article>
