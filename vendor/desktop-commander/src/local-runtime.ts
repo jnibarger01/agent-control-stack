@@ -234,6 +234,7 @@ export class LocalMcpRuntime {
           ? new LocalMcpRuntimeError('STARTUP_TIMEOUT', `Desktop Commander local MCP startup timed out after ${this.options.startupTimeoutMs}ms`, error)
         : new LocalMcpRuntimeError('STARTUP_FAILED', `Desktop Commander local MCP startup failed: ${error instanceof Error ? error.message : String(error)}`, error);
       this.lastError = runtimeError;
+      this.forceKillChild();
       if (!this.shutdownRequested) this.state = 'failed';
       await withTimeout(
         this.closeResources(),
@@ -359,6 +360,24 @@ export class LocalMcpRuntime {
     await this.closeResources();
     await this.startPromise?.catch(() => undefined);
     await this.closeResources();
+  }
+
+  /**
+   * Force-kill the spawned child, if any. Used on the failed-start path where
+   * the child is unresponsive by definition (e.g. STARTUP_TIMEOUT): graceful
+   * transport.close() can spend up to ~4s racing before escalating to SIGKILL,
+   * which exceeds the bounded cleanup window and leaves the child unreaped.
+   * SIGKILL makes the closePromise resolve promptly so cleanup stays within
+   * its timeout budget and the child is reaped deterministically.
+   */
+  private forceKillChild(): void {
+    const pid = this.transport?.pid;
+    if (pid == null) return;
+    try {
+      process.kill(pid, 'SIGKILL');
+    } catch {
+      // Child already exited or never spawned; nothing to reap.
+    }
   }
 
   private async closeResources(): Promise<void> {
