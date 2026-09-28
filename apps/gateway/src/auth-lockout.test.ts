@@ -171,6 +171,32 @@ describe("AuthFailureLockout", () => {
     expect(lockout.recordFailure("new-key", 60_001)).toMatchObject({ locked: false, failures: 1 });
   });
 
+  it("releases saturation-only lockout as soon as a successful login frees capacity", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 5, maxBuckets: 2 });
+    lockout.recordFailure("a", 0);
+    lockout.recordFailure("b", 1);
+    expect(lockout.recordFailure("overflowed", 2).locked).toBe(true);
+    expect(lockout.isLocked("new-ip", 3).locked).toBe(true);
+
+    // A successful authentication clears its tracked streak. Fresh principals
+    // must be admitted immediately instead of inheriting the stale overflow marker.
+    lockout.clear("a");
+    expect(lockout.isLocked("new-ip", 4)).toMatchObject({ locked: false, failures: 0 });
+    expect(lockout.recordFailure("new-ip", 4)).toMatchObject({ locked: false, failures: 1 });
+  });
+
+  it("releases saturation-only lockout when a tracked bucket expires and frees capacity", () => {
+    const lockout = new AuthFailureLockout({ windowMs: 1_000, maxFailures: 5, maxBuckets: 2 });
+    lockout.recordFailure("a", 0);
+    lockout.recordFailure("b", 500);
+    expect(lockout.recordFailure("overflowed", 600).locked).toBe(true);
+
+    // Reading the expired tracked key lazily reclaims it and therefore ends
+    // the global saturation marker before another principal is checked.
+    expect(lockout.isLocked("a", 1_000)).toMatchObject({ locked: false, failures: 0 });
+    expect(lockout.isLocked("new-ip", 1_001)).toMatchObject({ locked: false, failures: 0 });
+  });
+
   it("recordFailures handles empty and duplicate key lists", () => {
     const lockout = new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3 });
     expect(lockout.recordFailures([], 0)).toEqual([]);
