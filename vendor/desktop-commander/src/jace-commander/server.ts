@@ -240,7 +240,12 @@ export function createJcServer(config: JcConfig, mode: JcMode, deps: JcServerDep
     git_commit: async (args) => ok(await gitCommit(args, fsPolicy)),
     git_fetch: async (args) => ok(await gitFetch(args, fsPolicy)),
     git_push: async (args) => ok(await gitPush(args, fsPolicy)),
-    jc_doctor: async () => ok(await jcDoctor(config)),
+    jc_doctor: async () => ok(await jcDoctor(config, {
+      mode,
+      handlerNames: Object.keys(handlers),
+      verifierReady: Boolean(verifier && config.acsPublicKey && config.acsKeyId),
+      privilegedHelper: () => helperAvailable(helperOptions),
+    })),
     ping: async () => ok(await jcPing(config)),
     get_config: async () => ok(jcConfigView(config)),
   });

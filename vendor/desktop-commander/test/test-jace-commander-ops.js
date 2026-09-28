@@ -216,6 +216,22 @@ await test('kill_process terminates a managed process; list_processes reports it
   refused(await call('kill_process', { pid: 1 }), 'not_found');
 });
 
+await test('jc_doctor reports manifest/handler parity, verifier, served path, and backends', async () => {
+  const doctor = await call('jc_doctor', {});
+  okResult(doctor);
+  const report = doctor.structuredContent;
+  assert.equal(report.toolCount, 36);
+  assert.equal(report.liveHandlerCount, 36);
+  const check = (name) => report.checks.find((item) => item.name === name);
+  assert.equal(check('manifest').ok, true);
+  assert.equal(check('capability verification').ok, true);
+  assert.equal(check('bridge path').ok, true, check('bridge path').detail);
+  assert.equal(check('filesystem roots').ok, true);
+  assert.equal(check('acs').ok, false);
+  assert.equal(report.ok, true);
+  assert.doesNotMatch(JSON.stringify(report), /PRIVATE|BEGIN/);
+});
+
 await client.close();
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\njace-commander ops: ${passed} passed`);

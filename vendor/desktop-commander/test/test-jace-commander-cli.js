@@ -89,4 +89,27 @@ await test('main(): --json prints the structured refusal; nothing is sent withou
   assert.equal(JSON.parse(out[0]).kind, 'not_connected');
 });
 
+await test('main(): doctor reports a structured endpoint failure, never a crash', async () => {
+  const out = [];
+  const code = await main(['doctor', '--json'], { HOME: '/tmp', JC_STATE_DIR: '/tmp/jc-cli-test-state', JC_MCP_URL: 'http://127.0.0.1:9/jc/mcp' }, { stdout: (t) => out.push(t), stderr: () => {} });
+  assert.equal(code, JC_EXIT.notConnected);
+  const report = JSON.parse(out[0]);
+  assert.equal(report.ok, false);
+  assert.equal(report.server, null);
+  const byName = Object.fromEntries(report.client.map((check) => [check.name, check]));
+  assert.equal(byName['cli parity'].ok, true);
+  assert.equal(byName['jc mcp endpoint'].ok, false);
+  assert.match(byName['jc mcp endpoint'].detail, /not_connected/);
+});
+
+await test('git push requires the approved commit (--head)', () => {
+  const { command, rest } = resolveCommand(['git', 'push', '--repo', '/r']);
+  assert.equal(command.tool, 'git_push');
+  assert.throws(() => command.toArguments(parseArgs(rest)), /--head/);
+  const sha = 'b'.repeat(40);
+  const again = resolveCommand(['git', 'push', '--repo', '/r', '--head', sha]);
+  assert.deepEqual(again.command.toArguments(parseArgs(again.rest)), { repo: '/r', expectedHead: sha });
+  assert.equal(resolveCommand(['sessions']), undefined);
+});
+
 console.log(`\njace-commander cli: ${passed} passed`);

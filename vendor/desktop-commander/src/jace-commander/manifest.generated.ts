@@ -24,7 +24,7 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "d4b99b53ac434d7d2a5697080af5ee10031ed01f7a831b77c66552fb70d75d52",
+  "manifestHash": "7ab0daef63b8436055d48a644c401f0fb93a10ff6393d9b6b290fb9bdcf67f70",
   "scopes": [
     "fs.read",
     "fs.write",
@@ -610,7 +610,7 @@ export const JC_MANIFEST: JcManifest = {
     },
     {
       "name": "jc_doctor",
-      "description": "Report JC version, manifest size, filesystem roots, ACS reachability, git, and whether this process looks like a legacy checkout. No secrets.",
+      "description": "Diagnose the serving JC process: manifest vs live handlers, capability verification, filesystem roots, served code path (bridge), ACS reachability, git/process/privileged backends, and release identity. No secrets.",
       "inputSchema": {
         "type": "object",
         "properties": {},

@@ -21,6 +21,7 @@ import { connect, forgetMcpToken, loadMcpToken, mcpAccessToken } from './mcp-aut
 import { JC_EXIT, McpHttpClient, type JcCallOutcome } from './mcp-http-client.js';
 import { privilegedHelperAvailable } from './privileged-client.js';
 import { createJcServer } from './server.js';
+import { JC_TOOLS } from './tool-descriptors.js';
 import { VERSION } from '../version.js';
 
 type Out = { json: boolean; stdout: (text: string) => void; stderr: (text: string) => void };
@@ -98,6 +99,87 @@ async function runToolCommand(argv: string[], config: JcConfig, out: Out, env: N
   } finally {
     await client.close();
   }
+}
+
+interface ClientCheck {
+  name: string;
+  ok: boolean;
+  required: boolean;
+  detail: string;
+}
+
+function descriptorKey(tool: Record<string, unknown>): string {
+  return JSON.stringify([tool.name, tool.description, tool.inputSchema]);
+}
+
+/**
+ * `jace-commander doctor`: the client half of the chain (CLI verbs, the
+ * /jc/mcp endpoint, live tools/list against this manifest), then the server's
+ * own jc_doctor through the same governed path every other command uses.
+ */
+async function runDoctor(config: JcConfig, out: Out, env: NodeJS.ProcessEnv): Promise<number> {
+  const checks: ClientCheck[] = [];
+  const manifestVerbs = JC_MANIFEST.tools.flatMap((tool) => tool.cliCommands.map((verb) => `${verb}->${tool.name}`)).sort();
+  const cliVerbs = CLI_COMMANDS.map((command) => `${command.verb}->${command.tool}`).sort();
+  checks.push({
+    name: 'cli parity',
+    ok: manifestVerbs.join('|') === cliVerbs.join('|'),
+    required: true,
+    detail: `${cliVerbs.length} CLI verbs for ${JC_MANIFEST.tools.length} manifest tools`,
+  });
+  const url = mcpUrlFor(config, env);
+  const client = new McpHttpClient({ url, token: () => mcpAccessToken(url, config.stateDir, env) });
+  let server: Record<string, unknown> | null = null;
+  let exitCode: number = JC_EXIT.ok;
+  try {
+    let live: Array<Record<string, unknown>> | null = null;
+    try {
+      live = await client.listTools();
+      checks.push({ name: 'jc mcp endpoint', ok: true, required: true, detail: `${url} answered tools/list` });
+    } catch (error) {
+      const outcome = (error as { outcome?: JcCallOutcome }).outcome;
+      if (!outcome) throw error;
+      checks.push({ name: 'jc mcp endpoint', ok: false, required: true, detail: `${url}: ${outcome.kind}${outcome.code ? ` (${outcome.code})` : ''}${outcome.message ? `: ${outcome.message}` : ''}` });
+      exitCode = outcome.exitCode;
+    }
+    if (live) {
+      const expected = new Map(JC_TOOLS.map((tool) => [tool.name, descriptorKey(tool as unknown as Record<string, unknown>)]));
+      const seen = new Map(live.map((tool) => [String(tool.name), descriptorKey(tool)]));
+      const missing = [...expected.keys()].filter((name) => !seen.has(name));
+      const extra = [...seen.keys()].filter((name) => !expected.has(name));
+      const changed = [...expected.keys()].filter((name) => seen.has(name) && seen.get(name) !== expected.get(name));
+      const drift = missing.length + extra.length + changed.length > 0;
+      checks.push({
+        name: 'tools/list drift',
+        ok: !drift,
+        required: true,
+        detail: drift
+          ? `live ${seen.size} vs manifest ${expected.size}; missing [${missing.join(',')}] extra [${extra.join(',')}] changed [${changed.join(',')}]`
+          : `live tools/list matches manifest ${JC_MANIFEST.manifestHash.slice(0, 12)} (${seen.size} tools)`,
+      });
+      const outcome = await client.callTool('jc_doctor', {});
+      if (outcome.kind === 'ok' && outcome.result && typeof outcome.result === 'object') {
+        server = outcome.result as Record<string, unknown>;
+        checks.push({ name: 'jc_doctor', ok: server.ok === true, required: true, detail: `server report ${server.ok === true ? 'ok' : 'has failing checks'}` });
+      } else {
+        checks.push({ name: 'jc_doctor', ok: false, required: true, detail: `${outcome.kind}${outcome.code ? ` (${outcome.code})` : ''}${outcome.message ? `: ${outcome.message}` : ''}` });
+        exitCode = outcome.exitCode;
+      }
+    }
+  } finally {
+    await client.close();
+  }
+  const okAll = checks.every((check) => check.ok || !check.required);
+  if (!okAll && exitCode === JC_EXIT.ok) exitCode = JC_EXIT.toolFailure;
+  const report = { ok: okAll, version: VERSION, mcpUrl: url, manifestHash: JC_MANIFEST.manifestHash, client: checks, server };
+  if (out.json) {
+    out.stdout(JSON.stringify(report, null, 2));
+  } else {
+    const serverChecks = (server?.checks as ClientCheck[] | undefined) ?? [];
+    const line = (check: ClientCheck) => `${check.ok ? 'ok  ' : check.required ? 'FAIL' : 'warn'}  ${check.name.padEnd(24)} ${check.detail}`;
+    out.stdout([`jace-commander doctor: ${okAll ? 'ok' : 'FAIL'}`, ...checks.map(line), ...serverChecks.map(line)].join('\n'));
+  }
+  return exitCode;
 }
 
 async function localStatus(config: JcConfig): Promise<Record<string, unknown>> {
@@ -234,6 +316,8 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env,
       fs.rmSync(credentialsPath(config.stateDir), { force: true });
       out.stdout('logged out (local credential removed; revoke server-side via ACS if needed)');
       return JC_EXIT.ok;
+    case 'doctor':
+      return runDoctor(config, out, env);
     case 'status':
       if (rest.includes('--local')) {
         out.stdout(JSON.stringify(await localStatus(config), null, 2));

@@ -1,6 +1,9 @@
 # Jace Commander MCP bridge: a second bridge.js instance (BRIDGE_PROFILE=jace-commander)
 # whose stdio child is `node <dc>/dist/jace-commander/cli.js serve` (managed;
-# the bridge has no way to pass --standalone). Loopback only; the auth gateway
+# the bridge has no way to pass --standalone). <dc> defaults to the monorepo's
+# vendor/desktop-commander (bridge.js resolves it; JC_DC_DIR overrides), so the
+# unit must run the monorepo bridge, not the legacy desktop-commander-mcp-gateway
+# checkout. `jace-commander doctor` reports the served path. Loopback only; the auth gateway
 # routes https://<host>/jc/mcp here after OAuth + ACS acs.jc.v1 issuance.
 #
 # Install:  cp jace-commander-mcp.service ~/.config/systemd/user/
@@ -15,12 +18,12 @@ Description=Jace Commander MCP bridge (stdio -> Streamable HTTP, loopback only)
 After=network.target
 
 [Service]
-WorkingDirectory=/home/jacen/projects/desktop-commander-mcp-gateway
+WorkingDirectory=/opt/agent-control-stack/apps/dc-mcp-gateway
 Environment=BRIDGE_PROFILE=jace-commander
 Environment=BRIDGE_PORT=8003
 Environment=NODE_ENV=production
 EnvironmentFile=/home/jacen/.config/desktop-commander-mcp-gateway/jc-bridge.env
-ExecStart=/home/linuxbrew/.linuxbrew/bin/node /home/jacen/projects/desktop-commander-mcp-gateway/bridge.js
+ExecStart=/usr/bin/env node /opt/agent-control-stack/apps/dc-mcp-gateway/bridge.js
 Restart=on-failure
 RestartSec=5
 # privileged_exec reaches its root helper via `sudo -n` (setuid), which

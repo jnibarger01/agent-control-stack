@@ -622,7 +622,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "updates a remote branch to an approved commit; human approval required; secret-scanned; no force"
   ),
   jc_doctor: row(
-    "Report JC version, manifest size, filesystem roots, ACS reachability, git, and whether this process looks like a legacy checkout. No secrets.",
+    "Diagnose the serving JC process: manifest vs live handlers, capability verification, filesystem roots, served code path (bridge), ACS reachability, git/process/privileged backends, and release identity. No secrets.",
     { type: "object", properties: {}, additionalProperties: false },
     ["integration.read"],
     "jc.integration.read",
