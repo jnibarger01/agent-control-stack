@@ -37,6 +37,7 @@ import {
 import { JsonlTraceChain, readTraceFile, verifyChain } from './looptrace.js';
 import { invokePrivilegedHelper, privilegedHelperAvailable } from './privileged-client.js';
 import { JC_TOOLS } from './tool-descriptors.js';
+export { JC_TOOLS };
 import { VERSION } from '../version.js';
 
 export type JcMode = 'managed' | 'standalone';
