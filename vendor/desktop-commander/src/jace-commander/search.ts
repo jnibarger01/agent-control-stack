@@ -4,11 +4,24 @@
  *
  * The walk runs in the JC server process. The CLI reaches it only through
  * /jc/mcp, so ACS authorizes the same arguments the walker contains.
+ *
+ * ACS only contains the search ROOT it signs. Everything below the root is
+ * contained here, entry by entry, with the same rules read_file and
+ * list_directory apply (filesystem.ts):
+ *   - denied roots (JC state dir, ~/.ssh, ~/.aws, ...) and credential paths
+ *     (.env, credentials.json, *.pem, ...) are neither descended into, read,
+ *     nor named in results;
+ *   - symlinks are never followed, and every entry's realpath must stay
+ *     inside the configured roots and outside every denied location;
+ *   - file content is read only through openContained (O_NOFOLLOW, then the
+ *     opened inode's path is contained again), so a file swapped for a
+ *     symlink between the walk and the read is skipped, not followed.
  */
 import { randomBytes } from 'node:crypto';
+import { realpathSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { containJcPath, type JcFsPolicy } from './filesystem.js';
+import { containJcPath, jcWalkGuard, openContained, readdirNoFollow, type JcFsPolicy, type JcWalkGuard } from './filesystem.js';
 import { IntegrationError } from './integrations.js';
 
 export const JC_SEARCH_LIMITS = Object.freeze({
@@ -108,49 +121,85 @@ function page(session: SearchSession, limit: number): Record<string, unknown> {
 export function createSearchRegistry(): SearchRegistry {
   const sessions = new Map<string, SearchSession>();
 
-  async function walk(dir: string, session: SearchSession, matcher: RegExp, names: RegExp | undefined, mode: 'filename' | 'content'): Promise<void> {
+  async function readContainedText(full: string, policy: JcFsPolicy): Promise<string | undefined> {
+    let opened;
+    try {
+      opened = await openContained(full, policy);
+    } catch {
+      return undefined; // denied, swapped for a symlink, or vanished: skip silently
+    }
+    try {
+      if (!opened.stats.isFile() || opened.stats.size > JC_SEARCH_LIMITS.maxFileBytes) return undefined;
+      return await opened.handle.readFile({ encoding: 'utf8' });
+    } catch {
+      return undefined;
+    } finally {
+      await opened.handle.close().catch(() => undefined);
+    }
+  }
+
+  async function walk(
+    dir: string,
+    session: SearchSession,
+    matcher: RegExp,
+    names: RegExp | undefined,
+    mode: 'filename' | 'content',
+    policy: JcFsPolicy,
+    guard: JcWalkGuard,
+  ): Promise<void> {
     if (session.cancelled || session.results.length >= JC_SEARCH_LIMITS.maxStoredHits || session.scanned >= JC_SEARCH_LIMITS.maxFilesScanned) {
       session.truncated = session.results.length >= JC_SEARCH_LIMITS.maxStoredHits || session.scanned >= JC_SEARCH_LIMITS.maxFilesScanned;
       return;
     }
-    let entries;
+    let entries: string[];
     try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
+      // No-follow descriptor: a directory swapped for a symlink is not listed.
+      entries = (await readdirNoFollow(dir)).sort((a, b) => a.localeCompare(b));
     } catch {
       return;
     }
-    for (const entry of entries) {
+    for (const name of entries) {
       if (session.cancelled || session.results.length >= JC_SEARCH_LIMITS.maxStoredHits || session.scanned >= JC_SEARCH_LIMITS.maxFilesScanned) {
         session.truncated = true;
         return;
       }
-      if (SKIP_DIRS.has(entry.name) || entry.isSymbolicLink()) continue;
-      const full = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        await walk(full, session, matcher, names, mode);
+      if (SKIP_DIRS.has(name)) continue;
+      const full = path.join(dir, name);
+      // Denied locations and credential files are skipped before any stat:
+      // not descended into, not read, not named.
+      if (guard.isDenied(full)) continue;
+      let stats;
+      try {
+        stats = await fs.lstat(full);
+      } catch {
         continue;
       }
-      if (!entry.isFile()) continue;
+      // Symlinks are never followed (a link may point outside the roots or at
+      // a denied location).
+      if (stats.isSymbolicLink()) continue;
+      // Every entry's realpath must still be inside the roots and outside the
+      // denied locations (defends against a parent swapped mid-walk).
+      let real: string;
+      try {
+        real = realpathSync(full);
+      } catch {
+        continue;
+      }
+      if (!guard.isContainedReal(real)) continue;
+      if (stats.isDirectory()) {
+        await walk(full, session, matcher, names, mode, policy, guard);
+        continue;
+      }
+      if (!stats.isFile()) continue;
       session.scanned += 1;
-      if (names && !names.test(entry.name)) continue;
+      if (names && !names.test(name)) continue;
       if (mode === 'filename') {
-        if (matcher.test(entry.name)) session.results.push({ path: full });
+        if (matcher.test(name)) session.results.push({ path: full });
         continue;
       }
-      let stat;
-      try {
-        stat = await fs.stat(full);
-      } catch {
-        continue;
-      }
-      if (stat.size > JC_SEARCH_LIMITS.maxFileBytes) continue;
-      let text: string;
-      try {
-        text = await fs.readFile(full, 'utf8');
-      } catch {
-        continue;
-      }
-      if (text.includes('\0')) continue;
+      if (stats.size > JC_SEARCH_LIMITS.maxFileBytes) continue;
+      const text = await readContainedText(full, policy);
+      if (text === undefined || text.includes('\0')) continue;
       const lines = text.split(/\n/);
       for (let index = 0; index < lines.length; index += 1) {
         if (session.results.length >= JC_SEARCH_LIMITS.maxStoredHits) {
@@ -193,7 +242,7 @@ export function createSearchRegistry(): SearchRegistry {
         const oldest = sessions.keys().next().value;
         if (oldest && oldest !== session.searchId) sessions.delete(oldest);
       }
-      await walk(root, session, matcher, names, mode);
+      await walk(root, session, matcher, names, mode, policy, jcWalkGuard(policy));
       session.matched = session.results.length;
       session.done = !session.cancelled;
       return page(session, pageLimit(args.limit));
