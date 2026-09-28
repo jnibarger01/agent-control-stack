@@ -13,5 +13,8 @@
   },
   "bin": {
     "acs-jev": "./dist/cli.js"
+  },
+  "dependencies": {
+    "@agent-control-stack/shared": "0.1.0"
   }
 }

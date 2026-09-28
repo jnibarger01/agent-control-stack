@@ -401,14 +401,13 @@ async function handleToolsCall(input: {
       actor
     });
     // Shadow-mode Jev advisory (log-only, fire-and-forget). Fired ONLY after
-    // the policy-gated create_work_item call succeeds, so rejected intakes
-    // never send goal text to the advisory engine. Inert unless
-    // ACS_JEV_ENABLED=1. NEVER affects policy, approval, or routing
-    // decisions; it only emits advisory probability telemetry for the
-    // mission intake. State text is sent unauthenticated to the loopback
-    // advisory endpoint (127.0.0.1:8017) by design.
+    // the policy-gated create_work_item call succeeds. State is redacted and
+    // bounded before the loopback System One call. Correlation reuses the
+    // canonical work-item id; no trace id is minted at intake.
     if (parsed.data.name === "create_work_item") {
-      void maybeRunJevShadowAdvisory(parsed.data.arguments ?? {}).catch(() => {});
+      void maybeRunJevShadowAdvisory(parsed.data.arguments ?? {}, {
+        correlation: { workItemId: workItemIdFromToolResult(result) }
+      }).catch(() => {});
     }
     if (localAgent) {
       const structured = asStructuredContent(result);

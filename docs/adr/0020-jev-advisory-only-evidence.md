@@ -12,11 +12,14 @@ against the deterministic mission classifier, and evaluated offline. The risk
 is a well-documented failure mode: an advisory model quietly becoming an
 authorization, routing, approval, or promotion gate.
 
-The engine is a local yes/no probability engine reachable at
-`http://127.0.0.1:8017/v1/systemone`. It returns a single batched response of
-`{ model, answers: { <signal>: { type: "noul", noul: <probability 0..1> } } }`
-per `POST`. It does not advertise `choice` or `score` support, so the adapter
-must not assume or invent those capabilities.
+The deployed local engine is currently Noul-only and reachable at
+`http://127.0.0.1:8017/v1/systemone`. For Noul, `answer.noul` is **P(yes)**:
+values near `1` are strong yes and values near `0` are strong no. The adapter
+also owns typed Choice and Score contracts, but the deployed runtime does not
+advertise those primitives. Choice/Score therefore remain capability-gated and
+must never be inferred, downgraded to Noul, or fabricated. A complete trusted
+runtime capability profile may replace the current local default without
+changing the authority boundary.
 
 ## Decision
 

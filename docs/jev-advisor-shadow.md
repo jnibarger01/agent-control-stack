@@ -1,81 +1,111 @@
-# Jev Advisor — Shadow-Mode Advisory Classification
+# Jev Advisor — Shadow Semantic Observation
 
-Status: implemented (shadow mode only). Jev is a local yes/no probability
-engine served at `http://127.0.0.1:8017/v1/systemone` (model `jev-latest`).
-The adapter lives in `packages/jev-advisor` (`@agent-control-stack/jev-advisor`).
+Status: JEV-2 implemented on this branch; Jev remains advisory only.
 
-## Advisory only, never authoritative
+The System One endpoint is http://127.0.0.1:8017/v1/systemone by default.
+The adapter lives in packages/jev-advisor.
 
-Jev output is advisory metadata. It MUST NOT influence classifier evidence,
-risk ranking, policy decisions, approvals, routing authority, or any
-deterministic check. A differential test
-(`packages/policy-gate/src/jev-shadow.test.ts`) proves
-`classifyMissionIntake` evidence is identical with and without the advisor
-enabled. The evidence schema carries no Jev fields.
+## Authority boundary
 
-## Implemented behavior
+ACS remains the sole authority. Jev output MUST NOT change:
 
-- Feature gate `ACS_JEV_ENABLED`: off (inert, no network call) unless `1`.
-- `classifyJev(state, questions, options?)` batches ALL questions into one
-  POST; endpoint `ACS_JEV_URL` (default above), timeout `ACS_JEV_TIMEOUT_MS`
-  (default 750ms, AbortController).
-- Degrade-never-fail: timeout, connection refusal, non-2xx, invalid JSON,
-  or missing/malformed/out-of-range answers resolve with `degraded: true`,
-  empty signals, `model: null` — never a rejection, never fabricated
-  probabilities.
-- Telemetry (`buildJevTelemetryEvent` / `formatJevTelemetry`):
-  `{"classifier":"jev-routing-v1","consumer":"mission-router","latency_ms":84,"signals":{"needs_code":0.96},"route_before_jev":null,"route_selected":null,"actual_outcome":null}`
-  (degraded events add `"degraded": true` and omit probabilities). No state
-  text or secrets in events.
-- Shadow wiring: `packages/policy-gate/src/jev-shadow.ts` emits TWO batched
-  calls (6 routing signals, then 4 risk signals) as stderr telemetry lines,
-  fired-and-forgotten at the gateway MCP `create_work_item` boundary
-  (`apps/gateway/src/mcp.ts`) — only after the policy-gated tool call
-  succeeds, so rejected intakes never reach the advisory engine. Not wired
-  into `classifyMissionIntake`, policy, approval, or routing paths.
-- CLI: `acs-jev classify --state-file <path> --signal name="..." ... [--json] [--strict]`
-  prints the JevResult JSON plus an explicit machine-readable `decision`
-  field (`"skip" | "continue" | "duplicate_check_required" | "degraded"`;
-  see the consumer contract below) and exits 0 even on degradation
-  (`--strict` exits 2, for tests only).
+- ClassifierEvidence or deterministic task/risk/sensitivity classification
+- routing, executor, or model selection
+- policy allow/deny
+- approvals or capability issuance/consumption
+- work-item lifecycle, retries, verification, or promotion
 
-## Consumer contract and status
+Unavailable, timed-out, incompatible, malformed, or disabled Jev produces
+empty/degraded advisory evidence. There is no heuristic fallback. LoopTrace
+and Jev evidence must never be read back as authorization state.
 
-Consumers MUST act on the explicit machine-readable `decision` field emitted
-by `deriveJevDecision` / the CLI — never on prose or telemetry fields:
+## TypeSafe semantics
 
-- `"degraded"`: any Jev failure, disabled adapter, unavailability, timeout,
-  or malformed response; overrides any probability (never skip on degraded
-  data).
-- `"duplicate_check_required"`: status ok AND `duplicate_like` classifies
-  `"yes"`; the authoritative GitHub/open-PR duplicate check must run, the
-  Jev result alone NEVER discards, and a failure of that follow-up check
-  must also fail open into the existing agent path. Takes precedence over
-  `"skip"` (Jev must never discard something merely for looking
-  duplicate-like without the authoritative repo-scoped duplicate check).
-- `"skip"`: status ok AND `actionable` classifies `"no"` AND the probability
-  assigned to the returned no classification is <= 0.05.
-- `"continue"`: everything else (including a missing required signal).
+Noul probability is **P(yes)**.
 
-Cron/CI prefilter consumers (wired separately at the cron layer, not in this
-repo path) treat unknown, timeout, malformed, degraded, disabled, and CLI
-failure identically: NO skip, existing path unchanged, fail-open.
+- near 1: strong yes
+- near 0: strong no
+- p >= high: yes
+- p <= low: no
+- otherwise: unknown
 
-Status:
+Therefore actionable.noul = 0.02 means approximately 2% probability that the
+request is actionable, which is a strong no.
 
-- ACS advisory (mission intake): implemented, shadow mode only.
-- Continuous-improvement prefilter: contract documented; wired separately
-  at the cron layer (not implemented here).
-- Hermes / Telegram pre-routing: NOT implemented, explicit follow-on
-  (Mission Router is retired per `docs/mission-router-phase0-inventory.md`;
-  Hermes core is upstream-managed).
+Choice returns one declared option plus per-option probabilities and
+confidence. Score returns a position over ordered criteria plus probabilities
+and confidence. Typed Choice and Score are implemented in the adapter but
+remain unusable against a runtime whose complete capability profile says they
+are unsupported.
 
-## Planned (not implemented)
+Current local runtime capability:
 
-- Any consumption of advisory probabilities by decision paths.
-- Cross-batch result correlation or persistence of telemetry beyond stderr.
+| Primitive | Support |
+| --------- | ------- |
+| Noul      | yes     |
+| Choice    | no      |
+| Score     | no      |
 
-See `packages/jev-advisor/README.md` for the threshold table and API details.
-Every probability in the contract is the probability assigned to the
-returned no classification; the Jev wire representation is an internal
-detail of the adapter and never appears in contract text or telemetry.
+## Runtime capability negotiation
+
+LOCAL_BINARY_CAPABILITY is the default profile for the currently deployed
+binary; it is not permanent architectural truth. classifyJev can consume a
+complete profile supplied by runtime configuration, transport initialization,
+trusted health/metadata discovery, or injected tests.
+
+Missing response capability fields do not mean false. Only a complete trusted
+capability source can establish full primitive support. Unsupported requested
+primitives degrade with INCOMPATIBLE_MODEL before transport; they are never
+silently converted to Noul.
+
+## Mission-intake fan-out
+
+Question set jev-intake@2 owns exactly ten production intake questions:
+actionable, needs_code, needs_shell, needs_browser, needs_mobile,
+needs_desktop, destructive, auth_sensitive, runtime_mutation, and
+approval_likely.
+
+All ten are independent Noul questions over the same state and are sent in
+one POST /v1/systemone. The old routing/risk two-request split is removed.
+
+## Redaction and bounds
+
+Before state reaches Jev it is deterministically redacted and bounded.
+Secret-shaped text, authentication material, capability/approval tokens, and
+unrestricted argv are removed or replaced. This transformation contains no
+model logic.
+
+Telemetry schema jev-advisory-event/2 never includes raw state or tool
+arguments. It carries:
+
+- partial canonical correlation: request_id, work_item_id, trace_id when known
+- question_set_version and primitive per observation
+- model and resolved runtime capability profile
+- latency and degradation reason
+- bounded Noul/Choice/Score observations
+- a compact deterministic classifier baseline
+- actual_outcome when later enriched
+
+At intake, the gateway reuses the created work-item ID and the mission
+request ID. It does not mint a trace ID solely for Jev.
+
+## Gateway wiring
+
+packages/policy-gate/src/jev-shadow.ts runs only after create_work_item
+succeeds. It is feature-gated by ACS_JEV_ENABLED, fire-and-forget, and catches
+both Jev and telemetry-sink failures. The deterministic baseline snapshot is
+copied for comparison; the authoritative classifier object is not modified.
+
+Regression tests prove the authoritative classifier evidence hash is
+identical with Jev disabled, healthy, and degraded.
+
+## Existing advisory skip helper
+
+deriveJevDecision retains the historical offline recommendation semantics:
+when actionable is classified no and actionable P(yes) <= 0.05, it may return
+skip. This helper is not wired into authoritative ACS intake. A
+duplicate-like recommendation never replaces the deterministic duplicate
+check.
+
+Any future promotion of Jev evidence into an authoritative decision requires
+a separate design/ADR and evidence review.
