@@ -30,7 +30,7 @@
  * exactly as the manifest says it should — behavioral parity, not just data
  * parity.
  */
-import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -40,11 +40,21 @@ import {
   JC_AUDIENCE,
   JC_CAPABILITY_VERSION,
   JC_SCOPES,
+  jcMcpToolDescriptors,
   jcToolContracts
 } from "@agent-control-stack/jc-tool-manifest";
-import { jaceCommanderToolNames, jaceCommanderToolPolicy } from "@agent-control-stack/desktop-commander-adapter";
+import {
+  JACE_COMMANDER_AUDIENCE,
+  JACE_COMMANDER_CAPABILITY_VERSION,
+  JACE_COMMANDER_INVOCATION_DOMAIN,
+  jaceCommanderToolNames,
+  jaceCommanderToolPolicy,
+  prepareJaceCommanderCapability,
+  signPreparedJaceCommanderCapability,
+  validateJaceCommanderInvocation
+} from "@agent-control-stack/desktop-commander-adapter";
 import * as jcContract from "../../vendor/desktop-commander/src/jace-commander/contract.ts";
-import { strictCanonicalJsonV1 } from "../../vendor/desktop-commander/src/managed-acs.ts";
+import { JC_TOOLS } from "../../vendor/desktop-commander/src/jace-commander/tool-descriptors.ts";
 
 const KEY_ID = "drift-jc-key-1";
 const RUNTIME_ID = "runtime_jc_drift";
@@ -52,54 +62,65 @@ const RUNTIME_ID = "runtime_jc_drift";
 function keys() {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
   return {
-    privateKey,
+    privateKey: privateKey.export({ format: "der", type: "pkcs8" }).toString("base64url"),
     publicKey: publicKey.export({ format: "der", type: "spki" }).toString("base64url")
   };
 }
 
 function mint(
-  privateKey: ReturnType<typeof generateKeyPairSync>["privateKey"],
+  privateKey: string,
   toolName: string,
   normalizedArguments: Record<string, unknown>,
   overrides: Record<string, unknown> = {}
 ) {
-  const policy = jcContract.JC_TOOL_POLICIES[toolName]!;
-  const now = Date.now();
-  const payload = {
-    version: JC_CAPABILITY_VERSION,
-    issuer: "acs",
-    audience: JC_AUDIENCE,
-    runtimeId: RUNTIME_ID,
+  const invocation = validateJaceCommanderInvocation(toolName, normalizedArguments);
+  const actionHash = randomBytes(32).toString("hex");
+  const authorization = {
     workItemId: "wi-drift-1",
     attemptId: "att-drift-1",
     leaseId: "lease-drift-1",
-    leaseEpoch: 1,
-    toolName,
-    normalizedArguments,
-    invocationHash: jcContract.computeJcInvocationHash(toolName, normalizedArguments),
-    actionHash: randomBytes(32).toString("hex"),
-    requestHash: randomBytes(32).toString("hex"),
+    workerId: "worker-drift-1",
     planHash: randomBytes(32).toString("hex"),
-    scopes: [...policy.scopes],
-    ...(policy.requiresApproval ? { approvalId: "appr-drift-1" } : {}),
-    issuedAt: new Date(now).toISOString(),
-    expiresAt: new Date(now + 20_000).toISOString(),
-    nonce: randomBytes(32).toString("base64url"),
-    ...overrides
-  };
-  for (const [key, value] of Object.entries(overrides))
-    if (value === undefined) delete (payload as Record<string, unknown>)[key];
-  const signature = sign(null, Buffer.from(strictCanonicalJsonV1(payload), "utf8"), privateKey).toString("base64url");
-  return { payload, signature, keyId: KEY_ID };
+    inputHash: randomBytes(32).toString("hex"),
+    fencingEpoch: 1,
+    actionHash,
+    invocation,
+    ...(invocation.policy.requiresApproval
+      ? { approvalId: "appr-drift-1", approvalActionHash: actionHash }
+      : {})
+  } as Parameters<typeof prepareJaceCommanderCapability>[0];
+  const config = { runtimeId: RUNTIME_ID, keyId: KEY_ID, privateKey, ttlMs: 20_000 };
+  const prepared = prepareJaceCommanderCapability(authorization, config, new Date());
+  const payload = { ...prepared, ...overrides } as Record<string, unknown>;
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) delete payload[key];
+  }
+  return signPreparedJaceCommanderCapability(
+    payload as Parameters<typeof signPreparedJaceCommanderCapability>[0],
+    config
+  );
 }
 
 describe("jc-tool-manifest drift gate", () => {
-  it("lists the same tool set in the manifest, ACS's adapter, and DC's policy table", () => {
+  it("keeps capability constants aligned across manifest, ACS issuer, and JC verifier", () => {
+    expect(JACE_COMMANDER_CAPABILITY_VERSION).toBe(JC_CAPABILITY_VERSION);
+    expect(JACE_COMMANDER_CAPABILITY_VERSION).toBe(jcContract.JC_CAPABILITY_VERSION);
+    expect(JACE_COMMANDER_AUDIENCE).toBe(JC_AUDIENCE);
+    expect(JACE_COMMANDER_AUDIENCE).toBe(jcContract.JC_AUDIENCE);
+    expect(JACE_COMMANDER_INVOCATION_DOMAIN).toBe(jcContract.JC_INVOCATION_DOMAIN);
+  });
+
+  it("lists the same tool set in the manifest, ACS's adapter, DC's policy table, and MCP surface", () => {
     const manifestNames = jcToolContracts()
       .map((entry) => entry.name)
       .sort();
     expect(jaceCommanderToolNames().sort()).toEqual(manifestNames);
     expect(Object.keys(jcContract.JC_TOOL_POLICIES).sort()).toEqual(manifestNames);
+    expect(JC_TOOLS.map((tool) => tool.name).sort()).toEqual(manifestNames);
+  });
+
+  it("matches the exact MCP descriptors Jace Commander advertises", () => {
+    expect(JC_TOOLS).toEqual(jcMcpToolDescriptors());
   });
 
   it("agrees on scopes and approval requirement for every tool, across the manifest, ACS and DC", () => {
@@ -107,6 +128,7 @@ describe("jc-tool-manifest drift gate", () => {
       const acsPolicy = jaceCommanderToolPolicy(entry.name);
       expect(acsPolicy, `ACS is missing a policy for ${entry.name}`).toBeDefined();
       expect(acsPolicy!.scopes).toEqual(entry.scopes);
+      expect(Object.isFrozen(acsPolicy!.scopes), `${entry.name} ACS scopes must be immutable`).toBe(true);
       expect(acsPolicy!.requiresApproval).toBe(entry.requiresApproval);
       expect(acsPolicy!.actionKind).toBe(entry.actionKind);
       expect(acsPolicy!.risk).toBe(entry.risk);
