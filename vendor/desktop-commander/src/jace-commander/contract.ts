@@ -41,8 +41,11 @@ export interface JcToolPolicy {
 
 /**
  * Every tool the server registers MUST appear here; server.ts asserts it at
- * startup. Approval requirements are the manifest's: today `privileged_exec`
- * is the only approval-gated tool.
+ * startup. Approval requirements are the manifest's: every tool whose
+ * manifest entry has `requiresApproval` (privileged_exec, write_file,
+ * create_directory, move_file, edit_block, start_process, kill_process,
+ * git_add, git_commit, git_fetch, git_push) must carry an approvalId, and no
+ * other tool may.
  */
 export const JC_TOOL_POLICIES: Readonly<Record<string, JcToolPolicy>> = Object.freeze(
   Object.fromEntries(

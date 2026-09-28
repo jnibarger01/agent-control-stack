@@ -2,7 +2,12 @@
  * Governed child processes. argv[0] is an absolute executable, never a shell.
  * The CLI does not spawn; it calls these handlers through /jc/mcp.
  *
- * ACS approval binds the exact argv and cwd, so the approver sees what runs.
+ * ACS approval binds the exact argv, cwd and timeoutMs through the signed
+ * invocation hash, and the approval summary ACS shows the approver
+ * (jaceCommanderApprovalSummary in packages/desktop-commander-adapter) lists
+ * that argv (secret-looking values redacted), cwd and timeoutMs.
+ * kill_process approvals show only the session id / pid: ACS never sees a
+ * session's argv, which lives in this process.
  * The shell refusal below is defense in depth, not a sandbox: an approved
  * interpreter (python, node, ...) can still run arbitrary code.
  */

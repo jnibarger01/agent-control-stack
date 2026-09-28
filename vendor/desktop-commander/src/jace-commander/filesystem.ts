@@ -91,6 +91,26 @@ function deniedMatcher(policy: JcFsPolicy): (real: string) => boolean {
   return (real) => denied.some((root) => isInside(root, real)) || isCredentialPath(real);
 }
 
+/**
+ * Per-walk containment guard for tools that enumerate many paths (list,
+ * search). Roots and denied roots are resolved once; `isDenied` is the same
+ * denied-root / credential-path predicate read_file and list_directory use,
+ * and `isContainedReal` is assertContainedReal as a predicate.
+ */
+export interface JcWalkGuard {
+  isDenied(candidate: string): boolean;
+  isContainedReal(real: string): boolean;
+}
+
+export function jcWalkGuard(policy: JcFsPolicy): JcWalkGuard {
+  const roots = policy.roots.map(realpathOrSelf);
+  const isDenied = deniedMatcher(policy);
+  return {
+    isDenied,
+    isContainedReal: (real) => roots.some((root) => isInside(root, real)) && !isDenied(real),
+  };
+}
+
 /** The roots / denied / credential checks on an already-resolved path. */
 function assertContainedReal(real: string, policy: JcFsPolicy): void {
   if (!policy.roots.map(realpathOrSelf).some((root) => isInside(root, real))) {
@@ -134,7 +154,7 @@ function fsError(error: unknown, requested: unknown): IntegrationError {
   return new IntegrationError('read_failed', `cannot access path: ${String(requested)}`);
 }
 
-interface OpenedPath {
+export interface OpenedPath {
   handle: FileHandle;
   /** Path of the inode actually opened (re-contained). */
   real: string;
@@ -154,7 +174,7 @@ export function setJcFsRaceHookForTests(hook: typeof afterContainHook): void {
 }
 
 /** Contain, open once without following symlinks, and re-contain what was opened. */
-async function openContained(requested: unknown, policy: JcFsPolicy): Promise<OpenedPath> {
+export async function openContained(requested: unknown, policy: JcFsPolicy): Promise<OpenedPath> {
   const checked = containJcPath(requested, policy);
   if (afterContainHook) await afterContainHook(checked);
   let handle: FileHandle;
@@ -203,7 +223,7 @@ function entryType(stats: { isFile(): boolean; isDirectory(): boolean; isSymboli
 }
 
 /** readdir through a no-follow descriptor, so a directory swapped for a symlink is not listed. */
-async function readdirNoFollow(dir: string): Promise<string[]> {
+export async function readdirNoFollow(dir: string): Promise<string[]> {
   if (!PROC_FD) return fs.readdir(dir);
   const handle = await fs.open(dir, OPEN_FLAGS | fsConstants.O_DIRECTORY);
   try {

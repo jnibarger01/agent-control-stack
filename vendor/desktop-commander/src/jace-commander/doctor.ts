@@ -89,7 +89,7 @@ export async function jcDoctor(config: JcConfig, runtime: DoctorRuntime): Promis
       ? runtime.verifierReady
         ? `managed: every call needs an ACS-issued acs.jc.v1 capability (key ${config.acsKeyId ?? 'unset'})`
         : 'managed but no ACS verification key is configured; every call fails closed'
-      : 'standalone: calls are NOT capability-checked; development only',
+      : 'standalone: read-only tools only, NOT capability-checked; development only',
   });
   const roots = config.fsRoots.map((root) => ({ root, exists: fs.existsSync(root) }));
   checks.push({

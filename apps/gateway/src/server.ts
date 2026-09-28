@@ -10,6 +10,9 @@ import {
   authorizeJaceCommanderExecution,
   jaceCommanderApprovalSummary,
   jaceCommanderSigningConfigFromEnv,
+  jaceCommanderToolPolicy,
+  jaceCommanderWorkItemIntent,
+  jaceCommanderWorkItemTitle,
   prepareJaceCommanderCapability,
   signPreparedJaceCommanderCapability,
   SqliteJaceCommanderIssuanceRegistry,
@@ -79,6 +82,7 @@ import {
   MAX_EVENT_LIMIT,
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
+  resolveTraceProducerConfig,
   validateHeartbeatTtl,
   WorkerIdentityRegistry,
   type ReadEventsOptions,
@@ -304,6 +308,9 @@ function withAttemptPlan(
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
+  // Refuse to boot on an invalid ACS_TRACE_INSTANCE / ACS_RELEASE_SHA (trace_config_invalid)
+  // rather than discovering it inside an approval transaction (PR #212 B4, ADR 0021).
+  resolveTraceProducerConfig();
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
@@ -315,7 +322,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const sseClientsPerPrincipal = new Map<string, number>();
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
-    heartbeatTtlMs
+    heartbeatTtlMs,
+    // The gateway is the one process that refuses to boot on a bad trace config.
+    traceConfigValidation: "eager"
   });
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
@@ -1801,11 +1810,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           existing ??
           tools.create_work_item(
             createWorkItemSchema.parse({
-              title:
-                invocation.toolName === "privileged_exec"
-                  ? `ROOT: ${String((invocation.arguments.argv as string[]).join(" ")).slice(0, 180)}`
-                  : `Jace Commander capability: ${invocation.toolName}`,
-              intent: `ACS-issued acs.jc.v1 capability for Jace Commander tool ${invocation.toolName} requested by ${jcActor}`,
+              // Approvers see what they approve: title and intent carry the
+              // bounded, redacted argument summary for approval-gated tools.
+              title: jaceCommanderWorkItemTitle(invocation),
+              intent: jaceCommanderWorkItemIntent(invocation, jcActor),
               requester: "agent",
               requesterSubject: jcActor,
               target: {},
@@ -1871,6 +1879,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             decision: "require_approval",
             workItemId: workItem.id,
             actionHash,
+            approvalSummary: jaceCommanderApprovalSummary(invocation),
             approvalInstructions: `A human must POST /work-items/${workItem.id}/approve with actionHash ${actionHash}, then retry the identical call`
           });
         }
@@ -2119,17 +2128,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!workItem) {
         return reply.code(404).send({ error: "work item not found" });
       }
-      const dcTool =
-        typeof workItem.requestedActions[0]?.params?.tool === "string"
-          ? workItem.requestedActions[0].params.tool
-          : undefined;
-      if (
-        workItem.requesterSubject === actor &&
-        dcTool &&
-        desktopCommanderToolPolicy(dcTool)?.requiresApproval === true
-      ) {
+      const toolParams = workItem.requestedActions[0]?.params;
+      const dcTool = typeof toolParams?.tool === "string" ? toolParams.tool : undefined;
+      // Jace Commander (acs.jc.v1) items carry their contract; every tool the
+      // JC manifest marks requiresApproval is covered, not only the tools that
+      // also happen to have a Desktop Commander policy.
+      const approvalGatedTool =
+        dcTool !== undefined &&
+        (toolParams?.contract === "acs.jc.v1"
+          ? jaceCommanderToolPolicy(dcTool)?.requiresApproval === true
+          : desktopCommanderToolPolicy(dcTool)?.requiresApproval === true);
+      if (workItem.requesterSubject === actor && approvalGatedTool) {
         return reply.code(403).send({
-          error: "requester cannot approve its own Desktop Commander operation",
+          error:
+            toolParams?.contract === "acs.jc.v1"
+              ? "requester cannot approve its own Jace Commander operation"
+              : "requester cannot approve its own Desktop Commander operation",
           code: "approval_self_denied"
         });
       }

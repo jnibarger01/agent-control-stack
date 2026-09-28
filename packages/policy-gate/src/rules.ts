@@ -49,7 +49,7 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     if (context.operation === "approve" && context.actor === ACS_ADMIN_APPROVER) {
       return risk("forbidden", "privileged execution requires a human approver", ["deny:privileged-admin-approval"]);
     }
-    if (context.operation === "approve" && context.actor === context.requester) {
+    if (context.operation === "approve" && isRequestingActor(context)) {
       return risk("forbidden", "privileged execution cannot be self-approved", ["deny:self-approval"]);
     }
     return risk("requires_approval", "privileged execution always requires human approval", [
@@ -60,7 +60,7 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     if (context.operation === "approve" && context.actor === ACS_ADMIN_APPROVER) {
       return risk("forbidden", "Jace Commander mutations require a human approver", ["deny:jc-admin-approval"]);
     }
-    if (context.operation === "approve" && context.actor === context.requester) {
+    if (context.operation === "approve" && isRequestingActor(context)) {
       return risk("forbidden", "Jace Commander mutations cannot be self-approved", ["deny:self-approval"]);
     }
     return risk("requires_approval", "Jace Commander mutation requires human approval", ["approval:jc-mutation"]);
@@ -318,6 +318,18 @@ function isSystemMutation(commandName: string): boolean {
 function isLongRunning(context: PolicyContext): boolean {
   const timeoutMs = Number(context.action.params.timeoutMs ?? 0);
   return context.action.params.longRunning === true || timeoutMs > 120_000;
+}
+
+/**
+ * Whether the acting principal is the one that requested the work. Jace
+ * Commander work items are created with requester "agent" and the real
+ * (attested) actor in requesterSubject, so both are compared.
+ */
+function isRequestingActor(context: PolicyContext): boolean {
+  return (
+    context.actor === context.requester ||
+    (context.requesterSubject !== undefined && context.actor === context.requesterSubject)
+  );
 }
 
 function isSelfApproval(context: PolicyContext): boolean {

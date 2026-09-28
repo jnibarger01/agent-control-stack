@@ -8,7 +8,7 @@
  * `jace-commander doctor` reports the live chain as healthy.
  */
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { jcMcpToolDescriptors, jcToolNames } from "@agent-control-stack/jc-tool-manifest";
@@ -122,6 +122,54 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
     const denied = await mcp.call("start_search", { path: "/etc", pattern: "root", mode: "content" });
     expect(denied.status).toBe(503);
     expect(String(denied.body.code)).toMatch(/path_outside_allow_root/u);
+  });
+
+  it("start_search never names or returns credential files, denied dirs, or symlink escapes (PR #212 B1)", async () => {
+    // All values are fake. Before the fix these came back as search hits.
+    const secrets = join(project, "secrets");
+    mkdirSync(join(secrets, ".ssh"), { recursive: true });
+    mkdirSync(join(secrets, ".aws"), { recursive: true });
+    writeFileSync(join(secrets, ".env"), "API_TOKEN=FAKE_E2E_SECRET_ENV\n");
+    writeFileSync(join(secrets, "credentials.json"), '{"secret":"FAKE_E2E_SECRET_CREDS"}\n');
+    writeFileSync(join(secrets, ".ssh", "id_ed25519"), "FAKE_E2E_SECRET_SSH\n");
+    writeFileSync(join(secrets, ".aws", "credentials"), "aws_secret_access_key = FAKE_E2E_SECRET_AWS\n");
+    writeFileSync(join(secrets, "device-key.pem"), "FAKE_E2E_SECRET_PEM\n");
+    const outside = join(box.home, "outside-roots");
+    mkdirSync(outside, { recursive: true });
+    writeFileSync(join(outside, "loot.txt"), "FAKE_E2E_SECRET_OUTSIDE\n");
+    symlinkSync(join(outside, "loot.txt"), join(secrets, "escape-file.txt"));
+    symlinkSync(outside, join(secrets, "escape-dir"));
+    writeFileSync(join(secrets, "ok.txt"), "FAKE_E2E_SECRET_NOT_REALLY_OK\n");
+
+    const content = await mcp.call("start_search", {
+      path: project,
+      pattern: "FAKE_E2E_SECRET",
+      mode: "content",
+      limit: 100
+    });
+    expect(content.status, JSON.stringify(content.body)).toBe(200);
+    const hits = content.body.result.structuredContent.results as Array<{ path: string; text?: string }>;
+    expect(hits.map((hit) => hit.path)).toEqual([join(secrets, "ok.txt")]);
+
+    const names = await mcp.call("start_search", { path: project, pattern: "*", mode: "filename", limit: 100 });
+    expect(names.status, JSON.stringify(names.body)).toBe(200);
+    const named = (names.body.result.structuredContent.results as Array<{ path: string }>).map((hit) => hit.path);
+    for (const leaked of [
+      ".env",
+      "credentials.json",
+      "id_ed25519",
+      "credentials",
+      "device-key.pem",
+      "loot.txt",
+      "escape-file.txt"
+    ]) {
+      expect(
+        named.some((path) => path.endsWith(`/${leaked}`)),
+        `${leaked} named in ${JSON.stringify(named)}`
+      ).toBe(false);
+    }
+    expect(JSON.stringify(names.body)).not.toContain("FAKE_E2E_SECRET");
+    expect(named).toContain(join(secrets, "ok.txt"));
   });
 
   it("write_file does nothing until the operator approves those exact arguments", async () => {
