@@ -81,7 +81,11 @@ async function runToolCommand(argv: string[], config: JcConfig, out: Out, env: N
   const { command, rest } = resolved;
   let args: Record<string, unknown>;
   try {
-    args = command.toArguments(parseArgs(rest, ['json', ...(command.booleanFlags ?? [])]));
+    const parsed = parseArgs(rest, ['json', ...(command.booleanFlags ?? [])], command.options);
+    if (parsed.positionals.length > command.maxPositionals) {
+      throw new CliUsageError(`unexpected argument: ${parsed.positionals[command.maxPositionals]}`);
+    }
+    args = command.toArguments(parsed);
   } catch (error) {
     if (!(error instanceof CliUsageError)) throw error;
     const outcome: JcCallOutcome = { kind: 'invalid_arguments', exitCode: JC_EXIT.invalidArguments, code: 'usage', message: `${error.message}\nusage: jace-commander ${command.usage}` };
@@ -204,8 +208,14 @@ async function localStatus(config: JcConfig): Promise<Record<string, unknown>> {
 }
 
 export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env, io?: Partial<Out>): Promise<number> {
-  const json = argv.includes('--json');
-  const words = argv.filter((arg) => arg !== '--json');
+  // --json is a global option only before `--`: after it, every argument
+  // belongs to the invoked program (e.g. `jc sudo -- /usr/bin/tool --json`)
+  // and must reach ACS for approval exactly as typed.
+  const terminator = argv.indexOf('--');
+  const options = terminator === -1 ? argv : argv.slice(0, terminator);
+  const passthrough = terminator === -1 ? [] : argv.slice(terminator);
+  const json = options.includes('--json');
+  const words = [...options.filter((arg) => arg !== '--json'), ...passthrough];
   const out: Out = {
     json,
     stdout: io?.stdout ?? ((text) => console.log(text)),

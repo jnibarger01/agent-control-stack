@@ -20,8 +20,12 @@ export interface ParsedArgs {
   flags: Map<string, string | true>;
 }
 
-/** --flag value | --flag=value | boolean --flag; `--` ends flag parsing. */
-export function parseArgs(argv: readonly string[], booleanFlags: readonly string[] = []): ParsedArgs {
+/**
+ * --flag value | --flag=value | boolean --flag; `--` ends flag parsing.
+ * When `valueFlags` is given, any other flag is a usage error rather than
+ * silently swallowing the next argument as its value.
+ */
+export function parseArgs(argv: readonly string[], booleanFlags: readonly string[] = [], valueFlags?: readonly string[]): ParsedArgs {
   const positionals: string[] = [];
   const flags = new Map<string, string | true>();
   for (let index = 0; index < argv.length; index += 1) {
@@ -33,6 +37,9 @@ export function parseArgs(argv: readonly string[], booleanFlags: readonly string
     if (arg.startsWith('--')) {
       const eq = arg.indexOf('=');
       const name = arg.slice(2, eq === -1 ? undefined : eq);
+      if (valueFlags && !booleanFlags.includes(name) && !valueFlags.includes(name)) {
+        throw new CliUsageError(`unknown option --${name}`);
+      }
       if (eq !== -1) flags.set(name, arg.slice(eq + 1));
       else if (booleanFlags.includes(name)) flags.set(name, true);
       else {
@@ -79,6 +86,10 @@ export interface CliCommand {
   usage: string;
   summary: string;
   booleanFlags?: readonly string[];
+  /** Value-taking options this command accepts; anything else is a usage error. */
+  options: readonly string[];
+  /** Positional arguments accepted; more is a usage error, never silently ignored. */
+  maxPositionals: number;
   toArguments(args: ParsedArgs): Record<string, unknown>;
   /** Human rendering of a successful structured result. */
   render(result: Record<string, unknown> | undefined, text: string | undefined): string;
@@ -100,6 +111,8 @@ function renderListing(result: Record<string, unknown> | undefined): string {
 export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   {
     verb: 'status',
+    options: [],
+    maxPositionals: 0,
     tool: 'jc_status',
     usage: 'status',
     summary: 'Runtime status reported by the Jace Commander server (via /jc/mcp)',
@@ -108,6 +121,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'ls',
+    options: ['depth'],
+    maxPositionals: 1,
     tool: 'list_directory',
     usage: 'ls [path] [--depth N]',
     summary: 'List a directory (default: current directory)',
@@ -119,6 +134,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'stat',
+    options: [],
+    maxPositionals: 1,
     tool: 'get_file_info',
     usage: 'stat <path>',
     summary: 'File or directory metadata',
@@ -129,6 +146,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'read',
+    options: ['offset', 'length'],
+    maxPositionals: 1,
     tool: 'read_file',
     usage: 'read <path> [--offset N] [--length N]',
     summary: 'Read a line window of a file (negative --offset reads from the end)',
@@ -150,6 +169,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'cat',
+    options: [],
+    maxPositionals: 1,
     tool: 'read_file',
     usage: 'cat <path>',
     summary: 'Print a file (up to 10000 lines; use `read` to page further)',
@@ -158,6 +179,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'search',
+    options: ['filter', 'limit'],
+    maxPositionals: 2,
     tool: 'start_search',
     usage: 'search <pattern> [path] [--files] [--content] [--regex] [--ignore-case] [--filter GLOB] [--limit N]',
     summary: 'Search file contents (default) or names under a directory',
@@ -188,6 +211,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'search-results',
+    options: ['limit'],
+    maxPositionals: 1,
     tool: 'get_more_search_results',
     usage: 'search-results <search-id> [--limit N]',
     summary: 'Next page of a search',
@@ -202,6 +227,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'search-status',
+    options: [],
+    maxPositionals: 0,
     tool: 'list_searches',
     usage: 'search-status',
     summary: 'List searches without their hit contents',
@@ -210,6 +237,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'search-stop',
+    options: [],
+    maxPositionals: 1,
     tool: 'stop_search',
     usage: 'search-stop <search-id>',
     summary: 'Cancel a search',
@@ -218,6 +247,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'write',
+    options: ['content'],
+    maxPositionals: 1,
     tool: 'write_file',
     usage: 'write <path> --content TEXT [--overwrite]',
     summary: 'Write a file (approval required)',
@@ -231,6 +262,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'mkdir',
+    options: [],
+    maxPositionals: 1,
     tool: 'create_directory',
     usage: 'mkdir <path> [--recursive]',
     summary: 'Create a directory (approval required)',
@@ -243,6 +276,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'mv',
+    options: [],
+    maxPositionals: 2,
     tool: 'move_file',
     usage: 'mv <from> <to>',
     summary: 'Move a file inside the allowed roots (approval required)',
@@ -254,6 +289,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'edit',
+    options: ['new', 'old'],
+    maxPositionals: 1,
     tool: 'edit_block',
     usage: 'edit <path> --old TEXT --new TEXT',
     summary: 'Replace one exact text span (approval required)',
@@ -266,6 +303,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'start',
+    options: ['cwd', 'timeout'],
+    maxPositionals: Number.POSITIVE_INFINITY,
     tool: 'start_process',
     usage: 'start --cwd DIR -- /abs/executable [args...]',
     summary: 'Start a non-shell process (approval required)',
@@ -281,6 +320,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'output',
+    options: ['offset'],
+    maxPositionals: 1,
     tool: 'read_process_output',
     usage: 'output <session-id> [--offset N]',
     summary: 'Read output from a managed process',
@@ -292,6 +333,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'ps',
+    options: [],
+    maxPositionals: 0,
     tool: 'list_processes',
     usage: 'ps',
     summary: 'List managed processes',
@@ -300,6 +343,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'kill',
+    options: [],
+    maxPositionals: 1,
     tool: 'kill_process',
     usage: 'kill <session-id>',
     summary: 'Terminate a managed process (approval required)',
@@ -308,6 +353,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git status',
+    options: ['repo'],
+    maxPositionals: 0,
     tool: 'git_status',
     usage: 'git status [--repo PATH]',
     summary: 'Structured git status',
@@ -316,6 +363,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git diff',
+    options: ['path', 'repo'],
+    maxPositionals: 0,
     tool: 'git_diff',
     usage: 'git diff [--repo PATH] [--staged] [--path REL]',
     summary: 'git diff',
@@ -329,6 +378,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git log',
+    options: ['limit', 'repo'],
+    maxPositionals: 0,
     tool: 'git_log',
     usage: 'git log [--repo PATH] [--limit N]',
     summary: 'Recent commits',
@@ -340,6 +391,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git branch',
+    options: ['repo'],
+    maxPositionals: 0,
     tool: 'git_branch',
     usage: 'git branch [--repo PATH]',
     summary: 'Local branches',
@@ -348,6 +401,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git show',
+    options: ['repo', 'rev'],
+    maxPositionals: 0,
     tool: 'git_show',
     usage: 'git show [--repo PATH] [--rev HEAD|SHA]',
     summary: 'Show HEAD or a full commit SHA',
@@ -359,6 +414,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git add',
+    options: ['repo'],
+    maxPositionals: Number.POSITIVE_INFINITY,
     tool: 'git_add',
     usage: 'git add [--repo PATH] -- <relative> [more...]',
     summary: 'Stage explicit paths (approval required)',
@@ -370,6 +427,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git commit',
+    options: ['message', 'repo'],
+    maxPositionals: 2,
     tool: 'git_commit',
     usage: 'git commit [--repo PATH] -m MESSAGE',
     summary: 'Commit the index only (approval required)',
@@ -382,6 +441,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git fetch',
+    options: ['remote', 'repo'],
+    maxPositionals: 0,
     tool: 'git_fetch',
     usage: 'git fetch [--repo PATH] [--remote NAME]',
     summary: 'Fetch a remote (approval required)',
@@ -393,6 +454,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'git push',
+    options: ['head', 'remote', 'repo'],
+    maxPositionals: 0,
     tool: 'git_push',
     usage: 'git push --head SHA [--repo PATH] [--remote NAME]',
     summary: 'Push the approved commit on the current branch (approval required, no force)',
@@ -409,6 +472,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'doctor',
+    options: [],
+    maxPositionals: 0,
     tool: 'jc_doctor',
     usage: 'doctor',
     summary: 'Diagnose this JC process',
@@ -417,6 +482,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'ping',
+    options: [],
+    maxPositionals: 0,
     tool: 'ping',
     usage: 'ping',
     summary: 'Liveness and ACS probe',
@@ -425,6 +492,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'config',
+    options: [],
+    maxPositionals: 0,
     tool: 'get_config',
     usage: 'config',
     summary: 'Non-secret configuration',
@@ -433,6 +502,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'acs read',
+    options: ['id', 'status'],
+    maxPositionals: 1,
     tool: 'acs_read',
     usage: 'acs read <health|work-items|work-item> [--id ID] [--status STATUS]',
     summary: 'Read ACS health or work items',
@@ -445,6 +516,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'acs submit',
+    options: ['title', 'intent', 'target', 'actions', 'risk'],
+    maxPositionals: 0,
     tool: 'acs_submit_mission',
     usage: 'acs submit --title T --intent I --target JSON [--actions JSON] [--risk low|medium|high|critical]',
     summary: 'Submit a mission to ACS as a governed work item',
@@ -473,6 +546,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'swarm read',
+    options: ['task'],
+    maxPositionals: 1,
     tool: 'swarm_read',
     usage: 'swarm read <health|mission-control|runs|status|task> [--task ID]',
     summary: 'Read-only codex-swarm views',
@@ -484,6 +559,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'visualizer read',
+    options: [],
+    maxPositionals: 1,
     tool: 'visualizer_read',
     usage: 'visualizer read <system-status|runtimes|executions|approvals|alerts|agents>',
     summary: 'Read-only Agent Workflow Visualizer views',
@@ -492,6 +569,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'mission list',
+    options: [],
+    maxPositionals: 0,
     tool: 'mission_router_list',
     usage: 'mission list',
     summary: 'List Mission Router state (ids/states only)',
@@ -500,6 +579,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'looptrace verify',
+    options: [],
+    maxPositionals: 1,
     tool: 'looptrace_verify',
     usage: 'looptrace verify <trace.jsonl>',
     summary: 'Verify a LoopTrace hash chain',
@@ -508,6 +589,8 @@ export const CLI_COMMANDS: readonly CliCommand[] = Object.freeze([
   },
   {
     verb: 'sudo',
+    options: ['cwd', 'timeout'],
+    maxPositionals: Number.POSITIVE_INFINITY,
     tool: 'privileged_exec',
     usage: 'sudo [--cwd DIR] [--timeout MS] -- /abs/path/to/program [args...]',
     summary: 'Run ONE exact command as root after a human approves it in ACS',

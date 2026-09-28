@@ -95,9 +95,18 @@ Filesystem tools are contained twice:
   and checks it against `JC_FS_ROOTS` / `JC_FS_DENIED_ROOTS`. It also always
   denies built-in roots: the state dir, `/etc/jace-commander`, `~/.ssh`,
   `.gnupg`, `.aws`, `.azure`, `.kube`, `.docker`, `.config/gcloud`, the DC
-  gateway and relay config, and `.desktop-commander`. Credential-looking
-  basenames (`.env*`, keys, and so on) are refused too. If `JC_FS_ROOTS` is
-  unset, every filesystem call fails closed with `fs_roots_unconfigured`.
+  gateway and relay config, and `.desktop-commander`. Credential paths are
+  refused too (`credential-paths.ts`: ACS's canonical pattern, such as `.env*`,
+  `.git/config` and `token.json`, plus keys and `*.pem`), and listings omit
+  them entirely. If `JC_FS_ROOTS` is unset, every filesystem call fails closed
+  with `fs_roots_unconfigured`.
+* Each file is opened once with `O_NOFOLLOW`, and the inode actually opened
+  (`/proc/self/fd/N`) is contained again before any byte is read. A path
+  swapped for a symlink between the check and the read is refused.
+* Memory is bounded while reading, not afterwards. Text is streamed with a
+  1 MiB content cap, including a single enormous line. Images over 768 KiB
+  and PDF/DOCX/spreadsheets over 20 MiB get `file_too_large` rather than
+  truncated output.
 
 ## CLI (`jace-commander`, alias `jc`)
 

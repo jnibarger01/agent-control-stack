@@ -724,7 +724,9 @@ function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {
       // Policy consumers retain these objects for the process lifetime, so
       // nested policy values must be immutable too.
       scopes: Object.freeze([...source.scopes]),
-      ...TOOL_SURFACE[name]
+      group: TOOL_SURFACE[name].group,
+      pathArguments: Object.freeze([...TOOL_SURFACE[name].pathArguments]),
+      cliCommands: Object.freeze([...TOOL_SURFACE[name].cliCommands])
     });
     for (const arg of entry.pathArguments) {
       const properties = entry.inputSchema.properties as Record<string, unknown> | undefined;
@@ -764,7 +766,7 @@ export function jcMcpToolDescriptors(): Array<{
   return jcToolContracts().map(({ name, description, inputSchema }) => ({
     name,
     description,
-    inputSchema: { ...inputSchema }
+    inputSchema: structuredClone(inputSchema) as Record<string, unknown>
   }));
 }
 

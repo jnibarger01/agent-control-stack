@@ -23,6 +23,8 @@ Environment=BRIDGE_PROFILE=jace-commander
 Environment=BRIDGE_PORT=8003
 Environment=NODE_ENV=production
 EnvironmentFile=/home/jacen/.config/desktop-commander-mcp-gateway/jc-bridge.env
+# bridge.js must run from the monorepo: its default Jace Commander runtime is
+# ../../vendor/desktop-commander relative to itself.
 ExecStart=/usr/bin/env node /opt/agent-control-stack/apps/dc-mcp-gateway/bridge.js
 Restart=on-failure
 RestartSec=5
