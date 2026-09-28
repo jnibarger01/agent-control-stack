@@ -28,6 +28,14 @@ describe("jc-tool-manifest", () => {
       // Strict: an unknown key is rejected, never silently stripped.
       const probe = entry.argsSchema.safeParse({ __acs_unknown_field__: true });
       expect(probe.success, `${entry.name} must reject unknown keys`).toBe(false);
+      if (!probe.success) {
+        expect(
+          probe.error.issues.some(
+            (issue) => issue.code === "unrecognized_keys" && issue.keys.includes("__acs_unknown_field__")
+          ),
+          `${entry.name} must reject the unknown key specifically`
+        ).toBe(true);
+      }
     }
   });
 
