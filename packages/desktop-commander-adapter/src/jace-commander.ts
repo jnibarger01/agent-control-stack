@@ -61,7 +61,7 @@ export function jaceCommanderToolPolicy(toolName: string): JaceCommanderToolPoli
   if (!entry) return undefined;
   return Object.freeze({
     name: entry.name,
-    scopes: entry.scopes,
+    scopes: Object.freeze([...entry.scopes]),
     requiresApproval: entry.requiresApproval,
     actionKind: entry.actionKind,
     risk: entry.risk,
