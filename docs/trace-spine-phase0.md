@@ -107,7 +107,10 @@ The additional source-neutral lifecycle kinds are:
 - `replay.diverged`
 
 The schema version remains `trace-event/1`; existing approval events still
-validate unchanged. ACS vendors that exact publication/checksum.
+validate unchanged. ACS vendors the exact canonical trace-event/1 schema bytes
+published from that LoopTrace publication, pinned by SHA-256
+`5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434`. ACS does
+not vendor the LoopTrace commit itself.
 
 Jace Commander local event names remain private to the adapter boundary.
 Lifecycle events are normalized into the canonical vocabulary before any Jev

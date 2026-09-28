@@ -303,7 +303,7 @@ describe("request batching, endpoint, and redaction", () => {
     expect(calls[0].url).toBe("http://127.0.0.1:9999/v1/systemone");
   });
   it("redacts secret-shaped state before transport", async () => {
-    const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWX";
+    const secret = "«redacted:token…»";
     const { impl, calls } = mockFetch(noulBody({ actionable: 0.9 }));
     await classifyJev(
       `fix auth token=${secret} Bearer TEST_BEARER_PLACEHOLDER_DO_NOT_USE`,

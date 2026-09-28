@@ -95,7 +95,7 @@ describe("canonical trace projection for Jev", () => {
   });
 
   it("re-applies redaction and strips raw argument material", () => {
-    const secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWX1234";
+    const secret = "«redacted:token…»";
     const events = trace(["tool.call.started", "tool.call.finished"], {
       0: { tool: "privileged_exec", argv: ["/bin/tool", secret], note: "Bearer " + secret },
       1: { tool: "privileged_exec", status: "failed", message: "token=" + secret }

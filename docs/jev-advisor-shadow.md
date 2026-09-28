@@ -113,9 +113,11 @@ a separate design/ADR and evidence review.
 ## JEV-3 canonical trace observation
 
 JEV-3 extends the same advisory-only boundary to execution evidence. ACS now
-vendors the canonical LoopTrace lifecycle schema from LoopTrace commit
-`49aca302a1c5f0d12813c73ca4149f2fc7afefd4`; ACS does not maintain a
-private schema fork.
+vendors the exact canonical trace-event/1 schema bytes published from LoopTrace
+commit `49aca302a1c5f0d12813c73ca4149f2fc7afefd4`, pinned by SHA-256
+`5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434`; ACS does
+not maintain a private schema fork and does not vendor the LoopTrace commit
+itself.
 
 The lifecycle vocabulary adds source-neutral evidence kinds for run start/end,
 classification and route evidence, approval request/decision, executor start,
