@@ -284,6 +284,7 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
 .operator-metrics dt { color: var(--muted); }
 .operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+.operator-metrics div.overdue dt, .operator-metrics div.overdue dd { color: var(--amber); font-weight: 600; }
 .metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .metrics-scrape code { font-size: 12px; }
 .queue-item strong, .queue-item small { display: block; margin-top: 6px; }
@@ -477,6 +478,7 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
     <div><dt>Oldest lease age</dt><dd>9m 54s</dd></div>
     <div><dt>Pending approvals</dt><dd>1</dd></div>
     <div><dt>Oldest approval wait</dt><dd>40m 0s</dd></div>
+    <div class="overdue" title="Waiting longer than the 30m approval SLA"><dt>Approvals over SLA</dt><dd>1 of 2</dd></div>
   </dl>
   </div></div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>
         <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline"><ol class="timeline"><li data-sequence="3"><time>2026-07-05T00:39:50.000Z</time><strong>work_item.needs_approval</strong><small class="event-summary">work_item.id=wrk_approve · agent.id=/repo</small><details class="event-attrs"><summary>3 attributes</summary><dl><div><dt>work_item.id</dt><dd>wrk_approve</dd></div><div><dt>agent.id</dt><dd>/repo</dd></div><div><dt>api_key</dt><dd>[redacted]</dd></div></dl></details></li><li data-sequence="2"><time>2026-07-05T00:39:40.000Z</time><strong>policy.decided</strong><small class="event-summary">work_item.id=wrk_approve · action.kind=fs.read</small><details class="event-attrs"><summary>3 attributes</summary><dl><div><dt>work_item.id</dt><dd>wrk_approve</dd></div><div><dt>policy.outcome</dt><dd>require_approval</dd></div><div><dt>action.kind</dt><dd>fs.read</dd></div></dl></details></li><li data-sequence="1"><time>2026-07-05T00:39:30.000Z</time><strong>tunnel_session.heartbeat</strong><small class="event-summary">connector.id=chatgpt-prod</small><details class="event-attrs"><summary>1 attribute</summary><dl><div><dt>connector.id</dt><dd>chatgpt-prod</dd></div></dl></details></li></ol></div><button type="button" id="events-load-older" class="load-more">Load older</button></article>

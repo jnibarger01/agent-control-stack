@@ -278,6 +278,7 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
 .operator-metrics dt { color: var(--muted); }
 .operator-metrics dd { margin: 0; color: var(--ink); font-variant-numeric: tabular-nums; }
+.operator-metrics div.overdue dt, .operator-metrics div.overdue dd { color: var(--amber); font-weight: 600; }
 .metrics-scrape { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
 .metrics-scrape code { font-size: 12px; }
 .queue-item strong, .queue-item small { display: block; margin-top: 6px; }

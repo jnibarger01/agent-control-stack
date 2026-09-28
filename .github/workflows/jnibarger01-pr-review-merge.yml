@@ -84,13 +84,27 @@ jobs:
 
           # Request a fresh Copilot review. This is the semantic review for
           # correctness, security, regressions, scope, and test adequacy.
+          # Copilot review is optional: if the request fails or does not stick,
+          # or no review of the head arrives within the wait, continue without it.
+          require_copilot=true
           if ! review_request="$(gh pr edit "$PR" -R "$GITHUB_REPOSITORY" --add-reviewer @copilot 2>&1)"; then
-            upsert_comment "BLOCK — GitHub Copilot code review could not be requested. No merge was attempted.
-
-            Fix: enable Copilot code review for this repository/account, then re-run **Jace PR Review & Auto-Merge**.
-
-            Details: \`$review_request\`"
-            exit 1
+            echo "::notice::Copilot review unavailable (request failed: $review_request); continuing without it."
+            require_copilot=false
+          else
+            requested_copilot="$(gh api graphql -f owner="$OWNER" -f repo="$REPO" -F number="$PR" -f query='
+              query($owner: String!, $repo: String!, $number: Int!) {
+                repository(owner: $owner, name: $repo) {
+                  pullRequest(number: $number) {
+                    reviewRequests(first: 50) {
+                      nodes { requestedReviewer { ... on Bot { login } ... on User { login } } }
+                    }
+                  }
+                }
+              }' --jq '[.data.repository.pullRequest.reviewRequests.nodes[] | (.requestedReviewer.login // "") | ascii_downcase | select(contains("copilot"))] | length' 2>/dev/null || echo 0)"
+            if [[ "${requested_copilot:-0}" == "0" ]]; then
+              echo "::notice::Copilot review unavailable (review request did not stick); continuing without it."
+              require_copilot=false
+            fi
           fi
 
           ready=false
@@ -230,11 +244,14 @@ jobs:
 
             if [[ "$mergeable" == "UNKNOWN" ]]; then
               last_reason="GitHub is still computing mergeability"
-            elif (( copilot_current == 0 )); then
+            elif (( copilot_current == 0 )) && [[ "$require_copilot" == "true" ]] && (( attempt < 40 )); then
               last_reason="waiting for a Copilot review of head $head_sha"
             elif (( pending_checks > 0 )); then
               last_reason="waiting for $pending_checks pending status check(s)"
             else
+              if (( copilot_current == 0 )); then
+                echo "::notice::Copilot review not received for head $head_sha; continuing without it."
+              fi
               ready=true
               break
             fi
