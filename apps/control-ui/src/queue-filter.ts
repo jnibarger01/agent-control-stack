@@ -1,4 +1,4 @@
-import { type ExecutionAttempt, type WorkItem } from "@agent-control-stack/work-items";
+import { workItemRiskSchema, type ExecutionAttempt, type WorkItem } from "@agent-control-stack/work-items";
 import { type MissionControlAttemptLease } from "./types.js";
 
 /** Canonical work-item statuses used by the queue filter chips. Unknown values are ignored (no-op). */
@@ -21,7 +21,7 @@ export const WORK_ITEM_STATUS_VALUES = [
 const KNOWN_WORK_ITEM_STATUSES: ReadonlySet<string> = new Set(WORK_ITEM_STATUS_VALUES);
 
 /** Canonical work-item risk levels used by the queue filter risk chips. Unknown values are ignored (no-op). */
-export const WORK_ITEM_RISK_VALUES = ["low", "medium", "high", "critical"] as const;
+export const WORK_ITEM_RISK_VALUES = workItemRiskSchema.options;
 
 const KNOWN_WORK_ITEM_RISKS: ReadonlySet<string> = new Set(WORK_ITEM_RISK_VALUES);
 
