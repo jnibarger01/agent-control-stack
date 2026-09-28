@@ -12,5 +12,13 @@ export * from "./scheduler-firing.js";
 export * from "./liveness.js";
 export * from "./state-machine.js";
 export * from "./store.js";
+export {
+  normalizeTraceActorId,
+  rawTraceProducerConfig,
+  relayTraceOutbox,
+  resolveTraceProducerConfig,
+  validateTraceProducerConfig
+} from "./trace-outbox.js";
+export type { TraceProducerConfig } from "./trace-outbox.js";
 export * from "./work-item.js";
 export * from "./worker-identity.js";

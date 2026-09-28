@@ -31,9 +31,10 @@
  * parity.
  */
 import { generateKeyPairSync, randomBytes } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   JC_ACTION_KINDS,
@@ -41,12 +42,19 @@ import {
   JC_CAPABILITY_VERSION,
   JC_SCOPES,
   jcMcpToolDescriptors,
+  jcPortableManifest,
   jcToolContracts
 } from "@agent-control-stack/jc-tool-manifest";
+import { applyControlPlaneMigrations } from "@agent-control-stack/shared";
+import { JC_GENERATED_MANIFEST_PATH, renderJcGeneratedManifest } from "../../scripts/jc-tool-manifest.ts";
+import { JC_MANIFEST } from "../../vendor/desktop-commander/src/jace-commander/manifest.generated.ts";
+import { CLI_COMMANDS } from "../../vendor/desktop-commander/src/jace-commander/cli-commands.ts";
+import { isCredentialPath } from "../../vendor/desktop-commander/src/jace-commander/credential-paths.ts";
 import {
   JACE_COMMANDER_AUDIENCE,
   JACE_COMMANDER_CAPABILITY_VERSION,
   JACE_COMMANDER_INVOCATION_DOMAIN,
+  containPath,
   jaceCommanderToolNames,
   jaceCommanderToolPolicy,
   prepareJaceCommanderCapability,
@@ -85,9 +93,7 @@ function mint(
     fencingEpoch: 1,
     actionHash,
     invocation,
-    ...(invocation.policy.requiresApproval
-      ? { approvalId: "appr-drift-1", approvalActionHash: actionHash }
-      : {})
+    ...(invocation.policy.requiresApproval ? { approvalId: "appr-drift-1", approvalActionHash: actionHash } : {})
   } as Parameters<typeof prepareJaceCommanderCapability>[0];
   const config = { runtimeId: RUNTIME_ID, keyId: KEY_ID, privateKey, ttlMs: 20_000 };
   const prepared = prepareJaceCommanderCapability(authorization, config, new Date());
@@ -147,6 +153,70 @@ describe("jc-tool-manifest drift gate", () => {
   it("has no DC policy for a tool the manifest doesn't define, and vice versa", () => {
     const manifestNames = new Set(jcToolContracts().map((entry) => entry.name));
     expect(new Set(Object.keys(jcContract.JC_TOOL_POLICIES))).toEqual(manifestNames);
+  });
+
+  it("Jace Commander's generated manifest is byte-identical to the generator output (npm run jc-contracts:generate)", () => {
+    const onDisk = readFileSync(new URL(`../../${JC_GENERATED_MANIFEST_PATH}`, import.meta.url), "utf8");
+    expect(onDisk).toBe(renderJcGeneratedManifest());
+    expect(JC_MANIFEST).toEqual(jcPortableManifest());
+  });
+
+  it("the CLI command table implements exactly the manifest's CLI verbs, each bound to its tool", () => {
+    const fromManifest = jcToolContracts().flatMap((entry) =>
+      entry.cliCommands.map((verb) => `${verb} -> ${entry.name}`)
+    );
+    const fromCli = CLI_COMMANDS.map((command) => `${command.verb} -> ${command.tool}`);
+    expect([...fromCli].sort()).toEqual([...fromManifest].sort());
+  });
+
+  it("ACS's database tool allowlist (migration 029+) is exactly the manifest's tool set", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      applyControlPlaneMigrations(db);
+      const known = (
+        db.prepare("SELECT tool_name FROM jace_commander_tools ORDER BY tool_name").all() as Array<{
+          tool_name: string;
+        }>
+      ).map((entry) => entry.tool_name);
+      expect(known).toEqual(
+        jcToolContracts()
+          .map((entry) => entry.name)
+          .sort()
+      );
+    } finally {
+      db.close();
+    }
+  });
+
+  it("Jace Commander denies every credential path ACS's canonical containment denies", () => {
+    // Standalone JC has no ACS in front of it, so it must refuse at least
+    // what ACS refuses. Paths need not exist below the (real) root.
+    const root = realpathSync(mkdtempSync(join(tmpdir(), "jc-cred-")));
+    const samples = [
+      "/w/.env",
+      "/w/.env.local",
+      "/w/repo/.git/config",
+      "/w/.ssh/id_ed25519",
+      "/w/id_rsa",
+      "/w/.gnupg/pubring.kbx",
+      "/w/.aws/credentials",
+      "/w/.aws/config",
+      "/w/.kube/config",
+      "/w/.npmrc",
+      "/w/.netrc",
+      "/w/credentials.json",
+      "/w/token.json",
+      "/w/token",
+      "/w/.docker/config.json"
+    ].map((sample) => sample.replace(/^\/w/u, root));
+    for (const sample of samples) {
+      expect(() => containPath({ allowedRoots: [root], deniedRoots: [] }, sample), `ACS should deny ${sample}`).toThrow(
+        /credential/
+      );
+      expect(isCredentialPath(sample), `JC must deny ${sample}`).toBe(true);
+    }
+    expect(isCredentialPath(join(root, "src", "index.ts"))).toBe(false);
+    rmSync(root, { recursive: true, force: true });
   });
 
   describe("behavioral parity: DC's real verifier enforces exactly what the manifest says", () => {

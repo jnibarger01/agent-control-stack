@@ -15,6 +15,7 @@ import {
   type JcScope
 } from "@agent-control-stack/jc-tool-manifest";
 import type { z } from "zod";
+import { containPath, type ContainmentConfig } from "./containment.js";
 
 /**
  * acs.jc.v1 — ACS-issued capabilities for the Jace Commander MCP server
@@ -25,8 +26,12 @@ import type { z } from "zod";
  * but a separate version, audience, scope vocabulary and invocation domain so
  * neither contract's capabilities verify under the other.
  *
- * `privileged_exec` is the only approval-bound tool. ACS signs it only for a
- * consumed, human-granted approval bound to the exact argv.
+ * Approval-bound tools are exactly the manifest entries with
+ * `requiresApproval` (privileged_exec, the fs.write tools, start_process /
+ * kill_process and git add/commit/fetch/push). ACS signs them only for a
+ * consumed, human-granted approval bound to the exact invocation hash; the
+ * approver is shown a bounded, redacted summary of the validated arguments
+ * (jaceCommanderApprovalSummary).
  */
 
 export const JACE_COMMANDER_CAPABILITY_VERSION = "acs.jc.v1" as const;
@@ -49,6 +54,8 @@ export interface JaceCommanderToolPolicy {
   readonly requiresApproval: boolean;
   readonly actionKind: JaceCommanderActionKind;
   readonly risk: "low" | "medium" | "critical";
+  /** Arguments ACS must contain to its Jace Commander roots before signing. */
+  readonly pathArguments: readonly string[];
 }
 
 const ARGUMENT_SCHEMAS: Readonly<Record<string, z.ZodType>> = JC_TOOL_ARGUMENT_SCHEMAS;
@@ -61,8 +68,36 @@ export function jaceCommanderToolPolicy(toolName: string): JaceCommanderToolPoli
     scopes: Object.freeze([...entry.scopes]),
     requiresApproval: entry.requiresApproval,
     actionKind: entry.actionKind,
-    risk: entry.risk
+    risk: entry.risk,
+    pathArguments: entry.pathArguments
   });
+}
+
+/**
+ * ACS-side containment for path-bearing Jace Commander tools. Checks every
+ * manifest-declared path argument against the ACS roots; never rewrites the
+ * arguments (the capability binds the caller's exact strings, and Jace
+ * Commander contains them again at execution time).
+ */
+export function containJaceCommanderInvocation(
+  invocation: JaceCommanderInvocation,
+  containment: ContainmentConfig
+): void {
+  for (const name of invocation.policy.pathArguments) {
+    const value = invocation.arguments[name];
+    const paths = Array.isArray(value) ? value : [value];
+    for (const requested of paths) {
+      try {
+        containPath(containment, requested as string);
+      } catch (error) {
+        const code = error instanceof ControlStackError ? error.code : "desktop_commander_path_invalid";
+        throw new ControlStackError(
+          code.replace(/^desktop_commander_/u, "jace_commander_"),
+          error instanceof Error ? error.message : "path is not allowed"
+        );
+      }
+    }
+  }
 }
 
 export function jaceCommanderToolNames(): string[] {
@@ -128,21 +163,250 @@ export function validateJaceCommanderInvocation(toolName: string, rawArguments: 
   });
 }
 
-/** Human-readable approval summary shown to the approver; never contains stdin content. */
+// --- approval summaries --------------------------------------------------------
+
+/** Bounds for approver-facing previews (characters, list lengths). */
+export const JACE_COMMANDER_SUMMARY_LIMITS = Object.freeze({
+  preview: 200,
+  listEntries: 20,
+  entryChars: 256,
+  textChars: 1500
+});
+
+// Secret-looking substrings are replaced in every free-text preview. Same
+// shapes as the Mission Control display redaction (apps/control-ui
+// redaction.ts) plus generic key=value / "key": "value" secrets; bounded
+// quantifiers only.
+const PREVIEW_REDACTIONS: ReadonlyArray<readonly [RegExp, string]> = [
+  [/-----BEGIN [A-Z ]{0,40}PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]{0,40}PRIVATE KEY-----|$)/gu, "[redacted]"],
+  [/Bearer\s+[A-Za-z0-9._~+/-]{1,4096}=*/giu, "Bearer [redacted]"],
+  [/\bsk-[A-Za-z0-9_-]{12,}/gu, "[redacted]"],
+  [/\b(?:gh[pousr]|github_pat)_[A-Za-z0-9_]{20,}/gu, "[redacted]"],
+  [/\bxox[abprs]-[A-Za-z0-9-]{10,}/gu, "[redacted]"],
+  [/\bAKIA[0-9A-Z]{16}\b/gu, "[redacted]"],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/gu, "[redacted]"],
+  [/(\b[A-Za-z][A-Za-z0-9+.-]{0,31}:\/\/[^\s/:@]{1,256}:)[^\s/@]{1,256}@/gu, "$1[redacted]@"],
+  [
+    /((?:^|[^A-Za-z0-9])[A-Za-z0-9_.-]{0,64}(?:secret|token|passw(?:or)?d|api[-_]?key|private[-_]?key|credential|authorization|cookie)[A-Za-z0-9_.-]{0,64}["']?\s{0,8}[:=]\s{0,8}["']?)[^\s"',;&]{1,4096}/giu,
+    "$1[redacted]"
+  ]
+];
+
+// Key-shaped run: 32+ token characters mixing upper case, lower case and digits
+// (API keys, random secrets). Lower-case hex (git shas, sha256) and UUIDs do not
+// match; "/" is excluded so absolute paths are never mistaken for keys.
+const KEY_SHAPED_RUN = /[A-Za-z0-9+_=-]{32,4096}/gu;
+function looksKeyShaped(run: string): boolean {
+  return /[A-Z]/u.test(run) && /[a-z]/u.test(run) && /[0-9]/u.test(run);
+}
+
+/** Replace secret-looking substrings in an approver-facing preview. */
+export function redactJaceCommanderPreview(text: string): string {
+  let out = text;
+  for (const [pattern, replacement] of PREVIEW_REDACTIONS) out = out.replace(pattern, replacement);
+  return out.replace(KEY_SHAPED_RUN, (run) => (looksKeyShaped(run) ? "[redacted]" : run));
+}
+
+// An argv entry naming a secret-bearing option whose value is the NEXT entry
+// (`--password X`, `--token X`, `-H` + `Authorization: …` is covered by the text
+// rules), or a bare `Bearer` / `Authorization:` token followed by its value.
+const SECRET_OPTION_ENTRY =
+  /^(?:-{1,2}[A-Za-z0-9_.-]{0,64}(?:secret|token|passw(?:or)?d|pass|pwd|api[-_]?key|private[-_]?key|credential|auth(?:orization)?|bearer|cookie)[A-Za-z0-9_.-]{0,64}|bearer|basic|(?:proxy-)?authorization:?|cookie:?|[A-Za-z0-9_.-]{0,64}(?:secret|token|passw(?:or)?d|api[-_]?key)[A-Za-z0-9_.-]{0,64}[:=])$/iu;
+
+/**
+ * Argv-aware redaction for approver-facing previews and evidence: each entry
+ * gets the text redaction, and the entry after a secret-bearing option is
+ * replaced wholesale. Runs over the FULL argv before any bounding, so an
+ * option at the truncation edge still hides its value.
+ */
+export function redactJaceCommanderArgv(argv: readonly string[]): string[] {
+  const out: string[] = [];
+  let hideNext = false;
+  for (const entry of argv) {
+    if (hideNext) {
+      out.push("[redacted]");
+      // `Authorization:` `Bearer` `<token>`: a hidden scheme word hides the next entry too.
+      hideNext = /^(?:bearer|basic)$/iu.test(entry);
+      continue;
+    }
+    out.push(redactJaceCommanderPreview(entry));
+    hideNext = SECRET_OPTION_ENTRY.test(entry);
+  }
+  return out;
+}
+
+function preview(text: string, limit: number = JACE_COMMANDER_SUMMARY_LIMITS.preview): string {
+  const redacted = redactJaceCommanderPreview(text);
+  return redacted.length > limit ? `${redacted.slice(0, limit)}…` : redacted;
+}
+
+/** Bounded, redacted list (paths, argv entries). Every value is redacted; nothing raw is echoed. */
+function boundedList(values: readonly string[]): { values: string[]; total: number } {
+  const { listEntries, entryChars } = JACE_COMMANDER_SUMMARY_LIMITS;
+  return {
+    values: values.slice(0, listEntries).map((value) => preview(value, entryChars)),
+    total: values.length
+  };
+}
+
+/** Argv: argv-aware redaction over the full vector first, then bounding. */
+function boundedArgv(argv: readonly string[]): { values: string[]; total: number } {
+  return boundedList(redactJaceCommanderArgv(argv));
+}
+
+/** A single path-like field: bounded and redacted like any other free string. */
+function pathText(value: unknown): string | undefined {
+  const text = str(value);
+  return text === undefined ? undefined : preview(text, JACE_COMMANDER_SUMMARY_LIMITS.entryChars);
+}
+
+function sha256Hex(text: string): string {
+  return createHash("sha256").update(text, "utf8").digest("hex");
+}
+
+type SummaryArgs = Readonly<Record<string, unknown>>;
+type SummaryBuilder = (args: SummaryArgs) => Record<string, unknown>;
+
+const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+const strs = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+
+/**
+ * One summary builder per approval-gated tool, over its VALIDATED arguments
+ * (validateJaceCommanderInvocation already ran the strict schema). Values are
+ * bounded; free text (file content, edit text, argv, commit messages) is
+ * redacted. A drift test asserts every manifest tool with requiresApproval
+ * has a builder here, and jaceCommanderApprovalSummary fails closed if not.
+ */
+export const JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS: Readonly<Record<string, SummaryBuilder>> = Object.freeze({
+  privileged_exec: (args) => {
+    // Same bounded, argv-aware redacted path as start_process: the approver sees
+    // the command shape, never a secret passed on the command line. The exact
+    // argv stays bound through the invocation hash.
+    const argv = boundedArgv(strs(args.argv));
+    return {
+      runAs: "root",
+      argv: argv.values,
+      ...(argv.total > argv.values.length ? { argvTotal: argv.total } : {}),
+      cwd: pathText(args.cwd) ?? "/",
+      timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : 60_000,
+      stdinBytes: str(args.stdin) === undefined ? 0 : Buffer.byteLength(str(args.stdin)!, "utf8")
+    };
+  },
+  write_file: (args) => {
+    const content = str(args.content) ?? "";
+    return {
+      path: pathText(args.path),
+      bytes: Buffer.byteLength(content, "utf8"),
+      sha256: sha256Hex(content),
+      preview: preview(content),
+      overwrite: args.overwrite === true
+    };
+  },
+  edit_block: (args) => ({
+    path: pathText(args.path),
+    oldBytes: Buffer.byteLength(str(args.old) ?? "", "utf8"),
+    newBytes: Buffer.byteLength(str(args.new) ?? "", "utf8"),
+    oldPreview: preview(str(args.old) ?? ""),
+    newPreview: preview(str(args.new) ?? "")
+  }),
+  move_file: (args) => ({ from: pathText(args.from), to: pathText(args.to) }),
+  create_directory: (args) => ({ path: pathText(args.path), recursive: args.recursive === true }),
+  start_process: (args) => {
+    const argv = boundedArgv(strs(args.argv));
+    return {
+      argv: argv.values,
+      ...(argv.total > argv.values.length ? { argvTotal: argv.total } : {}),
+      cwd: pathText(args.cwd),
+      timeoutMs: typeof args.timeoutMs === "number" ? args.timeoutMs : "default"
+    };
+  },
+  kill_process: (args) => ({
+    ...(str(args.sessionId) !== undefined ? { sessionId: str(args.sessionId) } : {}),
+    ...(typeof args.pid === "number" ? { pid: args.pid } : {}),
+    // ACS never sees the target's argv: sessions live in the Jace Commander
+    // process. Said explicitly so the approver does not assume it was checked.
+    argv: "unknown to ACS (the session was started inside Jace Commander)"
+  }),
+  git_add: (args) => {
+    const paths = boundedList(strs(args.paths));
+    return {
+      repo: pathText(args.repo),
+      paths: paths.values,
+      ...(paths.total > paths.values.length ? { pathsTotal: paths.total } : {})
+    };
+  },
+  git_commit: (args) => ({ repo: pathText(args.repo), message: preview(str(args.message) ?? "", 500) }),
+  // remote / branch / expectedHead are schema-restricted (remote name, ref name,
+  // 40-hex sha): they cannot carry a URL, credential or free text.
+  git_fetch: (args) => ({ repo: pathText(args.repo), remote: str(args.remote) ?? "default" }),
+  git_push: (args) => ({
+    repo: pathText(args.repo),
+    remote: str(args.remote) ?? "default",
+    branch: str(args.branch) ?? "current",
+    expectedHead: str(args.expectedHead)
+  })
+});
+
+/**
+ * Approval summary shown to the approver (the 409 approval challenge, the
+ * work item's action params, title and intent). Always carries the tool and
+ * the invocation hash the capability is bound to. Never contains stdin or
+ * unbounded/unredacted file content.
+ */
 export function jaceCommanderApprovalSummary(invocation: JaceCommanderInvocation): Record<string, unknown> {
-  if (invocation.toolName !== JACE_COMMANDER_PRIVILEGED_TOOL) {
+  const builder = Object.prototype.hasOwnProperty.call(JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS, invocation.toolName)
+    ? JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS[invocation.toolName]
+    : undefined;
+  if (!builder) {
+    if (invocation.policy.requiresApproval) {
+      // Fail closed: never ask a human to approve something we cannot describe.
+      throw new ControlStackError(
+        "jace_commander_approval_summary_missing",
+        `no approval summary for approval-gated tool ${invocation.toolName}`
+      );
+    }
     return { tool: invocation.toolName, invocationHash: invocation.invocationHash };
   }
-  const args = invocation.arguments as { argv: string[]; cwd?: string; timeoutMs?: number; stdin?: string };
-  return {
-    tool: invocation.toolName,
-    runAs: "root",
-    argv: args.argv,
-    cwd: args.cwd ?? "/",
-    timeoutMs: args.timeoutMs ?? 60_000,
-    stdinBytes: args.stdin === undefined ? 0 : Buffer.byteLength(args.stdin, "utf8"),
-    invocationHash: invocation.invocationHash
-  };
+  return { tool: invocation.toolName, ...builder(invocation.arguments), invocationHash: invocation.invocationHash };
+}
+
+/** One-line rendering of the approval summary (bounded), for titles and intents. */
+export function jaceCommanderApprovalSummaryText(invocation: JaceCommanderInvocation): string {
+  const summary = jaceCommanderApprovalSummary(invocation);
+  const parts: string[] = [];
+  for (const [key, value] of Object.entries(summary)) {
+    if (key === "tool" || key === "invocationHash" || value === undefined) continue;
+    parts.push(`${key}=${JSON.stringify(value)}`);
+  }
+  // Defense in depth: every field was already redacted by its builder; the
+  // rendered line gets the text rules once more.
+  const text = redactJaceCommanderPreview(`${invocation.toolName} ${parts.join(" ")}`.trim());
+  const { textChars } = JACE_COMMANDER_SUMMARY_LIMITS;
+  return text.length > textChars ? `${text.slice(0, textChars)}…` : text;
+}
+
+/** Work-item title for a Jace Commander capability request (<= 200 chars). */
+export function jaceCommanderWorkItemTitle(invocation: JaceCommanderInvocation): string {
+  if (invocation.toolName === JACE_COMMANDER_PRIVILEGED_TOOL) {
+    // Built from the redacted, bounded summary argv, never the raw argv.
+    const summary = jaceCommanderApprovalSummary(invocation);
+    const argv = Array.isArray(summary.argv) ? (summary.argv as string[]) : [];
+    const more = typeof summary.argvTotal === "number" ? ` … (${summary.argvTotal} args)` : "";
+    const text = redactJaceCommanderPreview(`${argv.join(" ")}${more}`);
+    return `ROOT: ${text.length > 180 ? `${text.slice(0, 179)}…` : text}`;
+  }
+  if (!invocation.policy.requiresApproval) return `Jace Commander capability: ${invocation.toolName}`;
+  const text = `Jace Commander ${jaceCommanderApprovalSummaryText(invocation)}`;
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
+}
+
+/** Work-item intent: who asked for which tool, plus the approval summary for gated tools. */
+export function jaceCommanderWorkItemIntent(invocation: JaceCommanderInvocation, requesterSubject: string): string {
+  const base = `ACS-issued acs.jc.v1 capability for Jace Commander tool ${invocation.toolName} requested by ${requesterSubject}`;
+  return invocation.policy.requiresApproval
+    ? `${base}. Approve exactly: ${jaceCommanderApprovalSummaryText(invocation)}`
+    : base;
 }
 
 // --- execution authorization --------------------------------------------------

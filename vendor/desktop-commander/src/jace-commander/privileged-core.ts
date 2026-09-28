@@ -18,7 +18,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { FileNonceStore, JcAuthorizationError, JcCapabilityVerifier, type JcAuthorization } from './contract.js';
-import { JsonlTraceChain } from './looptrace.js';
+import { JsonlTraceChain, redactArgv } from './looptrace.js';
 
 export const PRIVILEGED_TOOL = 'privileged_exec';
 export const DEFAULT_PRIVILEGED_CONFIG_PATH = '/etc/jace-commander/privileged.json';
@@ -247,7 +247,15 @@ export async function executePrivileged(
     };
     // Boundary 1: durable intent BEFORE the side effect. No audit, no exec.
     try {
-      audit.append('tool_call_started', { tool: PRIVILEGED_TOOL, argv: args.argv, cwd: args.cwd ?? '/', ...attribution });
+      // argv is evidence, not a secret store: argv-aware redaction, bound to the
+      // exact approved argv through attribution.invocationHash.
+      audit.append('tool_call_started', {
+        tool: PRIVILEGED_TOOL,
+        argv: redactArgv(args.argv),
+        argvCount: args.argv.length,
+        cwd: args.cwd ?? '/',
+        ...attribution,
+      });
     } catch {
       throw new PrivilegedError('PRIVILEGED_AUDIT_UNAVAILABLE', 'privileged audit chain unavailable; refusing to execute');
     }

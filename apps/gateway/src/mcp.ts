@@ -1,5 +1,9 @@
 import type { IncomingHttpHeaders } from "node:http";
-import { type createWorkItemTools, workItemToolNames } from "@agent-control-stack/policy-gate";
+import {
+  type createWorkItemTools,
+  maybeRunJevShadowAdvisory,
+  workItemToolNames
+} from "@agent-control-stack/policy-gate";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import type { LocalAgentEventType, WorkItemStore } from "@agent-control-stack/work-items";
 import { ZodError, z } from "zod";
@@ -396,6 +400,16 @@ async function handleToolsCall(input: {
       auth: authorization.auth,
       actor
     });
+    // Shadow-mode Jev advisory (log-only, fire-and-forget). Fired ONLY after
+    // the policy-gated create_work_item call succeeds, so rejected intakes
+    // never send goal text to the advisory engine. Inert unless
+    // ACS_JEV_ENABLED=1. NEVER affects policy, approval, or routing
+    // decisions; it only emits advisory probability telemetry for the
+    // mission intake. State text is sent unauthenticated to the loopback
+    // advisory endpoint (127.0.0.1:8017) by design.
+    if (parsed.data.name === "create_work_item") {
+      void maybeRunJevShadowAdvisory(parsed.data.arguments ?? {}).catch(() => {});
+    }
     if (localAgent) {
       const structured = asStructuredContent(result);
       const stdout = typeof structured.stdout === "string" ? structured.stdout : "";

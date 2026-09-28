@@ -37,6 +37,12 @@ import {
   type WorkItemStatus
 } from "./work-item.js";
 import {
+  enqueueApprovalTraceEvent,
+  rawTraceProducerConfig,
+  validateTraceProducerConfig,
+  type ApprovalTraceInput
+} from "./trace-outbox.js";
+import {
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
   validateHeartbeatTtl,
@@ -891,6 +897,33 @@ export interface SqliteWorkItemStoreOptions {
   leaseMs?: number;
   heartbeatTtlMs?: number;
   onEvent?: (event: StoredAuditEvent) => void;
+  traceInstance?: string;
+  releaseSha?: string;
+  /**
+   * When the trace producer identity (traceInstance / ACS_TRACE_INSTANCE,
+   * releaseSha / ACS_RELEASE_SHA) is validated.
+   * - "lazy" (default): the store always opens; the identity is checked only when an
+   *   approval trace is produced, and a bad value is a counted, reported trace
+   *   failure. The approval still commits (ADR 0021). CLI, worker, scheduler and
+   *   evidence readers keep working with a bad trace env.
+   * - "eager": the constructor throws trace_config_invalid before opening the
+   *   database. The gateway opts in so a bad deployment refuses to boot.
+   */
+  traceConfigValidation?: "lazy" | "eager";
+  /**
+   * Called inside the approval transaction, after the trace savepoint rolled back, when
+   * an approval trace event could not be enqueued. Trace is
+   * observational (ADR 0021), so the approval still commits. Must not throw; a throw is
+   * swallowed. Defaults to a one-line JSON warning on stderr.
+   */
+  onTraceFailure?: (failure: TraceEnqueueFailure) => void;
+}
+
+export interface TraceEnqueueFailure {
+  kind: ApprovalTraceInput["kind"];
+  workItemId: string;
+  code: string;
+  message: string;
 }
 
 export interface WorkItemStore {
@@ -1117,13 +1150,27 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
   private auditChainValid = true;
+  private readonly traceInstance: string;
+  private readonly releaseSha: string;
+  private readonly onTraceFailure: (failure: TraceEnqueueFailure) => void;
+  private traceEnqueueFailures = 0;
+  /** Memoized lazy validation result: undefined = not checked yet, null = valid. */
+  private traceConfigError: ControlStackError | null | undefined;
 
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
+    // Trace producer identity: validated lazily at trace time by default (a bad value
+    // never stops the store from opening, and never fails an approval); "eager" refuses
+    // before the database is opened (the gateway opts in, so it refuses to boot).
+    const traceProducer = rawTraceProducerConfig(options);
+    if (options.traceConfigValidation === "eager") validateTraceProducerConfig(traceProducer);
+    this.traceInstance = traceProducer.instance;
+    this.releaseSha = traceProducer.releaseSha;
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     this.onEvent = options.onEvent ?? (() => undefined);
+    this.onTraceFailure = options.onTraceFailure ?? defaultTraceFailureReporter;
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
@@ -4303,6 +4350,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
+      this.enqueueApprovalTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: input.workItemId,
+        actionHash: input.actionHash,
+        requestHash,
+        actorId: input.approvedBy,
+        actorType: "human",
+        kind: "acs.approval.granted",
+        reason,
+        status: "granted"
+      });
       return {
         value: {
           workItemId: input.workItemId,
@@ -4379,6 +4438,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
+      this.enqueueApprovalTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId,
+        actionHash,
+        requestHash: row.request_hash,
+        actorId: "system",
+        actorType: "system",
+        kind: "acs.approval.consumed",
+        reason: "consumed",
+        status: "consumed"
+      });
       return { value: event, events: [event] };
     });
   }
@@ -5877,6 +5948,75 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => ({ value: operation(), events: [] }));
   }
 
+  /** Number of approval trace events that failed to enqueue in this process (non-blocking). */
+  getTraceEnqueueFailureCount(): number {
+    return this.traceEnqueueFailures;
+  }
+
+  /**
+   * Enqueues an approval trace event inside the caller's approval transaction, isolated
+   * by a savepoint. ADR 0021: trace is observational evidence and a failed trace must
+   * not deny an approval, so any enqueue error (identity grammar, chain conflict,
+   * schema/trigger failure) rolls back only the trace rows and is reported, never
+   * thrown. The approval commits without a trace row; there is still never a trace row
+   * without its approval.
+   */
+  private enqueueApprovalTraceNonBlocking(input: ApprovalTraceInput): void {
+    // Lazy producer-identity check, before any trace SQL. A bad ACS_TRACE_INSTANCE /
+    // ACS_RELEASE_SHA skips the trace and is counted and reported; it never throws here.
+    const configError = this.checkTraceConfig();
+    if (configError) {
+      this.reportTraceFailure(input, configError.code, configError.message);
+      return;
+    }
+    this.db.exec("SAVEPOINT acs_trace_enqueue");
+    try {
+      enqueueApprovalTraceEvent(this.db, input);
+      this.db.exec("RELEASE SAVEPOINT acs_trace_enqueue");
+      return;
+    } catch (error) {
+      // If the savepoint cannot be unwound the transaction state is unknown; these
+      // throw and fail the write rather than commit a partially written trace.
+      this.db.exec("ROLLBACK TO SAVEPOINT acs_trace_enqueue");
+      this.db.exec("RELEASE SAVEPOINT acs_trace_enqueue");
+      this.reportTraceFailure(
+        input,
+        error instanceof ControlStackError ? error.code : "trace_enqueue_failed",
+        error instanceof Error ? error.message : "trace enqueue failed"
+      );
+    }
+  }
+
+  private checkTraceConfig(): ControlStackError | null {
+    if (this.traceConfigError === undefined) {
+      try {
+        validateTraceProducerConfig({ instance: this.traceInstance, releaseSha: this.releaseSha });
+        this.traceConfigError = null;
+      } catch (error) {
+        this.traceConfigError =
+          error instanceof ControlStackError
+            ? error
+            : new ControlStackError("trace_config_invalid", "trace producer config is invalid");
+      }
+    }
+    return this.traceConfigError;
+  }
+
+  private reportTraceFailure(input: ApprovalTraceInput, code: string, message: string): void {
+    this.traceEnqueueFailures += 1;
+    const failure: TraceEnqueueFailure = {
+      kind: input.kind,
+      workItemId: input.workItemId,
+      code,
+      message: message.slice(0, 200)
+    };
+    try {
+      this.onTraceFailure(failure);
+    } catch {
+      // Reporting is best effort and must never affect the approval.
+    }
+  }
+
   private write<T>(operation: () => { value: T; events: StoredAuditEvent[] }): T {
     if (!this.auditChainValid) {
       throw new ControlStackError("audit_chain_invalid", "audit chain is invalid; writes are disabled");
@@ -6451,4 +6591,16 @@ function assertFutureIso(value: string, now: string, field: string): void {
 
 function publicKeyFingerprint(publicKeyPem: string): string {
   return createHash("sha256").update(publicKeyPem).digest("base64url");
+}
+
+function defaultTraceFailureReporter(failure: TraceEnqueueFailure): void {
+  process.stderr.write(
+    `${JSON.stringify({
+      level: "warn",
+      event: "trace_outbox_enqueue_failed",
+      kind: failure.kind,
+      work_item_id: failure.workItemId,
+      code: failure.code
+    })}\n`
+  );
 }

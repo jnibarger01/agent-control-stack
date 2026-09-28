@@ -79,6 +79,50 @@ async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, code: st
   }
 }
 
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code !== 'ESRCH';
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processIsAlive(pid) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return !processIsAlive(pid);
+}
+
+async function terminateOwnedChild(pid: number, timeoutMs: number): Promise<void> {
+  if (!processIsAlive(pid)) return;
+
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') return;
+  }
+
+  const gracefulMs = Math.min(250, Math.max(25, Math.floor(timeoutMs / 4)));
+  if (await waitForProcessExit(pid, gracefulMs)) return;
+
+  try {
+    process.kill(pid, 'SIGKILL');
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ESRCH') return;
+  }
+
+  const forcedMs = Math.max(25, timeoutMs - gracefulMs);
+  if (await waitForProcessExit(pid, forcedMs)) return;
+
+  throw new LocalMcpRuntimeError(
+    'CHILD_REAP_TIMEOUT',
+    `Desktop Commander local MCP child ${pid} did not exit within ${timeoutMs}ms`,
+  );
+}
+
 /**
  * One deterministic local MCP child per instance. It never starts the hosted
  * remote bridge. Managed ACS authorization is the default; callers must select
@@ -93,6 +137,7 @@ export class LocalMcpRuntime {
   private identity: RuntimeIdentityState | undefined;
   private lastError: LocalMcpRuntimeError | undefined;
   private shutdownRequested = false;
+  private childPid: number | null = null;
   private readonly options: Required<Pick<LocalMcpRuntimeOptions,
     'startupTimeoutMs' | 'healthTimeoutMs' | 'shutdownTimeoutMs' | 'callTimeoutMs' | 'clientName' | 'clientVersion'>>
     & Omit<LocalMcpRuntimeOptions, 'startupTimeoutMs' | 'healthTimeoutMs' | 'shutdownTimeoutMs' | 'callTimeoutMs' | 'clientName' | 'clientVersion'>;
@@ -181,19 +226,25 @@ export class LocalMcpRuntime {
       if (this.shutdownRequested) {
         throw new LocalMcpRuntimeError('STARTUP_CANCELLED', 'Desktop Commander local MCP startup was cancelled');
       }
-      this.transport = new StdioClientTransport({
+      const transport = new StdioClientTransport({
         command,
         args,
         cwd: this.options.cwd ?? path.dirname(serverPath),
         env: { ...getDefaultEnvironment(), ...identityEnv, DC_LOCAL_RUNTIME: 'true' },
         stderr: 'inherit',
       });
+      this.transport = transport;
+      const originalStart = transport.start.bind(transport);
+      transport.start = async () => {
+        await originalStart();
+        this.childPid = transport.pid;
+      };
       if (this.options.mode === 'managed') {
-        const originalSend = this.transport.send.bind(this.transport);
+        const originalSend = transport.send.bind(transport);
         const bootstrapScopes = (identityEnv.DESKTOP_COMMANDER_ACS_SCOPES
           ? identityEnv.DESKTOP_COMMANDER_ACS_SCOPES.split(',')
           : [...FIXED_ACS_SCOPES]);
-        (this.transport as any).send = (message: any) => {
+        (transport as any).send = (message: any) => {
           if (message?.method === 'initialize' && message.params) {
             message = {
               ...message,
@@ -235,12 +286,14 @@ export class LocalMcpRuntime {
         : new LocalMcpRuntimeError('STARTUP_FAILED', `Desktop Commander local MCP startup failed: ${error instanceof Error ? error.message : String(error)}`, error);
       this.lastError = runtimeError;
       if (!this.shutdownRequested) this.state = 'failed';
-      await withTimeout(
-        this.closeResources(),
-        this.options.shutdownTimeoutMs,
-        'STARTUP_CLEANUP_TIMEOUT',
-        'Desktop Commander failed-start cleanup timed out',
-      ).catch(() => undefined);
+      // A failed MCP startup still owns the spawned stdio child until the
+      // transport has emitted its close event. StdioClientTransport.close()
+      // has its own bounded TERM/KILL sequence; wrapping it in the runtime's
+      // shutdown timeout can expire during that sequence, detach our only
+      // transport reference, and let start() reject before the child is
+      // actually reaped. Fully synchronize failed-start cleanup here so a
+      // subsequent shutdown() cannot observe or inherit an orphaned child.
+      await this.closeResources().catch(() => undefined);
       throw runtimeError;
     }
   }
@@ -364,16 +417,24 @@ export class LocalMcpRuntime {
   private async closeResources(): Promise<void> {
     const client = this.client;
     const transport = this.transport;
+    const childPid = this.childPid;
     this.client = null;
     this.transport = null;
 
-    // Close the owning stdio transport first. In particular, Client.close()
-    // can wait for its protocol handshake timeout when startup never completed;
-    // transport.close() terminates and reaps that child immediately.
+    // Client.connect() starts an asynchronous Client.close() when initialize
+    // times out. That close clears StdioClientTransport's private process
+    // reference before its TERM/KILL sequence finishes, so a later
+    // transport.close() can no longer prove the child was reaped. Keep the
+    // PID captured at spawn and explicitly finish termination of only that
+    // owned child before cleanup is considered complete.
     if (transport) {
       await transport.close().catch(() => undefined);
     }
     if (client) await client.close().catch(() => undefined);
+    if (childPid !== null) {
+      await terminateOwnedChild(childPid, this.options.shutdownTimeoutMs);
+      if (this.childPid === childPid) this.childPid = null;
+    }
   }
 }
 

@@ -17,6 +17,7 @@ import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const ACS_CAPABILITY_META_KEY = 'capability';
 const ACS_GUARD_META_KEY = 'acsCapability';
@@ -48,7 +49,11 @@ if (JC && !MANAGED) {
 const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
 // Resolved once so a relative JC_DC_DIR is not applied twice (as cwd and
 // again inside the script path).
-const JC_DIR = path.resolve(process.env.JC_DC_DIR || '/home/jacen/projects/desktop-commander');
+// Default: this monorepo's own Desktop Commander build (vendor/desktop-commander,
+// next to apps/dc-mcp-gateway), never a legacy sibling checkout. A bridge left
+// on a stale checkout advertised a stale (or empty) Jace Commander tool list.
+const MONOREPO_DC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../vendor/desktop-commander');
+const JC_DIR = path.resolve(process.env.JC_DC_DIR || MONOREPO_DC_DIR);
 const DEFAULT_DC_ARGS = MANAGED
   ? '/home/jacen/projects/desktop-commander/dist/index.js'
   : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
@@ -79,6 +84,9 @@ const JC_CHILD_ENV_KEYS = [
   'JC_ACS_PUBLIC_KEY', 'JC_ACS_KEY_ID', 'JC_RUNTIME_ID', 'JC_STATE_DIR', 'JC_PUBLIC_MCP_URL',
   'JC_ACS_URL', 'JC_ACS_TOKEN', 'JC_SWARM_URL', 'JC_SWARM_TOKEN', 'JC_VISUALIZER_URL',
   'JC_MISSION_ROUTER_DIR', 'JC_TRACE_ROOTS', 'JC_PRIVILEGED_HELPER', 'JC_SUDO_PATH', 'JC_REQUEST_TIMEOUT_MS',
+  // Filesystem containment roots for the fs.read tools (defence in depth
+  // behind ACS's own roots); without them every filesystem tool fails closed.
+  'JC_FS_ROOTS', 'JC_FS_DENIED_ROOTS',
 ];
 if (JC && (!process.env.JC_ACS_PUBLIC_KEY || !process.env.JC_ACS_KEY_ID || !process.env.JC_RUNTIME_ID)) {
   console.error('bridge: jace-commander profile requires JC_ACS_PUBLIC_KEY, JC_ACS_KEY_ID and JC_RUNTIME_ID; refusing to start');
@@ -520,6 +528,9 @@ function computeJcAuthority() {
     // The child is always started as `serve` (managed); there is no standalone path.
     childMode: 'managed',
     bridge: { hasUpstreamPair: !!pair, initialized, spawnCount, sessionCount: pair ? pair.sessions.size : 0 },
+    // Which build the child runs (paths only, no secrets): lets `jace-commander
+    // doctor` and operators spot a bridge left on a legacy checkout.
+    runtime: { dir: JC_DIR, entrypoint: DC_ARGS[0], monorepoDefault: JC_DIR === MONOREPO_DC_DIR },
     enforcement: {
       executionTokenConfigured: !!EXECUTION_TOKEN,
       capabilityVerificationConfigured: !!(process.env.JC_ACS_PUBLIC_KEY && process.env.JC_ACS_KEY_ID),

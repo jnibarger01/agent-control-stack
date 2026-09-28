@@ -32,6 +32,8 @@ ADR status values:
 | [0017](0017-codex-swarm-subordinate-execution-engine.md)                 | Codex Swarm is a subordinate execution engine, not a peer control plane                   | Proposed                          |
 | [0018](0018-archive-hourly-pr-workflow.md)                               | Archive the disabled Hourly Pull Request Cycle workflow                                   | Accepted                          |
 | [0019](0019-acs-dc-execution-chain-monorepo.md)                          | Consolidate the ACS / Desktop Commander execution chain into this monorepo                | Proposed                          |
+| [0020](0020-jev-advisory-only-evidence.md)                               | Jev is advisory-only evidence, never an authority                                         | Accepted                          |
+| [0021](0021-looptrace-evidence-spine.md)                                 | LoopTrace is an observational evidence/replay spine, not an authority                     | Accepted                          |
 
 ## Decision rules
 

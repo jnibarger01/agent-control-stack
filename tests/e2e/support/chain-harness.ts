@@ -202,7 +202,7 @@ export interface ServiceProcess {
   stop(): Promise<void>;
 }
 
-function startNodeService(
+export function startNodeService(
   script: string,
   env: Record<string, string>,
   port: number,

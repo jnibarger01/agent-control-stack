@@ -94,7 +94,9 @@ function applyPreLeaseRenewalMetadata(db: DatabaseSync): void {
 describe("control-plane migration alternate 17-21 repair", () => {
   it("migrates a fresh database and leaves canonical metadata unchanged", () => {
     const db = database();
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 28 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
+      count: controlPlaneMigrations().length
+    });
     db.close();
   });
 
@@ -112,7 +114,9 @@ describe("control-plane migration alternate 17-21 repair", () => {
       .map(({ version, name, filename, checksum }) => ({ version, name, filename, checksum }));
     expect(rows).toEqual(canonical);
     applyControlPlaneMigrations(db);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 28 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
+      count: controlPlaneMigrations().length
+    });
     db.close();
   });
 
@@ -193,9 +197,13 @@ describe("control-plane migration pre-lease-renewal 20-23 repair", () => {
       .filter((migration) => migration.version >= 20)
       .map(({ version, name, filename, checksum }) => ({ version, name, filename, checksum }));
     expect(rows).toEqual(canonical);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 28 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
+      count: controlPlaneMigrations().length
+    });
     applyControlPlaneMigrations(db);
-    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 28 });
+    expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
+      count: controlPlaneMigrations().length
+    });
     db.close();
   });
 
