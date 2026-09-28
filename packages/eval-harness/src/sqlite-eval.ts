@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { stableHash, type AuditChainVerification } from "@agent-control-stack/shared";
 import {
+  auditWorkItemProjection,
   SqliteWorkItemStore,
   WorkItemEvent,
   type StoredAuditEvent,
@@ -183,7 +184,7 @@ function runGoldenPath(databasePath: string): SqliteEvaluationRun {
       !finalProjection ||
       projected.length !== 1 ||
       !persisted ||
-      stableHash(finalProjection) !== stableHash(persisted)
+      stableHash(finalProjection) !== stableHash(auditWorkItemProjection(persisted))
     ) {
       throw new Error(`SQLite evaluation replay divergence for ${created.id}`);
     }

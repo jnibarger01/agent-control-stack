@@ -6,6 +6,7 @@ import {
   ControlStackError,
   applyControlPlaneMigrations,
   auditEventHash,
+  canonicalJson,
   createId,
   createEvent,
   inspectControlPlaneDatabase,
@@ -94,6 +95,17 @@ import {
   type RecordActorReliabilityInput,
   type RecordActorRoutingDecisionInput
 } from "./routing.js";
+import {
+  classifierEvidenceHash,
+  classifierEvidenceSchema,
+  missionIntakeHash,
+  missionIntakeSchema,
+  missionRouteEvidenceHash,
+  missionRouteEvidenceSchema,
+  type ClassifierEvidence,
+  type MissionIntake,
+  type MissionRouteEvidence
+} from "./contracts.js";
 import {
   recordValidationRunInputSchema,
   validationCheckSchema,
@@ -574,6 +586,26 @@ export interface ApprovalGrant {
   event: StoredAuditEvent;
 }
 
+/** Immutable native-routing evidence bound to exactly one work item. */
+export interface MissionRoutingRecord {
+  workItemId: string;
+  intakeHash: string;
+  classifierEvidenceHash: string;
+  routeEvidenceHash: string;
+  intake: MissionIntake;
+  classifier: ClassifierEvidence;
+  route: MissionRouteEvidence;
+  createdAt: string;
+}
+
+export interface RecordMissionRoutingInput {
+  workItemId: string;
+  intake: unknown;
+  classifier: unknown;
+  route: unknown;
+  createdAt?: string;
+}
+
 export interface ConnectorRequestRecord {
   workItemId?: string;
   actor: string;
@@ -899,6 +931,8 @@ export interface SqliteWorkItemStoreOptions {
 export interface WorkItemStore {
   withTransaction<T>(operation: () => T): T;
   create(input: unknown): WorkItem;
+  recordMissionRouting(input: RecordMissionRoutingInput): MissionRoutingRecord;
+  getVerifiedMissionRouting(workItemId: string): MissionRoutingRecord | undefined;
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
   listDashboardWorkItems(options?: DashboardWorkItemsOptions): DashboardWorkItems;
@@ -1170,6 +1204,199 @@ export class SqliteWorkItemStore implements WorkItemStore {
         );
       return { value: workItem, events: [this.appendAuditEvent(workItemCreatedEvent(workItem))] };
     });
+  }
+
+  recordMissionRouting(input: RecordMissionRoutingInput): MissionRoutingRecord {
+    const intake = missionIntakeSchema.parse(input.intake);
+    const classifier = classifierEvidenceSchema.parse(input.classifier);
+    const route = missionRouteEvidenceSchema.parse(input.route);
+    const intakeHash = missionIntakeHash(intake);
+    const evidenceHash = classifierEvidenceHash(classifier);
+    const routeHash = missionRouteEvidenceHash(route);
+    const createdAt = input.createdAt ?? new Date().toISOString();
+
+    if (classifier.subjectIntakeHash !== intakeHash) {
+      throw new ControlStackError(
+        "mission_classifier_subject_mismatch",
+        "classifier evidence is not bound to mission intake"
+      );
+    }
+    if (route.subjectIntakeHash !== intakeHash || route.classifierEvidenceHash !== evidenceHash) {
+      throw new ControlStackError(
+        "mission_route_subject_mismatch",
+        "route evidence is not bound to intake and classifier evidence"
+      );
+    }
+
+    return this.write(() => {
+      this.getRequired(input.workItemId);
+      this.insertImmutableMissionEvidence("mission_intake_records", "intake_hash", intakeHash, intake, createdAt, {
+        schema_version: intake.schemaVersion
+      });
+      this.insertImmutableMissionEvidence(
+        "mission_classifier_evidence_records",
+        "evidence_hash",
+        evidenceHash,
+        classifier,
+        createdAt,
+        { intake_hash: intakeHash, schema_version: classifier.schemaVersion }
+      );
+      this.insertImmutableMissionEvidence(
+        "mission_route_evidence_records",
+        "route_evidence_hash",
+        routeHash,
+        route,
+        createdAt,
+        {
+          intake_hash: intakeHash,
+          classifier_evidence_hash: evidenceHash,
+          route_table_version: route.routeTableVersion,
+          route_table_hash: route.routeTableHash,
+          decision: route.decision,
+          engine_id: route.engineId ?? null
+        }
+      );
+
+      const existing = this.db
+        .prepare(
+          `SELECT intake_hash, classifier_evidence_hash, route_evidence_hash, created_at FROM work_item_mission_routing WHERE work_item_id = ?`
+        )
+        .get(input.workItemId) as
+        | { intake_hash: string; classifier_evidence_hash: string; route_evidence_hash: string; created_at: string }
+        | undefined;
+      if (existing) {
+        if (
+          existing.intake_hash !== intakeHash ||
+          existing.classifier_evidence_hash !== evidenceHash ||
+          existing.route_evidence_hash !== routeHash
+        ) {
+          throw new ControlStackError(
+            "mission_routing_binding_conflict",
+            "work item already has different native routing evidence"
+          );
+        }
+        return { value: this.getVerifiedMissionRouting(input.workItemId)!, events: [] };
+      }
+      this.db
+        .prepare(
+          `INSERT INTO work_item_mission_routing
+           (work_item_id, intake_hash, classifier_evidence_hash, route_evidence_hash, created_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(input.workItemId, intakeHash, evidenceHash, routeHash, createdAt);
+      return {
+        value: {
+          workItemId: input.workItemId,
+          intakeHash,
+          classifierEvidenceHash: evidenceHash,
+          routeEvidenceHash: routeHash,
+          intake,
+          classifier,
+          route,
+          createdAt
+        },
+        events: []
+      };
+    });
+  }
+
+  getVerifiedMissionRouting(workItemId: string): MissionRoutingRecord | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT binding.intake_hash, binding.classifier_evidence_hash, binding.route_evidence_hash, binding.created_at,
+                intake.schema_version AS intake_schema_version, intake.canonical_json AS intake_json,
+                classifier.intake_hash AS classifier_intake_hash, classifier.schema_version AS classifier_schema_version,
+                classifier.canonical_json AS classifier_json,
+                route.intake_hash AS route_intake_hash, route.classifier_evidence_hash AS route_classifier_evidence_hash,
+                route.route_table_version, route.route_table_hash, route.decision AS route_decision, route.engine_id AS route_engine_id,
+                route.canonical_json AS route_json
+         FROM work_item_mission_routing AS binding
+         JOIN mission_intake_records AS intake ON intake.intake_hash = binding.intake_hash
+         JOIN mission_classifier_evidence_records AS classifier ON classifier.evidence_hash = binding.classifier_evidence_hash
+         JOIN mission_route_evidence_records AS route ON route.route_evidence_hash = binding.route_evidence_hash
+         WHERE binding.work_item_id = ?`
+      )
+      .get(workItemId) as
+      | {
+          intake_hash: string;
+          classifier_evidence_hash: string;
+          route_evidence_hash: string;
+          created_at: string;
+          intake_schema_version: string;
+          intake_json: string;
+          classifier_intake_hash: string;
+          classifier_schema_version: string;
+          classifier_json: string;
+          route_intake_hash: string;
+          route_classifier_evidence_hash: string;
+          route_table_version: string;
+          route_table_hash: string;
+          route_decision: string;
+          route_engine_id: string | null;
+          route_json: string;
+        }
+      | undefined;
+    if (!row) return undefined;
+    const intake = missionIntakeSchema.parse(JSON.parse(row.intake_json));
+    const classifier = classifierEvidenceSchema.parse(JSON.parse(row.classifier_json));
+    const route = missionRouteEvidenceSchema.parse(JSON.parse(row.route_json));
+    const intakeHash = missionIntakeHash(intake);
+    const evidenceHash = classifierEvidenceHash(classifier);
+    const routeHash = missionRouteEvidenceHash(route);
+    if (
+      row.intake_hash !== intakeHash ||
+      row.classifier_evidence_hash !== evidenceHash ||
+      row.route_evidence_hash !== routeHash ||
+      row.intake_schema_version !== intake.schemaVersion ||
+      row.classifier_intake_hash !== intakeHash ||
+      row.classifier_schema_version !== classifier.schemaVersion ||
+      row.route_intake_hash !== intakeHash ||
+      row.route_classifier_evidence_hash !== evidenceHash ||
+      row.route_table_version !== route.routeTableVersion ||
+      row.route_table_hash !== route.routeTableHash ||
+      row.route_decision !== route.decision ||
+      row.route_engine_id !== (route.engineId ?? null) ||
+      classifier.subjectIntakeHash !== intakeHash ||
+      route.subjectIntakeHash !== intakeHash ||
+      route.classifierEvidenceHash !== evidenceHash
+    ) {
+      throw new ControlStackError(
+        "mission_routing_evidence_invalid",
+        "stored native routing evidence failed integrity verification"
+      );
+    }
+    return {
+      workItemId,
+      intakeHash,
+      classifierEvidenceHash: evidenceHash,
+      routeEvidenceHash: routeHash,
+      intake,
+      classifier,
+      route,
+      createdAt: row.created_at
+    };
+  }
+
+  private insertImmutableMissionEvidence(
+    table: "mission_intake_records" | "mission_classifier_evidence_records" | "mission_route_evidence_records",
+    hashColumn: "intake_hash" | "evidence_hash" | "route_evidence_hash",
+    hash: string,
+    evidence: object,
+    createdAt: string,
+    extra: Record<string, string | null>
+  ): void {
+    const columns = [hashColumn, ...Object.keys(extra), "canonical_json", "created_at"];
+    const values = [hash, ...Object.values(extra), canonicalJson(evidence), createdAt];
+    const placeholders = columns.map(() => "?").join(", ");
+    this.db.prepare(`INSERT OR IGNORE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`).run(...values);
+    const stored = this.db.prepare(`SELECT canonical_json FROM ${table} WHERE ${hashColumn} = ?`).get(hash) as
+      { canonical_json: string } | undefined;
+    if (!stored || stored.canonical_json !== canonicalJson(evidence)) {
+      throw new ControlStackError(
+        "mission_routing_evidence_conflict",
+        "native routing evidence hash conflicts with stored content"
+      );
+    }
   }
 
   get(id: string): WorkItem | undefined {

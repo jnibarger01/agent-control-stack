@@ -1,4 +1,11 @@
-import { createEvent, createId, stableHash, type AuditEvent } from "@agent-control-stack/shared";
+import {
+  collectSensitiveValues,
+  createEvent,
+  createId,
+  redactSensitiveText,
+  stableHash,
+  type AuditEvent
+} from "@agent-control-stack/shared";
 import { z } from "zod";
 
 export const requesterSchema = z.enum(["user", "agent", "system"]);
@@ -95,9 +102,8 @@ const resourceUsageSchema = z
   .strict();
 
 // Discriminated on `executionMode`. The `dry_run` branch is byte-identical to
-// the schema that has always shipped; the `desktop_commander` branch is the
-// only way a non-simulated result can be persisted, and it can only be produced
-// by the ACS worker after the full execution-authorization chain has passed.
+// the schema that has always shipped; non-simulated branches can only be
+// produced by the ACS worker after their full authority chain has passed.
 const simulationMetadataSchema = z.discriminatedUnion("executionMode", [
   z
     .object({
@@ -144,7 +150,19 @@ const simulationMetadataSchema = z.discriminatedUnion("executionMode", [
           message: "invocationFingerprint is required unless the execution was blocked before invocation"
         });
       }
+    }),
+  z
+    .object({
+      executionMode: z.literal("native_engine"),
+      simulated: z.literal(false),
+      backend: z.literal("engine-isolation-v1"),
+      engineId: identifierSchema,
+      routeId: identifierSchema,
+      adapterInvocationHash: hashSchema,
+      workerVersion: identifierSchema.optional(),
+      reason: z.string().max(512).optional()
     })
+    .strict()
 ]);
 
 const structuredOutputSchema = z.record(z.string(), z.unknown()).superRefine((value, context) => {
@@ -395,7 +413,7 @@ export function executionActionHash(
 }
 
 export function workItemCreatedEvent(workItem: WorkItem): AuditEvent {
-  return createEvent(WorkItemEvent.Created, workItem, workItemAttributes(workItem));
+  return createEvent(WorkItemEvent.Created, auditWorkItemProjection(workItem), workItemAttributes(workItem));
 }
 
 export function workItemStatusEvent(
@@ -405,7 +423,7 @@ export function workItemStatusEvent(
 ): AuditEvent {
   return createEvent(
     statusEvents[workItem.status],
-    { ...workItem, ...body },
+    { ...auditWorkItemProjection(workItem), ...body },
     { ...workItemAttributes(workItem), ...attributes }
   );
 }
@@ -421,6 +439,28 @@ export function projectWorkItems(events: AuditEvent[]): WorkItem[] {
   }
 
   return [...workItems.values()].sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+}
+
+export function auditWorkItemProjection(workItem: WorkItem): WorkItem {
+  const explicitSecrets = collectSensitiveValues({ target: workItem.target, actions: workItem.requestedActions });
+  return {
+    ...workItem,
+    title: redactedAuditText(workItem.title, explicitSecrets),
+    intent: redactedAuditText(workItem.intent, explicitSecrets),
+    target: {},
+    requestedActions: workItem.requestedActions.map((action) => ({
+      kind: action.kind,
+      description: redactedAuditText(action.description, explicitSecrets),
+      params: { declared: Object.keys(action.params).length > 0 }
+    }))
+  };
+}
+
+function redactedAuditText(value: string, explicitSecrets: readonly string[]): string {
+  const redacted = redactSensitiveText(value, explicitSecrets);
+  if (typeof redacted !== "string" || redacted.length === 0)
+    throw new Error("work item audit projection could not be produced safely");
+  return redacted;
 }
 
 function workItemAttributes(workItem: WorkItem): Record<string, string> {

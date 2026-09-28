@@ -1525,6 +1525,58 @@
                           "requestId"
                         ],
                         "additionalProperties": false
+                      },
+                      {
+                        "type": "object",
+                        "properties": {
+                          "executionMode": {
+                            "type": "string",
+                            "const": "native_engine"
+                          },
+                          "simulated": {
+                            "type": "boolean",
+                            "const": false
+                          },
+                          "backend": {
+                            "type": "string",
+                            "const": "engine-isolation-v1"
+                          },
+                          "engineId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                          },
+                          "routeId": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                          },
+                          "adapterInvocationHash": {
+                            "type": "string",
+                            "pattern": "^[a-f0-9]{64}$"
+                          },
+                          "workerVersion": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 128,
+                            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                          },
+                          "reason": {
+                            "type": "string",
+                            "maxLength": 512
+                          }
+                        },
+                        "required": [
+                          "executionMode",
+                          "simulated",
+                          "backend",
+                          "engineId",
+                          "routeId",
+                          "adapterInvocationHash"
+                        ],
+                        "additionalProperties": false
                       }
                     ]
                   }
