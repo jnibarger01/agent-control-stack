@@ -99,11 +99,64 @@ function fsyncDirectory(path: string): void {
   }
 }
 
-export function enqueueApprovalTraceEvent(db: Sql, input: ApprovalTraceInput): void {
-  if (!ID_RE.test(input.instance) || !ID_RE.test(input.actorId) || !ID_RE.test(input.workItemId)) {
-    fail("trace_producer_invalid", "trace identity is invalid");
+export interface TraceProducerConfig {
+  instance: string;
+  releaseSha: string;
+}
+
+/**
+ * Validates the trace producer identity (`ACS_TRACE_INSTANCE` / `ACS_RELEASE_SHA`).
+ * Operators control these values, so a bad value is a deployment error that must fail
+ * at boot — never at approval time, where it would deny an otherwise-valid approval
+ * (ADR 0021: a failed trace does not grant, deny, or approve anything).
+ */
+export function validateTraceProducerConfig(config: TraceProducerConfig): TraceProducerConfig {
+  if (typeof config.instance !== "string" || !ID_RE.test(config.instance)) {
+    fail(
+      "trace_config_invalid",
+      "ACS_TRACE_INSTANCE must match ^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$ (no spaces or slashes)"
+    );
   }
-  if (!RELEASE_RE.test(input.releaseSha)) fail("trace_producer_invalid", "release sha is invalid");
+  if (typeof config.releaseSha !== "string" || !RELEASE_RE.test(config.releaseSha)) {
+    fail("trace_config_invalid", "ACS_RELEASE_SHA must be a full 40-character lowercase hex sha or 'unreleased'");
+  }
+  return { instance: config.instance, releaseSha: config.releaseSha };
+}
+
+/**
+ * Resolves the producer identity from explicit options, then the environment, then
+ * defaults, and validates it. Throws `trace_config_invalid` on a bad value.
+ */
+export function resolveTraceProducerConfig(
+  options: { traceInstance?: string; releaseSha?: string } = {},
+  env: NodeJS.ProcessEnv = process.env
+): TraceProducerConfig {
+  return validateTraceProducerConfig({
+    instance: options.traceInstance ?? env.ACS_TRACE_INSTANCE ?? `acs-${process.pid}`,
+    releaseSha: options.releaseSha ?? env.ACS_RELEASE_SHA ?? "unreleased"
+  });
+}
+
+/**
+ * Trace identities must match the trace-event id grammar. Actor ids come from real
+ * identity providers (`jace@example.com`, `auth0|123`), so an id outside the grammar is
+ * replaced with a deterministic, non-reversible `h:` + 32-hex sha256 prefix instead of
+ * failing the approval. The canonical audit log keeps the raw approver.
+ */
+export function normalizeTraceActorId(id: string): string {
+  if (ID_RE.test(id)) return id;
+  return `h:${sha256(String(id)).slice(0, 32)}`;
+}
+
+export function enqueueApprovalTraceEvent(db: Sql, rawInput: ApprovalTraceInput): void {
+  const producer = validateTraceProducerConfig({ instance: rawInput.instance, releaseSha: rawInput.releaseSha });
+  const input: ApprovalTraceInput = {
+    ...rawInput,
+    instance: producer.instance,
+    releaseSha: producer.releaseSha,
+    actorId: normalizeTraceActorId(rawInput.actorId)
+  };
+  if (!ID_RE.test(input.workItemId)) fail("trace_producer_invalid", "trace work item id is invalid");
   const ts = new Date().toISOString();
   db.prepare(`INSERT OR IGNORE INTO trace_missions (work_item_id, trace_id, created_at) VALUES (?, ?, ?)`).run(
     input.workItemId,

@@ -6,8 +6,14 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { SqliteWorkItemStore } from "./store.js";
-import { TRACE_CHAIN_PRODUCER_KEY, relayTraceOutbox, utcSpoolDay } from "./trace-outbox.js";
+import { SqliteWorkItemStore, type TraceEnqueueFailure } from "./store.js";
+import {
+  TRACE_CHAIN_PRODUCER_KEY,
+  normalizeTraceActorId,
+  relayTraceOutbox,
+  resolveTraceProducerConfig,
+  utcSpoolDay
+} from "./trace-outbox.js";
 
 // sha256 of trace-event.v1.schema.json from LoopTrace af3e425fe5e2a2bb3ccb8c2a3301555124a25465
 const SCHEMA_PIN = "2c783e16c1c5056a20d4d71160e02569dd8ee00416ad6e8b78084b7652f787e5";
@@ -49,7 +55,7 @@ describe("trace outbox", () => {
     expect(createHash("sha256").update(text).digest("hex")).toBe(SCHEMA_PIN);
   });
 
-  it("rolls back the approval and the outbox row together", () => {
+  it("a failed outbox write does not deny the approval; only the trace rows roll back (ADR 0021)", () => {
     const dir = tempDir();
     const dbPath = join(dir, "control.db");
     const store = new SqliteWorkItemStore(dbPath, { traceInstance: "acs-test", releaseSha: "unreleased" });
@@ -61,23 +67,160 @@ describe("trace outbox", () => {
        BEGIN SELECT RAISE(ABORT, 'forced outbox failure'); END`
     );
     side.close();
-    const failing = new SqliteWorkItemStore(dbPath, { traceInstance: "acs-test", releaseSha: "unreleased" });
+    const failures: TraceEnqueueFailure[] = [];
+    const failing = new SqliteWorkItemStore(dbPath, {
+      traceInstance: "acs-test",
+      releaseSha: "unreleased",
+      onTraceFailure: (failure) => failures.push(failure)
+    });
     try {
-      expect(() =>
-        failing.recordApproval({ workItemId: item.id, actionHash: "hash_test", approvedBy: "user", reason: "exact" })
-      ).toThrow(/forced outbox failure|trace_outbox/);
+      const grant = failing.recordApproval({
+        workItemId: item.id,
+        actionHash: "hash_test",
+        approvedBy: "user",
+        reason: "exact"
+      });
+      expect(grant.requestHash).toMatch(/\S/);
+      failing.consumeApproval(item.id, "hash_test", { requestHash: grant.requestHash });
+      expect(failing.getTraceEnqueueFailureCount()).toBe(2);
     } finally {
       failing.close();
     }
+    expect(failures.map((failure) => failure.kind)).toEqual(["acs.approval.granted", "acs.approval.consumed"]);
+    expect(failures.every((failure) => failure.workItemId === item.id)).toBe(true);
+    expect(failures[0]?.message).toMatch(/forced outbox failure/);
     const check = new DatabaseSync(dbPath);
     try {
-      const approvals = check.prepare(`SELECT count(*) AS n FROM approval_records`).get() as { n: number };
+      const approvals = check.prepare(`SELECT status FROM approval_records`).all() as Array<{ status: string }>;
       const outbox = check.prepare(`SELECT count(*) AS n FROM trace_outbox`).get() as { n: number };
-      expect(approvals.n).toBe(0);
+      const missions = check.prepare(`SELECT count(*) AS n FROM trace_missions`).get() as { n: number };
+      const chain = check.prepare(`SELECT count(*) AS n FROM trace_chain_state`).get() as { n: number };
+      const audit = check
+        .prepare(`SELECT count(*) AS n FROM audit_events WHERE name IN ('approval.granted', 'approval.consumed')`)
+        .get() as { n: number };
+      expect(approvals).toEqual([{ status: "consumed" }]);
+      expect(audit.n).toBe(2);
+      // The savepoint unwinds every trace write, so no partial trace state is left behind.
       expect(outbox.n).toBe(0);
+      expect(missions.n).toBe(0);
+      expect(chain.n).toBe(0);
     } finally {
       check.close();
     }
+  });
+
+  it("a failing trace-failure reporter still cannot deny the approval", () => {
+    const dir = tempDir();
+    const dbPath = join(dir, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath, { traceInstance: "acs-test", releaseSha: "unreleased" });
+    const item = workItem(seed);
+    seed.close();
+    const side = new DatabaseSync(dbPath);
+    side.exec(
+      `CREATE TRIGGER trace_outbox_boom BEFORE INSERT ON trace_outbox
+       BEGIN SELECT RAISE(ABORT, 'forced outbox failure'); END`
+    );
+    side.close();
+    const store = new SqliteWorkItemStore(dbPath, {
+      traceInstance: "acs-test",
+      releaseSha: "unreleased",
+      onTraceFailure: () => {
+        throw new Error("reporter exploded");
+      }
+    });
+    try {
+      expect(() =>
+        store.recordApproval({ workItemId: item.id, actionHash: "hash_test", approvedBy: "user" })
+      ).not.toThrow();
+      expect(store.getTraceEnqueueFailureCount()).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it.each(["jace@example.com", "auth0|123"])(
+    "records an approval from %s and traces it under a normalised actor id",
+    (approvedBy) => {
+      const dir = tempDir();
+      const dbPath = join(dir, "control.db");
+      const failures: TraceEnqueueFailure[] = [];
+      const store = new SqliteWorkItemStore(dbPath, {
+        traceInstance: "acs-test",
+        releaseSha: "unreleased",
+        onTraceFailure: (failure) => failures.push(failure)
+      });
+      let itemId: string;
+      try {
+        const item = workItem(store);
+        itemId = item.id;
+        const grant = store.recordApproval({ workItemId: item.id, actionHash: "hash_test", approvedBy });
+        expect(grant.requestHash).toMatch(/\S/);
+        expect(store.getTraceEnqueueFailureCount()).toBe(0);
+      } finally {
+        store.close();
+      }
+      expect(failures).toEqual([]);
+      const expected = `h:${createHash("sha256").update(approvedBy).digest("hex").slice(0, 32)}`;
+      expect(normalizeTraceActorId(approvedBy)).toBe(expected);
+      const check = new DatabaseSync(dbPath);
+      try {
+        const approval = check.prepare(`SELECT approved_by FROM approval_records`).get() as { approved_by: string };
+        // The canonical approval record keeps the raw approver; only the trace is normalised.
+        expect(approval.approved_by).toBe(approvedBy);
+        const row = check.prepare(`SELECT work_item_id, canonical_json FROM trace_outbox`).get() as {
+          work_item_id: string;
+          canonical_json: string;
+        };
+        expect(row.work_item_id).toBe(itemId);
+        const event = JSON.parse(row.canonical_json) as { actor: { id: string; type: string }; kind: string };
+        expect(event.kind).toBe("acs.approval.granted");
+        expect(event.actor).toEqual({ id: expected, type: "human" });
+        expect(row.canonical_json).not.toContain(approvedBy);
+      } finally {
+        check.close();
+      }
+    }
+  );
+
+  it("passes trace-grammar actor ids through unchanged and hashes deterministically", () => {
+    expect(normalizeTraceActorId("user")).toBe("user");
+    expect(normalizeTraceActorId("worker:local-1")).toBe("worker:local-1");
+    expect(normalizeTraceActorId("jace@example.com")).toBe(normalizeTraceActorId("jace@example.com"));
+    expect(normalizeTraceActorId("jace@example.com")).toMatch(/^h:[a-f0-9]{32}$/);
+    expect(normalizeTraceActorId("")).toMatch(/^h:[a-f0-9]{32}$/);
+  });
+
+  it.each([
+    [{ releaseSha: "1c8dc83" }, /ACS_RELEASE_SHA/],
+    [{ releaseSha: "1C8DC8334972680EE4520F416922AE58D78CBAB8" }, /ACS_RELEASE_SHA/],
+    [{ traceInstance: "acs prod" }, /ACS_TRACE_INSTANCE/],
+    [{ traceInstance: "" }, /ACS_TRACE_INSTANCE/]
+  ])("refuses to construct the store with invalid trace config %o", (options, message) => {
+    const dir = tempDir();
+    const dbPath = join(dir, "control.db");
+    let thrown: unknown;
+    try {
+      new SqliteWorkItemStore(dbPath, { traceInstance: "acs-test", releaseSha: "unreleased", ...options }).close();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toBeInstanceOf(Error);
+    expect((thrown as { code?: string }).code).toBe("trace_config_invalid");
+    expect((thrown as Error).message).toMatch(message);
+    // Refused before opening the database.
+    expect(existsSync(dbPath)).toBe(false);
+  });
+
+  it("validates ACS_TRACE_INSTANCE / ACS_RELEASE_SHA from the environment", () => {
+    expect(resolveTraceProducerConfig({}, { ACS_TRACE_INSTANCE: "acs-prod", ACS_RELEASE_SHA: "a".repeat(40) })).toEqual(
+      {
+        instance: "acs-prod",
+        releaseSha: "a".repeat(40)
+      }
+    );
+    expect(() => resolveTraceProducerConfig({}, { ACS_RELEASE_SHA: "1c8dc83" })).toThrow(/ACS_RELEASE_SHA/);
+    expect(() => resolveTraceProducerConfig({}, { ACS_TRACE_INSTANCE: "acs prod" })).toThrow(/ACS_TRACE_INSTANCE/);
+    expect(resolveTraceProducerConfig({}, {}).releaseSha).toBe("unreleased");
   });
 
   it("writes an outbox row for every approval_records grant and consume", () => {

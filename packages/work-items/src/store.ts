@@ -36,7 +36,7 @@ import {
   type WorkItemRisk,
   type WorkItemStatus
 } from "./work-item.js";
-import { enqueueApprovalTraceEvent } from "./trace-outbox.js";
+import { enqueueApprovalTraceEvent, resolveTraceProducerConfig, type ApprovalTraceInput } from "./trace-outbox.js";
 import {
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
@@ -894,6 +894,20 @@ export interface SqliteWorkItemStoreOptions {
   onEvent?: (event: StoredAuditEvent) => void;
   traceInstance?: string;
   releaseSha?: string;
+  /**
+   * Called inside the approval transaction, after the trace savepoint rolled back, when
+   * an approval trace event could not be enqueued. Trace is
+   * observational (ADR 0021), so the approval still commits. Must not throw; a throw is
+   * swallowed. Defaults to a one-line JSON warning on stderr.
+   */
+  onTraceFailure?: (failure: TraceEnqueueFailure) => void;
+}
+
+export interface TraceEnqueueFailure {
+  kind: ApprovalTraceInput["kind"];
+  workItemId: string;
+  code: string;
+  message: string;
 }
 
 export interface WorkItemStore {
@@ -1122,15 +1136,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private auditChainValid = true;
   private readonly traceInstance: string;
   private readonly releaseSha: string;
+  private readonly onTraceFailure: (failure: TraceEnqueueFailure) => void;
+  private traceEnqueueFailures = 0;
 
   constructor(dbPath: string, options: SqliteWorkItemStoreOptions = {}) {
+    // Validate the trace producer identity before touching the database: a bad
+    // ACS_TRACE_INSTANCE / ACS_RELEASE_SHA refuses to boot instead of failing approvals.
+    const traceProducer = resolveTraceProducerConfig(options);
+    this.traceInstance = traceProducer.instance;
+    this.releaseSha = traceProducer.releaseSha;
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.leaseMs = options.leaseMs ?? 5 * 60 * 1000;
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     this.onEvent = options.onEvent ?? (() => undefined);
-    this.traceInstance = options.traceInstance ?? process.env.ACS_TRACE_INSTANCE ?? `acs-${process.pid}`;
-    this.releaseSha = options.releaseSha ?? process.env.ACS_RELEASE_SHA ?? "unreleased";
+    this.onTraceFailure = options.onTraceFailure ?? defaultTraceFailureReporter;
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
@@ -4310,7 +4330,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
-      enqueueApprovalTraceEvent(this.db, {
+      this.enqueueApprovalTraceNonBlocking({
         instance: this.traceInstance,
         releaseSha: this.releaseSha,
         workItemId: input.workItemId,
@@ -4398,7 +4418,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
-      enqueueApprovalTraceEvent(this.db, {
+      this.enqueueApprovalTraceNonBlocking({
         instance: this.traceInstance,
         releaseSha: this.releaseSha,
         workItemId,
@@ -5908,6 +5928,45 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => ({ value: operation(), events: [] }));
   }
 
+  /** Number of approval trace events that failed to enqueue in this process (non-blocking). */
+  getTraceEnqueueFailureCount(): number {
+    return this.traceEnqueueFailures;
+  }
+
+  /**
+   * Enqueues an approval trace event inside the caller's approval transaction, isolated
+   * by a savepoint. ADR 0021: trace is observational evidence and a failed trace must
+   * not deny an approval, so any enqueue error (identity grammar, chain conflict,
+   * schema/trigger failure) rolls back only the trace rows and is reported, never
+   * thrown. The approval commits without a trace row; there is still never a trace row
+   * without its approval.
+   */
+  private enqueueApprovalTraceNonBlocking(input: ApprovalTraceInput): void {
+    this.db.exec("SAVEPOINT acs_trace_enqueue");
+    try {
+      enqueueApprovalTraceEvent(this.db, input);
+      this.db.exec("RELEASE SAVEPOINT acs_trace_enqueue");
+      return;
+    } catch (error) {
+      // If the savepoint cannot be unwound the transaction state is unknown; these
+      // throw and fail the write rather than commit a partially written trace.
+      this.db.exec("ROLLBACK TO SAVEPOINT acs_trace_enqueue");
+      this.db.exec("RELEASE SAVEPOINT acs_trace_enqueue");
+      this.traceEnqueueFailures += 1;
+      const failure: TraceEnqueueFailure = {
+        kind: input.kind,
+        workItemId: input.workItemId,
+        code: error instanceof ControlStackError ? error.code : "trace_enqueue_failed",
+        message: error instanceof Error ? error.message.slice(0, 200) : "trace enqueue failed"
+      };
+      try {
+        this.onTraceFailure(failure);
+      } catch {
+        // Reporting is best effort and must never affect the approval.
+      }
+    }
+  }
+
   private write<T>(operation: () => { value: T; events: StoredAuditEvent[] }): T {
     if (!this.auditChainValid) {
       throw new ControlStackError("audit_chain_invalid", "audit chain is invalid; writes are disabled");
@@ -6482,4 +6541,16 @@ function assertFutureIso(value: string, now: string, field: string): void {
 
 function publicKeyFingerprint(publicKeyPem: string): string {
   return createHash("sha256").update(publicKeyPem).digest("base64url");
+}
+
+function defaultTraceFailureReporter(failure: TraceEnqueueFailure): void {
+  process.stderr.write(
+    `${JSON.stringify({
+      level: "warn",
+      event: "trace_outbox_enqueue_failed",
+      kind: failure.kind,
+      work_item_id: failure.workItemId,
+      code: failure.code
+    })}\n`
+  );
 }

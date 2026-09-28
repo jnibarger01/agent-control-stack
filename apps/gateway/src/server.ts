@@ -82,6 +82,7 @@ import {
   MAX_EVENT_LIMIT,
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
+  resolveTraceProducerConfig,
   validateHeartbeatTtl,
   WorkerIdentityRegistry,
   type ReadEventsOptions,
@@ -307,6 +308,9 @@ function withAttemptPlan(
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
+  // Refuse to boot on an invalid ACS_TRACE_INSTANCE / ACS_RELEASE_SHA (trace_config_invalid)
+  // rather than discovering it inside an approval transaction (PR #212 B4, ADR 0021).
+  resolveTraceProducerConfig();
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
