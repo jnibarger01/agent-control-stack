@@ -317,14 +317,28 @@ const TOOL_SURFACE: Readonly<Record<JcToolName, SurfaceRow>> = {
   read_multiple_files: surface("filesystem", ["paths"], [])
 };
 
+function deepFreezeJson<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) deepFreezeJson(child);
+    Object.freeze(value);
+  }
+  return value;
+}
+
 function buildManifest(): ReadonlyMap<JcToolName, JcToolContract> {
   const entries = new Map<JcToolName, JcToolContract>();
   const verbs = new Set<string>();
   for (const name of JC_TOOL_NAMES) {
+    const source = TOOL_ROWS[name];
     const entry = Object.freeze({
       name,
       argsSchema: JC_TOOL_ARGUMENT_SCHEMAS[name],
-      ...TOOL_ROWS[name],
+      ...source,
+      inputSchema: deepFreezeJson(source.inputSchema),
+      // Do not expose TOOL_ROWS' mutable array through the public contract.
+      // Policy consumers retain these objects for the process lifetime, so
+      // nested policy values must be immutable too.
+      scopes: Object.freeze([...source.scopes]),
       ...TOOL_SURFACE[name]
     });
     for (const arg of entry.pathArguments) {

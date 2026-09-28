@@ -231,6 +231,7 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .agent-row:hover, .agent-row.selected { background: var(--hover); }
 .empty { padding: 18px; color: var(--muted); }
 .pill { display: inline-flex; align-items: center; border-radius: 999px; padding: 2px 8px; font-size: 11px; background: var(--pill-bg); color: var(--pill-ink); border: 1px solid var(--pill-line); white-space: nowrap; }
+.lease-expiry-warning[hidden] { display: none; }
 .pill.execution-mode { font-weight: 700; letter-spacing: 0.04em; }
 .execution-mode-dry_run { color: var(--amber); border-color: var(--warn-line); background: var(--warn-bg); border-style: dashed; }
 .execution-mode-desktop_commander { color: var(--red); border-color: var(--bad-line); background: var(--bad-bg); }
