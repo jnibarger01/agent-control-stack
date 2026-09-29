@@ -24,6 +24,7 @@ Commands:
   publication list [--json]
   audit export [--db <path>] [-o <file>]
   audit verify (--file <jsonl> | [--db <path>])
+  trace relay [--db <path>] [--spool <dir>]
 
 Legacy binaries remain available: acs-worker, acs-scheduler, acs-mcp, acs-gateway.
 `;
@@ -43,6 +44,7 @@ export type AcsCommand =
   | { kind: "publication-list"; json: boolean }
   | { kind: "audit-export"; dbPath?: string; outputPath?: string }
   | { kind: "audit-verify"; dbPath?: string; filePath?: string }
+  | { kind: "trace-relay"; dbPath?: string; spoolDir?: string }
   | { kind: "skills"; args: string[] };
 
 export class AcsUsageError extends Error {
@@ -124,6 +126,29 @@ function parsePublicationArgs(args: string[]): AcsCommand {
   if (args[0] !== "list" || args.length > 2 || (args[1] && args[1] !== "--json"))
     throw new AcsUsageError("Usage: acs publication list [--json]");
   return { kind: "publication-list", json: args[1] === "--json" };
+}
+
+function parseTraceArgs(args: string[]): AcsCommand {
+  if (args[0] !== "relay") {
+    throw new AcsUsageError("Usage: acs trace relay [--db <path>] [--spool <dir>]");
+  }
+  let dbPath: string | undefined;
+  let spoolDir: string | undefined;
+  for (let index = 1; index < args.length; index += 1) {
+    const flag = args[index];
+    if (flag === "--db") {
+      dbPath = args[index + 1];
+      index += 1;
+      if (!dbPath) throw new AcsUsageError("acs trace relay --db requires a path");
+    } else if (flag === "--spool") {
+      spoolDir = args[index + 1];
+      index += 1;
+      if (!spoolDir) throw new AcsUsageError("acs trace relay --spool requires a path");
+    } else {
+      throw new AcsUsageError(`invalid trace relay argument: ${flag}`);
+    }
+  }
+  return { kind: "trace-relay", dbPath, spoolDir };
 }
 
 function parseAuditArgs(args: string[]): AcsCommand {
@@ -217,6 +242,8 @@ export function parseAcsArgs(args: string[]): AcsCommand {
       return parsePublicationArgs(rest);
     case "audit":
       return parseAuditArgs(rest);
+    case "trace":
+      return parseTraceArgs(rest);
     case "skills":
       return { kind: "skills", args: rest };
     default:

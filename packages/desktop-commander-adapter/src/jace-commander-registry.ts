@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import { ControlStackError, applyControlPlaneMigrations, createId } from "@agent-control-stack/shared";
 import { executionPlanApprovalRequestHash } from "@agent-control-stack/work-items";
 import { ACS_ADMIN_APPROVER } from "@agent-control-stack/policy-gate";
-import { JACE_COMMANDER_PRIVILEGED_TOOL, jaceCommanderNonceHash, jaceCommanderToolPolicy } from "./jace-commander.js";
+import { jaceCommanderNonceHash, jaceCommanderToolPolicy } from "./jace-commander.js";
 
 export interface JaceCommanderIssuanceBinding {
   readonly runtimeId: string;
@@ -16,7 +16,11 @@ export interface JaceCommanderIssuanceBinding {
   readonly actionHash: string;
   readonly invocationHash: string;
   readonly approvalId?: string;
-  /** requesterSubject of the work item; a privileged approval by this actor is self-approval. */
+  /**
+   * requesterSubject of the work item (the attested actor behind requester
+   * "agent"). An approval of ANY approval-gated tool by this actor is
+   * self-approval. Required and non-empty for approval-gated tools.
+   */
   readonly requesterSubject: string;
   readonly keyId: string;
   readonly nonce: string;
@@ -28,9 +32,11 @@ const HASH = /^[a-f0-9]{64}$/u;
 
 /**
  * Durable acs.jc.v1 issuance gate. Must commit BEFORE the capability is
- * signed. Re-derives lease/fencing/plan binding and, for privileged_exec,
- * requires a consumed approval bound to this exact plan+action that was
- * granted by a human: never `acs:admin`, never the requesting actor.
+ * signed. Re-derives lease/fencing/plan binding and, for EVERY tool whose
+ * manifest entry has `requiresApproval` (privileged_exec, the fs.write tools,
+ * start_process/kill_process and git add/commit/fetch/push), requires a
+ * consumed approval bound to this exact plan+action that was granted by a
+ * human: never `acs:admin`, never the requesting actor (requesterSubject).
  */
 export class SqliteJaceCommanderIssuanceRegistry {
   private readonly db: DatabaseSync;
@@ -139,19 +145,26 @@ export class SqliteJaceCommanderIssuanceRegistry {
             "approval is missing, expired, or mismatched"
           );
         }
-        if (input.toolName === JACE_COMMANDER_PRIVILEGED_TOOL) {
-          if (approval.approved_by_actor_id === ACS_ADMIN_APPROVER) {
-            throw new ControlStackError(
-              "jace_commander_human_approval_required",
-              "privileged_exec requires a human approval; admin auto-approval is not accepted"
-            );
-          }
-          if (approval.approved_by_actor_id === input.requesterSubject) {
-            throw new ControlStackError(
-              "jace_commander_self_approval_denied",
-              "privileged_exec cannot be self-approved"
-            );
-          }
+        // Applies to every approval-gated tool, not only privileged_exec.
+        if (approval.approved_by_actor_id === ACS_ADMIN_APPROVER) {
+          throw new ControlStackError(
+            "jace_commander_human_approval_required",
+            `${input.toolName} requires a human approval; admin auto-approval is not accepted`
+          );
+        }
+        // Fail closed: without a known requester there is no way to rule out
+        // self-approval.
+        if (typeof input.requesterSubject !== "string" || input.requesterSubject.length === 0) {
+          throw new ControlStackError(
+            "jace_commander_requester_unknown",
+            `${input.toolName} requires a known requester to rule out self-approval`
+          );
+        }
+        if (approval.approved_by_actor_id === input.requesterSubject) {
+          throw new ControlStackError(
+            "jace_commander_self_approval_denied",
+            `${input.toolName} cannot be self-approved`
+          );
         }
         approvalId = approval.approval_id;
         approvedBy = approval.approved_by_actor_id;

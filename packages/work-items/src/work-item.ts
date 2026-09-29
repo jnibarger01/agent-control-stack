@@ -144,7 +144,21 @@ const simulationMetadataSchema = z.discriminatedUnion("executionMode", [
           message: "invocationFingerprint is required unless the execution was blocked before invocation"
         });
       }
+    }),
+  z
+    .object({
+      executionMode: z.literal("jace_commander"),
+      simulated: z.literal(false),
+      backend: z.literal("jace-commander-mcp"),
+      backendVersion: z.string().max(128).optional(),
+      toolName: z.string().min(1).max(128),
+      invocationFingerprint: hashSchema,
+      requestId: identifierSchema,
+      approvalId: identifierSchema.optional(),
+      workerVersion: identifierSchema.optional(),
+      reason: z.string().max(512).optional()
     })
+    .strict()
 ]);
 
 const structuredOutputSchema = z.record(z.string(), z.unknown()).superRefine((value, context) => {

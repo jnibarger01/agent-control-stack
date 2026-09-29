@@ -65,4 +65,13 @@ describe("parseAcsArgs", () => {
     });
     expect(() => parseAcsArgs(["audit", "verify", "--file", "a", "--db", "b"])).toThrow(AcsUsageError);
   });
+
+  it("parses trace relay", () => {
+    expect(parseAcsArgs(["trace", "relay", "--db", "a.db", "--spool", "spool"])).toEqual({
+      kind: "trace-relay",
+      dbPath: "a.db",
+      spoolDir: "spool"
+    });
+    expect(() => parseAcsArgs(["trace", "watch"])).toThrow(AcsUsageError);
+  });
 });
