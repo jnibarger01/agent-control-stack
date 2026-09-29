@@ -1,0 +1,22 @@
+-- Migration 035: work-item queue index
+-- Forward-only: do not alter historical migrations.
+--
+-- `work_items` is append-only in practice: rows are guarded against deletion
+-- (033_db_guards.sql) and always grow with every item the control plane accepts.
+-- Two of the hottest reads filter on `status` and order by `created_at`, and
+-- neither had an index to support either half of the statement:
+--
+--   * worker claim (every tick, while the queue is empty):
+--       SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1
+--   * status-filtered listings (MCP / HTTP list_work_items, digests):
+--       SELECT * FROM work_items WHERE status = ? ORDER BY created_at DESC LIMIT ?
+--
+-- `EXPLAIN QUERY PLAN` for both was `SCAN work_items | USE TEMP B-TREE FOR ORDER
+-- BY`, i.e. a full scan of every item ever accepted plus a sort of the whole
+-- table, re-paid on each tick and each page request.
+--
+-- The compound index below serves both shapes: equality on `status`, then the
+-- `created_at` ordering (SQLite traverses it backwards for the DESC form), so an
+-- empty queue becomes an index seek instead of a scan, and the cost stops
+-- growing with history.
+CREATE INDEX IF NOT EXISTS idx_work_items_status_created ON work_items(status, created_at);
