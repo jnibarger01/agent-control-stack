@@ -437,6 +437,23 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     actorId: string;
     toolName: string;
   }): Promise<AdmissionPermit> {
+    // A lost terminal report must not strand scheduler capacity after the
+    // authoritative attempt lease has expired or been revoked. Reap only
+    // permits whose lease authority is no longer active; never revoke a live
+    // lease or widen execution authority here.
+    for (const [attemptId, binding] of [...admissionPermits.entries()]) {
+      const lease = workItems.getActiveLeaseForAttempt(attemptId);
+      if (
+        !lease ||
+        lease.leaseId !== binding.leaseId ||
+        lease.workerId !== binding.workerId ||
+        lease.fencingEpoch !== binding.fencingEpoch
+      ) {
+        metrics.increment("acs_admission_stale_permit_released_total", { lane: binding.lane });
+        releaseAdmissionPermit(attemptId);
+      }
+    }
+
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     input.request.raw.once("aborted", onAbort);
