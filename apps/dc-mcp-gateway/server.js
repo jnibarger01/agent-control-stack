@@ -36,6 +36,10 @@ const SIGNING_KEY = process.env.SIGNING_KEY || ''; // hex
 const GATEWAY_EXECUTION_TOKEN = process.env.GATEWAY_EXECUTION_TOKEN || ''; // optional; enables executor identity attestation
 const ACCESS_TTL_S = 3600;
 const REFRESH_TTL_S = 30 * 24 * 3600;
+const rawRefreshReplayGrace = Number.parseInt(process.env.REFRESH_REPLAY_GRACE_S || "1200", 10);
+const REFRESH_REPLAY_GRACE_S = Number.isFinite(rawRefreshReplayGrace)
+  ? Math.max(0, Math.min(rawRefreshReplayGrace, 3600))
+  : 1200;
 const CODE_TTL_S = 300;
 const MAX_BODY = 2 * 1024 * 1024; // 2 MB
 const rawInitializeAcsTimeout = Number.parseInt(process.env.MCP_INITIALIZE_ACS_TIMEOUT_MS || "400", 10);
@@ -363,17 +367,42 @@ async function handleConsent(req, res, body) {
 const codes = new Map(); // code -> grant data
 setInterval(() => { const t = now(); for (const [c, g] of codes) if (g.exp < t) codes.delete(c); }, 60_000);
 
-function issueTokens(grant) {
+function issueAccessToken(grant) {
   const t = now();
   const jti = randId();
-  const access = signJwt({
+  return signJwt({
     iss: ISSUER, sub: 'jacen', aud: grant.resource || RESOURCE, client_id: grant.client_id,
     scope: grant.scope, iat: t, exp: t + ACCESS_TTL_S, jti,
   });
+}
+
+function issueTokens(grant) {
+  const t = now();
+  const access = issueAccessToken(grant);
   const rjti = randId();
-  refreshTokens[rjti] = { client_id: grant.client_id, scope: grant.scope, resource: grant.resource || RESOURCE, exp: t + REFRESH_TTL_S, active: true };
+  refreshTokens[rjti] = {
+    client_id: grant.client_id,
+    scope: grant.scope,
+    resource: grant.resource || RESOURCE,
+    exp: t + REFRESH_TTL_S,
+    active: true
+  };
   saveJson(tokensFile, refreshTokens);
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_S, refresh_token: rjti, scope: grant.scope };
+}
+
+function resolveRefreshReplay(rec, at) {
+  if (!rec || rec.active || !rec.rotated_to || !rec.rotated_at) return null;
+  if (at - rec.rotated_at > REFRESH_REPLAY_GRACE_S) return null;
+  let token = rec.rotated_to;
+  for (let depth = 0; depth < 8; depth += 1) {
+    const next = refreshTokens[token];
+    if (!next || next.exp < at) return null;
+    if (next.active) return { token, rec: next };
+    if (!next.rotated_to) return null;
+    token = next.rotated_to;
+  }
+  return null;
 }
 
 async function handleToken(req, res, body) {
@@ -395,11 +424,47 @@ async function handleToken(req, res, body) {
     return send(res, 200, issueTokens(g), { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   if (grant_type === 'refresh_token') {
+    const at = now();
     const rec = refreshTokens[refresh_token];
-    if (!rec || !rec.active || rec.exp < now()) return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
-    if (resource && resource !== rec.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
-    rec.active = false; // rotation: old refresh token single-use
+    if (!rec || rec.exp < at) {
+      console.log('gateway: refresh rejected reason=unknown_or_expired');
+      return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
+    }
+    if (client_id && client_id !== rec.client_id) {
+      console.log('gateway: refresh rejected reason=client_mismatch');
+      return jsonError(res, 400, 'invalid_grant', 'client mismatch');
+    }
+    if (resource && resource !== rec.resource) {
+      console.log('gateway: refresh rejected reason=resource_mismatch');
+      return jsonError(res, 400, 'invalid_target', 'resource mismatch');
+    }
+
+    if (!rec.active) {
+      const replay = resolveRefreshReplay(rec, at);
+      if (!replay) {
+        console.log('gateway: refresh rejected reason=rotated_token_outside_replay_grace');
+        return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
+      }
+      console.log('gateway: refresh-token replay converged to the active rotated token');
+      return send(
+        res,
+        200,
+        {
+          access_token: issueAccessToken(replay.rec),
+          token_type: 'Bearer',
+          expires_in: ACCESS_TTL_S,
+          refresh_token: replay.token,
+          scope: replay.rec.scope
+        },
+        { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' }
+      );
+    }
+
+    rec.active = false;
+    rec.rotated_at = at;
     const t = issueTokens({ client_id: rec.client_id, scope: rec.scope, resource: rec.resource });
+    rec.rotated_to = t.refresh_token;
+    saveJson(tokensFile, refreshTokens);
     return send(res, 200, t, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
   return jsonError(res, 400, 'unsupported_grant_type', 'supported: authorization_code, refresh_token');

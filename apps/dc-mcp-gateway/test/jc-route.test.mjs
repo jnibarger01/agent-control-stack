@@ -186,6 +186,36 @@ test('OAuth flow mints a jc-audience token only when resource=/jc/mcp is request
     assert.equal(claims.aud, `${ORIGIN}/jc/mcp`);
     assert.equal((await call(gw.port, '/jc/mcp', tokens.access_token, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status, 200);
     assert.equal((await call(gw.port, '/mcp', tokens.access_token, { jsonrpc: '2.0', id: 1, method: 'tools/list' })).status, 401);
+
+    const rotateResponse = await fetch(`${base}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: tokens.refresh_token,
+        client_id: reg.client_id,
+        resource: `${ORIGIN}/jc/mcp`
+      }).toString(),
+    });
+    assert.equal(rotateResponse.status, 200);
+    const rotated = await rotateResponse.json();
+    assert.notEqual(rotated.refresh_token, tokens.refresh_token);
+
+    const replayResponse = await fetch(`${base}/token`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'refresh_token',
+        refresh_token: tokens.refresh_token,
+        client_id: reg.client_id,
+        resource: `${ORIGIN}/jc/mcp`
+      }).toString(),
+    });
+    assert.equal(replayResponse.status, 200);
+    const replayed = await replayResponse.json();
+    assert.equal(replayed.refresh_token, rotated.refresh_token, 'retry converges on the active rotated token');
+    const replayClaims = JSON.parse(Buffer.from(replayed.access_token.split('.')[1], 'base64url').toString('utf8'));
+    assert.equal(replayClaims.aud, `${ORIGIN}/jc/mcp`);
   } finally { close(); }
 });
 
