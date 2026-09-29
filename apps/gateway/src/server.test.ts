@@ -378,6 +378,30 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("keeps /readyz off the deep database verification path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-readyz-fast-path-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const deepHealth = vi.spyOn(SqliteWorkItemStore.prototype, "health");
+
+    try {
+      const startedAt = performance.now();
+      const ready = await app.inject({ method: "GET", url: "/readyz" });
+      const elapsedMs = performance.now() - startedAt;
+      expect(ready.statusCode).toBe(200);
+      expect(elapsedMs).toBeLessThan(2_000);
+      expect(deepHealth).not.toHaveBeenCalled();
+
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+      expect(deepHealth).toHaveBeenCalled();
+    } finally {
+      deepHealth.mockRestore();
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("separates process liveness from dependency readiness", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-health-separation-"));
     const dbPath = join(dir, "control.db");
@@ -398,7 +422,7 @@ describe("mission control gateway", () => {
     }
   });
 
-  it("uses integrity and foreign-key verification in the readiness contract", async () => {
+  it("uses integrity and foreign-key verification in the deep health contract", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-health-foreign-key-"));
     const dbPath = join(dir, "control.db");
     const seed = new SqliteWorkItemStore(dbPath);
@@ -427,10 +451,10 @@ describe("mission control gateway", () => {
     const app = buildGateway({ dbPath, logger: false, auth: testAuth });
 
     try {
-      const ready = await app.inject({ method: "GET", url: "/readyz" });
+      const health = await app.inject({ method: "GET", url: "/health" });
 
-      expect(ready.statusCode).toBe(503);
-      expect(ready.json()).toMatchObject({
+      expect(health.statusCode).toBe(503);
+      expect(health.json()).toMatchObject({
         ok: false,
         checks: {
           integrity: { ok: true },
@@ -601,7 +625,7 @@ describe("mission control gateway", () => {
     }
   });
 
-  it("reconciles stale tunnel sessions and agents before reporting readiness", async () => {
+  it("reconciles stale tunnel sessions and agents before reporting deep health", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-readiness-liveness-"));
     const dbPath = join(dir, "control.db");
     const staleAt = new Date(Date.now() - 901_000);
@@ -635,9 +659,9 @@ describe("mission control gateway", () => {
     let appClosed = false;
 
     try {
-      const ready = await app.inject({ method: "GET", url: "/readyz" });
-      expect(ready.statusCode).toBe(200);
-      expect(ready.json()).toMatchObject({ ok: true, checks: { liveness: { ok: true } } });
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+      expect(health.json()).toMatchObject({ ok: true, checks: { liveness: { ok: true } } });
       await app.close();
       appClosed = true;
 
