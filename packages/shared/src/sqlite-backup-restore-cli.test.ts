@@ -230,7 +230,7 @@ describe("sqlite-backup-restore snapshot retain-after-integrity", () => {
     const source = join(root, "sample.db");
     const live = join(root, "storage", "local.db");
     await runCli(["create-fixture", source]);
-    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
     const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
 
     const refused = await runCliExpectFailure(
@@ -297,7 +297,7 @@ describe("sqlite-backup-restore snapshot retain-after-integrity", () => {
 
     const source = join(root, "sample.db");
     await runCli(["create-fixture", source]);
-    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
     const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
 
     const refused = await runCliExpectFailure(
@@ -331,7 +331,7 @@ describe("sqlite-backup-restore snapshot retain-after-integrity", () => {
 
     const source = join(root, "sample.db");
     await runCli(["create-fixture", source]);
-    const snapshot = await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
+    await runCli(["snapshot", source, "--destination-dir", join(root, "backups")]);
     const backup = join(root, "backups", readlinkSync(join(root, "backups", "latest.db")));
 
     const refused = await runCliExpectFailure(
