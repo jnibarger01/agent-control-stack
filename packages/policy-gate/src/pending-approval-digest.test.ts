@@ -8,7 +8,8 @@ import {
   collectPendingApprovalDigest,
   deliverPendingApprovalDigest,
   loadPendingApprovalDigestConfig,
-  runPendingApprovalDigestOnce
+  runPendingApprovalDigestOnce,
+  type PendingApprovalDigest
 } from "./pending-approval-digest.js";
 import { createWorkItemTools } from "./tools.js";
 
@@ -201,6 +202,87 @@ describe("pending-approval digest", () => {
     expect(result).toEqual({ stdout: true, webhook: false });
     expect(lines).toHaveLength(1);
   });
+
+  it("parses the webhook timeout from the environment with a bounded default", () => {
+    expect(loadPendingApprovalDigestConfig({}).webhookTimeoutMs).toBe(5_000);
+    expect(
+      loadPendingApprovalDigestConfig({ ACS_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS: "750" }).webhookTimeoutMs
+    ).toBe(750);
+    for (const invalid of ["0", "-1", "60000", "not-a-number", ""]) {
+      expect(() =>
+        loadPendingApprovalDigestConfig({ ACS_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS: invalid })
+      ).toThrow();
+    }
+  });
+
+  it("bounds the webhook POST with the configured abort timeout instead of hanging the run", async () => {
+    const lines: string[] = [];
+    const signals: AbortSignal[] = [];
+    const fetchImpl = ((_url: string, init?: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        const signal = init?.signal;
+        if (!signal) {
+          reject(new Error("webhook POST was sent without an abort signal"));
+          return;
+        }
+        signals.push(signal);
+        signal.addEventListener("abort", () => reject(new Error("webhook receiver never answered")));
+      })) as unknown as typeof fetch;
+
+    const startedAt = Date.now();
+    await expect(
+      runPendingApprovalDigestOnce({
+        config: {
+          enabled: true,
+          olderThanMinutes: 1,
+          stdout: true,
+          webhookUrl: "http://127.0.0.1:9/ops/pending-approvals",
+          webhookTimeoutMs: 25,
+          dbPath: "unused.db",
+          actor: "ops-digest"
+        },
+        store: {
+          list: () => [
+            fixtureWorkItem({
+              id: "wrk_stale",
+              status: "needs_approval",
+              updatedAt: "2020-01-01T00:00:00.000Z"
+            })
+          ]
+        },
+        policy: fakeRequireApprovalPolicy("hash-a"),
+        now: new Date("2026-09-13T17:00:00.000Z"),
+        log: (line) => lines.push(line),
+        fetchImpl
+      })
+    ).rejects.toThrow("pending-approval digest webhook timed out after 25ms");
+
+    // The digest still reached stdout before the webhook attempt, the timeout
+    // was actually enforced, and the run ended well inside the old unbounded wait.
+    expect(lines).toHaveLength(1);
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(5_000);
+  });
+
+  it("does not abort a webhook that answers inside the timeout", async () => {
+    const signals: AbortSignal[] = [];
+    const fetchImpl = (async (_url: string, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal);
+      return new Response(null, { status: 204 });
+    }) as unknown as typeof fetch;
+
+    const result = await deliverPendingApprovalDigest(fixtureDigest(), {
+      stdout: false,
+      webhookUrl: "http://127.0.0.1:9/ops/pending-approvals",
+      webhookTimeoutMs: 30_000,
+      fetchImpl
+    });
+
+    expect(result).toEqual({ stdout: false, webhook: true });
+    expect(signals).toHaveLength(1);
+    expect(signals[0]?.aborted).toBe(false);
+  });
 });
 
 function bumpUpdatedAt(store: SqliteWorkItemStore, workItemId: string, updatedAt: string): void {
@@ -210,6 +292,23 @@ function bumpUpdatedAt(store: SqliteWorkItemStore, workItemId: string, updatedAt
     }
   ).db;
   db.prepare(`UPDATE work_items SET updated_at = ? WHERE id = ?`).run(updatedAt, workItemId);
+}
+
+function fixtureDigest(): PendingApprovalDigest {
+  return {
+    kind: "pending_approval_digest",
+    generatedAt: "2026-09-13T17:00:00.000Z",
+    olderThanMinutes: 30,
+    count: 1,
+    items: [
+      {
+        workItemId: "wrk_1",
+        actionHash: "a".repeat(64),
+        updatedAt: "2026-09-13T16:00:00.000Z",
+        ageMinutes: 60
+      }
+    ]
+  };
 }
 
 function fixtureWorkItem(overrides: Partial<WorkItem> & Pick<WorkItem, "id" | "status" | "updatedAt">): WorkItem {
