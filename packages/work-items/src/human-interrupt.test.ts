@@ -139,6 +139,93 @@ describe("durable human interruption and resumption", () => {
     );
   });
 
+  it("survives a store restart before the human responds and resumes from the persisted checkpoint", () => {
+    const f = fixture();
+    directory = f.directory;
+    const dbPath = join(f.directory, "control.db");
+    const interrupt = f.store.requestHumanInterrupt(
+      {
+        attemptId: f.claimed.attemptId!,
+        workItemId: f.claimed.id,
+        workerId: f.claimed.workerId,
+        fencingEpoch: f.claimed.fencingEpoch!,
+        leaseToken: f.claimed.leaseToken,
+        prompt: "Review after restart",
+        checkpoint: { phase: "awaiting-human", durable: true },
+        idempotencyKey: "hitl-restart"
+      },
+      { via: "domain_service", actorId: f.claimed.workerId }
+    );
+    f.store.close();
+
+    const restarted = new SqliteWorkItemStore(dbPath);
+    const pending = restarted.getPendingHumanInterruptForAttempt(f.claimed.attemptId!);
+    expect(pending?.interruptId).toBe(interrupt.interruptId);
+    expect(pending?.checkpoint).toEqual({ phase: "awaiting-human", durable: true });
+    restarted.resolveHumanInterrupt(
+      {
+        interruptId: interrupt.interruptId,
+        decision: "resume",
+        resolvedByActorId: "actor-user",
+        reason: "reviewed after process restart"
+      },
+      { via: "domain_service", actorId: "actor-user" }
+    );
+    const resumed = restarted.resumeHumanInterrupt(
+      {
+        interruptId: interrupt.interruptId,
+        workerId: "worker-restarted",
+        attemptAuthority: {
+          planHash: f.plan.planHash,
+          admissionId: f.admission.admissionId,
+          policyVersion: f.admission.policyVersion,
+          policyDecisionHash: f.admission.policyDecisionHash
+        }
+      },
+      { via: "domain_service", actorId: "worker-restarted" }
+    );
+    expect(resumed.running.attemptId).toBe(f.claimed.attemptId);
+    expect(resumed.running.fencingEpoch).toBe(f.claimed.fencingEpoch! + 1);
+    expect(resumed.interrupt.checkpoint).toEqual({ phase: "awaiting-human", durable: true });
+    restarted.close();
+  });
+
+  it("rejects a human response after the durable interruption expires", () => {
+    const f = fixture();
+    directory = f.directory;
+    const requestedAt = new Date("2026-09-29T05:00:00.000Z");
+    const interrupt = f.store.requestHumanInterrupt(
+      {
+        attemptId: f.claimed.attemptId!,
+        workItemId: f.claimed.id,
+        workerId: f.claimed.workerId,
+        fencingEpoch: f.claimed.fencingEpoch!,
+        leaseToken: f.claimed.leaseToken,
+        prompt: "Respond before expiry",
+        checkpoint: { phase: "expiring" },
+        idempotencyKey: "hitl-expiry",
+        expiresInMs: 1_000,
+        now: requestedAt
+      },
+      { via: "domain_service", actorId: f.claimed.workerId }
+    );
+
+    expect(() =>
+      f.store.resolveHumanInterrupt(
+        {
+          interruptId: interrupt.interruptId,
+          decision: "resume",
+          resolvedByActorId: "actor-user",
+          reason: "too late",
+          now: new Date(requestedAt.getTime() + 1_001)
+        },
+        { via: "domain_service", actorId: "actor-user" }
+      )
+    ).toThrowError(expect.objectContaining<Partial<ControlStackError>>({ code: "human_interrupt_expired" }));
+    expect(f.store.getAttempt(f.claimed.attemptId!)?.status).toBe("interrupted");
+    expect(f.store.getActiveLeaseForAttempt(f.claimed.attemptId!)?.status).toBe("revoked");
+  });
+
   it("lets a human cancel an interrupted attempt without restoring execution authority", () => {
     const f = fixture();
     directory = f.directory;
