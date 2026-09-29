@@ -62,8 +62,8 @@ async function startFixture() {
       JC_ACS_PUBLIC_KEY: 'test-public-key',
       JC_ACS_KEY_ID: 'test-key',
       JC_RUNTIME_ID: 'jc-test-runtime',
-      ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
-      ACS_WORKER_TOKEN: 'jc-worker-token'
+      JC_ACS_URL: `http://127.0.0.1:${acsPort}`,
+      ACS_JC_GATEWAY_TOKEN: 'jc-worker-token'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
