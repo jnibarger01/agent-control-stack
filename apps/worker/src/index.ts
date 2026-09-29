@@ -207,7 +207,8 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
 
   try {
     workItems.failExpiredLeases();
-    const running = tools.claim_next_approved_work_item({ workerId });
+    const resumed = tools.claim_next_resolved_human_interrupt({ workerId });
+    const running = resumed?.running ?? tools.claim_next_approved_work_item({ workerId });
     if (!running) {
       return { executed: false, reason: "no approved work item" };
     }

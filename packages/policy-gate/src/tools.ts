@@ -10,7 +10,10 @@ import {
   listWorkItemsSchema,
   resolveExecutionBackend,
   rejectRequestSchema,
+  resolveHumanInterruptInputSchema,
   type ClaimedWorkItem,
+  type HumanInterruptResolution,
+  type HumanInterruptResumeClaim,
   type PrivilegedTransitionOptions,
   type WorkItem,
   type WorkItemStore
@@ -45,6 +48,11 @@ const claimInputSchema = z.object({
 const claimByIdInputSchema = idInputSchema.extend({
   workerId: z.string().min(1),
   leaseMs: z.number().int().positive().optional()
+});
+const resumeInterruptClaimInputSchema = z.object({
+  workerId: z.string().min(1),
+  leaseMs: z.number().int().positive().optional(),
+  maxLeaseMs: z.number().int().positive().optional()
 });
 const approvalInputSchema = idInputSchema.merge(approvalRequestSchema);
 const cancelInputSchema = idInputSchema.merge(cancelRequestSchema);
@@ -201,6 +209,180 @@ function hasActionHash(input: unknown): boolean {
     typeof (input as { actionHash?: unknown }).actionHash === "string" &&
     (input as { actionHash: string }).actionHash.trim().length > 0
   );
+}
+
+export function gateHumanInterruptResolution(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  input: unknown
+): {
+  resolution: HumanInterruptResolution;
+  decision?: PolicyDecision;
+  approvals: ApprovalGrant[];
+} {
+  const parsed = resolveHumanInterruptInputSchema.parse(input);
+  return store.withTransaction(() => {
+    const request = store.getHumanInterrupt(parsed.interruptId);
+    if (!request) {
+      throw new ControlStackError("human_interrupt_not_found", "human interrupt not found");
+    }
+
+    if (parsed.decision === "cancel") {
+      return {
+        resolution: store.resolveHumanInterrupt(parsed, {
+          via: "policy_gate",
+          actorId: parsed.resolvedByActorId
+        }),
+        approvals: []
+      };
+    }
+
+    const workItem = store.get(request.workItemId);
+    if (!workItem || workItem.status !== "running") {
+      throw new ControlStackError("human_interrupt_work_item_not_running", "work item is no longer resumable");
+    }
+    const plan = store.getCurrentExecutionPlan(workItem.id);
+    if (!plan || plan.planHash !== request.planHash) {
+      throw new ControlStackError(
+        "human_interrupt_binding_mismatch",
+        "current execution plan changed while interrupted"
+      );
+    }
+
+    const { decision, evaluations } = evaluateAndRecordPolicy(
+      store,
+      policy,
+      workItem,
+      parsed.resolvedByActorId,
+      "approve"
+    );
+    if (decision.decision === "deny") {
+      throw new ControlStackError("human_interrupt_resume_denied", decision.reason);
+    }
+
+    const required = approvalRequired(evaluations);
+    const approvals: ApprovalGrant[] = [];
+    for (const evaluation of required) {
+      approvals.push(
+        store.recordApproval({
+          workItemId: workItem.id,
+          actionHash: evaluation.actionHash,
+          approvedBy: parsed.resolvedByActorId,
+          reason: parsed.reason ?? "approved at human interrupt",
+          ...(parsed.approvalExpiresInMs ? { expiresInMs: parsed.approvalExpiresInMs } : {})
+        })
+      );
+      store.grantExecutionPlanApproval(
+        {
+          workItemId: workItem.id,
+          planHash: plan.planHash,
+          actionHash: evaluation.actionHash,
+          approvedByActorId: parsed.resolvedByActorId,
+          reason: parsed.reason ?? "approved at human interrupt",
+          ...(parsed.approvalExpiresInMs ? { expiresInMs: parsed.approvalExpiresInMs } : {})
+        },
+        policyTransition
+      );
+    }
+
+    const resolution = store.resolveHumanInterrupt(parsed, {
+      via: "policy_gate",
+      actorId: parsed.resolvedByActorId
+    });
+    return { resolution, decision, approvals };
+  });
+}
+
+export function gateWorkerResumeHumanInterrupt(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  input: unknown
+): HumanInterruptResumeClaim | undefined {
+  const parsed = resumeInterruptClaimInputSchema.parse(input);
+  return store.withTransaction(() => {
+    const request = store.listResolvedHumanInterrupts()[0];
+    if (!request) return undefined;
+    const resolution = store.getHumanInterruptResolution(request.interruptId);
+    if (!resolution || resolution.decision !== "resume") {
+      throw new ControlStackError("human_interrupt_resume_not_authorized", "human resume decision is required");
+    }
+
+    const workItem = store.get(request.workItemId);
+    if (!workItem || workItem.status !== "running") {
+      throw new ControlStackError("human_interrupt_work_item_not_running", "work item is no longer resumable");
+    }
+    const plan = store.getCurrentExecutionPlan(workItem.id);
+    if (!plan || plan.planHash !== request.planHash) {
+      throw new ControlStackError(
+        "human_interrupt_binding_mismatch",
+        "current execution plan changed while interrupted"
+      );
+    }
+
+    const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, workItem, parsed.workerId, "claim");
+    if (decision.decision === "deny") {
+      throw new ControlStackError("human_interrupt_resume_denied", decision.reason);
+    }
+    const policyDecisionHash = stableHash({
+      schemaVersion: "acs.execution-plan-policy-decision.v1",
+      planHash: plan.planHash,
+      steps: evaluations.map((evaluation) => ({
+        actionHash: evaluation.actionHash,
+        decision: evaluation.decision.decision
+      }))
+    });
+    const admission = store.admitExecutionPlan(
+      {
+        workItemId: workItem.id,
+        planHash: plan.planHash,
+        policyVersion: "acs.policy.v1",
+        policyDecisionHash,
+        requiresApproval: decision.decision === "require_approval",
+        admittedByActorId: parsed.workerId
+      },
+      policyTransition
+    );
+
+    const required = approvalRequired(evaluations);
+    const missing = required.find((evaluation) => !store.hasApproval(workItem.id, evaluation.actionHash));
+    const planApprovals = required.map((evaluation) =>
+      store.getExecutionPlanApproval(workItem.id, plan.planHash, evaluation.actionHash)
+    );
+    if (missing || planApprovals.some((approval) => !approval)) {
+      throw new ControlStackError(
+        "human_interrupt_reapproval_required",
+        "resume approval is missing, expired, or no longer covers current policy"
+      );
+    }
+
+    const [firstApproval, ...restApprovals] = planApprovals;
+    const claim = store.resumeHumanInterrupt(
+      {
+        interruptId: request.interruptId,
+        workerId: parsed.workerId,
+        attemptAuthority: {
+          planHash: plan.planHash,
+          admissionId: admission.admissionId,
+          ...(firstApproval ? { approvalId: firstApproval.approvalId } : {}),
+          additionalApprovals: restApprovals
+            .filter((approval): approval is NonNullable<typeof approval> => approval !== undefined)
+            .map((approval) => ({ approvalId: approval.approvalId, actionHash: approval.actionHash })),
+          policyVersion: admission.policyVersion,
+          policyDecisionHash: admission.policyDecisionHash
+        },
+        ...(parsed.leaseMs ? { ttlMs: parsed.leaseMs } : {}),
+        ...(parsed.maxLeaseMs ? { maxTtlMs: parsed.maxLeaseMs } : {})
+      },
+      { via: "domain_service", actorId: parsed.workerId }
+    );
+
+    for (const evaluation of required) {
+      store.consumeApproval(claim.running.id, evaluation.actionHash, {
+        requestHash: approvalRequestHash(claim.running.id, evaluation.actionHash)
+      });
+    }
+    return claim;
+  });
 }
 
 export function gateUnblock(
@@ -526,6 +708,12 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
     },
     claim_approved_work_item_by_id(input: unknown): ClaimedWorkItem | undefined {
       return gateWorkerClaimById(store, policy, input);
+    },
+    resolve_human_interrupt(input: unknown) {
+      return gateHumanInterruptResolution(store, policy, input);
+    },
+    claim_next_resolved_human_interrupt(input: unknown): HumanInterruptResumeClaim | undefined {
+      return gateWorkerResumeHumanInterrupt(store, policy, input);
     },
     submit_work_result(input: unknown): WorkItem {
       return store.submitWorkResult(input);

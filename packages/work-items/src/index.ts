@@ -6,6 +6,7 @@ export * from "./governance.js";
 export * from "./routing.js";
 export * from "./validation.js";
 export * from "./recovery.js";
+export * from "./human-interrupt.js";
 export * from "./publication.js";
 export * from "./execution-read.js";
 export * from "./scheduler-firing.js";
