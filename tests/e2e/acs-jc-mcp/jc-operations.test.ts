@@ -17,6 +17,7 @@ import {
   McpHttpClient,
   sleep,
   sandbox,
+  waitFor,
   type Sandbox,
   type ServiceProcess
 } from "../support/chain-harness.js";
@@ -193,6 +194,25 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
     expect(outside.status).toBe(503);
     expect(String(outside.body.code)).toMatch(/path_outside_allow_root/u);
     expect(existsSync("/tmp/jc-e2e-outside.txt")).toBe(false);
+  });
+
+  it("releases the execution-admission permit when the governed call reaches its terminal result", async () => {
+    // The permit is bound to the attempt and released only by the canonical
+    // result the bridge reports back to ACS. If that reporting is missing the
+    // permit is held for the whole lease and every later governed call on the
+    // single JC executor queues behind it until it expires.
+    const file = join(project, "permit-release.txt");
+    writeFileSync(file, "permit release");
+    expect((await acs.admission()).global).toMatchObject({ active: 0, queued: 0 });
+
+    const read = await mcp.call("read_file", { path: file });
+    expect(read.status, JSON.stringify(read.body)).toBe(200);
+    expect(read.body.result.content[0].text).toContain("permit release");
+
+    await waitFor(async () => {
+      const snapshot = await acs.admission();
+      return snapshot.global.active === 0 && snapshot.global.queued === 0 ? true : undefined;
+    });
   });
 
   it("JC itself refuses a call that arrives without, or with a forged, ACS capability", async () => {

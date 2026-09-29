@@ -36,6 +36,15 @@ rl.on('line', (line) => {
     return;
   }
   if (msg.method === 'tools/call') {
+    if (msg.params?.name === 'hang') return;
+    if (msg.params?.name === 'error') {
+      process.stdout.write(JSON.stringify({
+        jsonrpc: '2.0',
+        id: msg.id,
+        error: { code: -32000, message: 'stub executor error' }
+      }) + '\n');
+      return;
+    }
     const meta = msg.params?._meta || {};
     const capability = meta.acsCapability;
     const granted = capability?.payload?.version === 'acs.jc.v1' && capability?.payload?.audience === 'jace-commander';

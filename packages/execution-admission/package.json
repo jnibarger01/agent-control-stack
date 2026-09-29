@@ -1,5 +1,5 @@
 {
-  "name": "@agent-control-stack/evidence",
+  "name": "@agent-control-stack/execution-admission",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,10 +12,7 @@
     }
   },
   "dependencies": {
-    "@agent-control-stack/advisory": "0.1.0",
-    "@agent-control-stack/jev-advisor": "0.1.0",
-    "@agent-control-stack/shared": "0.1.0",
-    "@agent-control-stack/work-items": "0.1.0",
-    "zod": "^4.0.0"
+    "@agent-control-stack/dc-tool-manifest": "0.1.0",
+    "@agent-control-stack/jc-tool-manifest": "0.1.0"
   }
 }

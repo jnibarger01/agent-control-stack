@@ -139,7 +139,7 @@ if (!JC && MANAGED && (!ACS_DC_PUBLIC_KEY || !ACS_DC_KEY_ID)) {
 // delivered to the client; ACS's lease-expiry reconciliation still wins.
 const ACS_BASE_URL = (process.env.ACS_GATEWAY_URL || '').replace(/\/+$/, '');
 const ACS_WORKER_TOKEN = process.env.ACS_WORKER_TOKEN || '';
-const ACS_WORKER_ID = process.env.ACS_WORKER_ID || 'acs-dc-bridge';
+const ACS_WORKER_ID = process.env.ACS_WORKER_ID || (JC ? 'acs-jc-bridge' : 'acs-dc-bridge');
 const rawBootstrapTimeout = Number.parseInt(process.env.ACS_RUNTIME_BOOTSTRAP_TIMEOUT_MS || '400', 10);
 const ACS_RUNTIME_BOOTSTRAP_TIMEOUT_MS = Number.isFinite(rawBootstrapTimeout)
   ? Math.max(100, Math.min(rawBootstrapTimeout, 750))
@@ -225,17 +225,24 @@ function attemptResultIdempotencyKey(attemptId) {
  * submission fails.
  */
 async function submitAcsResult(route, msg) {
-  // jc attempts have no ACS result contract yet; the root helper's audit chain
-  // is the execution evidence. Never post DC-shaped results for jc calls.
-  if (JC) return;
   if (!ACS_BASE_URL || !ACS_WORKER_TOKEN || !route?.capability) return;
   const payload = route.capability?.payload;
-  if (!payload || typeof msg.result !== 'object' || msg.result === null) return;
-  const isError = msg.result.isError === true;
-  const texts = Array.isArray(msg.result?.content)
-    ? msg.result.content.filter((c) => c && c.type === 'text' && typeof c.text === 'string').map((c) => c.text)
+  if (!payload) return;
+  const result =
+    typeof msg.result === 'object' && msg.result !== null
+      ? msg.result
+      : typeof msg.error === 'object' && msg.error !== null
+        ? {
+            isError: true,
+            content: [{ type: 'text', text: String(msg.error.message || 'executor returned a JSON-RPC error') }],
+          }
+        : null;
+  if (!result) return;
+  const isError = result.isError === true;
+  const texts = Array.isArray(result?.content)
+    ? result.content.filter((c) => c && c.type === 'text' && typeof c.text === 'string').map((c) => c.text)
     : [];
-  const summary = (isError ? texts.join('\n') : texts.join('\n') || 'ok').slice(0, 2000);
+  const summary = (isError ? texts.join('\n') || 'executor failed' : texts.join('\n') || 'ok').slice(0, 2000);
   const body = {
     workItemId: payload.workItemId,
     attemptId: payload.attemptId,
@@ -276,6 +283,47 @@ async function submitAcsResult(route, msg) {
   }
 }
 
+function submitAcsFailure(route, reason) {
+  if (!route?.capability) return;
+  void submitAcsResult(route, {
+    result: {
+      isError: true,
+      content: [{ type: 'text', text: String(reason || 'governed execution failed before response') }],
+    },
+  });
+}
+
+/**
+ * Terminal-report every governed tools/call that was authorized (carries an ACS
+ * capability) but whose response the bridge drops before the generic result path
+ * can run. Such a call will never be routed, so no terminal result would ever
+ * reach ACS and the attempt-bound execution-admission permit would be held for
+ * the whole lease. ACS still validates the binding and owns the transition; this
+ * only reports observed non-delivery.
+ */
+function reportAbandonedRoutes(routes, reason) {
+  for (const route of routes || []) {
+    if (route?.capability) submitAcsFailure(route, reason);
+  }
+}
+
+/**
+ * Capability route material for the governed tools/call messages in a body:
+ * the ACS capability envelope plus the lease/result binding the edge derived
+ * from ACS's issuance response. Both are transport-only; ACS revalidates every
+ * field before accepting the terminal result.
+ */
+function governedRouteBindings(messages) {
+  return (Array.isArray(messages) ? messages : [messages])
+    .filter((msg) => msg && msg.method === 'tools/call')
+    .map((msg) => ({
+      capability: msg.params?._meta?.[JC ? ACS_GUARD_META_KEY : ACS_CAPABILITY_META_KEY],
+      leaseBinding: msg.params?._meta?.acsLeaseBinding,
+      inputHash: msg.params?._meta?.acsLeaseBinding?.inputHash,
+    }))
+    .filter((route) => route.capability);
+}
+
 function sendJsonRpcError(res, status, code, message) {
   if (res.headersSent) return res.destroy();
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -296,6 +344,9 @@ async function readJsonBody(req) {
 function failClosed(reason, target = pair) {
   console.error(`bridge: fail-closed upstream routing fault: ${reason}`);
   if (!target) return;
+  for (const route of target.routes.values()) {
+    if (route?.capability) submitAcsFailure(route, `bridge routing fault: ${reason}`);
+  }
   for (const session of target.sessions.values()) {
     session.initializeResolve?.(false);
     session.closed = true;
@@ -458,13 +509,19 @@ async function forward(session, msg, headers) {
   const governed = outbound.params && typeof outbound.params._meta === 'object' && outbound.params._meta !== null
     ? outbound.params._meta[JC ? ACS_GUARD_META_KEY : ACS_CAPABILITY_META_KEY]
     : undefined;
-  pair.routes.set(upstreamId, {
+  const route = {
     session, downstreamId: msg.id, initialize: false,
     ...(governed ? { capability: governed, startedAt: new Date().toISOString(), leaseBinding: outbound.params._meta.acsLeaseBinding } : {}),
-  });
+  };
+  pair.routes.set(upstreamId, route);
   outbound.id = upstreamId;
   try { await pair.upstream.send(outbound); }
-  catch (error) { pair.routes.delete(upstreamId); session.pending.delete(key); throw error; }
+  catch (error) {
+    pair.routes.delete(upstreamId);
+    session.pending.delete(key);
+    if (route.capability) submitAcsFailure(route, `executor forwarding failed: ${error?.message || error}`);
+    throw error;
+  }
 }
 
 function spawnPair() {
@@ -603,7 +660,11 @@ function createSession(headers) {
       if (session.pair.sessions.get(sid) === session) session.pair.sessions.delete(sid);
       session.closed = true;
       session.initializeResolve?.(false);
-      for (const upstreamId of session.pending.values()) session.pair.routes.delete(upstreamId);
+      for (const upstreamId of session.pending.values()) {
+        const route = session.pair.routes.get(upstreamId);
+        if (route?.capability) submitAcsFailure(route, 'client session closed before governed execution completed');
+        session.pair.routes.delete(upstreamId);
+      }
       session.pending.clear();
     },
   });
@@ -720,21 +781,38 @@ const httpServer = http.createServer(async (req, res) => {
 
   if (EXECUTION_TOKEN && req.method === 'POST') {
     const att = req.headers['x-dc-attestation'];
-    if (att && !verifyAttestation(att, req.headers['x-dc-agent'])) { console.error('bridge: invalid gateway attestation; rejecting without forward'); return sendJsonRpcError(res, 400, -32001, 'gateway attestation invalid'); }
+    if (att && !verifyAttestation(att, req.headers['x-dc-agent'])) {
+      console.error('bridge: invalid gateway attestation; rejecting without forward');
+      let dropped = null;
+      try { dropped = await readJsonBody(req); } catch { /* unreadable body: nothing to report */ }
+      reportAbandonedRoutes(governedRouteBindings(dropped), 'bridge rejected the request before governed execution (attestation invalid)');
+      return sendJsonRpcError(res, 400, -32001, 'gateway attestation invalid');
+    }
   }
 
   const sid = req.headers['mcp-session-id'];
   let session = sid ? pair.sessions.get(sid) : null;
-  if (sid && (!session || session.closed)) return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+  if (sid && (!session || session.closed)) {
+    let dropped = null;
+    try { dropped = await readJsonBody(req); } catch { /* unreadable body: nothing to report */ }
+    reportAbandonedRoutes(governedRouteBindings(dropped), 'bridge dropped the request before governed execution (session closed)');
+    return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+  }
   try {
     let body;
     if (req.method === 'POST') body = await readJsonBody(req);
     if (req.method === 'POST') {
       const messages = Array.isArray(body) ? body : [body];
       const initialization = messages.some(isInitialize);
-      if (!session && !initialization) return sendJsonRpcError(res, 400, -32000, 'Mcp-Session-Id header is required');
+      if (!session && !initialization) {
+        reportAbandonedRoutes(governedRouteBindings(messages), 'bridge dropped the request before governed execution (session id required)');
+        return sendJsonRpcError(res, 400, -32000, 'Mcp-Session-Id header is required');
+      }
       if (!session) session = createSession(req.headers);
-    } else if (!session) return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+    } else if (!session) {
+      reportAbandonedRoutes(governedRouteBindings([body]), 'bridge dropped the request before governed execution (session closed)');
+      return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+    }
     lastDebug.last_headers = req.headers;
     await session.transport.handleRequest(req, res, body);
   } catch (e) {

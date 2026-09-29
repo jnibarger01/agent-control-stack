@@ -18,6 +18,7 @@ export class GatewayMetrics {
   private readonly counters = new Map<string, number>();
   private readonly counterSeries = new Map<string, { name: string; labels: Record<string, string> }>();
   private readonly durations = new Map<string, { count: number; sumSeconds: number }>();
+  private readonly gauges = new Map<string, number>();
   private sqliteReady = 0;
 
   increment(name: string, labels: Record<string, string> = {}): void {
@@ -59,6 +60,18 @@ export class GatewayMetrics {
     this.durations.set(key, current);
   }
 
+  observeDurationMs(name: string, durationMs: number, labels: Record<string, string> = {}): void {
+    const key = metricKey(name, labels);
+    const current = this.durations.get(key) ?? { count: 0, sumSeconds: 0 };
+    current.count += 1;
+    current.sumSeconds += Math.max(0, durationMs);
+    this.durations.set(key, current);
+  }
+
+  setGauge(name: string, value: number, labels: Record<string, string> = {}): void {
+    this.gauges.set(metricKey(name, labels), Math.max(0, value));
+  }
+
   setSqliteReady(ready: boolean): void {
     this.sqliteReady = ready ? 1 : 0;
   }
@@ -70,6 +83,7 @@ export class GatewayMetrics {
       `acs_sqlite_ready ${this.sqliteReady}`
     ];
     for (const [key, value] of this.counters) lines.push(`${key} ${value}`);
+    for (const [key, value] of this.gauges) lines.push(`${key} ${value}`);
     for (const [key, value] of this.durations) {
       lines.push(`${metricSuffix(key, "_count")} ${value.count}`);
       lines.push(`${metricSuffix(key, "_sum")} ${value.sumSeconds}`);

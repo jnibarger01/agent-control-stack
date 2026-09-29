@@ -7,9 +7,7 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
-    { "path": "../shared" },
-    { "path": "../work-items" },
-    { "path": "../advisory" },
-    { "path": "../jev-advisor" }
+    { "path": "../dc-tool-manifest" },
+    { "path": "../jc-tool-manifest" }
   ]
 }

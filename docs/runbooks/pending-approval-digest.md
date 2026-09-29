@@ -31,6 +31,8 @@ export ACS_PENDING_APPROVAL_DIGEST_OLDER_THAN_MINUTES=30   # default 30
 export ACS_PENDING_APPROVAL_DIGEST_STDOUT=true             # default true when enabled
 # optional local webhook (http/https only)
 # export ACS_PENDING_APPROVAL_DIGEST_WEBHOOK_URL=http://127.0.0.1:9999/hooks/acs-pending
+# optional bound for the webhook POST in ms (100-30000, default 5000)
+# export ACS_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS=5000
 export ACS_DB_PATH=storage/local.db
 
 npm run build
@@ -40,6 +42,12 @@ npm run ops:pending-approval-digest
 Schedule the oneshot with cron or a systemd timer the same way as
 `npm run start:worker` (see ADR 0013). Leave `ACS_PENDING_APPROVAL_DIGEST_ENABLED`
 unset to keep the feature off.
+
+The webhook POST is bounded: a receiver that accepts the connection and then
+never answers cannot hold the run (and, under cron, a growing pile of runs)
+open. Delivery is aborted after the bound and the run exits non-zero with
+`pending-approval digest webhook timed out after <n>ms`. The stdout line is
+written before the webhook attempt, so a failed POST never hides the digest.
 
 ## Verify
 
