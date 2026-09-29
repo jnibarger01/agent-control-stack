@@ -77,6 +77,7 @@ import {
   readExecutionModeValue,
   type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
+import { ObservationWorker } from "@agent-control-stack/evidence";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
   executionActionHash,
@@ -331,12 +332,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // bucket without rescanning every open client.
   const sseClientPrincipals = new Map<ServerResponse, string>();
   const sseClientsPerPrincipal = new Map<string, number>();
+  const jevObservationEnabled = process.env.ACS_JEV_ENABLED === "1";
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
     heartbeatTtlMs,
     // The gateway is the one process that refuses to boot on a bad trace config.
-    traceConfigValidation: "eager"
+    traceConfigValidation: "eager",
+    observationEnabled: jevObservationEnabled
   });
+  const observationWorker = new ObservationWorker(workItems, { config: { enabled: jevObservationEnabled } });
+  observationWorker.start();
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
@@ -2570,6 +2575,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.addHook("onClose", async () => {
     executionAdmission.shutdown();
     for (const attemptId of [...admissionPermits.keys()]) releaseAdmissionPermit(attemptId);
+    await observationWorker.stop();
     await acpAdapter?.stop();
     executionReads.close();
     deviceAuthStore.close();

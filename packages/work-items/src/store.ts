@@ -19,6 +19,23 @@ import {
 } from "@agent-control-stack/shared";
 import { transitionWorkItem } from "./state-machine.js";
 import {
+  OBSERVATION_OUTBOX_MAX_ATTEMPTS,
+  OBSERVATION_OUTBOX_MAX_PROJECTION_EVENTS,
+  OBSERVATION_OUTBOX_MAX_QUEUE,
+  type ObservationCapacity,
+  type ObservationCompletion,
+  type ObservationOutboxEntry
+} from "./observation-outbox.js";
+import type { CanonicalTraceEvent } from "./trace-event.js";
+import {
+  claimNextObservation as claimNextObservationRow,
+  completeObservation as completeObservationRow,
+  enqueueObservationAfterAuthority as enqueueObservationRow,
+  getObservationCapacity as readObservationCapacity,
+  loadCanonicalTrace as loadCanonicalTraceRows,
+  retryObservation as retryObservationRow
+} from "./observation-store.js";
+import {
   cancelRequestSchema,
   createWorkItem,
   listWorkItemsSchema,
@@ -917,6 +934,12 @@ export interface SqliteWorkItemStoreOptions {
    * swallowed. Defaults to a one-line JSON warning on stderr.
    */
   onTraceFailure?: (failure: TraceEnqueueFailure) => void;
+  /** Enables post-authority Jev observation scheduling. Disabled by default. */
+  observationEnabled?: boolean;
+  observationQuestionSetVersion?: string;
+  observationClassifierVersion?: string;
+  observationMaxQueued?: number;
+  observationMaxAttempts?: number;
 }
 
 export interface TraceEnqueueFailure {
@@ -1122,6 +1145,11 @@ export interface WorkItemStore {
   hasGrantedApprovalBy(workItemId: string, approvedBy: string): boolean;
   submitWorkResult(input: unknown): WorkItem;
   recordDerivedWorkResult(input: unknown): WorkItem;
+  claimNextObservation(now?: Date): ObservationOutboxEntry | undefined;
+  loadCanonicalTrace(workItemId: string, traceId: string, maxEvents?: number): CanonicalTraceEvent[];
+  completeObservation(observationId: string, completion: ObservationCompletion, now?: Date): void;
+  retryObservation(observationId: string, error: string, now?: Date): "pending" | "failed";
+  getObservationCapacity(): ObservationCapacity;
   getExecutionResult(resultId: string): StoredExecutionResult | undefined;
   getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined;
   retryWorkItem(id: string, input: RetryWorkItemInput): WorkItem;
@@ -1154,6 +1182,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private readonly releaseSha: string;
   private readonly onTraceFailure: (failure: TraceEnqueueFailure) => void;
   private traceEnqueueFailures = 0;
+  private readonly observationEnabled: boolean;
+  private readonly observationQuestionSetVersion: string;
+  private readonly observationClassifierVersion: string;
+  private readonly observationMaxQueued: number;
+  private readonly observationMaxAttempts: number;
   /** Memoized lazy validation result: undefined = not checked yet, null = valid. */
   private traceConfigError: ControlStackError | null | undefined;
 
@@ -1171,6 +1204,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     this.onEvent = options.onEvent ?? (() => undefined);
     this.onTraceFailure = options.onTraceFailure ?? defaultTraceFailureReporter;
+    this.observationEnabled = options.observationEnabled ?? false;
+    this.observationQuestionSetVersion = options.observationQuestionSetVersion ?? "jev-trace@1";
+    this.observationClassifierVersion = options.observationClassifierVersion ?? "jev-advisory-v2";
+    this.observationMaxQueued = boundedObservationInteger(
+      options.observationMaxQueued,
+      OBSERVATION_OUTBOX_MAX_QUEUE,
+      1,
+      OBSERVATION_OUTBOX_MAX_QUEUE
+    );
+    this.observationMaxAttempts = boundedObservationInteger(
+      options.observationMaxAttempts,
+      OBSERVATION_OUTBOX_MAX_ATTEMPTS,
+      1,
+      10
+    );
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
@@ -5019,7 +5067,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   submitWorkResult(input: unknown): WorkItem {
     const parsed = submitWorkResultSchema.parse(input);
-    return this.write(() => this.acceptResultInTransaction(parsed));
+    const accepted = this.write(() => this.acceptResultInTransaction(parsed));
+    this.enqueueObservationAfterAuthority(accepted.id);
+    return accepted;
   }
 
   recordDerivedWorkResult(input: unknown): WorkItem {
@@ -5027,7 +5077,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     if (parsed.outcome !== "blocked" && parsed.outcome !== "lease_expired") {
       throw new ControlStackError("result_outcome_invalid", "only ACS-derived outcomes may use this path");
     }
-    return this.write(() => {
+    const accepted = this.write(() => {
       const nowIso = new Date().toISOString();
       const attemptLease = this.db
         .prepare(`SELECT * FROM attempt_leases WHERE lease_id = ? AND status = 'active'`)
@@ -5075,6 +5125,64 @@ export class SqliteWorkItemStore implements WorkItemStore {
         allowAttemptProjection: Boolean(attemptLease)
       });
     });
+    this.enqueueObservationAfterAuthority(accepted.id);
+    return accepted;
+  }
+
+  claimNextObservation(now: Date = new Date()): ObservationOutboxEntry | undefined {
+    return this.write(() => ({ value: claimNextObservationRow(this.db, now), events: [] }));
+  }
+
+  loadCanonicalTrace(
+    workItemId: string,
+    traceId: string,
+    maxEvents: number = OBSERVATION_OUTBOX_MAX_PROJECTION_EVENTS
+  ): CanonicalTraceEvent[] {
+    const limit = boundedObservationInteger(maxEvents, OBSERVATION_OUTBOX_MAX_PROJECTION_EVENTS, 1, 1000);
+    return loadCanonicalTraceRows(this.db, workItemId, traceId, limit);
+  }
+
+  completeObservation(observationId: string, completion: ObservationCompletion, now: Date = new Date()): void {
+    this.write(() => {
+      completeObservationRow(this.db, observationId, completion, now);
+      return { value: undefined, events: [] };
+    });
+  }
+
+  retryObservation(observationId: string, error: string, now: Date = new Date()): "pending" | "failed" {
+    return this.write(() => ({ value: retryObservationRow(this.db, observationId, error, now), events: [] }));
+  }
+
+  getObservationCapacity(): ObservationCapacity {
+    return readObservationCapacity(this.db, this.observationMaxQueued);
+  }
+
+  private enqueueObservationAfterAuthority(workItemId: string): void {
+    if (!this.observationEnabled) return;
+    try {
+      this.db.exec("BEGIN IMMEDIATE");
+      try {
+        enqueueObservationRow(
+          this.db,
+          {
+            questionSetVersion: this.observationQuestionSetVersion,
+            classifierVersion: this.observationClassifierVersion,
+            maxQueued: this.observationMaxQueued,
+            maxAttempts: this.observationMaxAttempts
+          },
+          workItemId
+        );
+        this.db.exec("COMMIT");
+      } catch {
+        try {
+          this.db.exec("ROLLBACK");
+        } catch {
+          // The observation transaction may already be closed.
+        }
+      }
+    } catch {
+      // Observation is strictly post-authority and best effort.
+    }
   }
 
   getExecutionResult(resultId: string): StoredExecutionResult | undefined {
@@ -6606,6 +6714,19 @@ function normalizeInputSchema(value: Record<string, unknown> | undefined): strin
   }
   JSON.parse(serialized);
   return serialized;
+}
+
+function boundedObservationInteger(
+  value: number | undefined,
+  fallback: number,
+  minimum: number,
+  maximum: number
+): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved < minimum || resolved > maximum) {
+    throw new TypeError("invalid observation bound");
+  }
+  return resolved;
 }
 
 function assertOneOf<T extends string>(value: string, allowed: readonly T[], field: string): asserts value is T {
