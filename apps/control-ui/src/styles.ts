@@ -323,6 +323,10 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .agent-card-error { margin: 0; color: var(--red); font-size: 11px; overflow-wrap: anywhere; }
 .agent-detail-actions { display: flex; gap: 8px; margin: 0 0 12px; }
 .agent-work-item-link { display: inline-flex; align-items: center; text-decoration: none; }
+.agent-work-link { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+.agent-work-link:hover { text-decoration: underline; }
+.agent-work-table td small { display: block; margin-top: 3px; color: var(--muted); }
+.agent-work-current { background: var(--hover); box-shadow: inset 3px 0 0 var(--accent); }
 .agent-card-foot { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
 .agent-card-foot span { min-width: 0; overflow-wrap: anywhere; }
 .detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }

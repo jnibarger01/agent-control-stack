@@ -329,6 +329,10 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .agent-card-error { margin: 0; color: var(--red); font-size: 11px; overflow-wrap: anywhere; }
 .agent-detail-actions { display: flex; gap: 8px; margin: 0 0 12px; }
 .agent-work-item-link { display: inline-flex; align-items: center; text-decoration: none; }
+.agent-work-link { color: var(--accent); text-decoration: none; overflow-wrap: anywhere; }
+.agent-work-link:hover { text-decoration: underline; }
+.agent-work-table td small { display: block; margin-top: 3px; color: var(--muted); }
+.agent-work-current { background: var(--hover); box-shadow: inset 3px 0 0 var(--accent); }
 .agent-card-foot { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
 .agent-card-foot span { min-width: 0; overflow-wrap: anywhere; }
 .detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
@@ -2077,6 +2081,7 @@ function renderAgentDetail(target, detail) {
   const activity = detail.activity || {};
   const capabilities = Array.from(new Set(capabilityNames(agent.capabilities || []))).sort();
   const sessions = Array.isArray(detail.sessions) ? detail.sessions : [];
+  const recentWork = Array.isArray(detail.recentWork) ? detail.recentWork : [];
   const adapter = detail.adapterStatus ? (detail.adapterStatus.state || detail.adapterStatus.status || 'connected') : 'not configured';
   const status = agent.effectiveStatus || agent.status || 'UNKNOWN';
   const currentWorkItemId = activity.currentWorkItemId ? String(activity.currentWorkItemId) : '';
@@ -2099,6 +2104,7 @@ function renderAgentDetail(target, detail) {
       detailRow('Endpoint', agent.endpoint ? redactClient(agent.endpoint) : undefined) +
     '</dl>' +
     currentWorkItemAction +
+    '<div class="detail-section"><h4>Current & recent work</h4>' + agentWorkTable(recentWork) + '</div>' +
     '<div class="detail-section"><h4>Agent capabilities</h4>' + capabilityList(capabilities) + '</div>' +
     '<div class="detail-section"><h4>Recent ACP sessions</h4>' + agentSessionTable(sessions) + '</div>' +
     '<div class="detail-section"><h4>Recent agent events</h4>' + eventList(detail.events || []) + '</div>';
@@ -2122,13 +2128,45 @@ document.addEventListener('click', function (event) {
   selectWorkItem(workItemId, { scroll: true });
 });
 
+function agentWorkRelationshipLabel(relationship) {
+  if (relationship === 'acp_session') return 'ACP session';
+  if (relationship === 'worker_execution') return 'Worker execution';
+  if (relationship === 'agent_activity') return 'Agent activity';
+  return String(relationship || 'Observed');
+}
+
+function agentWorkLink(workItemId, label) {
+  if (!workItemId) return '—';
+  return '<a class="agent-work-link" href="?item=' + encodeURIComponent(workItemId) + '#queue" data-agent-work-item="' + escapeClient(workItemId) + '">' + escapeClient(label || workItemId) + '</a>';
+}
+
+function agentWorkTable(workItems) {
+  if (!workItems.length) return '<p class="muted">No work-item activity observed for this agent.</p>';
+  return '<div class="table-wrap"><table class="agent-table agent-work-table"><thead><tr><th>Work item</th><th>Status</th><th>Relationship</th><th>Last activity</th></tr></thead><tbody>' +
+    workItems.map(function (workItem) {
+      const relationships = (Array.isArray(workItem.relationships) ? workItem.relationships : [])
+        .map(agentWorkRelationshipLabel)
+        .join(' · ');
+      const sessions = Array.isArray(workItem.sessionIds) ? workItem.sessionIds.length : 0;
+      const relationshipText = (workItem.current ? 'Current · ' : '') +
+        (relationships || 'Observed') +
+        (sessions ? ' · ' + sessions + ' session' + (sessions === 1 ? '' : 's') : '');
+      return '<tr' + (workItem.current ? ' class="agent-work-current"' : '') + '>' +
+        '<td><strong>' + agentWorkLink(workItem.id, workItem.title || workItem.id) + '</strong><small>' + escapeClient(workItem.id || '') + '</small></td>' +
+        '<td>' + pillMarkup(workItem.status || 'unknown') + '</td>' +
+        '<td>' + escapeClient(relationshipText) + '</td>' +
+        '<td>' + escapeClient(formatClientTime(workItem.lastActivityAt)) + '</td>' +
+      '</tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
 function agentSessionTable(sessions) {
   if (!sessions.length) return '<p class="muted">No ACP sessions observed.</p>';
   return '<div class="table-wrap"><table class="agent-table agent-session-table"><thead><tr><th>Session</th><th>Status</th><th>Work item</th><th>Last event</th><th>Activity</th></tr></thead><tbody>' +
     sessions.map(function (session) {
       return '<tr><td>' + escapeClient(session.sessionId || '—') + '</td>' +
         '<td>' + pillMarkup(session.status || 'unknown') + '</td>' +
-        '<td>' + escapeClient(session.workItemId || '—') + '</td>' +
+        '<td>' + agentWorkLink(session.workItemId, session.workItemId) + '</td>' +
         '<td>' + escapeClient(session.lastEventType || '—') + '</td>' +
         '<td>' + escapeClient(formatClientTime(session.lastEventAt)) + '</td></tr>';
     }).join('') + '</tbody></table></div>';

@@ -911,34 +911,52 @@ describe("mission control gateway", () => {
         payload: { model: "gpt-5-codex" }
       });
       const timeline = new SqliteWorkItemStore(dbPath);
+      let currentWorkId = "";
+      let oldWorkId = "";
       try {
+        const currentWork = timeline.create({
+          title: "Current agent work",
+          requester: "user",
+          intent: "exercise the active agent session",
+          requestedActions: [{ kind: "manual", description: "current work" }],
+          risk: "medium"
+        });
+        const oldWork = timeline.create({
+          title: "Previous agent work",
+          requester: "user",
+          intent: "exercise recent agent history",
+          requestedActions: [{ kind: "manual", description: "previous work" }],
+          risk: "low"
+        });
+        currentWorkId = currentWork.id;
+        oldWorkId = oldWork.id;
         timeline.recordAgentTimelineEvent({
           agentId: "api-agent",
           actorId: "user",
           eventType: "initialized",
           sessionId: "session-active",
-          workItemId: "wrk_current"
+          workItemId: currentWorkId
         });
         timeline.recordAgentTimelineEvent({
           agentId: "api-agent",
           actorId: "user",
           eventType: "message",
           sessionId: "session-active",
-          workItemId: "wrk_current"
+          workItemId: currentWorkId
         });
         timeline.recordAgentTimelineEvent({
           agentId: "api-agent",
           actorId: "user",
           eventType: "initialized",
           sessionId: "session-closed",
-          workItemId: "wrk_old"
+          workItemId: oldWorkId
         });
         timeline.recordAgentTimelineEvent({
           agentId: "api-agent",
           actorId: "user",
           eventType: "disconnected",
           sessionId: "session-closed",
-          workItemId: "wrk_old"
+          workItemId: oldWorkId
         });
       } finally {
         timeline.close();
@@ -987,7 +1005,7 @@ describe("mission control gateway", () => {
       });
       expect(detail.json().activity).toMatchObject({
         currentTask: "idle",
-        currentWorkItemId: "wrk_current",
+        currentWorkItemId: currentWorkId,
         currentSessionId: "session-active",
         activeSessionCount: 1,
         recentSessionCount: 2,
@@ -998,17 +1016,41 @@ describe("mission control gateway", () => {
           expect.objectContaining({
             sessionId: "session-active",
             status: "active",
-            workItemId: "wrk_current",
+            workItemId: currentWorkId,
             lastEventType: "message"
           }),
           expect.objectContaining({
             sessionId: "session-closed",
             status: "closed",
-            workItemId: "wrk_old",
+            workItemId: oldWorkId,
             lastEventType: "disconnected"
           })
         ])
       );
+      expect(detail.json().recentWork).toEqual([
+        expect.objectContaining({
+          id: currentWorkId,
+          title: "Current agent work",
+          status: "pending_policy",
+          risk: "medium",
+          current: true,
+          relationships: ["acp_session"],
+          sessionIds: ["session-active"],
+          eventCount: 2,
+          lastActivityAt: expect.any(String)
+        }),
+        expect.objectContaining({
+          id: oldWorkId,
+          title: "Previous agent work",
+          status: "pending_policy",
+          risk: "low",
+          current: false,
+          relationships: ["acp_session"],
+          sessionIds: ["session-closed"],
+          eventCount: 2,
+          lastActivityAt: expect.any(String)
+        })
+      ]);
       expect(missingDetail.statusCode).toBe(404);
       expect(missingUpdate.statusCode).toBe(404);
       expect(missingCapabilities.statusCode).toBe(404);

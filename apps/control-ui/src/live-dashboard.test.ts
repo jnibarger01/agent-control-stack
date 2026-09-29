@@ -177,7 +177,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
       }
     ];
     const app = bootLive(
-      { workItems: [item("wrk_active")], events: [], agents: [], now: NOW },
+      { workItems: [item("wrk_active"), item("wrk_old")], events: [], agents: [], now: NOW },
       {
         "/agents": () => ({ body: { agents } }),
         "/api/agents/hermes-local": () => ({
@@ -199,10 +199,51 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
               currentWorkItemId: "wrk_active",
               currentSessionId: "session_active",
               activeSessionCount: 1,
-              recentSessionCount: 1,
+              recentSessionCount: 2,
               lastActivityAt: "2026-09-22T00:00:30.000Z"
             },
-            sessions: [],
+            sessions: [
+              {
+                sessionId: "session_active",
+                status: "active",
+                startedAt: "2026-09-22T00:00:00.000Z",
+                lastEventAt: "2026-09-22T00:00:30.000Z",
+                lastEventType: "message",
+                workItemId: "wrk_active"
+              },
+              {
+                sessionId: "session_old",
+                status: "closed",
+                startedAt: "2026-09-21T23:55:00.000Z",
+                lastEventAt: "2026-09-21T23:58:00.000Z",
+                lastEventType: "disconnected",
+                workItemId: "wrk_old"
+              }
+            ],
+            recentWork: [
+              {
+                id: "wrk_active",
+                title: "Task wrk_active",
+                status: "needs_approval",
+                risk: "low",
+                current: true,
+                relationships: ["acp_session"],
+                sessionIds: ["session_active"],
+                eventCount: 2,
+                lastActivityAt: "2026-09-22T00:00:30.000Z"
+              },
+              {
+                id: "wrk_old",
+                title: "Task wrk_old",
+                status: "needs_approval",
+                risk: "low",
+                current: false,
+                relationships: ["acp_session"],
+                sessionIds: ["session_old"],
+                eventCount: 2,
+                lastActivityAt: "2026-09-21T23:58:00.000Z"
+              }
+            ],
             events: []
           }
         })
@@ -265,14 +306,31 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.window.location.search).toContain("agentOrder=name");
     expect(app.window.location.hash).toBe("#agents");
 
-    const workLink = app.document.querySelector('[data-agent-work-item="wrk_active"]') as HTMLAnchorElement;
-    expect(workLink.getAttribute("href")).toBe("?item=wrk_active#queue");
-    workLink.click();
+    expect(app.text("#agent-detail")).toContain("Current & recent work");
+    expect(app.document.querySelectorAll(".agent-work-table tbody tr")).toHaveLength(2);
+    expect(app.text(".agent-work-current")).toContain("Current");
+    expect(app.text(".agent-work-current")).toContain("Task wrk_active");
+
+    const currentAction = app.document.querySelector(
+      '.agent-detail-actions [data-agent-work-item="wrk_active"]'
+    ) as HTMLAnchorElement;
+    expect(currentAction.getAttribute("href")).toBe("?item=wrk_active#queue");
+
+    const recentOldLink = app.document.querySelector(
+      '.agent-work-table [data-agent-work-item="wrk_old"]'
+    ) as HTMLAnchorElement;
+    const sessionOldLink = app.document.querySelector(
+      '.agent-session-table [data-agent-work-item="wrk_old"]'
+    ) as HTMLAnchorElement;
+    expect(recentOldLink.getAttribute("href")).toBe("?item=wrk_old#queue");
+    expect(sessionOldLink.getAttribute("href")).toBe("?item=wrk_old#queue");
+
+    recentOldLink.click();
     await app.flush();
     expect(app.document.body.dataset.activeView).toBe("queue");
-    expect(app.window.location.search).toBe("?item=wrk_active");
+    expect(app.window.location.search).toBe("?item=wrk_old");
     expect(app.window.location.hash).toBe("#queue");
-    expect(app.document.querySelector('[data-work-item="wrk_active"]')?.classList.contains("selected")).toBe(true);
+    expect(app.document.querySelector('[data-work-item="wrk_old"]')?.classList.contains("selected")).toBe(true);
   });
 
   it("restores selected agent and discovery filters from a direct URL", async () => {

@@ -1344,10 +1344,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
       const events = workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }));
       const sessions = projectAgentSessions(events);
+      const activity = projectAgentActivity(agent, sessions);
       return {
         agent: projectRegistryFreshness(agent, heartbeatTtlMs),
-        activity: projectAgentActivity(agent, sessions),
+        activity,
         sessions,
+        recentWork: projectAgentWorkItems(
+          request.params.id,
+          activity.currentWorkItemId,
+          sessions,
+          events,
+          (workItemId) => workItems.get(workItemId)
+        ),
         adapterStatus: adapterStatusFor(request.params.id),
         events
       };
@@ -3195,6 +3203,111 @@ function projectAgentActivity(agent: RegistryAgentDetail, sessions: AgentSession
     recentSessionCount: sessions.length,
     ...(lastActivityAt ? { lastActivityAt } : {})
   };
+}
+
+type AgentWorkRelationship = "acp_session" | "worker_execution" | "agent_activity";
+
+interface AgentWorkProjection {
+  id: string;
+  title: string;
+  status: WorkItem["status"] | "unknown";
+  risk: WorkItem["risk"] | "unknown";
+  current: boolean;
+  relationships: AgentWorkRelationship[];
+  sessionIds: string[];
+  eventCount: number;
+  lastActivityAt: string;
+  updatedAt?: string;
+}
+
+function projectAgentWorkItems(
+  agentId: string,
+  currentWorkItemId: string | undefined,
+  sessions: AgentSessionProjection[],
+  events: StoredAuditEvent[],
+  getWorkItem: (id: string) => WorkItem | undefined
+): AgentWorkProjection[] {
+  interface WorkAccumulator {
+    id: string;
+    relationships: Set<AgentWorkRelationship>;
+    sessionIds: Set<string>;
+    eventCount: number;
+    lastActivityAt: string;
+  }
+
+  const workById = new Map<string, WorkAccumulator>();
+  const touch = (
+    workItemId: string,
+    observedAt: string,
+    relationship: AgentWorkRelationship,
+    sessionId?: string,
+    countEvent = false
+  ) => {
+    const current = workById.get(workItemId);
+    const entry: WorkAccumulator = current ?? {
+      id: workItemId,
+      relationships: new Set<AgentWorkRelationship>(),
+      sessionIds: new Set<string>(),
+      eventCount: 0,
+      lastActivityAt: observedAt
+    };
+    entry.relationships.add(relationship);
+    if (sessionId) entry.sessionIds.add(sessionId);
+    if (countEvent) entry.eventCount += 1;
+    if (observedAt > entry.lastActivityAt) entry.lastActivityAt = observedAt;
+    workById.set(workItemId, entry);
+  };
+
+  for (const session of sessions) {
+    if (!session.workItemId) continue;
+    touch(session.workItemId, session.lastEventAt, "acp_session", session.sessionId);
+  }
+
+  for (const event of events) {
+    const workItemId =
+      typeof event.attributes["work_item.id"] === "string"
+        ? event.attributes["work_item.id"]
+        : typeof event.body.workItemId === "string"
+          ? event.body.workItemId
+          : undefined;
+    if (!workItemId) continue;
+
+    const relationship: AgentWorkRelationship =
+      event.attributes["worker.id"] === agentId
+        ? "worker_execution"
+        : event.name.startsWith("acp.")
+          ? "acp_session"
+          : "agent_activity";
+    const sessionId =
+      typeof event.attributes["acp.session_id"] === "string"
+        ? event.attributes["acp.session_id"]
+        : typeof event.body.sessionId === "string"
+          ? event.body.sessionId
+          : undefined;
+    touch(workItemId, auditEventIso(event), relationship, sessionId, true);
+  }
+
+  return [...workById.values()]
+    .map((entry): AgentWorkProjection => {
+      const workItem = getWorkItem(entry.id);
+      return {
+        id: entry.id,
+        title: workItem?.title ?? entry.id,
+        status: workItem?.status ?? "unknown",
+        risk: workItem?.risk ?? "unknown",
+        current: entry.id === currentWorkItemId,
+        relationships: [...entry.relationships].sort(),
+        sessionIds: [...entry.sessionIds].sort(),
+        eventCount: entry.eventCount,
+        lastActivityAt: entry.lastActivityAt,
+        ...(workItem ? { updatedAt: workItem.updatedAt } : {})
+      };
+    })
+    .sort((left, right) => {
+      if (left.current !== right.current) return left.current ? -1 : 1;
+      return right.lastActivityAt.localeCompare(left.lastActivityAt) || left.id.localeCompare(right.id);
+    })
+    .slice(0, 8);
 }
 
 function auditEventIso(event: StoredAuditEvent): string {
