@@ -10,6 +10,7 @@ import {
   approvalsPanel,
   connectorsPanel,
   eventTimeline,
+  humanInterruptsPanel,
   operatorMetricsPanel,
   overviewCards,
   queueFooter,
@@ -57,13 +58,10 @@ export function renderDashboardFragments(
       attemptLeasesByWorkItem
     ),
     queueFooter: queueFooter(model.finishedWorkItems),
-    approvalsList: approvalsPanel(
-      sortApprovalItems(approvalItems, now),
-      approvalOptionsByWorkItem(model),
-      now,
-      approvalSlaMs
-    ),
-    approvalsCount: `${approvalItems.length} waiting`,
+    approvalsList:
+      humanInterruptsPanel(model.humanInterrupts ?? []) +
+      approvalsPanel(sortApprovalItems(approvalItems, now), approvalOptionsByWorkItem(model), now, approvalSlaMs),
+    approvalsCount: `${approvalItems.length + (model.humanInterrupts?.length ?? 0)} waiting`,
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now, approvalSlaMs),
     systemStats: systemStats(stats, model.executionBackend),
     policy: policyPanelHtml(

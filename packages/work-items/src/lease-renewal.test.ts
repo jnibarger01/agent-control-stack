@@ -216,6 +216,83 @@ describe("attempt lease renewal, expiry, and steal", () => {
     expect(fixture.store.readEvents().filter((event) => event.name === "attempt_lease.expired")).toHaveLength(1);
   });
 
+  it("rebinds a preserved workspace to the fresh lease when a human-interrupted attempt resumes", () => {
+    const fixture = createFixture();
+    directory = fixture.directory;
+    const claimed = claimAuthoritative(fixture, "worker-a");
+
+    fixture.store.recordWorkspaceAllocation(
+      {
+        allocationId: "workspace-hitl",
+        workItemId: claimed.id,
+        attemptId: claimed.attemptId!,
+        leaseId: claimed.leaseId,
+        workerId: claimed.workerId,
+        fencingEpoch: claimed.fencingEpoch!,
+        hostPath: "/tmp/acs-workspace-hitl",
+        branch: "acs/attempt/hitl",
+        baseRef: "HEAD"
+      },
+      { via: "domain_service" }
+    );
+
+    const interrupt = fixture.store.requestHumanInterrupt(
+      {
+        attemptId: claimed.attemptId!,
+        workItemId: claimed.id,
+        workerId: claimed.workerId,
+        fencingEpoch: claimed.fencingEpoch!,
+        leaseToken: claimed.leaseToken,
+        prompt: "Continue?",
+        checkpoint: { phase: "review" },
+        idempotencyKey: "hitl-workspace-interrupt"
+      },
+      { via: "domain_service", actorId: claimed.workerId }
+    );
+    fixture.store.resolveHumanInterrupt(
+      {
+        interruptId: interrupt.interruptId,
+        decision: "resume",
+        resolvedByActorId: "human-reviewer",
+        response: { approved: true }
+      },
+      { via: "domain_service", actorId: "human-reviewer" }
+    );
+
+    const resumed = fixture.store.resumeHumanInterrupt(
+      {
+        interruptId: interrupt.interruptId,
+        workerId: "worker-b",
+        attemptAuthority: {
+          planHash: fixture.plan.planHash,
+          admissionId: fixture.admission.admissionId,
+          policyVersion: fixture.admission.policyVersion,
+          policyDecisionHash: fixture.admission.policyDecisionHash
+        },
+        ttlMs: 60_000
+      },
+      { via: "domain_service", actorId: "worker-b" }
+    );
+
+    expect(resumed.lease.fencingEpoch).toBe(claimed.fencingEpoch! + 1);
+    expect(fixture.store.getActiveWorkspaceAllocationForAttempt(claimed.attemptId!)).toMatchObject({
+      allocationId: "workspace-hitl",
+      leaseId: resumed.lease.leaseId,
+      workerId: "worker-b",
+      fencingEpoch: resumed.lease.fencingEpoch
+    });
+    expect(
+      fixture.store.getCommandAuthority({
+        workItemId: claimed.id,
+        attemptId: claimed.attemptId!,
+        leaseId: resumed.lease.leaseId,
+        workerId: "worker-b",
+        fencingToken: resumed.lease.fencingEpoch,
+        workspaceAllocationId: "workspace-hitl"
+      })
+    ).toBeDefined();
+  });
+
   it("steals an interrupted attempt lease so the prior worker cannot complete", () => {
     const fixture = createFixture();
     directory = fixture.directory;

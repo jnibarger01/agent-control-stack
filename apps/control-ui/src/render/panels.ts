@@ -226,6 +226,33 @@ export function approvalsPanel(
     .join("")}</div>`;
 }
 
+export function humanInterruptsPanel(interrupts: NonNullable<MissionControlViewModel["humanInterrupts"]>): string {
+  if (!interrupts.length) return "";
+  return `<div class="approvals-list human-interrupts" role="list" aria-label="Human interruptions">${interrupts
+    .map(({ request }) => {
+      const reasonId = `interrupt-reason-${escapeHtml(request.interruptId)}`;
+      const resultId = `interrupt-result-${escapeHtml(request.interruptId)}`;
+      const responseSpec = request.responseSpec
+        ? `<small>Expected response: <code>${escapeHtml(JSON.stringify(request.responseSpec))}</code></small>`
+        : "";
+      return `<article class="approval-item human-interrupt-item overdue" role="listitem" data-interrupt-ref="${escapeHtml(request.interruptId)}">
+        <span>${pill("interrupted")} <small class="wait-badge">Human decision required</small></span>
+        <strong>${escapeHtml(request.prompt)}</strong>
+        <small>Work item: <code>${escapeHtml(request.workItemId)}</code> · Attempt: <code>${escapeHtml(request.attemptId)}</code></small>
+        <small>Checkpoint: <code>${escapeHtml(request.checkpointHash.slice(0, 12))}…</code></small>
+        ${responseSpec}
+        <label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="${reasonId}" data-interrupt-reason="${escapeHtml(request.interruptId)}" required placeholder="Why resume or cancel" autocomplete="off" /></label>
+        <label class="reason-field"><span class="reason-label">Response <span class="muted">(optional JSON)</span></span><input data-interrupt-response="${escapeHtml(request.interruptId)}" placeholder='{"answer":"..."}' autocomplete="off" /></label>
+        <div class="approval-actions" role="group" aria-label="Human decision for ${escapeHtml(request.prompt)}">
+          <button type="button" data-interrupt-resume="${escapeHtml(request.interruptId)}">Resume</button>
+          <button type="button" data-interrupt-cancel="${escapeHtml(request.interruptId)}">Cancel execution</button>
+        </div>
+        <output id="${resultId}" class="approval-result" aria-live="polite"></output>
+      </article>`;
+    })
+    .join("")}</div>`;
+}
+
 function approvalButtonsFor(item: WorkItem, options: ApprovalActionOption[], reasonId: string): string {
   if (!options.length) {
     return `<button type="button" data-approve="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" disabled aria-describedby="${reasonId}">Approval hash unavailable</button>`;

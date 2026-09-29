@@ -72,6 +72,97 @@ describe("worker policy gate", () => {
     }
   });
 
+  it("persists a human interrupt across worker restart and resumes the same attempt with a new fence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-hitl-resume-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      const workItem = tools.create_work_item(readOnlyInput("Durable HITL resume"));
+      store.close();
+
+      const first = await runWorkerOnce({
+        dbPath,
+        workerId: "worker-before-pause",
+        execute: async () => ({
+          ok: true,
+          executionMode: "dry_run",
+          output: "checkpointed",
+          humanInterrupt: {
+            prompt: "Continue after review?",
+            checkpoint: { nextStep: 2, artifact: "draft.patch" }
+          }
+        })
+      });
+
+      expect(first).toMatchObject({
+        executed: false,
+        workItemId: workItem.id,
+        reason: "awaiting_human_input"
+      });
+      expect(first.humanInterruptId).toBeDefined();
+
+      const paused = new SqliteWorkItemStore(dbPath);
+      const pausedTools = createWorkItemTools(paused, createPolicyEngine());
+      const interrupt = paused.getHumanInterrupt(first.humanInterruptId!);
+      expect(interrupt).toMatchObject({
+        workItemId: workItem.id,
+        checkpoint: { nextStep: 2, artifact: "draft.patch" }
+      });
+      expect(paused.getAttempt(interrupt!.attemptId)?.status).toBe("interrupted");
+      expect(paused.getActiveLeaseForAttempt(interrupt!.attemptId)?.status).toBe("revoked");
+
+      pausedTools.resolve_human_interrupt({
+        interruptId: interrupt!.interruptId,
+        decision: "resume",
+        resolvedByActorId: "human-reviewer",
+        response: { approved: true, note: "continue" }
+      });
+      paused.close();
+
+      let resumedContext: unknown;
+      const second = await runWorkerOnce({
+        dbPath,
+        workerId: "worker-after-pause",
+        execute: async (input) => {
+          resumedContext = input.resumeContext;
+          return { ok: true, executionMode: "dry_run", output: "resumed and completed" };
+        }
+      });
+
+      expect(second).toMatchObject({ executed: true, workItemId: workItem.id });
+      expect(resumedContext).toMatchObject({
+        interruptId: interrupt!.interruptId,
+        checkpoint: { nextStep: 2, artifact: "draft.patch" },
+        response: { approved: true, note: "continue" }
+      });
+
+      const completed = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(completed.get(workItem.id)?.status).toBe("succeeded");
+        expect(completed.getAttempt(interrupt!.attemptId)).toMatchObject({
+          status: "succeeded",
+          currentFencingEpoch: 2,
+          claimedByWorkerId: "worker-after-pause"
+        });
+        const names = completed.readEvents({ workItemId: workItem.id, limit: 200 }).map((event) => event.name);
+        expect(names).toEqual(
+          expect.arrayContaining(["human_interrupt.requested", "human_interrupt.resolved", "human_interrupt.resumed"])
+        );
+      } finally {
+        completed.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The first worker run closes the initial store handle.
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("allocates and fences an attempt workspace around execution", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-workspace-"));
     const dbPath = join(dir, "control.db");

@@ -40,6 +40,43 @@ describe("renderDashboard", () => {
     result: { error: "worker lease expired" }
   };
 
+  it("renders durable human interruptions as operator decisions", () => {
+    const hash = "a".repeat(64);
+    const html = renderDashboard({
+      workItems: [{ ...workItem, status: "running" }],
+      events: [],
+      humanInterrupts: [
+        {
+          request: {
+            interruptId: "interrupt_test",
+            attemptId: "attempt_test",
+            workItemId: workItem.id,
+            planHash: hash,
+            inputHash: hash,
+            admissionId: "admission_test",
+            actionHash: hash,
+            checkpoint: { phase: "before-write" },
+            checkpointHash: hash,
+            prompt: "Continue after reviewing the diff?",
+            responseSpec: { type: "boolean" },
+            requestedByActorId: "worker-test",
+            fencingEpoch: 1,
+            idempotencyKey: "hitl-test",
+            createdAt: "2026-07-05T00:00:00.000Z",
+            expiresAt: "2026-07-06T00:00:00.000Z"
+          }
+        }
+      ]
+    });
+
+    expect(html).toContain("Continue after reviewing the diff?");
+    expect(html).toContain('data-interrupt-resume="interrupt_test"');
+    expect(html).toContain('data-interrupt-cancel="interrupt_test"');
+    expect(html).toContain('data-interrupt-response="interrupt_test"');
+    expect(html).toContain("1 waiting");
+    expect(html).not.toContain(JSON.stringify({ phase: "before-write" }));
+  });
+
   it("renders mission control without inventing agent health", () => {
     const html = renderDashboard({
       workItems: [workItem, blockedItem],
