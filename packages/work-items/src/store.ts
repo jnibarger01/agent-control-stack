@@ -3540,9 +3540,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   listRegistryAgents(): RegistryAgentDetail[] {
-    return (this.db.prepare(`SELECT * FROM agents ORDER BY name ASC`).all() as unknown as AgentRow[]).map((row) =>
-      this.agentDetail(rowToAgent(row))
-    );
+    const rows = this.db.prepare(`SELECT * FROM agents ORDER BY name ASC`).all() as unknown as AgentRow[];
+    if (rows.length === 0) return [];
+    // The registry listing is read on every runtime reconcile tick and on
+    // every gateway agents request, so the per-agent heartbeat/capability
+    // reads it used to issue were paid per poll rather than per change.
+    // Resolve both relations in one statement each and join them in memory.
+    const heartbeats = this.latestHeartbeatsByAgent();
+    const capabilities = this.capabilitiesByAgent();
+    return rows.map((row) => {
+      const agent = rowToAgent(row);
+      const heartbeat = heartbeats.get(agent.id);
+      return {
+        ...agent,
+        capabilities: capabilities.get(agent.id) ?? [],
+        ...(heartbeat ? { latestHeartbeat: heartbeat } : {})
+      };
+    });
   }
 
   getRegistryAgent(id: string): RegistryAgentDetail | undefined {
@@ -5661,6 +5675,49 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .prepare(`SELECT * FROM capabilities WHERE agent_id = ? ORDER BY name ASC`)
         .all(agentId) as unknown as CapabilityRow[]
     ).map(rowToCapability);
+  }
+
+  /**
+   * Latest heartbeat for every agent in one statement. The inner lookup is the
+   * same per-agent read `agentDetail()` uses (`ORDER BY observed_at DESC, id
+   * DESC LIMIT 1`, served by `idx_heartbeats_agent_observed`), so both paths
+   * agree on which heartbeat is "latest" - and unlike a window function over
+   * the whole append-only table it stays index-driven as history grows.
+   */
+  private latestHeartbeatsByAgent(): Map<string, RegistryHeartbeat> {
+    const rows = this.db
+      .prepare(
+        `SELECT id, agent_id, status, current_task, last_error, observed_at, actor_id
+         FROM heartbeats
+         WHERE id IN (
+           SELECT (
+             SELECT heartbeat.id
+             FROM heartbeats AS heartbeat
+             WHERE heartbeat.agent_id = agent.id
+             ORDER BY heartbeat.observed_at DESC, heartbeat.id DESC
+             LIMIT 1
+           )
+           FROM agents AS agent
+         )`
+      )
+      .all() as unknown as HeartbeatRow[];
+    return new Map(rows.map((row) => [row.agent_id, rowToHeartbeat(row)]));
+  }
+
+  /**
+   * Every capability grouped by agent, in the same `name ASC` order the
+   * per-agent read returns, so a batched listing is indistinguishable from
+   * the row-by-row one.
+   */
+  private capabilitiesByAgent(): Map<string, RegistryCapability[]> {
+    const rows = this.db.prepare(`SELECT * FROM capabilities ORDER BY name ASC`).all() as unknown as CapabilityRow[];
+    const byAgent = new Map<string, RegistryCapability[]>();
+    for (const row of rows) {
+      const existing = byAgent.get(row.agent_id);
+      if (existing) existing.push(rowToCapability(row));
+      else byAgent.set(row.agent_id, [rowToCapability(row)]);
+    }
+    return byAgent;
   }
 
   private getTunnelSessionRequired(input: TunnelSessionRef): RegisteredTunnelSession {
