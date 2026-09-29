@@ -29,6 +29,7 @@ const ISSUER = process.env.ISSUER || PUBLIC_ORIGIN;
 const UPSTREAM = process.env.UPSTREAM || 'http://127.0.0.1:8002';
 // Jace Commander lane (/jc/mcp): its own OAuth audience and its own bridge.
 const JC_RESOURCE = process.env.JC_RESOURCE || `${PUBLIC_ORIGIN}/jc/mcp`;
+const JC_ISSUER = process.env.JC_ISSUER || `${PUBLIC_ORIGIN}/jc`;
 const JC_UPSTREAM = process.env.JC_UPSTREAM || 'http://127.0.0.1:8003';
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const CONSENT_PASSPHRASE = process.env.CONSENT_PASSPHRASE || '';
@@ -64,14 +65,14 @@ try {
   JC = jcModeFromEnv();
   // Equal resources would make /mcp and /jc/mcp accept each other's tokens.
   if (JC.enabled && JC_RESOURCE === RESOURCE) throw new Error('JC_RESOURCE must differ from RESOURCE; refusing to start');
-  if (JC.enabled) console.log(`gateway: Jace Commander lane enabled at /jc/mcp (resource=${JC_RESOURCE}; ACS-managed only)`);
+  if (JC.enabled && JC_ISSUER === ISSUER) throw new Error('JC_ISSUER must differ from ISSUER; refusing to start');
+  if (JC.enabled) console.log(`gateway: Jace Commander lane enabled at /jc/mcp (resource=${JC_RESOURCE}; issuer=${JC_ISSUER}; ACS-managed only)`);
 } catch (e) {
   console.error(`gateway: ${e.message}`);
   process.exit(1);
 }
-// RFC 8707: tokens are minted for exactly one of these resources and are
-// only accepted on that resource's route.
-const ALLOWED_RESOURCES = JC.enabled ? [RESOURCE, JC_RESOURCE] : [RESOURCE];
+// RFC 8707: tokens are minted for exactly one of the lane resources (RESOURCE
+// or JC_RESOURCE) and are only accepted on that resource's route.
 if (!GATEWAY_EXECUTION_TOKEN) console.log('gateway: GATEWAY_EXECUTION_TOKEN not set; executor identity attestation disabled (log-once)');
 fs.mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 });
 
@@ -82,15 +83,15 @@ const META = {
 };
 const JC_META = {
   resource: JC_RESOURCE,
-  authorization_servers: [ISSUER],
+  authorization_servers: [JC_ISSUER],
   scopes_supported: ['mcp'],
 };
 
-const AS_META = () => ({
-  issuer: ISSUER,
-  authorization_endpoint: `${ISSUER}/authorize`,
-  token_endpoint: `${ISSUER}/token`,
-  registration_endpoint: `${ISSUER}/register`,
+const oauthMeta = ({ issuer, resource }) => ({
+  issuer,
+  authorization_endpoint: `${issuer}/authorize`,
+  token_endpoint: `${issuer}/token`,
+  registration_endpoint: `${issuer}/register`,
   response_types_supported: ['code'],
   grant_types_supported: ['authorization_code', 'refresh_token'],
   code_challenge_methods_supported: ['S256'],
@@ -98,9 +99,60 @@ const AS_META = () => ({
   scopes_supported: ['mcp'],
   client_id_metadata_document_supported: true,
   authorization_response_iss_parameter_supported: true,
-  resource: RESOURCE,
-  service_documentation: `${ISSUER}/`,
+  resource,
+  service_documentation: `${PUBLIC_ORIGIN}/`,
 });
+const AS_META = () => oauthMeta({ issuer: ISSUER, resource: RESOURCE });
+const JC_AS_META = () => oauthMeta({ issuer: JC_ISSUER, resource: JC_RESOURCE });
+
+const DC_OAUTH_LANE = Object.freeze({
+  name: 'dc',
+  issuer: ISSUER,
+  resource: RESOURCE,
+  consentPath: '/authorize/consent',
+});
+const JC_OAUTH_LANE = Object.freeze({
+  name: 'jc',
+  issuer: JC_ISSUER,
+  resource: JC_RESOURCE,
+  consentPath: '/jc/authorize/consent',
+});
+
+// Resource -> lane. The startup guard above guarantees these two are distinct,
+// so a resource value is a complete and unique lane discriminator.
+const LANE_BY_RESOURCE = new Map([
+  [RESOURCE, DC_OAUTH_LANE],
+  [JC_RESOURCE, JC_OAUTH_LANE],
+]);
+
+// Resolve which OAuth lane a stored grant / refresh record belongs to.
+//
+// Current records bind BOTH resource and issuer; issuer must match its
+// resource's lane exactly or the record is rejected.
+//
+// Historical refresh records (written before lanes existed) have no `issuer`
+// field. In that implementation every access token used ISSUER and the only
+// lane discriminator was `resource`, which was constrained at authorization
+// time to exactly [RESOURCE, JC_RESOURCE] and defaulted to RESOURCE. So for a
+// well-formed legacy record, resource alone provably determines the lane.
+//
+// Compatibility policy (allowLegacy=true, persisted refresh records only):
+//   - issuer absent  -> map from resource, but only for the two exact known
+//                       resources. Any other value is ambiguous -> fail closed.
+//   - issuer present -> must match its resource's lane -> else fail closed.
+// Legacy resolution is opt-in; it is never used for in-memory authorization
+// codes, which are always written with an explicit issuer.
+function resolveRecordLane(rec, { allowLegacy = false } = {}) {
+  if (!rec || typeof rec !== 'object') return { ok: false, reason: 'missing_record' };
+  const lane = LANE_BY_RESOURCE.get(rec.resource);
+  if (!lane) return { ok: false, reason: 'unknown_resource' };
+  if (rec.issuer === undefined || rec.issuer === null) {
+    if (!allowLegacy) return { ok: false, reason: 'missing_issuer' };
+    return { ok: true, lane, legacy: true };
+  }
+  if (rec.issuer !== lane.issuer) return { ok: false, reason: 'issuer_mismatch' };
+  return { ok: true, lane, legacy: false };
+}
 
 // ---------------------------------------------------------------------------
 // Persistence: registered clients + refresh tokens (rotated). 0600 files.
@@ -282,11 +334,11 @@ function validRedirect(client, redirectUri) {
 // Consent page (single-owner deployment: passphrase-gated approval)
 // ---------------------------------------------------------------------------
 function esc(s) { return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
-function consentPage(q) {
+function consentPage(q, lane = DC_OAUTH_LANE) {
   const hidden = Object.entries(q)
     .filter(([k]) => ['client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'code_challenge', 'code_challenge_method', 'resource'].includes(k))
     .map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join('\n');
-  const requested = q.resource || RESOURCE;
+  const requested = q.resource || lane.resource;
   const warning = requested === JC_RESOURCE
     ? 'Jace Commander access: ACS/codex-swarm/visualizer reads, mission submission, and ROOT commands (each root command still needs a separate human approval in ACS). Only approve clients you trust.'
     : 'Full Desktop Commander access (shell, filesystem). Only approve clients you trust.';
@@ -302,7 +354,7 @@ button{width:100%;padding:.7rem;border:0;border-radius:6px;background:#4f8cff;co
 <p>Client <code>${esc(q.client_id || '?')}</code> requests scope <code>${esc(q.scope || 'mcp')}</code> for
 <code>${esc(requested)}</code>.</p>
 <p class="warn">${esc(warning)}</p>
-<form method="POST" action="/authorize/consent">
+<form method="POST" action="${esc(lane.consentPath)}">
 ${hidden}
 <label>Consent passphrase<input type="password" name="passphrase" autocomplete="off" required></label>
 <button type="submit">Authorize</button></form></div></body></html>`;
@@ -314,94 +366,301 @@ function denyPage(msg) {
 
 function parseQuery(url) { return Object.fromEntries(new URL(url, 'http://localhost').searchParams.entries()); }
 
-async function handleAuthorize(req, res, q) {
-  const { client_id, redirect_uri, response_type, code_challenge, code_challenge_method, scope, state, resource } = q;
+async function handleAuthorize(req, res, q, entryLane = DC_OAUTH_LANE, reqPath = '/authorize') {
+  const { client_id, redirect_uri, response_type, code_challenge, code_challenge_method, scope, state } = q;
   if (!client_id || !redirect_uri) return jsonError(res, 400, 'invalid_request', 'client_id and redirect_uri required');
   const client = await resolveClient(client_id);
   if (!client) return send(res, 400, denyPage('Unknown client.'), { 'Content-Type': 'text/html; charset=utf-8' });
   if (!validRedirect(client, redirect_uri)) return send(res, 400, denyPage('redirect_uri not registered for this client.'), { 'Content-Type': 'text/html; charset=utf-8' });
+
+  // Select OAuth lane from requested resource per requirements 2 & 3:
+  // If /authorize receives resource=JC_RESOURCE, dispatch to JC lane semantics.
+  let lane;
+  if (entryLane.name === 'jc') {
+    lane = JC_OAUTH_LANE;
+  } else if (JC.enabled && q.resource === JC_RESOURCE) {
+    lane = JC_OAUTH_LANE;
+  } else {
+    lane = DC_OAUTH_LANE;
+  }
+
+  const resource = q.resource || lane.resource;
+
+  // Authorization responses that redirect to client must include the selected lane's iss
   const fail = (code, desc) => {
     const u = new URL(redirect_uri);
-    u.searchParams.set('error', code); u.searchParams.set('error_description', desc);
+    u.searchParams.set('error', code);
+    u.searchParams.set('error_description', desc);
     if (state) u.searchParams.set('state', state);
-    if (ISSUER && q.iss !== undefined) u.searchParams.set('iss', ISSUER);
+    u.searchParams.set('iss', lane.issuer);
     return redirect(res, u.toString());
   };
-  if (response_type !== 'code') return fail('unsupported_response_type', 'response_type must be code');
-  if (!code_challenge || code_challenge_method !== 'S256') return fail('invalid_request', 'PKCE with S256 is required');
-  if (/[^A-Za-z0-9\-._~]/.test(code_challenge) || code_challenge.length < 43 || code_challenge.length > 128)
+
+  // Issuer validation: never trust arbitrary incoming iss; if passed, must match selected lane
+  if (q.iss !== undefined && q.iss !== lane.issuer) {
+    log('GET', reqPath, 302, `oauth authorize error [lane=${lane.name}] issuer_mismatch`);
+    return fail('invalid_request', 'issuer mismatch');
+  }
+
+  // Cross-lane or unsupported resource validation
+  if (entryLane.name === 'jc' && resource !== JC_RESOURCE) {
+    log('GET', reqPath, 302, `oauth authorize error [lane=${lane.name}] cross_lane_rejection resource_mismatch`);
+    return fail('invalid_target', 'resource does not belong to this OAuth lane');
+  }
+  if (entryLane.name === 'dc' && resource !== RESOURCE && resource !== JC_RESOURCE) {
+    log('GET', reqPath, 302, `oauth authorize error [lane=${lane.name}] resource_mismatch`);
+    return fail('invalid_target', 'unknown or unsupported resource');
+  }
+
+  if (response_type !== 'code') {
+    log('GET', reqPath, 302, `oauth authorize error [lane=${lane.name}] unsupported_response_type`);
+    return fail('unsupported_response_type', 'response_type must be code');
+  }
+  if (!code_challenge || code_challenge_method !== 'S256') {
+    log('GET', reqPath, 302, `oauth authorize error [lane=${lane.name}] invalid_request pkce_required`);
+    return fail('invalid_request', 'PKCE with S256 is required');
+  }
+  if (/[^A-Za-z0-9\-._~]/.test(code_challenge) || code_challenge.length < 43 || code_challenge.length > 128) {
+    log('GET', reqPath, 302, `oauth authorize error [lane=${lane.name}] invalid_request malformed_code_challenge`);
     return fail('invalid_request', 'malformed code_challenge');
-  if (resource && !ALLOWED_RESOURCES.includes(resource)) return fail('invalid_target', 'resource mismatch');
+  }
   const reqScope = (scope || 'mcp').split(' ').filter((s) => s === 'mcp' || s === 'openid' || s === 'email' || s === 'profile');
-  if (reqScope.length === 0) return fail('invalid_scope', 'no permitted scope requested');
-  return send(res, 200, consentPage(q), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (reqScope.length === 0) {
+    log('GET', reqPath, 302, `oauth authorize error [lane=${lane.name}] invalid_scope`);
+    return fail('invalid_scope', 'no permitted scope requested');
+  }
+
+  log('GET', reqPath, 200, `oauth authorize consent_prompt [lane=${lane.name}] client_id=${client_id}`);
+  return send(res, 200, consentPage({ ...q, resource }, lane), { 'Content-Type': 'text/html; charset=utf-8' });
 }
 
-async function handleConsent(req, res, body) {
+async function handleConsent(req, res, body, entryLane = DC_OAUTH_LANE, reqPath = '/authorize/consent') {
   const params = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
-  const { client_id, redirect_uri, scope, state, code_challenge, resource } = params;
+  const { client_id, redirect_uri, scope, state, code_challenge } = params;
+
+  let lane;
+  if (entryLane.name === 'jc') {
+    lane = JC_OAUTH_LANE;
+  } else if (JC.enabled && params.resource === JC_RESOURCE) {
+    lane = JC_OAUTH_LANE;
+  } else {
+    lane = DC_OAUTH_LANE;
+  }
+
+  const resource = params.resource || lane.resource;
   const pass = params.passphrase || '';
   const passOk = pass.length > 0 && crypto.timingSafeEqual(
     Buffer.from(crypto.createHash('sha256').update(pass).digest()),
     Buffer.from(crypto.createHash('sha256').update(CONSENT_PASSPHRASE).digest()));
-  if (!passOk) return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (!passOk) {
+    log('POST', reqPath, 401, `oauth consent error [lane=${lane.name}] invalid_passphrase`);
+    return send(res, 401, denyPage('Invalid consent passphrase.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+
   const client = await resolveClient(client_id);
-  if (!client || !validRedirect(client, redirect_uri)) return send(res, 400, denyPage('Invalid client/redirect.'), { 'Content-Type': 'text/html; charset=utf-8' });
-  if (resource && !ALLOWED_RESOURCES.includes(resource)) return send(res, 400, denyPage('Unknown resource.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  if (!client || !validRedirect(client, redirect_uri)) {
+    log('POST', reqPath, 400, `oauth consent error [lane=${lane.name}] invalid_client`);
+    return send(res, 400, denyPage('Invalid client/redirect.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+
+  if (entryLane.name === 'jc' && resource !== JC_RESOURCE) {
+    log('POST', reqPath, 400, `oauth consent error [lane=${lane.name}] cross_lane_rejection resource_mismatch`);
+    return send(res, 400, denyPage('Resource does not belong to this OAuth lane.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+  if (entryLane.name === 'dc' && resource !== RESOURCE && resource !== JC_RESOURCE) {
+    log('POST', reqPath, 400, `oauth consent error [lane=${lane.name}] resource_mismatch`);
+    return send(res, 400, denyPage('Resource does not belong to this OAuth lane.'), { 'Content-Type': 'text/html; charset=utf-8' });
+  }
+
   const code = randId();
   codes.set(code, {
-    client_id, redirect_uri, scope: scope || 'mcp', resource: resource || RESOURCE,
-    code_challenge, exp: now() + CODE_TTL_S,
+    client_id,
+    redirect_uri,
+    scope: scope || 'mcp',
+    resource: lane.resource,
+    issuer: lane.issuer,
+    code_challenge,
+    exp: now() + CODE_TTL_S,
   });
+
   const u = new URL(redirect_uri);
   u.searchParams.set('code', code);
   if (state) u.searchParams.set('state', state);
-  u.searchParams.set('iss', ISSUER);
+  u.searchParams.set('iss', lane.issuer);
+  log('POST', reqPath, 302, `oauth consent redirect [lane=${lane.name}] client_id=${client_id}`);
   return redirect(res, u.toString());
 }
 
 const codes = new Map(); // code -> grant data
 setInterval(() => { const t = now(); for (const [c, g] of codes) if (g.exp < t) codes.delete(c); }, 60_000);
 
-function issueTokens(grant) {
+function issueTokens(grant, lane = DC_OAUTH_LANE) {
   const t = now();
   const jti = randId();
   const access = signJwt({
-    iss: ISSUER, sub: 'jacen', aud: grant.resource || RESOURCE, client_id: grant.client_id,
-    scope: grant.scope, iat: t, exp: t + ACCESS_TTL_S, jti,
+    iss: lane.issuer,
+    sub: 'jacen',
+    aud: lane.resource,
+    client_id: grant.client_id,
+    scope: grant.scope,
+    iat: t,
+    exp: t + ACCESS_TTL_S,
+    jti,
   });
   const rjti = randId();
-  refreshTokens[rjti] = { client_id: grant.client_id, scope: grant.scope, resource: grant.resource || RESOURCE, exp: t + REFRESH_TTL_S, active: true };
+  refreshTokens[rjti] = {
+    client_id: grant.client_id,
+    scope: grant.scope,
+    resource: lane.resource,
+    issuer: lane.issuer,
+    exp: t + REFRESH_TTL_S,
+    active: true,
+  };
   saveJson(tokensFile, refreshTokens);
   return { access_token: access, token_type: 'Bearer', expires_in: ACCESS_TTL_S, refresh_token: rjti, scope: grant.scope };
 }
 
-async function handleToken(req, res, body) {
+async function handleToken(req, res, body, entryLane = DC_OAUTH_LANE, reqPath = '/token') {
   const p = Object.fromEntries(new URLSearchParams(body.toString('utf8')).entries());
   const { grant_type, code, code_verifier, redirect_uri, client_id, client_secret, refresh_token, resource } = p;
+
   if (grant_type === 'authorization_code') {
     const g = code ? codes.get(code) : null;
-    if (!g) return jsonError(res, 400, 'invalid_grant', 'unknown or expired code');
+    if (!g) {
+      log('POST', reqPath, 400, 'oauth token error invalid_grant unknown_or_expired_code');
+      return jsonError(res, 400, 'invalid_grant', 'unknown or expired code');
+    }
     codes.delete(code); // one-time use, even on failure paths below
+
+    // Authorization codes are always written with an explicit issuer, so the
+    // legacy fallback is deliberately NOT enabled here.
+    const resolved = resolveRecordLane(g);
+    if (!resolved.ok) {
+      log('POST', reqPath, 400, `oauth token error invalid_grant corrupt_grant_binding (${resolved.reason})`);
+      return jsonError(res, 400, 'invalid_grant', 'invalid authorization code grant');
+    }
+    const grantLane = resolved.lane;
+    const isJcGrant = grantLane.name === 'jc';
+
+    let effectiveLane;
+    if (entryLane.name === 'jc') {
+      if (!isJcGrant) {
+        log('POST', reqPath, 400, `oauth token error cross_lane_rejection [entry=jc] dc_code_rejected`);
+        return jsonError(res, 400, 'invalid_target', 'authorization code belongs to a different OAuth lane');
+      }
+      effectiveLane = JC_OAUTH_LANE;
+    } else {
+      // entryLane is dc (/token)
+      if (isJcGrant) {
+        if (!JC.enabled) {
+          log('POST', reqPath, 400, `oauth token error cross_lane_rejection [entry=dc] jc_disabled`);
+          return jsonError(res, 400, 'invalid_target', 'resource is unavailable');
+        }
+        // Per requirement 4: process under JC lane without rejecting merely for hitting /token
+        effectiveLane = JC_OAUTH_LANE;
+      } else {
+        effectiveLane = DC_OAUTH_LANE;
+      }
+    }
+
+    if (resource && resource !== effectiveLane.resource) {
+      log('POST', reqPath, 400, `oauth token error resource_mismatch [lane=${effectiveLane.name}]`);
+      return jsonError(res, 400, 'invalid_target', 'resource mismatch');
+    }
+
     const client = await resolveClient(client_id || g.client_id);
-    if (!client || (client_id && client_id !== g.client_id)) return jsonError(res, 400, 'invalid_grant', 'client mismatch');
-    if (client.client_secret && client_secret !== client.client_secret) return jsonError(res, 401, 'invalid_client', 'client auth failed');
-    if (redirect_uri !== g.redirect_uri) return jsonError(res, 400, 'invalid_grant', 'redirect_uri mismatch');
-    if (!code_verifier) return jsonError(res, 400, 'invalid_request', 'code_verifier required');
+    if (!client || (client_id && client_id !== g.client_id)) {
+      log('POST', reqPath, 400, `oauth token error client_mismatch [lane=${effectiveLane.name}]`);
+      return jsonError(res, 400, 'invalid_grant', 'client mismatch');
+    }
+    if (client.client_secret && client_secret !== client.client_secret) {
+      log('POST', reqPath, 401, `oauth token error invalid_client [lane=${effectiveLane.name}]`);
+      return jsonError(res, 401, 'invalid_client', 'client auth failed');
+    }
+    if (redirect_uri !== g.redirect_uri) {
+      log('POST', reqPath, 400, `oauth token error redirect_uri_mismatch [lane=${effectiveLane.name}]`);
+      return jsonError(res, 400, 'invalid_grant', 'redirect_uri mismatch');
+    }
+    if (!code_verifier) {
+      log('POST', reqPath, 400, `oauth token error missing_code_verifier [lane=${effectiveLane.name}]`);
+      return jsonError(res, 400, 'invalid_request', 'code_verifier required');
+    }
     const expect = b64u(crypto.createHash('sha256').update(code_verifier).digest());
-    const a = Buffer.from(expect); const b = Buffer.from(g.code_challenge);
-    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return jsonError(res, 400, 'invalid_grant', 'PKCE verification failed');
-    if (resource && resource !== g.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
-    return send(res, 200, issueTokens(g), { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
+    const a = Buffer.from(expect);
+    const b = Buffer.from(g.code_challenge);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      log('POST', reqPath, 400, `oauth token error pkce_verification_failed [lane=${effectiveLane.name}]`);
+      return jsonError(res, 400, 'invalid_grant', 'PKCE verification failed');
+    }
+
+    log('POST', reqPath, 200, `oauth token exchange [lane=${effectiveLane.name}] client_id=${client_id || g.client_id}`);
+    return send(res, 200, issueTokens(g, effectiveLane), { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
+
   if (grant_type === 'refresh_token') {
     const rec = refreshTokens[refresh_token];
-    if (!rec || !rec.active || rec.exp < now()) return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
-    if (resource && resource !== rec.resource) return jsonError(res, 400, 'invalid_target', 'resource mismatch');
+    if (!rec || !rec.active || rec.exp < now()) {
+      log('POST', reqPath, 400, 'oauth refresh error invalid_refresh_token');
+      return jsonError(res, 400, 'invalid_grant', 'invalid refresh token');
+    }
+    if (client_id && client_id !== rec.client_id) {
+      log('POST', reqPath, 400, 'oauth refresh error client_mismatch');
+      return jsonError(res, 400, 'invalid_grant', 'client mismatch');
+    }
+
+    // Persisted refresh records may predate the `issuer` field. Under the
+    // documented compatibility policy those resolve from `resource` alone;
+    // everything else still requires an exact issuer/resource pairing.
+    const resolved = resolveRecordLane(rec, { allowLegacy: true });
+    if (!resolved.ok) {
+      log('POST', reqPath, 400, `oauth refresh error invalid_grant corrupt_refresh_binding (${resolved.reason})`);
+      return jsonError(res, 400, 'invalid_grant', 'invalid refresh token grant');
+    }
+    if (resolved.legacy) {
+      // Persisted below, together with rotation, so a rejected request never
+      // mutates the token store.
+      log('POST', reqPath, 200, `oauth refresh legacy_record_resolved [lane=${resolved.lane.name}] client_id=${rec.client_id}`);
+    }
+    const laneName = resolved.lane.name;
+
+    let effectiveLane;
+    if (entryLane.name === 'jc') {
+      if (laneName !== 'jc') {
+        log('POST', reqPath, 400, `oauth refresh error cross_lane_rejection [entry=jc] dc_refresh_token_rejected`);
+        return jsonError(res, 400, 'invalid_target', 'refresh token belongs to a different OAuth lane');
+      }
+      effectiveLane = JC_OAUTH_LANE;
+    } else {
+      // entryLane is dc (/token)
+      if (laneName === 'jc') {
+        if (!JC.enabled) {
+          log('POST', reqPath, 400, `oauth refresh error cross_lane_rejection [entry=dc] jc_disabled`);
+          return jsonError(res, 400, 'invalid_target', 'resource is unavailable');
+        }
+        effectiveLane = JC_OAUTH_LANE;
+      } else {
+        effectiveLane = DC_OAUTH_LANE;
+      }
+    }
+
+    if (resource && resource !== effectiveLane.resource) {
+      log('POST', reqPath, 400, `oauth refresh error resource_mismatch [lane=${effectiveLane.name}]`);
+      return jsonError(res, 400, 'invalid_target', 'resource mismatch');
+    }
+
     rec.active = false; // rotation: old refresh token single-use
-    const t = issueTokens({ client_id: rec.client_id, scope: rec.scope, resource: rec.resource });
+    if (resolved.legacy) {
+      // Backfill the now-known issuer so the compatibility window closes and
+      // later requests resolve under the strict rule.
+      rec.issuer = resolved.lane.issuer;
+    }
+    saveJson(tokensFile, refreshTokens);
+    const t = issueTokens({ client_id: rec.client_id, scope: rec.scope }, effectiveLane);
+    log('POST', reqPath, 200, `oauth refresh exchange [lane=${effectiveLane.name}] client_id=${rec.client_id}`);
     return send(res, 200, t, { 'Cache-Control': 'no-store', 'Pragma': 'no-cache' });
   }
+
+  log('POST', reqPath, 400, 'oauth token error unsupported_grant_type');
   return jsonError(res, 400, 'unsupported_grant_type', 'supported: authorization_code, refresh_token');
 }
 
@@ -437,15 +696,15 @@ async function handleRegister(req, res, body) {
 // Bearer validation for /mcp
 // ---------------------------------------------------------------------------
 const CHALLENGE = () => `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource", scope="mcp"`;
-const JC_CHALLENGE = () => `Bearer resource_metadata="${ISSUER}/.well-known/oauth-protected-resource/jc/mcp", scope="mcp"`;
+const JC_CHALLENGE = () => `Bearer resource_metadata="${PUBLIC_ORIGIN}/.well-known/oauth-protected-resource/jc/mcp", scope="mcp"`;
 
-function checkAuth(req, expectedResource = RESOURCE) {
+function checkAuth(req, expectedResource = RESOURCE, expectedIssuer = ISSUER) {
   const h = req.headers['authorization'] || '';
   const m = /^Bearer\s+(.+)$/i.exec(h);
   if (!m) return null;
   const payload = verifyJwt(m[1].trim());
   if (!payload) return null;
-  if (payload.iss !== ISSUER) return null;
+  if (payload.iss !== expectedIssuer) return null;
   const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
   if (!aud.includes(expectedResource)) return null; // audience/resource binding (RFC 8707)
   return payload;
@@ -680,34 +939,57 @@ const server = http.createServer(async (req, res) => {
     if (pathName === '/.well-known/oauth-protected-resource' || pathName === '/.well-known/oauth-protected-resource/mcp') {
       log('GET', pathName, 200); return send(res, 200, META);
     }
-    if (pathName === '/.well-known/oauth-protected-resource/jc/mcp' && JC.enabled) {
+    if (JC.enabled && (pathName === '/.well-known/oauth-protected-resource/jc/mcp' || pathName === '/jc/.well-known/oauth-protected-resource' || pathName === '/jc/.well-known/oauth-protected-resource/mcp')) {
       log('GET', pathName, 200); return send(res, 200, JC_META);
     }
     if (pathName === '/.well-known/oauth-authorization-server' || pathName === '/.well-known/oauth-authorization-server/mcp' || pathName === '/.well-known/openid-configuration') {
       log('GET', pathName, 200); return send(res, 200, AS_META());
     }
+    if (JC.enabled && (
+      pathName === '/.well-known/oauth-authorization-server/jc' ||
+      pathName === '/jc/.well-known/oauth-authorization-server' ||
+      pathName === '/jc/.well-known/openid-configuration'
+    )) {
+      log('GET', pathName, 200); return send(res, 200, JC_AS_META());
+    }
 
     // ---- OAuth endpoints ----
     if (pathName === '/authorize' && req.method === 'GET') {
       const q = parseQuery(req.url);
-      await handleAuthorize(req, res, q); log('GET', '/authorize', res.statusCode); return;
+      await handleAuthorize(req, res, q, DC_OAUTH_LANE, '/authorize'); return;
     }
     if (pathName === '/authorize/consent' && req.method === 'POST') {
       const body = await readBody(req);
-      await handleConsent(req, res, body); log('POST', '/authorize/consent', res.statusCode); return;
+      await handleConsent(req, res, body, DC_OAUTH_LANE, '/authorize/consent'); return;
     }
     if (pathName === '/token' && req.method === 'POST') {
       const body = await readBody(req);
-      await handleToken(req, res, body); log('POST', '/token', res.statusCode); return;
+      await handleToken(req, res, body, DC_OAUTH_LANE, '/token'); return;
     }
     if (pathName === '/register' && req.method === 'POST') {
       const body = await readBody(req);
       await handleRegister(req, res, body); log('POST', '/register', res.statusCode); return;
     }
+    if (JC.enabled && pathName === '/jc/authorize' && req.method === 'GET') {
+      const q = parseQuery(req.url);
+      await handleAuthorize(req, res, q, JC_OAUTH_LANE, '/jc/authorize'); return;
+    }
+    if (JC.enabled && pathName === '/jc/authorize/consent' && req.method === 'POST') {
+      const body = await readBody(req);
+      await handleConsent(req, res, body, JC_OAUTH_LANE, '/jc/authorize/consent'); return;
+    }
+    if (JC.enabled && pathName === '/jc/token' && req.method === 'POST') {
+      const body = await readBody(req);
+      await handleToken(req, res, body, JC_OAUTH_LANE, '/jc/token'); return;
+    }
+    if (JC.enabled && pathName === '/jc/register' && req.method === 'POST') {
+      const body = await readBody(req);
+      await handleRegister(req, res, body); log('POST', '/jc/register', res.statusCode); return;
+    }
 
     // ---- MCP proxy (auth required, all methods) ----
     if (pathName === '/mcp') {
-      const auth = checkAuth(req);
+      const auth = checkAuth(req, RESOURCE, ISSUER);
       if (!auth) {
         log(req.method, '/mcp', 401, 'auth required');
         return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': CHALLENGE() });
@@ -781,7 +1063,7 @@ const server = http.createServer(async (req, res) => {
 
     // ---- Jace Commander MCP proxy (auth required; ACS-managed only) ----
     if (pathName === '/jc/mcp' && JC.enabled) {
-      const auth = checkAuth(req, JC_RESOURCE);
+      const auth = checkAuth(req, JC_RESOURCE, JC_ISSUER);
       if (!auth) {
         log(req.method, '/jc/mcp', 401, 'auth required');
         return send(res, 401, { error: 'unauthorized' }, { 'WWW-Authenticate': JC_CHALLENGE() });
@@ -833,5 +1115,5 @@ server.keepAliveTimeout = 65_000;
 server.maxHeadersCount = 100;
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`gateway: listening on 127.0.0.1:${PORT}`);
-  console.log(`gateway: issuer=${ISSUER} resource=${RESOURCE} upstream=${UPSTREAM}${JC.enabled ? ` jc_resource=${JC_RESOURCE} jc_upstream=${JC_UPSTREAM}` : ''}`);
+  console.log(`gateway: issuer=${ISSUER} resource=${RESOURCE} upstream=${UPSTREAM}${JC.enabled ? ` jc_issuer=${JC_ISSUER} jc_resource=${JC_RESOURCE} jc_upstream=${JC_UPSTREAM}` : ''}`);
 });
