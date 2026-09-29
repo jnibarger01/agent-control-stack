@@ -145,3 +145,83 @@ Trace telemetry reuses the canonical work-item and trace identities and records
 the deterministic observed outcome when one is present. This data is for
 offline calibration/comparison only. No production decision path consumes the
 trace advisory result.
+
+## JEV-4 automatic trace observation scheduling
+
+JEV-3 provides the canonical trace projection and classifier infrastructure.
+JEV-4 schedules that observer automatically after authoritative work has
+already completed.
+
+Architecture:
+
+authoritative ACS execution
+|
+v
+canonical lifecycle / LoopTrace evidence
+|
+| authoritative operation already completes
+v
+non-authoritative observation trigger
+|
+v
+bounded trace projection
+|
+v
+Jev shadow analysis
+|
+v
+calibration telemetry only
+
+Automatic Jev trace observation is post-authority and non-blocking. Jev
+failure, saturation, incompatibility, timeout, or malformed output cannot
+alter ACS execution or lifecycle state.
+
+### Trigger scope
+
+Initially observe only terminal or diagnostically significant canonical
+traces, such as traces containing:
+
+- run.failed
+- run.completed
+- promotion.blocked
+- promotion.completed
+- replay.diverged
+
+The observer obtains a coherent canonical trace and runs the deterministic
+projection once appropriate evidence is available. If the trace is
+incomplete, malformed, corrupt, or unavailable, the observer emits degraded
+observational telemetry if safe, otherwise does nothing, and never alters
+execution state.
+
+### Bounded observation
+
+Observation has explicit bounds:
+
+- maximum queued observer jobs: 1000
+- maximum concurrent Jev observations: 5
+- maximum attempts/retries: 3
+- timeout: 30 seconds per observation
+- projection size: bounded to 1000 events
+
+When capacity is exhausted, observation is dropped/deferred rather than
+blocking authoritative execution. A bounded metric/telemetry signal records
+that observation was skipped/degraded.
+
+### Idempotency and correlation
+
+Duplicate scheduling is bounded/idempotent via the deterministic observational
+identity: `trace_id + question_set_version + classifier_version`. Repeated
+scheduling does not produce uncontrolled duplicate model calls. Retries
+are bounded and never affect ACS lifecycle.
+
+### Current runtime behavior
+
+The deployed runtime remains Noul-only (Choice and Score unsupported).
+Automatic trace observation against the existing jev-trace@1 mixed
+primitive set will normally produce INCOMPATIBLE_MODEL without sending a
+System One request. This is acceptable and remains observable in
+calibration telemetry. Do not alter the trace question set merely to force
+the current runtime to return a classification. A future runtime that
+explicitly advertises complete Noul+Choice+Score support should begin
+performing the typed trace analysis without requiring another architecture
+change.

@@ -9,6 +9,7 @@
   "references": [
     { "path": "../shared" },
     { "path": "../work-items" },
-    { "path": "../advisory" }
+    { "path": "../advisory" },
+    { "path": "../jev-advisor" }
   ]
 }
