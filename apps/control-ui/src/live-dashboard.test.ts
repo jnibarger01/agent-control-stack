@@ -177,7 +177,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
       }
     ];
     const app = bootLive(
-      { workItems: [], events: [], agents: [], now: NOW },
+      { workItems: [item("wrk_active")], events: [], agents: [], now: NOW },
       {
         "/agents": () => ({ body: { agents } }),
         "/api/agents/hermes-local": () => ({
@@ -261,6 +261,95 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.text("#agent-detail h3")).toBe("Hermes Agent");
     expect(app.text("#agent-detail")).toContain("Current work itemwrk_active");
     expect(app.calls.some((call) => call.url === "/api/agents/hermes-local")).toBe(true);
+    expect(app.window.location.search).toContain("agentId=hermes-local");
+    expect(app.window.location.search).toContain("agentOrder=name");
+    expect(app.window.location.hash).toBe("#agents");
+
+    const workLink = app.document.querySelector('[data-agent-work-item="wrk_active"]') as HTMLAnchorElement;
+    expect(workLink.getAttribute("href")).toBe("?item=wrk_active#queue");
+    workLink.click();
+    await app.flush();
+    expect(app.document.body.dataset.activeView).toBe("queue");
+    expect(app.window.location.search).toBe("?item=wrk_active");
+    expect(app.window.location.hash).toBe("#queue");
+    expect(app.document.querySelector('[data-work-item="wrk_active"]')?.classList.contains("selected")).toBe(true);
+  });
+
+  it("restores selected agent and discovery filters from a direct URL", async () => {
+    const agents: NonNullable<MissionControlViewModel["agents"]> = [
+      {
+        id: "hermes-local",
+        displayName: "Hermes Agent",
+        kind: "service",
+        status: "online",
+        health: "healthy",
+        currentTask: "Coordinate implementation",
+        capabilities: ["orchestrate"],
+        metadata: {
+          registered: "true",
+          acpRole: "ORCHESTRATION_LAYER",
+          provider: "local",
+          model: "hermes"
+        }
+      },
+      {
+        id: "codex-cli",
+        displayName: "Codex CLI",
+        kind: "cli",
+        status: "offline",
+        health: "unknown",
+        capabilities: ["code:implement"],
+        metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+      }
+    ];
+    const app = bootLive(
+      { workItems: [], events: [], agents, now: NOW },
+      {
+        "/agents": () => ({ body: { agents } }),
+        "/api/agents/hermes-local": () => ({
+          body: {
+            agent: {
+              id: "hermes-local",
+              name: "Hermes Agent",
+              kind: "service",
+              acpRole: "ORCHESTRATION_LAYER",
+              provider: "local",
+              model: "hermes",
+              status: "AVAILABLE",
+              effectiveStatus: "AVAILABLE",
+              capabilities: [{ name: "orchestrate" }]
+            },
+            activity: { currentTask: "Coordinate implementation" },
+            sessions: [],
+            events: []
+          }
+        })
+      },
+      {
+        url: "https://acs.local/?agentId=hermes-local&agentQ=hermes&agentRole=ORCHESTRATION_LAYER&agentStatus=online&agentOrder=name#agents"
+      }
+    );
+    await app.flush();
+
+    expect(app.document.body.dataset.activeView).toBe("agents");
+    expect((app.document.querySelector("#agent-search") as HTMLInputElement).value).toBe("hermes");
+    expect((app.document.querySelector("#agent-role-filter") as HTMLSelectElement).value).toBe("ORCHESTRATION_LAYER");
+    expect((app.document.querySelector("#agent-status-filter") as HTMLSelectElement).value).toBe("online");
+    expect((app.document.querySelector("#agent-attention-first") as HTMLInputElement).checked).toBe(false);
+    expect(app.document.querySelectorAll(".agent-card")).toHaveLength(1);
+    expect(app.document.querySelector('[data-agent="hermes-local"]')?.classList.contains("selected")).toBe(true);
+    expect(app.text("#agent-detail h3")).toBe("Hermes Agent");
+    expect(app.calls.some((call) => call.url === "/api/agents/hermes-local")).toBe(true);
+
+    const search = app.document.querySelector("#agent-search") as HTMLInputElement;
+    search.value = "local hermes";
+    search.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+    expect(app.window.location.search).toContain("agentId=hermes-local");
+    expect(app.window.location.search).toContain("agentQ=local+hermes");
+    expect(app.window.location.search).toContain("agentRole=ORCHESTRATION_LAYER");
+    expect(app.window.location.search).toContain("agentStatus=online");
+    expect(app.window.location.search).toContain("agentOrder=name");
+    expect(app.window.location.hash).toBe("#agents");
   });
 
   it("coalesces a burst of work-item events into a single fragment fetch", async () => {

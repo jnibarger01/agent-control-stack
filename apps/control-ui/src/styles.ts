@@ -321,6 +321,8 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .agent-card-task small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
 .agent-card-task > span { line-height: 1.35; overflow-wrap: anywhere; }
 .agent-card-error { margin: 0; color: var(--red); font-size: 11px; overflow-wrap: anywhere; }
+.agent-detail-actions { display: flex; gap: 8px; margin: 0 0 12px; }
+.agent-work-item-link { display: inline-flex; align-items: center; text-decoration: none; }
 .agent-card-foot { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
 .agent-card-foot span { min-width: 0; overflow-wrap: anywhere; }
 .detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }

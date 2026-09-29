@@ -327,6 +327,8 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .agent-card-task small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
 .agent-card-task > span { line-height: 1.35; overflow-wrap: anywhere; }
 .agent-card-error { margin: 0; color: var(--red); font-size: 11px; overflow-wrap: anywhere; }
+.agent-detail-actions { display: flex; gap: 8px; margin: 0 0 12px; }
+.agent-work-item-link { display: inline-flex; align-items: center; text-decoration: none; }
 .agent-card-foot { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
 .agent-card-foot span { min-width: 0; overflow-wrap: anywhere; }
 .detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
@@ -772,6 +774,7 @@ function appendAuditEvent(event) {
 }
 
 let selectedAgentId = null;
+let loadedAgentDetailId = null;
 let selectedExecutorId = null;
 let selectedConnectorId = null;
 let agentRosterAgents = [];
@@ -1806,6 +1809,54 @@ function readAgentDiscoveryState() {
   };
 }
 
+const AGENT_LOCATION_KEYS = ['agentId', 'agentQ', 'agentRole', 'agentStatus', 'agentOrder'];
+const QUEUE_LOCATION_KEYS = ['status', 'risk', 'q', 'text', 'agent', 'item'];
+
+function parseAgentDiscoveryFromLocation() {
+  const params = new URLSearchParams(location.search || '');
+  return {
+    selectedAgentId: String(params.get('agentId') || '').trim(),
+    search: String(params.get('agentQ') || '').trim().toLowerCase(),
+    role: String(params.get('agentRole') || '').trim(),
+    status: String(params.get('agentStatus') || '').trim(),
+    attentionFirst: params.get('agentOrder') !== 'name'
+  };
+}
+
+function syncAgentDiscoveryControls(state) {
+  const search = document.querySelector('#agent-search');
+  const role = document.querySelector('#agent-role-filter');
+  const status = document.querySelector('#agent-status-filter');
+  const attention = document.querySelector('#agent-attention-first');
+  if (search) search.value = state.search || '';
+  if (role) role.value = state.role || '';
+  if (status) status.value = state.status || '';
+  if (attention) attention.checked = state.attentionFirst !== false;
+}
+
+function deleteLocationKeys(url, keys) {
+  keys.forEach(function (key) { url.searchParams.delete(key); });
+}
+
+function writeAgentDiscoveryToLocation(state, agentId) {
+  const url = new URL(location.href);
+  deleteLocationKeys(url, QUEUE_LOCATION_KEYS);
+  deleteLocationKeys(url, AGENT_LOCATION_KEYS);
+  if (agentId) url.searchParams.set('agentId', agentId);
+  if (state.search) url.searchParams.set('agentQ', state.search);
+  if (state.role) url.searchParams.set('agentRole', state.role);
+  if (state.status) url.searchParams.set('agentStatus', state.status);
+  if (!state.attentionFirst) url.searchParams.set('agentOrder', 'name');
+  url.hash = '#agents';
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+
+function clearAgentDiscoveryLocation() {
+  const url = new URL(location.href);
+  deleteLocationKeys(url, AGENT_LOCATION_KEYS);
+  return url;
+}
+
 function filterAgentRosterClient(agents, state) {
   const terms = state.search.split(' ').filter(Boolean);
   return agents.filter(function (agent) {
@@ -1882,13 +1933,24 @@ function renderAgentTable(agents) {
   bindAgentRows();
 }
 
+function selectAgent(id, options) {
+  if (!id) return;
+  selectedAgentId = id;
+  document.querySelectorAll('[data-agent]').forEach(function (candidate) {
+    candidate.classList.toggle('selected', candidate.dataset.agent === id);
+  });
+  if (!options || options.writeLocation !== false) {
+    writeAgentDiscoveryToLocation(readAgentDiscoveryState(), id);
+  }
+  if (!options || options.loadDetail !== false) {
+    loadAgentDetail(id);
+  }
+}
+
 function bindAgentRows() {
   document.querySelectorAll('[data-agent]').forEach(function (card) {
     card.addEventListener('click', function () {
-      selectedAgentId = card.dataset.agent;
-      document.querySelectorAll('[data-agent]').forEach(function (candidate) { candidate.classList.remove('selected'); });
-      card.classList.add('selected');
-      loadAgentDetail(selectedAgentId);
+      selectAgent(card.dataset.agent);
     });
   });
 }
@@ -1930,26 +1992,59 @@ function applyAgentDiscovery() {
   return visible;
 }
 
+function restoreAgentDiscoveryFromLocation() {
+  const state = parseAgentDiscoveryFromLocation();
+  syncAgentDiscoveryControls(state);
+  selectedAgentId = state.selectedAgentId || null;
+  const visible = applyAgentDiscovery();
+  if (selectedAgentId && agentRosterAgents.some(function (agent) { return agent.id === selectedAgentId; })) {
+    selectAgent(selectedAgentId, {
+      writeLocation: false,
+      loadDetail: loadedAgentDetailId !== selectedAgentId
+    });
+  } else if (!selectedAgentId) {
+    loadedAgentDetailId = null;
+    const detail = document.querySelector('#agent-detail');
+    if (detail) {
+      detail.innerHTML = '<div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>';
+    }
+  }
+  return visible;
+}
+
 function bindAgentDiscovery() {
   const root = document.querySelector('#agent-discovery');
   if (!root) return;
-  const apply = function () { applyAgentDiscovery(); };
+  const initial = parseAgentDiscoveryFromLocation();
+  syncAgentDiscoveryControls(initial);
+  selectedAgentId = initial.selectedAgentId || null;
+  const applyAndWrite = function () {
+    applyAgentDiscovery();
+    writeAgentDiscoveryToLocation(readAgentDiscoveryState(), selectedAgentId);
+  };
   const search = document.querySelector('#agent-search');
   const role = document.querySelector('#agent-role-filter');
   const status = document.querySelector('#agent-status-filter');
   const attention = document.querySelector('#agent-attention-first');
   const clear = document.querySelector('#agent-filter-clear');
-  if (search) search.addEventListener('input', apply);
-  if (role) role.addEventListener('change', apply);
-  if (status) status.addEventListener('change', apply);
-  if (attention) attention.addEventListener('change', apply);
+  if (search) search.addEventListener('input', applyAndWrite);
+  if (role) role.addEventListener('change', applyAndWrite);
+  if (status) status.addEventListener('change', applyAndWrite);
+  if (attention) attention.addEventListener('change', applyAndWrite);
   if (clear) clear.addEventListener('click', function () {
     if (search) search.value = '';
     if (role) role.value = '';
     if (status) status.value = '';
     if (attention) attention.checked = true;
     applyAgentDiscovery();
+    writeAgentDiscoveryToLocation(readAgentDiscoveryState(), selectedAgentId);
     if (search) search.focus();
+  });
+  window.addEventListener('popstate', function () {
+    if (location.hash === '#agents' || new URLSearchParams(location.search).has('agentId')) {
+      showView('agents');
+      restoreAgentDiscoveryFromLocation();
+    }
   });
 }
 
@@ -1960,8 +2055,17 @@ async function refreshAgentRoster() {
     agentRosterAgents = agents;
     syncAgentRoleOptions(agents);
     applyAgentDiscovery();
-    if (selectedAgentId && !agents.some(function (agent) { return agent.id === selectedAgentId; })) {
+    if (selectedAgentId && agents.some(function (agent) { return agent.id === selectedAgentId; })) {
+      selectAgent(selectedAgentId, {
+        writeLocation: false,
+        loadDetail: loadedAgentDetailId !== selectedAgentId
+      });
+    } else if (selectedAgentId) {
       selectedAgentId = null;
+      loadedAgentDetailId = null;
+      if (document.body.dataset.activeView === 'agents') {
+        writeAgentDiscoveryToLocation(readAgentDiscoveryState(), null);
+      }
       const detail = document.querySelector('#agent-detail');
       if (detail) {
         detail.innerHTML = '<div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>';
@@ -1981,6 +2085,8 @@ async function loadAgentDetail(id) {
   target.innerHTML = '<div class="detail-loading">Loading agent detail...</div>';
   try {
     const detail = await fetchJson('/api/agents/' + encodeURIComponent(id));
+    if (selectedAgentId !== id) return;
+    loadedAgentDetailId = id;
     renderAgentDetail(target, detail);
   } catch (error) {
     target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
@@ -2000,6 +2106,10 @@ function renderAgentDetail(target, detail) {
   const sessions = Array.isArray(detail.sessions) ? detail.sessions : [];
   const adapter = detail.adapterStatus ? (detail.adapterStatus.state || detail.adapterStatus.status || 'connected') : 'not configured';
   const status = agent.effectiveStatus || agent.status || 'UNKNOWN';
+  const currentWorkItemId = activity.currentWorkItemId ? String(activity.currentWorkItemId) : '';
+  const currentWorkItemAction = currentWorkItemId
+    ? '<div class="agent-detail-actions"><a class="tool-button agent-work-item-link" href="?item=' + encodeURIComponent(currentWorkItemId) + '#queue" data-agent-work-item="' + escapeClient(currentWorkItemId) + '">Open current work item →</a></div>'
+    : '';
   target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.name || agent.id || 'Agent') + '</h3><small>' + escapeClient(agent.id || '') + '</small></div><div>' + pillMarkup(status) + '</div></div>' +
     '<dl class="detail-grid">' +
       detailRow('Role', agent.acpRole) +
@@ -2015,10 +2125,29 @@ function renderAgentDetail(target, detail) {
       detailRow('Adapter', adapter) +
       detailRow('Endpoint', agent.endpoint ? redactClient(agent.endpoint) : undefined) +
     '</dl>' +
+    currentWorkItemAction +
     '<div class="detail-section"><h4>Agent capabilities</h4>' + capabilityList(capabilities) + '</div>' +
     '<div class="detail-section"><h4>Recent ACP sessions</h4>' + agentSessionTable(sessions) + '</div>' +
     '<div class="detail-section"><h4>Recent agent events</h4>' + eventList(detail.events || []) + '</div>';
 }
+
+document.addEventListener('click', function (event) {
+  const link = event.target && event.target.closest ? event.target.closest('[data-agent-work-item]') : null;
+  if (!link) return;
+  event.preventDefault();
+  const workItemId = link.dataset.agentWorkItem;
+  if (!workItemId) return;
+
+  const emptyFilter = { statuses: [], risks: [], agentId: '', text: '' };
+  syncQueueFilterControls(emptyFilter);
+  applyQueueFilterClient(emptyFilter);
+  const url = clearAgentDiscoveryLocation();
+  deleteLocationKeys(url, QUEUE_LOCATION_KEYS);
+  url.hash = '#queue';
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+  showView('queue');
+  selectWorkItem(workItemId, { scroll: true });
+});
 
 function agentSessionTable(sessions) {
   if (!sessions.length) return '<p class="muted">No ACP sessions observed.</p>';
@@ -3023,6 +3152,10 @@ function openDashboardDrilldown(link) {
     writeQueueFilterToLocation(filter);
   }
   showView(view);
+  if (view === 'agents') {
+    writeAgentDiscoveryToLocation(readAgentDiscoveryState(), selectedAgentId);
+    return;
+  }
   const url = new URL(location.href);
   if (rawStatuses === undefined) {
     url.search = '';
@@ -3045,11 +3178,19 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');
   if (!link) return;
   event.preventDefault();
-  showView(link.dataset.nav);
+  const view = link.dataset.nav || 'overview';
+  showView(view);
+  if (view === 'agents') {
+    writeAgentDiscoveryToLocation(readAgentDiscoveryState(), selectedAgentId);
+    return;
+  }
   const href = link.getAttribute('href') || '#overview';
   history.replaceState(null, '', href);
 });
-showView((location.hash || '#overview').replace('#', ''));
+const initialLocationParams = new URLSearchParams(location.search || '');
+const hasAgentLocationState = AGENT_LOCATION_KEYS.some(function (key) { return initialLocationParams.has(key); });
+const initialHash = location.hash || (initialLocationParams.has('item') ? '#queue' : hasAgentLocationState ? '#agents' : '#overview');
+showView(initialHash.replace('#', ''));
 openWorkItemFromLocation();</script>
   </body>
 </html>
