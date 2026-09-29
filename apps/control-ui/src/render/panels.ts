@@ -33,12 +33,18 @@ function needsOperatorAttention(status: WorkItem["status"]): boolean {
 export function summarize(workItems: WorkItem[], agents: MissionControlAgent[], statusCounts?: Record<string, number>) {
   const count = (status: WorkItem["status"]) =>
     statusCounts ? toCount(statusCounts[status]) : workItems.filter((item) => item.status === status).length;
+  // Exactly the statuses the queue rows mark with the attention badge, so the
+  // overview card can never disagree with the queue about what needs an
+  // operator. Quarantined work is attention-worthy but is neither a failure
+  // nor blocked, so it has no other card to appear on.
+  const attention = [...OPERATOR_ATTENTION_STATUSES].reduce((total, status) => total + count(status), 0);
   return {
     totalAgents: agents.length,
     onlineAgents: agents.filter((agent) => agent.status === "online").length,
     running: count("running"),
     approvals: count("needs_approval"),
-    failed: count("failed") + count("blocked")
+    failed: count("failed") + count("blocked"),
+    attention
   };
 }
 
@@ -69,8 +75,13 @@ export function overviewCards(stats: ReturnType<typeof summarize>): string {
     ["Total Agents", stats.totalAgents, "Observed from persisted connector, tunnel, worker, and target events"],
     ["Online Agents", stats.onlineAgents, "Only recent heartbeats count as online"],
     ["Running Tasks", stats.running, "Lease-bound work currently running"],
+    [
+      "Needs Operator Attention",
+      stats.attention,
+      "Approvals, blocked, and quarantined work; the same set the queue marks for attention"
+    ],
     ["Pending Approvals", stats.approvals, "Policy-gated work waiting on a human"],
-    ["Failed / Blocked", stats.failed, "Items that need operator attention"]
+    ["Failed / Blocked", stats.failed, "Failed items plus blocked work"]
   ];
   return cards
     .map(
