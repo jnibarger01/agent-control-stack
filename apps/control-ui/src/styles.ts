@@ -342,7 +342,7 @@ output { color: var(--accent); min-height: 20px; }
 .skip-link:focus { left: 12px; top: 12px; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible, .executor-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .reason-field { display: grid; gap: 5px; }
 .reason-label { color: var(--muted); font-size: 12px; }
 .reason-label .req { color: var(--red); font-weight: 600; }
@@ -359,7 +359,7 @@ output { color: var(--accent); min-height: 20px; }
 .approval-confirm-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
 #approval-confirm-ok { background: var(--bad-bg); color: var(--red); border-color: var(--bad-line); font-weight: 700; }
 #approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
+@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail, .executor-detail { margin-left: 0; max-height: 430px; } }
 @media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
 @media (max-width: 767px) {
   body { grid-template-columns: 1fr; }
@@ -390,6 +390,7 @@ body[data-active-view="queue"] [data-view-panel~="queue"],
 body[data-active-view="execution"] [data-view-panel~="execution"],
 body[data-active-view="approvals"] [data-view-panel~="approvals"],
 body[data-active-view="agents"] [data-view-panel~="agents"],
+body[data-active-view="executors"] [data-view-panel~="executors"],
 body[data-active-view="connectors"] [data-view-panel~="connectors"],
 body[data-active-view="metrics"] [data-view-panel~="metrics"],
 body[data-active-view="audit"] [data-view-panel~="audit"],

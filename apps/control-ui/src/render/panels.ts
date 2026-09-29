@@ -72,7 +72,7 @@ const FINISHED_PAGE_STEP = 50;
 
 export function overviewCards(stats: ReturnType<typeof summarize>): string {
   const cards = [
-    ["Total Agents", stats.totalAgents, "Observed from persisted connector, tunnel, worker, and target events"],
+    ["Total Agents", stats.totalAgents, "Canonical agents from the persisted agent registry"],
     ["Online Agents", stats.onlineAgents, "Only recent heartbeats count as online"],
     ["Running Tasks", stats.running, "Lease-bound work currently running"],
     [
@@ -92,7 +92,7 @@ export function overviewCards(stats: ReturnType<typeof summarize>): string {
 }
 
 export function agentTable(agents: MissionControlAgent[]): string {
-  if (!agents.length) return `<div class="table-wrap"><p class="empty">No agents or connectors observed.</p></div>`;
+  if (!agents.length) return `<div class="table-wrap"><p class="empty">No registered agents.</p></div>`;
   return `<div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">${agents
     .map(
       (agent) =>
@@ -105,6 +105,15 @@ export function agentDetailPanel(): string {
   return `<section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
     <div class="detail-empty"><h3>No agent selected</h3><p>Select a row to load the registry record.</p></div>
   </section>`;
+}
+
+export function executorPanel(): string {
+  return `<div class="agent-layout executor-layout">
+    <div class="table-wrap"><p class="empty">Loading managed executors...</p></div>
+    <section id="executor-detail" class="detail-panel executor-detail" tabindex="-1" aria-live="polite" aria-label="Executor detail">
+      <div class="detail-empty"><h3>No executor selected</h3><p>Select a row to inspect runtime state and tool capabilities.</p></div>
+    </section>
+  </div>`;
 }
 
 export function queueFilterStrip(): string {

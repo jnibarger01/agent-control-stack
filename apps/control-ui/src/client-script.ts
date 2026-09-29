@@ -46,6 +46,7 @@ const sseEventNames = [
   'agent.updated',
   'agent.heartbeat',
   'agent.capabilities_replaced',
+  'desktop_commander.runtime_activated',
   'acp.initialized',
   'acp.disconnected',
   'acp.error',
@@ -103,7 +104,9 @@ function connectSse() {
     scheduleDashboardRefresh(0, { catchUp: reconnected });
     if (reconnected) {
       refreshAgentRoster();
+      refreshExecutorRoster();
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
+      if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -145,9 +148,14 @@ function appendAuditEvent(event) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
   }
+  if (eventName === 'desktop_commander.runtime_activated') {
+    refreshExecutorRoster();
+    if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
+  }
 }
 
 let selectedAgentId = null;
+let selectedExecutorId = null;
 
 function escapeClient(value) {
   return String(value ?? '').replace(/[&<>"']/g, function (char) {
@@ -284,7 +292,7 @@ function renderAgentTable(agents) {
   const wrap = document.querySelector('#agents .table-wrap');
   if (!wrap) return;
   if (!agents.length) {
-    wrap.innerHTML = '<p class="empty">No agents or connectors observed.</p>';
+    wrap.innerHTML = '<p class="empty">No registered agents.</p>';
     return;
   }
   wrap.innerHTML = '<table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">' + agentRowsMarkup(agents) + '</tbody></table>';
@@ -314,7 +322,7 @@ async function refreshAgentRoster() {
     const body = await fetchJson('/agents');
     const agents = Array.isArray(body.agents) ? body.agents : [];
     const count = document.querySelector('#agent-count');
-    if (count) count.textContent = agents.length + ' observed';
+    if (count) count.textContent = agents.length + ' registered';
     renderAgentTable(agents);
     if (selectedAgentId && agents.some(function (agent) { return agent.id === selectedAgentId; })) {
       document.querySelectorAll('[data-agent]').forEach(function (row) {
@@ -372,12 +380,128 @@ function renderAgentDetail(target, detail) {
       detailRow('Heartbeat', formatClientTime(agent.lastHeartbeatAt || registry.lastHeartbeatAt)) +
       detailRow('Adapter', adapter) +
     '</dl>' +
-    '<div class="detail-section"><h4>Capabilities</h4>' + capabilityList(uniqueCapabilities) + '</div>' +
+    '<div class="detail-section"><h4>Agent capabilities</h4>' + capabilityList(uniqueCapabilities) + '</div>' +
     '<div class="detail-section"><h4>Recent Events</h4>' + eventList(detail.events || []) + '</div>';
 }
 
+function executorRowsMarkup(executors) {
+  return executors.map(function (executor) {
+    const id = escapeClient(executor.id);
+    return '<tr class="agent-row executor-row" tabindex="0" data-executor="' + id + '">' +
+      '<td><strong>' + escapeClient(executor.displayName || executor.id) + '</strong><small>' + id + '</small></td>' +
+      '<td>' + escapeClient(executor.contract || '—') + '</td>' +
+      '<td>' + pillMarkup(executor.status || 'unknown') + '</td>' +
+      '<td>' + escapeClient(executor.runtimeId || '—') + '</td>' +
+      '<td>' + escapeClient(String(executor.capabilityCount || 0)) + '</td>' +
+      '<td>' + escapeClient(String(executor.unsupportedToolCount || 0)) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function renderExecutorTable(executors) {
+  const wrap = document.querySelector('#executors .table-wrap');
+  if (!wrap) return;
+  if (!executors.length) {
+    wrap.innerHTML = '<p class="empty">No managed executors configured.</p>';
+    return;
+  }
+  wrap.innerHTML = '<table class="agent-table executor-table"><thead><tr><th>Executor</th><th>Contract</th><th>Status</th><th>Runtime</th><th>Capabilities</th><th>Unsupported</th></tr></thead><tbody>' + executorRowsMarkup(executors) + '</tbody></table>';
+  bindExecutorRows();
+}
+
+function bindExecutorRows() {
+  document.querySelectorAll('[data-executor]').forEach(function (row) {
+    const activate = function () {
+      selectedExecutorId = row.dataset.executor;
+      document.querySelectorAll('[data-executor]').forEach(function (candidate) { candidate.classList.remove('selected'); });
+      row.classList.add('selected');
+      loadExecutorDetail(selectedExecutorId);
+    };
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+}
+
+async function refreshExecutorRoster() {
+  try {
+    const body = await fetchJson('/api/executors');
+    const executors = Array.isArray(body.executors) ? body.executors : [];
+    const count = document.querySelector('#executor-count');
+    if (count) count.textContent = executors.length + ' managed';
+    renderExecutorTable(executors);
+    if (selectedExecutorId && executors.some(function (executor) { return executor.id === selectedExecutorId; })) {
+      document.querySelectorAll('[data-executor]').forEach(function (row) {
+        if (row.dataset.executor === selectedExecutorId) row.classList.add('selected');
+      });
+    }
+  } catch (error) {
+    const detail = document.querySelector('#executor-detail');
+    if (detail && !selectedExecutorId) {
+      detail.innerHTML = '<div class="detail-error">Executor backend unavailable: ' + escapeClient(error.message) + '</div>';
+    }
+  }
+}
+
+async function loadExecutorDetail(id) {
+  const target = document.querySelector('#executor-detail');
+  if (!target || !id) return;
+  target.innerHTML = '<div class="detail-loading">Loading executor detail...</div>';
+  try {
+    const detail = await fetchJson('/api/executors/' + encodeURIComponent(id));
+    const capabilities = await fetchJson('/api/executors/' + encodeURIComponent(id) + '/capabilities');
+    renderExecutorDetail(target, detail.executor || {}, detail.runtimes || [], capabilities.capabilities || []);
+  } catch (error) {
+    target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
+  }
+}
+
+function renderExecutorDetail(target, executor, runtimes, capabilities) {
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(executor.displayName || executor.id || 'Executor') + '</h3><small>' + escapeClient(executor.id || '') + '</small></div><div>' + pillMarkup(executor.status || 'unknown') + '</div></div>' +
+    '<dl class="detail-grid">' +
+      detailRow('Contract', executor.contract) +
+      detailRow('Type', executor.kind) +
+      detailRow('Configured', executor.configured ? 'yes' : 'no') +
+      detailRow('Runtime', executor.runtimeId) +
+      detailRow('Capabilities', executor.capabilityCount) +
+      detailRow('Unsupported tools', executor.unsupportedToolCount) +
+      detailRow('Attested', formatClientTime(executor.attestedAt)) +
+      detailRow('Granted scopes', Array.isArray(executor.scopes) && executor.scopes.length ? executor.scopes.join(', ') : '—') +
+    '</dl>' +
+    '<div class="detail-section"><h4>Runtime registrations</h4>' + executorRuntimeList(runtimes) + '</div>' +
+    '<div class="detail-section"><h4>Tool capabilities</h4>' + executorCapabilityTable(capabilities) + '</div>';
+}
+
+function executorRuntimeList(runtimes) {
+  if (!Array.isArray(runtimes) || !runtimes.length) return '<p class="muted">No durable runtime registration.</p>';
+  return '<ul class="action-list">' + runtimes.map(function (runtime) {
+    return '<li><strong>' + escapeClient(runtime.runtimeId || 'runtime') + '</strong><small>' +
+      escapeClient((runtime.status || 'unknown') + ' · attested ' + formatClientTime(runtime.attestedAt)) +
+      '</small><small>' + escapeClient(Array.isArray(runtime.scopes) ? runtime.scopes.join(', ') : '') + '</small></li>';
+  }).join('') + '</ul>';
+}
+
+function executorCapabilityTable(capabilities) {
+  if (!Array.isArray(capabilities) || !capabilities.length) return '<p class="muted">No tool capabilities declared.</p>';
+  return '<div class="table-wrap"><table class="agent-table executor-capability-table"><thead><tr><th>Tool</th><th>Managed</th><th>Scope</th><th>Approval</th><th>Risk</th></tr></thead><tbody>' +
+    capabilities.map(function (capability) {
+      const scopes = Array.isArray(capability.scopes) ? capability.scopes.join(', ') : '';
+      const approval = capability.requiresApproval === undefined ? '—' : capability.requiresApproval ? 'required' : 'not required';
+      return '<tr><td><strong>' + escapeClient(capability.name || 'tool') + '</strong><small>' + escapeClient(capability.toolClass || '') + '</small></td>' +
+        '<td>' + pillMarkup(capability.managed || 'unknown') + '</td>' +
+        '<td>' + escapeClient(scopes || '—') + '</td>' +
+        '<td>' + escapeClient(approval) + '</td>' +
+        '<td>' + escapeClient(capability.riskClass || '—') + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
 function detailRow(label, value) {
-  return '<div><dt>' + escapeClient(label) + '</dt><dd>' + escapeClient(redactClient(value || '—')) + '</dd></div>';
+  const shown = value === 0 ? '0' : value || '—';
+  return '<div><dt>' + escapeClient(label) + '</dt><dd>' + escapeClient(redactClient(shown)) + '</dd></div>';
 }
 
 function capabilityList(capabilities) {
@@ -964,6 +1088,7 @@ const viewAliases = {
   execution: 'execution',
   approvals: 'approvals',
   agents: 'agents',
+  executors: 'executors',
   connectors: 'connectors',
   'operator-metrics': 'metrics',
   metrics: 'metrics',
@@ -979,6 +1104,7 @@ function showView(name) {
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
+  if (view === 'executors') refreshExecutorRoster();
   syncSystemProbes();
   syncMetricsPolling();
   syncLeaseExpiryWarningRefresh();

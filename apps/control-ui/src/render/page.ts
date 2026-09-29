@@ -6,7 +6,7 @@ import { styles } from "../styles.js";
 import { ADMIN_MODE_BANNER_TEXT, type MissionControlViewModel } from "../types.js";
 import { themeBootScript } from "../visibility.js";
 import { dashboardAgents, dashboardModel, renderDashboardFragments } from "./fragments.js";
-import { agentDetailPanel, agentTable, queueFilterStrip, workDetailPanel } from "./panels.js";
+import { agentDetailPanel, agentTable, executorPanel, queueFilterStrip, workDetailPanel } from "./panels.js";
 
 export function renderDashboard(input: WorkItem[] | MissionControlViewModel): string {
   const model = dashboardModel(input);
@@ -33,6 +33,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <a href="#queue" data-nav="execution">Execution</a>
         <a href="#approvals" data-nav="approvals">Approvals</a>
         <a href="#agents" data-nav="agents">Agents</a>
+        <a href="#executors" data-nav="executors">Executors</a>
         <a href="#connectors" data-nav="connectors">Connectors</a>
         <a href="#operator-metrics" data-nav="metrics">Metrics</a>
         <a href="#events" data-nav="audit">Audit</a>
@@ -43,7 +44,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
     </aside>
     <main id="main-content" tabindex="-1">
       <header>
-        <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
+        <div><h1>Mission Control</h1><p>Agents, executors, work items, approvals, and audit events.</p></div>
         <div class="header-controls">
           <fieldset class="execution-mode" id="execution-mode-control">
             <legend>Execution Mode</legend>
@@ -60,7 +61,8 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
       <section id="overview" class="cards" data-view-panel="overview">${fragments.cards}</section>
       <section class="grid">
-        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">${agents.length} observed</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
+        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Canonical agent registry + agent events</p></div><span id="agent-count">${agents.length} registered</span></div><div class="agent-layout">${agentTable(agents)}${agentDetailPanel()}</div></article>
+        <article id="executors" class="panel wide roster-panel" data-view-panel="executors"><div class="panel-head"><div><h2>Executors</h2><p>Managed execution bridges, runtime state, and tool capabilities</p></div><span id="executor-count">loading</span></div>${executorPanel()}</article>
         <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}<div class="queue" id="queue-list">${fragments.queueList}</div><div id="queue-footer" class="queue-footer">${fragments.queueFooter}</div>${workDetailPanel()}</article>
       </section>
       <section class="grid approvals-grid">

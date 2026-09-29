@@ -68,6 +68,13 @@ describe("renderDashboard", () => {
     expect(html).toContain("fetchJson('/agents')");
     expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8')");
     expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities')");
+    expect(html).toContain('data-nav="executors"');
+    expect(html).toContain('id="executors"');
+    expect(html).toContain("fetchJson('/api/executors')");
+    expect(html).toContain("fetchJson('/api/executors/' + encodeURIComponent(id))");
+    expect(html).toContain("fetchJson('/api/executors/' + encodeURIComponent(id) + '/capabilities')");
+    expect(html).toContain("Agent capabilities");
+    expect(html).not.toContain("No agents or connectors observed.");
     expect(html).not.toContain("JSON.stringify(await res.json(), null, 2)");
     expect(html).not.toContain("data-approve-all");
     expect(html).toContain("Execution Mode");
