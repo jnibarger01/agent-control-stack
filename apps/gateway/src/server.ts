@@ -3500,13 +3500,11 @@ function resolveMaxPendingWorkItemsFromEnv(env: NodeJS.ProcessEnv = process.env)
     .parse(env.ACS_MAX_PENDING_WORK_ITEMS ?? 1_000);
 }
 
-function hasPendingWorkItemCapacity(store: { list: () => WorkItem[] }, maxPendingWorkItems: number): boolean {
-  const pending = store
-    .list()
-    .filter((workItem) =>
-      ["draft", "pending_policy", "needs_approval", "approved", "running"].includes(workItem.status)
-    ).length;
-  return pending < maxPendingWorkItems;
+function hasPendingWorkItemCapacity(
+  store: { countPendingWorkItems: () => number },
+  maxPendingWorkItems: number
+): boolean {
+  return store.countPendingWorkItems() < maxPendingWorkItems;
 }
 
 function isRateLimitedRoute(url: string): boolean {

@@ -103,6 +103,22 @@ describe("work-item queue index (migration 035)", () => {
     }
   });
 
+  it("counts pending queue capacity through the status index without materializing history", () => {
+    const { store, db } = openStore();
+    try {
+      seedMixedHistory(db, 2_000);
+      expect(store.countPendingWorkItems()).toBe(3);
+      const plan = queryPlan(
+        db,
+        "SELECT COUNT(*) FROM work_items WHERE status IN ('draft', 'pending_policy', 'needs_approval', 'approved', 'running')"
+      );
+      expect(plan).toContain("USING COVERING INDEX idx_work_items_status_created");
+      expect(plan).not.toContain("SCAN work_items");
+    } finally {
+      store.close();
+    }
+  });
+
   it("serves status-filtered listings without scanning work_items", () => {
     const { store, db } = openStore();
     try {
