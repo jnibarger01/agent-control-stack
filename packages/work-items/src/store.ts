@@ -1124,6 +1124,8 @@ export interface WorkItemStore {
     options?: ClaimOptions
   ): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
+  /** Count work items that consume pending-queue capacity without materializing rows. */
+  countPendingWorkItems(): number;
   /** Count attempt leases that are still active and not yet past expires_at. */
   countActiveAttemptLeases(now?: Date): number;
   /** Append a gateway/system lifecycle event to the canonical audit chain. */
@@ -4955,6 +4957,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
         ]
       };
     });
+  }
+
+  countPendingWorkItems(): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM work_items
+         WHERE status IN ('draft', 'pending_policy', 'needs_approval', 'approved', 'running')`
+      )
+      .get() as { count: number };
+    return row.count;
   }
 
   countActiveAttemptLeases(now = new Date()): number {
