@@ -62,6 +62,39 @@ export function redactSecrets(text: string): { text: string; redacted: boolean }
   return { text: out, redacted };
 }
 
+// An argv entry naming a secret-bearing option whose value is the NEXT entry
+// (`--password X`), or a bare `Bearer` / `Authorization:` word. Mirrors
+// redactJaceCommanderArgv in ACS (packages/desktop-commander-adapter).
+const SECRET_OPTION_ENTRY =
+  /^(?:-{1,2}[A-Za-z0-9_.-]{0,64}(?:secret|token|passw(?:or)?d|pass|pwd|api[-_]?key|private[-_]?key|credential|auth(?:orization)?|bearer|cookie)[A-Za-z0-9_.-]{0,64}|bearer|basic|(?:proxy-)?authorization:?|cookie:?|[A-Za-z0-9_.-]{0,64}(?:secret|token|passw(?:or)?d|api[-_]?key)[A-Za-z0-9_.-]{0,64}[:=])$/i;
+// 32+ token characters mixing upper case, lower case and digits (API keys).
+// Lower-case hex and UUIDs do not match; "/" is excluded so paths never do.
+const KEY_SHAPED_RUN = /[A-Za-z0-9+_=-]{32,4096}/g;
+
+/**
+ * Argv-aware redaction for evidence (the privileged audit chain): secret
+ * values after a secret-bearing option, key-shaped values, and everything
+ * redactSecrets catches. The exact argv stays bound through the capability's
+ * invocation hash, which the audit records alongside.
+ */
+export function redactArgv(argv: readonly string[]): string[] {
+  const out: string[] = [];
+  let hideNext = false;
+  for (const entry of argv) {
+    if (hideNext) {
+      out.push('[REDACTED:option_value]');
+      hideNext = /^(?:bearer|basic)$/i.test(entry);
+      continue;
+    }
+    const text = redactSecrets(entry).text.replace(KEY_SHAPED_RUN, (run) =>
+      /[A-Z]/.test(run) && /[a-z]/.test(run) && /[0-9]/.test(run) ? '[REDACTED:key_shaped]' : run,
+    );
+    out.push(text);
+    hideNext = SECRET_OPTION_ENTRY.test(entry);
+  }
+  return out;
+}
+
 function redactDeep(value: unknown): { payload: unknown; redacted: boolean } {
   let redacted = false;
   const walk = (entry: unknown): unknown => {

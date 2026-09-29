@@ -20,6 +20,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { FastifyInstance } from "fastify";
+import {
+  ExecutionAdmissionScheduler,
+  type ExecutionAdmissionController
+} from "@agent-control-stack/execution-admission";
 import { buildGateway, type GatewayCredential } from "../../../apps/gateway/src/server.js";
 
 export const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -105,8 +109,31 @@ export interface AcsHandle {
   close(): Promise<void>;
 }
 
+/**
+ * Admission controller for suites that mint capabilities straight from ACS and
+ * deliver them to a runtime with no bridge in between. Those flows never submit
+ * canonical terminal results to ACS, so no result callback ever releases a
+ * permit; keep that enforcement-only characteristic from tying up
+ * production-sized limits for the whole lease.
+ */
+export function directCapabilityAdmission(): ExecutionAdmissionController {
+  return new ExecutionAdmissionScheduler({
+    config: {
+      executionMaxInflight: 64,
+      executorMaxInflight: 64,
+      queueMax: 64,
+      queueTimeoutMs: 30_000,
+      waitMaxInflight: 16
+    }
+  });
+}
+
 /** The real ACS gateway with DC capability signing, bound to this sandbox's DC runtime. */
-export async function startAcs(box: Sandbox, runtimeId: string, options: { ttlMs?: number } = {}): Promise<AcsHandle> {
+export async function startAcs(
+  box: Sandbox,
+  runtimeId: string,
+  options: { ttlMs?: number; executionAdmission?: ExecutionAdmissionController } = {}
+): Promise<AcsHandle> {
   const keys = signingKeys();
   const fingerprint = createHash("sha256").update(readFileSync(DC_ENTRY)).digest("hex");
   const credentials: GatewayCredential[] = [
@@ -139,7 +166,8 @@ export async function startAcs(box: Sandbox, runtimeId: string, options: { ttlMs
       identityConfigFingerprint: fingerprint,
       runtimeScopes: [...RUNTIME_SCOPES]
     },
-    desktopCommanderContainment: { allowedRoots: [box.workspace], deniedRoots: [] }
+    desktopCommanderContainment: { allowedRoots: [box.workspace], deniedRoots: [] },
+    ...(options.executionAdmission ? { executionAdmission: options.executionAdmission } : {})
   });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
@@ -202,7 +230,7 @@ export interface ServiceProcess {
   stop(): Promise<void>;
 }
 
-function startNodeService(
+export function startNodeService(
   script: string,
   env: Record<string, string>,
   port: number,

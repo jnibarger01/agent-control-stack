@@ -9,7 +9,7 @@ import { approvalActionHashPrefix } from "../approval-actions.js";
 import { executionModeChip } from "../execution-mode.js";
 import { nanoToIso, pill, time } from "../format.js";
 import { escapeHtml } from "../html.js";
-import { approvalWaitMs, approvalWaitStart, formatWait } from "../operator-workflow.js";
+import { DEFAULT_APPROVAL_SLA_MS, approvalWaitMs, approvalWaitStart, formatWait } from "../operator-workflow.js";
 import { WORK_ITEM_RISK_VALUES, WORK_ITEM_STATUS_VALUES, workItemAgentId } from "../queue-filter.js";
 import { redactSecrets } from "../redaction.js";
 import {
@@ -254,22 +254,31 @@ function workItemResultError(item: WorkItem): string | undefined {
 export function operatorMetricsPanel(
   workItems: WorkItem[],
   attemptLeasesByWorkItem: Record<string, MissionControlAttemptLease[]>,
-  now: Date
+  now: Date,
+  slaMs: number = DEFAULT_APPROVAL_SLA_MS
 ): string {
   const activeLeases = Object.values(attemptLeasesByWorkItem)
     .flat()
     .filter((lease) => lease.status === "active");
   const pendingApprovals = workItems.filter((item) => item.status === "needs_approval");
+  // Every card that waits on a human, i.e. exactly the population the
+  // approvals panel renders wait badges for. Kept in step with that panel so
+  // the breach count can never disagree with the per-card "over SLA" badges.
+  const awaitingOperator = workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
   const oldestLeaseAge = maxAgeMs(
     activeLeases.map((lease) => lease.issuedAt),
     now
   );
   const oldestApprovalWait = maxAgeMs(pendingApprovals.map(approvalWaitStart), now);
+  // A non-positive SLA disables the flag, matching waitBadge().
+  const overSla = slaMs > 0 ? awaitingOperator.filter((item) => (approvalWaitMs(item, now) ?? 0) >= slaMs).length : 0;
+  const slaWindow = formatWait(slaMs);
   return `<div class="operator-metrics"><dl>
     <div><dt>Active leases</dt><dd>${activeLeases.length}</dd></div>
     <div><dt>Oldest lease age</dt><dd>${formatDuration(oldestLeaseAge)}</dd></div>
     <div><dt>Pending approvals</dt><dd>${pendingApprovals.length}</dd></div>
     <div><dt>Oldest approval wait</dt><dd>${formatDuration(oldestApprovalWait)}</dd></div>
+    <div${overSla > 0 ? ` class="overdue" title="Waiting longer than the ${escapeHtml(slaWindow)} approval SLA"` : ""}><dt>Approvals over SLA</dt><dd>${overSla} of ${awaitingOperator.length}</dd></div>
   </dl>
   </div>`;
 }

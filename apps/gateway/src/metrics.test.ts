@@ -6,12 +6,17 @@ describe("GatewayMetrics", () => {
     const metrics = new GatewayMetrics();
     metrics.observeRequest("POST", "/work-items", 201, 25);
     metrics.increment("acs_audit_events_total", { event_name: "work_item.created" });
+    metrics.setGauge("acs_admission_active", 2, { class: "execution" });
+    metrics.observeDurationMs("acs_admission_wait_ms", 12, { lane: "jc", class: "execution" });
     metrics.setSqliteReady(true);
 
     const output = metrics.render();
     expect(output).toContain('acs_http_requests_total{method="POST",route="/work-items",status="201"} 1');
     expect(output).toContain('acs_http_request_duration_seconds_count{method="POST",route="/work-items"} 1');
     expect(output).toContain('acs_audit_events_total{event_name="work_item.created"} 1');
+    expect(output).toContain('acs_admission_active{class="execution"} 2');
+    expect(output).toContain('acs_admission_wait_ms_count{class="execution",lane="jc"} 1');
+    expect(output).toContain('acs_admission_wait_ms_sum{class="execution",lane="jc"} 12');
     expect(output).toContain("acs_sqlite_ready 1");
   });
 });

@@ -3,6 +3,7 @@ export * from "./explain.js";
 export * from "./fingerprint.js";
 export * from "./mission-classifier.js";
 export * from "./plan-tools.js";
+export * from "./jev-shadow.js";
 export * from "./policy.js";
 export * from "./preview.js";
 export * from "./rules.js";

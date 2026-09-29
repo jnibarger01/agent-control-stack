@@ -5,6 +5,15 @@ import { approvalRequired } from "./tools.js";
 
 const positiveInteger = z.number().int().positive();
 
+/**
+ * Bound for the outbound digest webhook POST. A receiver that accepts the
+ * connection and never answers must not hold a scheduled oneshot run (and,
+ * under cron, a growing pile of them) open indefinitely. Same shape and range
+ * as the in-repo portfolio client's request bound.
+ */
+export const DEFAULT_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS = 5_000;
+const webhookTimeoutMsSchema = z.number().int().min(100).max(30_000);
+
 export interface PendingApprovalDigestEntry {
   workItemId: string;
   actionHash: string;
@@ -24,6 +33,8 @@ export interface PendingApprovalDigestConfig {
   enabled: boolean;
   olderThanMinutes: number;
   webhookUrl?: string;
+  /** Bound for the outbound webhook POST. Defaults to DEFAULT_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS. */
+  webhookTimeoutMs?: number;
   stdout: boolean;
   dbPath: string;
   actor: string;
@@ -40,6 +51,8 @@ export interface CollectPendingApprovalDigestInput {
 export interface DeliverPendingApprovalDigestOptions {
   stdout?: boolean;
   webhookUrl?: string;
+  /** Abort the webhook POST after this many milliseconds. Defaults to the module default. */
+  webhookTimeoutMs?: number;
   fetchImpl?: typeof fetch;
   log?: (line: string) => void;
 }
@@ -65,6 +78,13 @@ export function loadPendingApprovalDigestConfig(env: NodeJS.ProcessEnv = process
       throw new Error("ACS_PENDING_APPROVAL_DIGEST_WEBHOOK_URL must be http(s)");
     }
   }
+  // Parsed even when the webhook is unset, so a bad value fails the run loudly
+  // instead of silently falling back to the default bound.
+  const webhookTimeoutMs = webhookTimeoutMsSchema.parse(
+    env.ACS_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS === undefined
+      ? DEFAULT_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS
+      : Number(env.ACS_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS)
+  );
   const stdoutEnv = env.ACS_PENDING_APPROVAL_DIGEST_STDOUT?.trim().toLowerCase();
   const stdout =
     stdoutEnv === undefined || stdoutEnv === ""
@@ -74,6 +94,7 @@ export function loadPendingApprovalDigestConfig(env: NodeJS.ProcessEnv = process
     enabled,
     olderThanMinutes,
     ...(webhookUrl ? { webhookUrl } : {}),
+    webhookTimeoutMs,
     stdout,
     dbPath: env.ACS_DB_PATH?.trim() || "storage/local.db",
     actor: env.ACS_PENDING_APPROVAL_DIGEST_ACTOR?.trim() || "ops-digest"
@@ -136,11 +157,27 @@ export async function deliverPendingApprovalDigest(
 
   if (options.webhookUrl) {
     const fetchImpl = options.fetchImpl ?? fetch;
-    const response = await fetchImpl(options.webhookUrl, {
-      method: "POST",
-      headers: { "content-type": "application/json", accept: "application/json" },
-      body: JSON.stringify(digest)
-    });
+    const timeoutMs = options.webhookTimeoutMs ?? DEFAULT_PENDING_APPROVAL_DIGEST_WEBHOOK_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      response = await fetchImpl(options.webhookUrl, {
+        method: "POST",
+        headers: { "content-type": "application/json", accept: "application/json" },
+        body: JSON.stringify(digest),
+        signal: controller.signal
+      });
+    } catch (error) {
+      // Classified on the signal, not on the error's name, so any transport that
+      // rejects on abort is reported as the timeout it actually was.
+      if (controller.signal.aborted) {
+        throw new Error(`pending-approval digest webhook timed out after ${timeoutMs}ms`, { cause: error });
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
     if (!response.ok) {
       throw new Error(`pending-approval digest webhook failed: HTTP ${response.status}`);
     }
@@ -188,6 +225,7 @@ export async function runPendingApprovalDigestOnce(
     await deliverPendingApprovalDigest(digest, {
       stdout: config.stdout,
       webhookUrl: config.webhookUrl,
+      webhookTimeoutMs: config.webhookTimeoutMs,
       fetchImpl: options.fetchImpl,
       log: options.log
     });

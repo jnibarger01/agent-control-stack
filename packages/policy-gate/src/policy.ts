@@ -19,6 +19,13 @@ export const policyContextSchema = z.object({
   actor: z.string().min(1),
   operation: policyOperationSchema,
   requester: z.string().min(1),
+  /**
+   * Authenticated principal behind `requester`, when the work item records one.
+   * Jace Commander / Desktop Commander items are created with requester
+   * "agent" and the real actor here, so self-approval checks must compare the
+   * approver against this too. Not part of the action fingerprint.
+   */
+  requesterSubject: z.string().min(1).optional(),
   risk: z.enum(["low", "medium", "high", "critical"]),
   action: z.object({
     kind: z.string().min(1),
@@ -81,6 +88,7 @@ export function policyContextFromAction(
     actor,
     operation,
     requester: workItem.requester,
+    ...(workItem.requesterSubject ? { requesterSubject: workItem.requesterSubject } : {}),
     risk: workItem.risk,
     action: canonicalAction(action),
     ...normalizeAction(workItem, action)

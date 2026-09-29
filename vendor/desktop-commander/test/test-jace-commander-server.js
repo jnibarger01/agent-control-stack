@@ -11,6 +11,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { loadJcConfig } from '../dist/jace-commander/config.js';
 import { createJcServer } from '../dist/jace-commander/server.js';
+import { JC_TOOL_POLICIES } from '../dist/jace-commander/contract.js';
+import { JC_MANIFEST } from '../dist/jace-commander/manifest.generated.js';
 import { buildEvent, GENESIS_HASH } from '../dist/jace-commander/looptrace.js';
 import { makeIssuer } from './fixtures/jc-mint.js';
 
@@ -57,11 +59,15 @@ const test = async (name, fn) => { await fn(); passed += 1; console.log(`  ✓ $
 const managed = await connect('managed');
 const standalone = await connect('standalone');
 
-await test('lists exactly the governed tool set', async () => {
+await test('lists exactly the governed tool set (derived from the generated manifest)', async () => {
   const { tools } = await managed.listTools();
-  assert.deepEqual(tools.map((t) => t.name).sort(), [
-    'acs_read', 'acs_submit_mission', 'jc_status', 'looptrace_verify', 'mission_router_list', 'privileged_exec', 'swarm_read', 'visualizer_read',
-  ]);
+  const expected = JC_MANIFEST.tools.map((t) => t.name).sort();
+  assert.deepEqual(tools.map((t) => t.name).sort(), expected);
+  assert.deepEqual(Object.keys(JC_TOOL_POLICIES).sort(), expected);
+  // The original control-plane tools are still served (compatibility).
+  for (const legacy of ['acs_read', 'acs_submit_mission', 'jc_status', 'looptrace_verify', 'mission_router_list', 'privileged_exec', 'swarm_read', 'visualizer_read']) {
+    assert.ok(expected.includes(legacy), `${legacy} must remain available`);
+  }
 });
 
 await test('managed: a call without a capability is rejected before any upstream request', async () => {
@@ -111,9 +117,12 @@ await test('visualizer requires an explicit loopback URL', async () => {
   assert.equal(parse(result).error.code, 'not_configured');
 });
 
+// acs_submit_mission is integration.write, so it is managed-only (PR #212 B5).
+const managedCall = (name, args) => managed.callTool({ name, arguments: args, _meta: { acsCapability: issuer.mint(name, args) } });
+
 await test('acs_submit_mission without an ACS credential does not call ACS', async () => {
   const before = fetchLog.length;
-  const result = await standalone.callTool({ name: 'acs_submit_mission', arguments: { title: 't', intent: 'i', target: {} } });
+  const result = await managedCall('acs_submit_mission', { title: 't', intent: 'i', target: {} });
   assert.equal(parse(result).error.code, 'acs_not_logged_in');
   assert.equal(fetchLog.length, before);
 });
@@ -121,7 +130,7 @@ await test('acs_submit_mission without an ACS credential does not call ACS', asy
 await test('acs_submit_mission posts only governed fields with the bearer token', async () => {
   process.env.JC_ACS_TOKEN = 'test-token-value';
   try {
-    const result = await standalone.callTool({ name: 'acs_submit_mission', arguments: { title: 'apt update', intent: 'refresh package lists', target: { services: ['apt'] }, correlationId: 'corr-1' } });
+    const result = await managedCall('acs_submit_mission', { title: 'apt update', intent: 'refresh package lists', target: { services: ['apt'] }, correlationId: 'corr-1' });
     assert.equal(result.isError, undefined);
     const call = fetchLog.at(-1);
     assert.equal(call.url, 'http://127.0.0.1:3999/work-items');
@@ -133,8 +142,15 @@ await test('acs_submit_mission posts only governed fields with the bearer token'
 });
 
 await test('privileged_exec with no capability is refused without touching sudo', async () => {
-  const result = await standalone.callTool({ name: 'privileged_exec', arguments: { argv: ['/usr/bin/id'] } });
+  const result = await managed.callTool({ name: 'privileged_exec', arguments: { argv: ['/usr/bin/id'] } });
   assert.equal(parse(result).error.code, 'JC_CAPABILITY_MISSING');
+  assert.equal(helperCalls.length, 0);
+});
+
+await test('privileged_exec is not served in standalone mode at all, even with a capability', async () => {
+  const args = { argv: ['/usr/bin/id'] };
+  const result = await standalone.callTool({ name: 'privileged_exec', arguments: args, _meta: { acsCapability: issuer.mint('privileged_exec', args) } });
+  assert.equal(parse(result).error.code, 'JC_STANDALONE_TOOL_REFUSED');
   assert.equal(helperCalls.length, 0);
 });
 

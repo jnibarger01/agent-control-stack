@@ -44,6 +44,9 @@ export function renderDashboardFragments(
   const stats = summarize(model.workItems, agents, model.statusCounts);
   const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
   const attemptLeasesByWorkItem = model.attemptLeasesByWorkItem ?? {};
+  // One SLA source for the whole render: the per-card badges, the approvals
+  // panel, and the metrics-panel breach count must always agree.
+  const approvalSlaMs = model.approvalSlaMs === undefined ? DEFAULT_APPROVAL_SLA_MS : toCount(model.approvalSlaMs);
   return {
     cards: overviewCards(stats),
     queueList: workQueueItems(
@@ -58,10 +61,10 @@ export function renderDashboardFragments(
       sortApprovalItems(approvalItems, now),
       approvalOptionsByWorkItem(model),
       now,
-      model.approvalSlaMs === undefined ? DEFAULT_APPROVAL_SLA_MS : toCount(model.approvalSlaMs)
+      approvalSlaMs
     ),
     approvalsCount: `${approvalItems.length} waiting`,
-    metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
+    metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now, approvalSlaMs),
     systemStats: systemStats(stats, model.executionBackend),
     policy: policyPanelHtml(
       summarizePolicyDecisions(model.policyDecisionEvents ?? model.events ?? []),
