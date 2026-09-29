@@ -46,6 +46,11 @@ const sseEventNames = [
   'agent.updated',
   'agent.heartbeat',
   'agent.capabilities_replaced',
+  'connector.registered',
+  'connector.key_rotated',
+  'tunnel_session.registered',
+  'tunnel_session.revoked',
+  'tunnel_session.reconciled',
   'desktop_commander.runtime_activated',
   'acp.initialized',
   'acp.disconnected',
@@ -105,8 +110,10 @@ function connectSse() {
     if (reconnected) {
       refreshAgentRoster();
       refreshExecutorRoster();
+      refreshConnectorRoster();
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
       if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
+      if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -144,7 +151,7 @@ function appendAuditEvent(event) {
   if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
-  if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
+  if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
   }
@@ -152,10 +159,15 @@ function appendAuditEvent(event) {
     refreshExecutorRoster();
     if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
   }
+  if (eventName.startsWith('connector.') || eventName.startsWith('tunnel_session.')) {
+    refreshConnectorRoster();
+    if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
+  }
 }
 
 let selectedAgentId = null;
 let selectedExecutorId = null;
+let selectedConnectorId = null;
 
 function escapeClient(value) {
   return String(value ?? '').replace(/[&<>"']/g, function (char) {
@@ -175,6 +187,7 @@ ${themeClientSource()}
 function onDashboardFragmentsApplied() {
   updateTitleBadge();
   refreshWaitBadges();
+  if (document.body.dataset.activeView === 'connectors') refreshConnectorRoster();
 }
 function onWorkItemControlSucceeded(control, id, body) {
   const created = body && body.workItem && body.workItem.id;
@@ -496,6 +509,109 @@ function executorCapabilityTable(capabilities) {
         '<td>' + escapeClient(scopes || '—') + '</td>' +
         '<td>' + escapeClient(approval) + '</td>' +
         '<td>' + escapeClient(capability.riskClass || '—') + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function connectorRowsMarkup(connectors) {
+  return connectors.map(function (connector) {
+    const id = escapeClient(connector.id);
+    const scopes = Array.isArray(connector.allowedScopes) ? connector.allowedScopes.join(', ') : '';
+    return '<tr class="agent-row connector-row" tabindex="0" data-connector="' + id + '">' +
+      '<td><strong>' + escapeClient(connector.displayName || connector.id) + '</strong><small>' + id + '</small></td>' +
+      '<td>' + pillMarkup(connector.status || 'unknown') + '</td>' +
+      '<td>' + escapeClient(String(connector.activeSessionCount || 0) + ' / ' + String(connector.sessionCount || 0)) + '</td>' +
+      '<td>' + escapeClient(scopes || '—') + '</td>' +
+      '<td>' + escapeClient(formatClientTime(connector.lastHeartbeatAt)) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function renderConnectorTable(connectors) {
+  const wrap = document.querySelector('#connectors .table-wrap');
+  if (!wrap) return;
+  if (!connectors.length) {
+    wrap.innerHTML = '<p class="empty">No registered connectors.</p>';
+    return;
+  }
+  wrap.innerHTML = '<table class="agent-table connector-table"><thead><tr><th>Connector</th><th>Status</th><th>Active sessions</th><th>Scopes</th><th>Last heartbeat</th></tr></thead><tbody>' + connectorRowsMarkup(connectors) + '</tbody></table>';
+  bindConnectorRows();
+}
+
+function bindConnectorRows() {
+  document.querySelectorAll('[data-connector]').forEach(function (row) {
+    const activate = function () {
+      selectedConnectorId = row.dataset.connector;
+      document.querySelectorAll('[data-connector]').forEach(function (candidate) { candidate.classList.remove('selected'); });
+      row.classList.add('selected');
+      loadConnectorDetail(selectedConnectorId);
+    };
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+}
+
+async function refreshConnectorRoster() {
+  try {
+    const body = await fetchJson('/api/connectors');
+    const connectors = Array.isArray(body.connectors) ? body.connectors : [];
+    const count = document.querySelector('#connector-count');
+    if (count) count.textContent = connectors.length + ' registered';
+    renderConnectorTable(connectors);
+    if (selectedConnectorId && connectors.some(function (connector) { return connector.id === selectedConnectorId; })) {
+      document.querySelectorAll('[data-connector]').forEach(function (row) {
+        if (row.dataset.connector === selectedConnectorId) row.classList.add('selected');
+      });
+    }
+  } catch (error) {
+    const detail = document.querySelector('#connector-detail');
+    if (detail && !selectedConnectorId) {
+      detail.innerHTML = '<div class="detail-error">Connector backend unavailable: ' + escapeClient(error.message) + '</div>';
+    }
+  }
+}
+
+async function loadConnectorDetail(id) {
+  const target = document.querySelector('#connector-detail');
+  if (!target || !id) return;
+  target.innerHTML = '<div class="detail-loading">Loading connector detail...</div>';
+  try {
+    const detail = await fetchJson('/api/connectors/' + encodeURIComponent(id));
+    renderConnectorDetail(target, detail.connector || {}, detail.sessions || []);
+  } catch (error) {
+    target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
+  }
+}
+
+function renderConnectorDetail(target, connector, sessions) {
+  const scopes = Array.isArray(connector.allowedScopes) ? connector.allowedScopes : [];
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(connector.displayName || connector.id || 'Connector') + '</h3><small>' + escapeClient(connector.id || '') + '</small></div><div>' + pillMarkup(connector.status || 'unknown') + '</div></div>' +
+    '<dl class="detail-grid">' +
+      detailRow('Active sessions', String(connector.activeSessionCount || 0) + ' / ' + String(connector.sessionCount || 0)) +
+      detailRow('Last heartbeat', formatClientTime(connector.lastHeartbeatAt)) +
+      detailRow('Next expiry', formatClientTime(connector.nextSessionExpiryAt)) +
+      detailRow('Updated', formatClientTime(connector.updatedAt)) +
+      detailRow('Public key fingerprint', connector.publicKeyFingerprint ? shortHash(connector.publicKeyFingerprint) : '—') +
+    '</dl>' +
+    '<div class="detail-section"><h4>Granted scopes</h4>' + capabilityList(scopes) + '</div>' +
+    '<div class="detail-section"><h4>Tunnel sessions</h4>' + connectorSessionTable(sessions) + '</div>';
+}
+
+function connectorSessionTable(sessions) {
+  if (!Array.isArray(sessions) || !sessions.length) return '<p class="muted">No tunnel sessions registered.</p>';
+  return '<div class="table-wrap"><table class="agent-table connector-session-table"><thead><tr><th>Tunnel</th><th>Session</th><th>Status</th><th>Heartbeat</th><th>Expires</th></tr></thead><tbody>' +
+    sessions.map(function (session) {
+      const status = session.effectiveStatus || session.status || 'unknown';
+      const reason = session.staleReason ? ' · ' + String(session.staleReason).replaceAll('_', ' ') : '';
+      return '<tr><td>' + escapeClient(session.tunnelId || '—') + '</td>' +
+        '<td>' + escapeClient(session.sessionId || '—') + '</td>' +
+        '<td>' + pillMarkup(status) + '<small>' + escapeClient(reason) + '</small></td>' +
+        '<td>' + escapeClient(formatClientTime(session.lastHeartbeatAt)) + '</td>' +
+        '<td>' + escapeClient(formatClientTime(session.expiresAt)) + '</td></tr>';
     }).join('') + '</tbody></table></div>';
 }
 
@@ -1105,6 +1221,7 @@ function showView(name) {
     link.classList.toggle('active', link.dataset.nav === view);
   });
   if (view === 'executors') refreshExecutorRoster();
+  if (view === 'connectors') refreshConnectorRoster();
   syncSystemProbes();
   syncMetricsPolling();
   syncLeaseExpiryWarningRefresh();

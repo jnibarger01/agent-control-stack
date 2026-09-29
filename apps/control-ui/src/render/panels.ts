@@ -329,18 +329,13 @@ export function systemStats(stats: ReturnType<typeof summarize>, executionBacken
   return `<dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl>`;
 }
 
-export function connectorsPanel(agents: MissionControlAgent[], executionBackend?: string): string {
-  const connectors = agents.filter((agent) => /connector|tunnel/i.test(agent.kind));
-  const backend = executionBackend ? escapeHtml(executionBackend) : "unset";
-  const rows = connectors.length
-    ? `<div class="table-wrap"><table><thead><tr><th>Connector</th><th>Status</th><th>Last event</th></tr></thead><tbody>${connectors
-        .map(
-          (agent) =>
-            `<tr><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${pill(agent.status)}</td><td>${agent.lastEventAt ? time(agent.lastEventAt) : "—"}</td></tr>`
-        )
-        .join("")}</tbody></table></div>`
-    : `<p class="empty">No connectors observed.</p>`;
-  return `${rows}<p class="empty">Execution backend: ${backend}</p>`;
+export function connectorsPanel(): string {
+  return `<div class="agent-layout connector-layout">
+    <div class="table-wrap"><p class="empty">Loading registered connectors...</p></div>
+    <section id="connector-detail" class="detail-panel connector-detail" tabindex="-1" aria-live="polite" aria-label="Connector detail">
+      <div class="detail-empty"><h3>No connector selected</h3><p>Select a connector to inspect tunnel sessions and granted scopes.</p></div>
+    </section>
+  </div>`;
 }
 
 export function eventTimeline(events: StoredAuditEvent[]): string {

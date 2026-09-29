@@ -72,7 +72,7 @@ export function renderDashboardFragments(
       (timeUnixNano) => time(nanoToIso(timeUnixNano))
     ),
     eventsTimeline: eventTimeline([...(model.events ?? [])].reverse()),
-    connectors: connectorsPanel(agents, model.executionBackend),
+    connectors: connectorsPanel(),
     generatedAt: now.toISOString()
   };
 }

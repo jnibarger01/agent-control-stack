@@ -3081,6 +3081,37 @@ describe("gateway MCP transport", () => {
       expect(connector.statusCode).toBe(201);
       expect(session.statusCode).toBe(201);
 
+      const connectors = await app.inject({ method: "GET", url: "/api/connectors" });
+      expect(connectors.statusCode).toBe(200);
+      expect(connectors.json().connectors).toEqual([
+        expect.objectContaining({
+          id: "chatgpt-prod",
+          displayName: "ChatGPT Desktop",
+          status: "active",
+          allowedScopes: ["acs:work:create", "acs:work:read"],
+          sessionCount: 1,
+          activeSessionCount: 1,
+          publicKeyFingerprint: expect.any(String)
+        })
+      ]);
+      expect(JSON.stringify(connectors.json())).not.toContain("BEGIN PUBLIC KEY");
+      expect(JSON.stringify(connectors.json())).not.toContain("publicKeyPem");
+
+      const connectorDetail = await app.inject({ method: "GET", url: "/api/connectors/chatgpt-prod" });
+      expect(connectorDetail.statusCode).toBe(200);
+      expect(connectorDetail.json()).toMatchObject({
+        connector: { id: "chatgpt-prod", activeSessionCount: 1 },
+        sessions: [
+          {
+            connectorId: "chatgpt-prod",
+            tunnelId: "tunnel_abc123",
+            sessionId: "session_1",
+            effectiveStatus: "active"
+          }
+        ]
+      });
+      expect(JSON.stringify(connectorDetail.json())).not.toContain("publicKeyPem");
+
       await app.close();
       appClosed = true;
       const store = new SqliteWorkItemStore(dbPath);

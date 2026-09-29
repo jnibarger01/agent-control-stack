@@ -359,7 +359,7 @@ output { color: var(--accent); min-height: 20px; }
 .approval-confirm-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
 #approval-confirm-ok { background: var(--bad-bg); color: var(--red); border-color: var(--bad-line); font-weight: 700; }
 #approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail, .executor-detail { margin-left: 0; max-height: 430px; } }
+@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail, .executor-detail, .connector-detail { margin-left: 0; max-height: 430px; } }
 @media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
 @media (max-width: 767px) {
   body { grid-template-columns: 1fr; }
@@ -398,6 +398,7 @@ body[data-active-view="policy"] [data-view-panel~="policy"],
 body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
 /* The view rule above must not flatten the overview card grid. */
 body[data-active-view="overview"] #overview.cards { display: grid; }
+body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .approval-item { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .system-probes { padding: 0 18px 16px; }
 .system-probes dl { margin: 0; display: grid; gap: 8px; }

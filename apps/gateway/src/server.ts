@@ -105,6 +105,8 @@ import {
   validateHeartbeatTtl,
   WorkerIdentityRegistry,
   type ReadEventsOptions,
+  type RegisteredConnector,
+  type RegisteredTunnelSession,
   type RegistryAgentDetail,
   type RegistryStatus,
   type StoredAuditEvent,
@@ -1032,6 +1034,23 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       auth: authorization.auth
     });
     return { tools: workItemToolNames };
+  });
+
+  app.get("/api/connectors", { preHandler: requireRead }, async () => {
+    const connectors = workItems
+      .listConnectors()
+      .map((connector) => projectConnector(connector, workItems.listTunnelSessions(connector.id), heartbeatTtlMs));
+    return { connectors };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/connectors/:id", { preHandler: requireRead }, async (request, reply) => {
+    const connector = workItems.getConnector(request.params.id);
+    if (!connector) return reply.code(404).send({ error: "connector not found" });
+    const sessions = workItems.listTunnelSessions(connector.id);
+    return {
+      connector: projectConnector(connector, sessions, heartbeatTtlMs),
+      sessions: sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs))
+    };
   });
 
   app.post("/connectors", async (request, reply) => {
@@ -3068,6 +3087,53 @@ function eventReadOptions(
     ...filters,
     limit: parsed.limit === undefined ? DEFAULT_EVENT_LIMIT : Math.min(parsed.limit, MAX_EVENT_LIMIT),
     ...(parsed.afterSequence === undefined ? {} : { afterSequence: parsed.afterSequence })
+  };
+}
+
+function projectTunnelSession(session: RegisteredTunnelSession, heartbeatTtlMs: number) {
+  const now = new Date();
+  const sessionExpired =
+    !Number.isFinite(Date.parse(session.expiresAt)) || Date.parse(session.expiresAt) <= now.getTime();
+  const heartbeatExpired =
+    session.status === "active" && isHeartbeatExpired(session.lastHeartbeatAt, session.issuedAt, now, heartbeatTtlMs);
+  return {
+    ...session,
+    effectiveStatus: session.status === "revoked" || sessionExpired || heartbeatExpired ? "inactive" : "active",
+    staleReason:
+      session.status === "revoked"
+        ? "revoked"
+        : sessionExpired
+          ? "session_expired"
+          : heartbeatExpired
+            ? "heartbeat_expired"
+            : undefined
+  };
+}
+
+function projectConnector(connector: RegisteredConnector, sessions: RegisteredTunnelSession[], heartbeatTtlMs: number) {
+  const projectedSessions = sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs));
+  const activeSessions = projectedSessions.filter((session) => session.effectiveStatus === "active");
+  const lastHeartbeatAt = sessions
+    .map((session) => session.lastHeartbeatAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1);
+  const nextSessionExpiryAt = activeSessions
+    .map((session) => session.expiresAt)
+    .sort()
+    .at(0);
+  return {
+    id: connector.id,
+    displayName: connector.displayName,
+    allowedScopes: [...connector.allowedScopes],
+    status: connector.status,
+    publicKeyFingerprint: createHash("sha256").update(connector.publicKeyPem).digest("base64url"),
+    createdAt: connector.createdAt,
+    updatedAt: connector.updatedAt,
+    sessionCount: sessions.length,
+    activeSessionCount: activeSessions.length,
+    ...(lastHeartbeatAt ? { lastHeartbeatAt } : {}),
+    ...(nextSessionExpiryAt ? { nextSessionExpiryAt } : {})
   };
 }
 

@@ -1394,6 +1394,17 @@ describe("work item state machine", () => {
         expiresAt: new Date(Date.now() + 60_000).toISOString(),
         actorId: "user"
       });
+      expect(store.listConnectors()).toEqual([
+        expect.objectContaining({ id: "chatgpt-prod", displayName: "chatgpt-prod", status: "active" })
+      ]);
+      expect(store.getConnector("chatgpt-prod")).toMatchObject({
+        id: "chatgpt-prod",
+        allowedScopes: ["acs:work:create"]
+      });
+      expect(store.getConnector("missing")).toBeUndefined();
+      expect(store.listTunnelSessions("chatgpt-prod")).toEqual([
+        expect.objectContaining({ connectorId: "chatgpt-prod", tunnelId: "tunnel_1", sessionId: "session_1" })
+      ]);
       expectControlError(
         () =>
           store.revokeTunnelSession({
