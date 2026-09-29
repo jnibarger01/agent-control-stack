@@ -366,6 +366,24 @@ async function forwardInitialize(session, msg, outbound) {
   if (session.closed || !pair || pair !== session.pair) return;
   const target = pair;
   const key = idKey(msg.id);
+  const protocolVersion =
+    typeof msg?.params?.protocolVersion === 'string' ? msg.params.protocolVersion : '';
+
+  // Jace Commander initialize is capability-free and has no per-session ACS
+  // bootstrap challenge. After the canonical child has negotiated a protocol
+  // version once, reuse that immutable initialize result for new downstream
+  // sessions instead of serializing another stdio round trip.
+  if (JC && protocolVersion) {
+    const cachedResult = target.initializeCache.get(protocolVersion);
+    if (cachedResult) {
+      const completion = new Promise((resolve) => { session.initializeResolve = resolve; });
+      session.initializePromise = completion;
+      await session.transport.send({ jsonrpc: '2.0', id: msg.id, result: structuredClone(cachedResult) });
+      session.upstreamInitialized = true;
+      session.initializeResolve?.(true);
+      return true;
+    }
+  }
   if (session.pending.has(key)) {
     failClosed(`duplicate downstream initialize id in session ${session.id}`, target);
     return;
@@ -425,7 +443,12 @@ async function forwardInitialize(session, msg, outbound) {
       return false;
     }
     target.routes.set(upstreamId, {
-      session, downstreamId: msg.id, initialize: true, expectedChallenge, bridgeBootstrap,
+      session,
+      downstreamId: msg.id,
+      initialize: true,
+      protocolVersion,
+      expectedChallenge,
+      bridgeBootstrap,
     });
     session.pending.set(key, upstreamId);
     effectiveOutbound.id = upstreamId;
@@ -544,6 +567,7 @@ function spawnPair() {
     routes: new Map(),
     expiredRoutes: new Set(),
     initTail: Promise.resolve(),
+    initializeCache: new Map(),
     initializedOnce: false,
   };
   upstream.onmessage = async (msg) => {
@@ -599,6 +623,13 @@ function spawnPair() {
             route.session.initializeResolve?.(false);
             return;
           }
+        }
+        if (JC && route.protocolVersion && response?.result) {
+          const cachedResult = structuredClone(response.result);
+          if (cachedResult?._meta && typeof cachedResult._meta === 'object') {
+            delete cachedResult._meta.acsRuntimeIdentity;
+          }
+          next.initializeCache.set(route.protocolVersion, cachedResult);
         }
         next.initializedOnce = true;
       }
