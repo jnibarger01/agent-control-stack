@@ -892,6 +892,39 @@ describe("mission control gateway", () => {
         headers: actorHeaders,
         payload: { model: "gpt-5-codex" }
       });
+      const timeline = new SqliteWorkItemStore(dbPath);
+      try {
+        timeline.recordAgentTimelineEvent({
+          agentId: "api-agent",
+          actorId: "user",
+          eventType: "initialized",
+          sessionId: "session-active",
+          workItemId: "wrk_current"
+        });
+        timeline.recordAgentTimelineEvent({
+          agentId: "api-agent",
+          actorId: "user",
+          eventType: "message",
+          sessionId: "session-active",
+          workItemId: "wrk_current"
+        });
+        timeline.recordAgentTimelineEvent({
+          agentId: "api-agent",
+          actorId: "user",
+          eventType: "initialized",
+          sessionId: "session-closed",
+          workItemId: "wrk_old"
+        });
+        timeline.recordAgentTimelineEvent({
+          agentId: "api-agent",
+          actorId: "user",
+          eventType: "disconnected",
+          sessionId: "session-closed",
+          workItemId: "wrk_old"
+        });
+      } finally {
+        timeline.close();
+      }
       const actors = await app.inject({ method: "GET", url: "/api/actors" });
       const list = await app.inject({ method: "GET", url: "/api/agents" });
       const detail = await app.inject({ method: "GET", url: "/api/agents/api-agent" });
@@ -934,6 +967,30 @@ describe("mission control gateway", () => {
         capabilities: [{ name: "repo:inspect" }],
         latestHeartbeat: { actorId: "user", status: "AVAILABLE", currentTask: "idle" }
       });
+      expect(detail.json().activity).toMatchObject({
+        currentTask: "idle",
+        currentWorkItemId: "wrk_current",
+        currentSessionId: "session-active",
+        activeSessionCount: 1,
+        recentSessionCount: 2,
+        lastActivityAt: expect.any(String)
+      });
+      expect(detail.json().sessions).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            sessionId: "session-active",
+            status: "active",
+            workItemId: "wrk_current",
+            lastEventType: "message"
+          }),
+          expect.objectContaining({
+            sessionId: "session-closed",
+            status: "closed",
+            workItemId: "wrk_old",
+            lastEventType: "disconnected"
+          })
+        ])
+      );
       expect(missingDetail.statusCode).toBe(404);
       expect(missingUpdate.statusCode).toBe(404);
       expect(missingCapabilities.statusCode).toBe(404);

@@ -93,10 +93,10 @@ export function overviewCards(stats: ReturnType<typeof summarize>): string {
 
 export function agentTable(agents: MissionControlAgent[]): string {
   if (!agents.length) return `<div class="table-wrap"><p class="empty">No registered agents.</p></div>`;
-  return `<div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">${agents
+  return `<div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Role</th><th>Runtime</th><th>Status</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">${agents
     .map(
       (agent) =>
-        `<tr class="agent-row" tabindex="0" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(redactSecrets(agent.lastError)) : "—"}</td></tr>`
+        `<tr class="agent-row" tabindex="0" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.metadata.acpRole ?? "—")}</td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(redactSecrets(agent.lastError)) : "—"}</td></tr>`
     )
     .join("")}</tbody></table></div>`;
 }

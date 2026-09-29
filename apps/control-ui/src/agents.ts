@@ -44,10 +44,17 @@ export function projectAgents(
       status: projected.status,
       health: projected.health,
       capabilities: agent.capabilities.map((capability) => capability.name),
+      currentTask: agent.latestHeartbeat?.currentTask,
       lastHeartbeatAt: agent.lastHeartbeatAt,
       lastEventAt: agent.lastHeartbeatAt ?? agent.updatedAt,
       lastError: agent.lastError,
-      metadata: { registryStatus: agent.status, registered: "true" }
+      metadata: {
+        registryStatus: agent.status,
+        registered: "true",
+        acpRole: agent.acpRole,
+        ...(agent.provider ? { provider: agent.provider } : {}),
+        ...(agent.model ? { model: agent.model } : {})
+      }
     });
   }
 
@@ -72,6 +79,13 @@ export function projectAgents(
 }
 function eventPatch(id: string, event: StoredAuditEvent, body: Record<string, unknown>): Partial<MissionControlAgent> {
   const patch: Partial<MissionControlAgent> = { lastEventAt: nanoToIso(event.timeUnixNano) };
+  const workItemId =
+    typeof event.attributes?.["work_item.id"] === "string"
+      ? event.attributes["work_item.id"]
+      : typeof body.workItemId === "string"
+        ? body.workItemId
+        : undefined;
+  if (workItemId) patch.currentWorkItemId = workItemId;
   if (typeof body.displayName === "string") patch.displayName = body.displayName;
   if (event.name.includes("heartbeat")) patch.lastHeartbeatAt = patch.lastEventAt;
   if (event.name.includes("revoked")) patch.status = "offline";

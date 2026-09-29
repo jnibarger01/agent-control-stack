@@ -289,11 +289,12 @@ function agentRowsMarkup(agents) {
   return agents.map(function (agent) {
     const id = escapeClient(agent.id);
     const name = escapeClient(agent.displayName || agent.name || agent.id);
+    const role = agent.metadata && agent.metadata.acpRole ? agent.metadata.acpRole : '—';
     return '<tr class="agent-row" tabindex="0" data-agent="' + id + '" data-agent-id="' + id + '">' +
       '<td><strong>' + name + '</strong><small>' + id + '</small></td>' +
-      '<td>' + escapeClient(agent.kind || 'observed') + '</td>' +
-      '<td>' + pillMarkup(agent.status || agent.effectiveStatus || 'observed') + '</td>' +
-      '<td>' + pillMarkup(agent.health || 'unknown') + '</td>' +
+      '<td>' + escapeClient(role) + '</td>' +
+      '<td>' + escapeClient(agent.kind || '—') + '</td>' +
+      '<td>' + pillMarkup(agent.status || 'observed') + '</td>' +
       '<td>' + escapeClient(agent.currentTask || '—') + '</td>' +
       '<td>' + escapeClient(formatClientTime(agent.lastHeartbeatAt)) + '</td>' +
       '<td>' + escapeClient(redactClient(agent.lastError || '—')) + '</td>' +
@@ -308,7 +309,7 @@ function renderAgentTable(agents) {
     wrap.innerHTML = '<p class="empty">No registered agents.</p>';
     return;
   }
-  wrap.innerHTML = '<table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">' + agentRowsMarkup(agents) + '</tbody></table>';
+  wrap.innerHTML = '<table class="agent-table"><thead><tr><th>Agent</th><th>Role</th><th>Runtime</th><th>Status</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">' + agentRowsMarkup(agents) + '</tbody></table>';
   bindAgentRows();
 }
 
@@ -355,16 +356,8 @@ async function loadAgentDetail(id) {
   if (!target || !id) return;
   target.innerHTML = '<div class="detail-loading">Loading agent detail...</div>';
   try {
-    const projected = await fetchJson('/agents/' + encodeURIComponent(id) + '?limit=8');
-    const registry = await fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8').catch(function () { return null; });
-    const capabilities = await fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities').catch(function () { return null; });
-    renderAgentDetail(target, {
-      projected: projected.agent,
-      registry: registry && registry.agent,
-      adapterStatus: (registry && registry.adapterStatus) || projected.adapterStatus,
-      events: (registry && registry.events && registry.events.length ? registry.events : projected.events) || [],
-      capabilities: (capabilities && capabilities.capabilities) || (registry && registry.agent && registry.agent.capabilities) || []
-    });
+    const detail = await fetchJson('/api/agents/' + encodeURIComponent(id));
+    renderAgentDetail(target, detail);
   } catch (error) {
     target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
   }
@@ -377,24 +370,42 @@ function capabilityNames(input) {
 }
 
 function renderAgentDetail(target, detail) {
-  const agent = detail.projected || detail.registry || {};
-  const registry = detail.registry || {};
-  const capabilities = capabilityNames(detail.capabilities).concat(capabilityNames(agent.capabilities || []));
-  const uniqueCapabilities = Array.from(new Set(capabilities)).sort();
+  const agent = detail.agent || {};
+  const activity = detail.activity || {};
+  const capabilities = Array.from(new Set(capabilityNames(agent.capabilities || []))).sort();
+  const sessions = Array.isArray(detail.sessions) ? detail.sessions : [];
   const adapter = detail.adapterStatus ? (detail.adapterStatus.state || detail.adapterStatus.status || 'connected') : 'not configured';
-  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.displayName || registry.name || agent.id) + '</h3><small>' + escapeClient(agent.id || registry.id || '') + '</small></div><div>' + pillMarkup(agent.status || registry.effectiveStatus || registry.status || 'observed') + ' ' + pillMarkup(agent.health || 'unknown') + '</div></div>' +
+  const status = agent.effectiveStatus || agent.status || 'UNKNOWN';
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.name || agent.id || 'Agent') + '</h3><small>' + escapeClient(agent.id || '') + '</small></div><div>' + pillMarkup(status) + '</div></div>' +
     '<dl class="detail-grid">' +
-      detailRow('Type', agent.kind || registry.kind) +
-      detailRow('Provider', registry.provider) +
-      detailRow('Model', registry.model) +
-      detailRow('Endpoint', registry.endpoint ? redactClient(registry.endpoint) : undefined) +
-      detailRow('Current task', agent.currentTask) +
-      detailRow('Current work item', agent.currentWorkItemId) +
-      detailRow('Heartbeat', formatClientTime(agent.lastHeartbeatAt || registry.lastHeartbeatAt)) +
+      detailRow('Role', agent.acpRole) +
+      detailRow('Runtime', agent.kind) +
+      detailRow('Provider', agent.provider) +
+      detailRow('Model', agent.model) +
+      detailRow('Current task', activity.currentTask || (agent.latestHeartbeat && agent.latestHeartbeat.currentTask)) +
+      detailRow('Current work item', activity.currentWorkItemId) +
+      detailRow('Current ACP session', activity.currentSessionId) +
+      detailRow('Active ACP sessions', activity.activeSessionCount) +
+      detailRow('Last heartbeat', formatClientTime(agent.lastHeartbeatAt)) +
+      detailRow('Last activity', formatClientTime(activity.lastActivityAt)) +
       detailRow('Adapter', adapter) +
+      detailRow('Endpoint', agent.endpoint ? redactClient(agent.endpoint) : undefined) +
     '</dl>' +
-    '<div class="detail-section"><h4>Agent capabilities</h4>' + capabilityList(uniqueCapabilities) + '</div>' +
-    '<div class="detail-section"><h4>Recent Events</h4>' + eventList(detail.events || []) + '</div>';
+    '<div class="detail-section"><h4>Agent capabilities</h4>' + capabilityList(capabilities) + '</div>' +
+    '<div class="detail-section"><h4>Recent ACP sessions</h4>' + agentSessionTable(sessions) + '</div>' +
+    '<div class="detail-section"><h4>Recent agent events</h4>' + eventList(detail.events || []) + '</div>';
+}
+
+function agentSessionTable(sessions) {
+  if (!sessions.length) return '<p class="muted">No ACP sessions observed.</p>';
+  return '<div class="table-wrap"><table class="agent-table agent-session-table"><thead><tr><th>Session</th><th>Status</th><th>Work item</th><th>Last event</th><th>Activity</th></tr></thead><tbody>' +
+    sessions.map(function (session) {
+      return '<tr><td>' + escapeClient(session.sessionId || '—') + '</td>' +
+        '<td>' + pillMarkup(session.status || 'unknown') + '</td>' +
+        '<td>' + escapeClient(session.workItemId || '—') + '</td>' +
+        '<td>' + escapeClient(session.lastEventType || '—') + '</td>' +
+        '<td>' + escapeClient(formatClientTime(session.lastEventAt)) + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
 }
 
 function executorRowsMarkup(executors) {

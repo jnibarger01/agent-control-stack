@@ -66,14 +66,18 @@ describe("renderDashboard", () => {
     expect(html).not.toContain(`data-agent="/repo"`);
     expect(html).toContain("refreshAgentRoster()");
     expect(html).toContain("fetchJson('/agents')");
-    expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8')");
-    expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities')");
+    expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id))");
+    expect(html).not.toContain("fetchJson('/agents/' + encodeURIComponent(id)");
+    expect(html).not.toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities')");
     expect(html).toContain('data-nav="executors"');
     expect(html).toContain('id="executors"');
     expect(html).toContain("fetchJson('/api/executors')");
     expect(html).toContain("fetchJson('/api/executors/' + encodeURIComponent(id))");
     expect(html).toContain("fetchJson('/api/executors/' + encodeURIComponent(id) + '/capabilities')");
     expect(html).toContain("Agent capabilities");
+    expect(html).toContain("Recent ACP sessions");
+    expect(html).toContain("Current ACP session");
+    expect(html).toContain("<th>Role</th><th>Runtime</th><th>Status</th>");
     expect(html).toContain("fetchJson('/api/connectors')");
     expect(html).toContain("fetchJson('/api/connectors/' + encodeURIComponent(id))");
     expect(html).toContain("Registered connector identities + tunnel sessions");
@@ -390,6 +394,50 @@ describe("renderDashboard", () => {
       status: "offline",
       health: "unknown",
       capabilities: ["code:implement", "code:test", "repo:inspect"]
+    });
+  });
+
+  it("projects registered agent role, runtime identity, and heartbeat task", () => {
+    const agents = projectAgents([], [], new Date("2026-07-05T00:01:00.000Z"), [
+      {
+        id: "hermes-local",
+        name: "Hermes Agent",
+        kind: "service",
+        acpRole: "ORCHESTRATION_LAYER",
+        provider: "local",
+        model: "hermes",
+        capabilities: [],
+        status: "AVAILABLE",
+        lastHeartbeatAt: "2026-07-05T00:00:30.000Z",
+        latestHeartbeat: {
+          id: 1,
+          agentId: "hermes-local",
+          status: "AVAILABLE",
+          currentTask: "coordinate implementation",
+          observedAt: "2026-07-05T00:00:30.000Z",
+          actorId: "actor_system_bootstrap"
+        },
+        createdAt: "2026-07-05T00:00:00.000Z",
+        updatedAt: "2026-07-05T00:00:30.000Z",
+        createdByActorId: "actor_system_bootstrap",
+        updatedByActorId: "actor_system_bootstrap"
+      }
+    ]);
+
+    expect(agents[0]).toMatchObject({
+      id: "hermes-local",
+      displayName: "Hermes Agent",
+      kind: "service",
+      status: "online",
+      health: "healthy",
+      currentTask: "coordinate implementation",
+      metadata: {
+        registered: "true",
+        registryStatus: "AVAILABLE",
+        acpRole: "ORCHESTRATION_LAYER",
+        provider: "local",
+        model: "hermes"
+      }
     });
   });
 });

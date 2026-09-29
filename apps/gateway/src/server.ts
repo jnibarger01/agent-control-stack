@@ -1303,10 +1303,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!agent) {
         return reply.code(404).send({ error: "agent not found" });
       }
+      const events = workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }));
+      const sessions = projectAgentSessions(events);
       return {
         agent: projectRegistryFreshness(agent, heartbeatTtlMs),
+        activity: projectAgentActivity(agent, sessions),
+        sessions,
         adapterStatus: adapterStatusFor(request.params.id),
-        events: workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }))
+        events
       };
     } catch (error) {
       return sendError(reply, error);
@@ -3088,6 +3092,75 @@ function eventReadOptions(
     limit: parsed.limit === undefined ? DEFAULT_EVENT_LIMIT : Math.min(parsed.limit, MAX_EVENT_LIMIT),
     ...(parsed.afterSequence === undefined ? {} : { afterSequence: parsed.afterSequence })
   };
+}
+
+interface AgentSessionProjection {
+  sessionId: string;
+  status: "active" | "closed" | "error";
+  startedAt: string;
+  lastEventAt: string;
+  lastEventType: string;
+  workItemId?: string;
+}
+
+function projectAgentSessions(events: StoredAuditEvent[]): AgentSessionProjection[] {
+  const sessions = new Map<string, AgentSessionProjection>();
+  for (const event of events) {
+    if (!event.name.startsWith("acp.")) continue;
+    const sessionId =
+      typeof event.attributes["acp.session_id"] === "string"
+        ? event.attributes["acp.session_id"]
+        : typeof event.body.sessionId === "string"
+          ? event.body.sessionId
+          : undefined;
+    if (!sessionId) continue;
+
+    const observedAt = auditEventIso(event);
+    const eventType =
+      typeof event.attributes["acp.event_type"] === "string"
+        ? event.attributes["acp.event_type"]
+        : event.name.slice("acp.".length);
+    const status: AgentSessionProjection["status"] =
+      eventType === "error" ? "error" : eventType === "stop" || eventType === "disconnected" ? "closed" : "active";
+    const workItemId =
+      typeof event.attributes["work_item.id"] === "string"
+        ? event.attributes["work_item.id"]
+        : typeof event.body.workItemId === "string"
+          ? event.body.workItemId
+          : undefined;
+    const current = sessions.get(sessionId);
+    sessions.set(sessionId, {
+      sessionId,
+      status,
+      startedAt: current?.startedAt ?? observedAt,
+      lastEventAt: observedAt,
+      lastEventType: eventType,
+      ...(workItemId ? { workItemId } : current?.workItemId ? { workItemId: current.workItemId } : {})
+    });
+  }
+  return [...sessions.values()].sort((left, right) => right.lastEventAt.localeCompare(left.lastEventAt));
+}
+
+function projectAgentActivity(agent: RegistryAgentDetail, sessions: AgentSessionProjection[]) {
+  const activeSessions = sessions.filter((session) => session.status === "active");
+  const currentSession = activeSessions[0];
+  const lastActivityAt = [agent.lastHeartbeatAt, sessions[0]?.lastEventAt]
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1);
+  return {
+    ...(agent.latestHeartbeat?.currentTask ? { currentTask: agent.latestHeartbeat.currentTask } : {}),
+    ...(currentSession?.workItemId ? { currentWorkItemId: currentSession.workItemId } : {}),
+    ...(currentSession ? { currentSessionId: currentSession.sessionId } : {}),
+    activeSessionCount: activeSessions.length,
+    recentSessionCount: sessions.length,
+    ...(lastActivityAt ? { lastActivityAt } : {})
+  };
+}
+
+function auditEventIso(event: StoredAuditEvent): string {
+  const millis = Number(BigInt(event.timeUnixNano) / 1_000_000n);
+  return new Date(millis).toISOString();
 }
 
 function projectTunnelSession(session: RegisteredTunnelSession, heartbeatTtlMs: number) {
