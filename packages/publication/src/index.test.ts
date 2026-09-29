@@ -8,7 +8,8 @@ function defaultGitRunner(branch = "acs/attempt/attempt-1"): GitRunner {
   return vi.fn(async (args: string[]): Promise<GitResult> => {
     if (args[0] === "symbolic-ref") return { stdout: `${branch}\n`, stderr: "", exitCode: 0 };
     if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-    if (args[0] === "diff" && args.includes("--name-only")) return { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
+    if (args[0] === "diff" && args.includes("--name-only"))
+      return { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
     return { stdout: "", stderr: "", exitCode: 0 };
   });
 }
@@ -31,6 +32,7 @@ function testStore(overrides: Partial<PublicationStore> = {}): PublicationStore 
   return {
     getByIdempotency: () => undefined,
     record: (record: PublicationRecord) => record,
+    recordBlocked: vi.fn(),
     getValidationRunForAttempt: () => ({ passed: true }),
     planAllowsPush: () => true,
     ...overrides
@@ -58,9 +60,85 @@ describe("publishValidatedAttempt", () => {
     expect(github.createOrUpdate).toHaveBeenCalledTimes(1);
   });
 
+  it("records a bounded promotion block without changing the original refusal", async () => {
+    const recordBlocked = vi.fn();
+    const github = { createOrUpdate: vi.fn() };
+    await expect(
+      publishValidatedAttempt(input(), testStore({ planAllowsPush: () => false, recordBlocked }), github)
+    ).rejects.toThrow(/does not authorize a push/);
+
+    expect(recordBlocked).toHaveBeenCalledTimes(1);
+    expect(recordBlocked).toHaveBeenCalledWith({
+      workItemId: "work-1",
+      attemptId: "attempt-1",
+      stage: "plan_authorization",
+      reasonCode: "push_not_authorized",
+      externalState: "none"
+    });
+    expect(github.createOrUpdate).not.toHaveBeenCalled();
+  });
+
+  it("records post-push lease loss with bounded external state", async () => {
+    const runner = defaultGitRunner();
+    let leaseCalls = 0;
+    const recordBlocked = vi.fn();
+    const leaseIsCurrent = vi.fn(async () => {
+      leaseCalls += 1;
+      return leaseCalls <= 2;
+    });
+    await expect(
+      publishValidatedAttempt(input({ gitRunner: runner, leaseIsCurrent }), testStore({ recordBlocked }), {
+        createOrUpdate: vi.fn()
+      })
+    ).rejects.toThrow(/lease became stale after publication push/);
+
+    expect(recordBlocked).toHaveBeenCalledWith(
+      expect.objectContaining({
+        stage: "lease_post_push",
+        reasonCode: "lease_not_current",
+        externalState: "branch_pushed"
+      })
+    );
+  });
+
+  it("records PR-operation failure without persisting raw failure text", async () => {
+    const recordBlocked = vi.fn();
+    const github = {
+      createOrUpdate: vi.fn(async () => {
+        throw new Error("sensitive provider detail");
+      })
+    };
+    await expect(publishValidatedAttempt(input(), testStore({ recordBlocked }), github)).rejects.toThrow(
+      "sensitive provider detail"
+    );
+
+    expect(recordBlocked).toHaveBeenCalledWith({
+      workItemId: "work-1",
+      attemptId: "attempt-1",
+      stage: "pull_request",
+      reasonCode: "pull_request_failed",
+      externalState: "branch_pushed"
+    });
+    expect(JSON.stringify(recordBlocked.mock.calls)).not.toContain("sensitive provider detail");
+  });
+
+  it("never masks the original refusal when blocked-audit recording fails", async () => {
+    const github = { createOrUpdate: vi.fn() };
+    const recordBlocked = vi.fn(() => {
+      throw new Error("audit sink unavailable");
+    });
+    await expect(
+      publishValidatedAttempt(input(), testStore({ planAllowsPush: () => false, recordBlocked }), github)
+    ).rejects.toThrow(/does not authorize a push/);
+    expect(recordBlocked).toHaveBeenCalledTimes(1);
+    expect(github.createOrUpdate).not.toHaveBeenCalled();
+  });
+
   it("refuses stale lease before any external publication", async () => {
     const github = { createOrUpdate: vi.fn() };
-    await expect(publishValidatedAttempt(input({ leaseIsCurrent: vi.fn(async () => false) }), testStore(), github)).rejects.toThrow("current lease");
+    await expect(
+      publishValidatedAttempt(input({ leaseIsCurrent: vi.fn(async () => false) }), testStore(), github)
+    ).rejects.toThrow("current lease");
     expect(github.createOrUpdate).not.toHaveBeenCalled();
   });
 
@@ -102,22 +180,23 @@ describe("publishValidatedAttempt", () => {
 
   it("refuses when the workspace HEAD is detached, even though the caller-supplied branch matches", async () => {
     const runner: GitRunner = vi.fn(async (args: string[]): Promise<GitResult> => {
-      if (args[0] === "symbolic-ref") return { stdout: "", stderr: "fatal: ref HEAD is not a symbolic ref", exitCode: 1 };
+      if (args[0] === "symbolic-ref")
+        return { stdout: "", stderr: "fatal: ref HEAD is not a symbolic ref", exitCode: 1 };
       return { stdout: "", stderr: "", exitCode: 0 };
     });
     const github = { createOrUpdate: vi.fn() };
-    await expect(
-      publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)
-    ).rejects.toThrow(/HEAD is detached/);
+    await expect(publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)).rejects.toThrow(
+      /HEAD is detached/
+    );
     expect(github.createOrUpdate).not.toHaveBeenCalled();
   });
 
   it("refuses when the workspace is actually checked out on a different branch than the attempt claims", async () => {
     const runner = defaultGitRunner("some-other-branch");
     const github = { createOrUpdate: vi.fn() };
-    await expect(
-      publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)
-    ).rejects.toThrow(/is actually on branch "some-other-branch"/);
+    await expect(publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)).rejects.toThrow(
+      /is actually on branch "some-other-branch"/
+    );
     expect(github.createOrUpdate).not.toHaveBeenCalled();
   });
 
@@ -128,9 +207,9 @@ describe("publishValidatedAttempt", () => {
       return { stdout: "", stderr: "", exitCode: 0 };
     });
     const github = { createOrUpdate: vi.fn() };
-    await expect(
-      publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)
-    ).rejects.toThrow(/no staged changes/);
+    await expect(publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)).rejects.toThrow(
+      /no staged changes/
+    );
     expect(github.createOrUpdate).not.toHaveBeenCalled();
   });
 
@@ -140,18 +219,29 @@ describe("publishValidatedAttempt", () => {
       calls.push(args);
       if (args[0] === "symbolic-ref") return { stdout: "acs/attempt/attempt-1\n", stderr: "", exitCode: 0 };
       if (args[0] === "rev-parse") return { stdout: "real-sha-789\n", stderr: "", exitCode: 0 };
-      if (args[0] === "diff" && args.includes("--name-only")) return { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
+      if (args[0] === "diff" && args.includes("--name-only"))
+        return { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
       return { stdout: "", stderr: "", exitCode: 0 };
     });
     const store = memoryStore();
     const github = { createOrUpdate: vi.fn(async () => ({ url: "https://github.com/acme/repo/pull/2" })) };
-    const record = await publishValidatedAttempt(input({ gitRunner: runner, branch: "acs/attempt/attempt-1" }), store, github);
+    const record = await publishValidatedAttempt(
+      input({ gitRunner: runner, branch: "acs/attempt/attempt-1" }),
+      store,
+      github
+    );
 
     expect(calls.some((call) => call[0] === "add" && call.includes("-A"))).toBe(true);
     expect(calls.some((call) => call.includes("commit") && call.includes("-m"))).toBe(true);
-    expect(calls.some((call) => call[0] === "push" && call.includes("--") && call.includes("HEAD:refs/heads/acs/attempt/attempt-1"))).toBe(true);
+    expect(
+      calls.some(
+        (call) => call[0] === "push" && call.includes("--") && call.includes("HEAD:refs/heads/acs/attempt/attempt-1")
+      )
+    ).toBe(true);
     expect(record.commitSha).toBe("real-sha-789");
-    expect(github.createOrUpdate).toHaveBeenCalledWith(expect.objectContaining({ commitSha: "real-sha-789", branch: "acs/attempt/attempt-1" }));
+    expect(github.createOrUpdate).toHaveBeenCalledWith(
+      expect.objectContaining({ commitSha: "real-sha-789", branch: "acs/attempt/attempt-1" })
+    );
 
     // push must be issued strictly after the commit, and the PR must be opened strictly after the push.
     const commitIndex = calls.findIndex((call) => call.includes("commit"));
@@ -163,14 +253,15 @@ describe("publishValidatedAttempt", () => {
   it("refuses publication when git commit fails", async () => {
     const runner: GitRunner = vi.fn(async (args: string[]): Promise<GitResult> => {
       if (args[0] === "symbolic-ref") return { stdout: "acs/attempt/attempt-1\n", stderr: "", exitCode: 0 };
-      if (args[0] === "diff" && args.includes("--name-only")) return { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
+      if (args[0] === "diff" && args.includes("--name-only"))
+        return { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
       if (args.includes("commit")) return { stdout: "", stderr: "nothing to commit", exitCode: 1 };
       return { stdout: "", stderr: "", exitCode: 0 };
     });
     const github = { createOrUpdate: vi.fn() };
-    await expect(
-      publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)
-    ).rejects.toThrow(/git commit failed/);
+    await expect(publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)).rejects.toThrow(
+      /git commit failed/
+    );
     expect(github.createOrUpdate).not.toHaveBeenCalled();
   });
 
@@ -180,13 +271,9 @@ describe("publishValidatedAttempt", () => {
       const runner = defaultGitRunner();
       const github = { createOrUpdate: vi.fn() };
 
-      await expect(
-        publishValidatedAttempt(
-          input({ remote, gitRunner: runner }),
-          testStore(),
-          github
-        )
-      ).rejects.toThrow(/configured remote name/);
+      await expect(publishValidatedAttempt(input({ remote, gitRunner: runner }), testStore(), github)).rejects.toThrow(
+        /configured remote name/
+      );
 
       expect(runner).not.toHaveBeenCalledWith(expect.arrayContaining([remote]));
       expect(github.createOrUpdate).not.toHaveBeenCalled();
@@ -200,15 +287,14 @@ describe("publishValidatedAttempt", () => {
       if (args[0] === "symbolic-ref") return { stdout: "acs/attempt/attempt-1\n", stderr: "", exitCode: 0 };
       if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "", exitCode: 0 };
       if (args[0] === "diff" && args.includes("--name-only")) return { stdout: "", stderr: "", exitCode: 0 };
-      if (args[0] === "ls-remote") return { stdout: "abc123\trefs/heads/acs/attempt/attempt-1\n", stderr: "", exitCode: 0 };
+      if (args[0] === "ls-remote")
+        return { stdout: "abc123\trefs/heads/acs/attempt/attempt-1\n", stderr: "", exitCode: 0 };
       return { stdout: "", stderr: "", exitCode: 0 };
     });
 
-    const record = await publishValidatedAttempt(
-      input({ remote: "origin", gitRunner: runner }),
-      testStore(),
-      { createOrUpdate: vi.fn(async () => ({ url: "https://github.com/acme/repo/pull/3" })) }
-    );
+    const record = await publishValidatedAttempt(input({ remote: "origin", gitRunner: runner }), testStore(), {
+      createOrUpdate: vi.fn(async () => ({ url: "https://github.com/acme/repo/pull/3" }))
+    });
 
     expect(record.commitSha).toBe("abc123");
     expect(calls).toContainEqual(["ls-remote", "--heads", "--", "origin", "acs/attempt/attempt-1"]);
@@ -219,14 +305,15 @@ describe("publishValidatedAttempt", () => {
     const runner: GitRunner = vi.fn(async (args: string[]): Promise<GitResult> => {
       if (args[0] === "symbolic-ref") return { stdout: "acs/attempt/attempt-1\n", stderr: "", exitCode: 0 };
       if (args[0] === "rev-parse") return { stdout: "abc123\n", stderr: "", exitCode: 0 };
-      if (args[0] === "diff" && args.includes("--name-only")) return { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
+      if (args[0] === "diff" && args.includes("--name-only"))
+        return { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
       if (args[0] === "push") return { stdout: "", stderr: "! [rejected] non-fast-forward", exitCode: 1 };
       return { stdout: "", stderr: "", exitCode: 0 };
     });
     const github = { createOrUpdate: vi.fn() };
-    await expect(
-      publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)
-    ).rejects.toThrow(/git push failed/);
+    await expect(publishValidatedAttempt(input({ gitRunner: runner }), testStore(), github)).rejects.toThrow(
+      /git push failed/
+    );
     expect(github.createOrUpdate).not.toHaveBeenCalled();
   });
 
@@ -283,9 +370,28 @@ describe("publishValidatedAttempt", () => {
   it("serializes concurrent callers so only one PR request occurs", async () => {
     const store = memoryStore();
     let release!: () => void;
-    const gate = new Promise<void>((resolve) => { release = resolve; });
-    const github = { createOrUpdate: vi.fn(async () => { release(); return { url: "https://github.com/acme/repo/pull/3" }; }) };
-    const first = publishValidatedAttempt(input({ gitRunner: async (args) => { if (args[0] === "status") await gate; if (args[0] === "symbolic-ref") return { stdout: "acs/attempt/attempt-1\n", stderr: "", exitCode: 0 }; return args[0] === "rev-parse" ? { stdout: "abc123\n", stderr: "", exitCode: 0 } : { stdout: "src/index.ts\n", stderr: "", exitCode: 0 }; } }), store, github);
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const github = {
+      createOrUpdate: vi.fn(async () => {
+        release();
+        return { url: "https://github.com/acme/repo/pull/3" };
+      })
+    };
+    const first = publishValidatedAttempt(
+      input({
+        gitRunner: async (args) => {
+          if (args[0] === "status") await gate;
+          if (args[0] === "symbolic-ref") return { stdout: "acs/attempt/attempt-1\n", stderr: "", exitCode: 0 };
+          return args[0] === "rev-parse"
+            ? { stdout: "abc123\n", stderr: "", exitCode: 0 }
+            : { stdout: "src/index.ts\n", stderr: "", exitCode: 0 };
+        }
+      }),
+      store,
+      github
+    );
     const second = publishValidatedAttempt(input(), store, github);
     release();
     const records = await Promise.all([first, second]);

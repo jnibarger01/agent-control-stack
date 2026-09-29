@@ -15,8 +15,8 @@ import {
   utcSpoolDay
 } from "./trace-outbox.js";
 
-// sha256 of trace-event.v1.schema.json from LoopTrace 49aca302a1c5f0d12813c73ca4149f2fc7afefd4
-const SCHEMA_PIN = "5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434";
+// sha256 of the source-first LoopTrace capability-evidence trace-event/1 schema
+const SCHEMA_PIN = "8b694731594466f5a83d6132df84a07421a472a1d618e34bf74259c9444051a0";
 const dirs: string[] = [];
 
 // The end-to-end replay test drives the real LoopTrace CLI, which lives in a
@@ -100,10 +100,11 @@ describe("trace outbox", () => {
         .get() as { n: number };
       expect(approvals).toEqual([{ status: "consumed" }]);
       expect(audit.n).toBe(2);
-      // The savepoint unwinds every trace write, so no partial trace state is left behind.
-      expect(outbox.n).toBe(0);
-      expect(missions.n).toBe(0);
-      expect(chain.n).toBe(0);
+      // The approval savepoint unwinds only the failed approval trace writes.
+      // The earlier run.received lifecycle fact remains intact.
+      expect(outbox.n).toBe(1);
+      expect(missions.n).toBe(1);
+      expect(chain.n).toBe(1);
     } finally {
       check.close();
     }
@@ -167,10 +168,11 @@ describe("trace outbox", () => {
         const approval = check.prepare(`SELECT approved_by FROM approval_records`).get() as { approved_by: string };
         // The canonical approval record keeps the raw approver; only the trace is normalised.
         expect(approval.approved_by).toBe(approvedBy);
-        const row = check.prepare(`SELECT work_item_id, canonical_json FROM trace_outbox`).get() as {
-          work_item_id: string;
-          canonical_json: string;
-        };
+        const row = check
+          .prepare(
+            `SELECT work_item_id, canonical_json FROM trace_outbox WHERE json_extract(canonical_json, '$.kind') = 'acs.approval.granted'`
+          )
+          .get() as { work_item_id: string; canonical_json: string };
         expect(row.work_item_id).toBe(itemId);
         const event = JSON.parse(row.canonical_json) as { actor: { id: string; type: string }; kind: string };
         expect(event.kind).toBe("acs.approval.granted");
@@ -247,7 +249,7 @@ describe("trace outbox", () => {
         expect(store.get(item.id)?.title).toBe("Trace approval");
         expect(store.list().map((entry) => entry.id)).toContain(item.id);
         expect(store.readEvents().map((event) => event.name)).toContain("work_item.created");
-        expect(store.getTraceEnqueueFailureCount()).toBe(0);
+        expect(store.getTraceEnqueueFailureCount()).toBe(1);
       } finally {
         store.close();
       }
@@ -265,11 +267,12 @@ describe("trace outbox", () => {
         const item = workItem(store);
         const grant = store.recordApproval({ workItemId: item.id, actionHash: "hash_test", approvedBy: "user" });
         store.consumeApproval(item.id, "hash_test", { requestHash: grant.requestHash });
-        expect(store.getTraceEnqueueFailureCount()).toBe(2);
+        expect(store.getTraceEnqueueFailureCount()).toBe(3);
       } finally {
         store.close();
       }
       expect(failures.map((failure) => [failure.kind, failure.code])).toEqual([
+        ["run.received", "trace_config_invalid"],
         ["acs.approval.granted", "trace_config_invalid"],
         ["acs.approval.consumed", "trace_config_invalid"]
       ]);
@@ -300,8 +303,9 @@ describe("trace outbox", () => {
         spy.mockRestore();
       }
       const lines = writes.filter((line) => line.includes("trace_outbox_enqueue_failed"));
-      expect(lines).toHaveLength(1);
-      expect(JSON.parse(lines[0]!)).toMatchObject({
+      expect(lines).toHaveLength(2);
+      expect(lines.map((line) => JSON.parse(line).kind)).toEqual(["run.received", "acs.approval.granted"]);
+      expect(JSON.parse(lines[1]!)).toMatchObject({
         level: "warn",
         event: "trace_outbox_enqueue_failed",
         kind: "acs.approval.granted",
@@ -363,7 +367,16 @@ describe("trace outbox", () => {
         .get() as { n: number };
       expect(orphans.n).toBe(0);
       expect(consumed.n).toBe(0);
-      expect((check.prepare(`SELECT count(*) AS n FROM trace_outbox`).get() as { n: number }).n).toBe(2);
+      expect((check.prepare(`SELECT count(*) AS n FROM trace_outbox`).get() as { n: number }).n).toBe(4);
+      expect(
+        (
+          check
+            .prepare(
+              `SELECT count(*) AS n FROM trace_outbox WHERE json_extract(canonical_json, '$.kind') = 'approval.decided'`
+            )
+            .get() as { n: number }
+        ).n
+      ).toBe(1);
     } finally {
       check.close();
     }
@@ -381,9 +394,9 @@ describe("trace outbox", () => {
     const midway = new DatabaseSync(dbPath);
     expect(
       (midway.prepare(`SELECT count(*) AS n FROM trace_outbox WHERE shipped_at IS NULL`).get() as { n: number }).n
-    ).toBe(1);
+    ).toBe(3);
     midway.close();
-    expect(relayTraceOutbox(dbPath, spool).shipped).toBe(1);
+    expect(relayTraceOutbox(dbPath, spool).shipped).toBe(3);
     const cli = LOOPTRACE_CLI;
     const storeDir = join(dir, "looptrace");
     const ingested = spawnSync(process.execPath, [cli, "ingest", "--once", "--spool", spool, "--store", storeDir], {
@@ -410,6 +423,7 @@ describe("trace outbox", () => {
     const item = workItem(store);
     store.close();
     const db = new DatabaseSync(dbPath);
+    db.exec("DELETE FROM trace_outbox; DELETE FROM trace_missions; DELETE FROM trace_chain_state;");
     const canonical = JSON.stringify({
       ts: "2026-01-01T02:00:00.000Z",
       source: { system: "acs" }
@@ -464,22 +478,37 @@ describe("trace outbox", () => {
       const rows = check
         .prepare(`SELECT seq, canonical_json FROM trace_outbox WHERE work_item_id = ? ORDER BY seq`)
         .all(item.id) as Array<{ seq: number; canonical_json: string }>;
-      expect(rows.map((row) => row.seq)).toEqual([1, 2]);
-      const first = JSON.parse(rows[0].canonical_json) as { trace_id: string; payload_hash: string };
-      const second = JSON.parse(rows[1].canonical_json) as {
-        trace_id: string;
-        prev_hash: string;
-        source: { instance: string };
-      };
-      expect(second.trace_id).toBe(first.trace_id);
-      expect(second.trace_id).toBe(missions[0].trace_id);
-      expect(second.prev_hash).toBe(createHash("sha256").update(rows[0].canonical_json).digest("hex"));
-      expect(second.source.instance).not.toBe(JSON.parse(rows[0].canonical_json).source.instance);
+      expect(rows.map((row) => row.seq)).toEqual([1, 2, 3, 4, 5]);
+      const parsed = rows.map(
+        (row) =>
+          JSON.parse(row.canonical_json) as {
+            trace_id: string;
+            prev_hash: string;
+            kind: string;
+            source: { instance: string };
+          }
+      );
+      expect(new Set(parsed.map((event) => event.trace_id))).toEqual(new Set([missions[0].trace_id]));
+      expect(parsed.map((event) => event.kind)).toEqual([
+        "run.received",
+        expect.stringMatching(/^(?:acs\.approval\.granted|approval\.decided)$/),
+        expect.stringMatching(/^(?:acs\.approval\.granted|approval\.decided)$/),
+        expect.stringMatching(/^(?:acs\.approval\.granted|approval\.decided)$/),
+        expect.stringMatching(/^(?:acs\.approval\.granted|approval\.decided)$/)
+      ]);
+      for (let index = 1; index < rows.length; index += 1) {
+        expect(parsed[index]?.prev_hash).toBe(
+          createHash("sha256")
+            .update(rows[index - 1].canonical_json)
+            .digest("hex")
+        );
+      }
+      expect(new Set(parsed.slice(1).map((event) => event.source.instance))).toEqual(new Set(["acs-a", "acs-b"]));
       const chains = check.prepare(`SELECT producer_key, seq FROM trace_chain_state`).all() as Array<{
         producer_key: string;
         seq: number;
       }>;
-      expect(chains).toEqual([{ producer_key: TRACE_CHAIN_PRODUCER_KEY, seq: 2 }]);
+      expect(chains).toEqual([{ producer_key: TRACE_CHAIN_PRODUCER_KEY, seq: 5 }]);
     } finally {
       check.close();
     }
@@ -505,7 +534,7 @@ describe("trace outbox", () => {
     try {
       expect(
         (check.prepare(`SELECT count(*) AS n FROM trace_outbox WHERE shipped_at IS NULL`).get() as { n: number }).n
-      ).toBe(1);
+      ).toBe(3);
     } finally {
       check.close();
     }
