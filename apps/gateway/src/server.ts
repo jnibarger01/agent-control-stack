@@ -498,7 +498,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.get("/livez", async () => ({ ok: true, status: "alive" }));
 
-  const readiness = async (_request: FastifyRequest, reply: FastifyReply) => {
+  const operationalReadiness = async (_request: FastifyRequest, reply: FastifyReply) => {
+    const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
+    const health = mergeSandboxReadyzCheck(workItems.readinessHealth(), sandboxCheck);
+    return reply.code(health.ok ? 200 : 503).send(health);
+  };
+
+  const deepHealth = async (_request: FastifyRequest, reply: FastifyReply) => {
     const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
     const initialHealth = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
     const dependencyChecks = Object.entries(initialHealth.checks)
@@ -521,8 +527,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
     return reply.code(health.ok ? 200 : 503).send(health);
   };
-  app.get("/readyz", readiness);
-  app.get("/health", readiness);
+  app.get("/readyz", operationalReadiness);
+  app.get("/health", deepHealth);
 
   const readAuthority = options.readManagedAuthority ?? (() => observeLiveManagedAuthority());
   const executionModeView = () => {

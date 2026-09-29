@@ -18,6 +18,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  completeRuntimeBootstrap,
+  dcRuntimeIdentityFromState,
+  injectRuntimeBootstrap,
+  issueRuntimeBootstrap,
+} from './managed.js';
 
 const ACS_CAPABILITY_META_KEY = 'capability';
 const ACS_GUARD_META_KEY = 'acsCapability';
@@ -134,7 +140,33 @@ if (!JC && MANAGED && (!ACS_DC_PUBLIC_KEY || !ACS_DC_KEY_ID)) {
 const ACS_BASE_URL = (process.env.ACS_GATEWAY_URL || '').replace(/\/+$/, '');
 const ACS_WORKER_TOKEN = process.env.ACS_WORKER_TOKEN || '';
 const ACS_WORKER_ID = process.env.ACS_WORKER_ID || 'acs-dc-bridge';
+const rawBootstrapTimeout = Number.parseInt(process.env.ACS_RUNTIME_BOOTSTRAP_TIMEOUT_MS || '350', 10);
+const ACS_RUNTIME_BOOTSTRAP_TIMEOUT_MS = Number.isFinite(rawBootstrapTimeout)
+  ? Math.max(100, Math.min(rawBootstrapTimeout, 500))
+  : 350;
+const rawInitializeTimeout = Number.parseInt(process.env.MCP_INITIALIZE_UPSTREAM_TIMEOUT_MS || '1000', 10);
+const MCP_INITIALIZE_UPSTREAM_TIMEOUT_MS = Number.isFinite(rawInitializeTimeout)
+  ? Math.max(250, Math.min(rawInitializeTimeout, 1200))
+  : 1000;
+const BRIDGE_RUNTIME_MANAGED = !JC && MANAGED && ACS_BASE_URL && ACS_WORKER_TOKEN
+  ? { enabled: true, acsGatewayUrl: ACS_BASE_URL, acsGatewayToken: ACS_WORKER_TOKEN, timeoutMs: ACS_RUNTIME_BOOTSTRAP_TIMEOUT_MS }
+  : null;
 const MAX_BODY = 2 * 1024 * 1024;
+const MAX_IGNORED_LATE_RESPONSES = 128;
+
+function rememberIgnoredLateResponse(target, upstreamId) {
+  target.ignoredResponseIds.add(upstreamId);
+  while (target.ignoredResponseIds.size > MAX_IGNORED_LATE_RESPONSES) {
+    const oldest = target.ignoredResponseIds.values().next().value;
+    target.ignoredResponseIds.delete(oldest);
+  }
+}
+
+function managedRuntimeIdentityForChild() {
+  if (!BRIDGE_RUNTIME_MANAGED) return null;
+  const childEntrypoint = path.isAbsolute(DC_ARGS[0]) ? DC_ARGS[0] : path.resolve(DC_CWD, DC_ARGS[0]);
+  return dcRuntimeIdentityFromState({ ...process.env, ACS_DC_ENTRYPOINT: childEntrypoint });
+}
 
 let pair = null; // { upstream, sessions, routes, initTail, initializedOnce }
 let spawnCount = 0;
@@ -278,7 +310,19 @@ function failClosed(reason, target = pair) {
     session.closed = true;
     session.transport.close().catch(() => {});
   }
-  target.sessions.clear(); target.routes.clear();
+  target.sessions.clear(); target.routes.clear(); target.ignoredResponseIds?.clear();
+}
+
+async function closeDownstreamSession(session) {
+  if (!session) return;
+  session.closed = true;
+  session.initializeResolve?.(false);
+  if (session.id && session.pair.sessions.get(session.id) === session) {
+    session.pair.sessions.delete(session.id);
+  }
+  for (const upstreamId of session.pending.values()) session.pair.routes.delete(upstreamId);
+  session.pending.clear();
+  await session.transport?.close().catch(() => {});
 }
 
 /**
@@ -298,33 +342,100 @@ async function forwardInitialize(session, msg, outbound) {
   }
 
   const upstreamId = `gw-init-${randomUUID()}`;
-  const expectedChallenge = msg?.params?._meta?.acsRuntimeBootstrap?.challenge;
   const completion = new Promise((resolve) => { session.initializeResolve = resolve; });
   session.initializePromise = completion;
+  let effectiveOutbound = outbound;
+  let expectedChallenge = msg?.params?._meta?.acsRuntimeBootstrap?.challenge;
+  let bridgeBootstrap = null;
+
+  // Auth-edge traffic already carries a runtime bootstrap. Direct loopback
+  // clients do not, so the bridge obtains the same ACS-issued challenge using
+  // its dedicated worker credential. This attests the runtime only; execution
+  // authority is still issued per governed tools/call by ACS.
+  if (MANAGED && !JC && !expectedChallenge) {
+    if (!BRIDGE_RUNTIME_MANAGED) {
+      await session.transport.send({
+        jsonrpc: '2.0', id: msg.id,
+        error: { code: -32603, message: 'managed runtime bootstrap unavailable' },
+      });
+      await closeDownstreamSession(session);
+      return false;
+    }
+    const identity = managedRuntimeIdentityForChild();
+    if (!identity) {
+      await session.transport.send({
+        jsonrpc: '2.0', id: msg.id,
+        error: { code: -32603, message: 'managed runtime identity unavailable' },
+      });
+      await closeDownstreamSession(session);
+      return false;
+    }
+    try {
+      const challenge = await issueRuntimeBootstrap(BRIDGE_RUNTIME_MANAGED, identity);
+      effectiveOutbound = injectRuntimeBootstrap(effectiveOutbound, challenge);
+      expectedChallenge = challenge.challenge;
+      bridgeBootstrap = { identity, challenge };
+    } catch (error) {
+      await session.transport.send({
+        jsonrpc: '2.0', id: msg.id,
+        error: {
+          code: -32603,
+          message: `managed runtime bootstrap failed (${error?.acsCode || 'runtime_bootstrap_failed'})`,
+        },
+      });
+      await closeDownstreamSession(session);
+      return false;
+    }
+  }
 
   const run = async () => {
     if (session.closed || target !== pair || session.pair !== target) {
       session.initializeResolve?.(false);
       return false;
     }
-    target.routes.set(upstreamId, {
+    const route = {
       session,
       downstreamId: msg.id,
       initialize: true,
       expectedChallenge,
-    });
+      bridgeBootstrap,
+      initializeTimer: null,
+    };
+    target.routes.set(upstreamId, route);
     session.pending.set(key, upstreamId);
-    outbound.id = upstreamId;
-    await target.startPromise;
+    effectiveOutbound.id = upstreamId;
+    lastDebug.last_upstream_message = effectiveOutbound;
+    route.initializeTimer = setTimeout(async () => {
+      if (target.routes.get(upstreamId) !== route || session.closed) return;
+      target.routes.delete(upstreamId);
+      session.pending.delete(key);
+      rememberIgnoredLateResponse(target, upstreamId);
+      try {
+        await session.transport.send({
+          jsonrpc: '2.0', id: msg.id,
+          error: { code: -32603, message: 'upstream initialize timeout' },
+        });
+      } catch { /* session teardown below is authoritative */ }
+      await closeDownstreamSession(session);
+    }, MCP_INITIALIZE_UPSTREAM_TIMEOUT_MS);
+    route.initializeTimer.unref?.();
+
+    const started = await Promise.race([
+      target.startPromise.then(() => true),
+      completion.then(() => false),
+    ]);
+    if (!started) return false;
     if (session.closed || target !== pair || session.pair !== target) {
+      clearTimeout(route.initializeTimer);
       target.routes.delete(upstreamId);
       session.pending.delete(key);
       session.initializeResolve?.(false);
       return false;
     }
     try {
-      await target.upstream.send(outbound);
+      await target.upstream.send(effectiveOutbound);
     } catch (error) {
+      clearTimeout(route.initializeTimer);
       target.routes.delete(upstreamId);
       session.pending.delete(key);
       session.initializeResolve?.(false);
@@ -390,15 +501,21 @@ function spawnPair() {
     upstream,
     sessions: new Map(),
     routes: new Map(),
+    ignoredResponseIds: new Set(),
     initTail: Promise.resolve(),
     initializedOnce: false,
   };
   upstream.onmessage = async (msg) => {
     if (isResponse(msg)) {
-      const route = next.routes.get(String(msg.id));
-      if (!route || !route.session) return failClosed(`orphan upstream response ${String(msg.id)}`, next);
+      const responseId = String(msg.id);
+      const route = next.routes.get(responseId);
+      if (!route || !route.session) {
+        if (next.ignoredResponseIds.delete(responseId)) return;
+        return failClosed(`orphan upstream response ${responseId}`, next);
+      }
       next.routes.delete(String(msg.id));
       route.session.pending.delete(idKey(route.downstreamId));
+      if (route.initializeTimer) clearTimeout(route.initializeTimer);
       if (route.session.closed) {
         if (route.initialize) route.session.initializeResolve?.(false);
         return;
@@ -418,8 +535,32 @@ function spawnPair() {
           } catch (error) {
             failClosed(`downstream initialize rejection delivery failed: ${error.message}`, next);
           }
-          route.session.initializeResolve?.(false);
+          await closeDownstreamSession(route.session);
           return;
+        }
+        if (route.bridgeBootstrap) {
+          try {
+            await completeRuntimeBootstrap(
+              BRIDGE_RUNTIME_MANAGED,
+              route.bridgeBootstrap.identity,
+              route.bridgeBootstrap.challenge,
+              response.result._meta.acsRuntimeIdentity,
+            );
+          } catch (error) {
+            try {
+              await route.session.transport.send({
+                jsonrpc: '2.0', id: route.downstreamId,
+                error: {
+                  code: -32603,
+                  message: `managed runtime bootstrap completion failed (${error?.acsCode || 'runtime_bootstrap_rejected'})`,
+                },
+              });
+            } catch (deliveryError) {
+              failClosed(`downstream bootstrap rejection delivery failed: ${deliveryError.message}`, next);
+            }
+            await closeDownstreamSession(route.session);
+            return;
+          }
         }
         next.initializedOnce = true;
       }
@@ -591,7 +732,13 @@ const httpServer = http.createServer(async (req, res) => {
   if (path === '/debug/last-headers') {
     const pendingCount = pair ? [...pair.sessions.values()].reduce((count, session) => count + session.pending.size, 0) : 0;
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ ...lastDebug, spawn_count: spawnCount, session_count: pair?.sessions.size || 0, pending_count: pendingCount }));
+    res.end(JSON.stringify({
+      ...lastDebug,
+      spawn_count: spawnCount,
+      session_count: pair?.sessions.size || 0,
+      pending_count: pendingCount,
+      route_count: pair?.routes.size || 0,
+    }));
     return;
   }
   if (path !== '/mcp') { res.writeHead(404, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ error: 'not_found' })); return; }

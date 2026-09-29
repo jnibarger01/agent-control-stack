@@ -1045,6 +1045,9 @@ export interface WorkItemStore {
     workspaceAllocationId: string;
   }): CommandAuthority | undefined;
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
+  /** Cheap readiness view: no full integrity scan or full audit-chain replay. */
+  readinessHealth(): StoreHealth;
+  /** Deep health view: recomputes database integrity, foreign keys, migrations, and the full audit chain. */
   health(): StoreHealth;
   verifyAuditChain(): AuditChainVerification;
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
@@ -1150,6 +1153,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private transactionDepth = 0;
   private pendingEvents: StoredAuditEvent[] = [];
   private auditChainValid = true;
+  private readinessDatabaseChecks!: Pick<
+    StoreHealth["checks"],
+    "integrity" | "foreignKeys" | "migrations" | "auditChain"
+  >;
   private readonly traceInstance: string;
   private readonly releaseSha: string;
   private readonly onTraceFailure: (failure: TraceEnqueueFailure) => void;
@@ -1178,7 +1185,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
     `);
     try {
       applyControlPlaneMigrations(this.db);
-      this.auditChainValid = this.verifyAuditChain().ok;
+      const initialHealth = inspectControlPlaneDatabase(this.db);
+      this.auditChainValid = initialHealth.checks.auditChain.ok;
+      this.readinessDatabaseChecks = { ...initialHealth.checks };
     } catch (error) {
       this.db.close();
       throw error;
@@ -3568,9 +3577,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return verifyAuditChain(this.readAllEvents());
   }
 
+  readinessHealth(): StoreHealth {
+    const checks = {
+      read: this.readHealth(),
+      write: this.writeHealth(),
+      ...this.readinessDatabaseChecks,
+      liveness: this.livenessHealth()
+    };
+    return { ok: Object.values(checks).every((check) => check.ok), checks };
+  }
+
   health(): StoreHealth {
     const database = inspectControlPlaneDatabase(this.db);
     this.auditChainValid = database.checks.auditChain.ok;
+    this.readinessDatabaseChecks = { ...database.checks };
     const checks = {
       read: this.readHealth(),
       write: this.writeHealth(),

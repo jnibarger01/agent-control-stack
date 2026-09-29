@@ -7,7 +7,23 @@ const rl = readline.createInterface({ input: process.stdin });
 rl.on('line', (line) => {
   let msg;
   try { msg = JSON.parse(line); } catch { return; }
-  if (msg.method !== 'initialize' || msg.id === undefined) return;
+  if (msg.id === undefined) return;
+  if (msg.method === 'tools/list') {
+    process.stdout.write(`${JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { tools: [] } })}\n`);
+    return;
+  }
+  if (msg.method === 'tools/call') {
+    const executionDelayMs = Number(msg.params?.arguments?.delayMs || 0);
+    setTimeout(() => {
+      process.stdout.write(`${JSON.stringify({
+        jsonrpc: '2.0',
+        id: msg.id,
+        result: { content: [{ type: 'text', text: 'done' }] },
+      })}\n`);
+    }, executionDelayMs);
+    return;
+  }
+  if (msg.method !== 'initialize') return;
   const bootstrap = msg.params?._meta?.acsRuntimeBootstrap;
   const result = {
     protocolVersion: msg.params?.protocolVersion || '2025-06-18',
