@@ -10,10 +10,15 @@ import {
   authorizeJaceCommanderExecution,
   jaceCommanderApprovalSummary,
   jaceCommanderSigningConfigFromEnv,
+  jaceCommanderToolPolicy,
+  jaceCommanderWorkItemIntent,
+  jaceCommanderWorkItemTitle,
   prepareJaceCommanderCapability,
   signPreparedJaceCommanderCapability,
   SqliteJaceCommanderIssuanceRegistry,
   validateJaceCommanderInvocation,
+  containJaceCommanderInvocation,
+  jaceCommanderContainmentFromEnv,
   validateJaceCommanderSigningConfig,
   type JaceCommanderExecutionAuthorization,
   type JaceCommanderInvocation,
@@ -36,6 +41,15 @@ import {
   type ContainmentConfig,
   type ExecutionAuthorization
 } from "@agent-control-stack/desktop-commander-adapter";
+import {
+  AdmissionError,
+  ExecutionAdmissionScheduler,
+  classifyAdmissionTool,
+  resolveExecutionAdmissionConfig,
+  type AdmissionEvent,
+  type AdmissionPermit,
+  type ExecutionAdmissionController
+} from "@agent-control-stack/execution-admission";
 import {
   projectAgents,
   renderDashboard,
@@ -63,6 +77,7 @@ import {
   readExecutionModeValue,
   type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
+import { ObservationWorker } from "@agent-control-stack/evidence";
 import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
   executionActionHash,
@@ -77,6 +92,7 @@ import {
   MAX_EVENT_LIMIT,
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
+  resolveTraceProducerConfig,
   validateHeartbeatTtl,
   WorkerIdentityRegistry,
   type ReadEventsOptions,
@@ -266,6 +282,12 @@ export interface GatewayOptions {
    * Must be a different key from the acs.dc.v1 key.
    */
   jaceCommanderCapability?: JaceCommanderSigningConfig | false;
+  /**
+   * Containment roots for path-bearing Jace Commander tools. Defaults to
+   * ACS_JACE_COMMANDER_ALLOWED_ROOTS / _DENIED_ROOTS; `false` or absent config
+   * makes every path-bearing JC tool fail closed (503) at issuance.
+   */
+  jaceCommanderContainment?: ContainmentConfig | false;
   /** Containment roots for the gateway-side Phase 6-8 re-authorization. */
   desktopCommanderContainment?: ContainmentConfig;
   /**
@@ -276,6 +298,8 @@ export interface GatewayOptions {
   readManagedAuthority?: () => ManagedAuthorityObservation;
   /** Shared shutdown gate; tests may inject one to assert claim drain behavior. */
   shutdownController?: ShutdownController;
+  /** Execution admission controller; tests may inject a deterministic controller. */
+  executionAdmission?: ExecutionAdmissionController;
 }
 
 /**
@@ -296,6 +320,9 @@ function withAttemptPlan(
 }
 
 export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
+  // Refuse to boot on an invalid ACS_TRACE_INSTANCE / ACS_RELEASE_SHA (trace_config_invalid)
+  // rather than discovering it inside an approval transaction (PR #212 B4, ADR 0021).
+  resolveTraceProducerConfig();
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
@@ -305,10 +332,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // bucket without rescanning every open client.
   const sseClientPrincipals = new Map<ServerResponse, string>();
   const sseClientsPerPrincipal = new Map<string, number>();
+  const jevObservationEnabled = process.env.ACS_JEV_ENABLED === "1";
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
-    heartbeatTtlMs
+    heartbeatTtlMs,
+    // The gateway is the one process that refuses to boot on a bad trace config.
+    traceConfigValidation: "eager",
+    observationEnabled: jevObservationEnabled
   });
+  const observationWorker = new ObservationWorker(workItems, { config: { enabled: jevObservationEnabled } });
+  observationWorker.start();
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
@@ -341,11 +374,148 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     );
   }
   const metrics = new GatewayMetrics();
+  function refreshAdmissionMetrics(): void {
+    const snapshot = executionAdmission.snapshot();
+    metrics.setGauge("acs_admission_active", snapshot.global.active, { class: "execution" });
+    metrics.setGauge("acs_admission_active", snapshot.wait.active, { class: "wait" });
+    metrics.setGauge("acs_admission_queue_depth", snapshot.global.queued, { class: "execution" });
+    metrics.setGauge("acs_admission_queue_depth", snapshot.wait.queued, { class: "wait" });
+    metrics.setGauge("acs_executor_inflight", snapshot.lanes.jc.active, { lane: "jc" });
+    metrics.setGauge("acs_executor_inflight", snapshot.lanes.dc.active, { lane: "dc" });
+  }
+  function recordAdmissionEvent(event: AdmissionEvent): void {
+    if (event.type === "admitted") {
+      metrics.observeDurationMs("acs_admission_wait_ms", event.waitMs, {
+        lane: event.lane,
+        class: event.executionClass
+      });
+    } else if (event.type === "released") {
+      metrics.observeDurationMs("acs_admission_service_ms", event.serviceMs, {
+        lane: event.lane,
+        class: event.executionClass
+      });
+    } else if (event.type === "cancelled") {
+      metrics.increment("acs_admission_cancelled_total", { lane: event.lane, class: event.executionClass });
+    } else {
+      metrics.increment("acs_admission_rejected_total", {
+        lane: event.lane,
+        class: event.executionClass,
+        reason: event.reason
+      });
+    }
+    refreshAdmissionMetrics();
+  }
+  const executionAdmission: ExecutionAdmissionController =
+    options.executionAdmission ??
+    new ExecutionAdmissionScheduler({ config: resolveExecutionAdmissionConfig(), onEvent: recordAdmissionEvent });
+  shutdownController.onShutdown(() => executionAdmission.shutdown());
+  const admissionPermits = new Map<
+    string,
+    {
+      permit: AdmissionPermit;
+      lane: "jc" | "dc";
+      workItemId: string;
+      leaseId: string;
+      workerId: string;
+      fencingEpoch: number;
+      actionHash: string;
+      planHash: string;
+      inputHash: string;
+    }
+  >();
+
+  async function acquireExecutionPermit(input: {
+    request: FastifyRequest;
+    reply: FastifyReply;
+    lane: "jc" | "dc";
+    executorId: string;
+    actorId: string;
+    toolName: string;
+  }): Promise<AdmissionPermit> {
+    const abort = new AbortController();
+    const onAbort = () => abort.abort();
+    input.request.raw.once("aborted", onAbort);
+    input.reply.raw.once("close", onAbort);
+    const enqueuedAt = Date.now();
+    try {
+      return await executionAdmission.acquire({
+        requestId: input.request.id,
+        lane: input.lane,
+        executorId: input.executorId,
+        actorId: input.actorId,
+        toolName: input.toolName,
+        executionClass: classifyAdmissionTool(input.lane, input.toolName),
+        enqueuedAt,
+        deadlineAt: Number.MAX_SAFE_INTEGER,
+        signal: abort.signal
+      });
+    } finally {
+      input.request.raw.removeListener("aborted", onAbort);
+      input.reply.raw.removeListener("close", onAbort);
+    }
+  }
+
+  function bindAdmissionPermit(input: {
+    attemptId: string;
+    permit: AdmissionPermit;
+    lane: "jc" | "dc";
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+  }): void {
+    if (admissionPermits.has(input.attemptId)) {
+      throw new Error(`execution admission permit already bound for attempt ${input.attemptId}`);
+    }
+    admissionPermits.set(input.attemptId, input);
+    refreshAdmissionMetrics();
+  }
+
+  function releaseAdmissionPermit(attemptId: string): boolean {
+    const binding = admissionPermits.get(attemptId);
+    if (!binding) return false;
+    admissionPermits.delete(attemptId);
+    binding.permit.release();
+    refreshAdmissionMetrics();
+    return true;
+  }
+
+  let admissionReconciliationMismatch = false;
+  function reconcileAdmissionAccounting(): void {
+    const activeLeaseCount = workItems.countActiveAttemptLeases();
+    const mismatch =
+      admissionPermits.size > activeLeaseCount ||
+      [...admissionPermits.entries()].some(([attemptId, binding]) => {
+        const lease = workItems.getActiveLeaseForAttempt(attemptId);
+        return !lease || lease.leaseId !== binding.leaseId || lease.workerId !== binding.workerId;
+      });
+    if (mismatch && !admissionReconciliationMismatch) {
+      metrics.increment("scheduler_runtime_reconciliation_required");
+      try {
+        workItems.recordSystemEvent({
+          name: "scheduler_runtime_reconciliation_required",
+          body: { admissionPermits: admissionPermits.size, activeAttemptLeases: activeLeaseCount },
+          attributes: {
+            "scheduler.admission_permits": admissionPermits.size,
+            "scheduler.active_attempt_leases": activeLeaseCount
+          }
+        });
+      } catch {
+        // Diagnostic only. Reconciliation telemetry must never affect execution authority.
+      }
+    }
+    admissionReconciliationMismatch = mismatch;
+  }
+
   const portfolioClient = options.portfolioClient ?? createPortfolioClientFromEnv();
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
   const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
+  const jcContainment = resolveJcContainment(options.jaceCommanderContainment);
   const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
   /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
   function recordLeaseAuthorizedExecutionEvent(
@@ -479,15 +649,26 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.get("/livez", async () => ({ ok: true, status: "alive" }));
+  app.get("/healthz", async () => ({ ok: true, status: "alive" }));
 
   const readiness = async (_request: FastifyRequest, reply: FastifyReply) => {
+    const execution = executionAdmission.snapshot();
+    const executionView = {
+      saturated: execution.saturated,
+      active: execution.global.active,
+      capacity: execution.global.capacity,
+      queued: execution.global.queued,
+      waitActive: execution.wait.active,
+      waitCapacity: execution.wait.capacity,
+      waitQueued: execution.wait.queued
+    };
     const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
     const initialHealth = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
     const dependencyChecks = Object.entries(initialHealth.checks)
       .filter(([name]) => name !== "liveness")
       .map(([, check]) => check);
     if (!dependencyChecks.every((check) => check.ok)) {
-      return reply.code(503).send(initialHealth);
+      return reply.code(503).send({ ...initialHealth, execution: executionView });
     }
     try {
       workItems.reconcileStaleTunnelSessions();
@@ -496,12 +677,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
       return reply.code(503).send({
         ...health,
+        execution: executionView,
         ok: false,
         checks: { ...health.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
       });
     }
     const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
-    return reply.code(health.ok ? 200 : 503).send(health);
+    return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
   };
   app.get("/readyz", readiness);
   app.get("/health", readiness);
@@ -564,7 +746,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
     const health = workItems.health();
     metrics.setSqliteReady(health.ok);
+    refreshAdmissionMetrics();
     return reply.type("text/plain; version=0.0.4").send(metrics.render());
+  });
+  app.get("/internal/execution-admission", { preHandler: requireRead }, async () => {
+    reconcileAdmissionAccounting();
+    refreshAdmissionMetrics();
+    return executionAdmission.snapshot();
   });
 
   app.post("/session/login", async (request, reply) => {
@@ -1490,181 +1678,209 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
-        const claimed = tools.claim_approved_work_item_by_id({
-          id: workItem.id,
-          workerId,
-          leaseMs: DC_BRIDGE_LEASE_MS
+        const admissionPermit = await acquireExecutionPermit({
+          request,
+          reply,
+          lane: "dc",
+          executorId: DC_BRIDGE_WORKER_ID,
+          actorId: `${dcActor}:${body.client_id}`,
+          toolName: body.tool
         });
-        if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
-          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply.code(409).send({
-            decision: "require_approval",
-            workItemId: workItem.id,
-            actionHash,
-            approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
-          });
-        }
-
-        const trustedWorkItem = workItems.get(workItem.id);
-        const lease = trustedWorkItem ? workItems.getActiveLeaseForAttempt(claimed.attemptId) : undefined;
-        if (!trustedWorkItem || !lease) {
-          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply
-            .code(503)
-            .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
-        }
-
-        let authorization: ExecutionAuthorization;
+        let admissionBound = false;
         try {
-          authorization = authorizeDesktopCommanderExecution({
-            claimed,
-            trustedWorkItem,
-            lease,
+          const claimed = tools.claim_approved_work_item_by_id({
+            id: workItem.id,
             workerId,
-            containment: dcContainment,
-            requestId: request.id,
-            invocation
+            leaseMs: DC_BRIDGE_LEASE_MS
           });
-        } catch (error) {
-          const code = error instanceof ControlStackError ? error.code : "authorization_failed";
-          try {
-            recordLeaseAuthorizedExecutionEvent(
-              {
-                workItemId: claimed.id,
-                attemptId: claimed.attemptId,
-                leaseId: claimed.leaseId,
-                workerId,
-                fencingEpoch: claimed.fencingEpoch
-              },
-              authorizationDeniedEvent({
-                workItemId: workItem.id,
-                workerId,
-                requestId: request.id,
-                toolName: body.tool,
-                attemptId: claimed.attemptId,
-                leaseId: claimed.leaseId,
-                fencingEpoch: claimed.fencingEpoch,
-                code,
-                reason: error instanceof Error ? error.message : String(error)
-              })
-            );
-          } catch {
-            // Lease authority may already have lapsed.
-          }
-          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply
-            .code(403)
-            .send({ decision: "deny", reason: "authorization_failed", code, workItemId: workItem.id });
-        }
-
-        let approvalActionHash: string | undefined;
-        if (dcPolicy.requiresApproval) {
-          const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
-          if (!approval) {
-            recordLeaseAuthorizedExecutionEvent(
-              authorization,
-              capabilityDeniedEvent({
-                auth: authorization,
-                runtimeId: capabilitySigningConfig.runtimeId,
-                code: "desktop_commander_approval_rejected"
-              })
-            );
+          if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-            return reply.code(403).send({
-              decision: "deny",
-              reason: "issuance_rejected",
-              code: "approval_binding_missing",
-              workItemId: workItem.id
+            return reply.code(409).send({
+              decision: "require_approval",
+              workItemId: workItem.id,
+              actionHash,
+              approvalInstructions: `POST /work-items/${workItem.id}/approve with actionHash ${actionHash}`
             });
           }
-          approvalActionHash = approval.actionHash;
-        }
-        if (approvalActionHash !== undefined) {
-          authorization = { ...authorization, approvalActionHash } as ExecutionAuthorization;
-        }
 
-        const payloadActionHash = approvalActionHash ?? claimed.actionHash;
-        const requestHash = executionPlanApprovalRequestHash({
-          workItemId: workItem.id,
-          planHash: claimed.planHash,
-          actionHash: payloadActionHash
-        });
-        const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
+          const trustedWorkItem = workItems.get(workItem.id);
+          const lease = trustedWorkItem ? workItems.getActiveLeaseForAttempt(claimed.attemptId) : undefined;
+          if (!trustedWorkItem || !lease) {
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply
+              .code(503)
+              .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
+          }
 
-        try {
-          const recorded = capabilityIssuanceRegistry.recordIssuance({
-            runtimeId: payload.runtimeId,
-            identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
-            leaseId: payload.leaseId,
+          let authorization: ExecutionAuthorization;
+          try {
+            authorization = authorizeDesktopCommanderExecution({
+              claimed,
+              trustedWorkItem,
+              lease,
+              workerId,
+              containment: dcContainment,
+              requestId: request.id,
+              invocation
+            });
+          } catch (error) {
+            const code = error instanceof ControlStackError ? error.code : "authorization_failed";
+            try {
+              recordLeaseAuthorizedExecutionEvent(
+                {
+                  workItemId: claimed.id,
+                  attemptId: claimed.attemptId,
+                  leaseId: claimed.leaseId,
+                  workerId,
+                  fencingEpoch: claimed.fencingEpoch
+                },
+                authorizationDeniedEvent({
+                  workItemId: workItem.id,
+                  workerId,
+                  requestId: request.id,
+                  toolName: body.tool,
+                  attemptId: claimed.attemptId,
+                  leaseId: claimed.leaseId,
+                  fencingEpoch: claimed.fencingEpoch,
+                  code,
+                  reason: error instanceof Error ? error.message : String(error)
+                })
+              );
+            } catch {
+              // Lease authority may already have lapsed.
+            }
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply
+              .code(403)
+              .send({ decision: "deny", reason: "authorization_failed", code, workItemId: workItem.id });
+          }
+
+          let approvalActionHash: string | undefined;
+          if (dcPolicy.requiresApproval) {
+            const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
+            if (!approval) {
+              recordLeaseAuthorizedExecutionEvent(
+                authorization,
+                capabilityDeniedEvent({
+                  auth: authorization,
+                  runtimeId: capabilitySigningConfig.runtimeId,
+                  code: "desktop_commander_approval_rejected"
+                })
+              );
+              recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                reason: "issuance_rejected",
+                code: "approval_binding_missing",
+                workItemId: workItem.id
+              });
+            }
+            approvalActionHash = approval.actionHash;
+          }
+          if (approvalActionHash !== undefined) {
+            authorization = { ...authorization, approvalActionHash } as ExecutionAuthorization;
+          }
+
+          const payloadActionHash = approvalActionHash ?? claimed.actionHash;
+          const requestHash = executionPlanApprovalRequestHash({
+            workItemId: workItem.id,
+            planHash: claimed.planHash,
+            actionHash: payloadActionHash
+          });
+          const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
+
+          try {
+            const recorded = capabilityIssuanceRegistry.recordIssuance({
+              runtimeId: payload.runtimeId,
+              identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint,
+              leaseId: payload.leaseId,
+              attemptId: payload.attemptId,
+              workItemId: payload.workItemId,
+              workerId,
+              fencingEpoch: payload.leaseEpoch,
+              planHash: payload.planHash,
+              actionHash: payload.actionHash,
+              invocationHash: payload.invocationHash,
+              requiredScopes: payload.scopes,
+              approvalRequired: dcPolicy.requiresApproval,
+              approvalId: payload.approvalId,
+              keyId: capabilitySigningConfig.keyId,
+              nonce: payload.nonce,
+              issuedAt: payload.issuedAt,
+              expiresAt: payload.expiresAt
+            });
+            if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
+              throw new ControlStackError(
+                "desktop_commander_capability_issuance_rejected",
+                "issuance binding does not match capability payload"
+              );
+            }
+          } catch (error) {
+            const code =
+              error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
+            try {
+              recordLeaseAuthorizedExecutionEvent(
+                authorization,
+                capabilityDeniedEvent({ auth: authorization, runtimeId: payload.runtimeId, code })
+              );
+            } catch {
+              // Lease authority may already have lapsed.
+            }
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply
+              .code(403)
+              .send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
+          }
+
+          try {
+            const issuanceEvent = capabilityIssuedEvent({
+              auth: authorization,
+              runtimeId: payload.runtimeId,
+              keyId: capabilitySigningConfig.keyId,
+              requestHash: payload.requestHash,
+              expiresAt: payload.expiresAt
+            });
+            recordLeaseAuthorizedExecutionEvent(authorization, issuanceEvent);
+          } catch (error) {
+            return reply.code(503).send({
+              error: "capability evidence could not be committed",
+              code: "capability_evidence_unavailable",
+              detail: error instanceof Error ? error.message : String(error)
+            });
+          }
+
+          const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
+          bindAdmissionPermit({
             attemptId: payload.attemptId,
+            permit: admissionPermit,
+            lane: "dc",
             workItemId: payload.workItemId,
+            leaseId: payload.leaseId,
             workerId,
             fencingEpoch: payload.leaseEpoch,
+            actionHash: claimed.actionHash,
+            planHash: payload.planHash,
+            inputHash: claimed.inputHash
+          });
+          admissionBound = true;
+          return {
+            decision: "allow",
+            capability,
+            workItemId: workItem.id,
+            attemptId: payload.attemptId,
+            leaseId: payload.leaseId,
+            leaseEpoch: payload.leaseEpoch,
             planHash: payload.planHash,
             actionHash: payload.actionHash,
+            claimActionHash: claimed.actionHash,
+            inputHash: claimed.inputHash,
             invocationHash: payload.invocationHash,
-            requiredScopes: payload.scopes,
-            approvalRequired: dcPolicy.requiresApproval,
-            approvalId: payload.approvalId,
-            keyId: capabilitySigningConfig.keyId,
-            nonce: payload.nonce,
-            issuedAt: payload.issuedAt,
-            expiresAt: payload.expiresAt
-          });
-          if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
-            throw new ControlStackError(
-              "desktop_commander_capability_issuance_rejected",
-              "issuance binding does not match capability payload"
-            );
-          }
-        } catch (error) {
-          const code =
-            error instanceof ControlStackError ? error.code : "desktop_commander_capability_issuance_rejected";
-          try {
-            recordLeaseAuthorizedExecutionEvent(
-              authorization,
-              capabilityDeniedEvent({ auth: authorization, runtimeId: payload.runtimeId, code })
-            );
-          } catch {
-            // Lease authority may already have lapsed.
-          }
-          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply.code(403).send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
+            workerId
+          };
+        } finally {
+          if (!admissionBound) admissionPermit.release();
         }
-
-        try {
-          const issuanceEvent = capabilityIssuedEvent({
-            auth: authorization,
-            runtimeId: payload.runtimeId,
-            keyId: capabilitySigningConfig.keyId,
-            requestHash: payload.requestHash,
-            expiresAt: payload.expiresAt
-          });
-          recordLeaseAuthorizedExecutionEvent(authorization, issuanceEvent);
-        } catch (error) {
-          return reply.code(503).send({
-            error: "capability evidence could not be committed",
-            code: "capability_evidence_unavailable",
-            detail: error instanceof Error ? error.message : String(error)
-          });
-        }
-
-        const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
-        recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
-        return {
-          decision: "allow",
-          capability,
-          workItemId: workItem.id,
-          attemptId: payload.attemptId,
-          leaseId: payload.leaseId,
-          leaseEpoch: payload.leaseEpoch,
-          planHash: payload.planHash,
-          actionHash: payload.actionHash,
-          claimActionHash: claimed.actionHash,
-          inputHash: claimed.inputHash,
-          invocationHash: payload.invocationHash,
-          workerId
-        };
       } catch (error) {
         return sendError(reply, error);
       }
@@ -1694,9 +1910,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             code: "jc_bridge_identity_required"
           });
         }
-        const jcActor = firstHeader(request.headers["x-dc-actor"]);
+        // The edge's /jc/mcp lane attests the requester as `x-jc-actor`
+        // (apps/dc-mcp-gateway/managed.js); `x-dc-actor` is still accepted for
+        // older callers. Both are honored only from the authenticated
+        // acs-jc-bridge identity checked above; if both are sent they must agree.
+        const jcActorHeader = firstHeader(request.headers["x-jc-actor"]);
+        const legacyActorHeader = firstHeader(request.headers["x-dc-actor"]);
+        if (jcActorHeader && legacyActorHeader && jcActorHeader !== legacyActorHeader) {
+          return reply.code(400).send({ error: "conflicting actor headers", code: "jc_actor_invalid" });
+        }
+        const jcActor = jcActorHeader ?? legacyActorHeader;
         if (!jcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(jcActor)) {
-          return reply.code(400).send({ error: "x-dc-actor header is required", code: "jc_actor_invalid" });
+          return reply.code(400).send({ error: "x-jc-actor header is required", code: "jc_actor_invalid" });
         }
         const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
         if (!jcSigningConfig) {
@@ -1729,6 +1954,28 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         }
 
         const toolPolicy = invocation.policy;
+        if (toolPolicy.pathArguments.length > 0) {
+          // ACS is the containment authority for filesystem tools: no roots
+          // configured means no filesystem capability is ever signed.
+          if (!jcContainment) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied");
+            return reply.code(503).send({
+              error: "jace-commander filesystem containment not configured",
+              code: "jace_commander_containment_unconfigured"
+            });
+          }
+          try {
+            containJaceCommanderInvocation(invocation, jcContainment);
+          } catch (error) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied");
+            return reply.code(403).send({
+              decision: "deny",
+              reason: "path_not_allowed",
+              code: error instanceof ControlStackError ? error.code : "jace_commander_path_invalid",
+              ...(error instanceof ControlStackError ? { detail: error.message.slice(0, 512) } : {})
+            });
+          }
+        }
         const bindingHash = stableHash({
           contract: "acs.jc.v1",
           tool: invocation.toolName,
@@ -1761,11 +2008,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           existing ??
           tools.create_work_item(
             createWorkItemSchema.parse({
-              title:
-                invocation.toolName === "privileged_exec"
-                  ? `ROOT: ${String((invocation.arguments.argv as string[]).join(" ")).slice(0, 180)}`
-                  : `Jace Commander capability: ${invocation.toolName}`,
-              intent: `ACS-issued acs.jc.v1 capability for Jace Commander tool ${invocation.toolName} requested by ${jcActor}`,
+              // Approvers see what they approve: title and intent carry the
+              // bounded, redacted argument summary for approval-gated tools.
+              title: jaceCommanderWorkItemTitle(invocation),
+              intent: jaceCommanderWorkItemIntent(invocation, jcActor),
               requester: "agent",
               requesterSubject: jcActor,
               target: {},
@@ -1820,150 +2066,179 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
-        const claimed = tools.claim_approved_work_item_by_id({
-          id: workItem.id,
-          workerId,
-          leaseMs: JC_BRIDGE_LEASE_MS
+        const admissionPermit = await acquireExecutionPermit({
+          request,
+          reply,
+          lane: "jc",
+          executorId: JC_BRIDGE_WORKER_ID,
+          actorId: `${jcActor}:${body.client_id}`,
+          toolName: invocation.toolName
         });
-        if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
-          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-          return reply.code(409).send({
-            decision: "require_approval",
-            workItemId: workItem.id,
-            actionHash,
-            approvalInstructions: `A human must POST /work-items/${workItem.id}/approve with actionHash ${actionHash}, then retry the identical call`
+        let admissionBound = false;
+        try {
+          const claimed = tools.claim_approved_work_item_by_id({
+            id: workItem.id,
+            workerId,
+            leaseMs: JC_BRIDGE_LEASE_MS
           });
-        }
-        workItem = workItems.get(workItem.id) ?? workItem;
-        const lease = workItems.getActiveLeaseForAttempt(claimed.attemptId);
-        if (!lease) {
-          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-          return reply
-            .code(503)
-            .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
-        }
-
-        const authority = {
-          workItemId: claimed.id,
-          attemptId: claimed.attemptId,
-          leaseId: claimed.leaseId,
-          workerId,
-          fencingEpoch: claimed.fencingEpoch
-        };
-        const deny = (code: string, status = 403) => {
-          try {
-            recordLeaseAuthorizedExecutionEvent(authority, {
-              name: "jace_commander.capability_denied",
-              body: { tool: invocation.toolName, code, requestId: request.id },
-              attributes: {
-                "jace_commander.tool": invocation.toolName,
-                "jace_commander.invocation_hash": invocation.invocationHash,
-                "jace_commander.denial_code": code
-              }
+          if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+            return reply.code(409).send({
+              decision: "require_approval",
+              workItemId: workItem.id,
+              actionHash,
+              approvalSummary: jaceCommanderApprovalSummary(invocation),
+              approvalInstructions: `A human must POST /work-items/${workItem.id}/approve with actionHash ${actionHash}, then retry the identical call`
             });
-          } catch {
-            // Lease authority may already have lapsed.
           }
-          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-          return reply
-            .code(status)
-            .send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
-        };
+          workItem = workItems.get(workItem.id) ?? workItem;
+          const lease = workItems.getActiveLeaseForAttempt(claimed.attemptId);
+          if (!lease) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+            return reply
+              .code(503)
+              .send({ error: "canonical execution authority unavailable", code: "execution_authority_unavailable" });
+          }
 
-        let authorization: JaceCommanderExecutionAuthorization;
-        try {
-          authorization = authorizeJaceCommanderExecution({
-            claimed,
-            trustedWorkItem: workItem,
-            lease,
+          const authority = {
+            workItemId: claimed.id,
+            attemptId: claimed.attemptId,
+            leaseId: claimed.leaseId,
             workerId,
-            invocation
-          });
-        } catch (error) {
-          return deny(error instanceof ControlStackError ? error.code : "authorization_failed");
-        }
-        if (toolPolicy.requiresApproval) {
-          const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
-          if (!approval) return deny("approval_binding_missing");
-          authorization = {
-            ...authorization,
-            approvalActionHash: approval.actionHash
-          } as JaceCommanderExecutionAuthorization;
-        }
+            fencingEpoch: claimed.fencingEpoch
+          };
+          const deny = (code: string, status = 403) => {
+            try {
+              recordLeaseAuthorizedExecutionEvent(authority, {
+                name: "jace_commander.capability_denied",
+                body: { tool: invocation.toolName, code, requestId: request.id },
+                attributes: {
+                  "jace_commander.tool": invocation.toolName,
+                  "jace_commander.invocation_hash": invocation.invocationHash,
+                  "jace_commander.denial_code": code
+                }
+              });
+            } catch {
+              // Lease authority may already have lapsed.
+            }
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+            return reply
+              .code(status)
+              .send({ decision: "deny", reason: "issuance_rejected", code, workItemId: workItem.id });
+          };
 
-        const payload = prepareJaceCommanderCapability(authorization, jcSigningConfig);
-        try {
-          const recorded = jcIssuanceRegistry.recordIssuance({
-            runtimeId: payload.runtimeId,
-            toolName: payload.toolName,
-            leaseId: payload.leaseId,
-            attemptId: payload.attemptId,
-            workItemId: payload.workItemId,
-            workerId,
-            fencingEpoch: payload.leaseEpoch,
-            planHash: payload.planHash,
-            actionHash: payload.actionHash,
-            invocationHash: payload.invocationHash,
-            approvalId: payload.approvalId,
-            requesterSubject: jcActor,
-            keyId: jcSigningConfig.keyId,
-            nonce: payload.nonce,
-            issuedAt: payload.issuedAt,
-            expiresAt: payload.expiresAt
-          });
-          if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
-            throw new ControlStackError(
-              "jace_commander_capability_issuance_rejected",
-              "issuance binding does not match capability payload"
+          let authorization: JaceCommanderExecutionAuthorization;
+          try {
+            authorization = authorizeJaceCommanderExecution({
+              claimed,
+              trustedWorkItem: workItem,
+              lease,
+              workerId,
+              invocation
+            });
+          } catch (error) {
+            return deny(error instanceof ControlStackError ? error.code : "authorization_failed");
+          }
+          if (toolPolicy.requiresApproval) {
+            const approval = lease.approvalId ? workItems.getExecutionPlanApprovalById(lease.approvalId) : undefined;
+            if (!approval) return deny("approval_binding_missing");
+            authorization = {
+              ...authorization,
+              approvalActionHash: approval.actionHash
+            } as JaceCommanderExecutionAuthorization;
+          }
+
+          const payload = prepareJaceCommanderCapability(authorization, jcSigningConfig);
+          try {
+            const recorded = jcIssuanceRegistry.recordIssuance({
+              runtimeId: payload.runtimeId,
+              toolName: payload.toolName,
+              leaseId: payload.leaseId,
+              attemptId: payload.attemptId,
+              workItemId: payload.workItemId,
+              workerId,
+              fencingEpoch: payload.leaseEpoch,
+              planHash: payload.planHash,
+              actionHash: payload.actionHash,
+              invocationHash: payload.invocationHash,
+              approvalId: payload.approvalId,
+              requesterSubject: jcActor,
+              keyId: jcSigningConfig.keyId,
+              nonce: payload.nonce,
+              issuedAt: payload.issuedAt,
+              expiresAt: payload.expiresAt
+            });
+            if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
+              throw new ControlStackError(
+                "jace_commander_capability_issuance_rejected",
+                "issuance binding does not match capability payload"
+              );
+            }
+          } catch (error) {
+            return deny(
+              error instanceof ControlStackError ? error.code : "jace_commander_capability_issuance_rejected"
             );
           }
-        } catch (error) {
-          return deny(error instanceof ControlStackError ? error.code : "jace_commander_capability_issuance_rejected");
-        }
 
-        try {
-          recordLeaseAuthorizedExecutionEvent(authority, {
-            name: "jace_commander.capability_issued",
-            body: {
-              tool: payload.toolName,
-              runtimeId: payload.runtimeId,
-              keyId: jcSigningConfig.keyId,
-              requestHash: payload.requestHash,
-              expiresAt: payload.expiresAt,
-              ...(payload.approvalId ? { approvalId: payload.approvalId } : {})
-            },
-            attributes: {
-              "jace_commander.tool": payload.toolName,
-              "jace_commander.invocation_hash": payload.invocationHash,
-              "jace_commander.runtime_id": payload.runtimeId,
-              "execution.request_hash": payload.requestHash,
-              ...(payload.approvalId ? { "approval.id": payload.approvalId } : {})
-            }
-          });
-        } catch (error) {
-          return reply.code(503).send({
-            error: "capability evidence could not be committed",
-            code: "capability_evidence_unavailable",
-            detail: error instanceof Error ? error.message : String(error)
-          });
-        }
+          try {
+            recordLeaseAuthorizedExecutionEvent(authority, {
+              name: "jace_commander.capability_issued",
+              body: {
+                tool: payload.toolName,
+                runtimeId: payload.runtimeId,
+                keyId: jcSigningConfig.keyId,
+                requestHash: payload.requestHash,
+                expiresAt: payload.expiresAt,
+                ...(payload.approvalId ? { approvalId: payload.approvalId } : {})
+              },
+              attributes: {
+                "jace_commander.tool": payload.toolName,
+                "jace_commander.invocation_hash": payload.invocationHash,
+                "jace_commander.runtime_id": payload.runtimeId,
+                "execution.request_hash": payload.requestHash,
+                ...(payload.approvalId ? { "approval.id": payload.approvalId } : {})
+              }
+            });
+          } catch (error) {
+            return reply.code(503).send({
+              error: "capability evidence could not be committed",
+              code: "capability_evidence_unavailable",
+              detail: error instanceof Error ? error.message : String(error)
+            });
+          }
 
-        const capability = signPreparedJaceCommanderCapability(payload, jcSigningConfig);
-        recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
-        return {
-          decision: "allow",
-          capability,
-          workItemId: workItem.id,
-          attemptId: payload.attemptId,
-          leaseId: payload.leaseId,
-          leaseEpoch: payload.leaseEpoch,
-          planHash: payload.planHash,
-          actionHash: payload.actionHash,
-          claimActionHash: claimed.actionHash,
-          inputHash: claimed.inputHash,
-          invocationHash: payload.invocationHash,
-          workerId
-        };
+          const capability = signPreparedJaceCommanderCapability(payload, jcSigningConfig);
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
+          bindAdmissionPermit({
+            attemptId: payload.attemptId,
+            permit: admissionPermit,
+            lane: "jc",
+            workItemId: payload.workItemId,
+            leaseId: payload.leaseId,
+            workerId,
+            fencingEpoch: payload.leaseEpoch,
+            actionHash: claimed.actionHash,
+            planHash: payload.planHash,
+            inputHash: claimed.inputHash
+          });
+          admissionBound = true;
+          return {
+            decision: "allow",
+            capability,
+            workItemId: workItem.id,
+            attemptId: payload.attemptId,
+            leaseId: payload.leaseId,
+            leaseEpoch: payload.leaseEpoch,
+            planHash: payload.planHash,
+            actionHash: payload.actionHash,
+            claimActionHash: claimed.actionHash,
+            inputHash: claimed.inputHash,
+            invocationHash: payload.invocationHash,
+            workerId
+          };
+        } finally {
+          if (!admissionBound) admissionPermit.release();
+        }
       } catch (error) {
         return sendError(reply, error);
       }
@@ -2079,17 +2354,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!workItem) {
         return reply.code(404).send({ error: "work item not found" });
       }
-      const dcTool =
-        typeof workItem.requestedActions[0]?.params?.tool === "string"
-          ? workItem.requestedActions[0].params.tool
-          : undefined;
-      if (
-        workItem.requesterSubject === actor &&
-        dcTool &&
-        desktopCommanderToolPolicy(dcTool)?.requiresApproval === true
-      ) {
+      const toolParams = workItem.requestedActions[0]?.params;
+      const dcTool = typeof toolParams?.tool === "string" ? toolParams.tool : undefined;
+      // Jace Commander (acs.jc.v1) items carry their contract; every tool the
+      // JC manifest marks requiresApproval is covered, not only the tools that
+      // also happen to have a Desktop Commander policy.
+      const approvalGatedTool =
+        dcTool !== undefined &&
+        (toolParams?.contract === "acs.jc.v1"
+          ? jaceCommanderToolPolicy(dcTool)?.requiresApproval === true
+          : desktopCommanderToolPolicy(dcTool)?.requiresApproval === true);
+      if (workItem.requesterSubject === actor && approvalGatedTool) {
         return reply.code(403).send({
-          error: "requester cannot approve its own Desktop Commander operation",
+          error:
+            toolParams?.contract === "acs.jc.v1"
+              ? "requester cannot approve its own Jace Commander operation"
+              : "requester cannot approve its own Desktop Commander operation",
           code: "approval_self_denied"
         });
       }
@@ -2164,18 +2444,33 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         if (body.outcome === "blocked" || body.outcome === "lease_expired") {
           return reply.code(403).send({ error: "ACS-derived outcomes are not worker-submittable", code: "forbidden" });
         }
-        const replay = workItems.getExecutionResultForIdempotency(body.workerId, body.idempotencyKey);
-        const workItem = workItems.submitWorkResult(body);
-        const resultId = typeof workItem.result?.resultId === "string" ? workItem.result.resultId : undefined;
-        const result = resultId ? workItems.getExecutionResult(resultId) : undefined;
-        if (!result) {
-          throw new ControlStackError("result_persistence_failed", "accepted result could not be read back");
-        }
-        request.log.info(
-          { requestId: request.id, workItemId: body.workItemId, workerId: body.workerId, resultId: result.resultId },
-          "worker result accepted"
+        const admissionBinding = body.attemptId ? admissionPermits.get(body.attemptId) : undefined;
+        const releasesAdmission = Boolean(
+          admissionBinding &&
+          admissionBinding.workItemId === body.workItemId &&
+          admissionBinding.leaseId === body.leaseId &&
+          admissionBinding.workerId === body.workerId &&
+          admissionBinding.fencingEpoch === body.fencingEpoch &&
+          admissionBinding.actionHash === body.actionHash &&
+          admissionBinding.planHash === body.planHash &&
+          admissionBinding.inputHash === body.inputHash
         );
-        return reply.code(replay ? 200 : 201).send({ result, workItem });
+        try {
+          const replay = workItems.getExecutionResultForIdempotency(body.workerId, body.idempotencyKey);
+          const workItem = workItems.submitWorkResult(body);
+          const resultId = typeof workItem.result?.resultId === "string" ? workItem.result.resultId : undefined;
+          const result = resultId ? workItems.getExecutionResult(resultId) : undefined;
+          if (!result) {
+            throw new ControlStackError("result_persistence_failed", "accepted result could not be read back");
+          }
+          request.log.info(
+            { requestId: request.id, workItemId: body.workItemId, workerId: body.workerId, resultId: result.resultId },
+            "worker result accepted"
+          );
+          return reply.code(replay ? 200 : 201).send({ result, workItem });
+        } finally {
+          if (releasesAdmission && body.attemptId) releaseAdmissionPermit(body.attemptId);
+        }
       } catch (error) {
         request.log.warn(
           {
@@ -2278,6 +2573,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.addHook("onClose", async () => {
+    executionAdmission.shutdown();
+    for (const attemptId of [...admissionPermits.keys()]) releaseAdmissionPermit(attemptId);
+    await observationWorker.stop();
     await acpAdapter?.stop();
     executionReads.close();
     deviceAuthStore.close();
@@ -2398,6 +2696,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 function sendError(reply: FastifyReply, error: unknown) {
   if (error instanceof ZodError) {
     return reply.code(400).send({ error: "invalid request" });
+  }
+  if (error instanceof AdmissionError) {
+    const status = error.code === "queue_full" ? 429 : 503;
+    if (error.retryAfterMs !== undefined) {
+      reply.header("retry-after", String(Math.max(1, Math.ceil(error.retryAfterMs / 1_000))));
+    }
+    return reply.code(status).send({
+      error: error.message,
+      code: error.code,
+      ...(error.retryAfterMs !== undefined ? { retry_after_ms: error.retryAfterMs } : {})
+    });
   }
   if (error instanceof ControlStackError) {
     const status =
@@ -2556,6 +2865,17 @@ function resolveCapabilitySigningConfig(
   } catch {
     // Partially/incorrectly configured Desktop Commander capability env must
     // not crash gateway startup; the endpoint fails closed with 503 instead.
+    return undefined;
+  }
+}
+
+function resolveJcContainment(override: ContainmentConfig | false | undefined): ContainmentConfig | undefined {
+  if (override === false) return undefined;
+  if (override) return override;
+  try {
+    return jaceCommanderContainmentFromEnv();
+  } catch {
+    // Invalid roots: fail closed for filesystem tools, keep the rest serving.
     return undefined;
   }
 }

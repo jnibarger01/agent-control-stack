@@ -127,6 +127,24 @@ export function desktopCommanderContainmentFromEnv(env: NodeJS.ProcessEnv = proc
 }
 
 /**
+ * Containment roots for Jace Commander filesystem tools
+ * (ACS_JACE_COMMANDER_ALLOWED_ROOTS / ACS_JACE_COMMANDER_DENIED_ROOTS),
+ * separate from Desktop Commander's. Returns `undefined` when no allow root
+ * is configured: the issuance route then refuses every path-bearing JC tool
+ * (fail closed) while the non-filesystem tools keep working.
+ */
+export function jaceCommanderContainmentFromEnv(env: NodeJS.ProcessEnv = process.env):
+  | { allowedRoots: string[]; deniedRoots: string[] }
+  | undefined {
+  const allowedRoots = parseRoots(env.ACS_JACE_COMMANDER_ALLOWED_ROOTS, "ACS_JACE_COMMANDER_ALLOWED_ROOTS");
+  if (allowedRoots.length === 0) return undefined;
+  return {
+    allowedRoots,
+    deniedRoots: parseRoots(env.ACS_JACE_COMMANDER_DENIED_ROOTS, "ACS_JACE_COMMANDER_DENIED_ROOTS")
+  };
+}
+
+/**
  * Build the adapter config from environment. Returns `undefined` when Desktop
  * Commander execution is not configured at all, so callers can stay dry-run.
  * Throws (fail closed) when it is partially/incorrectly configured.

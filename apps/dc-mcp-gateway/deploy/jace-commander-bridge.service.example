@@ -5,15 +5,15 @@ Description=Jace Commander MCP bridge (stdio <-> Streamable HTTP, 127.0.0.1:8003
 After=network.target
 
 [Service]
-WorkingDirectory=%h/projects/desktop-commander-mcp-gateway
-EnvironmentFile=%h/projects/desktop-commander-mcp-gateway/.env.jc-bridge
+WorkingDirectory=%h/projects/agent-control-stack/apps/dc-mcp-gateway
+EnvironmentFile=%h/.config/desktop-commander-mcp-gateway/jc-bridge.env
 # .env.jc-bridge (0600):
 #   BRIDGE_PORT=8003
 #   BRIDGE_PROFILE=jace-commander
 #   ACS_MANAGED_MODE=1
 #   DC_CMD=/usr/bin/node
-#   DC_ARGS=/home/jacen/projects/desktop-commander/dist/jace-commander/cli.js serve
-#   DC_CWD=/home/jacen/projects/desktop-commander
+#   (no DC_ARGS / JC_DC_DIR: the monorepo vendor/desktop-commander build is the default)
+#   JC_FS_ROOTS=/home/jacen/projects
 #   JC_ACS_PUBLIC_KEY=<base64url SPKI of ACS acs.jc.v1 key>
 #   JC_ACS_KEY_ID=<key id>
 #   JC_RUNTIME_ID=jc-jacen-ubuntu

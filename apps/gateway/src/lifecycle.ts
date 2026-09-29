@@ -16,15 +16,27 @@ export interface GatewayProcess {
 /** Shared flag that claim/MCP mutating intake checks during graceful shutdown. */
 export class ShutdownController {
   private shuttingDown = false;
+  private readonly listeners = new Set<() => void>();
 
   isShuttingDown(): boolean {
     return this.shuttingDown;
+  }
+
+  onShutdown(listener: () => void): () => void {
+    if (this.shuttingDown) {
+      listener();
+      return () => {};
+    }
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
   }
 
   /** Returns true the first time shutdown begins; false if already shutting down. */
   beginShutdown(): boolean {
     if (this.shuttingDown) return false;
     this.shuttingDown = true;
+    for (const listener of this.listeners) listener();
+    this.listeners.clear();
     return true;
   }
 
