@@ -19,6 +19,14 @@ export interface RuntimeBootstrapChallenge extends RuntimeAttestation {
   readonly expiresAt: string;
 }
 
+export interface DesktopCommanderRuntimeRecord extends RuntimeAttestation {
+  readonly status: "active" | "revoked";
+  readonly registeredAt: string;
+  readonly attestedAt: string;
+  readonly revokedAt?: string;
+  readonly revocationReason?: string;
+}
+
 export interface RuntimeBootstrapRegistry {
   issueBootstrap(
     input: Omit<RuntimeAttestation, "scopes"> & { scopes: readonly string[]; ttlMs?: number },
@@ -113,6 +121,51 @@ export class SqliteDesktopCommanderRuntimeRegistry {
 
   close(): void {
     this.db.close();
+  }
+
+  getRuntime(runtimeId: string): DesktopCommanderRuntimeRecord | undefined {
+    requireId(runtimeId, "runtimeId");
+    const row = this.db
+      .prepare(
+        `SELECT runtime_id, identity_config_fingerprint, status, registered_at, attested_at, revoked_at, revocation_reason
+         FROM desktop_commander_runtimes WHERE runtime_id = ?`
+      )
+      .get(runtimeId) as
+      | {
+          runtime_id: string;
+          identity_config_fingerprint: string;
+          status: "active" | "revoked";
+          registered_at: string;
+          attested_at: string;
+          revoked_at: string | null;
+          revocation_reason: string | null;
+        }
+      | undefined;
+    if (!row) return undefined;
+    const scopes = (
+      this.db
+        .prepare("SELECT scope_name FROM desktop_commander_runtime_scopes WHERE runtime_id = ? ORDER BY scope_name")
+        .all(runtimeId) as Array<{ scope_name: string }>
+    ).map((entry) => entry.scope_name);
+    return {
+      runtimeId: row.runtime_id,
+      identityConfigFingerprint: row.identity_config_fingerprint,
+      scopes,
+      status: row.status,
+      registeredAt: row.registered_at,
+      attestedAt: row.attested_at,
+      ...(row.revoked_at ? { revokedAt: row.revoked_at } : {}),
+      ...(row.revocation_reason ? { revocationReason: row.revocation_reason } : {})
+    };
+  }
+
+  listRuntimes(): DesktopCommanderRuntimeRecord[] {
+    const ids = this.db
+      .prepare("SELECT runtime_id FROM desktop_commander_runtimes ORDER BY runtime_id")
+      .all() as Array<{ runtime_id: string }>;
+    return ids
+      .map(({ runtime_id }) => this.getRuntime(runtime_id))
+      .filter((runtime): runtime is DesktopCommanderRuntimeRecord => Boolean(runtime));
   }
 
   issueBootstrap(

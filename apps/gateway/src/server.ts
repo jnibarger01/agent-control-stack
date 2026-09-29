@@ -10,6 +10,7 @@ import {
   authorizeJaceCommanderExecution,
   jaceCommanderApprovalSummary,
   jaceCommanderSigningConfigFromEnv,
+  jaceCommanderToolNames,
   jaceCommanderToolPolicy,
   jaceCommanderWorkItemIntent,
   jaceCommanderWorkItemTitle,
@@ -30,6 +31,7 @@ import {
   desktopCommanderContainmentFromEnv,
   desktopCommanderInvocationFingerprint,
   desktopCommanderManagedToolDisposition,
+  desktopCommanderManagedToolDispositions,
   desktopCommanderRequiredScopes,
   desktopCommanderToolPolicy,
   normalizeInvocation,
@@ -518,6 +520,73 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
   const jcContainment = resolveJcContainment(options.jaceCommanderContainment);
   const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
+
+  const desktopExecutorCapabilities = () =>
+    desktopCommanderManagedToolDispositions().map((disposition) => {
+      const policy = desktopCommanderToolPolicy(disposition.name);
+      return {
+        executorId: DC_BRIDGE_WORKER_ID,
+        name: disposition.name,
+        contract: "acs.dc.v1" as const,
+        managed: disposition.managed,
+        toolClass: disposition.toolClass,
+        scopes: policy ? desktopCommanderRequiredScopes(disposition.name) : [],
+        ...(policy ? { riskClass: policy.riskClass, requiresApproval: policy.requiresApproval } : {}),
+        reason: disposition.reason
+      };
+    });
+
+  const jaceExecutorCapabilities = () =>
+    jaceCommanderToolNames().map((name) => {
+      const policy = jaceCommanderToolPolicy(name);
+      if (!policy) throw new Error(`missing Jace Commander tool policy for ${name}`);
+      return {
+        executorId: JC_BRIDGE_WORKER_ID,
+        name,
+        contract: "acs.jc.v1" as const,
+        managed: "capability" as const,
+        toolClass: "jace_commander_tool" as const,
+        scopes: [...policy.scopes],
+        riskClass: policy.risk,
+        requiresApproval: policy.requiresApproval,
+        actionKind: policy.actionKind
+      };
+    });
+
+  const executorSummaries = () => {
+    const dcRuntime = capabilitySigningConfig
+      ? capabilityIssuanceRegistry.getRuntime(capabilitySigningConfig.runtimeId)
+      : undefined;
+    const dcCapabilities = desktopExecutorCapabilities();
+    const jcCapabilities = jaceExecutorCapabilities();
+    return [
+      {
+        id: DC_BRIDGE_WORKER_ID,
+        displayName: "Desktop Commander",
+        kind: "managed_mcp_executor" as const,
+        contract: "acs.dc.v1" as const,
+        configured: Boolean(capabilitySigningConfig),
+        status: !capabilitySigningConfig ? "unconfigured" : (dcRuntime?.status ?? "unattested"),
+        ...(capabilitySigningConfig ? { runtimeId: capabilitySigningConfig.runtimeId } : {}),
+        ...(dcRuntime ? { attestedAt: dcRuntime.attestedAt, scopes: [...dcRuntime.scopes] } : { scopes: [] }),
+        capabilityCount: dcCapabilities.filter((capability) => capability.managed === "capability").length,
+        unsupportedToolCount: dcCapabilities.filter((capability) => capability.managed === "unsupported").length
+      },
+      {
+        id: JC_BRIDGE_WORKER_ID,
+        displayName: "Jace Commander",
+        kind: "managed_mcp_executor" as const,
+        contract: "acs.jc.v1" as const,
+        configured: Boolean(jcSigningConfig),
+        status: jcSigningConfig ? "configured" : "unconfigured",
+        ...(jcSigningConfig ? { runtimeId: jcSigningConfig.runtimeId } : {}),
+        scopes: [],
+        capabilityCount: jcCapabilities.length,
+        unsupportedToolCount: 0
+      }
+    ];
+  };
+
   /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
   function recordLeaseAuthorizedExecutionEvent(
     authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch?: number },
@@ -1163,6 +1232,35 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/api/agents", { preHandler: requireRead }, async () => ({
     agents: workItems.listRegistryAgents().map((agent) => projectRegistryFreshness(agent, heartbeatTtlMs))
   }));
+
+  app.get("/api/executors", { preHandler: requireRead }, async () => ({ executors: executorSummaries() }));
+
+  app.get<{ Params: { id: string } }>("/api/executors/:id", { preHandler: requireRead }, async (request, reply) => {
+    const executor = executorSummaries().find((candidate) => candidate.id === request.params.id);
+    if (!executor) return reply.code(404).send({ error: "executor not found" });
+    if (executor.id !== DC_BRIDGE_WORKER_ID) return { executor };
+    return {
+      executor,
+      runtimes: capabilityIssuanceRegistry.listRuntimes().map((runtime) => ({
+        runtimeId: runtime.runtimeId,
+        status: runtime.status,
+        scopes: [...runtime.scopes],
+        registeredAt: runtime.registeredAt,
+        attestedAt: runtime.attestedAt,
+        ...(runtime.revokedAt ? { revokedAt: runtime.revokedAt } : {})
+      }))
+    };
+  });
+
+  app.get<{ Params: { id: string } }>(
+    "/api/executors/:id/capabilities",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      if (request.params.id === DC_BRIDGE_WORKER_ID) return { capabilities: desktopExecutorCapabilities() };
+      if (request.params.id === JC_BRIDGE_WORKER_ID) return { capabilities: jaceExecutorCapabilities() };
+      return reply.code(404).send({ error: "executor not found" });
+    }
+  );
 
   app.post("/api/agents", async (request, reply) => {
     try {
