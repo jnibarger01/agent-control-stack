@@ -3051,8 +3051,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   getActiveLeaseForAttempt(attemptId: string): AttemptLease | undefined {
     const row = this.db
-      .prepare(`SELECT * FROM attempt_leases WHERE attempt_id = ? ORDER BY issued_at DESC LIMIT 1`)
-      .get(attemptId) as unknown as AttemptLeaseRow | undefined;
+      .prepare(
+        `SELECT * FROM attempt_leases
+         WHERE attempt_id = ? AND status = 'active' AND expires_at > ?
+         ORDER BY issued_at DESC LIMIT 1`
+      )
+      .get(attemptId, new Date().toISOString()) as unknown as AttemptLeaseRow | undefined;
     return row ? rowToAttemptLease(row) : undefined;
   }
 

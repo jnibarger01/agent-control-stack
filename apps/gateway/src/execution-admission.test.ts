@@ -4,7 +4,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ShutdownController } from "./lifecycle.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
@@ -304,6 +304,31 @@ describe("gateway execution admission integration", () => {
       expect(result.statusCode, result.body).toBe(201);
       expect(ctx.scheduler.snapshot().global.active).toBe(0);
     } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("releases a stale JC permit when its authoritative lease has expired without a terminal report", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const startedAt = Date.now();
+    const ctx = buildFixture();
+    try {
+      const first = await issueJc(ctx.app, "chatgpt:lost-result", "client-lost-result");
+      expect(first.statusCode, first.body).toBe(200);
+      expect(ctx.scheduler.snapshot().global.active).toBe(1);
+
+      vi.setSystemTime(startedAt + 5 * 60_000 + 1_000);
+
+      const second = await issueJc(ctx.app, "chatgpt:after-expiry", "client-after-expiry");
+      expect(second.statusCode, second.body).toBe(200);
+      expect(ctx.scheduler.snapshot().global).toMatchObject({ active: 1, queued: 0 });
+
+      const result = await submitJcResult(ctx.app, second.json());
+      expect(result.statusCode, result.body).toBe(201);
+      expect(ctx.scheduler.snapshot().global.active).toBe(0);
+    } finally {
+      vi.useRealTimers();
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
     }
