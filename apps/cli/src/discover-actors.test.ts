@@ -27,12 +27,14 @@ describe("discoverLocalActors", () => {
       "opencode-local",
       "hermes-local",
       "openclaw-bridge",
+      "muse-code",
       "grok-cli",
       "pi-cli"
     ]);
     expect(CANONICAL_DISCOVERY_TARGETS.every((target) => target.probeArgs[0] === "--version")).toBe(true);
     expect(isWorkerCapacityTarget("hermes-local")).toBe(false);
     expect(isWorkerCapacityTarget("openclaw-bridge")).toBe(false);
+    expect(isWorkerCapacityTarget("muse-code")).toBe(false);
     expect(isWorkerCapacityTarget("codex-cli")).toBe(true);
     expect(isWorkerCapacityTarget("grok-cli")).toBe(true);
     expect(isWorkerCapacityTarget("pi-cli")).toBe(true);
@@ -148,7 +150,7 @@ describe("discoverLocalActors", () => {
     }
   });
 
-  it("keeps hermes-local and openclaw-bridge history but excludes them from worker-capacity JSON", async () => {
+  it("keeps orchestration agents observable without advertising worker capacity", async () => {
     const { directory, dbPath, store } = tempDb();
     const now = new Date("2026-08-17T18:00:00.000Z");
     try {
@@ -160,10 +162,14 @@ describe("discoverLocalActors", () => {
       });
       expect(store.getRegistryAgent("hermes-local")?.status).toBe("AVAILABLE");
       expect(store.getRegistryAgent("openclaw-bridge")?.status).toBe("AVAILABLE");
+      expect(store.getRegistryAgent("muse-code")?.status).toBe("AVAILABLE");
       const json = listAvailableActors({ dbPath, now, heartbeatTtlMs: 60_000 });
-      expect(json.every((actor) => actor.actor_id !== "hermes-local" && actor.actor_id !== "openclaw-bridge")).toBe(
-        true
-      );
+      expect(
+        json.every(
+          (actor) =>
+            actor.actor_id !== "hermes-local" && actor.actor_id !== "openclaw-bridge" && actor.actor_id !== "muse-code"
+        )
+      ).toBe(true);
       expect(json.every((actor) => actor.capacity === 1)).toBe(true);
       expect(json[0] && Object.keys(json[0]).sort()).toEqual(
         ["actor_id", "agent_type", "capacity", "pane_id", "role", "status"].sort()
@@ -255,7 +261,10 @@ describe("discoverLocalActors", () => {
   it("fail-closes missing or failed Grok and Pi probes without creating agents", async () => {
     const { directory, store } = tempDb();
     const now = new Date("2026-08-18T12:00:00.000Z");
-    const before = store.listRegistryAgents().map((agent) => agent.id).sort();
+    const before = store
+      .listRegistryAgents()
+      .map((agent) => agent.id)
+      .sort();
     try {
       await discoverLocalActors({
         store,
@@ -265,7 +274,12 @@ describe("discoverLocalActors", () => {
       });
       expect(store.getRegistryAgent("grok-cli")?.status).toBe("OFFLINE");
       expect(store.getRegistryAgent("pi-cli")?.status).toBe("ERROR");
-      expect(store.listRegistryAgents().map((agent) => agent.id).sort()).toEqual(before);
+      expect(
+        store
+          .listRegistryAgents()
+          .map((agent) => agent.id)
+          .sort()
+      ).toEqual(before);
 
       await discoverLocalActors({
         store,
@@ -291,9 +305,9 @@ describe("discoverLocalActors", () => {
         actorId: SYSTEM_BOOTSTRAP_ACTOR_ID,
         now: stale
       });
-      expect(listAvailableActors({ dbPath, now, heartbeatTtlMs: 60_000 }).some((actor) => actor.actor_id === "grok-cli")).toBe(
-        false
-      );
+      expect(
+        listAvailableActors({ dbPath, now, heartbeatTtlMs: 60_000 }).some((actor) => actor.actor_id === "grok-cli")
+      ).toBe(false);
 
       await discoverLocalActors({
         store,

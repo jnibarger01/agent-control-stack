@@ -902,6 +902,7 @@ describe("work item state machine", () => {
         ["opencode-local", "OpenCode", "LOCAL_CODING_AGENT"],
         ["hermes-local", "Hermes Agent", "ORCHESTRATION_LAYER"],
         ["openclaw-bridge", "OpenClaw", "DESKTOP_LOCAL_AGENT_BRIDGE"],
+        ["muse-code", "Muse", "LOCAL_CODING_AGENT"],
         ["grok-cli", "Grok CLI", "RESEARCH_BROAD_SCAN_AGENT"],
         ["pi-cli", "Pi CLI", "REVIEW_PLANNING_AGENT"]
       ] as const;
@@ -962,7 +963,8 @@ describe("work item state machine", () => {
         { version: 32, name: "trace_outbox", filename: "032_trace_outbox.sql" },
         { version: 33, name: "jace_commander_execution_results", filename: "033_jace_commander_execution_results.sql" },
         { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" },
-        { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" }
+        { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" },
+        { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -1096,7 +1098,8 @@ describe("work item state machine", () => {
         { version: 32 },
         { version: 33 },
         { version: 34 },
-        { version: 35 }
+        { version: 35 },
+        { version: 36 }
       ]);
     } finally {
       db.close();
@@ -1206,7 +1209,7 @@ describe("work item state machine", () => {
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32, 33, 34, 35
+        31, 32, 33, 34, 35, 36
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1282,7 +1285,7 @@ describe("work item state machine", () => {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32, 33, 34, 35
+        31, 32, 33, 34, 35, 36
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([

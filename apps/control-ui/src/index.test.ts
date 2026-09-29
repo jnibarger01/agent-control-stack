@@ -63,8 +63,7 @@ describe("renderDashboard", () => {
     expect(html).toContain(`data-unblock="wrk_blocked"`);
     expect(html).toContain(`data-reason="wrk_test"`);
     expect(html).toContain("worker lease expired");
-    expect(html).toContain(`data-agent="/repo"`);
-    expect(html).toContain(`data-agent-id="/repo"`);
+    expect(html).not.toContain(`data-agent="/repo"`);
     expect(html).toContain("refreshAgentRoster()");
     expect(html).toContain("fetchJson('/agents')");
     expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8')");
@@ -211,9 +210,9 @@ describe("renderDashboard", () => {
     expect(html).not.toContain("button.dataset.reject ? 'cancel'");
   });
 
-  it("projects online status only from recent heartbeat events", () => {
+  it("does not promote connectors or work-item targets into the agent roster", () => {
     const model: MissionControlViewModel = {
-      workItems: [],
+      workItems: [workItem],
       now: new Date("2026-07-05T00:01:00.000Z"),
       events: [
         {
@@ -229,11 +228,7 @@ describe("renderDashboard", () => {
       ]
     };
 
-    expect(projectAgents(model.workItems, model.events, model.now)[0]).toMatchObject({
-      id: "chatgpt-prod",
-      status: "online",
-      health: "healthy"
-    });
+    expect(projectAgents(model.workItems, model.events, model.now)).toEqual([]);
   });
 
   it("visually distinguishes work items that need operator attention from normally running ones", () => {

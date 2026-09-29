@@ -99,7 +99,11 @@ describe("mission control gateway", () => {
       expect(page.statusCode).toBe(200);
       expect(page.body).toContain("ACS Mission Control");
       expect(page.body).toContain("Inspect route");
-      expect(agents.json().agents).toEqual(expect.arrayContaining([expect.objectContaining({ id: "chatgpt-prod" })]));
+      const agentIds = agents.json().agents.map((agent: { id: string }) => agent.id);
+      expect(agentIds).toEqual(
+        expect.arrayContaining(["codex-cli", "claude-code", "hermes-local", "openclaw-bridge", "muse-code"])
+      );
+      expect(agentIds).not.toContain("chatgpt-prod");
       expect(detail.json().events.map((event: { name: string }) => event.name)).toContain("work_item.created");
     } finally {
       await app.close();
