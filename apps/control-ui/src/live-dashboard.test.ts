@@ -343,6 +343,12 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     await app.advance(2_000);
     app.setPostResponse({ status: 201, body: { id: "wrk_made" } });
     const form = app.document.querySelector("#task-form") as HTMLFormElement;
+    const service = form.querySelector('[name="service"]') as HTMLSelectElement;
+    const agent = app.document.createElement("option");
+    agent.value = "codex-cli";
+    agent.textContent = "Codex CLI";
+    service.append(agent);
+    service.value = "codex-cli";
     (form.querySelector('[name="title"]') as HTMLInputElement).value = "Composer task";
     (form.querySelector('[name="intent"]') as HTMLTextAreaElement).value = "do the thing";
     form.dispatchEvent(new app.window.Event("submit", { bubbles: true, cancelable: true }));

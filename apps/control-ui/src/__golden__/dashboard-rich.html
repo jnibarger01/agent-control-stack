@@ -563,7 +563,7 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
     <label>Task title<input name="title" required maxlength="120" placeholder="Investigate a failing route" /></label>
     <label>What should the agent do?<textarea name="intent" required rows="4" placeholder="Describe the goal and what a good result looks like."></textarea></label>
     <div class="form-row">
-      <label>Agent<select name="service" required><option value="">Choose an agent</option></select></label>
+      <label>Agent<select name="service" required><option value="">Choose an agent</option><option value="hermes-local">Hermes Agent</option><option value="codex-cli">Codex CLI</option></select></label>
       <label>Project / repo<input name="repo" placeholder="/home/jacen/projects/agent-control-stack" /></label>
     </div>
     <label class="composer-worktree" style="display:flex;align-items:center;gap:.55rem"><input type="checkbox" name="newWorktree" value="true" checked style="width:auto;min-width:auto" /> Use a new worktree</label>
