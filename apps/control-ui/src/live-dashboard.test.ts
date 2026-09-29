@@ -148,6 +148,84 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.window.location.hash).toBe("#approvals");
   });
 
+  it("renders refreshed agents as selectable cards with roster summaries", async () => {
+    const agents = [
+      {
+        id: "hermes-local",
+        displayName: "Hermes Agent",
+        kind: "service",
+        status: "online",
+        health: "healthy",
+        currentTask: "Coordinate implementation",
+        lastHeartbeatAt: "2026-09-22T00:00:30.000Z",
+        capabilities: ["orchestrate", "delegate"],
+        metadata: {
+          registered: "true",
+          acpRole: "ORCHESTRATION_LAYER",
+          provider: "local",
+          model: "hermes"
+        }
+      },
+      {
+        id: "codex-cli",
+        displayName: "Codex CLI",
+        kind: "cli",
+        status: "offline",
+        health: "unknown",
+        capabilities: ["code:implement"],
+        metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+      }
+    ];
+    const app = bootLive(
+      { workItems: [], events: [], agents: [], now: NOW },
+      {
+        "/agents": () => ({ body: { agents } }),
+        "/api/agents/hermes-local": () => ({
+          body: {
+            agent: {
+              id: "hermes-local",
+              name: "Hermes Agent",
+              kind: "service",
+              acpRole: "ORCHESTRATION_LAYER",
+              provider: "local",
+              model: "hermes",
+              status: "AVAILABLE",
+              effectiveStatus: "AVAILABLE",
+              lastHeartbeatAt: "2026-09-22T00:00:30.000Z",
+              capabilities: [{ name: "orchestrate" }, { name: "delegate" }]
+            },
+            activity: {
+              currentTask: "Coordinate implementation",
+              currentWorkItemId: "wrk_active",
+              currentSessionId: "session_active",
+              activeSessionCount: 1,
+              recentSessionCount: 1,
+              lastActivityAt: "2026-09-22T00:00:30.000Z"
+            },
+            sessions: [],
+            events: []
+          }
+        })
+      }
+    );
+    await app.flush();
+
+    expect(app.document.querySelectorAll(".agent-card")).toHaveLength(2);
+    expect(app.text("#agent-summary")).toContain("Registered2");
+    expect(app.text("#agent-summary")).toContain("Online1");
+    expect(app.text("#agent-summary")).toContain("Active tasks1");
+    expect(app.text("#agent-summary")).toContain("Stale / offline1");
+    expect(app.text('[data-agent="hermes-local"]')).toContain("Orchestration Layer");
+    expect(app.text('[data-agent="hermes-local"]')).toContain("Coordinate implementation");
+
+    (app.document.querySelector('[data-agent="hermes-local"]') as HTMLButtonElement).click();
+    await app.flush();
+    expect(app.document.querySelector('[data-agent="hermes-local"]')?.classList.contains("selected")).toBe(true);
+    expect(app.text("#agent-detail h3")).toBe("Hermes Agent");
+    expect(app.text("#agent-detail")).toContain("Current work itemwrk_active");
+    expect(app.calls.some((call) => call.url === "/api/agents/hermes-local")).toBe(true);
+  });
+
   it("coalesces a burst of work-item events into a single fragment fetch", async () => {
     const app = bootLive({ workItems: [item("wrk_a")], events: [], now: NOW });
     app.open();

@@ -125,19 +125,63 @@ export function overviewCards(
     .join("");
 }
 
+function agentRoleLabel(role: string | undefined): string {
+  if (!role) return "Role not reported";
+  return role
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function agentInitial(agent: MissionControlAgent): string {
+  return (agent.displayName || agent.id).trim().charAt(0).toUpperCase() || "?";
+}
+
+function agentSummary(agents: MissionControlAgent[]): string {
+  const online = agents.filter((agent) => agent.status === "online").length;
+  const activeTasks = agents.filter((agent) => Boolean(agent.currentTask)).length;
+  const unavailable = agents.filter((agent) => agent.status === "stale" || agent.status === "offline").length;
+  return `<div class="agent-summary" id="agent-summary">
+    <div><span>Registered</span><strong>${agents.length}</strong></div>
+    <div><span>Online</span><strong>${online}</strong></div>
+    <div><span>Active tasks</span><strong>${activeTasks}</strong></div>
+    <div><span>Stale / offline</span><strong>${unavailable}</strong></div>
+  </div>`;
+}
+
+function agentCard(agent: MissionControlAgent): string {
+  const role = agentRoleLabel(agent.metadata.acpRole);
+  const providerModel = [agent.metadata.provider, agent.metadata.model].filter(Boolean).join(" · ");
+  const runtime = providerModel ? `${agent.kind} · ${providerModel}` : agent.kind;
+  const task = agent.currentTask ? escapeHtml(agent.currentTask) : "No active task reported";
+  const heartbeat = agent.lastHeartbeatAt ? `Heartbeat ${time(agent.lastHeartbeatAt)}` : "No heartbeat observed";
+  const capabilityCount = agent.capabilities.length;
+  const error = agent.lastError
+    ? `<span class="agent-card-error">${escapeHtml(redactSecrets(agent.lastError))}</span>`
+    : "";
+  return `<button type="button" class="agent-card" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}" aria-label="Open ${escapeHtml(agent.displayName)}">
+    <span class="agent-card-head">
+      <span class="agent-avatar" aria-hidden="true">${escapeHtml(agentInitial(agent))}</span>
+      <span class="agent-card-identity"><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></span>
+      ${pill(agent.status)}
+    </span>
+    <span class="agent-card-meta"><span>${escapeHtml(role)}</span><span>${escapeHtml(runtime)}</span></span>
+    <span class="agent-card-task"><small>Current task</small><span>${task}</span></span>
+    ${error}<span class="agent-card-foot"><span>${heartbeat}</span><span>${capabilityCount} capabilit${capabilityCount === 1 ? "y" : "ies"}</span></span>
+  </button>`;
+}
+
 export function agentTable(agents: MissionControlAgent[]): string {
-  if (!agents.length) return `<div class="table-wrap"><p class="empty">No registered agents.</p></div>`;
-  return `<div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Role</th><th>Runtime</th><th>Status</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">${agents
-    .map(
-      (agent) =>
-        `<tr class="agent-row" tabindex="0" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.metadata.acpRole ?? "—")}</td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(redactSecrets(agent.lastError)) : "—"}</td></tr>`
-    )
-    .join("")}</tbody></table></div>`;
+  if (!agents.length) return `<div class="agent-roster"><p class="empty">No registered agents.</p></div>`;
+  return `<div class="agent-roster">${agentSummary(agents)}<div class="agent-card-grid" id="agent-roster-body">${agents
+    .map(agentCard)
+    .join("")}</div></div>`;
 }
 
 export function agentDetailPanel(): string {
   return `<section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
-    <div class="detail-empty"><h3>No agent selected</h3><p>Select a row to load the registry record.</p></div>
+    <div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>
   </section>`;
 }
 

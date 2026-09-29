@@ -77,7 +77,9 @@ describe("renderDashboard", () => {
     expect(html).toContain("Agent capabilities");
     expect(html).toContain("Recent ACP sessions");
     expect(html).toContain("Current ACP session");
-    expect(html).toContain("<th>Role</th><th>Runtime</th><th>Status</th>");
+    expect(html).toContain("agent-card-grid");
+    expect(html).toContain("agent-summary");
+    expect(html).toContain("Identity, role, activity, and runtime presence");
     expect(html).toContain("fetchJson('/api/connectors')");
     expect(html).toContain("fetchJson('/api/connectors/' + encodeURIComponent(id))");
     expect(html).toContain("Registered connector identities + tunnel sessions");
@@ -88,6 +90,53 @@ describe("renderDashboard", () => {
     expect(html).toContain("Execution Mode");
     expect(html).toContain("Admin / YOLO");
     expect(html).toContain('data-execution-mode="strict"');
+  });
+
+  it("renders registered agents as status cards with roster summaries", () => {
+    const html = renderDashboard({
+      workItems: [],
+      events: [],
+      agents: [
+        {
+          id: "hermes-local",
+          displayName: "Hermes Agent",
+          kind: "service",
+          status: "online",
+          health: "healthy",
+          currentTask: "Coordinate implementation",
+          lastHeartbeatAt: "2026-07-05T00:00:30.000Z",
+          capabilities: ["orchestrate", "delegate"],
+          metadata: {
+            registered: "true",
+            acpRole: "ORCHESTRATION_LAYER",
+            provider: "local",
+            model: "hermes"
+          }
+        },
+        {
+          id: "codex-cli",
+          displayName: "Codex CLI",
+          kind: "cli",
+          status: "offline",
+          health: "unknown",
+          capabilities: ["code:implement"],
+          metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+        }
+      ],
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain('class="agent-summary"');
+    expect(html).toContain("<span>Registered</span><strong>2</strong>");
+    expect(html).toContain("<span>Online</span><strong>1</strong>");
+    expect(html).toContain("<span>Active tasks</span><strong>1</strong>");
+    expect(html).toContain("<span>Stale / offline</span><strong>1</strong>");
+    expect(html).toContain('class="agent-card" data-agent="hermes-local"');
+    expect(html).toContain("Orchestration Layer");
+    expect(html).toContain("service · local · hermes");
+    expect(html).toContain("Coordinate implementation");
+    expect(html).toContain("2 capabilities");
+    expect(html).toContain('class="agent-card" data-agent="codex-cli"');
   });
 
   it("keeps agents, executors, connectors, and admission as distinct overview and system domains", () => {

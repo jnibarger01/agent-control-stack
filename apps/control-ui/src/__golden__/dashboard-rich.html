@@ -216,12 +216,16 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 .execution-mode label { display: block; margin-top: 4px; }
 .admin-mode-banner { margin: 0 0 14px; padding: 12px 14px; border: 2px solid var(--admin-banner-line); background: var(--admin-banner-bg); color: var(--admin-banner-ink); border-radius: 8px; font-weight: 800; letter-spacing: .02em; }
 .admin-mode-banner[hidden] { display: none; }
-.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px var(--shadow); }
 .card { padding: 15px; min-height: 108px; }
+.dashboard-card { display: block; color: inherit; text-decoration: none; cursor: pointer; transition: border-color .15s ease, transform .15s ease, background .15s ease; }
+.dashboard-card:hover { border-color: var(--control-hover-line); background: var(--hover); transform: translateY(-1px); }
+.dashboard-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .card span, .panel-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; }
 .card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
 .card p { font-size: 12px; line-height: 1.35; }
+.card-action { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
 .lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .panel { min-width: 0; overflow: hidden; }
@@ -296,6 +300,27 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .approval-item { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 12px; display: grid; gap: 9px; }
 .approval-item strong, .approval-item small { display: block; }
 .agent-layout { display: grid; }
+.agent-roster { min-width: 0; padding: 12px; display: grid; gap: 12px; align-content: start; }
+.agent-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.agent-summary div { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 10px; }
+.agent-summary span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.agent-summary strong { display: block; margin-top: 4px; font-size: 18px; color: var(--ink); }
+.agent-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; align-items: stretch; }
+.agent-card { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); padding: 12px; display: grid; gap: 10px; text-align: left; font: inherit; cursor: pointer; }
+.agent-card:hover, .agent-card.selected { background: var(--hover); border-color: var(--control-hover-line); }
+.agent-card.selected { box-shadow: inset 3px 0 0 var(--accent); }
+.agent-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agent-avatar { flex: 0 0 34px; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--control-line); border-radius: 9px; background: var(--control-bg); font-weight: 800; }
+.agent-card-identity { flex: 1; min-width: 0; }
+.agent-card-identity strong, .agent-card-identity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-card-identity small { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.agent-card-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; color: var(--muted); font-size: 11px; }
+.agent-card-task { display: grid; gap: 3px; border-top: 1px solid var(--soft-line); padding-top: 9px; }
+.agent-card-task small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.agent-card-task > span { line-height: 1.35; overflow-wrap: anywhere; }
+.agent-card-error { margin: 0; color: var(--red); font-size: 11px; overflow-wrap: anywhere; }
+.agent-card-foot { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
+.agent-card-foot span { min-width: 0; overflow-wrap: anywhere; }
 .detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
 .detail-empty, .detail-loading, .detail-error { color: var(--muted); }
 .detail-error { color: var(--red); }
@@ -348,7 +373,7 @@ output { color: var(--accent); min-height: 20px; }
 .skip-link:focus { left: 12px; top: 12px; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible, .agent-card:focus-visible, .executor-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .reason-field { display: grid; gap: 5px; }
 .reason-label { color: var(--muted); font-size: 12px; }
 .reason-label .req { color: var(--red); font-weight: 600; }
@@ -365,7 +390,7 @@ output { color: var(--accent); min-height: 20px; }
 .approval-confirm-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
 #approval-confirm-ok { background: var(--bad-bg); color: var(--red); border-color: var(--bad-line); font-weight: 700; }
 #approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
+@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail, .executor-detail, .connector-detail { margin-left: 0; max-height: 430px; } }
 @media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
 @media (max-width: 767px) {
   body { grid-template-columns: 1fr; }
@@ -382,6 +407,8 @@ output { color: var(--accent); min-height: 20px; }
   .approval-actions { flex-direction: column; }
   .approval-actions button { width: 100%; min-height: 44px; font-size: 15px; }
   .table-wrap { max-height: none; }
+  .agent-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-card-grid { grid-template-columns: 1fr; }
   .agent-table th:nth-child(n+5), .agent-table td:nth-child(n+5) { display: none; }
   .queue-filter-fields { grid-template-columns: 1fr; }
   .queue-filter-chip { min-height: 44px; }
@@ -396,6 +423,7 @@ body[data-active-view="queue"] [data-view-panel~="queue"],
 body[data-active-view="execution"] [data-view-panel~="execution"],
 body[data-active-view="approvals"] [data-view-panel~="approvals"],
 body[data-active-view="agents"] [data-view-panel~="agents"],
+body[data-active-view="executors"] [data-view-panel~="executors"],
 body[data-active-view="connectors"] [data-view-panel~="connectors"],
 body[data-active-view="metrics"] [data-view-panel~="metrics"],
 body[data-active-view="audit"] [data-view-panel~="audit"],
@@ -403,6 +431,7 @@ body[data-active-view="policy"] [data-view-panel~="policy"],
 body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
 /* The view rule above must not flatten the overview card grid. */
 body[data-active-view="overview"] #overview.cards { display: grid; }
+body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .approval-item { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .system-probes { padding: 0 18px 16px; }
 .system-probes dl { margin: 0; display: grid; gap: 8px; }
@@ -421,6 +450,7 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
         <a href="#queue" data-nav="execution">Execution</a>
         <a href="#approvals" data-nav="approvals">Approvals</a>
         <a href="#agents" data-nav="agents">Agents</a>
+        <a href="#executors" data-nav="executors">Executors</a>
         <a href="#connectors" data-nav="connectors">Connectors</a>
         <a href="#operator-metrics" data-nav="metrics">Metrics</a>
         <a href="#events" data-nav="audit">Audit</a>
@@ -431,7 +461,7 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
     </aside>
     <main id="main-content" tabindex="-1">
       <header>
-        <div><h1>Mission Control</h1><p>Agents, work items, approvals, and audit events.</p></div>
+        <div><h1>Mission Control</h1><p>Agents, executors, work items, approvals, and audit events.</p></div>
         <div class="header-controls">
           <fieldset class="execution-mode" id="execution-mode-control">
             <legend>Execution Mode</legend>
@@ -446,11 +476,40 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
       <div id="admin-mode-banner" class="admin-mode-banner" role="alert">ACS ADMIN MODE -- human approval disabled</div>
       <div id="execution-mode-problem" class="admin-mode-banner" role="alert" hidden></div>
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
-      <section id="overview" class="cards" data-view-panel="overview"><article class="card"><span>Total Agents</span><strong>2</strong><p>Observed from persisted connector, tunnel, worker, and target events</p></article><article class="card"><span>Online Agents</span><strong>1</strong><p>Only recent heartbeats count as online</p></article><article class="card"><span>Running Tasks</span><strong>1</strong><p>Lease-bound work currently running</p></article><article class="card"><span>Needs Operator Attention</span><strong>3</strong><p>Approvals, blocked, and quarantined work; the same set the queue marks for attention</p></article><article class="card"><span>Pending Approvals</span><strong>1</strong><p>Policy-gated work waiting on a human</p></article><article class="card"><span>Failed / Blocked</span><strong>1</strong><p>Failed items plus blocked work</p></article></section>
+      <section id="overview" class="cards" data-view-panel="overview"><a class="card dashboard-card" href="#agents" data-dashboard-view="agents" aria-label="Open Agents"><span>Agents</span><strong>1 / 2</strong><p>online by heartbeat / registered</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#executors" data-dashboard-view="executors" aria-label="Open Executors"><span>Executors</span><strong>1 / 2</strong><p>configured / known execution bridges</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#connectors" data-dashboard-view="connectors" aria-label="Open Connectors"><span>Connectors</span><strong>1</strong><p>active tunnel sessions · 1 / 1 registered connectors enabled</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#execution" data-dashboard-view="execution" data-dashboard-statuses="running" aria-label="Open Running Tasks"><span>Running Tasks</span><strong>1</strong><p>Lease-bound work currently running</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="needs_approval,blocked,quarantined" aria-label="Open Needs Operator Attention"><span>Needs Operator Attention</span><strong>3</strong><p>Approvals, blocked, and quarantined work; the same set the queue marks for attention</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#approvals" data-dashboard-view="approvals" aria-label="Open Pending Approvals"><span>Pending Approvals</span><strong>1</strong><p>Policy-gated work waiting on a human</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="failed,blocked" aria-label="Open Failed / Blocked"><span>Failed / Blocked</span><strong>1</strong><p>Failed items plus blocked work</p><small class="card-action">Open →</small></a></section>
       <section class="grid">
-        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Backend registry + audit projection</p></div><span id="agent-count">2 observed</span></div><div class="agent-layout"><div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body"><tr class="agent-row" tabindex="0" data-agent="chatgpt-prod" data-agent-id="chatgpt-prod"><td><strong>chatgpt-prod</strong><small>chatgpt-prod</small></td><td>tunnel</td><td><span class="pill online">online</span></td><td><span class="pill healthy">healthy</span></td><td>—</td><td>2026-07-05T00:39:30.000Z</td><td>—</td></tr><tr class="agent-row" tabindex="0" data-agent="/repo" data-agent-id="/repo"><td><strong>/repo</strong><small>/repo</small></td><td>target</td><td><span class="pill stale">stale</span></td><td><span class="pill unknown">unknown</span></td><td>Finished task</td><td>—</td><td>—</td></tr></tbody></table></div><section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
-    <div class="detail-empty"><h3>No agent selected</h3><p>Select a row to load the registry record.</p></div>
+        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Identity, role, activity, and runtime presence</p></div><span id="agent-count">2 registered</span></div><div class="agent-layout"><div class="agent-roster"><div class="agent-summary" id="agent-summary">
+    <div><span>Registered</span><strong>2</strong></div>
+    <div><span>Online</span><strong>1</strong></div>
+    <div><span>Active tasks</span><strong>1</strong></div>
+    <div><span>Stale / offline</span><strong>1</strong></div>
+  </div><div class="agent-card-grid" id="agent-roster-body"><button type="button" class="agent-card" data-agent="hermes-local" data-agent-id="hermes-local" aria-label="Open Hermes Agent">
+    <span class="agent-card-head">
+      <span class="agent-avatar" aria-hidden="true">H</span>
+      <span class="agent-card-identity"><strong>Hermes Agent</strong><small>hermes-local</small></span>
+      <span class="pill online">online</span>
+    </span>
+    <span class="agent-card-meta"><span>Orchestration Layer</span><span>service</span></span>
+    <span class="agent-card-task"><small>Current task</small><span>coordinate implementation</span></span>
+    <span class="agent-card-foot"><span>Heartbeat 2026-07-05T00:39:30.000Z</span><span>1 capability</span></span>
+  </button><button type="button" class="agent-card" data-agent="codex-cli" data-agent-id="codex-cli" aria-label="Open Codex CLI">
+    <span class="agent-card-head">
+      <span class="agent-avatar" aria-hidden="true">C</span>
+      <span class="agent-card-identity"><strong>Codex CLI</strong><small>codex-cli</small></span>
+      <span class="pill offline">offline</span>
+    </span>
+    <span class="agent-card-meta"><span>Implementation Agent</span><span>cli</span></span>
+    <span class="agent-card-task"><small>Current task</small><span>No active task reported</span></span>
+    <span class="agent-card-foot"><span>No heartbeat observed</span><span>1 capability</span></span>
+  </button></div></div><section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
+    <div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>
   </section></div></article>
+        <article id="executors" class="panel wide roster-panel" data-view-panel="executors"><div class="panel-head"><div><h2>Executors</h2><p>Managed execution bridges, runtime state, and tool capabilities</p></div><span id="executor-count">loading</span></div><div class="agent-layout executor-layout">
+    <div class="table-wrap"><p class="empty">Loading managed executors...</p></div>
+    <section id="executor-detail" class="detail-panel executor-detail" tabindex="-1" aria-live="polite" aria-label="Executor detail">
+      <div class="detail-empty"><h3>No executor selected</h3><p>Select a row to inspect runtime state and tool capabilities.</p></div>
+    </section>
+  </div></article>
         <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">5 items</span></div><div class="queue-filter" id="queue-filter" role="search" aria-label="Filter work queue">
   <div class="queue-filter-row">
     <fieldset class="queue-filter-statuses">
@@ -488,7 +547,16 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
   </dl>
   </div></div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>
         <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline"><ol class="timeline"><li data-sequence="3"><time>2026-07-05T00:39:50.000Z</time><strong>work_item.needs_approval</strong><small class="event-summary">work_item.id=wrk_approve · agent.id=/repo</small><details class="event-attrs"><summary>3 attributes</summary><dl><div><dt>work_item.id</dt><dd>wrk_approve</dd></div><div><dt>agent.id</dt><dd>/repo</dd></div><div><dt>api_key</dt><dd>[redacted]</dd></div></dl></details></li><li data-sequence="2"><time>2026-07-05T00:39:40.000Z</time><strong>policy.decided</strong><small class="event-summary">work_item.id=wrk_approve · action.kind=fs.read</small><details class="event-attrs"><summary>3 attributes</summary><dl><div><dt>work_item.id</dt><dd>wrk_approve</dd></div><div><dt>policy.outcome</dt><dd>require_approval</dd></div><div><dt>action.kind</dt><dd>fs.read</dd></div></dl></details></li><li data-sequence="1"><time>2026-07-05T00:39:30.000Z</time><strong>tunnel_session.heartbeat</strong><small class="event-summary">connector.id=chatgpt-prod</small><details class="event-attrs"><summary>1 attribute</summary><dl><div><dt>connector.id</dt><dd>chatgpt-prod</dd></div></dl></details></li></ol></div><button type="button" id="events-load-older" class="load-more">Load older</button></article>
-        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Health</h2><span>live</span></div><div class="system-panel"><div id="system-stats"><dl><div><dt>Agents online</dt><dd>1 / 2</dd></div><div><dt>Running tasks</dt><dd>1</dd></div><div><dt>Pending approvals</dt><dd>1</dd></div><div><dt>Failed or blocked</dt><dd>1</dd></div><div><dt>Execution backend</dt><dd>dry-run worker</dd></div></dl></div><div id="system-probes" class="system-probes"></div></div></article>
+        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Status</h2><span>readiness · infrastructure</span></div><div class="system-panel"><div id="system-stats"><dl>
+    <div><dt>Agent heartbeats online</dt><dd>1 / 2</dd></div>
+    <div><dt>Executors configured</dt><dd>1 / 2</dd></div>
+    <div><dt>Attested executor runtimes</dt><dd>1</dd></div>
+    <div><dt>Connectors enabled</dt><dd>1 / 1</dd></div>
+    <div><dt>Active tunnel sessions</dt><dd>1</dd></div>
+    <div><dt>Execution admission</dt><dd>1 / 2 active</dd></div>
+    <div><dt>Admission queue</dt><dd>0</dd></div>
+    <div><dt>Execution backend</dt><dd>dry-run worker</dd></div>
+  </dl></div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
         <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div><form id="task-form" novalidate data-known-action-kinds="[&quot;fs.read&quot;,&quot;git.status&quot;]">
@@ -504,7 +572,12 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
     <section id="composer-preview" class="composer-preview" aria-live="polite" aria-label="Policy preview"><p class="muted">Fill in a title and instructions to preview policy.</p></section>
     <div class="composer-actions"><button type="button" id="composer-preview-button" class="tool-button">Check policy</button><button type="submit">Create Work Item</button></div><output id="task-result"></output>
   </form></article>
-        <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><h2>Connectors</h2><span>1 observed</span></div><div id="connectors-body"><div class="table-wrap"><table><thead><tr><th>Connector</th><th>Status</th><th>Last event</th></tr></thead><tbody><tr><td><strong>chatgpt-prod</strong><small>chatgpt-prod</small></td><td><span class="pill online">online</span></td><td>2026-07-05T00:39:30.000Z</td></tr></tbody></table></div><p class="empty">Execution backend: dry-run worker</p></div></article>
+        <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><div><h2>Connectors</h2><p>Registered connector identities + tunnel sessions</p></div><span id="connector-count">loading</span></div><div id="connectors-body"><div class="agent-layout connector-layout">
+    <div class="table-wrap"><p class="empty">Loading registered connectors...</p></div>
+    <section id="connector-detail" class="detail-panel connector-detail" tabindex="-1" aria-live="polite" aria-label="Connector detail">
+      <div class="detail-empty"><h3>No connector selected</h3><p>Select a connector to inspect tunnel sessions and granted scopes.</p></div>
+    </section>
+  </div></div></article>
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>recent decisions</span></div><div id="policy-body" class="policy-body"><p class="empty">No policy decisions in the recent window.</p><div class="detail-section"><h4>Action kinds policy evaluates</h4><div class="chip-list"><span class="chip">fs.read</span><span class="chip">git.status</span></div><p class="muted">Any other kind is denied (fail closed).</p></div></div></article>
         <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
       </section>
@@ -544,6 +617,12 @@ const sseEventNames = [
   'agent.updated',
   'agent.heartbeat',
   'agent.capabilities_replaced',
+  'connector.registered',
+  'connector.key_rotated',
+  'tunnel_session.registered',
+  'tunnel_session.revoked',
+  'tunnel_session.reconciled',
+  'desktop_commander.runtime_activated',
   'acp.initialized',
   'acp.disconnected',
   'acp.error',
@@ -601,7 +680,11 @@ function connectSse() {
     scheduleDashboardRefresh(0, { catchUp: reconnected });
     if (reconnected) {
       refreshAgentRoster();
+      refreshExecutorRoster();
+      refreshConnectorRoster();
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
+      if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
+      if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -639,13 +722,23 @@ function appendAuditEvent(event) {
   if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
-  if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
+  if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
+  }
+  if (eventName === 'desktop_commander.runtime_activated') {
+    refreshExecutorRoster();
+    if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
+  }
+  if (eventName.startsWith('connector.') || eventName.startsWith('tunnel_session.')) {
+    refreshConnectorRoster();
+    if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
   }
 }
 
 let selectedAgentId = null;
+let selectedExecutorId = null;
+let selectedConnectorId = null;
 
 function escapeClient(value) {
   return String(value ?? '').replace(/[&<>"']/g, function (char) {
@@ -1096,7 +1189,9 @@ async function probePath(path) {
   const started = performance.now();
   try {
     const res = await fetch(path, { headers: { accept: 'application/json' }, cache: 'no-store' });
-    return { path, status: res.status, ms: Math.round(performance.now() - started), at: Date.now() };
+    let payload = null;
+    try { payload = await res.json(); } catch {}
+    return { path, status: res.status, ms: Math.round(performance.now() - started), at: Date.now(), payload };
   } catch {
     return { path, status: 0, ms: Math.round(performance.now() - started), at: Date.now() };
   }
@@ -1115,10 +1210,17 @@ function renderProbes() {
   const failures = probeHistory.length - okRows.length;
   const state = latest.status === 0 ? 'down' : latest.status >= 300 ? 'failing' : latest.ms >= 1000 ? 'slow' : 'ok';
   root.dataset.state = state;
+  const payload = latest.payload && typeof latest.payload === 'object' ? latest.payload : {};
+  const checks = payload.checks && typeof payload.checks === 'object' ? payload.checks : {};
+  const checkNames = Object.keys(checks);
+  const failedChecks = checkNames.filter(function (name) { return !checks[name] || checks[name].ok !== true; });
+  const execution = payload.execution && typeof payload.execution === 'object' ? payload.execution : null;
   const rows = [
-    ['/readyz', (latest.status || 'unreachable') + ' · ' + latest.ms + 'ms · ' + state],
-    ['Average (ok, last ' + probeHistory.length + ')', avg === null ? '—' : avg + 'ms'],
-    ['Failures (last ' + probeHistory.length + ')', String(failures)],
+    ['Gateway readiness', (latest.status || 'unreachable') + ' · ' + latest.ms + 'ms · ' + state],
+    ['Dependency checks', checkNames.length ? (failedChecks.length ? 'failed: ' + failedChecks.join(', ') : checkNames.length + ' passing') : '—'],
+    ['Execution admission', execution ? String(execution.active) + ' / ' + String(execution.capacity) + ' active · ' + String(execution.queued) + ' queued' + (execution.saturated ? ' · saturated' : '') : '—'],
+    ['Average latency (ok, last ' + probeHistory.length + ')', avg === null ? '—' : avg + 'ms'],
+    ['Probe failures (last ' + probeHistory.length + ')', String(failures)],
     ['Last checked', new Date(latest.at).toLocaleTimeString()]
   ];
   const list = document.createElement('dl');
@@ -1508,6 +1610,7 @@ renderThemeToggle();
 function onDashboardFragmentsApplied() {
   updateTitleBadge();
   refreshWaitBadges();
+  if (document.body.dataset.activeView === 'connectors') refreshConnectorRoster();
 }
 function onWorkItemControlSucceeded(control, id, body) {
   const created = body && body.workItem && body.workItem.id;
@@ -1605,47 +1708,70 @@ async function loadWorkDetail(id, options) {
   }
 }
 
-function agentRowsMarkup(agents) {
+function agentRoleLabelClient(role) {
+  if (!role) return 'Role not reported';
+  return String(role).toLowerCase().split('_').map(function (part) {
+    return part.charAt(0).toUpperCase() + part.slice(1);
+  }).join(' ');
+}
+
+function agentSummaryMarkup(agents) {
+  const online = agents.filter(function (agent) { return agent.status === 'online'; }).length;
+  const activeTasks = agents.filter(function (agent) { return Boolean(agent.currentTask); }).length;
+  const unavailable = agents.filter(function (agent) { return agent.status === 'stale' || agent.status === 'offline'; }).length;
+  return '<div class="agent-summary" id="agent-summary">' +
+    '<div><span>Registered</span><strong>' + agents.length + '</strong></div>' +
+    '<div><span>Online</span><strong>' + online + '</strong></div>' +
+    '<div><span>Active tasks</span><strong>' + activeTasks + '</strong></div>' +
+    '<div><span>Stale / offline</span><strong>' + unavailable + '</strong></div>' +
+  '</div>';
+}
+
+function agentCardsMarkup(agents) {
   return agents.map(function (agent) {
     const id = escapeClient(agent.id);
     const name = escapeClient(agent.displayName || agent.name || agent.id);
-    return '<tr class="agent-row" tabindex="0" data-agent="' + id + '" data-agent-id="' + id + '">' +
-      '<td><strong>' + name + '</strong><small>' + id + '</small></td>' +
-      '<td>' + escapeClient(agent.kind || 'observed') + '</td>' +
-      '<td>' + pillMarkup(agent.status || agent.effectiveStatus || 'observed') + '</td>' +
-      '<td>' + pillMarkup(agent.health || 'unknown') + '</td>' +
-      '<td>' + escapeClient(agent.currentTask || '—') + '</td>' +
-      '<td>' + escapeClient(formatClientTime(agent.lastHeartbeatAt)) + '</td>' +
-      '<td>' + escapeClient(redactClient(agent.lastError || '—')) + '</td>' +
-    '</tr>';
+    const metadata = agent.metadata || {};
+    const role = escapeClient(agentRoleLabelClient(metadata.acpRole));
+    const providerModel = [metadata.provider, metadata.model].filter(Boolean).join(' · ');
+    const runtime = escapeClient(providerModel ? ((agent.kind || '—') + ' · ' + providerModel) : (agent.kind || '—'));
+    const initial = escapeClient(String(agent.displayName || agent.name || agent.id || '?').trim().charAt(0).toUpperCase() || '?');
+    const task = escapeClient(agent.currentTask || 'No active task reported');
+    const heartbeat = agent.lastHeartbeatAt ? ('Heartbeat ' + formatClientTime(agent.lastHeartbeatAt)) : 'No heartbeat observed';
+    const capabilityCount = Array.isArray(agent.capabilities) ? agent.capabilities.length : 0;
+    const error = agent.lastError ? '<span class="agent-card-error">' + escapeClient(redactClient(agent.lastError)) + '</span>' : '';
+    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '" aria-label="Open ' + name + '">' +
+      '<span class="agent-card-head">' +
+        '<span class="agent-avatar" aria-hidden="true">' + initial + '</span>' +
+        '<span class="agent-card-identity"><strong>' + name + '</strong><small>' + id + '</small></span>' +
+        pillMarkup(agent.status || 'observed') +
+      '</span>' +
+      '<span class="agent-card-meta"><span>' + role + '</span><span>' + runtime + '</span></span>' +
+      '<span class="agent-card-task"><small>Current task</small><span>' + task + '</span></span>' +
+      error +
+      '<span class="agent-card-foot"><span>' + escapeClient(heartbeat) + '</span><span>' + capabilityCount + ' capabilit' + (capabilityCount === 1 ? 'y' : 'ies') + '</span></span>' +
+    '</button>';
   }).join('');
 }
 
 function renderAgentTable(agents) {
-  const wrap = document.querySelector('#agents .table-wrap');
+  const wrap = document.querySelector('#agents .agent-roster');
   if (!wrap) return;
   if (!agents.length) {
-    wrap.innerHTML = '<p class="empty">No agents or connectors observed.</p>';
+    wrap.innerHTML = '<p class="empty">No registered agents.</p>';
     return;
   }
-  wrap.innerHTML = '<table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">' + agentRowsMarkup(agents) + '</tbody></table>';
+  wrap.innerHTML = agentSummaryMarkup(agents) + '<div class="agent-card-grid" id="agent-roster-body">' + agentCardsMarkup(agents) + '</div>';
   bindAgentRows();
 }
 
 function bindAgentRows() {
-  document.querySelectorAll('[data-agent]').forEach(function (row) {
-    const activate = function () {
-      selectedAgentId = row.dataset.agent;
+  document.querySelectorAll('[data-agent]').forEach(function (card) {
+    card.addEventListener('click', function () {
+      selectedAgentId = card.dataset.agent;
       document.querySelectorAll('[data-agent]').forEach(function (candidate) { candidate.classList.remove('selected'); });
-      row.classList.add('selected');
+      card.classList.add('selected');
       loadAgentDetail(selectedAgentId);
-    };
-    row.addEventListener('click', activate);
-    row.addEventListener('keydown', function (event) {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        activate();
-      }
     });
   });
 }
@@ -1655,7 +1781,7 @@ async function refreshAgentRoster() {
     const body = await fetchJson('/agents');
     const agents = Array.isArray(body.agents) ? body.agents : [];
     const count = document.querySelector('#agent-count');
-    if (count) count.textContent = agents.length + ' observed';
+    if (count) count.textContent = agents.length + ' registered';
     renderAgentTable(agents);
     if (selectedAgentId && agents.some(function (agent) { return agent.id === selectedAgentId; })) {
       document.querySelectorAll('[data-agent]').forEach(function (row) {
@@ -1675,16 +1801,8 @@ async function loadAgentDetail(id) {
   if (!target || !id) return;
   target.innerHTML = '<div class="detail-loading">Loading agent detail...</div>';
   try {
-    const projected = await fetchJson('/agents/' + encodeURIComponent(id) + '?limit=8');
-    const registry = await fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8').catch(function () { return null; });
-    const capabilities = await fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities').catch(function () { return null; });
-    renderAgentDetail(target, {
-      projected: projected.agent,
-      registry: registry && registry.agent,
-      adapterStatus: (registry && registry.adapterStatus) || projected.adapterStatus,
-      events: (registry && registry.events && registry.events.length ? registry.events : projected.events) || [],
-      capabilities: (capabilities && capabilities.capabilities) || (registry && registry.agent && registry.agent.capabilities) || []
-    });
+    const detail = await fetchJson('/api/agents/' + encodeURIComponent(id));
+    renderAgentDetail(target, detail);
   } catch (error) {
     target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
   }
@@ -1697,28 +1815,265 @@ function capabilityNames(input) {
 }
 
 function renderAgentDetail(target, detail) {
-  const agent = detail.projected || detail.registry || {};
-  const registry = detail.registry || {};
-  const capabilities = capabilityNames(detail.capabilities).concat(capabilityNames(agent.capabilities || []));
-  const uniqueCapabilities = Array.from(new Set(capabilities)).sort();
+  const agent = detail.agent || {};
+  const activity = detail.activity || {};
+  const capabilities = Array.from(new Set(capabilityNames(agent.capabilities || []))).sort();
+  const sessions = Array.isArray(detail.sessions) ? detail.sessions : [];
   const adapter = detail.adapterStatus ? (detail.adapterStatus.state || detail.adapterStatus.status || 'connected') : 'not configured';
-  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.displayName || registry.name || agent.id) + '</h3><small>' + escapeClient(agent.id || registry.id || '') + '</small></div><div>' + pillMarkup(agent.status || registry.effectiveStatus || registry.status || 'observed') + ' ' + pillMarkup(agent.health || 'unknown') + '</div></div>' +
+  const status = agent.effectiveStatus || agent.status || 'UNKNOWN';
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.name || agent.id || 'Agent') + '</h3><small>' + escapeClient(agent.id || '') + '</small></div><div>' + pillMarkup(status) + '</div></div>' +
     '<dl class="detail-grid">' +
-      detailRow('Type', agent.kind || registry.kind) +
-      detailRow('Provider', registry.provider) +
-      detailRow('Model', registry.model) +
-      detailRow('Endpoint', registry.endpoint ? redactClient(registry.endpoint) : undefined) +
-      detailRow('Current task', agent.currentTask) +
-      detailRow('Current work item', agent.currentWorkItemId) +
-      detailRow('Heartbeat', formatClientTime(agent.lastHeartbeatAt || registry.lastHeartbeatAt)) +
+      detailRow('Role', agent.acpRole) +
+      detailRow('Runtime', agent.kind) +
+      detailRow('Provider', agent.provider) +
+      detailRow('Model', agent.model) +
+      detailRow('Current task', activity.currentTask || (agent.latestHeartbeat && agent.latestHeartbeat.currentTask)) +
+      detailRow('Current work item', activity.currentWorkItemId) +
+      detailRow('Current ACP session', activity.currentSessionId) +
+      detailRow('Active ACP sessions', activity.activeSessionCount) +
+      detailRow('Last heartbeat', formatClientTime(agent.lastHeartbeatAt)) +
+      detailRow('Last activity', formatClientTime(activity.lastActivityAt)) +
       detailRow('Adapter', adapter) +
+      detailRow('Endpoint', agent.endpoint ? redactClient(agent.endpoint) : undefined) +
     '</dl>' +
-    '<div class="detail-section"><h4>Capabilities</h4>' + capabilityList(uniqueCapabilities) + '</div>' +
-    '<div class="detail-section"><h4>Recent Events</h4>' + eventList(detail.events || []) + '</div>';
+    '<div class="detail-section"><h4>Agent capabilities</h4>' + capabilityList(capabilities) + '</div>' +
+    '<div class="detail-section"><h4>Recent ACP sessions</h4>' + agentSessionTable(sessions) + '</div>' +
+    '<div class="detail-section"><h4>Recent agent events</h4>' + eventList(detail.events || []) + '</div>';
+}
+
+function agentSessionTable(sessions) {
+  if (!sessions.length) return '<p class="muted">No ACP sessions observed.</p>';
+  return '<div class="table-wrap"><table class="agent-table agent-session-table"><thead><tr><th>Session</th><th>Status</th><th>Work item</th><th>Last event</th><th>Activity</th></tr></thead><tbody>' +
+    sessions.map(function (session) {
+      return '<tr><td>' + escapeClient(session.sessionId || '—') + '</td>' +
+        '<td>' + pillMarkup(session.status || 'unknown') + '</td>' +
+        '<td>' + escapeClient(session.workItemId || '—') + '</td>' +
+        '<td>' + escapeClient(session.lastEventType || '—') + '</td>' +
+        '<td>' + escapeClient(formatClientTime(session.lastEventAt)) + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function executorRowsMarkup(executors) {
+  return executors.map(function (executor) {
+    const id = escapeClient(executor.id);
+    return '<tr class="agent-row executor-row" tabindex="0" data-executor="' + id + '">' +
+      '<td><strong>' + escapeClient(executor.displayName || executor.id) + '</strong><small>' + id + '</small></td>' +
+      '<td>' + escapeClient(executor.contract || '—') + '</td>' +
+      '<td>' + pillMarkup(executor.status || 'unknown') + '</td>' +
+      '<td>' + escapeClient(executor.runtimeId || '—') + '</td>' +
+      '<td>' + escapeClient(String(executor.capabilityCount || 0)) + '</td>' +
+      '<td>' + escapeClient(String(executor.unsupportedToolCount || 0)) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function renderExecutorTable(executors) {
+  const wrap = document.querySelector('#executors .table-wrap');
+  if (!wrap) return;
+  if (!executors.length) {
+    wrap.innerHTML = '<p class="empty">No managed executors configured.</p>';
+    return;
+  }
+  wrap.innerHTML = '<table class="agent-table executor-table"><thead><tr><th>Executor</th><th>Contract</th><th>Status</th><th>Runtime</th><th>Capabilities</th><th>Unsupported</th></tr></thead><tbody>' + executorRowsMarkup(executors) + '</tbody></table>';
+  bindExecutorRows();
+}
+
+function bindExecutorRows() {
+  document.querySelectorAll('[data-executor]').forEach(function (row) {
+    const activate = function () {
+      selectedExecutorId = row.dataset.executor;
+      document.querySelectorAll('[data-executor]').forEach(function (candidate) { candidate.classList.remove('selected'); });
+      row.classList.add('selected');
+      loadExecutorDetail(selectedExecutorId);
+    };
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+}
+
+async function refreshExecutorRoster() {
+  try {
+    const body = await fetchJson('/api/executors');
+    const executors = Array.isArray(body.executors) ? body.executors : [];
+    const count = document.querySelector('#executor-count');
+    if (count) count.textContent = executors.length + ' managed';
+    renderExecutorTable(executors);
+    if (selectedExecutorId && executors.some(function (executor) { return executor.id === selectedExecutorId; })) {
+      document.querySelectorAll('[data-executor]').forEach(function (row) {
+        if (row.dataset.executor === selectedExecutorId) row.classList.add('selected');
+      });
+    }
+  } catch (error) {
+    const detail = document.querySelector('#executor-detail');
+    if (detail && !selectedExecutorId) {
+      detail.innerHTML = '<div class="detail-error">Executor backend unavailable: ' + escapeClient(error.message) + '</div>';
+    }
+  }
+}
+
+async function loadExecutorDetail(id) {
+  const target = document.querySelector('#executor-detail');
+  if (!target || !id) return;
+  target.innerHTML = '<div class="detail-loading">Loading executor detail...</div>';
+  try {
+    const detail = await fetchJson('/api/executors/' + encodeURIComponent(id));
+    const capabilities = await fetchJson('/api/executors/' + encodeURIComponent(id) + '/capabilities');
+    renderExecutorDetail(target, detail.executor || {}, detail.runtimes || [], capabilities.capabilities || []);
+  } catch (error) {
+    target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
+  }
+}
+
+function renderExecutorDetail(target, executor, runtimes, capabilities) {
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(executor.displayName || executor.id || 'Executor') + '</h3><small>' + escapeClient(executor.id || '') + '</small></div><div>' + pillMarkup(executor.status || 'unknown') + '</div></div>' +
+    '<dl class="detail-grid">' +
+      detailRow('Contract', executor.contract) +
+      detailRow('Type', executor.kind) +
+      detailRow('Configured', executor.configured ? 'yes' : 'no') +
+      detailRow('Runtime', executor.runtimeId) +
+      detailRow('Capabilities', executor.capabilityCount) +
+      detailRow('Unsupported tools', executor.unsupportedToolCount) +
+      detailRow('Attested', formatClientTime(executor.attestedAt)) +
+      detailRow('Granted scopes', Array.isArray(executor.scopes) && executor.scopes.length ? executor.scopes.join(', ') : '—') +
+    '</dl>' +
+    '<div class="detail-section"><h4>Runtime registrations</h4>' + executorRuntimeList(runtimes) + '</div>' +
+    '<div class="detail-section"><h4>Tool capabilities</h4>' + executorCapabilityTable(capabilities) + '</div>';
+}
+
+function executorRuntimeList(runtimes) {
+  if (!Array.isArray(runtimes) || !runtimes.length) return '<p class="muted">No durable runtime registration.</p>';
+  return '<ul class="action-list">' + runtimes.map(function (runtime) {
+    return '<li><strong>' + escapeClient(runtime.runtimeId || 'runtime') + '</strong><small>' +
+      escapeClient((runtime.status || 'unknown') + ' · attested ' + formatClientTime(runtime.attestedAt)) +
+      '</small><small>' + escapeClient(Array.isArray(runtime.scopes) ? runtime.scopes.join(', ') : '') + '</small></li>';
+  }).join('') + '</ul>';
+}
+
+function executorCapabilityTable(capabilities) {
+  if (!Array.isArray(capabilities) || !capabilities.length) return '<p class="muted">No tool capabilities declared.</p>';
+  return '<div class="table-wrap"><table class="agent-table executor-capability-table"><thead><tr><th>Tool</th><th>Managed</th><th>Scope</th><th>Approval</th><th>Risk</th></tr></thead><tbody>' +
+    capabilities.map(function (capability) {
+      const scopes = Array.isArray(capability.scopes) ? capability.scopes.join(', ') : '';
+      const approval = capability.requiresApproval === undefined ? '—' : capability.requiresApproval ? 'required' : 'not required';
+      return '<tr><td><strong>' + escapeClient(capability.name || 'tool') + '</strong><small>' + escapeClient(capability.toolClass || '') + '</small></td>' +
+        '<td>' + pillMarkup(capability.managed || 'unknown') + '</td>' +
+        '<td>' + escapeClient(scopes || '—') + '</td>' +
+        '<td>' + escapeClient(approval) + '</td>' +
+        '<td>' + escapeClient(capability.riskClass || '—') + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function connectorRowsMarkup(connectors) {
+  return connectors.map(function (connector) {
+    const id = escapeClient(connector.id);
+    const scopes = Array.isArray(connector.allowedScopes) ? connector.allowedScopes.join(', ') : '';
+    return '<tr class="agent-row connector-row" tabindex="0" data-connector="' + id + '">' +
+      '<td><strong>' + escapeClient(connector.displayName || connector.id) + '</strong><small>' + id + '</small></td>' +
+      '<td>' + pillMarkup(connector.status || 'unknown') + '</td>' +
+      '<td>' + escapeClient(String(connector.activeSessionCount || 0) + ' / ' + String(connector.sessionCount || 0)) + '</td>' +
+      '<td>' + escapeClient(scopes || '—') + '</td>' +
+      '<td>' + escapeClient(formatClientTime(connector.lastHeartbeatAt)) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function renderConnectorTable(connectors) {
+  const wrap = document.querySelector('#connectors .table-wrap');
+  if (!wrap) return;
+  if (!connectors.length) {
+    wrap.innerHTML = '<p class="empty">No registered connectors.</p>';
+    return;
+  }
+  wrap.innerHTML = '<table class="agent-table connector-table"><thead><tr><th>Connector</th><th>Status</th><th>Active sessions</th><th>Scopes</th><th>Last heartbeat</th></tr></thead><tbody>' + connectorRowsMarkup(connectors) + '</tbody></table>';
+  bindConnectorRows();
+}
+
+function bindConnectorRows() {
+  document.querySelectorAll('[data-connector]').forEach(function (row) {
+    const activate = function () {
+      selectedConnectorId = row.dataset.connector;
+      document.querySelectorAll('[data-connector]').forEach(function (candidate) { candidate.classList.remove('selected'); });
+      row.classList.add('selected');
+      loadConnectorDetail(selectedConnectorId);
+    };
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+}
+
+async function refreshConnectorRoster() {
+  try {
+    const body = await fetchJson('/api/connectors');
+    const connectors = Array.isArray(body.connectors) ? body.connectors : [];
+    const count = document.querySelector('#connector-count');
+    if (count) count.textContent = connectors.length + ' registered';
+    renderConnectorTable(connectors);
+    if (selectedConnectorId && connectors.some(function (connector) { return connector.id === selectedConnectorId; })) {
+      document.querySelectorAll('[data-connector]').forEach(function (row) {
+        if (row.dataset.connector === selectedConnectorId) row.classList.add('selected');
+      });
+    }
+  } catch (error) {
+    const detail = document.querySelector('#connector-detail');
+    if (detail && !selectedConnectorId) {
+      detail.innerHTML = '<div class="detail-error">Connector backend unavailable: ' + escapeClient(error.message) + '</div>';
+    }
+  }
+}
+
+async function loadConnectorDetail(id) {
+  const target = document.querySelector('#connector-detail');
+  if (!target || !id) return;
+  target.innerHTML = '<div class="detail-loading">Loading connector detail...</div>';
+  try {
+    const detail = await fetchJson('/api/connectors/' + encodeURIComponent(id));
+    renderConnectorDetail(target, detail.connector || {}, detail.sessions || []);
+  } catch (error) {
+    target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
+  }
+}
+
+function renderConnectorDetail(target, connector, sessions) {
+  const scopes = Array.isArray(connector.allowedScopes) ? connector.allowedScopes : [];
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(connector.displayName || connector.id || 'Connector') + '</h3><small>' + escapeClient(connector.id || '') + '</small></div><div>' + pillMarkup(connector.status || 'unknown') + '</div></div>' +
+    '<dl class="detail-grid">' +
+      detailRow('Active sessions', String(connector.activeSessionCount || 0) + ' / ' + String(connector.sessionCount || 0)) +
+      detailRow('Last heartbeat', formatClientTime(connector.lastHeartbeatAt)) +
+      detailRow('Next expiry', formatClientTime(connector.nextSessionExpiryAt)) +
+      detailRow('Updated', formatClientTime(connector.updatedAt)) +
+      detailRow('Public key fingerprint', connector.publicKeyFingerprint ? shortHash(connector.publicKeyFingerprint) : '—') +
+    '</dl>' +
+    '<div class="detail-section"><h4>Granted scopes</h4>' + capabilityList(scopes) + '</div>' +
+    '<div class="detail-section"><h4>Tunnel sessions</h4>' + connectorSessionTable(sessions) + '</div>';
+}
+
+function connectorSessionTable(sessions) {
+  if (!Array.isArray(sessions) || !sessions.length) return '<p class="muted">No tunnel sessions registered.</p>';
+  return '<div class="table-wrap"><table class="agent-table connector-session-table"><thead><tr><th>Tunnel</th><th>Session</th><th>Status</th><th>Heartbeat</th><th>Expires</th></tr></thead><tbody>' +
+    sessions.map(function (session) {
+      const status = session.effectiveStatus || session.status || 'unknown';
+      const reason = session.staleReason ? ' · ' + String(session.staleReason).replaceAll('_', ' ') : '';
+      return '<tr><td>' + escapeClient(session.tunnelId || '—') + '</td>' +
+        '<td>' + escapeClient(session.sessionId || '—') + '</td>' +
+        '<td>' + pillMarkup(status) + '<small>' + escapeClient(reason) + '</small></td>' +
+        '<td>' + escapeClient(formatClientTime(session.lastHeartbeatAt)) + '</td>' +
+        '<td>' + escapeClient(formatClientTime(session.expiresAt)) + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
 }
 
 function detailRow(label, value) {
-  return '<div><dt>' + escapeClient(label) + '</dt><dd>' + escapeClient(redactClient(value || '—')) + '</dd></div>';
+  const shown = value === 0 ? '0' : value || '—';
+  return '<div><dt>' + escapeClient(label) + '</dt><dd>' + escapeClient(redactClient(shown)) + '</dd></div>';
 }
 
 function capabilityList(capabilities) {
@@ -2450,6 +2805,7 @@ const viewAliases = {
   execution: 'execution',
   approvals: 'approvals',
   agents: 'agents',
+  executors: 'executors',
   connectors: 'connectors',
   'operator-metrics': 'metrics',
   metrics: 'metrics',
@@ -2465,10 +2821,45 @@ function showView(name) {
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
+  if (view === 'executors') refreshExecutorRoster();
+  if (view === 'connectors') refreshConnectorRoster();
   syncSystemProbes();
   syncMetricsPolling();
   syncLeaseExpiryWarningRefresh();
 }
+
+function openDashboardDrilldown(link) {
+  const view = link.dataset.dashboardView || 'overview';
+  const rawStatuses = link.dataset.dashboardStatuses;
+  if (rawStatuses !== undefined) {
+    const filter = {
+      statuses: String(rawStatuses).split(',').map(function (value) { return value.trim(); }).filter(Boolean),
+      risks: [],
+      agentId: '',
+      text: ''
+    };
+    syncQueueFilterControls(filter);
+    applyQueueFilterClient(filter);
+    writeQueueFilterToLocation(filter);
+  }
+  showView(view);
+  const url = new URL(location.href);
+  if (rawStatuses === undefined) {
+    url.search = '';
+  } else {
+    url.searchParams.delete('item');
+  }
+  url.hash = '#' + view;
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+
+document.addEventListener('click', function (event) {
+  const link = event.target && event.target.closest ? event.target.closest('a[data-dashboard-view]') : null;
+  if (!link) return;
+  event.preventDefault();
+  openDashboardDrilldown(link);
+});
+
 document.addEventListener('visibilitychange', syncLeaseExpiryWarningRefresh);
 document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');

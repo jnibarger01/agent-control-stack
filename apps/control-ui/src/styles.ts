@@ -294,6 +294,27 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .approval-item { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 12px; display: grid; gap: 9px; }
 .approval-item strong, .approval-item small { display: block; }
 .agent-layout { display: grid; }
+.agent-roster { min-width: 0; padding: 12px; display: grid; gap: 12px; align-content: start; }
+.agent-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.agent-summary div { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 10px; }
+.agent-summary span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.agent-summary strong { display: block; margin-top: 4px; font-size: 18px; color: var(--ink); }
+.agent-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; align-items: stretch; }
+.agent-card { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); padding: 12px; display: grid; gap: 10px; text-align: left; font: inherit; cursor: pointer; }
+.agent-card:hover, .agent-card.selected { background: var(--hover); border-color: var(--control-hover-line); }
+.agent-card.selected { box-shadow: inset 3px 0 0 var(--accent); }
+.agent-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agent-avatar { flex: 0 0 34px; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--control-line); border-radius: 9px; background: var(--control-bg); font-weight: 800; }
+.agent-card-identity { flex: 1; min-width: 0; }
+.agent-card-identity strong, .agent-card-identity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-card-identity small { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.agent-card-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; color: var(--muted); font-size: 11px; }
+.agent-card-task { display: grid; gap: 3px; border-top: 1px solid var(--soft-line); padding-top: 9px; }
+.agent-card-task small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.agent-card-task > span { line-height: 1.35; overflow-wrap: anywhere; }
+.agent-card-error { margin: 0; color: var(--red); font-size: 11px; overflow-wrap: anywhere; }
+.agent-card-foot { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
+.agent-card-foot span { min-width: 0; overflow-wrap: anywhere; }
 .detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
 .detail-empty, .detail-loading, .detail-error { color: var(--muted); }
 .detail-error { color: var(--red); }
@@ -346,7 +367,7 @@ output { color: var(--accent); min-height: 20px; }
 .skip-link:focus { left: 12px; top: 12px; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible, .executor-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible, .agent-card:focus-visible, .executor-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .reason-field { display: grid; gap: 5px; }
 .reason-label { color: var(--muted); font-size: 12px; }
 .reason-label .req { color: var(--red); font-weight: 600; }
@@ -380,6 +401,8 @@ output { color: var(--accent); min-height: 20px; }
   .approval-actions { flex-direction: column; }
   .approval-actions button { width: 100%; min-height: 44px; font-size: 15px; }
   .table-wrap { max-height: none; }
+  .agent-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-card-grid { grid-template-columns: 1fr; }
   .agent-table th:nth-child(n+5), .agent-table td:nth-child(n+5) { display: none; }
   .queue-filter-fields { grid-template-columns: 1fr; }
   .queue-filter-chip { min-height: 44px; }

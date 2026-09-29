@@ -285,48 +285,70 @@ async function loadWorkDetail(id, options) {
   }
 }
 
-function agentRowsMarkup(agents) {
+function agentRoleLabelClient(role) {
+  if (!role) return 'Role not reported';
+  return String(role).toLowerCase().split('_').map(function (part) {
+    return part.charAt(0).toUpperCase() + part.slice(1);
+  }).join(' ');
+}
+
+function agentSummaryMarkup(agents) {
+  const online = agents.filter(function (agent) { return agent.status === 'online'; }).length;
+  const activeTasks = agents.filter(function (agent) { return Boolean(agent.currentTask); }).length;
+  const unavailable = agents.filter(function (agent) { return agent.status === 'stale' || agent.status === 'offline'; }).length;
+  return '<div class="agent-summary" id="agent-summary">' +
+    '<div><span>Registered</span><strong>' + agents.length + '</strong></div>' +
+    '<div><span>Online</span><strong>' + online + '</strong></div>' +
+    '<div><span>Active tasks</span><strong>' + activeTasks + '</strong></div>' +
+    '<div><span>Stale / offline</span><strong>' + unavailable + '</strong></div>' +
+  '</div>';
+}
+
+function agentCardsMarkup(agents) {
   return agents.map(function (agent) {
     const id = escapeClient(agent.id);
     const name = escapeClient(agent.displayName || agent.name || agent.id);
-    const role = agent.metadata && agent.metadata.acpRole ? agent.metadata.acpRole : '—';
-    return '<tr class="agent-row" tabindex="0" data-agent="' + id + '" data-agent-id="' + id + '">' +
-      '<td><strong>' + name + '</strong><small>' + id + '</small></td>' +
-      '<td>' + escapeClient(role) + '</td>' +
-      '<td>' + escapeClient(agent.kind || '—') + '</td>' +
-      '<td>' + pillMarkup(agent.status || 'observed') + '</td>' +
-      '<td>' + escapeClient(agent.currentTask || '—') + '</td>' +
-      '<td>' + escapeClient(formatClientTime(agent.lastHeartbeatAt)) + '</td>' +
-      '<td>' + escapeClient(redactClient(agent.lastError || '—')) + '</td>' +
-    '</tr>';
+    const metadata = agent.metadata || {};
+    const role = escapeClient(agentRoleLabelClient(metadata.acpRole));
+    const providerModel = [metadata.provider, metadata.model].filter(Boolean).join(' · ');
+    const runtime = escapeClient(providerModel ? ((agent.kind || '—') + ' · ' + providerModel) : (agent.kind || '—'));
+    const initial = escapeClient(String(agent.displayName || agent.name || agent.id || '?').trim().charAt(0).toUpperCase() || '?');
+    const task = escapeClient(agent.currentTask || 'No active task reported');
+    const heartbeat = agent.lastHeartbeatAt ? ('Heartbeat ' + formatClientTime(agent.lastHeartbeatAt)) : 'No heartbeat observed';
+    const capabilityCount = Array.isArray(agent.capabilities) ? agent.capabilities.length : 0;
+    const error = agent.lastError ? '<span class="agent-card-error">' + escapeClient(redactClient(agent.lastError)) + '</span>' : '';
+    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '" aria-label="Open ' + name + '">' +
+      '<span class="agent-card-head">' +
+        '<span class="agent-avatar" aria-hidden="true">' + initial + '</span>' +
+        '<span class="agent-card-identity"><strong>' + name + '</strong><small>' + id + '</small></span>' +
+        pillMarkup(agent.status || 'observed') +
+      '</span>' +
+      '<span class="agent-card-meta"><span>' + role + '</span><span>' + runtime + '</span></span>' +
+      '<span class="agent-card-task"><small>Current task</small><span>' + task + '</span></span>' +
+      error +
+      '<span class="agent-card-foot"><span>' + escapeClient(heartbeat) + '</span><span>' + capabilityCount + ' capabilit' + (capabilityCount === 1 ? 'y' : 'ies') + '</span></span>' +
+    '</button>';
   }).join('');
 }
 
 function renderAgentTable(agents) {
-  const wrap = document.querySelector('#agents .table-wrap');
+  const wrap = document.querySelector('#agents .agent-roster');
   if (!wrap) return;
   if (!agents.length) {
     wrap.innerHTML = '<p class="empty">No registered agents.</p>';
     return;
   }
-  wrap.innerHTML = '<table class="agent-table"><thead><tr><th>Agent</th><th>Role</th><th>Runtime</th><th>Status</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">' + agentRowsMarkup(agents) + '</tbody></table>';
+  wrap.innerHTML = agentSummaryMarkup(agents) + '<div class="agent-card-grid" id="agent-roster-body">' + agentCardsMarkup(agents) + '</div>';
   bindAgentRows();
 }
 
 function bindAgentRows() {
-  document.querySelectorAll('[data-agent]').forEach(function (row) {
-    const activate = function () {
-      selectedAgentId = row.dataset.agent;
+  document.querySelectorAll('[data-agent]').forEach(function (card) {
+    card.addEventListener('click', function () {
+      selectedAgentId = card.dataset.agent;
       document.querySelectorAll('[data-agent]').forEach(function (candidate) { candidate.classList.remove('selected'); });
-      row.classList.add('selected');
+      card.classList.add('selected');
       loadAgentDetail(selectedAgentId);
-    };
-    row.addEventListener('click', activate);
-    row.addEventListener('keydown', function (event) {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        activate();
-      }
     });
   });
 }
