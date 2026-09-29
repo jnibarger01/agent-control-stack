@@ -168,6 +168,7 @@ function appendAuditEvent(event) {
 let selectedAgentId = null;
 let selectedExecutorId = null;
 let selectedConnectorId = null;
+let agentRosterAgents = [];
 
 function escapeClient(value) {
   return String(value ?? '').replace(/[&<>"']/g, function (char) {
@@ -292,6 +293,88 @@ function agentRoleLabelClient(role) {
   }).join(' ');
 }
 
+function agentAttentionRankClient(agent) {
+  if (agent.lastError) return 0;
+  if (agent.status === 'stale') return 1;
+  if (agent.status === 'online' && agent.currentTask) return 2;
+  if (agent.status === 'online') return 3;
+  if (agent.status === 'observed') return 4;
+  if (agent.status === 'offline') return 5;
+  return 6;
+}
+
+function agentNameForSort(agent) {
+  return String(agent.displayName || agent.name || agent.id || '').toLowerCase();
+}
+
+function sortAgentRosterClient(agents, attentionFirst) {
+  return agents.slice().sort(function (left, right) {
+    if (attentionFirst) {
+      const rank = agentAttentionRankClient(left) - agentAttentionRankClient(right);
+      if (rank !== 0) return rank;
+    }
+    const name = agentNameForSort(left).localeCompare(agentNameForSort(right));
+    return name || String(left.id || '').localeCompare(String(right.id || ''));
+  });
+}
+
+function agentSearchText(agent) {
+  const metadata = agent.metadata || {};
+  return [
+    agent.displayName,
+    agent.name,
+    agent.id,
+    agent.kind,
+    metadata.acpRole,
+    agentRoleLabelClient(metadata.acpRole),
+    metadata.provider,
+    metadata.model,
+    agent.currentTask,
+    agent.lastError,
+    ...(Array.isArray(agent.capabilities) ? agent.capabilities : [])
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function readAgentDiscoveryState() {
+  const search = document.querySelector('#agent-search');
+  const role = document.querySelector('#agent-role-filter');
+  const status = document.querySelector('#agent-status-filter');
+  const attention = document.querySelector('#agent-attention-first');
+  return {
+    search: search ? String(search.value || '').trim().toLowerCase() : '',
+    role: role ? String(role.value || '') : '',
+    status: status ? String(status.value || '') : '',
+    attentionFirst: attention ? Boolean(attention.checked) : true
+  };
+}
+
+function filterAgentRosterClient(agents, state) {
+  const terms = state.search.split(' ').filter(Boolean);
+  return agents.filter(function (agent) {
+    const metadata = agent.metadata || {};
+    if (state.role && metadata.acpRole !== state.role) return false;
+    if (state.status && agent.status !== state.status) return false;
+    if (!terms.length) return true;
+    const haystack = agentSearchText(agent);
+    return terms.every(function (term) { return haystack.includes(term); });
+  });
+}
+
+function syncAgentRoleOptions(agents) {
+  const select = document.querySelector('#agent-role-filter');
+  if (!select) return;
+  const selected = select.value;
+  const roles = Array.from(new Set(agents.map(function (agent) {
+    return agent.metadata && agent.metadata.acpRole;
+  }).filter(Boolean))).sort(function (left, right) {
+    return agentRoleLabelClient(left).localeCompare(agentRoleLabelClient(right));
+  });
+  select.innerHTML = '<option value="">All roles</option>' + roles.map(function (role) {
+    return '<option value="' + escapeClient(role) + '">' + escapeClient(agentRoleLabelClient(role)) + '</option>';
+  }).join('');
+  if (roles.includes(selected)) select.value = selected;
+}
+
 function agentSummaryMarkup(agents) {
   const online = agents.filter(function (agent) { return agent.status === 'online'; }).length;
   const activeTasks = agents.filter(function (agent) { return Boolean(agent.currentTask); }).length;
@@ -310,6 +393,7 @@ function agentCardsMarkup(agents) {
     const name = escapeClient(agent.displayName || agent.name || agent.id);
     const metadata = agent.metadata || {};
     const role = escapeClient(agentRoleLabelClient(metadata.acpRole));
+    const attentionClass = agent.lastError ? ' has-error' : agent.status === 'stale' ? ' is-stale' : '';
     const providerModel = [metadata.provider, metadata.model].filter(Boolean).join(' · ');
     const runtime = escapeClient(providerModel ? ((agent.kind || '—') + ' · ' + providerModel) : (agent.kind || '—'));
     const initial = escapeClient(String(agent.displayName || agent.name || agent.id || '?').trim().charAt(0).toUpperCase() || '?');
@@ -317,7 +401,7 @@ function agentCardsMarkup(agents) {
     const heartbeat = agent.lastHeartbeatAt ? ('Heartbeat ' + formatClientTime(agent.lastHeartbeatAt)) : 'No heartbeat observed';
     const capabilityCount = Array.isArray(agent.capabilities) ? agent.capabilities.length : 0;
     const error = agent.lastError ? '<span class="agent-card-error">' + escapeClient(redactClient(agent.lastError)) + '</span>' : '';
-    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '" aria-label="Open ' + name + '">' +
+    return '<button type="button" class="agent-card' + attentionClass + '" data-agent="' + id + '" data-agent-id="' + id + '" data-agent-role="' + escapeClient(metadata.acpRole || '') + '" data-agent-status="' + escapeClient(agent.status || '') + '" aria-label="Open ' + name + '">' +
       '<span class="agent-card-head">' +
         '<span class="agent-avatar" aria-hidden="true">' + initial + '</span>' +
         '<span class="agent-card-identity"><strong>' + name + '</strong><small>' + id + '</small></span>' +
@@ -332,13 +416,11 @@ function agentCardsMarkup(agents) {
 }
 
 function renderAgentTable(agents) {
-  const wrap = document.querySelector('#agents .agent-roster');
-  if (!wrap) return;
-  if (!agents.length) {
-    wrap.innerHTML = '<p class="empty">No registered agents.</p>';
-    return;
-  }
-  wrap.innerHTML = agentSummaryMarkup(agents) + '<div class="agent-card-grid" id="agent-roster-body">' + agentCardsMarkup(agents) + '</div>';
+  const summary = document.querySelector('#agent-summary');
+  const grid = document.querySelector('#agent-roster-body');
+  if (!summary || !grid) return;
+  summary.outerHTML = agentSummaryMarkup(agentRosterAgents);
+  grid.innerHTML = agentCardsMarkup(agents);
   bindAgentRows();
 }
 
@@ -353,17 +435,79 @@ function bindAgentRows() {
   });
 }
 
+function applyAgentDiscovery() {
+  const state = readAgentDiscoveryState();
+  const filtered = filterAgentRosterClient(agentRosterAgents, state);
+  const visible = sortAgentRosterClient(filtered, state.attentionFirst);
+  const grid = document.querySelector('#agent-roster-body');
+  if (grid && !visible.length) {
+    const message = agentRosterAgents.length ? 'No agents match the current filters.' : 'No registered agents.';
+    grid.innerHTML = '<p class="empty agent-empty">' + message + '</p>';
+    const summary = document.querySelector('#agent-summary');
+    if (summary) summary.outerHTML = agentSummaryMarkup(agentRosterAgents);
+  } else {
+    renderAgentTable(visible);
+  }
+
+  if (selectedAgentId) {
+    document.querySelectorAll('[data-agent]').forEach(function (card) {
+      if (card.dataset.agent === selectedAgentId) card.classList.add('selected');
+    });
+  }
+
+  const count = document.querySelector('#agent-count');
+  const filteredState = Boolean(state.search || state.role || state.status);
+  if (count) {
+    count.textContent = filteredState
+      ? (visible.length + ' of ' + agentRosterAgents.length + ' agents')
+      : (agentRosterAgents.length + ' registered');
+  }
+  const live = document.querySelector('#agent-filter-live');
+  if (live) {
+    const ordering = state.attentionFirst ? 'attention first' : 'name order';
+    live.textContent = filteredState
+      ? ('Showing ' + visible.length + ' of ' + agentRosterAgents.length + ' agents · ' + ordering)
+      : ('Showing all ' + agentRosterAgents.length + ' agents · ' + ordering);
+  }
+  return visible;
+}
+
+function bindAgentDiscovery() {
+  const root = document.querySelector('#agent-discovery');
+  if (!root) return;
+  const apply = function () { applyAgentDiscovery(); };
+  const search = document.querySelector('#agent-search');
+  const role = document.querySelector('#agent-role-filter');
+  const status = document.querySelector('#agent-status-filter');
+  const attention = document.querySelector('#agent-attention-first');
+  const clear = document.querySelector('#agent-filter-clear');
+  if (search) search.addEventListener('input', apply);
+  if (role) role.addEventListener('change', apply);
+  if (status) status.addEventListener('change', apply);
+  if (attention) attention.addEventListener('change', apply);
+  if (clear) clear.addEventListener('click', function () {
+    if (search) search.value = '';
+    if (role) role.value = '';
+    if (status) status.value = '';
+    if (attention) attention.checked = true;
+    applyAgentDiscovery();
+    if (search) search.focus();
+  });
+}
+
 async function refreshAgentRoster() {
   try {
     const body = await fetchJson('/agents');
     const agents = Array.isArray(body.agents) ? body.agents : [];
-    const count = document.querySelector('#agent-count');
-    if (count) count.textContent = agents.length + ' registered';
-    renderAgentTable(agents);
-    if (selectedAgentId && agents.some(function (agent) { return agent.id === selectedAgentId; })) {
-      document.querySelectorAll('[data-agent]').forEach(function (row) {
-        if (row.dataset.agent === selectedAgentId) row.classList.add('selected');
-      });
+    agentRosterAgents = agents;
+    syncAgentRoleOptions(agents);
+    applyAgentDiscovery();
+    if (selectedAgentId && !agents.some(function (agent) { return agent.id === selectedAgentId; })) {
+      selectedAgentId = null;
+      const detail = document.querySelector('#agent-detail');
+      if (detail) {
+        detail.innerHTML = '<div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>';
+      }
     }
   } catch (error) {
     const detail = document.querySelector('#agent-detail');
@@ -1078,6 +1222,7 @@ function bindQueueFilter() {
 bindQueueFilter();
 bindWorkItems();
 bindAgentRows();
+bindAgentDiscovery();
 refreshAgentRoster();
 connectSse();
 renderNotificationToggle();

@@ -217,6 +217,43 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.text("#agent-summary")).toContain("Stale / offline1");
     expect(app.text('[data-agent="hermes-local"]')).toContain("Orchestration Layer");
     expect(app.text('[data-agent="hermes-local"]')).toContain("Coordinate implementation");
+    expect(app.document.querySelector(".agent-card")?.getAttribute("data-agent")).toBe("hermes-local");
+
+    const search = app.document.querySelector("#agent-search") as HTMLInputElement;
+    search.value = "codex implementation";
+    search.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+    expect(app.document.querySelectorAll(".agent-card")).toHaveLength(1);
+    expect(app.document.querySelector(".agent-card")?.getAttribute("data-agent")).toBe("codex-cli");
+    expect(app.text("#agent-count")).toBe("1 of 2 agents");
+
+    app.emit("agent.updated", { "agent.id": "codex-cli" });
+    await app.flush();
+    expect((app.document.querySelector("#agent-search") as HTMLInputElement).value).toBe("codex implementation");
+    expect(app.document.querySelectorAll(".agent-card")).toHaveLength(1);
+    expect(app.document.querySelector(".agent-card")?.getAttribute("data-agent")).toBe("codex-cli");
+
+    (app.document.querySelector("#agent-filter-clear") as HTMLButtonElement).click();
+    expect(app.document.querySelectorAll(".agent-card")).toHaveLength(2);
+
+    const role = app.document.querySelector("#agent-role-filter") as HTMLSelectElement;
+    role.value = "ORCHESTRATION_LAYER";
+    role.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    expect(app.document.querySelectorAll(".agent-card")).toHaveLength(1);
+    expect(app.document.querySelector(".agent-card")?.getAttribute("data-agent")).toBe("hermes-local");
+
+    (app.document.querySelector("#agent-filter-clear") as HTMLButtonElement).click();
+    const status = app.document.querySelector("#agent-status-filter") as HTMLSelectElement;
+    status.value = "offline";
+    status.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    expect(app.document.querySelectorAll(".agent-card")).toHaveLength(1);
+    expect(app.document.querySelector(".agent-card")?.getAttribute("data-agent")).toBe("codex-cli");
+
+    (app.document.querySelector("#agent-filter-clear") as HTMLButtonElement).click();
+    const attention = app.document.querySelector("#agent-attention-first") as HTMLInputElement;
+    attention.checked = false;
+    attention.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    expect(app.document.querySelector(".agent-card")?.getAttribute("data-agent")).toBe("codex-cli");
+    expect(app.text("#agent-filter-live")).toContain("name order");
 
     (app.document.querySelector('[data-agent="hermes-local"]') as HTMLButtonElement).click();
     await app.flush();

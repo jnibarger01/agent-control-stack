@@ -127,6 +127,12 @@ describe("renderDashboard", () => {
     });
 
     expect(html).toContain('class="agent-summary"');
+    expect(html).toContain('id="agent-discovery"');
+    expect(html).toContain('id="agent-search"');
+    expect(html).toContain('id="agent-role-filter"');
+    expect(html).toContain('id="agent-status-filter"');
+    expect(html).toContain('id="agent-attention-first" type="checkbox" checked');
+    expect(html).toContain('id="agent-filter-clear"');
     expect(html).toContain("<span>Registered</span><strong>2</strong>");
     expect(html).toContain("<span>Online</span><strong>1</strong>");
     expect(html).toContain("<span>Active tasks</span><strong>1</strong>");
@@ -137,6 +143,65 @@ describe("renderDashboard", () => {
     expect(html).toContain("Coordinate implementation");
     expect(html).toContain("2 capabilities");
     expect(html).toContain('class="agent-card" data-agent="codex-cli"');
+  });
+
+  it("orders the agent roster by operational attention before name", () => {
+    const html = renderDashboard({
+      workItems: [],
+      events: [],
+      agents: [
+        {
+          id: "offline-agent",
+          displayName: "Alpha Offline",
+          kind: "cli",
+          status: "offline",
+          health: "unknown",
+          capabilities: [],
+          metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+        },
+        {
+          id: "active-agent",
+          displayName: "Bravo Active",
+          kind: "service",
+          status: "online",
+          health: "healthy",
+          currentTask: "Working",
+          capabilities: [],
+          metadata: { registered: "true", acpRole: "ORCHESTRATION_LAYER" }
+        },
+        {
+          id: "stale-agent",
+          displayName: "Charlie Stale",
+          kind: "adapter",
+          status: "stale",
+          health: "warning",
+          capabilities: [],
+          metadata: { registered: "true", acpRole: "REVIEW_PLANNING_AGENT" }
+        },
+        {
+          id: "error-agent",
+          displayName: "Zulu Error",
+          kind: "bridge",
+          status: "online",
+          health: "unhealthy",
+          lastError: "runtime unavailable",
+          capabilities: [],
+          metadata: { registered: "true", acpRole: "DESKTOP_LOCAL_AGENT_BRIDGE" }
+        }
+      ],
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    const error = html.indexOf('data-agent="error-agent"');
+    const stale = html.indexOf('data-agent="stale-agent"');
+    const active = html.indexOf('data-agent="active-agent"');
+    const offline = html.indexOf('data-agent="offline-agent"');
+    expect(error).toBeGreaterThan(-1);
+    expect(error).toBeLessThan(stale);
+    expect(stale).toBeLessThan(active);
+    expect(active).toBeLessThan(offline);
+    expect(html).toContain('class="agent-card has-error"');
+    expect(html).toContain('class="agent-card is-stale"');
   });
 
   it("keeps agents, executors, connectors, and admission as distinct overview and system domains", () => {

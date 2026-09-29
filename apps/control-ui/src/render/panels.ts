@@ -138,6 +138,56 @@ function agentInitial(agent: MissionControlAgent): string {
   return (agent.displayName || agent.id).trim().charAt(0).toUpperCase() || "?";
 }
 
+function agentAttentionRank(agent: MissionControlAgent): number {
+  if (agent.lastError) return 0;
+  if (agent.status === "stale") return 1;
+  if (agent.status === "online" && agent.currentTask) return 2;
+  if (agent.status === "online") return 3;
+  if (agent.status === "observed") return 4;
+  if (agent.status === "offline") return 5;
+  return 6;
+}
+
+function sortAgentsForDiscovery(agents: MissionControlAgent[]): MissionControlAgent[] {
+  return [...agents].sort((left, right) => {
+    const attention = agentAttentionRank(left) - agentAttentionRank(right);
+    if (attention !== 0) return attention;
+    return left.displayName.localeCompare(right.displayName) || left.id.localeCompare(right.id);
+  });
+}
+
+function agentDiscoveryControls(agents: MissionControlAgent[]): string {
+  const roles = [
+    ...new Set(agents.map((agent) => agent.metadata.acpRole).filter((role): role is string => Boolean(role)))
+  ].sort((left, right) => agentRoleLabel(left).localeCompare(agentRoleLabel(right)));
+  const roleOptions = roles
+    .map((role) => `<option value="${escapeHtml(role)}">${escapeHtml(agentRoleLabel(role))}</option>`)
+    .join("");
+  return `<div class="agent-discovery" id="agent-discovery" role="search" aria-label="Find and filter agents">
+    <label class="agent-discovery-search" for="agent-search">Search agents
+      <input id="agent-search" type="search" autocomplete="off" spellcheck="false" placeholder="name, id, role, model, task" />
+    </label>
+    <label for="agent-role-filter">Role
+      <select id="agent-role-filter"><option value="">All roles</option>${roleOptions}</select>
+    </label>
+    <label for="agent-status-filter">Status
+      <select id="agent-status-filter">
+        <option value="">All statuses</option>
+        <option value="online">Online</option>
+        <option value="stale">Stale</option>
+        <option value="offline">Offline</option>
+        <option value="observed">Observed</option>
+      </select>
+    </label>
+    <label class="agent-attention-toggle" for="agent-attention-first">
+      <input id="agent-attention-first" type="checkbox" checked />
+      <span>Attention first</span>
+    </label>
+    <button type="button" id="agent-filter-clear" class="tool-button">Clear</button>
+    <p id="agent-filter-live" class="agent-filter-live" aria-live="polite">Showing all ${agents.length} agents · attention first</p>
+  </div>`;
+}
+
 function agentSummary(agents: MissionControlAgent[]): string {
   const online = agents.filter((agent) => agent.status === "online").length;
   const activeTasks = agents.filter((agent) => Boolean(agent.currentTask)).length;
@@ -152,6 +202,7 @@ function agentSummary(agents: MissionControlAgent[]): string {
 
 function agentCard(agent: MissionControlAgent): string {
   const role = agentRoleLabel(agent.metadata.acpRole);
+  const attentionClass = agent.lastError ? " has-error" : agent.status === "stale" ? " is-stale" : "";
   const providerModel = [agent.metadata.provider, agent.metadata.model].filter(Boolean).join(" · ");
   const runtime = providerModel ? `${agent.kind} · ${providerModel}` : agent.kind;
   const task = agent.currentTask ? escapeHtml(agent.currentTask) : "No active task reported";
@@ -160,7 +211,7 @@ function agentCard(agent: MissionControlAgent): string {
   const error = agent.lastError
     ? `<span class="agent-card-error">${escapeHtml(redactSecrets(agent.lastError))}</span>`
     : "";
-  return `<button type="button" class="agent-card" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}" aria-label="Open ${escapeHtml(agent.displayName)}">
+  return `<button type="button" class="agent-card${attentionClass}" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}" data-agent-role="${escapeHtml(agent.metadata.acpRole ?? "")}" data-agent-status="${escapeHtml(agent.status)}" aria-label="Open ${escapeHtml(agent.displayName)}">
     <span class="agent-card-head">
       <span class="agent-avatar" aria-hidden="true">${escapeHtml(agentInitial(agent))}</span>
       <span class="agent-card-identity"><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></span>
@@ -173,10 +224,11 @@ function agentCard(agent: MissionControlAgent): string {
 }
 
 export function agentTable(agents: MissionControlAgent[]): string {
-  if (!agents.length) return `<div class="agent-roster"><p class="empty">No registered agents.</p></div>`;
-  return `<div class="agent-roster">${agentSummary(agents)}<div class="agent-card-grid" id="agent-roster-body">${agents
-    .map(agentCard)
-    .join("")}</div></div>`;
+  const ordered = sortAgentsForDiscovery(agents);
+  const cards = ordered.length
+    ? ordered.map(agentCard).join("")
+    : `<p class="empty agent-empty">No registered agents.</p>`;
+  return `<div class="agent-roster">${agentDiscoveryControls(agents)}${agentSummary(agents)}<div class="agent-card-grid" id="agent-roster-body">${cards}</div></div>`;
 }
 
 export function agentDetailPanel(): string {

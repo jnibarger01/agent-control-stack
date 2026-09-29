@@ -301,6 +301,12 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .approval-item strong, .approval-item small { display: block; }
 .agent-layout { display: grid; }
 .agent-roster { min-width: 0; padding: 12px; display: grid; gap: 12px; align-content: start; }
+.agent-discovery { display: grid; grid-template-columns: minmax(240px, 2fr) minmax(150px, 1fr) minmax(130px, .85fr) auto auto; gap: 8px; align-items: end; border: 1px solid var(--line); border-radius: 9px; background: var(--surface-2); padding: 10px; }
+.agent-discovery label { min-width: 0; }
+.agent-discovery-search { min-width: 220px; }
+.agent-attention-toggle { display: flex; align-items: center; gap: 7px; min-height: 40px; padding: 0 9px; border: 1px solid var(--control-line); border-radius: 8px; background: var(--control-bg); color: var(--ink); white-space: nowrap; }
+.agent-attention-toggle input { width: auto; margin: 0; }
+.agent-filter-live { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 11px; }
 .agent-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
 .agent-summary div { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 10px; }
 .agent-summary span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
@@ -308,6 +314,8 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .agent-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; align-items: stretch; }
 .agent-card { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); padding: 12px; display: grid; gap: 10px; text-align: left; font: inherit; cursor: pointer; }
 .agent-card:hover, .agent-card.selected { background: var(--hover); border-color: var(--control-hover-line); }
+.agent-card.has-error { border-color: var(--bad-line); }
+.agent-card.is-stale:not(.has-error) { border-color: var(--warn-line); }
 .agent-card.selected { box-shadow: inset 3px 0 0 var(--accent); }
 .agent-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
 .agent-avatar { flex: 0 0 34px; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--control-line); border-radius: 9px; background: var(--control-bg); font-weight: 800; }
@@ -407,8 +415,13 @@ output { color: var(--accent); min-height: 20px; }
   .approval-actions { flex-direction: column; }
   .approval-actions button { width: 100%; min-height: 44px; font-size: 15px; }
   .table-wrap { max-height: none; }
+  .agent-discovery { grid-template-columns: 1fr; }
+  .agent-discovery-search { min-width: 0; }
+  .agent-attention-toggle { min-height: 44px; }
+  #agent-filter-clear { min-height: 44px; }
   .agent-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agent-card-grid { grid-template-columns: 1fr; }
+  .agent-empty { grid-column: 1 / -1; }
   .agent-table th:nth-child(n+5), .agent-table td:nth-child(n+5) { display: none; }
   .queue-filter-fields { grid-template-columns: 1fr; }
   .queue-filter-chip { min-height: 44px; }
@@ -478,7 +491,34 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
       <section id="overview" class="cards" data-view-panel="overview"><a class="card dashboard-card" href="#agents" data-dashboard-view="agents" aria-label="Open Agents"><span>Agents</span><strong>0 / 0</strong><p>online by heartbeat / registered</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#executors" data-dashboard-view="executors" aria-label="Open Executors"><span>Executors</span><strong>—</strong><p>configured / known execution bridges</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#connectors" data-dashboard-view="connectors" aria-label="Open Connectors"><span>Connectors</span><strong>—</strong><p>active tunnel sessions · Connector state unavailable in this render</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#execution" data-dashboard-view="execution" data-dashboard-statuses="running" aria-label="Open Running Tasks"><span>Running Tasks</span><strong>0</strong><p>Lease-bound work currently running</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="needs_approval,blocked,quarantined" aria-label="Open Needs Operator Attention"><span>Needs Operator Attention</span><strong>2</strong><p>Approvals, blocked, and quarantined work; the same set the queue marks for attention</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#approvals" data-dashboard-view="approvals" aria-label="Open Pending Approvals"><span>Pending Approvals</span><strong>1</strong><p>Policy-gated work waiting on a human</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="failed,blocked" aria-label="Open Failed / Blocked"><span>Failed / Blocked</span><strong>1</strong><p>Failed items plus blocked work</p><small class="card-action">Open →</small></a></section>
       <section class="grid">
-        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Identity, role, activity, and runtime presence</p></div><span id="agent-count">0 registered</span></div><div class="agent-layout"><div class="agent-roster"><p class="empty">No registered agents.</p></div><section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
+        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Identity, role, activity, and runtime presence</p></div><span id="agent-count">0 registered</span></div><div class="agent-layout"><div class="agent-roster"><div class="agent-discovery" id="agent-discovery" role="search" aria-label="Find and filter agents">
+    <label class="agent-discovery-search" for="agent-search">Search agents
+      <input id="agent-search" type="search" autocomplete="off" spellcheck="false" placeholder="name, id, role, model, task" />
+    </label>
+    <label for="agent-role-filter">Role
+      <select id="agent-role-filter"><option value="">All roles</option></select>
+    </label>
+    <label for="agent-status-filter">Status
+      <select id="agent-status-filter">
+        <option value="">All statuses</option>
+        <option value="online">Online</option>
+        <option value="stale">Stale</option>
+        <option value="offline">Offline</option>
+        <option value="observed">Observed</option>
+      </select>
+    </label>
+    <label class="agent-attention-toggle" for="agent-attention-first">
+      <input id="agent-attention-first" type="checkbox" checked />
+      <span>Attention first</span>
+    </label>
+    <button type="button" id="agent-filter-clear" class="tool-button">Clear</button>
+    <p id="agent-filter-live" class="agent-filter-live" aria-live="polite">Showing all 0 agents · attention first</p>
+  </div><div class="agent-summary" id="agent-summary">
+    <div><span>Registered</span><strong>0</strong></div>
+    <div><span>Online</span><strong>0</strong></div>
+    <div><span>Active tasks</span><strong>0</strong></div>
+    <div><span>Stale / offline</span><strong>0</strong></div>
+  </div><div class="agent-card-grid" id="agent-roster-body"><p class="empty agent-empty">No registered agents.</p></div></div><section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
     <div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>
   </section></div></article>
         <article id="executors" class="panel wide roster-panel" data-view-panel="executors"><div class="panel-head"><div><h2>Executors</h2><p>Managed execution bridges, runtime state, and tool capabilities</p></div><span id="executor-count">loading</span></div><div class="agent-layout executor-layout">
@@ -707,6 +747,7 @@ function appendAuditEvent(event) {
 let selectedAgentId = null;
 let selectedExecutorId = null;
 let selectedConnectorId = null;
+let agentRosterAgents = [];
 
 function escapeClient(value) {
   return String(value ?? '').replace(/[&<>"']/g, function (char) {
@@ -1683,6 +1724,88 @@ function agentRoleLabelClient(role) {
   }).join(' ');
 }
 
+function agentAttentionRankClient(agent) {
+  if (agent.lastError) return 0;
+  if (agent.status === 'stale') return 1;
+  if (agent.status === 'online' && agent.currentTask) return 2;
+  if (agent.status === 'online') return 3;
+  if (agent.status === 'observed') return 4;
+  if (agent.status === 'offline') return 5;
+  return 6;
+}
+
+function agentNameForSort(agent) {
+  return String(agent.displayName || agent.name || agent.id || '').toLowerCase();
+}
+
+function sortAgentRosterClient(agents, attentionFirst) {
+  return agents.slice().sort(function (left, right) {
+    if (attentionFirst) {
+      const rank = agentAttentionRankClient(left) - agentAttentionRankClient(right);
+      if (rank !== 0) return rank;
+    }
+    const name = agentNameForSort(left).localeCompare(agentNameForSort(right));
+    return name || String(left.id || '').localeCompare(String(right.id || ''));
+  });
+}
+
+function agentSearchText(agent) {
+  const metadata = agent.metadata || {};
+  return [
+    agent.displayName,
+    agent.name,
+    agent.id,
+    agent.kind,
+    metadata.acpRole,
+    agentRoleLabelClient(metadata.acpRole),
+    metadata.provider,
+    metadata.model,
+    agent.currentTask,
+    agent.lastError,
+    ...(Array.isArray(agent.capabilities) ? agent.capabilities : [])
+  ].filter(Boolean).join(' ').toLowerCase();
+}
+
+function readAgentDiscoveryState() {
+  const search = document.querySelector('#agent-search');
+  const role = document.querySelector('#agent-role-filter');
+  const status = document.querySelector('#agent-status-filter');
+  const attention = document.querySelector('#agent-attention-first');
+  return {
+    search: search ? String(search.value || '').trim().toLowerCase() : '',
+    role: role ? String(role.value || '') : '',
+    status: status ? String(status.value || '') : '',
+    attentionFirst: attention ? Boolean(attention.checked) : true
+  };
+}
+
+function filterAgentRosterClient(agents, state) {
+  const terms = state.search.split(' ').filter(Boolean);
+  return agents.filter(function (agent) {
+    const metadata = agent.metadata || {};
+    if (state.role && metadata.acpRole !== state.role) return false;
+    if (state.status && agent.status !== state.status) return false;
+    if (!terms.length) return true;
+    const haystack = agentSearchText(agent);
+    return terms.every(function (term) { return haystack.includes(term); });
+  });
+}
+
+function syncAgentRoleOptions(agents) {
+  const select = document.querySelector('#agent-role-filter');
+  if (!select) return;
+  const selected = select.value;
+  const roles = Array.from(new Set(agents.map(function (agent) {
+    return agent.metadata && agent.metadata.acpRole;
+  }).filter(Boolean))).sort(function (left, right) {
+    return agentRoleLabelClient(left).localeCompare(agentRoleLabelClient(right));
+  });
+  select.innerHTML = '<option value="">All roles</option>' + roles.map(function (role) {
+    return '<option value="' + escapeClient(role) + '">' + escapeClient(agentRoleLabelClient(role)) + '</option>';
+  }).join('');
+  if (roles.includes(selected)) select.value = selected;
+}
+
 function agentSummaryMarkup(agents) {
   const online = agents.filter(function (agent) { return agent.status === 'online'; }).length;
   const activeTasks = agents.filter(function (agent) { return Boolean(agent.currentTask); }).length;
@@ -1701,6 +1824,7 @@ function agentCardsMarkup(agents) {
     const name = escapeClient(agent.displayName || agent.name || agent.id);
     const metadata = agent.metadata || {};
     const role = escapeClient(agentRoleLabelClient(metadata.acpRole));
+    const attentionClass = agent.lastError ? ' has-error' : agent.status === 'stale' ? ' is-stale' : '';
     const providerModel = [metadata.provider, metadata.model].filter(Boolean).join(' · ');
     const runtime = escapeClient(providerModel ? ((agent.kind || '—') + ' · ' + providerModel) : (agent.kind || '—'));
     const initial = escapeClient(String(agent.displayName || agent.name || agent.id || '?').trim().charAt(0).toUpperCase() || '?');
@@ -1708,7 +1832,7 @@ function agentCardsMarkup(agents) {
     const heartbeat = agent.lastHeartbeatAt ? ('Heartbeat ' + formatClientTime(agent.lastHeartbeatAt)) : 'No heartbeat observed';
     const capabilityCount = Array.isArray(agent.capabilities) ? agent.capabilities.length : 0;
     const error = agent.lastError ? '<span class="agent-card-error">' + escapeClient(redactClient(agent.lastError)) + '</span>' : '';
-    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '" aria-label="Open ' + name + '">' +
+    return '<button type="button" class="agent-card' + attentionClass + '" data-agent="' + id + '" data-agent-id="' + id + '" data-agent-role="' + escapeClient(metadata.acpRole || '') + '" data-agent-status="' + escapeClient(agent.status || '') + '" aria-label="Open ' + name + '">' +
       '<span class="agent-card-head">' +
         '<span class="agent-avatar" aria-hidden="true">' + initial + '</span>' +
         '<span class="agent-card-identity"><strong>' + name + '</strong><small>' + id + '</small></span>' +
@@ -1723,13 +1847,11 @@ function agentCardsMarkup(agents) {
 }
 
 function renderAgentTable(agents) {
-  const wrap = document.querySelector('#agents .agent-roster');
-  if (!wrap) return;
-  if (!agents.length) {
-    wrap.innerHTML = '<p class="empty">No registered agents.</p>';
-    return;
-  }
-  wrap.innerHTML = agentSummaryMarkup(agents) + '<div class="agent-card-grid" id="agent-roster-body">' + agentCardsMarkup(agents) + '</div>';
+  const summary = document.querySelector('#agent-summary');
+  const grid = document.querySelector('#agent-roster-body');
+  if (!summary || !grid) return;
+  summary.outerHTML = agentSummaryMarkup(agentRosterAgents);
+  grid.innerHTML = agentCardsMarkup(agents);
   bindAgentRows();
 }
 
@@ -1744,17 +1866,79 @@ function bindAgentRows() {
   });
 }
 
+function applyAgentDiscovery() {
+  const state = readAgentDiscoveryState();
+  const filtered = filterAgentRosterClient(agentRosterAgents, state);
+  const visible = sortAgentRosterClient(filtered, state.attentionFirst);
+  const grid = document.querySelector('#agent-roster-body');
+  if (grid && !visible.length) {
+    const message = agentRosterAgents.length ? 'No agents match the current filters.' : 'No registered agents.';
+    grid.innerHTML = '<p class="empty agent-empty">' + message + '</p>';
+    const summary = document.querySelector('#agent-summary');
+    if (summary) summary.outerHTML = agentSummaryMarkup(agentRosterAgents);
+  } else {
+    renderAgentTable(visible);
+  }
+
+  if (selectedAgentId) {
+    document.querySelectorAll('[data-agent]').forEach(function (card) {
+      if (card.dataset.agent === selectedAgentId) card.classList.add('selected');
+    });
+  }
+
+  const count = document.querySelector('#agent-count');
+  const filteredState = Boolean(state.search || state.role || state.status);
+  if (count) {
+    count.textContent = filteredState
+      ? (visible.length + ' of ' + agentRosterAgents.length + ' agents')
+      : (agentRosterAgents.length + ' registered');
+  }
+  const live = document.querySelector('#agent-filter-live');
+  if (live) {
+    const ordering = state.attentionFirst ? 'attention first' : 'name order';
+    live.textContent = filteredState
+      ? ('Showing ' + visible.length + ' of ' + agentRosterAgents.length + ' agents · ' + ordering)
+      : ('Showing all ' + agentRosterAgents.length + ' agents · ' + ordering);
+  }
+  return visible;
+}
+
+function bindAgentDiscovery() {
+  const root = document.querySelector('#agent-discovery');
+  if (!root) return;
+  const apply = function () { applyAgentDiscovery(); };
+  const search = document.querySelector('#agent-search');
+  const role = document.querySelector('#agent-role-filter');
+  const status = document.querySelector('#agent-status-filter');
+  const attention = document.querySelector('#agent-attention-first');
+  const clear = document.querySelector('#agent-filter-clear');
+  if (search) search.addEventListener('input', apply);
+  if (role) role.addEventListener('change', apply);
+  if (status) status.addEventListener('change', apply);
+  if (attention) attention.addEventListener('change', apply);
+  if (clear) clear.addEventListener('click', function () {
+    if (search) search.value = '';
+    if (role) role.value = '';
+    if (status) status.value = '';
+    if (attention) attention.checked = true;
+    applyAgentDiscovery();
+    if (search) search.focus();
+  });
+}
+
 async function refreshAgentRoster() {
   try {
     const body = await fetchJson('/agents');
     const agents = Array.isArray(body.agents) ? body.agents : [];
-    const count = document.querySelector('#agent-count');
-    if (count) count.textContent = agents.length + ' registered';
-    renderAgentTable(agents);
-    if (selectedAgentId && agents.some(function (agent) { return agent.id === selectedAgentId; })) {
-      document.querySelectorAll('[data-agent]').forEach(function (row) {
-        if (row.dataset.agent === selectedAgentId) row.classList.add('selected');
-      });
+    agentRosterAgents = agents;
+    syncAgentRoleOptions(agents);
+    applyAgentDiscovery();
+    if (selectedAgentId && !agents.some(function (agent) { return agent.id === selectedAgentId; })) {
+      selectedAgentId = null;
+      const detail = document.querySelector('#agent-detail');
+      if (detail) {
+        detail.innerHTML = '<div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>';
+      }
     }
   } catch (error) {
     const detail = document.querySelector('#agent-detail');
@@ -2469,6 +2653,7 @@ function bindQueueFilter() {
 bindQueueFilter();
 bindWorkItems();
 bindAgentRows();
+bindAgentDiscovery();
 refreshAgentRoster();
 connectSse();
 renderNotificationToggle();
