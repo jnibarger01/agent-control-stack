@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import {
   jaceCommanderInvocationHash,
@@ -84,7 +85,16 @@ function gateway(configured = true, fsRoots?: (root: string) => string[]) {
       ? { runtimeId: RUNTIME_ID, keyId: "jc-test-key", privateKey: signing.privateKey, ttlMs: 29_000 }
       : false,
     readManagedAuthority: () => healthyAuthority,
-    jaceCommanderContainment: fsRoots ? { allowedRoots: fsRoots(root), deniedRoots: [] } : false
+    jaceCommanderContainment: fsRoots ? { allowedRoots: fsRoots(root), deniedRoots: [] } : false,
+    executionAdmission: new ExecutionAdmissionScheduler({
+      config: {
+        executionMaxInflight: 1_000,
+        executorMaxInflight: 1_000,
+        queueMax: 1_000,
+        queueTimeoutMs: 30_000,
+        waitMaxInflight: 1_000
+      }
+    })
   });
   return { root, signing, app, dbPath: join(root, "control.db") };
 }

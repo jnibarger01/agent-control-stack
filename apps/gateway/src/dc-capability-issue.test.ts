@@ -3,6 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import { describe, expect, it } from "vitest";
 import { buildGateway, type GatewayCredential } from "./server.js";
@@ -65,7 +66,16 @@ async function buildTestGateway(dbName = "control.db"): Promise<TestContext> {
     logger: false,
     auth: { token: "", actor: "user", actorId: testAuth.actorId, credentials },
     desktopCommanderCapability: signingConfig(keys),
-    desktopCommanderContainment: { allowedRoots: [root], deniedRoots: [] }
+    desktopCommanderContainment: { allowedRoots: [root], deniedRoots: [] },
+    executionAdmission: new ExecutionAdmissionScheduler({
+      config: {
+        executionMaxInflight: 1_000,
+        executorMaxInflight: 1_000,
+        queueMax: 1_000,
+        queueTimeoutMs: 30_000,
+        waitMaxInflight: 1_000
+      }
+    })
   });
   return { root, keys, app };
 }
