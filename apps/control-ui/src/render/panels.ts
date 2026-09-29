@@ -86,22 +86,41 @@ export function overviewCards(
     ? `${toCount(infrastructure.connectors.enabled)} / ${toCount(infrastructure.connectors.registered)} registered connectors enabled`
     : "Connector state unavailable in this render";
   const cards = [
-    ["Agents", agents, "online by heartbeat / registered"],
-    ["Executors", executors, "configured / known execution bridges"],
-    ["Connectors", connectors, `active tunnel sessions · ${connectorHelp}`],
-    ["Running Tasks", stats.running, "Lease-bound work currently running"],
-    [
-      "Needs Operator Attention",
-      stats.attention,
-      "Approvals, blocked, and quarantined work; the same set the queue marks for attention"
-    ],
-    ["Pending Approvals", stats.approvals, "Policy-gated work waiting on a human"],
-    ["Failed / Blocked", stats.failed, "Failed items plus blocked work"]
+    { label: "Agents", value: agents, help: "online by heartbeat / registered", view: "agents" },
+    { label: "Executors", value: executors, help: "configured / known execution bridges", view: "executors" },
+    { label: "Connectors", value: connectors, help: `active tunnel sessions · ${connectorHelp}`, view: "connectors" },
+    {
+      label: "Running Tasks",
+      value: stats.running,
+      help: "Lease-bound work currently running",
+      view: "execution",
+      statuses: "running"
+    },
+    {
+      label: "Needs Operator Attention",
+      value: stats.attention,
+      help: "Approvals, blocked, and quarantined work; the same set the queue marks for attention",
+      view: "queue",
+      statuses: "needs_approval,blocked,quarantined"
+    },
+    {
+      label: "Pending Approvals",
+      value: stats.approvals,
+      help: "Policy-gated work waiting on a human",
+      view: "approvals"
+    },
+    {
+      label: "Failed / Blocked",
+      value: stats.failed,
+      help: "Failed items plus blocked work",
+      view: "queue",
+      statuses: "failed,blocked"
+    }
   ];
   return cards
     .map(
-      ([label, value, help]) =>
-        `<article class="card"><span>${label}</span><strong>${value}</strong><p>${help}</p></article>`
+      ({ label, value, help, view, statuses }) =>
+        `<a class="card dashboard-card" href="#${view}" data-dashboard-view="${view}"${statuses ? ` data-dashboard-statuses="${statuses}"` : ""} aria-label="Open ${label}"><span>${label}</span><strong>${value}</strong><p>${help}</p><small class="card-action">Open →</small></a>`
     )
     .join("");
 }

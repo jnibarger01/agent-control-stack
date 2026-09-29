@@ -104,6 +104,50 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.assigned).toEqual([]);
   });
 
+  it("drills overview cards into domain views and filtered execution queues", async () => {
+    const app = bootLive({
+      workItems: [
+        item("wrk_approval"),
+        item("wrk_running", { status: "running" }),
+        item("wrk_failed", { status: "failed" }),
+        item("wrk_blocked", { status: "blocked" })
+      ],
+      events: [],
+      now: NOW
+    });
+    app.open();
+    await app.flush();
+
+    (
+      app.document.querySelector(
+        '#overview [data-dashboard-view="execution"][data-dashboard-statuses="running"]'
+      ) as HTMLElement
+    ).click();
+    expect(app.document.body.dataset.activeView).toBe("execution");
+    expect(app.window.location.search).toBe("?status=running");
+    expect(app.window.location.hash).toBe("#execution");
+    expect(app.text("#queue-filter-count")).toBe("1 of 4 items");
+
+    (
+      app.document.querySelector(
+        '#overview [data-dashboard-view="queue"][data-dashboard-statuses="failed,blocked"]'
+      ) as HTMLElement
+    ).click();
+    expect(app.document.body.dataset.activeView).toBe("queue");
+    expect(app.window.location.search).toBe("?status=failed&status=blocked");
+    expect(app.window.location.hash).toBe("#queue");
+    expect(app.text("#queue-filter-count")).toBe("2 of 4 items");
+
+    (app.document.querySelector('#overview [data-dashboard-view="agents"]') as HTMLElement).click();
+    expect(app.document.body.dataset.activeView).toBe("agents");
+    expect(app.window.location.search).toBe("");
+    expect(app.window.location.hash).toBe("#agents");
+
+    (app.document.querySelector('#overview [data-dashboard-view="approvals"]') as HTMLElement).click();
+    expect(app.document.body.dataset.activeView).toBe("approvals");
+    expect(app.window.location.hash).toBe("#approvals");
+  });
+
   it("coalesces a burst of work-item events into a single fragment fetch", async () => {
     const app = bootLive({ workItems: [item("wrk_a")], events: [], now: NOW });
     app.open();

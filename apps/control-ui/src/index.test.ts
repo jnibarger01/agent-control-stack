@@ -107,6 +107,12 @@ describe("renderDashboard", () => {
     expect(html).toContain("<span>Agents</span><strong>3 / 8</strong>");
     expect(html).toContain("<span>Executors</span><strong>2 / 2</strong>");
     expect(html).toContain("<span>Connectors</span><strong>4</strong>");
+    expect(html).toContain('data-dashboard-view="agents"');
+    expect(html).toContain('data-dashboard-view="executors"');
+    expect(html).toContain('data-dashboard-view="connectors"');
+    expect(html).toContain('data-dashboard-view="execution" data-dashboard-statuses="running"');
+    expect(html).toContain('data-dashboard-view="queue" data-dashboard-statuses="failed,blocked"');
+    expect(html).toContain('data-dashboard-view="approvals"');
     expect(html).toContain("1 / 2 registered connectors enabled");
     expect(html).toContain("Agent heartbeats online");
     expect(html).toContain("Executors configured");

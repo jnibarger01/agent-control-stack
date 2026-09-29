@@ -1237,6 +1237,39 @@ function showView(name) {
   syncMetricsPolling();
   syncLeaseExpiryWarningRefresh();
 }
+
+function openDashboardDrilldown(link) {
+  const view = link.dataset.dashboardView || 'overview';
+  const rawStatuses = link.dataset.dashboardStatuses;
+  if (rawStatuses !== undefined) {
+    const filter = {
+      statuses: String(rawStatuses).split(',').map(function (value) { return value.trim(); }).filter(Boolean),
+      risks: [],
+      agentId: '',
+      text: ''
+    };
+    syncQueueFilterControls(filter);
+    applyQueueFilterClient(filter);
+    writeQueueFilterToLocation(filter);
+  }
+  showView(view);
+  const url = new URL(location.href);
+  if (rawStatuses === undefined) {
+    url.search = '';
+  } else {
+    url.searchParams.delete('item');
+  }
+  url.hash = '#' + view;
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+
+document.addEventListener('click', function (event) {
+  const link = event.target && event.target.closest ? event.target.closest('a[data-dashboard-view]') : null;
+  if (!link) return;
+  event.preventDefault();
+  openDashboardDrilldown(link);
+});
+
 document.addEventListener('visibilitychange', syncLeaseExpiryWarningRefresh);
 document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');

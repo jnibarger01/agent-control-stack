@@ -213,9 +213,13 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px var(--shadow); }
 .card { padding: 15px; min-height: 108px; }
+.dashboard-card { display: block; color: inherit; text-decoration: none; cursor: pointer; transition: border-color .15s ease, transform .15s ease, background .15s ease; }
+.dashboard-card:hover { border-color: var(--control-hover-line); background: var(--hover); transform: translateY(-1px); }
+.dashboard-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .card span, .panel-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; }
 .card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
 .card p { font-size: 12px; line-height: 1.35; }
+.card-action { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
 .lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .panel { min-width: 0; overflow: hidden; }
