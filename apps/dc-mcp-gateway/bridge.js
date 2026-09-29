@@ -137,8 +137,8 @@ if (!JC && MANAGED && (!ACS_DC_PUBLIC_KEY || !ACS_DC_KEY_ID)) {
 // lease. ACS remains the sole owner of canonical result state; the bridge only
 // reports what it observed. Submission failures never alter the tool result
 // delivered to the client; ACS's lease-expiry reconciliation still wins.
-const ACS_BASE_URL = (process.env.ACS_GATEWAY_URL || '').replace(/\/+$/, '');
-const ACS_WORKER_TOKEN = process.env.ACS_WORKER_TOKEN || '';
+const ACS_BASE_URL = (process.env.ACS_GATEWAY_URL || (JC ? process.env.JC_ACS_URL : '') || '').replace(/\/+$/, '');
+const ACS_WORKER_TOKEN = process.env.ACS_WORKER_TOKEN || (JC ? process.env.ACS_JC_GATEWAY_TOKEN || '' : '');
 const ACS_WORKER_ID = process.env.ACS_WORKER_ID || (JC ? 'acs-jc-bridge' : 'acs-dc-bridge');
 const rawBootstrapTimeout = Number.parseInt(process.env.ACS_RUNTIME_BOOTSTRAP_TIMEOUT_MS || '400', 10);
 const ACS_RUNTIME_BOOTSTRAP_TIMEOUT_MS = Number.isFinite(rawBootstrapTimeout)
