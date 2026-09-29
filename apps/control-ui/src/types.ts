@@ -3,6 +3,8 @@ import {
   type ExecutionAttempt,
   type ExecutionPlanAdmission,
   type ExecutionPlanRecord,
+  type HumanInterruptRequest,
+  type HumanInterruptResolution,
   type RegistryAgentDetail,
   type StoredAuditEvent,
   type WorkItem
@@ -69,6 +71,11 @@ export interface MissionControlViewModel {
   executionBackend?: string;
   /** Exact per-status counts across the store. When present, cards use these instead of counting `workItems`. */
   statusCounts?: Record<string, number>;
+  /** Pending durable human interruptions awaiting an operator decision. */
+  humanInterrupts?: Array<{
+    request: HumanInterruptRequest;
+    resolution?: HumanInterruptResolution;
+  }>;
   /** Recent `policy.decided` events for the Policy panel. Falls back to `events` when absent. */
   policyDecisionEvents?: StoredAuditEvent[];
   /** Action kinds the composer suggests (the policy's supported kinds). */

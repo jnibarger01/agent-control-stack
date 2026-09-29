@@ -864,6 +864,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       },
       events: workItems.readEvents(eventReadOptions(request.query)),
       registeredAgents: workItems.listRegistryAgents(),
+      humanInterrupts: workItems.listPendingHumanInterrupts().map((interrupt) => ({ request: interrupt })),
       approvalActionsByWorkItem: approvalActionsByWorkItem(
         policy,
         workItemList,
@@ -2410,16 +2411,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           decision: z.enum(["resume", "cancel"]),
           response: z.json().optional(),
           reason: z.string().min(1).max(2_000).optional(),
-          approvalExpiresInMs: z.number().int().positive().max(24 * 60 * 60 * 1_000).optional()
+          approvalExpiresInMs: z
+            .number()
+            .int()
+            .positive()
+            .max(24 * 60 * 60 * 1_000)
+            .optional()
         })
         .strict()
         .parse(requestObject(request.body));
-      const actor = requireMutationActor(
-        request,
-        reply,
-        auth,
-        body.decision === "resume" ? "acs:approve" : undefined
-      );
+      const actor = requireMutationActor(request, reply, auth, body.decision === "resume" ? "acs:approve" : undefined);
       if (!actor) return;
       const result = tools.resolve_human_interrupt({
         interruptId: request.params.id,

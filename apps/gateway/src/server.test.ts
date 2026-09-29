@@ -11,6 +11,7 @@ import {
   DEFAULT_EVENT_LIMIT,
   MAX_EVENT_LIMIT,
   SqliteWorkItemStore,
+  defaultExecutionPlanForWorkItem,
   type WorkItem
 } from "@agent-control-stack/work-items";
 import { describe, expect, it, vi } from "vitest";
@@ -62,6 +63,89 @@ function approvalActionHash(workItem: WorkItem, actor: string = testAuth.actorId
   }
   return decision.actionHash;
 }
+
+describe("durable human interrupt routes", () => {
+  it("renders a pending interruption and lets a human resolve it for policy-gated resume", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-gateway-hitl-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    try {
+      store.registerActor({ id: testAuth.actorId, actorType: "HUMAN", displayName: "Operator" });
+      const workItem = store.create({
+        title: "HITL gateway fixture",
+        requester: "agent",
+        requesterSubject: "agent-requester",
+        intent: "pause for review",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.read", description: "inspect", params: { paths: ["README.md"] } }],
+        risk: "low"
+      });
+      const plan = store.createExecutionPlan({
+        workItemId: workItem.id,
+        definition: defaultExecutionPlanForWorkItem(workItem),
+        createdByActorId: "agent-requester"
+      });
+      const admission = store.admitExecutionPlan(
+        {
+          workItemId: workItem.id,
+          planHash: plan.planHash,
+          policyVersion: "acs.policy.v1",
+          policyDecisionHash: "a".repeat(64),
+          requiresApproval: false,
+          admittedByActorId: "policy-gate"
+        },
+        { via: "policy_gate" }
+      );
+      store.approveWorkItem(workItem.id, { via: "domain_service" });
+      const claimed = store.claimNextApprovedWorkItem("worker-hitl", {
+        attemptAuthority: {
+          planHash: plan.planHash,
+          admissionId: admission.admissionId,
+          policyVersion: admission.policyVersion,
+          policyDecisionHash: admission.policyDecisionHash
+        }
+      });
+      if (!claimed?.attemptId || claimed.fencingEpoch === undefined) throw new Error("expected worker claim");
+      store.requestHumanInterrupt(
+        {
+          attemptId: claimed.attemptId,
+          workItemId: claimed.id,
+          workerId: claimed.workerId,
+          fencingEpoch: claimed.fencingEpoch,
+          leaseToken: claimed.leaseToken,
+          prompt: "Review before continuing",
+          checkpoint: { phase: "review" },
+          idempotencyKey: "gateway-hitl"
+        },
+        { via: "domain_service", actorId: claimed.workerId }
+      );
+    } finally {
+      store.close();
+    }
+
+    const app = buildTestGateway({ dbPath, logger: false });
+    try {
+      const page = await app.inject({ method: "GET", url: "/" });
+      expect(page.statusCode).toBe(200);
+      expect(page.body).toContain("Review before continuing");
+      const pending = await app.inject({ method: "GET", url: "/human-interrupts" });
+      const interruptId = pending.json().interrupts[0]?.interruptId;
+      expect(interruptId).toBeTruthy();
+
+      const resolved = await app.inject({
+        method: "POST",
+        url: `/human-interrupts/${interruptId}/resolve`,
+        payload: { decision: "resume", reason: "review complete", response: { approved: true } }
+      });
+      expect(resolved.statusCode).toBe(200);
+      expect(resolved.json().resolution.decision).toBe("resume");
+      expect((await app.inject({ method: "GET", url: "/human-interrupts" })).json().interrupts).toEqual([]);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("mission control gateway", () => {
   it("renders mission control from persisted work items and audit events", async () => {

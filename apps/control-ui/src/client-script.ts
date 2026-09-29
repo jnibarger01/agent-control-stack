@@ -75,7 +75,7 @@ function applySseConnectionState(root, connected) {
       ? '<span aria-hidden="true"></span> Live'
       : '<span aria-hidden="true"></span> Disconnected';
   }
-  root.querySelectorAll('[data-approve],[data-reject],[data-unblock],[data-work-control]').forEach(function (button) {
+  root.querySelectorAll('[data-approve],[data-reject],[data-unblock],[data-work-control],[data-interrupt-resume],[data-interrupt-cancel]').forEach(function (button) {
     const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
     button.disabled = !connected || approveWithoutHash;
   });
@@ -902,6 +902,51 @@ document.querySelectorAll('[data-execution-mode]').forEach((input) => {
       if (problem) problem.hidden = true;
     }
   });
+});
+
+// Delegated: durable human-interrupt cards are replaced by live fragment patches.
+document.addEventListener('click', async (event) => {
+    const button = event.target && event.target.closest ? event.target.closest('[data-interrupt-resume],[data-interrupt-cancel]') : null;
+    if (!button || button.disabled) return;
+    const id = button.dataset.interruptResume || button.dataset.interruptCancel;
+    const decision = button.dataset.interruptResume ? 'resume' : 'cancel';
+    const output = document.querySelector('#interrupt-result-' + id);
+    if (!sseConnected) {
+      if (output) output.textContent = 'Disconnected: actions disabled until reconnect';
+      return;
+    }
+    const reasonInput = document.querySelector('[data-interrupt-reason="' + id + '"]');
+    const reason = reasonInput ? reasonInput.value.trim() : '';
+    if (!reason) {
+      if (output) output.textContent = 'Reason required';
+      if (reasonInput) reasonInput.focus();
+      return;
+    }
+    const responseInput = document.querySelector('[data-interrupt-response="' + id + '"]');
+    const responseText = responseInput ? responseInput.value.trim() : '';
+    let response;
+    if (responseText) {
+      try {
+        response = JSON.parse(responseText);
+      } catch (_) {
+        if (output) output.textContent = 'Response must be valid JSON';
+        if (responseInput) responseInput.focus();
+        return;
+      }
+    }
+    const payload = { decision: decision, reason: reason };
+    if (response !== undefined) payload.response = response;
+    const res = await fetch('/human-interrupts/' + encodeURIComponent(id) + '/resolve', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    const body = await res.json().catch(() => ({}));
+    if (output) output.textContent = res.ok ? decision + ' accepted' : 'Rejected: ' + (body.error || body.code || res.status);
+    if (res.ok) {
+      announce(decision + ' accepted for human interrupt ' + id);
+      scheduleDashboardRefresh(0);
+    }
 });
 
 // Delegated: approval cards are replaced by live fragment patches.
