@@ -92,6 +92,7 @@ const stubPath = path.join(ROOT, 'test', 'stub-dc.mjs');
 
 const bridge = startProc(path.join(ROOT, 'bridge.js'), {
   BRIDGE_PORT: String(brPort),
+  ACS_MANAGED_MODE: '0',
   DC_GATEWAY_EXECUTION_TOKEN: EXEC_TOKEN,
   DC_CMD: process.execPath,
   DC_ARGS: stubPath,
@@ -99,6 +100,7 @@ const bridge = startProc(path.join(ROOT, 'bridge.js'), {
 }, 'bridge');
 const bridge2 = startProc(path.join(ROOT, 'bridge.js'), {
   BRIDGE_PORT: String(br2Port),
+  ACS_MANAGED_MODE: '0',
   DC_GATEWAY_EXECUTION_TOKEN: EXEC_TOKEN,
   DC_CMD: process.execPath,
   DC_ARGS: stubPath,
