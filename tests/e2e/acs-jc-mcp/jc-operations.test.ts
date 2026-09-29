@@ -51,12 +51,36 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
       env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", HOME: box.home }
     }).trim();
 
+  function managedAuthorizationError(
+    call: Call,
+    expected: {
+      jsonRpcCode: -32001 | -32002;
+      kind: "managed_authorization_denied" | "managed_authorization_required";
+      acsCode: string;
+    }
+  ): { workItemId?: string; actionHash?: string } {
+    expect(call.status, JSON.stringify(call.body)).toBe(200);
+    expect(call.body).toMatchObject({
+      jsonrpc: "2.0",
+      error: {
+        code: expected.jsonRpcCode,
+        data: { kind: expected.kind, acsCode: expected.acsCode }
+      }
+    });
+    return call.body.error.data as { workItemId?: string; actionHash?: string };
+  }
+
   /** Call; if ACS holds it for approval, approve the exact action as the operator and call again. */
   async function approved(tool: string, args: Record<string, unknown>): Promise<Call> {
     const held = await mcp.call(tool, args);
-    expect(held.status, JSON.stringify(held.body)).toBe(503);
-    expect(held.body).toMatchObject({ error: "managed_authorization_required", code: "require_approval" });
-    expect(await acs.approve(held.body.workItemId, held.body.actionHash)).toBe(200);
+    const refusal = managedAuthorizationError(held, {
+      jsonRpcCode: -32002,
+      kind: "managed_authorization_required",
+      acsCode: "require_approval"
+    });
+    expect(refusal.workItemId).toBeTypeOf("string");
+    expect(refusal.actionHash).toBeTypeOf("string");
+    expect(await acs.approve(refusal.workItemId!, refusal.actionHash!)).toBe(200);
     const executed = await mcp.call(tool, args);
     expect(executed.status, JSON.stringify(executed.body)).toBe(200);
     return executed;
@@ -121,8 +145,12 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
     }
     expect(results.some((result) => result.path.endsWith("verifier.ts"))).toBe(true);
     const denied = await mcp.call("start_search", { path: "/etc", pattern: "root", mode: "content" });
-    expect(denied.status).toBe(503);
-    expect(String(denied.body.code)).toMatch(/path_outside_allow_root/u);
+    const refusal = managedAuthorizationError(denied, {
+      jsonRpcCode: -32001,
+      kind: "managed_authorization_denied",
+      acsCode: "jace_commander_path_outside_allow_root"
+    });
+    expect(refusal.workItemId).toBeUndefined();
   });
 
   it("start_search never names or returns credential files, denied dirs, or symlink escapes (PR #212 B1)", async () => {
@@ -176,12 +204,19 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
   it("write_file does nothing until the operator approves those exact arguments", async () => {
     const target = join(project, "approved.txt");
     const held = await mcp.call("write_file", { path: target, content: "approved content" });
-    expect(held.status).toBe(503);
-    expect(held.body.code).toBe("require_approval");
+    const heldRefusal = managedAuthorizationError(held, {
+      jsonRpcCode: -32002,
+      kind: "managed_authorization_required",
+      acsCode: "require_approval"
+    });
     expect(existsSync(target)).toBe(false);
-    expect(await acs.approve(held.body.workItemId, held.body.actionHash)).toBe(200);
+    expect(await acs.approve(heldRefusal.workItemId!, heldRefusal.actionHash!)).toBe(200);
     const different = await mcp.call("write_file", { path: target, content: "something else" });
-    expect(different.status).toBe(503);
+    managedAuthorizationError(different, {
+      jsonRpcCode: -32002,
+      kind: "managed_authorization_required",
+      acsCode: "require_approval"
+    });
     expect(existsSync(target)).toBe(false);
     const executed = await mcp.call("write_file", { path: target, content: "approved content" });
     expect(executed.status, JSON.stringify(executed.body)).toBe(200);
@@ -191,8 +226,11 @@ describe.skipIf(!E2E_ENABLED)("E2E JC-2: writes, processes, git, doctor via /jc/
 
   it("writes outside the roots are denied by ACS before any approval is requested", async () => {
     const outside = await mcp.call("write_file", { path: "/tmp/jc-e2e-outside.txt", content: "x" });
-    expect(outside.status).toBe(503);
-    expect(String(outside.body.code)).toMatch(/path_outside_allow_root/u);
+    managedAuthorizationError(outside, {
+      jsonRpcCode: -32001,
+      kind: "managed_authorization_denied",
+      acsCode: "jace_commander_path_outside_allow_root"
+    });
     expect(existsSync("/tmp/jc-e2e-outside.txt")).toBe(false);
   });
 

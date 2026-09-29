@@ -258,30 +258,47 @@ export function capabilityTransport(managed, { identity, requestId }) {
     const actor = subject.startsWith('chatgpt:') ? subject : `chatgpt:${subject}`;
     const issuePath = managed.issuePath || '/dc/capability/issue';
     const actorHeader = issuePath === '/jc/capability/issue' ? 'x-jc-actor' : 'x-dc-actor';
-    const { status, json } = await acsPost(managed, issuePath, {
-      client_id: clientId,
-      tool: toolName,
-      argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
-      correlationId: requestId,
-    }, { [actorHeader]: actor });
+    let issuance;
+    try {
+      issuance = await acsPost(managed, issuePath, {
+        client_id: clientId,
+        tool: toolName,
+        argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
+        correlationId: requestId,
+      }, { [actorHeader]: actor });
+    } catch {
+      throw Object.assign(new Error('ACS capability issuance unavailable'), {
+        acsCode: 'acs_http_unreachable',
+        acsDecision: null,
+        acsDetails: {},
+      });
+    }
+    const { status, json } = issuance;
     if (status !== 200 || !json || json.decision !== 'allow') {
+      const decision = json && typeof json.decision === 'string' ? json.decision : null;
       const code = json && typeof json.code === 'string'
         ? json.code
         : json && typeof json.reason === 'string'
           ? json.reason
-          : json && typeof json.decision === 'string'
-            ? json.decision
+          : decision
+            ? decision
             : `acs_http_${status || 'unreachable'}`;
-      // Preserve the approval challenge metadata ACS attaches to a
-      // require_approval response (workItemId/actionHash/approvalInstructions).
-      // Transport only: this confers no authority, it just lets the caller
-      // find the existing work item to approve through ACS's own endpoint.
-      const acsApproval = {};
-      if (json && typeof json.workItemId === 'string') acsApproval.workItemId = json.workItemId;
-      if (json && typeof json.actionHash === 'string') acsApproval.actionHash = json.actionHash;
-      if (json && typeof json.approvalInstructions === 'string') acsApproval.approvalInstructions = json.approvalInstructions;
-      if (json && json.approvalSummary && typeof json.approvalSummary === 'object') acsApproval.approvalSummary = json.approvalSummary;
-      throw Object.assign(new Error(`ACS did not authorize this invocation (${code})`), { acsCode: code, acsApproval });
+      // Preserve only the bounded string fields the edge is allowed to surface
+      // back to MCP callers (docs/protocol/dc-authorization-arguments.md).
+      // Anything else ACS attaches — e.g. the approvalSummary object — is
+      // deliberately dropped so internal detail cannot leak into JSON-RPC
+      // error data.
+      const acsDetails = {};
+      for (const key of ['reason', 'detail', 'workItemId', 'actionHash', 'approvalInstructions']) {
+        if (json && typeof json[key] === 'string') acsDetails[key] = json[key];
+      }
+      const acsApproval = { ...acsDetails };
+      throw Object.assign(new Error(`ACS did not authorize this invocation (${code})`), {
+        acsCode: code,
+        acsDecision: decision,
+        acsDetails,
+        acsApproval,
+      });
     }
     const envelope = json.capability;
     if (

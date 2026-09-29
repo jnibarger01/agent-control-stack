@@ -5,7 +5,7 @@
  * Proves at the gateway boundary:
  *  - spoofed client _meta.acsCapability is stripped and never reaches upstream
  *  - missing/forged/expired/wrong-scope/approval-mismatch/lease-mismatch ACS
- *    responses fail closed (503, nothing forwarded upstream)
+ *    responses fail closed (JSON-RPC errors, nothing forwarded upstream)
  *  - ACS unreachable fails closed
  *  - every tools/call fetches a fresh capability from ACS (no gateway-side
  *    replay/cache path exists)
@@ -167,6 +167,38 @@ test('managed mode: spoofed _meta stripped, ACS-issued capability injected, iden
   }
 });
 
+test('managed mode rejects a batch containing tools/call before ACS issuance or upstream forwarding', async () => {
+  const { acs, acsRequests, upstream, upstreamRequests } = harness();
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const acsPort = acs.address().port;
+  const upPort = upstream.address().port;
+  const port = 18124;
+  const child = startServer(port, {
+    ACS_MANAGED_MODE: '1',
+    ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
+    ACS_GATEWAY_TOKEN: 'svc-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  await waitListening(child, port);
+  try {
+    const batch = [
+      { jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'start_process', arguments: { command: 'ls' } } },
+      { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} },
+    ];
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), batch);
+    assert.equal(status, 503, text);
+    assert.deepEqual(JSON.parse(text), {
+      error: 'managed_authorization_unavailable',
+      code: 'batched_tools_call_rejected',
+    });
+    assert.equal(acsRequests.length, 0, 'no ACS issuance for rejected batch');
+    assert.equal(upstreamRequests.length, 0, 'rejected batch must never reach Desktop Commander');
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
 for (const [name, decision] of [
   ['missing capability (ACS denies)', { ok: false, code: 'acs_not_authorized' }],
   ['forged/expired capability rejected by ACS', { ok: false, code: 'capability_expired' }],
@@ -197,9 +229,14 @@ for (const [name, decision] of [
     await waitListening(child, port);
     try {
       const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-      assert.equal(status, 503, text);
+      assert.equal(status, 200, text);
       const body = JSON.parse(text);
-      assert.equal(body.code, decision.code);
+      assert.equal(body.jsonrpc, '2.0');
+      assert.equal(body.id, TOOLS_CALL.id);
+      assert.equal(body.error.code, -32003);
+      assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+      assert.equal(body.error.data.acsCode, decision.code);
+      assert.equal(body.error.data.retryable, true);
       // FAIL CLOSED: nothing reached Desktop Commander
       assert.equal(upstreamRequests.length, 0);
     } finally {
@@ -237,15 +274,132 @@ test('managed mode preserves approval challenge metadata when ACS requires appro
   });
   await waitListening(child, port);
   try {
-    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-    assert.equal(status, 503, text);
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'approval-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
     const body = JSON.parse(text);
-    assert.equal(body.error, 'managed_authorization_required');
-    assert.equal(body.code, 'require_approval');
-    assert.equal(body.workItemId, 'wrk_test123');
-    assert.equal(body.actionHash, 'hash_abc');
-    assert.equal(body.approvalInstructions, 'POST /work-items/wrk_test123/approve with actionHash hash_abc');
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'approval-request');
+    assert.equal(body.error.code, -32002);
+    assert.match(body.error.message, /approval required/i);
+    assert.deepEqual(body.error.data, {
+      kind: 'managed_authorization_required',
+      acsCode: 'require_approval',
+      retryable: true,
+      workItemId: 'wrk_test123',
+      actionHash: 'hash_abc',
+      approvalInstructions: 'POST /work-items/wrk_test123/approve with actionHash hash_abc',
+    });
     // Still fail-closed: no capability was minted, nothing reached Desktop Commander.
+    assert.equal(upstreamRequests.length, 0);
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
+test('managed mode returns a JSON-RPC denial without forwarding to Desktop Commander', async () => {
+  const { acs, upstream, upstreamRequests } = harness({
+    acsBehavior: () => ({ decision: 'deny', code: 'managed_tool_unsupported', reason: 'tool is not managed' }),
+  });
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const acsPort = acs.address().port;
+  const upPort = upstream.address().port;
+  const port = 18123;
+  const child = startServer(port, {
+    ACS_MANAGED_MODE: '1',
+    ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
+    ACS_GATEWAY_TOKEN: 'svc-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  await waitListening(child, port);
+  try {
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'deny-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'deny-request');
+    assert.equal(body.error.code, -32001);
+    assert.equal(body.error.data.kind, 'managed_authorization_denied');
+    assert.equal(body.error.data.acsCode, 'managed_tool_unsupported');
+    assert.equal(body.error.data.retryable, false);
+    assert.equal(body.error.data.reason, 'tool is not managed');
+    assert.equal(upstreamRequests.length, 0);
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
+test('managed mode lets the ACS decision win over a conflicting code (deny beats require_approval code)', async () => {
+  // A contradictory ACS body must not surface a denial as an approval
+  // challenge: decision is authoritative per the normative error contract
+  // (docs/protocol/dc-authorization-arguments.md).
+  const { acs, upstream, upstreamRequests } = harness({
+    acsBehavior: () => ({ decision: 'deny', code: 'require_approval', reason: 'conflicting code' }),
+  });
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const acsPort = acs.address().port;
+  const upPort = upstream.address().port;
+  const port = 18125;
+  const child = startServer(port, {
+    ACS_MANAGED_MODE: '1',
+    ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
+    ACS_GATEWAY_TOKEN: 'svc-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  await waitListening(child, port);
+  try {
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'conflicting-code-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'conflicting-code-request');
+    assert.equal(body.error.code, -32001);
+    assert.equal(body.error.data.kind, 'managed_authorization_denied');
+    assert.equal(body.error.data.acsCode, 'require_approval');
+    assert.equal(body.error.data.retryable, false);
+    assert.equal(upstreamRequests.length, 0);
+  } finally {
+    child.kill('SIGKILL'); acs.close(); upstream.close();
+  }
+});
+
+test('managed mode treats a stray require_approval code without a decision as malformed', async () => {
+  // Malformed ACS bodies map to managed_authorization_unavailable, never to
+  // an approval challenge.
+  const { acs, upstream, upstreamRequests } = harness({
+    acsBehavior: () => ({ code: 'require_approval', reason: 'no decision field' }),
+  });
+  await new Promise((r) => { acs.listen(0, '127.0.0.1', r); });
+  await new Promise((r) => { upstream.listen(0, '127.0.0.1', r); });
+  const acsPort = acs.address().port;
+  const upPort = upstream.address().port;
+  const port = 18126;
+  const child = startServer(port, {
+    ACS_MANAGED_MODE: '1',
+    ACS_GATEWAY_URL: `http://127.0.0.1:${acsPort}`,
+    ACS_GATEWAY_TOKEN: 'svc-token',
+    UPSTREAM: `http://127.0.0.1:${upPort}`,
+  });
+  await waitListening(child, port);
+  try {
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'stray-code-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'stray-code-request');
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+    assert.equal(body.error.data.acsCode, 'require_approval');
+    assert.equal(body.error.data.retryable, true);
     assert.equal(upstreamRequests.length, 0);
   } finally {
     child.kill('SIGKILL'); acs.close(); upstream.close();
@@ -270,8 +424,16 @@ test('managed mode fails closed when ACS is unreachable', async () => {
   });
   await waitListening(child, port);
   try {
-    const { status } = await mcpCall(port, tokenFor('a'.repeat(32)), TOOLS_CALL);
-    assert.equal(status, 503);
+    const request = structuredClone(TOOLS_CALL);
+    request.id = 'unreachable-request';
+    const { status, text } = await mcpCall(port, tokenFor('a'.repeat(32)), request);
+    assert.equal(status, 200, text);
+    const body = JSON.parse(text);
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'unreachable-request');
+    assert.equal(body.error.code, -32003);
+    assert.equal(body.error.data.kind, 'managed_authorization_unavailable');
+    assert.equal(body.error.data.retryable, true);
     assert.equal(upstreamRequests.length, 0);
   } finally {
     child.kill('SIGKILL'); upstream.close();
