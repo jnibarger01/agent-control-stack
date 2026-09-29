@@ -10,7 +10,7 @@ import { executionModeChip } from "../execution-mode.js";
 import { nanoToIso, pill, time } from "../format.js";
 import { escapeHtml } from "../html.js";
 import { DEFAULT_APPROVAL_SLA_MS, approvalWaitMs, approvalWaitStart, formatWait } from "../operator-workflow.js";
-import { WORK_ITEM_STATUS_VALUES, workItemAgentId } from "../queue-filter.js";
+import { WORK_ITEM_RISK_VALUES, WORK_ITEM_STATUS_VALUES, workItemAgentId } from "../queue-filter.js";
 import { redactSecrets } from "../redaction.js";
 import {
   type ApprovalActionOption,
@@ -101,11 +101,21 @@ export function queueFilterStrip(): string {
     const id = `queue-status-${status}`;
     return `<label class="queue-filter-chip" for="${id}"><input type="checkbox" id="${id}" name="queue-status" value="${escapeHtml(status)}" data-queue-status="${escapeHtml(status)}" /> <span>${escapeHtml(status)}</span></label>`;
   }).join("");
+  const riskChips = WORK_ITEM_RISK_VALUES.map((risk) => {
+    const id = `queue-risk-${risk}`;
+    return `<label class="queue-filter-chip" for="${id}"><input type="checkbox" id="${id}" name="queue-risk" value="${escapeHtml(risk)}" data-queue-risk="${escapeHtml(risk)}" /> <span>${escapeHtml(risk)}</span></label>`;
+  }).join("");
   return `<div class="queue-filter" id="queue-filter" role="search" aria-label="Filter work queue">
   <div class="queue-filter-row">
     <fieldset class="queue-filter-statuses">
       <legend>Status</legend>
       <div class="queue-filter-chips">${chips}</div>
+    </fieldset>
+  </div>
+  <div class="queue-filter-row">
+    <fieldset class="queue-filter-risks">
+      <legend>Risk</legend>
+      <div class="queue-filter-chips">${riskChips}</div>
     </fieldset>
   </div>
   <div class="queue-filter-row queue-filter-fields">
@@ -136,7 +146,7 @@ export function workQueueItems(
       const attempts = executionAttemptsByWorkItem[item.id] ?? [];
       const leases = attemptLeasesByWorkItem[item.id] ?? [];
       const agentId = workItemAgentId(item, attempts, leases);
-      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
+      return `<button class="queue-item${attention ? " attention" : ""}" data-work-item="${escapeHtml(item.id)}" data-status="${escapeHtml(item.status)}" data-risk="${escapeHtml(item.risk)}" data-title="${escapeHtml(item.title)}" data-agent-id="${escapeHtml(agentId)}"><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${attention ? attentionBadge() : ""}</span><strong>${escapeHtml(item.title)}</strong><small>${escapeHtml(redactSecrets(item.intent))}</small>${executionPlanBadge(plan, admission)}${executionSummary(attempts, leases)}${workItemError(item)}</button>`;
     })
     .join("");
 }
