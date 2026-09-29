@@ -7,13 +7,16 @@ import {
   restoreControlPlaneDatabase,
   verifyControlPlaneDatabaseFile
 } from "@agent-control-stack/shared";
+import { parseConfigText } from "@agent-control-stack/machine-controller";
 import {
   chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readlinkSync,
+  realpathSync,
   renameSync,
   rmSync,
   statSync,
@@ -21,7 +24,7 @@ import {
   unlinkSync
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 const WAL_CHECKPOINT_MODES = new Set(["PASSIVE", "FULL", "RESTART", "TRUNCATE"]);
@@ -94,7 +97,15 @@ try {
     const into = optionalFlag(rest, "--into");
     const temporaryRoot = into ? null : mkdtempSync(join(tmpdir(), "acs-restore-dry-run-"));
     const destination = resolve(into ?? join(temporaryRoot, "restored.db"));
-    if (into) mkdirSync(dirname(destination), { recursive: true });
+    if (into) {
+      // A kept dry-run is rehearsal only. Require the stopped service's live
+      // database identity explicitly, then cross-check service env/config aliases.
+      // The guard runs before mkdir/copy so a missing live DB cannot be created here.
+      const runtimeDir = resolveRuntimeDir(rest);
+      const explicitLiveDatabase = optionalFlag(rest, "--live-db");
+      assertNotLiveControlPlaneDatabase(destination, runtimeDir, explicitLiveDatabase);
+      mkdirSync(dirname(destination), { recursive: true });
+    }
     try {
       const healthBefore = verifyControlPlaneDatabaseFile(backupPath);
       const result = await restoreControlPlaneDatabase(backupPath, destination, { writersStopped: true });
@@ -108,7 +119,7 @@ try {
         health: result.health,
         safetyBackup: result.safetyBackup ?? null,
         note: into
-          ? "Restored to --into path only; live ACS_DB_PATH was not touched."
+          ? "Restored to --into path only; no configured live control-plane database was used as the destination."
           : "Restored into a temporary directory; cleaned up after verification."
       });
     } finally {
@@ -205,6 +216,209 @@ function optionalFlag(args, name) {
   return value;
 }
 
+// Return every absolute filesystem path that may name the live database. --live-db
+// is mandatory for a kept rehearsal because a stopped service may have had an
+// ACS_DB_PATH visible only to its service manager. Any ACS_DB_PATH/runtime config
+// visible here is treated as an additional alias to protect.
+//
+// Relative live paths and relative runtime-config paths are resolved against the
+// runtime's own working directory, never against this command's cwd. When a relative
+// value cannot be anchored, --into is refused instead of being compared against a guess.
+function liveControlPlaneDatabasePaths(runtimeDir, explicitLiveDatabase) {
+  if (typeof explicitLiveDatabase !== "string" || explicitLiveDatabase.trim() === "") {
+    throw new Error(
+      "restore-dry-run --into refused: --live-db <path> is required to identify the stopped service's authoritative live database"
+    );
+  }
+
+  const paths = new Set();
+  const explicit = anchorLivePath(explicitLiveDatabase, runtimeDir, "--live-db");
+  if (explicit === null) {
+    throw new Error("restore-dry-run --into refused: --live-db must identify a filesystem database");
+  }
+  paths.add(explicit);
+
+  const configured = process.env.ACS_DB_PATH;
+  if (typeof configured === "string" && configured !== "") {
+    const variants = [configured];
+    if (configured.trim() !== "" && configured.trim() !== configured) variants.push(configured.trim());
+    for (const variant of variants) {
+      const anchored = anchorLivePath(variant, runtimeDir, "ACS_DB_PATH");
+      if (anchored !== null) paths.add(anchored);
+    }
+  }
+
+  const configPath = resolveRuntimeConfigPath(runtimeDir);
+  if (configPath !== null && existsSync(configPath)) {
+    const parsed = parseConfigText(readFileSync(configPath, "utf8"));
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new Error(`cannot determine live database from invalid runtime config: ${configPath}`);
+    }
+    const runtime = parsed.runtime;
+    if (runtime !== undefined) {
+      if (runtime === null || typeof runtime !== "object" || Array.isArray(runtime)) {
+        throw new Error(`cannot determine live database from invalid runtime config: ${configPath}`);
+      }
+      const dbPath = runtime.db_path;
+      if (dbPath !== undefined) {
+        if (typeof dbPath !== "string" || dbPath.trim() === "") {
+          throw new Error(`cannot determine live database from invalid runtime.db_path: ${configPath}`);
+        }
+        const anchored = anchorLivePath(dbPath, runtimeDir, `runtime.db_path in ${configPath}`);
+        if (anchored !== null) paths.add(anchored);
+      }
+    }
+  }
+
+  // Defense in depth for the managed runtime default when its working directory is
+  // known. --live-db remains mandatory because a stopped standalone service can have
+  // service-local ACS_DB_PATH state that is absent from the later operator shell.
+  if (runtimeDir !== null) {
+    const defaultAnchored = anchorLivePath("storage/local.db", runtimeDir, "default live database path");
+    if (defaultAnchored !== null) paths.add(defaultAnchored);
+  }
+  return paths;
+}
+
+function resolveRuntimeConfigPath(runtimeDir) {
+  const configured = process.env.ACS_RUNTIME_CONFIG?.trim();
+  if (configured) {
+    if (isAbsolute(configured)) return resolve(configured);
+    if (runtimeDir === null) {
+      throw new Error(
+        "restore-dry-run --into refused: ACS_RUNTIME_CONFIG is relative and the runtime working directory is unknown " +
+          "(pass --runtime-dir <dir> or set ACS_RUNTIME_DIR)"
+      );
+    }
+    return resolve(runtimeDir, configured);
+  }
+  return runtimeDir === null ? null : resolve(runtimeDir, "acs.config.yaml");
+}
+
+// Resolve one configured live database value to an absolute filesystem path, or null
+// when it cannot name a file on disk (e.g. :memory:). SQLite file: URIs are parsed to
+// the path the runtime actually opens. Relative values are anchored to the runtime's
+// working directory; without one, --into is refused (fail closed).
+function anchorLivePath(value, runtimeDir, origin) {
+  const filesystemPath = sqliteFileUriToPath(value, origin);
+  if (filesystemPath === ":memory:") return null;
+  if (isAbsolute(filesystemPath)) return resolve(filesystemPath);
+  if (runtimeDir === null) {
+    throw new Error(
+      "restore-dry-run --into refused: cannot locate the live control-plane database: " +
+        `${origin} is relative ("${value}") and the runtime working directory is unknown ` +
+        "(pass --runtime-dir <dir> or set ACS_RUNTIME_DIR to the runtime's working directory)"
+    );
+  }
+  return resolve(runtimeDir, filesystemPath);
+}
+
+// Parse a SQLite file: URI (file:/var/lib/acs/control.db,
+// file:///var/lib/acs/control.db?mode=ro) to the filesystem path the runtime opens
+// when it passes the value verbatim to the database driver. Values without a file:
+// scheme pass through unchanged. URIs that cannot be mapped to a local filesystem
+// path refuse --into instead of being compared lexically, which would never match
+// the real database file.
+function sqliteFileUriToPath(value, origin) {
+  const match = /^file:(.*)$/is.exec(value);
+  if (!match) return value;
+  let decoded;
+  try {
+    decoded = decodeURIComponent(match[1].split(/[?#]/, 1)[0]);
+  } catch {
+    throw new Error(
+      `restore-dry-run --into refused: cannot parse SQLite file URI in ${origin}: ` +
+        `"${value}" (invalid percent-encoding)`
+    );
+  }
+  if (decoded.startsWith("//")) {
+    const withoutSlashes = decoded.slice(2);
+    const slash = withoutSlashes.indexOf("/");
+    const host = slash < 0 ? withoutSlashes : withoutSlashes.slice(0, slash);
+    const pathPart = slash < 0 ? "" : withoutSlashes.slice(slash);
+    if (host !== "" && host.toLowerCase() !== "localhost") {
+      throw new Error(
+        `restore-dry-run --into refused: cannot parse SQLite file URI in ${origin}: ` +
+          `"${value}" (remote host "${host}" has no local filesystem path)`
+      );
+    }
+    return pathPart === "" ? "/" : pathPart;
+  }
+  return decoded;
+}
+
+// The runtime's working directory is the only authoritative anchor for relative live
+// database paths. It comes from --runtime-dir (preferred) or ACS_RUNTIME_DIR.
+function resolveRuntimeDir(args) {
+  const fromFlag = optionalFlag(args, "--runtime-dir");
+  const raw = fromFlag ?? process.env.ACS_RUNTIME_DIR;
+  if (raw === undefined || raw.trim() === "") return null;
+  const absolute = resolve(raw);
+  let stat;
+  try {
+    stat = statSync(absolute);
+  } catch {
+    throw new Error(
+      "restore-dry-run --into refused: runtime directory does not exist: " +
+        `${absolute} (pass --runtime-dir <dir> or set ACS_RUNTIME_DIR to the runtime's working directory)`
+    );
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`restore-dry-run --into refused: runtime directory is not a directory: ${absolute}`);
+  }
+  return absolute;
+}
+
+function assertNotLiveControlPlaneDatabase(destination, runtimeDir, explicitLiveDatabase) {
+  const canonicalDestination = canonicalPath(destination);
+  for (const livePath of liveControlPlaneDatabasePaths(runtimeDir, explicitLiveDatabase)) {
+    const canonicalLive = canonicalPath(livePath);
+    if (canonicalDestination === canonicalLive || sameFilesystemPathIdentity(destination, livePath)) {
+      throw new Error(
+        `restore-dry-run --into refuses to overwrite the live control-plane database: ${canonicalLive} ` +
+          "(rehearse into a scratch path, or use db-ops.mjs restore with --replace --writers-stopped to replace it deliberately)"
+      );
+    }
+  }
+}
+
+// Resolve symlinks in the deepest existing ancestor, then append missing path
+// components. This protects a live path that does not exist yet but is reachable
+// through a symlinked directory. Resolution errors fail closed.
+function canonicalPath(path) {
+  const identity = filesystemPathIdentity(path);
+  return resolve(identity.realPath, ...identity.missing);
+}
+
+// Canonical strings do not collapse bind mounts or hard links. Compare the deepest
+// existing filesystem object's device/inode plus the same remaining missing suffix.
+// That protects a not-yet-created live leaf reached through a bind-mount alias too.
+function sameFilesystemPathIdentity(left, right) {
+  const a = filesystemPathIdentity(left);
+  const b = filesystemPathIdentity(right);
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.missing.length === b.missing.length &&
+    a.missing.every((component, index) => component === b.missing[index])
+  );
+}
+
+function filesystemPathIdentity(path) {
+  const absolute = resolve(path);
+  let existing = absolute;
+  const missing = [];
+  while (!existsSync(existing)) {
+    const parent = dirname(existing);
+    if (parent === existing) break;
+    missing.unshift(basename(existing));
+    existing = parent;
+  }
+  const realPath = realpathSync(existing);
+  const stat = statSync(realPath);
+  return { realPath, dev: stat.dev, ino: stat.ino, missing };
+}
+
 function sidecarSizes(database) {
   const sizes = { database: existsSync(database) ? statSync(database).size : 0 };
   for (const suffix of ["-wal", "-shm"]) {
@@ -236,7 +450,6 @@ function assertNoActiveWriter(destination) {
     db.close();
   }
 }
-
 
 function readLatestPointer(latestPath) {
   try {
@@ -295,7 +508,7 @@ function usage() {
   process.stderr.write(
     "usage: sqlite-backup-restore.mjs create-fixture <path> | " +
       "snapshot <db> [--destination-dir <dir>] (updates latest.db only after integrity_check) | " +
-      "restore-dry-run <backup> [--into <path>] | " +
+      "restore-dry-run <backup> [--into <path> --live-db <path>] [--runtime-dir <dir>] | " +
       "verify <db> | " +
       "wal-checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE] | " +
       "vacuum <db> --writers-stopped\n"

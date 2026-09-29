@@ -61,10 +61,32 @@ These steps work without a live gateway.
 
        node scripts/sqlite-backup-restore.mjs restore-dry-run "$BACKUP"
 
-Optional keep output:
+Optional keep output requires both the runtime working directory and the
+authoritative live database identity for the stopped service:
 
-       node scripts/sqlite-backup-restore.mjs restore-dry-run "$BACKUP" --into storage/fixtures/restored-dry-run.db
+       node scripts/sqlite-backup-restore.mjs restore-dry-run "$BACKUP" \
+         --into storage/fixtures/restored-dry-run.db \
+         --runtime-dir . \
+         --live-db storage/local.db
        node scripts/sqlite-backup-restore.mjs verify storage/fixtures/restored-dry-run.db
+
+`restore-dry-run --into` is always a rehearsal. It requires `--live-db <path>`
+to identify the actual database used by the stopped service; do not infer that value
+from the operator shell after the service is stopped. The guard also protects aliases
+found through `ACS_DB_PATH`, `runtime.db_path` in the runtime configuration, the
+managed-runtime `storage/local.db` default, symlinked parents, hard links, and
+filesystem-identity aliases such as bind-mounted parents. SQLite `file:` URIs are
+resolved before comparison. The refusal happens before destination directories or
+files are created. Deliberate live replacement belongs to
+`db-ops.mjs restore --replace --writers-stopped`.
+
+Relative live paths and relative `ACS_RUNTIME_CONFIG` values are resolved against
+the runtime's own working directory, never against the shell that invokes the
+rehearsal. For a kept rehearsal, pass `--runtime-dir <dir>` (or set
+`ACS_RUNTIME_DIR`) whenever any protected path is relative. The default
+`acs.config.yaml` is looked up in that runtime directory. If a relative value cannot
+be anchored, `--into` is refused outright rather than guessed against the rehearsal
+cwd.
 
 Each command prints one JSON object. ok:true means integrity, foreignKeys,
 migrations, and auditChain all passed.
