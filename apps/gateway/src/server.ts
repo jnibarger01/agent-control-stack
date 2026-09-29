@@ -570,7 +570,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
   const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
   const jcContainment = resolveJcContainment(options.jaceCommanderContainment);
-  const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
 
   const desktopExecutorCapabilities = () =>
     desktopCommanderManagedToolDispositions().map((disposition) => {
@@ -2385,59 +2384,67 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
           const payload = prepareJaceCommanderCapability(authorization, jcSigningConfig);
           const capabilityId = jaceCommanderCapabilityId(payload);
+          let issuancePhase = true;
           try {
-            const recorded = jcIssuanceRegistry.recordIssuance({
-              runtimeId: payload.runtimeId,
-              toolName: payload.toolName,
-              leaseId: payload.leaseId,
-              attemptId: payload.attemptId,
-              workItemId: payload.workItemId,
-              workerId,
-              fencingEpoch: payload.leaseEpoch,
-              planHash: payload.planHash,
-              actionHash: payload.actionHash,
-              invocationHash: payload.invocationHash,
-              approvalId: payload.approvalId,
-              requesterSubject: jcActor,
-              keyId: jcSigningConfig.keyId,
-              nonce: payload.nonce,
-              issuedAt: payload.issuedAt,
-              expiresAt: payload.expiresAt
+            workItems.withSqliteTransaction((db) => {
+              const issuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(db);
+              const recorded = issuanceRegistry.recordIssuance(
+                {
+                  runtimeId: payload.runtimeId,
+                  toolName: payload.toolName,
+                  leaseId: payload.leaseId,
+                  attemptId: payload.attemptId,
+                  workItemId: payload.workItemId,
+                  workerId,
+                  fencingEpoch: payload.leaseEpoch,
+                  planHash: payload.planHash,
+                  actionHash: payload.actionHash,
+                  invocationHash: payload.invocationHash,
+                  approvalId: payload.approvalId,
+                  requesterSubject: jcActor,
+                  keyId: jcSigningConfig.keyId,
+                  nonce: payload.nonce,
+                  issuedAt: payload.issuedAt,
+                  expiresAt: payload.expiresAt
+                },
+                { withinTransaction: true }
+              );
+              if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
+                throw new ControlStackError(
+                  "jace_commander_capability_issuance_rejected",
+                  "issuance binding does not match capability payload"
+                );
+              }
+
+              issuancePhase = false;
+              recordLeaseAuthorizedExecutionEvent(authority, {
+                name: "jace_commander.capability_issued",
+                body: {
+                  capabilityId,
+                  tool: payload.toolName,
+                  runtimeId: payload.runtimeId,
+                  keyId: jcSigningConfig.keyId,
+                  requestHash: payload.requestHash,
+                  expiresAt: payload.expiresAt,
+                  ...(payload.approvalId ? { approvalId: payload.approvalId } : {})
+                },
+                attributes: {
+                  "capability.id": capabilityId,
+                  "jace_commander.tool": payload.toolName,
+                  "jace_commander.invocation_hash": payload.invocationHash,
+                  "jace_commander.runtime_id": payload.runtimeId,
+                  "execution.request_hash": payload.requestHash,
+                  ...(payload.approvalId ? { "approval.id": payload.approvalId } : {})
+                }
+              });
+              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
             });
-            if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
-              throw new ControlStackError(
-                "jace_commander_capability_issuance_rejected",
-                "issuance binding does not match capability payload"
+          } catch (error) {
+            if (issuancePhase) {
+              return deny(
+                error instanceof ControlStackError ? error.code : "jace_commander_capability_issuance_rejected"
               );
             }
-          } catch (error) {
-            return deny(
-              error instanceof ControlStackError ? error.code : "jace_commander_capability_issuance_rejected"
-            );
-          }
-
-          try {
-            recordLeaseAuthorizedExecutionEvent(authority, {
-              name: "jace_commander.capability_issued",
-              body: {
-                capabilityId,
-                tool: payload.toolName,
-                runtimeId: payload.runtimeId,
-                keyId: jcSigningConfig.keyId,
-                requestHash: payload.requestHash,
-                expiresAt: payload.expiresAt,
-                ...(payload.approvalId ? { approvalId: payload.approvalId } : {})
-              },
-              attributes: {
-                "capability.id": capabilityId,
-                "jace_commander.tool": payload.toolName,
-                "jace_commander.invocation_hash": payload.invocationHash,
-                "jace_commander.runtime_id": payload.runtimeId,
-                "execution.request_hash": payload.requestHash,
-                ...(payload.approvalId ? { "approval.id": payload.approvalId } : {})
-              }
-            });
-          } catch (error) {
             return reply.code(503).send({
               error: "capability evidence could not be committed",
               code: "capability_evidence_unavailable",
@@ -2446,7 +2453,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           }
 
           const capability = signPreparedJaceCommanderCapability(payload, jcSigningConfig);
-          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
           bindAdmissionPermit({
             attemptId: payload.attemptId,
             permit: admissionPermit,
@@ -2818,7 +2824,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     executionReads.close();
     deviceAuthStore.close();
     capabilityIssuanceRegistry.close();
-    jcIssuanceRegistry.close();
     workItems.close();
   });
 

@@ -6602,6 +6602,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   /** Number of trace events that failed to enqueue in this process (non-blocking). */
+  /**
+   * Gateway-internal atomic extension hook. The callback runs on the canonical
+   * SQLite connection inside the same audited write transaction so adjunct
+   * authority records can commit atomically with work-item evidence.
+   */
+  withSqliteTransaction<T>(operation: (db: DatabaseSync) => T): T {
+    return this.write(() => ({ value: operation(this.db), events: [] }));
+  }
+
   getTraceEnqueueFailureCount(): number {
     return this.traceEnqueueFailures;
   }
