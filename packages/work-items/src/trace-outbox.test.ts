@@ -15,8 +15,8 @@ import {
   utcSpoolDay
 } from "./trace-outbox.js";
 
-// sha256 of trace-event.v1.schema.json from LoopTrace af3e425fe5e2a2bb3ccb8c2a3301555124a25465
-const SCHEMA_PIN = "2c783e16c1c5056a20d4d71160e02569dd8ee00416ad6e8b78084b7652f787e5";
+// sha256 of trace-event.v1.schema.json from LoopTrace 49aca302a1c5f0d12813c73ca4149f2fc7afefd4
+const SCHEMA_PIN = "5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434";
 const dirs: string[] = [];
 
 // The end-to-end replay test drives the real LoopTrace CLI, which lives in a

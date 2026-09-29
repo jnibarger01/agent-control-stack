@@ -1,29 +1,53 @@
 /**
  * @agent-control-stack/jev-advisor
  *
- * Advisory Jev classifier client (shadow mode). Jev is a local yes/no
- * probability engine. This adapter is ADVISORY ONLY: its output must never
- * influence policy, approval, routing authority, or any deterministic
- * decision. It never rejects — on any failure it resolves with
- * `degraded: true`, empty signals, and no fabricated probabilities.
+ * Typed, capability-aware Jev/System One client. Jev is ADVISORY ONLY.
+ * Any disabled, unavailable, incompatible, timed-out, or malformed result
+ * degrades to empty evidence and must not affect ACS authority.
  */
 
 import {
   LOCAL_BINARY_CAPABILITY,
+  checkObservedCapability,
+  observeCapability,
+  supportsPrimitive,
+  type JevCapability,
+  type JevPrimitive
+} from "./contracts/capability.js";
+import type { CanonicalTraceEvent } from "@agent-control-stack/work-items";
+import {
+  choice,
+  noul,
+  parseJevAnswer,
+  score,
+  type JevAnswer,
+  type JevQuestion,
+  type JevQuestions
+} from "./contracts/questions.js";
+import { prepareJevState } from "./redaction.js";
+import {
+  buildJevTelemetryEvent,
+  formatJevTelemetry,
+  JEV_CLASSIFIER_VERSION,
+  type JevTelemetryEvent
+} from "./telemetry.js";
+import { projectCanonicalTraceForJev, type JevTraceProjection } from "./trace-projection.js";
+
+export * from "./telemetry.js";
+export * from "./contracts/questions.js";
+export * from "./question-registry.js";
+export * from "./redaction.js";
+export * from "./trace-projection.js";
+export {
+  LOCAL_BINARY_CAPABILITY,
+  capabilityFromMetadata,
   checkCapability,
   checkObservedCapability,
   observeCapability,
-  type JevCapability
+  supportsPrimitive
 } from "./contracts/capability.js";
-import { JEV_CLASSIFIER_VERSION } from "./telemetry.js";
-export * from "./telemetry.js";
-export {
-  LOCAL_BINARY_CAPABILITY,
-  checkCapability,
-  checkObservedCapability,
-  observeCapability
-} from "./contracts/capability.js";
-export type { JevCapability, JevCapabilityObservation } from "./contracts/capability.js";
+export type { JevCapability, JevCapabilityObservation, JevPrimitive } from "./contracts/capability.js";
+
 export const DEFAULT_JEV_URL = "http://127.0.0.1:8017/v1/systemone";
 export const DEFAULT_JEV_TIMEOUT_MS = 750;
 export const JEV_ENABLED_ENV = "ACS_JEV_ENABLED";
@@ -41,8 +65,8 @@ export type JevSignal =
   | "auth_sensitive"
   | "runtime_mutation"
   | "approval_likely";
-
 export type ClassifiedSignal = {
+  /** TypeSafe Noul probability P(yes). */
   probability: number;
   classification: "yes" | "no" | "unknown";
   highThreshold: number;
@@ -55,16 +79,16 @@ export type JevResult = {
   classifierVersion: typeof JEV_CLASSIFIER_VERSION;
   model: string | null;
   latencyMs: number;
+  answers: Record<string, JevAnswer>;
   signals: Record<string, ClassifiedSignal>;
+  capability: JevCapability | null;
   degraded: boolean;
   /** Present only when the call did not produce usable advisory answers. */
   failureReason?: JevFailureReason;
 };
 
-/** `[low, high]` pair. Overridable per signal. */
+/** [low, high] thresholds over Noul P(yes). */
 export type JevThresholdPair = readonly [number, number];
-
-/** Per-signal default thresholds, exactly as specified by the advisory contract. */
 export const DEFAULT_JEV_THRESHOLDS: Readonly<Record<JevSignal, JevThresholdPair>> = {
   actionable: [0.15, 0.85],
   urgent: [0.1, 0.9],
@@ -82,30 +106,30 @@ export const DEFAULT_JEV_THRESHOLDS: Readonly<Record<JevSignal, JevThresholdPair
 
 export type JevThresholdOverrides = Partial<Record<JevSignal, JevThresholdPair>>;
 
+export type JevCapabilityProvider = () => JevCapability | null | undefined | Promise<JevCapability | null | undefined>;
+
 export type ClassifyJevOptions = {
-  /** Override the `ACS_JEV_URL` endpoint. */
   url?: string;
-  /** Override the `ACS_JEV_TIMEOUT_MS` timeout. */
   timeoutMs?: number;
-  /** Override the `ACS_JEV_ENABLED` gate. */
   enabled?: boolean;
-  /** Injectable fetch for tests. Defaults to global fetch. */
   fetchImpl?: typeof fetch;
-  /** Per-signal threshold overrides. */
   thresholds?: JevThresholdOverrides;
   /**
-   * Full capability profile validated once before the request.
-   * Defaults to the local binary contract. Decision responses are not used
-   * to fill this in.
+   * Complete capability profile supplied by runtime configuration, transport
+   * initialization, trusted metadata discovery, or tests.
    */
   capabilityProfile?: JevCapability;
+  /**
+   * Trusted runtime capability discovery. If configured but unable to return
+   * a complete profile, the call degrades rather than assuming support.
+   */
+  capabilityProvider?: JevCapabilityProvider;
 };
 
 function readEnv(name: string): string | undefined {
   return typeof process !== "undefined" && process.env ? process.env[name] : undefined;
 }
 
-/** Feature gate: active only when `ACS_JEV_ENABLED` is exactly `1`. */
 export function isJevEnabled(envValue: string | undefined = readEnv(JEV_ENABLED_ENV)): boolean {
   return envValue === "1";
 }
@@ -118,7 +142,6 @@ function validateThresholdPair(signal: string, pair: JevThresholdPair): void {
     );
   }
 }
-
 function resolveThresholds(overrides: JevThresholdOverrides | undefined): Record<JevSignal, JevThresholdPair> {
   const resolved = { ...DEFAULT_JEV_THRESHOLDS };
   if (overrides) {
@@ -132,6 +155,7 @@ function resolveThresholds(overrides: JevThresholdOverrides | undefined): Record
   return resolved;
 }
 
+/** Threshold a TypeSafe Noul probability, which is always P(yes). */
 export function classifyProbability(p: number, thresholds: JevThresholdPair): "yes" | "no" | "unknown" {
   const [low, high] = thresholds;
   if (p >= high) return "yes";
@@ -139,34 +163,35 @@ export function classifyProbability(p: number, thresholds: JevThresholdPair): "y
   return "unknown";
 }
 
-function degradedResult(latencyMs: number, failureReason: JevFailureReason = "NO_ADVICE"): JevResult {
+function degradedResult(
+  latencyMs: number,
+  failureReason: JevFailureReason | undefined,
+  capability: JevCapability | null = null
+): JevResult {
   return {
     classifierVersion: JEV_CLASSIFIER_VERSION,
     model: null,
     latencyMs,
+    answers: {},
     signals: {},
+    capability,
     degraded: true,
-    failureReason
+    ...(failureReason !== undefined ? { failureReason } : {})
   };
 }
+type JevResponseShape = { model?: unknown; answers?: unknown };
 
-type JevAnswerShape = { noul?: unknown; type?: unknown };
-type JevResponseShape = { model?: unknown; answers?: Record<string, unknown> };
-
-/** Prefilter decision, derived only from a JevResult. Never inferred from prose/telemetry. */
 export type JevDecision = "skip" | "continue" | "duplicate_check_required" | "degraded";
 
 /**
- * Machine-readable decision contract:
- * - "degraded": any Jev failure/disabled/unavailable/timeout/malformed result
- *   (overrides any probability — never skip on degraded data);
- * - "duplicate_check_required": status ok AND duplicate_like classified "yes"
- *   (the authoritative GitHub/open-PR duplicate check must run; Jev alone
- *   NEVER discards);
- * - "skip": status ok AND the probability assigned to the returned no
- *   classification for `actionable` is <= 0.05 with classification "no";
- * - "continue": everything else (including missing required signals).
- * Precedence: degraded > duplicate_check_required > skip > continue.
+ * Offline advisory recommendation only:
+ * - degraded: no usable Jev evidence;
+ * - duplicate_check_required: duplicate_like is a strong yes;
+ * - skip: actionable P(yes) <= 0.05 and classified no;
+ * - continue: otherwise.
+ *
+ * A low Noul is a strong NO, not a probability assigned to a "no class".
+ * This helper is never wired into authoritative ACS intake.
  */
 export function deriveJevDecision(result: JevResult): JevDecision {
   if (result.degraded) return "degraded";
@@ -179,47 +204,110 @@ export function deriveJevDecision(result: JevResult): JevDecision {
   return "continue";
 }
 
+function primitiveOf(question: unknown): JevPrimitive | null {
+  if (!question || typeof question !== "object" || Array.isArray(question)) return null;
+  const type = (question as { type?: unknown }).type;
+  return type === "noul" || type === "choice" || type === "score" ? type : null;
+}
+function sanitizeCapability(profile: JevCapability | null | undefined): JevCapability | null {
+  if (!profile) return null;
+  if (
+    typeof profile.promptVersion !== "string" ||
+    !/^[A-Za-z0-9._:-]{1,64}$/.test(profile.promptVersion) ||
+    typeof profile.supportsNoul !== "boolean" ||
+    typeof profile.supportsChoice !== "boolean" ||
+    typeof profile.supportsScore !== "boolean" ||
+    typeof profile.fingerprint !== "string" ||
+    !/^[A-Za-z0-9._:-]{0,128}$/.test(profile.fingerprint)
+  ) {
+    return null;
+  }
+  if (
+    profile.ggufRevision !== undefined &&
+    (typeof profile.ggufRevision !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(profile.ggufRevision))
+  ) {
+    return null;
+  }
+  return {
+    promptVersion: profile.promptVersion,
+    supportsNoul: profile.supportsNoul,
+    supportsChoice: profile.supportsChoice,
+    supportsScore: profile.supportsScore,
+    fingerprint: profile.fingerprint,
+    ...(profile.ggufRevision !== undefined ? { ggufRevision: profile.ggufRevision } : {})
+  };
+}
+
+async function resolveCapability(options: ClassifyJevOptions): Promise<JevCapability | null> {
+  if (options.capabilityProfile !== undefined) return sanitizeCapability(options.capabilityProfile);
+  if (options.capabilityProvider !== undefined) {
+    try {
+      return sanitizeCapability(await options.capabilityProvider());
+    } catch {
+      return null;
+    }
+  }
+  return LOCAL_BINARY_CAPABILITY;
+}
+function serializeQuestion(question: JevQuestion): Record<string, unknown> {
+  if (question.type === "noul") {
+    return question.criteria === undefined
+      ? { type: "noul", instructions: question.instructions }
+      : { type: "noul", instructions: question.instructions, criteria: question.criteria };
+  }
+  if (question.type === "choice") {
+    return { type: "choice", instructions: question.instructions, criteria: question.criteria };
+  }
+  return { type: "score", instructions: question.instructions, criteria: question.criteria };
+}
+
+function questionsSupported(questions: JevQuestions, capability: JevCapability): boolean {
+  for (const question of Object.values(questions)) {
+    const primitive = primitiveOf(question);
+    if (primitive === null || !supportsPrimitive(capability, primitive)) return false;
+  }
+  return true;
+}
+
 /**
- * Classify all questions against the Jev engine in ONE batched POST.
- * DEGRADE-never-fail: resolves (never rejects) with `degraded: true` on any
- * failure. Output is advisory data only.
+ * Evaluate all independent typed questions in one System One POST.
+ * Never heuristically falls back. Runtime failures resolve to degraded evidence.
  */
 export async function classifyJev(
   state: string | object,
-  questions: Record<string, string>,
+  questions: JevQuestions,
   options: ClassifyJevOptions = {}
 ): Promise<JevResult> {
   const startedAt = Date.now();
   const elapsed = () => Math.max(0, Date.now() - startedAt);
 
   const enabled = options.enabled ?? isJevEnabled();
-  if (!enabled) {
-    // Inert by default: no network call, no fabricated data, no failure reason.
+  if (!enabled) return degradedResult(elapsed(), undefined);
+
+  const questionEntries = Object.entries(questions);
+  if (questionEntries.length === 0) {
+    const capability = await resolveCapability(options);
     return {
       classifierVersion: JEV_CLASSIFIER_VERSION,
       model: null,
       latencyMs: elapsed(),
+      answers: {},
       signals: {},
-      degraded: true
+      capability,
+      degraded: false
     };
   }
 
-  const signalNames = Object.keys(questions);
-  if (signalNames.length === 0) {
-    return { classifierVersion: JEV_CLASSIFIER_VERSION, model: null, latencyMs: 0, signals: {}, degraded: false };
+  const capability = await resolveCapability(options);
+  if (capability === null || !questionsSupported(questions, capability)) {
+    return degradedResult(elapsed(), "INCOMPATIBLE_MODEL", capability);
   }
 
   const thresholds = resolveThresholds(options.thresholds);
   const url = options.url ?? readEnv("ACS_JEV_URL") ?? DEFAULT_JEV_URL;
   const timeoutMs = options.timeoutMs ?? readNumberEnv("ACS_JEV_TIMEOUT_MS") ?? DEFAULT_JEV_TIMEOUT_MS;
   const doFetch = options.fetchImpl ?? fetch;
-  const profile = options.capabilityProfile ?? LOCAL_BINARY_CAPABILITY;
-  // The configured profile must be satisfiable by the local binary contract.
-  // This runs once, before any decision request, and does not read the response.
-  const profileCheck = checkCapability(LOCAL_BINARY_CAPABILITY, profile);
-  if (!profileCheck.ok) {
-    return degradedResult(elapsed(), "INCOMPATIBLE_MODEL");
-  }
+  const safeState = prepareJevState(state);
 
   let response: Response;
   try {
@@ -231,10 +319,8 @@ export async function classifyJev(
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           model: "jev-latest",
-          state,
-          questions: Object.fromEntries(
-            signalNames.map((name) => [name, { type: "noul", instructions: questions[name] }])
-          )
+          state: safeState,
+          questions: Object.fromEntries(questionEntries.map(([name, question]) => [name, serializeQuestion(question)]))
         }),
         signal: controller.signal
       });
@@ -243,74 +329,173 @@ export async function classifyJev(
     }
   } catch (error) {
     const timedOut = error instanceof Error && error.name === "AbortError";
-    return degradedResult(elapsed(), timedOut ? "TIMEOUT" : "UNAVAILABLE");
+    return degradedResult(elapsed(), timedOut ? "TIMEOUT" : "UNAVAILABLE", capability);
   }
-  if (!response.ok) return degradedResult(elapsed(), "UNAVAILABLE");
+  if (!response.ok) return degradedResult(elapsed(), "UNAVAILABLE", capability);
 
   let parsed: unknown;
   try {
     parsed = JSON.parse(await response.text());
   } catch {
-    return degradedResult(elapsed(), "NO_ADVICE");
+    return degradedResult(elapsed(), "NO_ADVICE", capability);
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return degradedResult(elapsed(), "NO_ADVICE", capability);
   }
 
   const body = parsed as JevResponseShape;
-  const observed = checkObservedCapability(observeCapability(body), profile);
-  if (!observed.ok) return degradedResult(elapsed(), "INCOMPATIBLE_MODEL");
-  const answers = body?.answers;
-  if (answers === null || typeof answers !== "object") return degradedResult(elapsed(), "NO_ADVICE");
-
+  const observed = checkObservedCapability(observeCapability(body), capability);
+  if (!observed.ok) return degradedResult(elapsed(), "INCOMPATIBLE_MODEL", capability);
+  if (!body.answers || typeof body.answers !== "object" || Array.isArray(body.answers)) {
+    return degradedResult(elapsed(), "NO_ADVICE", capability);
+  }
+  const rawAnswers = body.answers as Record<string, unknown>;
+  const answers: Record<string, JevAnswer> = {};
   const signals: Record<string, ClassifiedSignal> = {};
-  for (const name of signalNames) {
-    const answer = (answers as Record<string, unknown>)[name] as JevAnswerShape | undefined;
-    const probability = answer?.noul;
-    // Unknown question names, malformed answers, and out-of-range probabilities
-    // count as missing answers: degrade with NO fabricated values.
-    if (
-      answer === null ||
-      typeof answer !== "object" ||
-      answer.type !== "noul" ||
-      typeof probability !== "number" ||
-      !Number.isFinite(probability) ||
-      probability < 0 ||
-      probability > 1
-    ) {
-      return degradedResult(elapsed(), "NO_ADVICE");
+
+  for (const [name, question] of questionEntries) {
+    const primitive = primitiveOf(question);
+    if (primitive === null) return degradedResult(elapsed(), "INCOMPATIBLE_MODEL", capability);
+    const answer = parseJevAnswer(question, rawAnswers[name]);
+    if (answer === null) return degradedResult(elapsed(), "NO_ADVICE", capability);
+    answers[name] = answer;
+    if (answer.type === "noul") {
+      const pair = thresholds[name as JevSignal] ?? DEFAULT_JEV_THRESHOLDS.actionable;
+      signals[name] = {
+        probability: answer.noul,
+        classification: classifyProbability(answer.noul, pair),
+        lowThreshold: pair[0],
+        highThreshold: pair[1]
+      };
     }
-    const pair = thresholds[name as JevSignal] ?? [
-      DEFAULT_JEV_THRESHOLDS.actionable[0],
-      DEFAULT_JEV_THRESHOLDS.actionable[1]
-    ];
-    signals[name] = {
-      probability,
-      classification: classifyProbability(probability, pair),
-      lowThreshold: pair[0],
-      highThreshold: pair[1]
-    };
   }
 
   return {
     classifierVersion: JEV_CLASSIFIER_VERSION,
     model: typeof body.model === "string" ? sanitizeModelName(body.model) : null,
     latencyMs: elapsed(),
+    answers,
     signals,
+    capability,
     degraded: false
   };
 }
 
-/**
- * The `model` string originates from the remote engine and is echoed into
- * consumer-visible output (CLI stdout, logs). Restrict it to a safe charset
- * and length so it can never carry newlines, control characters, or
- * prompt-injection payloads; anything else is treated as absent (null).
- */
 function sanitizeModelName(model: string): string | null {
   return /^[A-Za-z0-9._-]{1,64}$/.test(model) ? model : null;
 }
-
 function readNumberEnv(name: string): number | undefined {
   const raw = readEnv(name);
   if (raw === undefined || raw === "") return undefined;
   const value = Number(raw);
   return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+export const JEV_TRACE_QUESTION_SET_VERSION = "jev-trace@1" as const;
+export const JEV_TRACE_FAILURE_MODES = [
+  "healthy",
+  "tool_loop",
+  "budget_burn",
+  "instruction_drift",
+  "verifier_fail",
+  "stagnation",
+  "hallucination",
+  "policy_denied",
+  "worktree_collision",
+  "other"
+] as const;
+
+export const JEV_TRACE_QUESTIONS = {
+  failure_mode: choice("What is the primary semantic failure mode in this execution trace?", {
+    healthy: "Execution completed without a material semantic failure.",
+    tool_loop: "The run repeated the same or equivalent tool actions without useful progress.",
+    budget_burn: "The run consumed disproportionate execution effort relative to progress.",
+    instruction_drift: "The run materially diverged from the task or governing instructions.",
+    verifier_fail: "Verification rejected or contradicted the produced result.",
+    stagnation: "The run stopped making meaningful progress without a clear repeated tool loop.",
+    hallucination: "The run relied on unsupported or fabricated state, results, or capabilities.",
+    policy_denied: "A policy or approval boundary denied the attempted action.",
+    worktree_collision: "Repository or worktree state conflicted with another execution context.",
+    other: "A material failure occurred that does not fit another declared mode."
+  }),
+  should_escalate: noul("Should a human or higher-level reviewer inspect this run before further action?"),
+  needs_maker_checker: noul("Does the observed execution evidence warrant independent maker/checker review?"),
+  context_rot: noul("Does the trace show evidence that working context became stale, inconsistent, or misleading?"),
+  recovery_urgency: score("How urgent is recovery or intervention for this run?", [
+    "none",
+    "low",
+    "moderate",
+    "high",
+    "immediate"
+  ])
+} as const satisfies JevQuestions;
+
+export type JevTraceAdvisory = {
+  projection: JevTraceProjection;
+  result: JevResult;
+  telemetry: JevTelemetryEvent;
+};
+
+export type JevTraceShadowOptions = ClassifyJevOptions & {
+  sink?: (line: string) => void;
+};
+
+export async function classifyJevTrace(
+  events: readonly CanonicalTraceEvent[],
+  options: ClassifyJevOptions = {}
+): Promise<JevTraceAdvisory> {
+  const projection = projectCanonicalTraceForJev(events);
+  const result = await classifyJev(projection, JEV_TRACE_QUESTIONS, options);
+  const telemetry = buildJevTelemetryEvent({
+    result,
+    consumer: "trace-shadow",
+    questionSetVersion: JEV_TRACE_QUESTION_SET_VERSION,
+    correlation: {
+      traceId: projection.trace_id,
+      workItemId: projection.work_item_id
+    },
+    actualOutcome: traceActualOutcome(events)
+  });
+  return { projection, result, telemetry };
+}
+
+/**
+ * Fire-and-forget/offline observer entrypoint. It has no authority hooks and
+ * deliberately swallows projection, transport, and telemetry-sink failures.
+ */
+export async function runJevTraceShadow(
+  events: readonly CanonicalTraceEvent[],
+  options: JevTraceShadowOptions = {}
+): Promise<JevTraceAdvisory | null> {
+  try {
+    const advisory = await classifyJevTrace(events, options);
+    try {
+      (options.sink ?? defaultTraceSink)(formatJevTelemetry(advisory.telemetry));
+    } catch {
+      // Telemetry sinks never alter execution.
+    }
+    return advisory;
+  } catch {
+    return null;
+  }
+}
+
+function defaultTraceSink(line: string): void {
+  process.stderr.write(line + "\n");
+}
+
+function traceActualOutcome(events: readonly CanonicalTraceEvent[]): string | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const kind = events[index]?.kind;
+    if (
+      kind === "run.failed" ||
+      kind === "run.completed" ||
+      kind === "promotion.blocked" ||
+      kind === "promotion.completed" ||
+      kind === "replay.diverged"
+    ) {
+      return kind;
+    }
+  }
+  return null;
 }

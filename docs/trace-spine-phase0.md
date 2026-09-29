@@ -79,8 +79,47 @@ Local HEAD is recorded above. A search of `desktop-commander/src` found no `trac
 
 - The outbox is attached to `recordApproval` and `consumeApproval` only. Deny and revoke are not approval-table writes.
 - **Known gap:** `rejectWorkItem` is a human authority decision and does not write a trace event. A rejected mission reconstructs as if approval never happened. Phase 2 starts with work-item state transitions, including rejection, before capability events.
-- Schema publication is JSON Schema plus the hand-rolled validator in LoopTrace. Zod was an assumption from before this inventory. ACS vendors `packages/work-items/contracts/trace-event.v1.schema.json` and pins its sha256. That file was copied from LoopTrace commit `af3e425fe5e2a2bb3ccb8c2a3301555124a25465` (`feat/trace-event-v1`).
+- Schema publication is JSON Schema plus the hand-rolled validator in LoopTrace. Zod was an assumption from before this inventory. ACS vendors `packages/work-items/contracts/trace-event.v1.schema.json` and pins its sha256. The current vendored file is copied from LoopTrace commit `49aca302a1c5f0d12813c73ca4149f2fc7afefd4` (`feat/jev3-lifecycle-evidence-20260928`), which extends the original `af3e425fe5e2a2bb3ccb8c2a3301555124a25465` publication with source-neutral lifecycle evidence kinds while preserving `trace-event/1`.
 - Delivery is the NDJSON spool. `looptrace ingest --once`, `looptrace trace <work_item_id>`, and `looptrace gaps` are the commands. `acs trace relay` drains the outbox.
 - Producer canonical JSON matches LoopTrace's sorted-key form. `prev_hash` for sequence 1 is 64 zero hex digits. Later events use the sha256 of the previous event's canonical bytes.
 - `seq` and `prev_hash` are assigned inside the approval transaction. The chain key is the database (`trace_chain_state.producer_key = 'acs'`), not the process. `source.instance` still records which process emitted the event. `trace_missions.work_item_id` is the primary key; the insert is `INSERT OR IGNORE` followed by `SELECT` in that same transaction.
 - Spool filenames use the event `ts` UTC date (`YYYY-MM-DD`). The relay fsyncs the new file, its parent directory, and the spool directory before it marks the outbox row shipped.
+
+## JEV-3 lifecycle expansion (2026-09-28)
+
+The canonical LoopTrace source was updated first on
+`feat/jev3-lifecycle-evidence-20260928`, commit
+`49aca302a1c5f0d12813c73ca4149f2fc7afefd4`. Its published
+`trace-event.v1.schema.json` SHA-256 is
+`5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434`.
+The LoopTrace schema/store suite passes with the expanded event vocabulary.
+
+The additional source-neutral lifecycle kinds are:
+
+- `run.received`, `run.started`
+- `classification.recorded`, `route.recorded`
+- `approval.requested`, `approval.decided`
+- `executor.started`
+- `tool.call.started`, `tool.call.finished`
+- `verification.started`, `verification.finished`
+- `promotion.blocked`, `promotion.completed`
+- `run.failed`, `run.completed`
+- `replay.diverged`
+
+The schema version remains `trace-event/1`; existing approval events still
+validate unchanged. ACS vendors the exact canonical trace-event/1 schema bytes
+published from that LoopTrace publication, pinned by SHA-256
+`5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434`. ACS does
+not vendor the LoopTrace commit itself.
+
+Jace Commander local event names remain private to the adapter boundary.
+Lifecycle events are normalized into the canonical vocabulary before any Jev
+projection. Ancillary JC-only events with no reviewed canonical semantic
+equivalent (`task_validated`, rollback checkpoint, file diff, and trace
+sealed) are explicitly omitted rather than mislabeled. `agent_started`
+projects the first execution boundary as both `run.started` and
+`executor.started`; `run_replay_started` projects `run.started` with a
+replay marker.
+
+This normalized evidence is observational only. It does not replace ACS audit,
+approval, capability, lifecycle, verification, or promotion state.

@@ -20,5 +20,6 @@ export {
   validateTraceProducerConfig
 } from "./trace-outbox.js";
 export type { TraceProducerConfig } from "./trace-outbox.js";
+export * from "./trace-event.js";
 export * from "./work-item.js";
 export * from "./worker-identity.js";
