@@ -2341,6 +2341,76 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
 
+  app.post("/internal/human-interrupts", async (request, reply) => {
+    try {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) return;
+      const body = z
+        .object({
+          attemptId: z.string().min(1),
+          workItemId: z.string().min(1),
+          fencingEpoch: z.number().int().positive(),
+          leaseToken: z.string().min(16),
+          prompt: z.string().min(1).max(8_000),
+          checkpoint: z.record(z.string(), z.json()),
+          responseSpec: z.record(z.string(), z.json()).optional(),
+          idempotencyKey: z.string().min(1).max(128),
+          expiresInMs: z.number().int().positive().optional()
+        })
+        .strict()
+        .parse(requestObject(request.body));
+      const interrupt = workItems.requestHumanInterrupt(
+        { ...body, workerId },
+        { via: "domain_service", actorId: workerId }
+      );
+      return reply.code(202).send({ interrupt });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get("/human-interrupts", { preHandler: requireRead }, async (request) => {
+    const query = request.query as { workItemId?: string; state?: string } | undefined;
+    const workItemId = query?.workItemId;
+    const state = query?.state ?? "pending";
+    const interrupts =
+      state === "resolved"
+        ? workItems.listResolvedHumanInterrupts(workItemId)
+        : workItems.listPendingHumanInterrupts(workItemId);
+    return {
+      state,
+      interrupts: interrupts.map((interrupt) => ({
+        ...interrupt,
+        resolution: workItems.getHumanInterruptResolution(interrupt.interruptId)
+      }))
+    };
+  });
+
+  app.post<{ Params: { id: string } }>("/human-interrupts/:id/resolve", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) return;
+      const body = z
+        .object({
+          decision: z.enum(["resume", "cancel"]),
+          response: z.json().optional(),
+          reason: z.string().min(1).max(2_000).optional()
+        })
+        .strict()
+        .parse(requestObject(request.body));
+      const result = tools.resolve_human_interrupt({
+        interruptId: request.params.id,
+        decision: body.decision,
+        resolvedByActorId: actor,
+        ...(body.response === undefined ? {} : { response: body.response }),
+        ...(body.reason === undefined ? {} : { reason: body.reason })
+      });
+      return result;
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/work-items/:id/approve", async (request, reply) => {
     try {
       const actor = requireMutationActor(request, reply, auth, "acs:approve");

@@ -130,6 +130,21 @@ import {
   type RecordRecoveryDecisionInput
 } from "./recovery.js";
 import {
+  humanInterruptCheckpointHash,
+  humanInterruptRequestSchema,
+  humanInterruptResolutionSchema,
+  humanInterruptResponseHash,
+  requestHumanInterruptInputSchema,
+  resolveHumanInterruptInputSchema,
+  resumeHumanInterruptInputSchema,
+  type HumanInterruptRequest,
+  type HumanInterruptResolution,
+  type HumanInterruptResumeClaim,
+  type RequestHumanInterruptInput,
+  type ResolveHumanInterruptInput,
+  type ResumeHumanInterruptInput
+} from "./human-interrupt.js";
+import {
   publicationRecordSchema,
   recordPublicationInputSchema,
   type PublicationRecord,
@@ -333,6 +348,36 @@ interface RecoveryRow {
   created_at: string;
 }
 
+interface HumanInterruptRequestRow {
+  interrupt_id: string;
+  attempt_id: string;
+  work_item_id: string;
+  plan_hash: string;
+  input_hash: string;
+  admission_id: string;
+  action_hash: string;
+  checkpoint_json: string;
+  checkpoint_hash: string;
+  prompt: string;
+  response_spec_json: string | null;
+  requested_by_actor_id: string;
+  fencing_epoch: number;
+  idempotency_key: string;
+  created_at: string;
+  expires_at: string;
+}
+
+interface HumanInterruptResolutionRow {
+  interrupt_id: string;
+  decision: "resume" | "cancel";
+  response_json: string | null;
+  response_hash: string | null;
+  resolved_by_actor_id: string;
+  reason: string | null;
+  resume_approval_id: string | null;
+  resolved_at: string;
+}
+
 interface PublicationRow {
   publication_id: string;
   work_item_id: string;
@@ -382,6 +427,16 @@ interface WorkspaceAllocationRow {
   cleanup_last_error: string | null;
   created_at: string;
   torn_down_at: string | null;
+}
+
+interface WorkspaceAuthorityBindingRow {
+  binding_id: string;
+  allocation_id: string;
+  attempt_id: string;
+  lease_id: string;
+  worker_id: string;
+  fencing_epoch: number;
+  created_at: string;
 }
 
 interface SchedulerFiringRow {
@@ -987,6 +1042,20 @@ export interface WorkItemStore {
   getValidationRunForAttempt(attemptId: string): ValidationRun | undefined;
   recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord;
   getRecoveryDecisionForAttempt(attemptId: string): RecoveryRecord | undefined;
+  requestHumanInterrupt(input: RequestHumanInterruptInput, options: PrivilegedTransitionOptions): HumanInterruptRequest;
+  getHumanInterrupt(interruptId: string): HumanInterruptRequest | undefined;
+  getPendingHumanInterruptForAttempt(attemptId: string): HumanInterruptRequest | undefined;
+  listPendingHumanInterrupts(workItemId?: string): HumanInterruptRequest[];
+  listResolvedHumanInterrupts(workItemId?: string): HumanInterruptRequest[];
+  resolveHumanInterrupt(
+    input: ResolveHumanInterruptInput,
+    options: PrivilegedTransitionOptions
+  ): HumanInterruptResolution;
+  getHumanInterruptResolution(interruptId: string): HumanInterruptResolution | undefined;
+  resumeHumanInterrupt(
+    input: ResumeHumanInterruptInput,
+    options: PrivilegedTransitionOptions
+  ): HumanInterruptResumeClaim;
   recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord;
   getPublicationByIdempotency(idempotencyKey: string): PublicationRecord | undefined;
   listPublications(workItemId?: string): PublicationRecord[];
@@ -2320,6 +2389,532 @@ export class SqliteWorkItemStore implements WorkItemStore {
       : undefined;
   }
 
+  requestHumanInterrupt(
+    input: RequestHumanInterruptInput,
+    options: PrivilegedTransitionOptions
+  ): HumanInterruptRequest {
+    requirePrivilegedTransition(options, "request_human_interrupt");
+    const parsed = requestHumanInterruptInputSchema.parse(input);
+    if (options.actorId && options.actorId !== parsed.workerId) {
+      throw new ControlStackError("worker_identity_mismatch", "interrupt requester does not match worker identity");
+    }
+    return this.write(() => {
+      const existing = this.db
+        .prepare(`SELECT * FROM human_interrupt_requests WHERE idempotency_key = ?`)
+        .get(parsed.idempotencyKey) as unknown as HumanInterruptRequestRow | undefined;
+      if (existing) return { value: rowToHumanInterruptRequest(existing), events: [] };
+      const pending = this.db
+        .prepare(
+          `SELECT requests.interrupt_id
+           FROM human_interrupt_requests AS requests
+           LEFT JOIN human_interrupt_resolutions AS resolutions
+             ON resolutions.interrupt_id = requests.interrupt_id
+           WHERE requests.attempt_id = ? AND resolutions.interrupt_id IS NULL
+           LIMIT 1`
+        )
+        .get(parsed.attemptId) as { interrupt_id: string } | undefined;
+      if (pending) {
+        throw new ControlStackError("human_interrupt_already_pending", "attempt already has a pending human interrupt");
+      }
+
+      const attempt = this.db
+        .prepare(`SELECT * FROM execution_attempts WHERE attempt_id = ? AND work_item_id = ?`)
+        .get(parsed.attemptId, parsed.workItemId) as unknown as ExecutionAttemptRow | undefined;
+      if (!attempt || attempt.status !== "running") {
+        throw new ControlStackError(
+          "human_interrupt_attempt_not_running",
+          "human interrupt requires a running attempt"
+        );
+      }
+      if (attempt.claimed_by_worker_id !== parsed.workerId || attempt.current_fencing_epoch !== parsed.fencingEpoch) {
+        throw new ControlStackError("human_interrupt_fence_stale", "human interrupt fence is stale");
+      }
+      const lease = this.db
+        .prepare(
+          `SELECT * FROM attempt_leases
+           WHERE attempt_id = ? AND work_item_id = ? AND worker_id = ? AND fencing_epoch = ? AND status = 'active'`
+        )
+        .get(parsed.attemptId, parsed.workItemId, parsed.workerId, parsed.fencingEpoch) as unknown as
+        AttemptLeaseRow | undefined;
+      const nowDate = parsed.now ?? new Date();
+      const now = nowDate.toISOString();
+      if (
+        !lease ||
+        Date.parse(lease.expires_at) <= nowDate.getTime() ||
+        lease.token_hash !== hashAttemptLeaseToken(parsed.leaseToken)
+      ) {
+        throw new ControlStackError("human_interrupt_lease_invalid", "active attempt lease proof is required");
+      }
+      const workItem = this.getRequired(parsed.workItemId);
+      if (workItem.status !== "running") {
+        throw new ControlStackError("human_interrupt_work_item_not_running", "work item is not running");
+      }
+      const legacyLease = this.db
+        .prepare(`SELECT token_hash FROM leases WHERE lease_id = ? AND status = 'active'`)
+        .get(lease.lease_id) as { token_hash: string } | undefined;
+      if (
+        !legacyLease ||
+        legacyLease.token_hash !== hashLeaseToken(parsed.workItemId, parsed.workerId, parsed.leaseToken)
+      ) {
+        throw new ControlStackError("human_interrupt_lease_invalid", "work-item lease proof is required");
+      }
+
+      const interruptId = createId("interrupt");
+      const checkpointHash = humanInterruptCheckpointHash(parsed.checkpoint);
+      const expiresAt = new Date(nowDate.getTime() + (parsed.expiresInMs ?? 24 * 60 * 60 * 1_000)).toISOString();
+      const actionHash = executionActionHash(workItem);
+      this.db
+        .prepare(
+          `INSERT INTO human_interrupt_requests
+           (interrupt_id, attempt_id, work_item_id, plan_hash, input_hash, admission_id, action_hash,
+            checkpoint_json, checkpoint_hash, prompt, response_spec_json, requested_by_actor_id,
+            fencing_epoch, idempotency_key, created_at, expires_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          interruptId,
+          parsed.attemptId,
+          parsed.workItemId,
+          attempt.plan_hash,
+          attempt.input_hash,
+          lease.admission_id,
+          actionHash,
+          JSON.stringify(parsed.checkpoint),
+          checkpointHash,
+          parsed.prompt,
+          parsed.responseSpec === undefined ? null : JSON.stringify(parsed.responseSpec),
+          parsed.workerId,
+          parsed.fencingEpoch,
+          parsed.idempotencyKey,
+          now,
+          expiresAt
+        );
+
+      this.transitionAttempt(
+        {
+          attemptId: parsed.attemptId,
+          workItemId: parsed.workItemId,
+          workerId: parsed.workerId,
+          fencingEpoch: parsed.fencingEpoch,
+          status: "interrupted",
+          now: nowDate
+        },
+        { via: "domain_service" }
+      );
+      this.db
+        .prepare(`UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+        .run(now, lease.lease_id);
+      this.db
+        .prepare(`UPDATE leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+        .run(now, lease.lease_id);
+      this.db
+        .prepare(
+          `UPDATE work_items SET lease_expires_at = NULL, lease_token_hash = NULL, updated_at = ?
+           WHERE id = ? AND status = 'running' AND worker_id = ?`
+        )
+        .run(now, parsed.workItemId, parsed.workerId);
+
+      const request = this.getHumanInterrupt(interruptId)!;
+      const event = this.appendAuditEvent(
+        createEvent(
+          "human_interrupt.requested",
+          {
+            interruptId,
+            attemptId: parsed.attemptId,
+            workItemId: parsed.workItemId,
+            checkpointHash,
+            expiresAt
+          },
+          {
+            "work_item.id": parsed.workItemId,
+            "attempt.id": parsed.attemptId,
+            "human_interrupt.id": interruptId,
+            "worker.id": parsed.workerId
+          }
+        )
+      );
+      return { value: request, events: [event] };
+    });
+  }
+
+  getHumanInterrupt(interruptId: string): HumanInterruptRequest | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM human_interrupt_requests WHERE interrupt_id = ?`)
+      .get(interruptId) as unknown as HumanInterruptRequestRow | undefined;
+    return row ? rowToHumanInterruptRequest(row) : undefined;
+  }
+
+  getPendingHumanInterruptForAttempt(attemptId: string): HumanInterruptRequest | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT r.* FROM human_interrupt_requests r
+         LEFT JOIN human_interrupt_resolutions x ON x.interrupt_id = r.interrupt_id
+         WHERE r.attempt_id = ? AND x.interrupt_id IS NULL AND julianday(r.expires_at) > julianday('now')
+         ORDER BY r.created_at DESC LIMIT 1`
+      )
+      .get(attemptId) as unknown as HumanInterruptRequestRow | undefined;
+    return row ? rowToHumanInterruptRequest(row) : undefined;
+  }
+
+  listPendingHumanInterrupts(workItemId?: string): HumanInterruptRequest[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.* FROM human_interrupt_requests r
+         LEFT JOIN human_interrupt_resolutions x ON x.interrupt_id = r.interrupt_id
+         WHERE x.interrupt_id IS NULL AND julianday(r.expires_at) > julianday('now')
+           AND (? IS NULL OR r.work_item_id = ?)
+         ORDER BY r.created_at ASC`
+      )
+      .all(workItemId ?? null, workItemId ?? null) as unknown as HumanInterruptRequestRow[];
+    return rows.map(rowToHumanInterruptRequest);
+  }
+
+  listResolvedHumanInterrupts(workItemId?: string): HumanInterruptRequest[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.* FROM human_interrupt_requests r
+         JOIN human_interrupt_resolutions x
+           ON x.interrupt_id = r.interrupt_id AND x.decision = 'resume'
+         LEFT JOIN human_interrupt_resumptions s ON s.interrupt_id = r.interrupt_id
+         WHERE s.interrupt_id IS NULL
+           AND julianday(r.expires_at) > julianday('now')
+           AND (? IS NULL OR r.work_item_id = ?)
+         ORDER BY x.resolved_at ASC`
+      )
+      .all(workItemId ?? null, workItemId ?? null) as unknown as HumanInterruptRequestRow[];
+    return rows.map(rowToHumanInterruptRequest);
+  }
+
+  resolveHumanInterrupt(
+    input: ResolveHumanInterruptInput,
+    options: PrivilegedTransitionOptions
+  ): HumanInterruptResolution {
+    requirePrivilegedTransition(options, "resolve_human_interrupt");
+    const parsed = resolveHumanInterruptInputSchema.parse(input);
+    if (options.actorId && options.actorId !== parsed.resolvedByActorId) {
+      throw new ControlStackError("actor_identity_mismatch", "human interrupt resolver does not match actor identity");
+    }
+    return this.write(() => {
+      const existing = this.getHumanInterruptResolution(parsed.interruptId);
+      if (existing) {
+        if (existing.decision !== parsed.decision || existing.resolvedByActorId !== parsed.resolvedByActorId) {
+          throw new ControlStackError(
+            "human_interrupt_already_resolved",
+            "human interrupt was already resolved differently"
+          );
+        }
+        return { value: existing, events: [] };
+      }
+      const request = this.getHumanInterrupt(parsed.interruptId);
+      if (!request) throw new ControlStackError("human_interrupt_not_found", "human interrupt not found");
+      const nowDate = parsed.now ?? new Date();
+      const now = nowDate.toISOString();
+      if (Date.parse(request.expiresAt) <= nowDate.getTime()) {
+        throw new ControlStackError("human_interrupt_expired", "human interrupt has expired");
+      }
+      const responseHash = parsed.response === undefined ? undefined : humanInterruptResponseHash(parsed.response);
+      this.db
+        .prepare(
+          `INSERT INTO human_interrupt_resolutions
+           (interrupt_id, decision, response_json, response_hash, resolved_by_actor_id, reason, resume_approval_id, resolved_at)
+           VALUES (?, ?, ?, ?, ?, ?, NULL, ?)`
+        )
+        .run(
+          parsed.interruptId,
+          parsed.decision,
+          parsed.response === undefined ? null : JSON.stringify(parsed.response),
+          responseHash ?? null,
+          parsed.resolvedByActorId,
+          parsed.reason ?? null,
+          now
+        );
+
+      if (parsed.decision === "cancel") {
+        const cancelledAttempt = this.db
+          .prepare(
+            `UPDATE execution_attempts
+             SET status = 'cancelled', terminal_at = ?, outcome_code = 'human_cancelled', updated_at = ?
+             WHERE attempt_id = ? AND work_item_id = ? AND status = 'interrupted'`
+          )
+          .run(now, now, request.attemptId, request.workItemId);
+        if (cancelledAttempt.changes !== 1) {
+          throw new ControlStackError(
+            "human_interrupt_attempt_not_interrupted",
+            "interrupted attempt is no longer cancellable"
+          );
+        }
+        this.cancelWorkItem(
+          request.workItemId,
+          { actor: parsed.resolvedByActorId, reason: parsed.reason ?? "cancelled at human interrupt" },
+          { via: "domain_service", actorId: parsed.resolvedByActorId }
+        );
+      }
+
+      const resolution = this.getHumanInterruptResolution(parsed.interruptId)!;
+      const event = this.appendAuditEvent(
+        createEvent("human_interrupt.resolved", resolution, {
+          "work_item.id": request.workItemId,
+          "attempt.id": request.attemptId,
+          "human_interrupt.id": request.interruptId,
+          "human_interrupt.decision": parsed.decision,
+          "actor.id": parsed.resolvedByActorId
+        })
+      );
+      return { value: resolution, events: [event] };
+    });
+  }
+
+  getHumanInterruptResolution(interruptId: string): HumanInterruptResolution | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM human_interrupt_resolutions WHERE interrupt_id = ?`)
+      .get(interruptId) as unknown as HumanInterruptResolutionRow | undefined;
+    return row ? rowToHumanInterruptResolution(row) : undefined;
+  }
+
+  resumeHumanInterrupt(
+    input: ResumeHumanInterruptInput,
+    options: PrivilegedTransitionOptions
+  ): HumanInterruptResumeClaim {
+    requirePrivilegedTransition(options, "resume_human_interrupt");
+    const parsed = resumeHumanInterruptInputSchema.parse(input);
+    if (options.actorId && options.actorId !== parsed.workerId) {
+      throw new ControlStackError("worker_identity_mismatch", "resume worker does not match actor identity");
+    }
+    return this.write(() => {
+      const request = this.getHumanInterrupt(parsed.interruptId);
+      if (!request) throw new ControlStackError("human_interrupt_not_found", "human interrupt not found");
+      const resolution = this.getHumanInterruptResolution(parsed.interruptId);
+      if (!resolution || resolution.decision !== "resume") {
+        throw new ControlStackError("human_interrupt_resume_not_authorized", "human resume decision is required");
+      }
+      const nowDate = parsed.now ?? new Date();
+      const now = nowDate.toISOString();
+      if (Date.parse(request.expiresAt) <= nowDate.getTime()) {
+        throw new ControlStackError("human_interrupt_expired", "human interrupt has expired");
+      }
+      const prior = this.db
+        .prepare(
+          `SELECT * FROM attempt_leases
+           WHERE attempt_id = ? AND work_item_id = ? AND fencing_epoch = ?
+           ORDER BY issued_at DESC LIMIT 1`
+        )
+        .get(request.attemptId, request.workItemId, request.fencingEpoch) as unknown as AttemptLeaseRow | undefined;
+      if (!prior || prior.status !== "revoked") {
+        throw new ControlStackError(
+          "human_interrupt_prior_lease_missing",
+          "revoked prior execution authority is required"
+        );
+      }
+      const already = this.db
+        .prepare(`SELECT lease_id FROM human_interrupt_resumptions WHERE interrupt_id = ?`)
+        .get(parsed.interruptId) as { lease_id: string } | undefined;
+      if (already) {
+        throw new ControlStackError("human_interrupt_already_resumed", "human interrupt was already resumed");
+      }
+
+      const attemptBeforeResume = this.getAttempt(request.attemptId);
+      if (
+        !attemptBeforeResume ||
+        attemptBeforeResume.status !== "interrupted" ||
+        attemptBeforeResume.planHash !== request.planHash ||
+        attemptBeforeResume.inputHash !== request.inputHash
+      ) {
+        throw new ControlStackError(
+          "human_interrupt_attempt_not_interrupted",
+          "interrupted attempt is no longer resumable"
+        );
+      }
+      const workItem = this.getRequired(request.workItemId);
+      const currentPlan = this.getCurrentExecutionPlan(request.workItemId);
+      if (
+        workItem.status !== "running" ||
+        executionActionHash(workItem) !== request.actionHash ||
+        !currentPlan ||
+        currentPlan.planHash !== request.planHash
+      ) {
+        throw new ControlStackError(
+          "human_interrupt_binding_mismatch",
+          "work item or execution plan changed before resume"
+        );
+      }
+
+      if (
+        prior.plan_hash !== request.planHash ||
+        prior.input_hash !== request.inputHash ||
+        prior.admission_id !== request.admissionId
+      ) {
+        throw new ControlStackError(
+          "human_interrupt_authority_mismatch",
+          "persisted interrupted authority does not match the checkpoint"
+        );
+      }
+      const authority = parsed.attemptAuthority;
+      const admission = this.getExecutionPlanAdmission(authority.admissionId);
+      if (
+        authority.planHash !== request.planHash ||
+        !admission ||
+        admission.workItemId !== request.workItemId ||
+        admission.planHash !== request.planHash ||
+        admission.policyVersion !== authority.policyVersion ||
+        admission.policyDecisionHash !== authority.policyDecisionHash
+      ) {
+        throw new ControlStackError(
+          "human_interrupt_authority_mismatch",
+          "resume authority does not match the current interrupted plan"
+        );
+      }
+      const leaseToken = createLeaseToken();
+      const lease = this.leaseAttempt(
+        {
+          attemptId: request.attemptId,
+          workItemId: request.workItemId,
+          admissionId: authority.admissionId,
+          ...(authority.approvalId ? { approvalId: authority.approvalId } : {}),
+          additionalApprovals: authority.additionalApprovals ?? [],
+          workerId: parsed.workerId,
+          leaseToken,
+          policyVersion: authority.policyVersion,
+          policyDecisionHash: authority.policyDecisionHash,
+          ttlMs: parsed.ttlMs ?? this.leaseMs,
+          ...(parsed.maxTtlMs ? { maxTtlMs: parsed.maxTtlMs } : {}),
+          now: nowDate
+        },
+        { via: "domain_service" }
+      );
+      const attempt = this.transitionAttempt(
+        {
+          attemptId: request.attemptId,
+          workItemId: request.workItemId,
+          workerId: parsed.workerId,
+          fencingEpoch: lease.fencingEpoch,
+          status: "running",
+          now: nowDate
+        },
+        { via: "domain_service" }
+      );
+      const workspaceRow = this.db
+        .prepare(
+          `SELECT * FROM workspace_allocations
+           WHERE attempt_id = ? AND status = 'active' LIMIT 1`
+        )
+        .get(request.attemptId) as unknown as WorkspaceAllocationRow | undefined;
+      let workspaceBindingEvent: StoredAuditEvent | undefined;
+      if (workspaceRow) {
+        const bindingId = createId("workspace-binding");
+        this.db
+          .prepare(
+            `INSERT INTO workspace_allocation_authority_bindings
+             (binding_id, allocation_id, attempt_id, lease_id, worker_id, fencing_epoch, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            bindingId,
+            workspaceRow.allocation_id,
+            request.attemptId,
+            lease.leaseId,
+            parsed.workerId,
+            lease.fencingEpoch,
+            now
+          );
+        workspaceBindingEvent = this.appendAuditEvent(
+          createEvent(
+            "workspace_allocation.authority_rebound",
+            {
+              bindingId,
+              allocationId: workspaceRow.allocation_id,
+              attemptId: request.attemptId,
+              leaseId: lease.leaseId,
+              workerId: parsed.workerId,
+              fencingEpoch: lease.fencingEpoch
+            },
+            {
+              "workspace.allocation_id": workspaceRow.allocation_id,
+              "attempt.id": request.attemptId,
+              "lease.id": lease.leaseId,
+              "worker.id": parsed.workerId
+            }
+          )
+        );
+      }
+      const updated = this.db
+        .prepare(
+          `UPDATE work_items
+           SET updated_at = ?, worker_id = ?, lease_expires_at = ?, lease_token_hash = ?
+           WHERE id = ? AND status = 'running'`
+        )
+        .run(
+          now,
+          parsed.workerId,
+          lease.expiresAt,
+          hashLeaseToken(request.workItemId, parsed.workerId, leaseToken),
+          request.workItemId
+        );
+      if (updated.changes !== 1) throw new ControlStackError("work_item_conflict", "work item changed while resuming");
+      this.insertLease({
+        leaseId: lease.leaseId,
+        workItemId: request.workItemId,
+        workerId: parsed.workerId,
+        leaseToken,
+        actionHash: request.actionHash,
+        issuedAt: lease.issuedAt,
+        expiresAt: lease.expiresAt
+      });
+      this.db
+        .prepare(
+          `INSERT INTO human_interrupt_resumptions (interrupt_id, lease_id, worker_id, fencing_epoch, resumed_at)
+           VALUES (?, ?, ?, ?, ?)`
+        )
+        .run(parsed.interruptId, lease.leaseId, parsed.workerId, lease.fencingEpoch, now);
+
+      const workspaceHash = stableHash({
+        domain: "acs.attempt-workspace.v1",
+        workItemId: request.workItemId,
+        cwd: workItem.target.cwd,
+        repo: workItem.target.repo
+      });
+      const running: ClaimedWorkItem = {
+        ...this.getRequired(request.workItemId),
+        workerId: parsed.workerId,
+        leaseToken,
+        leaseId: lease.leaseId,
+        actionHash: request.actionHash,
+        attemptId: request.attemptId,
+        planHash: request.planHash,
+        inputHash: request.inputHash,
+        fencingEpoch: lease.fencingEpoch,
+        workspaceHash,
+        startedAt: attempt.startedAt ?? now,
+        leaseExpiresAt: lease.expiresAt
+      };
+      const event = this.appendAuditEvent(
+        createEvent(
+          "human_interrupt.resumed",
+          {
+            interruptId: request.interruptId,
+            attemptId: request.attemptId,
+            workItemId: request.workItemId,
+            workerId: parsed.workerId,
+            leaseId: lease.leaseId,
+            fencingEpoch: lease.fencingEpoch,
+            checkpointHash: request.checkpointHash,
+            responseHash: resolution.responseHash
+          },
+          {
+            "work_item.id": request.workItemId,
+            "attempt.id": request.attemptId,
+            "human_interrupt.id": request.interruptId,
+            "lease.id": lease.leaseId,
+            "worker.id": parsed.workerId
+          }
+        )
+      );
+      return {
+        value: { interrupt: request, resolution, attempt, lease, running },
+        events: [...(workspaceBindingEvent ? [workspaceBindingEvent] : []), event]
+      };
+    });
+  }
+
   // === ADR 0015 governance projections ===================================
 
   recordPlanProposal(input: RecordPlanProposalInput, options: PrivilegedTransitionOptions): PlanProposalProjection {
@@ -3132,32 +3727,52 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  private currentWorkspaceAllocation(row: WorkspaceAllocationRow): WorkspaceAllocation {
+    const binding = this.db
+      .prepare(
+        `SELECT * FROM workspace_allocation_authority_bindings
+         WHERE allocation_id = ? ORDER BY fencing_epoch DESC LIMIT 1`
+      )
+      .get(row.allocation_id) as unknown as WorkspaceAuthorityBindingRow | undefined;
+    return rowToWorkspaceAllocation(
+      binding
+        ? {
+            ...row,
+            attempt_id: binding.attempt_id,
+            lease_id: binding.lease_id,
+            worker_id: binding.worker_id,
+            fencing_epoch: binding.fencing_epoch
+          }
+        : row
+    );
+  }
+
   getWorkspaceAllocation(allocationId: string): WorkspaceAllocation | undefined {
     const row = this.db
       .prepare(`SELECT * FROM workspace_allocations WHERE allocation_id = ?`)
       .get(allocationId) as unknown as WorkspaceAllocationRow | undefined;
-    return row ? rowToWorkspaceAllocation(row) : undefined;
+    return row ? this.currentWorkspaceAllocation(row) : undefined;
   }
 
   getActiveWorkspaceAllocationForWorkItem(workItemId: string): WorkspaceAllocation | undefined {
     const row = this.db
       .prepare(`SELECT * FROM workspace_allocations WHERE work_item_id = ? AND status <> 'torn_down'`)
       .get(workItemId) as unknown as WorkspaceAllocationRow | undefined;
-    return row ? rowToWorkspaceAllocation(row) : undefined;
+    return row ? this.currentWorkspaceAllocation(row) : undefined;
   }
 
   getActiveWorkspaceAllocationForAttempt(attemptId: string): WorkspaceAllocation | undefined {
     const row = this.db
       .prepare(`SELECT * FROM workspace_allocations WHERE attempt_id = ? AND status <> 'torn_down'`)
       .get(attemptId) as unknown as WorkspaceAllocationRow | undefined;
-    return row ? rowToWorkspaceAllocation(row) : undefined;
+    return row ? this.currentWorkspaceAllocation(row) : undefined;
   }
 
   getWorkspaceAllocationByHostPath(hostPath: string): WorkspaceAllocation | undefined {
     const row = this.db
       .prepare(`SELECT * FROM workspace_allocations WHERE host_path = ? AND status <> 'torn_down'`)
       .get(hostPath) as unknown as WorkspaceAllocationRow | undefined;
-    return row ? rowToWorkspaceAllocation(row) : undefined;
+    return row ? this.currentWorkspaceAllocation(row) : undefined;
   }
 
   closeWorkspaceAllocation(allocationId: string, options: PrivilegedTransitionOptions): WorkspaceAllocation {
@@ -3352,10 +3967,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .prepare(`SELECT * FROM workspace_allocations WHERE allocation_id = ?`)
         .get(input.allocationId) as unknown as WorkspaceAllocationRow | undefined;
       if (!row) throw new ControlStackError("workspace_allocation_not_found", "no such workspace allocation");
+      const effective = this.currentWorkspaceAllocation(row);
       if (
-        row.lease_id !== input.leaseId ||
-        row.worker_id !== input.workerId ||
-        row.fencing_epoch !== input.fencingEpoch
+        effective.leaseId !== input.leaseId ||
+        effective.workerId !== input.workerId ||
+        effective.fencingEpoch !== input.fencingEpoch
       ) {
         throw new ControlStackError("workspace_cleanup_fence_stale", "workspace cleanup fence is stale");
       }
@@ -3487,6 +4103,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .get(input.workspaceAllocationId, input.workItemId) as unknown as WorkspaceAllocationRow | undefined;
     if (!allocationRow) return undefined;
 
+    const effectiveAllocation = this.currentWorkspaceAllocation(allocationRow);
     const now = Date.now();
     const valid =
       leaseRow.status === "active" &&
@@ -3498,17 +4115,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
       (attemptRow.status === "leased" ||
         attemptRow.status === "running" ||
         attemptRow.status === "cancellation_requested") &&
-      allocationRow.status === "active" &&
-      allocationRow.attempt_id === input.attemptId &&
-      allocationRow.lease_id === input.leaseId &&
-      allocationRow.worker_id === input.workerId &&
-      allocationRow.fencing_epoch === input.fencingToken;
+      effectiveAllocation.status === "active" &&
+      effectiveAllocation.attemptId === input.attemptId &&
+      effectiveAllocation.leaseId === input.leaseId &&
+      effectiveAllocation.workerId === input.workerId &&
+      effectiveAllocation.fencingEpoch === input.fencingToken;
     if (!valid) return undefined;
 
     return commandAuthoritySchema.parse({
       attempt: rowToExecutionAttempt(attemptRow),
       lease: rowToAttemptLease(leaseRow),
-      workspaceAllocation: rowToWorkspaceAllocation(allocationRow)
+      workspaceAllocation: effectiveAllocation
     });
   }
 
@@ -6229,6 +6846,40 @@ export class SqliteWorkItemStore implements WorkItemStore {
       { event_hash: string } | undefined;
     return row?.event_hash ?? "";
   }
+}
+
+function rowToHumanInterruptRequest(row: HumanInterruptRequestRow): HumanInterruptRequest {
+  return humanInterruptRequestSchema.parse({
+    interruptId: row.interrupt_id,
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    planHash: row.plan_hash,
+    inputHash: row.input_hash,
+    admissionId: row.admission_id,
+    actionHash: row.action_hash,
+    checkpoint: JSON.parse(row.checkpoint_json),
+    checkpointHash: row.checkpoint_hash,
+    prompt: row.prompt,
+    ...(row.response_spec_json === null ? {} : { responseSpec: JSON.parse(row.response_spec_json) }),
+    requestedByActorId: row.requested_by_actor_id,
+    fencingEpoch: row.fencing_epoch,
+    idempotencyKey: row.idempotency_key,
+    createdAt: row.created_at,
+    expiresAt: row.expires_at
+  });
+}
+
+function rowToHumanInterruptResolution(row: HumanInterruptResolutionRow): HumanInterruptResolution {
+  return humanInterruptResolutionSchema.parse({
+    interruptId: row.interrupt_id,
+    decision: row.decision,
+    ...(row.response_json === null ? {} : { response: JSON.parse(row.response_json) }),
+    ...(row.response_hash === null ? {} : { responseHash: row.response_hash }),
+    resolvedByActorId: row.resolved_by_actor_id,
+    ...(row.reason === null ? {} : { reason: row.reason }),
+    ...(row.resume_approval_id === null ? {} : { resumeApprovalId: row.resume_approval_id }),
+    resolvedAt: row.resolved_at
+  });
 }
 
 function rowToWorkItem(row: WorkItemRow): WorkItem {
