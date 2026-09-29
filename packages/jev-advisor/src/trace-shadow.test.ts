@@ -68,6 +68,18 @@ function fullAnswerBody() {
         score: 3.7,
         probabilities: { "0": 0.01, "1": 0.02, "2": 0.07, "3": 0.1, "4": 0.8 },
         confidence: 0.8
+      },
+      capability_issuance_latency: {
+        type: "score",
+        score: 1,
+        probabilities: { "0": 0.01, "1": 0.02, "2": 0.97 },
+        confidence: 0.8
+      },
+      execution_latency: {
+        type: "score",
+        score: 1,
+        probabilities: { "0": 0.01, "1": 0.02, "2": 0.97 },
+        confidence: 0.8
       }
     }
   };
@@ -322,7 +334,7 @@ describe("Jev canonical trace classifier", () => {
       }
     );
     expect(calls).toHaveLength(1);
-    expect(Object.keys((calls[0] as { questions: object }).questions)).toHaveLength(5);
+    expect(Object.keys((calls[0] as { questions: object }).questions)).toHaveLength(7);
     expect(result.result.degraded).toBe(false);
     expect(result.result.answers.failure_mode).toMatchObject({
       type: "choice",

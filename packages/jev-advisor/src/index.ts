@@ -15,6 +15,7 @@ import {
   type JevPrimitive
 } from "./contracts/capability.js";
 import type { CanonicalTraceEvent } from "@agent-control-stack/work-items";
+import { projectLatencyMetrics } from "./latency-projection.js";
 import {
   choice,
   noul,
@@ -32,6 +33,14 @@ import {
   type JevTelemetryEvent
 } from "./telemetry.js";
 import { projectCanonicalTraceForJev, type JevTraceProjection } from "./trace-projection.js";
+export { projectCanonicalTraceForJev, type JevTraceProjection } from "./trace-projection.js";
+export {
+  projectLatencyMetrics,
+  redactLatencyPayload,
+  type CapabilityIssuanceLatency,
+  type ExecutionLatency,
+  type JevLatencyMetrics
+} from "./latency-projection.js";
 
 export * from "./telemetry.js";
 export * from "./contracts/questions.js";
@@ -427,7 +436,13 @@ export const JEV_TRACE_QUESTIONS = {
     "moderate",
     "high",
     "immediate"
-  ])
+  ]),
+  capability_issuance_latency: score("How fast was capability issuance in this trace?", [
+    "fast",
+    "moderate",
+    "slow"
+  ]),
+  execution_latency: score("How fast was execution in this trace?", ["fast", "moderate", "slow"])
 } as const satisfies JevQuestions;
 
 export type JevTraceAdvisory = {
@@ -445,6 +460,7 @@ export async function classifyJevTrace(
   options: ClassifyJevOptions = {}
 ): Promise<JevTraceAdvisory> {
   const projection = projectCanonicalTraceForJev(events);
+  const latencyMetrics = projectLatencyMetrics(events);
   const result = await classifyJev(projection, JEV_TRACE_QUESTIONS, options);
   const telemetry = buildJevTelemetryEvent({
     result,
@@ -454,7 +470,8 @@ export async function classifyJevTrace(
       traceId: projection.trace_id,
       workItemId: projection.work_item_id
     },
-    actualOutcome: traceActualOutcome(events)
+    actualOutcome: traceActualOutcome(events),
+    latencyMetrics
   });
   return { projection, result, telemetry };
 }
