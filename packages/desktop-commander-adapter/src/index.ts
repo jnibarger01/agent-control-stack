@@ -52,6 +52,7 @@ export type { SplitToolArguments } from "./authorization-arguments.js";
 
 export {
   DESKTOP_COMMANDER_CAPABILITY_VERSION,
+  desktopCommanderCapabilityId,
   desktopCommanderCapabilityNonceHash,
   desktopCommanderRequiredScopes,
   prepareDesktopCommanderCapability,
@@ -118,6 +119,7 @@ export {
   redactJaceCommanderArgv,
   redactJaceCommanderPreview,
   jaceCommanderInvocationHash,
+  jaceCommanderCapabilityId,
   jaceCommanderNonceHash,
   jaceCommanderSigningConfigFromEnv,
   jaceCommanderToolNames,

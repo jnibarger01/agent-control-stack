@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import {
+  jaceCommanderCapabilityId,
   jaceCommanderInvocationHash,
   jaceCommanderToolNames,
   jaceCommanderToolPolicy
@@ -181,6 +182,35 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(Date.parse(payload.expiresAt) - Date.parse(payload.issuedAt)).toBeLessThanOrEqual(30_000);
       expect(capability.keyId).toBe("jc-test-key");
       expect(signatureValid(ctx, capability)).toBe(true);
+
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        const rows = db
+          .prepare(
+            `SELECT canonical_json FROM trace_outbox
+             WHERE work_item_id = ? AND json_extract(canonical_json, '$.kind') = 'capability.issued'`
+          )
+          .all(payload.workItemId) as Array<{ canonical_json: string }>;
+        expect(rows).toHaveLength(1);
+        const trace = JSON.parse(rows[0]!.canonical_json);
+        expect(trace.subject).toEqual({
+          work_item_id: payload.workItemId,
+          capability_id: jaceCommanderCapabilityId(payload)
+        });
+        expect(trace.payload).toMatchObject({
+          contract: "acs.jc.v1",
+          tool: "acs_read",
+          runtime_id: RUNTIME_ID,
+          attempt_id: payload.attemptId,
+          lease_id: payload.leaseId,
+          lease_epoch: payload.leaseEpoch,
+          approval_bound: false
+        });
+        expect(rows[0]!.canonical_json).not.toContain(payload.nonce);
+        expect(rows[0]!.canonical_json).not.toContain("normalizedArguments");
+      } finally {
+        db.close();
+      }
     }));
 
   it("denies unknown tools and invalid arguments deterministically", () =>

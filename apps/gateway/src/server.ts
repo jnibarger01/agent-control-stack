@@ -8,6 +8,8 @@ import {
 import {
   authorizeDesktopCommanderExecution,
   authorizeJaceCommanderExecution,
+  desktopCommanderCapabilityId,
+  jaceCommanderCapabilityId,
   jaceCommanderApprovalSummary,
   jaceCommanderSigningConfigFromEnv,
   jaceCommanderToolPolicy,
@@ -54,6 +56,7 @@ import {
   loadMachineControllerConfig,
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
+import { ObservationWorker } from "@agent-control-stack/evidence";
 import {
   createPolicyEngine,
   createWorkItemTools,
@@ -224,6 +227,16 @@ export interface GatewayAuthOptions {
 
 export { WorkerIdentityRegistry };
 
+export interface JevObservationWorkerLifecycle {
+  start(): void;
+  stop(): Promise<void>;
+}
+
+export interface GatewayJevObservationOptions {
+  enabled?: boolean;
+  createWorker?: (store: SqliteWorkItemStore) => JevObservationWorkerLifecycle;
+}
+
 export interface GatewayOptions {
   dbPath?: string;
   heartbeatTtlMs?: number;
@@ -288,6 +301,12 @@ export interface GatewayOptions {
   readManagedAuthority?: () => ManagedAuthorityObservation;
   /** Shared shutdown gate; tests may inject one to assert claim drain behavior. */
   shutdownController?: ShutdownController;
+  /**
+   * Post-authority JEV-4 observation worker. false disables it explicitly.
+   * Otherwise production follows ACS_JEV_ENABLED=1; tests may inject a
+   * lifecycle-only worker without changing authority behavior.
+   */
+  jevObservation?: GatewayJevObservationOptions | false;
 }
 
 /**
@@ -326,6 +345,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     // The gateway is the one process that refuses to boot on a bad trace config.
     traceConfigValidation: "eager"
   });
+  const jevObservationOptions = options.jevObservation === false ? undefined : options.jevObservation;
+  const jevObservationEnabled =
+    options.jevObservation === false ? false : (jevObservationOptions?.enabled ?? process.env.ACS_JEV_ENABLED === "1");
+  const observationWorker: JevObservationWorkerLifecycle | undefined = jevObservationEnabled
+    ? (jevObservationOptions?.createWorker?.(workItems) ?? new ObservationWorker(workItems))
+    : undefined;
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
@@ -648,6 +673,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       } catch (error) {
         app.log.error({ err: error }, "ACP adapter failed to initialize");
         throw error;
+      }
+    });
+  }
+
+  if (observationWorker) {
+    app.addHook("onReady", async () => {
+      try {
+        observationWorker.start();
+      } catch (error) {
+        // JEV is observational only: startup failure must never block ACS readiness.
+        app.log.error({ err: error }, "JEV observation worker failed to initialize");
       }
     });
   }
@@ -1608,6 +1644,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           actionHash: payloadActionHash
         });
         const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
+        const capabilityId = desktopCommanderCapabilityId(payload);
 
         try {
           const recorded = capabilityIssuanceRegistry.recordIssuance({
@@ -1653,6 +1690,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         try {
           const issuanceEvent = capabilityIssuedEvent({
             auth: authorization,
+            capabilityId,
             runtimeId: payload.runtimeId,
             keyId: capabilitySigningConfig.keyId,
             requestHash: payload.requestHash,
@@ -1941,6 +1979,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         }
 
         const payload = prepareJaceCommanderCapability(authorization, jcSigningConfig);
+        const capabilityId = jaceCommanderCapabilityId(payload);
         try {
           const recorded = jcIssuanceRegistry.recordIssuance({
             runtimeId: payload.runtimeId,
@@ -1974,6 +2013,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           recordLeaseAuthorizedExecutionEvent(authority, {
             name: "jace_commander.capability_issued",
             body: {
+              capabilityId,
               tool: payload.toolName,
               runtimeId: payload.runtimeId,
               keyId: jcSigningConfig.keyId,
@@ -1982,6 +2022,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               ...(payload.approvalId ? { approvalId: payload.approvalId } : {})
             },
             attributes: {
+              "capability.id": capabilityId,
+              "capability.contract": "acs.jc.v1",
               "jace_commander.tool": payload.toolName,
               "jace_commander.invocation_hash": payload.invocationHash,
               "jace_commander.runtime_id": payload.runtimeId,
@@ -2332,6 +2374,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.addHook("onClose", async () => {
+    await observationWorker?.stop();
     await acpAdapter?.stop();
     executionReads.close();
     deviceAuthStore.close();

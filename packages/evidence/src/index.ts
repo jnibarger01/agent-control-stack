@@ -51,3 +51,34 @@ export type {
 
 export { EvidenceReader } from "./reader.js";
 export type { EvidenceReaderContext, EvidenceStoreReader } from "./reader.js";
+
+export {
+  observationalIdentity,
+  observationJobStatusSchema,
+  observationOutboxEntrySchema,
+  OBSERVATION_CLASSIFIER_VERSION,
+  OBSERVATION_OUTBOX_MAX_QUEUE,
+  OBSERVATION_OUTBOX_MAX_CONCURRENT,
+  OBSERVATION_OUTBOX_MAX_ATTEMPTS,
+  OBSERVATION_OUTBOX_TIMEOUT_MS,
+  OBSERVATION_OUTBOX_MAX_PROJECTION_EVENTS,
+  OBSERVATION_QUESTION_SET_VERSION,
+  type CompleteObservationJobInput,
+  type ObservationOutboxEntry,
+  type ObservationResult,
+  type ObservationCapacity,
+  type ObservationJobStatus,
+  type ObservationSkipReason
+} from "./observation-outbox.js";
+
+export {
+  ObservationWorker,
+  DEFAULT_CONFIG,
+  type ObservationClassifierOptions,
+  type ObservationWorkerCapacity,
+  type ObservationWorkerConfig,
+  type ObservationWorkerOptions,
+  type ObservationWorkerState,
+  type ObservationWorkerStore,
+  type TraceClassifier
+} from "./observation-worker.js";

@@ -38,10 +38,28 @@ import {
 } from "./work-item.js";
 import {
   enqueueApprovalTraceEvent,
+  enqueueResultTraceEvent,
+  enqueueWorkItemLifecycleTraceEvent,
   rawTraceProducerConfig,
   validateTraceProducerConfig,
-  type ApprovalTraceInput
+  type ApprovalTraceInput,
+  type ResultTraceInput,
+  type WorkItemLifecycleTraceInput
 } from "./trace-outbox.js";
+import {
+  OBSERVATION_CLASSIFIER_VERSION,
+  OBSERVATION_OUTBOX_MAX_ATTEMPTS,
+  OBSERVATION_OUTBOX_MAX_CONCURRENT,
+  OBSERVATION_OUTBOX_MAX_QUEUE,
+  OBSERVATION_QUESTION_SET_VERSION,
+  observationOutboxEntrySchema,
+  observationalIdentity,
+  type CompleteObservationJobInput,
+  type ObservationCapacity,
+  type ObservationOutboxEntry,
+  type ObservationSkipReason
+} from "./observation-outbox.js";
+import type { CanonicalTraceEvent, CanonicalTraceEventKind } from "./trace-event.js";
 import {
   DEFAULT_HEARTBEAT_TTL_MS,
   isHeartbeatExpired,
@@ -114,8 +132,11 @@ import {
 } from "./recovery.js";
 import {
   publicationRecordSchema,
+  recordPublicationBlockedInputSchema,
   recordPublicationInputSchema,
+  type PublicationBlockedRecord,
   type PublicationRecord,
+  type RecordPublicationBlockedInput,
   type RecordPublicationInput
 } from "./publication.js";
 import {
@@ -917,10 +938,12 @@ export interface SqliteWorkItemStoreOptions {
    * swallowed. Defaults to a one-line JSON warning on stderr.
    */
   onTraceFailure?: (failure: TraceEnqueueFailure) => void;
+  observationMaxQueued?: number;
+  onObservationSkip?: (skip: ObservationSkipReason) => void;
 }
 
 export interface TraceEnqueueFailure {
-  kind: ApprovalTraceInput["kind"];
+  kind: CanonicalTraceEventKind;
   workItemId: string;
   code: string;
   message: string;
@@ -965,6 +988,10 @@ export interface WorkItemStore {
   recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord;
   getRecoveryDecisionForAttempt(attemptId: string): RecoveryRecord | undefined;
   recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord;
+  recordPublicationBlocked(
+    input: RecordPublicationBlockedInput,
+    options: PrivilegedTransitionOptions
+  ): PublicationBlockedRecord;
   getPublicationByIdempotency(idempotencyKey: string): PublicationRecord | undefined;
   listPublications(workItemId?: string): PublicationRecord[];
 
@@ -1121,6 +1148,14 @@ export interface WorkItemStore {
   /** True when a granted approval row was recorded by the given approver. */
   hasGrantedApprovalBy(workItemId: string, approvedBy: string): boolean;
   submitWorkResult(input: unknown): WorkItem;
+  getObservationCapacity(): ObservationCapacity;
+  getObservationEnqueueSkipCount(): number;
+  getObservationJob(observationId: string): ObservationOutboxEntry | undefined;
+  claimNextObservationJob(now?: Date, maxRunning?: number): ObservationOutboxEntry | undefined;
+  retryObservationJob(observationId: string, error: string, now?: Date): ObservationOutboxEntry;
+  completeObservationJob(input: CompleteObservationJobInput): ObservationOutboxEntry;
+  recoverStaleObservationJobs(staleBefore: Date, now?: Date): number;
+  readCanonicalTraceEvents(workItemId: string, traceId: string, maxEvents: number): CanonicalTraceEvent[];
   recordDerivedWorkResult(input: unknown): WorkItem;
   getExecutionResult(resultId: string): StoredExecutionResult | undefined;
   getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined;
@@ -1154,6 +1189,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
   private readonly releaseSha: string;
   private readonly onTraceFailure: (failure: TraceEnqueueFailure) => void;
   private traceEnqueueFailures = 0;
+  private readonly observationMaxQueued: number;
+  private readonly onObservationSkip: (skip: ObservationSkipReason) => void;
+  private observationEnqueueSkips = 0;
   /** Memoized lazy validation result: undefined = not checked yet, null = valid. */
   private traceConfigError: ControlStackError | null | undefined;
 
@@ -1171,6 +1209,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
     this.onEvent = options.onEvent ?? (() => undefined);
     this.onTraceFailure = options.onTraceFailure ?? defaultTraceFailureReporter;
+    this.observationMaxQueued =
+      options.observationMaxQueued === undefined
+        ? OBSERVATION_OUTBOX_MAX_QUEUE
+        : Math.max(0, Math.floor(options.observationMaxQueued));
+    this.onObservationSkip = options.onObservationSkip ?? defaultObservationSkipReporter;
     this.db.exec(`
       PRAGMA busy_timeout = 5000;
       PRAGMA journal_mode = WAL;
@@ -1208,7 +1251,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
           workItem.createdAt,
           workItem.updatedAt
         );
-      return { value: workItem, events: [this.appendAuditEvent(workItemCreatedEvent(workItem))] };
+      const event = this.appendAuditEvent(workItemCreatedEvent(workItem));
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: workItem.id,
+        kind: "run.received",
+        actorId: "acs",
+        actorType: "system",
+        payload: { status: workItem.status, risk: workItem.risk }
+      });
+      return { value: workItem, events: [event] };
     });
   }
 
@@ -2746,6 +2799,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: parsed.workItemId,
+        kind: "verification.started",
+        component: "verification",
+        actorId: "acs",
+        actorType: "system",
+        payload: {
+          attempt_id: parsed.attemptId,
+          policy_version: parsed.policyVersion,
+          reviewers_required: parsed.reviewersRequired,
+          mode: parsed.reviewersRequired === 0 ? "automatic" : "independent_review"
+        }
+      });
       return { value, events: [event] };
     });
   }
@@ -2825,6 +2893,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: parsed.workItemId,
+        kind: "verification.finished",
+        component: "verification",
+        actorId: "acs",
+        actorType: "system",
+        payload: {
+          attempt_id: parsed.attemptId,
+          outcome: parsed.outcome,
+          accepted: parsed.outcome === "attempt_accepted",
+          evidence_manifest_hash: parsed.evidenceManifestHash,
+          review_finding_count: parsed.reviewFindingHashes.length,
+          policy_version: parsed.verificationPolicyVersion
+        }
+      });
       return { value, events: [event] };
     });
   }
@@ -2916,6 +3001,77 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "publication.id": record.publicationId
         })
       );
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: record.workItemId,
+        kind: "promotion.completed",
+        component: "publication",
+        actorId: options.actorId ?? "acs",
+        actorType: "system",
+        payload: {
+          attempt_id: record.attemptId,
+          publication_id: record.publicationId,
+          commit_sha: record.commitSha,
+          transport: "pull_request"
+        }
+      });
+      return { value: record, events: [event] };
+    });
+  }
+
+  recordPublicationBlocked(
+    input: RecordPublicationBlockedInput,
+    options: PrivilegedTransitionOptions
+  ): PublicationBlockedRecord {
+    requirePrivilegedTransition(options, "record_publication_blocked");
+    const parsed = recordPublicationBlockedInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      const attempt = this.getAttempt(parsed.attemptId);
+      if (!attempt || attempt.workItemId !== parsed.workItemId) {
+        throw new ControlStackError(
+          "publication_block_attempt_mismatch",
+          "promotion block must reference an attempt owned by the work item"
+        );
+      }
+
+      const record: PublicationBlockedRecord = {
+        workItemId: parsed.workItemId,
+        attemptId: parsed.attemptId,
+        stage: parsed.stage,
+        reasonCode: parsed.reasonCode,
+        externalState: parsed.externalState,
+        recordedAt: (parsed.now ?? new Date()).toISOString()
+      };
+      const event = this.appendAuditEvent(
+        createEvent(
+          "publication.blocked",
+          { ...record },
+          {
+            "work_item.id": record.workItemId,
+            "attempt.id": record.attemptId,
+            "publication.stage": record.stage,
+            "publication.reason_code": record.reasonCode,
+            "publication.external_state": record.externalState
+          }
+        )
+      );
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: record.workItemId,
+        kind: "promotion.blocked",
+        component: "publication",
+        actorId: options.actorId ?? "acs",
+        actorType: "system",
+        payload: {
+          attempt_id: record.attemptId,
+          stage: record.stage,
+          reason_code: record.reasonCode,
+          external_state: record.externalState
+        }
+      });
       return { value: record, events: [event] };
     });
   }
@@ -4276,6 +4432,135 @@ export class SqliteWorkItemStore implements WorkItemStore {
           attributes
         )
       );
+      const body = input.body ?? {};
+      const bodyString = (key: string): string => {
+        const value = body[key];
+        return typeof value === "string" ? value : "";
+      };
+      const bodyNumber = (key: string): number | undefined => {
+        const value = body[key];
+        return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+      };
+      const bodyBoolean = (key: string): boolean | undefined => {
+        const value = body[key];
+        return typeof value === "boolean" ? value : undefined;
+      };
+      if (input.name === "desktop_commander.capability_issued" || input.name === "jace_commander.capability_issued") {
+        const isDc = input.name === "desktop_commander.capability_issued";
+        this.enqueueWorkItemLifecycleTraceNonBlocking({
+          instance: this.traceInstance,
+          releaseSha: this.releaseSha,
+          workItemId,
+          kind: "capability.issued",
+          component: "capability-issuer",
+          capabilityId: bodyString("capabilityId") || attributeString("capability.id"),
+          actorId: workerId,
+          actorType: "agent",
+          payload: {
+            contract: isDc ? "acs.dc.v1" : "acs.jc.v1",
+            tool: bodyString("tool") || attributeString(isDc ? "desktop_commander.tool" : "jace_commander.tool"),
+            runtime_id: bodyString("runtimeId"),
+            attempt_id: attemptId,
+            lease_id: leaseId,
+            lease_epoch: fencingEpoch,
+            action_hash: attributeString("action.hash"),
+            invocation_hash: attributeString(
+              isDc ? "desktop_commander.invocation_hash" : "jace_commander.invocation_hash"
+            ),
+            request_hash: bodyString("requestHash") || attributeString("execution.request_hash"),
+            key_id: bodyString("keyId"),
+            expires_at: bodyString("expiresAt"),
+            approval_bound: attributeString("approval.id").length > 0
+          }
+        });
+      }
+
+      const traceExecutionBoundary = (
+        kind: "executor.started" | "tool.call.started" | "tool.call.finished",
+        payload: Record<string, unknown>
+      ): void => {
+        const tool = typeof payload.tool === "string" ? payload.tool : "";
+        const actionHash = attributeString("action.hash");
+        const invocationHash = attributeString("desktop_commander.invocation_hash");
+        const argumentsDigest = typeof payload.arguments_digest === "string" ? payload.arguments_digest : "";
+        const argumentCount = payload.argument_count;
+        const durationMs = payload.duration_ms;
+        const truncated = payload.truncated;
+        const isError = payload.is_error;
+        const status = payload.status;
+        const resultHash = payload.result_hash;
+        const hashPattern = /^[a-f0-9]{64}$/u;
+        const invalidStart =
+          kind === "tool.call.started" &&
+          (!hashPattern.test(argumentsDigest) || !Number.isSafeInteger(argumentCount) || (argumentCount as number) < 0);
+        const invalidFinish =
+          kind === "tool.call.finished" &&
+          (!Number.isFinite(durationMs) ||
+            (durationMs as number) < 0 ||
+            typeof truncated !== "boolean" ||
+            typeof isError !== "boolean" ||
+            (status !== "succeeded" && status !== "failed") ||
+            typeof resultHash !== "string" ||
+            (resultHash.length > 0 && !hashPattern.test(resultHash)));
+        if (
+          tool.length === 0 ||
+          !hashPattern.test(actionHash) ||
+          !hashPattern.test(invocationHash) ||
+          invalidStart ||
+          invalidFinish
+        ) {
+          this.reportTraceFailure(
+            { kind, workItemId },
+            "trace_execution_evidence_incomplete",
+            "execution trace correlation fields are missing or invalid"
+          );
+          return;
+        }
+        this.enqueueWorkItemLifecycleTraceNonBlocking({
+          instance: this.traceInstance,
+          releaseSha: this.releaseSha,
+          workItemId,
+          kind,
+          component: "execution",
+          actorId: workerId,
+          actorType: "agent",
+          payload: {
+            executor: "desktop_commander",
+            attempt_id: attemptId,
+            lease_id: leaseId,
+            lease_epoch: fencingEpoch,
+            action_hash: actionHash,
+            invocation_hash: invocationHash,
+            ...payload
+          }
+        });
+      };
+
+      if (input.name === "execution.started") {
+        traceExecutionBoundary("executor.started", {
+          tool: bodyString("toolName") || attributeString("desktop_commander.tool")
+        });
+      } else if (input.name === "desktop_commander.tool_called") {
+        traceExecutionBoundary("tool.call.started", {
+          tool: bodyString("toolName") || attributeString("desktop_commander.tool"),
+          arguments_digest: bodyString("argumentsDigest"),
+          argument_count: bodyNumber("argumentCount")
+        });
+      } else if (input.name === "desktop_commander.tool_succeeded" || input.name === "desktop_commander.tool_failed") {
+        const durationMs = bodyNumber("durationMs");
+        const truncated = bodyBoolean("truncated");
+        const isError = bodyBoolean("isError");
+        traceExecutionBoundary("tool.call.finished", {
+          tool: bodyString("toolName") || attributeString("desktop_commander.tool"),
+          status: input.name === "desktop_commander.tool_succeeded" ? "succeeded" : "failed",
+          duration_ms: durationMs,
+          result_hash: bodyString("resultHash") || attributeString("execution.result_hash"),
+          truncated,
+          is_error: isError,
+          ...(bodyString("outcome") ? { outcome: bodyString("outcome") } : {}),
+          ...(bodyString("errorCode") ? { error_code: bodyString("errorCode") } : {})
+        });
+      }
       return { value: event, events: [event] };
     });
   }
@@ -5005,7 +5290,183 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   submitWorkResult(input: unknown): WorkItem {
     const parsed = submitWorkResultSchema.parse(input);
-    return this.write(() => this.acceptResultInTransaction(parsed));
+    return this.write(() => {
+      const accepted = this.acceptResultInTransaction(parsed);
+      const isNewResult = accepted.events.some((event) => event.name === "execution_result.accepted");
+      if (isNewResult) {
+        const resultId = typeof accepted.value.result?.resultId === "string" ? accepted.value.result.resultId : "";
+        const traceId = this.enqueueResultTraceNonBlocking({
+          instance: this.traceInstance,
+          releaseSha: this.releaseSha,
+          workItemId: parsed.workItemId,
+          workerId: parsed.workerId,
+          resultId,
+          outcome: parsed.outcome
+        });
+        if (traceId) this.enqueueObservationNonBlocking(parsed.workItemId, traceId);
+      }
+      return accepted;
+    });
+  }
+
+  getObservationCapacity(): ObservationCapacity {
+    const rows = this.db
+      .prepare(
+        `SELECT status, COUNT(*) AS count FROM observation_outbox WHERE status IN ('pending', 'running') GROUP BY status`
+      )
+      .all() as Array<{ status: "pending" | "running"; count: number }>;
+    let queued = 0;
+    let running = 0;
+    for (const row of rows) {
+      if (row.status === "pending") queued = Number(row.count);
+      else running = Number(row.count);
+    }
+    return {
+      queued,
+      running,
+      maxQueued: this.observationMaxQueued,
+      saturated: queued >= this.observationMaxQueued
+    };
+  }
+
+  getObservationEnqueueSkipCount(): number {
+    return this.observationEnqueueSkips;
+  }
+
+  getObservationJob(observationId: string): ObservationOutboxEntry | undefined {
+    const row = this.db.prepare(`SELECT * FROM observation_outbox WHERE observation_id = ?`).get(observationId);
+    return row ? observationRow(row as Record<string, unknown>) : undefined;
+  }
+
+  claimNextObservationJob(
+    now: Date = new Date(),
+    maxRunning: number = OBSERVATION_OUTBOX_MAX_CONCURRENT
+  ): ObservationOutboxEntry | undefined {
+    const boundedMaxRunning = Math.max(1, Math.floor(maxRunning));
+    return this.write(() => {
+      const running = this.db
+        .prepare(`SELECT COUNT(*) AS count FROM observation_outbox WHERE status = 'running'`)
+        .get() as { count: number };
+      if (Number(running.count) >= boundedMaxRunning) return { value: undefined, events: [] };
+      const row = this.db
+        .prepare(
+          `SELECT observation_id FROM observation_outbox
+           WHERE status = 'pending' AND attempts < max_attempts
+           ORDER BY created_at ASC, observation_id ASC LIMIT 1`
+        )
+        .get() as { observation_id: string } | undefined;
+      if (!row) return { value: undefined, events: [] };
+      const startedAt = now.toISOString();
+      const claimed = this.db
+        .prepare(
+          `UPDATE observation_outbox
+           SET status = 'running', attempts = attempts + 1, started_at = ?, completed_at = NULL
+           WHERE observation_id = ? AND status = 'pending' AND attempts < max_attempts`
+        )
+        .run(startedAt, row.observation_id);
+      if (claimed.changes !== 1) return { value: undefined, events: [] };
+      return { value: this.getObservationJob(row.observation_id), events: [] };
+    });
+  }
+
+  retryObservationJob(observationId: string, error: string, now: Date = new Date()): ObservationOutboxEntry {
+    return this.write(() => {
+      const current = this.getObservationJob(observationId);
+      if (!current) throw new ControlStackError("observation_missing", "observation job does not exist");
+      if (current.status === "completed" || current.status === "degraded" || current.status === "failed") {
+        return { value: current, events: [] };
+      }
+      if (current.status !== "running") {
+        throw new ControlStackError("observation_state_conflict", "only a running observation can be retried");
+      }
+      const terminal = current.attempts >= current.maxAttempts;
+      this.db
+        .prepare(
+          terminal
+            ? `UPDATE observation_outbox SET status = 'failed', completed_at = ?, error = ? WHERE observation_id = ? AND status = 'running'`
+            : `UPDATE observation_outbox SET status = 'pending', started_at = NULL, error = ? WHERE observation_id = ? AND status = 'running'`
+        )
+        .run(
+          ...(terminal ? [now.toISOString(), error.slice(0, 512), observationId] : [error.slice(0, 512), observationId])
+        );
+      const updated = this.getObservationJob(observationId);
+      if (!updated) throw new ControlStackError("observation_missing", "observation job disappeared");
+      return { value: updated, events: [] };
+    });
+  }
+
+  completeObservationJob(input: CompleteObservationJobInput): ObservationOutboxEntry {
+    return this.write(() => {
+      const current = this.getObservationJob(input.observationId);
+      if (!current) throw new ControlStackError("observation_missing", "observation job does not exist");
+      if (current.status === "completed" || current.status === "degraded") {
+        if (
+          current.status !== input.status ||
+          current.classifierOutcome !== input.classifierOutcome ||
+          current.error !== input.error
+        ) {
+          throw new ControlStackError("observation_conflict", "observation completion conflicts with stored result");
+        }
+        return { value: current, events: [] };
+      }
+      if (current.status !== "running") {
+        throw new ControlStackError("observation_state_conflict", "only a running observation can complete");
+      }
+      const completedAt = (input.now ?? new Date()).toISOString();
+      const updated = this.db
+        .prepare(
+          `UPDATE observation_outbox
+           SET status = ?, completed_at = ?, classifier_outcome = ?, error = ?
+           WHERE observation_id = ? AND status = 'running'`
+        )
+        .run(
+          input.status,
+          completedAt,
+          input.classifierOutcome,
+          input.error?.slice(0, 512) ?? null,
+          input.observationId
+        );
+      if (updated.changes !== 1) {
+        throw new ControlStackError("observation_state_conflict", "observation changed while completing");
+      }
+      const value = this.getObservationJob(input.observationId);
+      if (!value) throw new ControlStackError("observation_missing", "observation job disappeared");
+      return { value, events: [] };
+    });
+  }
+
+  recoverStaleObservationJobs(staleBefore: Date, now: Date = new Date()): number {
+    return this.write(() => {
+      const retryable = this.db
+        .prepare(
+          `UPDATE observation_outbox
+           SET status = 'pending', started_at = NULL, error = 'stale_running_recovered'
+           WHERE status = 'running' AND started_at <= ? AND attempts < max_attempts`
+        )
+        .run(staleBefore.toISOString());
+      const exhausted = this.db
+        .prepare(
+          `UPDATE observation_outbox
+           SET status = 'failed', completed_at = ?, error = 'stale_running_exhausted'
+           WHERE status = 'running' AND started_at <= ? AND attempts >= max_attempts`
+        )
+        .run(now.toISOString(), staleBefore.toISOString());
+      return { value: Number(retryable.changes) + Number(exhausted.changes), events: [] };
+    });
+  }
+
+  readCanonicalTraceEvents(workItemId: string, traceId: string, maxEvents: number): CanonicalTraceEvent[] {
+    const limit = Math.max(1, Math.min(1000, Math.floor(maxEvents)));
+    const rows = this.db
+      .prepare(`SELECT canonical_json FROM trace_outbox WHERE work_item_id = ? ORDER BY seq ASC LIMIT ?`)
+      .all(workItemId, limit) as Array<{ canonical_json: string }>;
+    return rows.map((row) => {
+      const parsed = JSON.parse(row.canonical_json) as CanonicalTraceEvent;
+      if (parsed.trace_id !== traceId || parsed.subject?.work_item_id !== workItemId) {
+        throw new ControlStackError("trace_event_mismatch", "canonical trace correlation does not match observation");
+      }
+      return parsed;
+    });
   }
 
   recordDerivedWorkResult(input: unknown): WorkItem {
@@ -5591,6 +6052,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
       );
       const createdEvent = this.appendAuditEvent(workItemCreatedEvent(linked));
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: linked.id,
+        kind: "run.received",
+        actorId: "acs",
+        actorType: "system",
+        payload: {
+          status: linked.status,
+          risk: linked.risk,
+          lineage_type: lineageType,
+          source_work_item_id: source.id
+        }
+      });
       return { value: linked, events: [createdEvent, event] };
     });
   }
@@ -5743,17 +6218,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
             .run(updated.updatedAt, updated.updatedAt, id);
         }
       }
-      return {
-        value: updated,
-        events: [
-          this.appendAuditEvent(
-            workItemStatusEvent(updated, options.eventBody, {
-              ...options.eventAttributes,
-              ...(actorId ? { "actor.id": actorId } : {})
-            })
-          )
-        ]
-      };
+      const event = this.appendAuditEvent(
+        workItemStatusEvent(updated, options.eventBody, {
+          ...options.eventAttributes,
+          ...(actorId ? { "actor.id": actorId } : {})
+        })
+      );
+      this.enqueueWorkItemTransitionTraceNonBlocking(current, updated, {
+        actorId,
+        eventBody: options.eventBody
+      });
+      return { value: updated, events: [event] };
     });
   }
 
@@ -5948,7 +6423,189 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => ({ value: operation(), events: [] }));
   }
 
-  /** Number of approval trace events that failed to enqueue in this process (non-blocking). */
+  private enqueueWorkItemLifecycleTraceNonBlocking(input: WorkItemLifecycleTraceInput): string | null {
+    const configError = this.checkTraceConfig();
+    if (configError) {
+      this.reportTraceFailure(input, configError.code, configError.message);
+      return null;
+    }
+    this.db.exec("SAVEPOINT acs_lifecycle_trace_enqueue");
+    try {
+      const traceId = enqueueWorkItemLifecycleTraceEvent(this.db, input);
+      this.db.exec("RELEASE SAVEPOINT acs_lifecycle_trace_enqueue");
+      return traceId;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO SAVEPOINT acs_lifecycle_trace_enqueue");
+      this.db.exec("RELEASE SAVEPOINT acs_lifecycle_trace_enqueue");
+      this.reportTraceFailure(
+        input,
+        error instanceof ControlStackError ? error.code : "trace_enqueue_failed",
+        error instanceof Error ? error.message : "lifecycle trace enqueue failed"
+      );
+      return null;
+    }
+  }
+
+  private enqueueWorkItemTransitionTraceNonBlocking(
+    current: WorkItem,
+    updated: WorkItem,
+    options: { actorId?: string; eventBody?: Record<string, unknown> }
+  ): void {
+    const explicitActor =
+      typeof options.eventBody?.actor === "string" && options.eventBody.actor.length > 0
+        ? options.eventBody.actor
+        : undefined;
+    const actorId = explicitActor ?? options.actorId ?? "acs";
+    const actorType = explicitActor ? "human" : "system";
+    const basePayload = { previous_status: current.status, status: updated.status };
+
+    if (updated.status === "needs_approval") {
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: updated.id,
+        kind: "approval.requested",
+        actorId: "acs",
+        actorType: "system",
+        payload: basePayload
+      });
+      return;
+    }
+    if (updated.status === "rejected") {
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: updated.id,
+        kind: "approval.decided",
+        actorId,
+        actorType,
+        payload: { ...basePayload, decision: "rejected" }
+      });
+      return;
+    }
+    if (updated.status === "cancelled" || updated.status === "failed") {
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: updated.id,
+        kind: "run.failed",
+        actorId,
+        actorType,
+        payload: { ...basePayload, outcome: updated.status }
+      });
+      return;
+    }
+    if (updated.status === "succeeded") {
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: updated.id,
+        kind: "run.completed",
+        actorId,
+        actorType,
+        payload: { ...basePayload, outcome: "succeeded" }
+      });
+    }
+  }
+
+  private enqueueResultTraceNonBlocking(input: ResultTraceInput): string | null {
+    const kind = input.outcome === "succeeded" ? "run.completed" : "run.failed";
+    const configError = this.checkTraceConfig();
+    if (configError) {
+      this.reportTraceFailure({ kind, workItemId: input.workItemId }, configError.code, configError.message);
+      this.reportObservationSkip({
+        reason: "trace_enqueue_failed",
+        workItemId: input.workItemId,
+        traceId: null,
+        observedAt: new Date().toISOString(),
+        message: configError.message
+      });
+      return null;
+    }
+    this.db.exec("SAVEPOINT acs_result_trace_enqueue");
+    try {
+      const traceId = enqueueResultTraceEvent(this.db, input);
+      this.db.exec("RELEASE SAVEPOINT acs_result_trace_enqueue");
+      return traceId;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO SAVEPOINT acs_result_trace_enqueue");
+      this.db.exec("RELEASE SAVEPOINT acs_result_trace_enqueue");
+      const message = error instanceof Error ? error.message : "result trace enqueue failed";
+      this.reportTraceFailure(
+        { kind, workItemId: input.workItemId },
+        error instanceof ControlStackError ? error.code : "trace_enqueue_failed",
+        message
+      );
+      this.reportObservationSkip({
+        reason: "trace_enqueue_failed",
+        workItemId: input.workItemId,
+        traceId: null,
+        observedAt: new Date().toISOString(),
+        message
+      });
+      return null;
+    }
+  }
+
+  private enqueueObservationNonBlocking(workItemId: string, traceId: string): void {
+    this.db.exec("SAVEPOINT acs_observation_enqueue");
+    try {
+      const capacity = this.getObservationCapacity();
+      if (capacity.saturated) {
+        this.db.exec("RELEASE SAVEPOINT acs_observation_enqueue");
+        this.reportObservationSkip({
+          reason: "queue_saturated",
+          workItemId,
+          traceId,
+          observedAt: new Date().toISOString()
+        });
+        return;
+      }
+      const observationId = observationalIdentity({
+        traceId,
+        questionSetVersion: OBSERVATION_QUESTION_SET_VERSION,
+        classifierVersion: OBSERVATION_CLASSIFIER_VERSION
+      });
+      this.db
+        .prepare(
+          `INSERT OR IGNORE INTO observation_outbox
+           (observation_id, work_item_id, trace_id, question_set_version, classifier_version,
+            attempts, max_attempts, status, created_at, started_at, completed_at, classifier_outcome, error)
+           VALUES (?, ?, ?, ?, ?, 0, ?, 'pending', ?, NULL, NULL, NULL, NULL)`
+        )
+        .run(
+          observationId,
+          workItemId,
+          traceId,
+          OBSERVATION_QUESTION_SET_VERSION,
+          OBSERVATION_CLASSIFIER_VERSION,
+          OBSERVATION_OUTBOX_MAX_ATTEMPTS,
+          new Date().toISOString()
+        );
+      this.db.exec("RELEASE SAVEPOINT acs_observation_enqueue");
+    } catch (error) {
+      this.db.exec("ROLLBACK TO SAVEPOINT acs_observation_enqueue");
+      this.db.exec("RELEASE SAVEPOINT acs_observation_enqueue");
+      this.reportObservationSkip({
+        reason: "observation_enqueue_failed",
+        workItemId,
+        traceId,
+        observedAt: new Date().toISOString(),
+        message: error instanceof Error ? error.message : "observation enqueue failed"
+      });
+    }
+  }
+
+  private reportObservationSkip(skip: ObservationSkipReason): void {
+    this.observationEnqueueSkips += 1;
+    try {
+      this.onObservationSkip(skip);
+    } catch {
+      // Observational reporting is best effort and cannot affect authoritative state.
+    }
+  }
+
+  /** Number of trace events that failed to enqueue in this process (non-blocking). */
   getTraceEnqueueFailureCount(): number {
     return this.traceEnqueueFailures;
   }
@@ -5972,6 +6629,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.db.exec("SAVEPOINT acs_trace_enqueue");
     try {
       enqueueApprovalTraceEvent(this.db, input);
+      if (input.kind === "acs.approval.granted") {
+        enqueueWorkItemLifecycleTraceEvent(this.db, {
+          instance: input.instance,
+          releaseSha: input.releaseSha,
+          workItemId: input.workItemId,
+          component: "approvals",
+          kind: "approval.decided",
+          actorId: input.actorId,
+          actorType: input.actorType,
+          payload: {
+            decision: "approved",
+            status: input.status,
+            action_hash: input.actionHash,
+            request_hash: input.requestHash
+          }
+        });
+      }
       this.db.exec("RELEASE SAVEPOINT acs_trace_enqueue");
       return;
     } catch (error) {
@@ -6002,7 +6676,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.traceConfigError;
   }
 
-  private reportTraceFailure(input: ApprovalTraceInput, code: string, message: string): void {
+  private reportTraceFailure(
+    input: { kind: CanonicalTraceEventKind; workItemId: string },
+    code: string,
+    message: string
+  ): void {
     this.traceEnqueueFailures += 1;
     const failure: TraceEnqueueFailure = {
       kind: input.kind,
@@ -6064,6 +6742,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
       { event_hash: string } | undefined;
     return row?.event_hash ?? "";
   }
+}
+
+function observationRow(row: Record<string, unknown>): ObservationOutboxEntry {
+  return observationOutboxEntrySchema.parse({
+    observationId: row.observation_id,
+    workItemId: row.work_item_id,
+    traceId: row.trace_id,
+    questionSetVersion: row.question_set_version,
+    classifierVersion: row.classifier_version,
+    attempts: row.attempts,
+    maxAttempts: row.max_attempts,
+    status: row.status,
+    createdAt: row.created_at,
+    startedAt: row.started_at,
+    completedAt: row.completed_at,
+    classifierOutcome: row.classifier_outcome,
+    error: row.error
+  });
 }
 
 function rowToWorkItem(row: WorkItemRow): WorkItem {
@@ -6591,6 +7287,18 @@ function assertFutureIso(value: string, now: string, field: string): void {
 
 function publicKeyFingerprint(publicKeyPem: string): string {
   return createHash("sha256").update(publicKeyPem).digest("base64url");
+}
+
+function defaultObservationSkipReporter(skip: ObservationSkipReason): void {
+  process.stderr.write(
+    `${JSON.stringify({
+      level: "warn",
+      event: "jev_observation_skipped",
+      reason: skip.reason,
+      work_item_id: skip.workItemId,
+      trace_id: skip.traceId
+    })}\n`
+  );
 }
 
 function defaultTraceFailureReporter(failure: TraceEnqueueFailure): void {

@@ -959,7 +959,8 @@ describe("work item state machine", () => {
         { version: 29, name: "jace_commander_tool_allowlist", filename: "029_jace_commander_tool_allowlist.sql" },
         { version: 30, name: "jace_commander_search_tools", filename: "030_jace_commander_search_tools.sql" },
         { version: 31, name: "jace_commander_operations", filename: "031_jace_commander_operations.sql" },
-        { version: 32, name: "trace_outbox", filename: "032_trace_outbox.sql" }
+        { version: 32, name: "trace_outbox", filename: "032_trace_outbox.sql" },
+        { version: 33, name: "observation_outbox", filename: "033_observation_outbox.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -1090,7 +1091,8 @@ describe("work item state machine", () => {
         { version: 29 },
         { version: 30 },
         { version: 31 },
-        { version: 32 }
+        { version: 32 },
+        { version: 33 }
       ]);
     } finally {
       db.close();
@@ -1200,7 +1202,7 @@ describe("work item state machine", () => {
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32
+        31, 32, 33
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1276,7 +1278,7 @@ describe("work item state machine", () => {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32
+        31, 32, 33
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([

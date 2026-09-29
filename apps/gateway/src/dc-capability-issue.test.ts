@@ -4,6 +4,7 @@ import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
+import { desktopCommanderCapabilityId } from "@agent-control-stack/desktop-commander-adapter";
 import { describe, expect, it } from "vitest";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
@@ -287,7 +288,79 @@ describe("POST /dc/capability/issue (lease-bound)", () => {
       expect(issuances).toEqual([
         { lease_id: payload.leaseId, attempt_id: payload.attemptId, work_item_id: body.workItemId }
       ]);
+
+      const traceRows = db
+        .prepare(
+          `SELECT canonical_json FROM trace_outbox
+           WHERE work_item_id = ? AND json_extract(canonical_json, '$.kind') = 'capability.issued'`
+        )
+        .all(body.workItemId) as Array<{ canonical_json: string }>;
+      expect(traceRows).toHaveLength(1);
+      const trace = JSON.parse(traceRows[0]!.canonical_json);
+      expect(trace.subject).toEqual({
+        work_item_id: body.workItemId,
+        capability_id: desktopCommanderCapabilityId(payload)
+      });
+      expect(trace.payload).toMatchObject({
+        contract: "acs.dc.v1",
+        tool: "read_file",
+        runtime_id: RUNTIME_ID,
+        attempt_id: payload.attemptId,
+        lease_id: payload.leaseId,
+        lease_epoch: payload.leaseEpoch,
+        approval_bound: false
+      });
+      expect(traceRows[0]!.canonical_json).not.toContain(payload.nonce);
+      expect(traceRows[0]!.canonical_json).not.toContain("normalizedArguments");
       db.close();
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps capability issuance authoritative when canonical trace persistence is unavailable", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      await attestRuntime(ctx);
+      const db = new DatabaseSync(join(ctx.root, "control.db"));
+      try {
+        db.exec(`CREATE TRIGGER capability_trace_boom BEFORE INSERT ON trace_outbox
+                 BEGIN SELECT RAISE(ABORT, 'trace unavailable'); END`);
+      } finally {
+        db.close();
+      }
+
+      const response = await issuePayload(ctx.app, "read_file", { path: join(ctx.root, "trace-fail.txt") });
+      expect(response.statusCode).toBe(200);
+      const body = response.json();
+      expect(body.capability.payload.version).toBe("acs.dc.v1");
+
+      const detail = await ctx.app.inject({
+        method: "GET",
+        url: `/work-items/${body.workItemId}`,
+        headers: AUTH
+      });
+      expect(detail.statusCode).toBe(200);
+      expect(
+        detail.json().events.some((event: { name: string }) => event.name === "desktop_commander.capability_issued")
+      ).toBe(true);
+
+      const check = new DatabaseSync(join(ctx.root, "control.db"));
+      try {
+        expect(
+          (
+            check
+              .prepare(
+                `SELECT count(*) AS n FROM trace_outbox
+                 WHERE work_item_id = ? AND json_extract(canonical_json, '$.kind') = 'capability.issued'`
+              )
+              .get(body.workItemId) as { n: number }
+          ).n
+        ).toBe(0);
+      } finally {
+        check.close();
+      }
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });

@@ -12,6 +12,7 @@ export const CANONICAL_TRACE_EVENT_KINDS = [
   "route.recorded",
   "approval.requested",
   "approval.decided",
+  "capability.issued",
   "executor.started",
   "tool.call.started",
   "tool.call.finished",
