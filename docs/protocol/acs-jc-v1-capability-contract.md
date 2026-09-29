@@ -34,18 +34,34 @@ rejected by the other verifier.
 
 ## Tools
 
-| Tool                                                     | Scopes               | Approval          | Policy action kind     | Work-item risk |
-| -------------------------------------------------------- | -------------------- | ----------------- | ---------------------- | -------------- |
-| `jc_status`, `acs_read`, `swarm_read`, `visualizer_read` | `integration.read`   | no                | `jc.integration.read`  | low            |
-| `acs_submit_mission`                                     | `integration.write`  | no                | `jc.integration.write` | low            |
-| `mission_router_list`, `looptrace_verify`                | `fs.read`            | no                | `jc.fs.read`           | low            |
-| `privileged_exec`                                        | `process.privileged` | **human, always** | `privileged.exec`      | critical       |
+| Tool                                                                  | Scopes               | Approval          | Policy action kind     | Work-item risk |
+| --------------------------------------------------------------------- | -------------------- | ----------------- | ---------------------- | -------------- |
+| `jc_status`, `acs_read`, `swarm_read`, `visualizer_read`              | `integration.read`   | no                | `jc.integration.read`  | low            |
+| `acs_submit_mission`                                                  | `integration.write`  | no                | `jc.integration.write` | low            |
+| `mission_router_list`, `looptrace_verify`                             | `fs.read`            | no                | `jc.fs.read`           | low            |
+| `list_directory`, `get_file_info`, `read_file`, `read_multiple_files` | `fs.read`            | no                | `jc.fs.read`           | low            |
+| `privileged_exec`                                                     | `process.privileged` | **human, always** | `privileged.exec`      | critical       |
 
 The argument schemas are strict (unknown keys are rejected) and **are never
 rewritten**. `normalizedArguments` equals the delivered arguments. For
 `privileged_exec` the arguments are
 `{argv: string[1..256], cwd?: abs path, timeoutMs?: 1..600000, stdin?: <=64KiB}`,
 where `argv[0]` is a normalized absolute path and no argument contains NUL.
+
+The canonical tool list, schemas, scopes, path arguments and CLI verbs live in
+`packages/jc-tool-manifest`. Migration 029 moves the issuance allowlist out of
+migration 028's `CHECK (tool_name IN (...))` and into the append-only
+`jace_commander_tools` table, which `jace_commander_capability_issuances.tool_name`
+references by foreign key. `tests/e2e/jc-tool-contract-drift.test.ts`
+fails if the manifest and that table diverge.
+
+**Filesystem containment.** For every tool with `pathArguments`, the route
+checks each path against `ACS_JACE_COMMANDER_ALLOWED_ROOTS` /
+`ACS_JACE_COMMANDER_DENIED_ROOTS` before creating a work item or signing. With
+no roots configured it returns 503 `jace_commander_containment_unconfigured`.
+A path outside the roots gets 403 `{decision:"deny", reason:"path_not_allowed"}`.
+Jace Commander re-checks the realpath against its own roots after it verifies
+the capability.
 
 Interop vectors (the ACS and desktop-commander tests both pin these):
 
@@ -85,7 +101,8 @@ These are enforced in three independent places.
 ## Flow
 
 1. The bridge calls `POST /jc/capability/issue`. It sends
-   `{client_id, tool, argsSummary, correlationId?}` with `x-dc-actor`,
+   `{client_id, tool, argsSummary, correlationId?}` with `x-jc-actor` (the
+   legacy `x-dc-actor` is still accepted; two headers that disagree get 400),
    authenticated as `acs-jc-bridge`.
 2. For `privileged_exec`, ACS creates a `needs_approval` work item (risk
    critical; title `ROOT: <argv>`, plus an `approvalSummary` with argv, cwd,
@@ -104,6 +121,8 @@ workItemId, actionHash, approvalSummary}`.
 ACS_JACE_COMMANDER_CAPABILITY_PRIVATE_KEY=<base64url PKCS#8 DER Ed25519>
 ACS_JACE_COMMANDER_CAPABILITY_KEY_ID=<key id>
 ACS_JACE_COMMANDER_RUNTIME_ID=<must equal the MCP server's JC_RUNTIME_ID and the helper's runtimeId>
+ACS_JACE_COMMANDER_ALLOWED_ROOTS=<:-separated absolute paths; unset = filesystem tools fail closed>
+ACS_JACE_COMMANDER_DENIED_ROOTS=<optional>
 ```
 
 All three must be set together. If they are partial or invalid, the route

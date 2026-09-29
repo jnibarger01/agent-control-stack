@@ -24,6 +24,7 @@
     "dc-health": "dist/health/health-check.js",
     "dc-audit-ui": "dist/audit/audit-server.js",
     "jace-commander": "dist/jace-commander/cli.js",
+    "jc": "dist/jace-commander/cli.js",
     "jc-privileged-helper": "dist/jace-commander/privileged-helper.js"
   },
   "main": "dist/local-runtime.js",

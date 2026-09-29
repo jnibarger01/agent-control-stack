@@ -12,7 +12,11 @@
  * not exported.
  */
 
-export { desktopCommanderAdapterConfigFromEnv, desktopCommanderContainmentFromEnv } from "./config.js";
+export {
+  desktopCommanderAdapterConfigFromEnv,
+  desktopCommanderContainmentFromEnv,
+  jaceCommanderContainmentFromEnv
+} from "./config.js";
 export type { DesktopCommanderAdapterConfig } from "./config.js";
 
 export {
@@ -104,7 +108,15 @@ export {
   JACE_COMMANDER_PRIVILEGED_TOOL,
   PRIVILEGED_EXEC_ACTION_KIND,
   authorizeJaceCommanderExecution,
+  containJaceCommanderInvocation,
+  JACE_COMMANDER_APPROVAL_SUMMARY_BUILDERS,
+  JACE_COMMANDER_SUMMARY_LIMITS,
   jaceCommanderApprovalSummary,
+  jaceCommanderApprovalSummaryText,
+  jaceCommanderWorkItemIntent,
+  jaceCommanderWorkItemTitle,
+  redactJaceCommanderArgv,
+  redactJaceCommanderPreview,
   jaceCommanderInvocationHash,
   jaceCommanderNonceHash,
   jaceCommanderSigningConfigFromEnv,
@@ -126,3 +138,4 @@ export type {
 } from "./jace-commander.js";
 export { SqliteJaceCommanderIssuanceRegistry } from "./jace-commander-registry.js";
 export type { JaceCommanderIssuanceBinding } from "./jace-commander-registry.js";
+export * from "./jc-looptrace-normalizer.js";

@@ -61,11 +61,17 @@ Gateway (`server.js`), in addition to the existing env:
 | `ACS_JC_GATEWAY_TOKEN` | required when enabled; must differ from `ACS_GATEWAY_TOKEN` |
 
 Bridge (`bridge.js`, second instance): see
-`deploy/jace-commander-bridge.service.example`.
+`deploy/jace-commander-bridge.service.example`. `JC_DC_DIR` now defaults to
+the monorepo's own `vendor/desktop-commander`, resolved relative to
+`bridge.js`, not a legacy checkout. `GET /authority` reports
+`runtime: {dir, entrypoint, monorepoDefault}` so you can see which build is
+running. `JC_FS_ROOTS` / `JC_FS_DENIED_ROOTS` are forwarded to the child.
 
 ACS: set `ACS_JACE_COMMANDER_CAPABILITY_PRIVATE_KEY`, `…_KEY_ID`,
-`ACS_JACE_COMMANDER_RUNTIME_ID`, and a worker credential whose actor id is
-`acs-jc-bridge`.
+`ACS_JACE_COMMANDER_RUNTIME_ID`, `ACS_JACE_COMMANDER_ALLOWED_ROOTS` (the
+filesystem tools answer 503 `jace_commander_containment_unconfigured` without
+it; use the same or narrower roots than the bridge's `JC_FS_ROOTS`), and a
+worker credential whose actor id is `acs-jc-bridge`.
 
 ## Tests
 
