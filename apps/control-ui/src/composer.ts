@@ -8,20 +8,34 @@ import { escapeHtml } from "./html.js";
 export const COMPOSER_PREVIEW_DEBOUNCE_MS = 600;
 export const DEFAULT_ACTION_KIND = "agent.prompt";
 
-export function composerHtml(actionKinds: readonly string[] = []): string {
+export function composerHtml(
+  actionKinds: readonly string[] = [],
+  agents: readonly { id: string; displayName: string; metadata: Record<string, string> }[] = []
+): string {
   const options = actionKinds.map((kind) => `<option value="${escapeHtml(kind)}"></option>`).join("");
+  const agentOptions = agents
+    .filter((agent) => agent.metadata.registered === "true")
+    .map((agent) => `<option value="${escapeHtml(agent.id)}">${escapeHtml(agent.displayName)}</option>`)
+    .join("");
   return `<form id="task-form" novalidate data-known-action-kinds="${escapeHtml(JSON.stringify(actionKinds))}">
-    <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
-    <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
-    <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
-    <label>Requested action kind<input name="actionKind" list="composer-action-kinds" autocomplete="off" spellcheck="false" placeholder="${DEFAULT_ACTION_KIND}" aria-describedby="composer-kind-hint" /></label>
-    <datalist id="composer-action-kinds">${options}</datalist>
-    <small id="composer-kind-hint" class="field-hint">${actionKinds.length ? "Suggestions are the action kinds policy evaluates; any other kind is denied." : "Defaults to " + DEFAULT_ACTION_KIND + "."}</small>
-    <label>Requested action description<input name="actionDescription" placeholder="Defaults to prompt dispatch when blank" /></label>
-    <label>Action params (JSON object, optional)<textarea name="actionParams" rows="3" spellcheck="false" placeholder='{"paths": ["README.md"]}' aria-describedby="composer-params-error"></textarea></label>
-    <small id="composer-params-error" class="field-error" role="alert"></small>
-    <section id="composer-preview" class="composer-preview" aria-live="polite" aria-label="Policy preview"><p class="muted">Fill in a title and instructions to preview policy.</p></section>
-    <div class="composer-actions"><button type="button" id="composer-preview-button" class="tool-button">Check policy</button><button type="submit">Create Work Item</button></div><output id="task-result"></output>
+    <label>Task title<input name="title" required maxlength="120" placeholder="Investigate a failing route" /></label>
+    <label>What should the agent do?<textarea name="intent" required rows="4" placeholder="Describe the goal and what a good result looks like."></textarea></label>
+    <div class="form-row">
+      <label>Agent<select name="service" required><option value="">Choose an agent</option>${agentOptions}</select></label>
+      <label>Project / repo<input name="repo" placeholder="/home/jacen/projects/agent-control-stack" /></label>
+    </div>
+    <label class="composer-worktree" style="display:flex;align-items:center;gap:.55rem"><input type="checkbox" name="newWorktree" value="true" checked style="width:auto;min-width:auto" /> Use a new worktree</label>
+    <details class="composer-advanced"><summary>Advanced options</summary>
+      <label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label>
+      <label>Action kind<input name="actionKind" list="composer-action-kinds" autocomplete="off" spellcheck="false" placeholder="${DEFAULT_ACTION_KIND}" aria-describedby="composer-kind-hint" /></label>
+      <datalist id="composer-action-kinds">${options}</datalist>
+      <small id="composer-kind-hint" class="field-hint">${actionKinds.length ? "Policy-approved action kinds are suggested; other kinds are denied." : "Defaults to " + DEFAULT_ACTION_KIND + "."}</small>
+      <label>Action description<input name="actionDescription" placeholder="Defaults to prompt dispatch" /></label>
+      <label>Action parameters (JSON, optional)<textarea name="actionParams" rows="3" spellcheck="false" placeholder='{"paths": ["README.md"]}' aria-describedby="composer-params-error"></textarea></label>
+      <small id="composer-params-error" class="field-error" role="alert"></small>
+    </details>
+    <section id="composer-preview" class="composer-preview" aria-live="polite" aria-label="Policy preview"><p class="muted">Add a title, goal, and agent to check policy.</p></section>
+    <div class="composer-actions"><button type="button" id="composer-preview-button" class="tool-button">Check policy</button><button type="submit">Create task</button></div><output id="task-result"></output>
   </form>`;
 }
 
@@ -39,6 +53,9 @@ function composerDraft(form) {
   const kind = String(data.get('actionKind') || '').trim() || '${DEFAULT_ACTION_KIND}';
   const description = String(data.get('actionDescription') || '').trim() || 'Dispatch prompt to selected agent';
   const service = String(data.get('service') || '').trim();
+  const repo = String(data.get('repo') || '').trim();
+  const newWorktree = data.get('newWorktree') === 'true';
+  const intent = String(data.get('intent') || '');
   const rawParams = String(data.get('actionParams') || '').trim();
   let params = {};
   let paramsError = '';
@@ -51,14 +68,14 @@ function composerDraft(form) {
     }
   }
   return {
-    ready: Boolean(String(data.get('title') || '').trim() && String(data.get('intent') || '').trim()),
+    ready: Boolean(String(data.get('title') || '').trim() && intent.trim() && service),
     kind: kind,
     paramsError: paramsError,
     payload: {
       title: String(data.get('title') || ''),
-      intent: String(data.get('intent') || ''),
+      intent: intent + (newWorktree ? '\\n\\nWorktree preference: use a new git worktree for this task.' : '\\n\\nWorktree preference: use the selected project checkout.'),
       risk: String(data.get('risk') || 'medium'),
-      target: service ? { services: [service] } : {},
+      target: { services: [service], ...(repo ? { repo } : {}) },
       requestedActions: [{ kind: kind, description: description, params: paramsError ? {} : params }]
     }
   };
@@ -108,7 +125,7 @@ async function previewComposerPolicy(form) {
   showComposerParamsError(form, draft.paramsError);
   const root = document.getElementById('composer-preview');
   if (!draft.ready) {
-    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Fill in a title and instructions to preview policy.</p>'; }
+    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Add a title, goal, and agent to check policy.</p>'; }
     return;
   }
   if (draft.paramsError) return;
@@ -150,8 +167,8 @@ composerForm?.addEventListener('submit', async function (event) {
   const draft = composerDraft(form);
   showComposerParamsError(form, draft.paramsError);
   if (!draft.ready) {
-    if (result) result.textContent = 'Title and instructions are required';
-    (form.querySelector('[name="title"]').value.trim() ? form.querySelector('[name="intent"]') : form.querySelector('[name="title"]')).focus();
+    if (result) result.textContent = 'Task title, instructions, and agent are required';
+    (form.querySelector('[name="title"]').value.trim() ? (form.querySelector('[name="intent"]').value.trim() ? form.querySelector('[name="service"]') : form.querySelector('[name="intent"]')) : form.querySelector('[name="title"]')).focus();
     return;
   }
   if (draft.paramsError) {
@@ -167,7 +184,7 @@ composerForm?.addEventListener('submit', async function (event) {
     form.reset();
     composerPreviewSeq += 1;
     const root = document.getElementById('composer-preview');
-    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Fill in a title and instructions to preview policy.</p>'; }
+    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Add a title, goal, and agent to check policy.</p>'; }
     announce('Created ' + createdId);
     scheduleDashboardRefresh(0);
   }
