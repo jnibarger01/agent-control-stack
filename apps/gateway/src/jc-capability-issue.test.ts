@@ -507,7 +507,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         try {
           const row = db
             .prepare(
-              "SELECT work_item_id AS workItemId FROM execution_plan_approvals WHERE approved_by_actor_id = ? ORDER BY approved_at DESC LIMIT 1"
+              "SELECT work_item_id AS workItemId FROM execution_plan_approvals WHERE approved_by_actor_id = ? ORDER BY created_at DESC LIMIT 1"
             )
             .get("acs:admin") as { workItemId: string } | undefined;
           expect(row?.workItemId).toBeTruthy();
