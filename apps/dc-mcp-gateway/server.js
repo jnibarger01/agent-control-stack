@@ -38,6 +38,14 @@ const ACCESS_TTL_S = 3600;
 const REFRESH_TTL_S = 30 * 24 * 3600;
 const CODE_TTL_S = 300;
 const MAX_BODY = 2 * 1024 * 1024; // 2 MB
+const rawInitializeAcsTimeout = Number.parseInt(process.env.MCP_INITIALIZE_ACS_TIMEOUT_MS || "400", 10);
+const MCP_INITIALIZE_ACS_TIMEOUT_MS = Number.isFinite(rawInitializeAcsTimeout)
+  ? Math.max(100, Math.min(rawInitializeAcsTimeout, 750))
+  : 400;
+const rawInitializeUpstreamTimeout = Number.parseInt(process.env.MCP_INITIALIZE_UPSTREAM_TIMEOUT_MS || "1200", 10);
+const MCP_INITIALIZE_UPSTREAM_TIMEOUT_MS = Number.isFinite(rawInitializeUpstreamTimeout)
+  ? Math.max(250, Math.min(rawInitializeUpstreamTimeout, 1900))
+  : 1200;
 
 for (const [k, v] of Object.entries({ PUBLIC_ORIGIN, CONSENT_PASSPHRASE, SIGNING_KEY })) {
   if (!v) { console.error(`gateway: missing required env ${k}; refusing to start`); process.exit(1); }
@@ -444,6 +452,10 @@ function proxyMcp(req, res, bodyBuf, auth, target = { base: UPSTREAM, pathname: 
  * rejection all fail closed with 503 before anything is exposed.
  */
 function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, auth) {
+  const initializeManaged = {
+    ...MANAGED,
+    timeoutMs: Math.min(MANAGED.timeoutMs || MCP_INITIALIZE_ACS_TIMEOUT_MS, MCP_INITIALIZE_ACS_TIMEOUT_MS),
+  };
   return new Promise((resolve, reject) => {
     const url = new URL(req.url, UPSTREAM);
     const headers = {};
@@ -526,7 +538,7 @@ function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, 
             typeof runtimeIdentity.challenge === 'string' && runtimeIdentity.challenge.length > 0 &&
             Array.isArray(runtimeIdentity.scopes);
           if (!valid) return fail('runtime_identity_proof_missing_or_malformed');
-          await completeRuntimeBootstrap(MANAGED, identity, challenge, runtimeIdentity);
+          await completeRuntimeBootstrap(initializeManaged, identity, challenge, runtimeIdentity);
           const out = {};
           for (const [k, v] of Object.entries(ures.headers)) if (!HOP.has(k.toLowerCase())) out[k] = v;
           delete out['transfer-encoding'];
@@ -541,7 +553,7 @@ function proxyInitializeWithAttestation(req, res, bodyBuf, identity, challenge, 
         }
       });
     });
-    ureq.setTimeout(30_000, () => ureq.destroy(new Error('initialize upstream timeout')));
+    ureq.setTimeout(MCP_INITIALIZE_UPSTREAM_TIMEOUT_MS, () => ureq.destroy(new Error('initialize upstream timeout')));
     ureq.on('error', () => fail('initialize_upstream_unreachable'));
     if (bodyBuf && bodyBuf.length) ureq.write(bodyBuf);
     ureq.end();
@@ -690,7 +702,11 @@ const server = http.createServer(async (req, res) => {
           try {
             const identity = dcRuntimeIdentityFromState();
             if (!identity) throw Object.assign(new Error('DC runtime identity unavailable'), { acsCode: 'runtime_identity_unavailable' });
-            const challenge = await issueRuntimeBootstrap(MANAGED, identity);
+            const initializeManaged = {
+              ...MANAGED,
+              timeoutMs: Math.min(MANAGED.timeoutMs || MCP_INITIALIZE_ACS_TIMEOUT_MS, MCP_INITIALIZE_ACS_TIMEOUT_MS),
+            };
+            const challenge = await issueRuntimeBootstrap(initializeManaged, identity);
             body = Buffer.from(JSON.stringify(injectRuntimeBootstrap(parsed, challenge)), 'utf8');
             await proxyInitializeWithAttestation(req, res, body, identity, challenge, auth);
             log(req.method, '/mcp', 200, 'initialize attested + proxied');
