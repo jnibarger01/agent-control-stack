@@ -22,7 +22,9 @@ async function probePath(path) {
   const started = performance.now();
   try {
     const res = await fetch(path, { headers: { accept: 'application/json' }, cache: 'no-store' });
-    return { path, status: res.status, ms: Math.round(performance.now() - started), at: Date.now() };
+    let payload = null;
+    try { payload = await res.json(); } catch {}
+    return { path, status: res.status, ms: Math.round(performance.now() - started), at: Date.now(), payload };
   } catch {
     return { path, status: 0, ms: Math.round(performance.now() - started), at: Date.now() };
   }
@@ -41,10 +43,17 @@ function renderProbes() {
   const failures = probeHistory.length - okRows.length;
   const state = latest.status === 0 ? 'down' : latest.status >= 300 ? 'failing' : latest.ms >= ${PROBE_SLOW_MS} ? 'slow' : 'ok';
   root.dataset.state = state;
+  const payload = latest.payload && typeof latest.payload === 'object' ? latest.payload : {};
+  const checks = payload.checks && typeof payload.checks === 'object' ? payload.checks : {};
+  const checkNames = Object.keys(checks);
+  const failedChecks = checkNames.filter(function (name) { return !checks[name] || checks[name].ok !== true; });
+  const execution = payload.execution && typeof payload.execution === 'object' ? payload.execution : null;
   const rows = [
-    ['${PROBE_PATH}', (latest.status || 'unreachable') + ' · ' + latest.ms + 'ms · ' + state],
-    ['Average (ok, last ' + probeHistory.length + ')', avg === null ? '—' : avg + 'ms'],
-    ['Failures (last ' + probeHistory.length + ')', String(failures)],
+    ['Gateway readiness', (latest.status || 'unreachable') + ' · ' + latest.ms + 'ms · ' + state],
+    ['Dependency checks', checkNames.length ? (failedChecks.length ? 'failed: ' + failedChecks.join(', ') : checkNames.length + ' passing') : '—'],
+    ['Execution admission', execution ? String(execution.active) + ' / ' + String(execution.capacity) + ' active · ' + String(execution.queued) + ' queued' + (execution.saturated ? ' · saturated' : '') : '—'],
+    ['Average latency (ok, last ' + probeHistory.length + ')', avg === null ? '—' : avg + 'ms'],
+    ['Probe failures (last ' + probeHistory.length + ')', String(failures)],
     ['Last checked', new Date(latest.at).toLocaleTimeString()]
   ];
   const list = document.createElement('dl');

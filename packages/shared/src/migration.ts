@@ -74,7 +74,9 @@ const migrationFiles = [
   { version: 31, name: "jace_commander_operations", filename: "031_jace_commander_operations.sql" },
   { version: 32, name: "trace_outbox", filename: "032_trace_outbox.sql" },
   { version: 33, name: "jace_commander_execution_results", filename: "033_jace_commander_execution_results.sql" },
-  { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" }
+  { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" },
+  { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" },
+  { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

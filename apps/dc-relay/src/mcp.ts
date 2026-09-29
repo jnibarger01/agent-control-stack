@@ -76,8 +76,17 @@ function text(value: unknown, isError = false): Record<string, unknown> {
 }
 function toolResultFromCall(call: CallRecord): Record<string, unknown> {
   if (call.status === 'completed') {
-    const result = call.result as { content?: unknown; isError?: unknown } | null;
-    if (result && Array.isArray(result.content)) return { content: result.content, isError: result.isError === true };
+    const result = call.result as { content?: unknown; isError?: unknown; structuredContent?: unknown } | null;
+    if (result && Array.isArray(result.content)) {
+      const toolResult: Record<string, unknown> = {
+        content: result.content,
+        isError: result.isError === true,
+      };
+      if (result.structuredContent && typeof result.structuredContent === 'object' && !Array.isArray(result.structuredContent)) {
+        toolResult.structuredContent = result.structuredContent;
+      }
+      return toolResult;
+    }
     return text(result ?? null);
   }
   return text({ call_id: call.id, status: call.status, error: call.error_message ?? `call ${call.status}` }, true);

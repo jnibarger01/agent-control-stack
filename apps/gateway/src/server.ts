@@ -8,8 +8,11 @@ import {
 import {
   authorizeDesktopCommanderExecution,
   authorizeJaceCommanderExecution,
+  desktopCommanderCapabilityId,
+  jaceCommanderCapabilityId,
   jaceCommanderApprovalSummary,
   jaceCommanderSigningConfigFromEnv,
+  jaceCommanderToolNames,
   jaceCommanderToolPolicy,
   jaceCommanderWorkItemIntent,
   jaceCommanderWorkItemTitle,
@@ -30,6 +33,7 @@ import {
   desktopCommanderContainmentFromEnv,
   desktopCommanderInvocationFingerprint,
   desktopCommanderManagedToolDisposition,
+  desktopCommanderManagedToolDispositions,
   desktopCommanderRequiredScopes,
   desktopCommanderToolPolicy,
   normalizeInvocation,
@@ -103,6 +107,8 @@ import {
   validateHeartbeatTtl,
   WorkerIdentityRegistry,
   type ReadEventsOptions,
+  type RegisteredConnector,
+  type RegisteredTunnelSession,
   type RegistryAgentDetail,
   type RegistryStatus,
   type StoredAuditEvent,
@@ -235,6 +241,16 @@ export interface GatewayAuthOptions {
 
 export { WorkerIdentityRegistry };
 
+export interface JevObservationWorkerLifecycle {
+  start(): void;
+  stop(): Promise<void>;
+}
+
+export interface GatewayJevObservationOptions {
+  enabled?: boolean;
+  createWorker?: (store: SqliteWorkItemStore) => JevObservationWorkerLifecycle;
+}
+
 export interface GatewayOptions {
   dbPath?: string;
   heartbeatTtlMs?: number;
@@ -301,6 +317,12 @@ export interface GatewayOptions {
   shutdownController?: ShutdownController;
   /** Execution admission controller; tests may inject a deterministic controller. */
   executionAdmission?: ExecutionAdmissionController;
+  /**
+   * Post-authority JEV observation worker. false disables it explicitly.
+   * Otherwise production follows ACS_JEV_ENABLED=1; tests may inject a
+   * lifecycle-only worker without changing authority behavior.
+   */
+  jevObservation?: GatewayJevObservationOptions | false;
 }
 
 /**
@@ -333,7 +355,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // bucket without rescanning every open client.
   const sseClientPrincipals = new Map<ServerResponse, string>();
   const sseClientsPerPrincipal = new Map<string, number>();
-  const jevObservationEnabled = process.env.ACS_JEV_ENABLED === "1";
+  const jevObservationOptions = options.jevObservation === false ? undefined : options.jevObservation;
+  const jevObservationEnabled =
+    options.jevObservation === false ? false : (jevObservationOptions?.enabled ?? process.env.ACS_JEV_ENABLED === "1");
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
     heartbeatTtlMs,
@@ -341,8 +365,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     traceConfigValidation: "eager",
     observationEnabled: jevObservationEnabled
   });
-  const observationWorker = new ObservationWorker(workItems, { config: { enabled: jevObservationEnabled } });
-  observationWorker.start();
+  const observationWorker: JevObservationWorkerLifecycle | undefined = jevObservationEnabled
+    ? (jevObservationOptions?.createWorker?.(workItems) ?? new ObservationWorker(workItems))
+    : undefined;
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
@@ -375,6 +400,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     );
   }
   const metrics = new GatewayMetrics();
+  if (observationWorker) {
+    app.addHook("onReady", async () => {
+      try {
+        observationWorker.start();
+      } catch (error) {
+        // JEV is observational only: startup failure must never block ACS readiness.
+        app.log.error({ err: error }, "JEV observation worker failed to initialize");
+      }
+    });
+  }
+
   function refreshAdmissionMetrics(): void {
     const snapshot = executionAdmission.snapshot();
     metrics.setGauge("acs_admission_active", snapshot.global.active, { class: "execution" });
@@ -518,6 +554,73 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
   const jcContainment = resolveJcContainment(options.jaceCommanderContainment);
   const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
+
+  const desktopExecutorCapabilities = () =>
+    desktopCommanderManagedToolDispositions().map((disposition) => {
+      const policy = desktopCommanderToolPolicy(disposition.name);
+      return {
+        executorId: DC_BRIDGE_WORKER_ID,
+        name: disposition.name,
+        contract: "acs.dc.v1" as const,
+        managed: disposition.managed,
+        toolClass: disposition.toolClass,
+        scopes: policy ? desktopCommanderRequiredScopes(disposition.name) : [],
+        ...(policy ? { riskClass: policy.riskClass, requiresApproval: policy.requiresApproval } : {}),
+        reason: disposition.reason
+      };
+    });
+
+  const jaceExecutorCapabilities = () =>
+    jaceCommanderToolNames().map((name) => {
+      const policy = jaceCommanderToolPolicy(name);
+      if (!policy) throw new Error(`missing Jace Commander tool policy for ${name}`);
+      return {
+        executorId: JC_BRIDGE_WORKER_ID,
+        name,
+        contract: "acs.jc.v1" as const,
+        managed: "capability" as const,
+        toolClass: "jace_commander_tool" as const,
+        scopes: [...policy.scopes],
+        riskClass: policy.risk,
+        requiresApproval: policy.requiresApproval,
+        actionKind: policy.actionKind
+      };
+    });
+
+  const executorSummaries = () => {
+    const dcRuntime = capabilitySigningConfig
+      ? capabilityIssuanceRegistry.getRuntime(capabilitySigningConfig.runtimeId)
+      : undefined;
+    const dcCapabilities = desktopExecutorCapabilities();
+    const jcCapabilities = jaceExecutorCapabilities();
+    return [
+      {
+        id: DC_BRIDGE_WORKER_ID,
+        displayName: "Desktop Commander",
+        kind: "managed_mcp_executor" as const,
+        contract: "acs.dc.v1" as const,
+        configured: Boolean(capabilitySigningConfig),
+        status: !capabilitySigningConfig ? "unconfigured" : (dcRuntime?.status ?? "unattested"),
+        ...(capabilitySigningConfig ? { runtimeId: capabilitySigningConfig.runtimeId } : {}),
+        ...(dcRuntime ? { attestedAt: dcRuntime.attestedAt, scopes: [...dcRuntime.scopes] } : { scopes: [] }),
+        capabilityCount: dcCapabilities.filter((capability) => capability.managed === "capability").length,
+        unsupportedToolCount: dcCapabilities.filter((capability) => capability.managed === "unsupported").length
+      },
+      {
+        id: JC_BRIDGE_WORKER_ID,
+        displayName: "Jace Commander",
+        kind: "managed_mcp_executor" as const,
+        contract: "acs.jc.v1" as const,
+        configured: Boolean(jcSigningConfig),
+        status: jcSigningConfig ? "configured" : "unconfigured",
+        ...(jcSigningConfig ? { runtimeId: jcSigningConfig.runtimeId } : {}),
+        scopes: [],
+        capabilityCount: jcCapabilities.length,
+        unsupportedToolCount: 0
+      }
+    ];
+  };
+
   /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
   function recordLeaseAuthorizedExecutionEvent(
     authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch?: number },
@@ -854,6 +957,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const ids = workItemList.map((workItem) => workItem.id);
     const attempts = executionReads.listExecutionAttemptsForWorkItems(ids);
     const leases = executionReads.listAttemptLeasesForWorkItems(ids);
+    const now = new Date();
+    const events = workItems.readEvents(eventReadOptions(request.query));
+    const registeredAgents = workItems.listRegistryAgents();
+    const projectedAgents = projectAgents(workItemList, events, now, registeredAgents);
+    const executors = executorSummaries();
+    const connectors = workItems.listConnectors();
+    const enabledConnectorIds = new Set(
+      connectors.filter((connector) => connector.status === "active").map((connector) => connector.id)
+    );
+    const tunnelSessions = workItems.listTunnelSessions();
+    const admission = executionAdmission.snapshot();
     return {
       workItems: workItemList,
       statusCounts: dashboard.statusCounts,
@@ -862,8 +976,35 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         total: dashboard.finishedTotal,
         limit: dashboard.finishedLimit
       },
-      events: workItems.readEvents(eventReadOptions(request.query)),
-      registeredAgents: workItems.listRegistryAgents(),
+      events,
+      registeredAgents,
+      agents: projectedAgents,
+      infrastructure: {
+        agents: {
+          registered: registeredAgents.length,
+          online: projectedAgents.filter((agent) => agent.status === "online").length
+        },
+        executors: {
+          total: executors.length,
+          configured: executors.filter((executor) => executor.configured).length,
+          attestedRuntimes: executors.filter((executor) => executor.status === "active").length
+        },
+        connectors: {
+          registered: connectors.length,
+          enabled: enabledConnectorIds.size,
+          activeSessions: tunnelSessions.filter(
+            (session) =>
+              enabledConnectorIds.has(session.connectorId) &&
+              projectTunnelSession(session, heartbeatTtlMs).effectiveStatus === "active"
+          ).length
+        },
+        admission: {
+          active: admission.global.active,
+          capacity: admission.global.capacity,
+          queued: admission.global.queued,
+          saturated: admission.saturated
+        }
+      },
       approvalActionsByWorkItem: approvalActionsByWorkItem(
         policy,
         workItemList,
@@ -876,6 +1017,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       executionBackend: reportedExecutionBackend(),
       composerActionKinds: [...SUPPORTED_ACTION_KINDS],
       policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW }),
+      now,
       ...dashboardExecutionMode()
     };
   }
@@ -963,6 +1105,23 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       auth: authorization.auth
     });
     return { tools: workItemToolNames };
+  });
+
+  app.get("/api/connectors", { preHandler: requireRead }, async () => {
+    const connectors = workItems
+      .listConnectors()
+      .map((connector) => projectConnector(connector, workItems.listTunnelSessions(connector.id), heartbeatTtlMs));
+    return { connectors };
+  });
+
+  app.get<{ Params: { id: string } }>("/api/connectors/:id", { preHandler: requireRead }, async (request, reply) => {
+    const connector = workItems.getConnector(request.params.id);
+    if (!connector) return reply.code(404).send({ error: "connector not found" });
+    const sessions = workItems.listTunnelSessions(connector.id);
+    return {
+      connector: projectConnector(connector, sessions, heartbeatTtlMs),
+      sessions: sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs))
+    };
   });
 
   app.post("/connectors", async (request, reply) => {
@@ -1164,6 +1323,35 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     agents: workItems.listRegistryAgents().map((agent) => projectRegistryFreshness(agent, heartbeatTtlMs))
   }));
 
+  app.get("/api/executors", { preHandler: requireRead }, async () => ({ executors: executorSummaries() }));
+
+  app.get<{ Params: { id: string } }>("/api/executors/:id", { preHandler: requireRead }, async (request, reply) => {
+    const executor = executorSummaries().find((candidate) => candidate.id === request.params.id);
+    if (!executor) return reply.code(404).send({ error: "executor not found" });
+    if (executor.id !== DC_BRIDGE_WORKER_ID) return { executor };
+    return {
+      executor,
+      runtimes: capabilityIssuanceRegistry.listRuntimes().map((runtime) => ({
+        runtimeId: runtime.runtimeId,
+        status: runtime.status,
+        scopes: [...runtime.scopes],
+        registeredAt: runtime.registeredAt,
+        attestedAt: runtime.attestedAt,
+        ...(runtime.revokedAt ? { revokedAt: runtime.revokedAt } : {})
+      }))
+    };
+  });
+
+  app.get<{ Params: { id: string } }>(
+    "/api/executors/:id/capabilities",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      if (request.params.id === DC_BRIDGE_WORKER_ID) return { capabilities: desktopExecutorCapabilities() };
+      if (request.params.id === JC_BRIDGE_WORKER_ID) return { capabilities: jaceExecutorCapabilities() };
+      return reply.code(404).send({ error: "executor not found" });
+    }
+  );
+
   app.post("/api/agents", async (request, reply) => {
     try {
       if (!requireMutationActor(request, reply, auth)) {
@@ -1186,10 +1374,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (!agent) {
         return reply.code(404).send({ error: "agent not found" });
       }
+      const events = workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }));
+      const sessions = projectAgentSessions(events);
       return {
         agent: projectRegistryFreshness(agent, heartbeatTtlMs),
+        activity: projectAgentActivity(agent, sessions),
+        sessions,
         adapterStatus: adapterStatusFor(request.params.id),
-        events: workItems.readEvents(eventReadOptions(request.query, { agentId: request.params.id }))
+        events
       };
     } catch (error) {
       return sendError(reply, error);
@@ -1805,6 +1997,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             actionHash: payloadActionHash
           });
           const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
+          const capabilityId = desktopCommanderCapabilityId(payload);
 
           try {
             const recorded = capabilityIssuanceRegistry.recordIssuance({
@@ -1852,6 +2045,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           try {
             const issuanceEvent = capabilityIssuedEvent({
               auth: authorization,
+              capabilityId,
               runtimeId: payload.runtimeId,
               keyId: capabilitySigningConfig.keyId,
               requestHash: payload.requestHash,
@@ -2166,6 +2360,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           }
 
           const payload = prepareJaceCommanderCapability(authorization, jcSigningConfig);
+          const capabilityId = jaceCommanderCapabilityId(payload);
           try {
             const recorded = jcIssuanceRegistry.recordIssuance({
               runtimeId: payload.runtimeId,
@@ -2201,6 +2396,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             recordLeaseAuthorizedExecutionEvent(authority, {
               name: "jace_commander.capability_issued",
               body: {
+                capabilityId,
                 tool: payload.toolName,
                 runtimeId: payload.runtimeId,
                 keyId: jcSigningConfig.keyId,
@@ -2209,6 +2405,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 ...(payload.approvalId ? { approvalId: payload.approvalId } : {})
               },
               attributes: {
+                "capability.id": capabilityId,
                 "jace_commander.tool": payload.toolName,
                 "jace_commander.invocation_hash": payload.invocationHash,
                 "jace_commander.runtime_id": payload.runtimeId,
@@ -2592,7 +2789,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.addHook("onClose", async () => {
     executionAdmission.shutdown();
     for (const attemptId of [...admissionPermits.keys()]) releaseAdmissionPermit(attemptId);
-    await observationWorker.stop();
+    await observationWorker?.stop();
     await acpAdapter?.stop();
     executionReads.close();
     deviceAuthStore.close();
@@ -2970,6 +3167,122 @@ function eventReadOptions(
     ...filters,
     limit: parsed.limit === undefined ? DEFAULT_EVENT_LIMIT : Math.min(parsed.limit, MAX_EVENT_LIMIT),
     ...(parsed.afterSequence === undefined ? {} : { afterSequence: parsed.afterSequence })
+  };
+}
+
+interface AgentSessionProjection {
+  sessionId: string;
+  status: "active" | "closed" | "error";
+  startedAt: string;
+  lastEventAt: string;
+  lastEventType: string;
+  workItemId?: string;
+}
+
+function projectAgentSessions(events: StoredAuditEvent[]): AgentSessionProjection[] {
+  const sessions = new Map<string, AgentSessionProjection>();
+  for (const event of events) {
+    if (!event.name.startsWith("acp.")) continue;
+    const sessionId =
+      typeof event.attributes["acp.session_id"] === "string"
+        ? event.attributes["acp.session_id"]
+        : typeof event.body.sessionId === "string"
+          ? event.body.sessionId
+          : undefined;
+    if (!sessionId) continue;
+
+    const observedAt = auditEventIso(event);
+    const eventType =
+      typeof event.attributes["acp.event_type"] === "string"
+        ? event.attributes["acp.event_type"]
+        : event.name.slice("acp.".length);
+    const status: AgentSessionProjection["status"] =
+      eventType === "error" ? "error" : eventType === "stop" || eventType === "disconnected" ? "closed" : "active";
+    const workItemId =
+      typeof event.attributes["work_item.id"] === "string"
+        ? event.attributes["work_item.id"]
+        : typeof event.body.workItemId === "string"
+          ? event.body.workItemId
+          : undefined;
+    const current = sessions.get(sessionId);
+    sessions.set(sessionId, {
+      sessionId,
+      status,
+      startedAt: current?.startedAt ?? observedAt,
+      lastEventAt: observedAt,
+      lastEventType: eventType,
+      ...(workItemId ? { workItemId } : current?.workItemId ? { workItemId: current.workItemId } : {})
+    });
+  }
+  return [...sessions.values()].sort((left, right) => right.lastEventAt.localeCompare(left.lastEventAt));
+}
+
+function projectAgentActivity(agent: RegistryAgentDetail, sessions: AgentSessionProjection[]) {
+  const activeSessions = sessions.filter((session) => session.status === "active");
+  const currentSession = activeSessions[0];
+  const lastActivityAt = [agent.lastHeartbeatAt, sessions[0]?.lastEventAt]
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1);
+  return {
+    ...(agent.latestHeartbeat?.currentTask ? { currentTask: agent.latestHeartbeat.currentTask } : {}),
+    ...(currentSession?.workItemId ? { currentWorkItemId: currentSession.workItemId } : {}),
+    ...(currentSession ? { currentSessionId: currentSession.sessionId } : {}),
+    activeSessionCount: activeSessions.length,
+    recentSessionCount: sessions.length,
+    ...(lastActivityAt ? { lastActivityAt } : {})
+  };
+}
+
+function auditEventIso(event: StoredAuditEvent): string {
+  const millis = Number(BigInt(event.timeUnixNano) / 1_000_000n);
+  return new Date(millis).toISOString();
+}
+
+function projectTunnelSession(session: RegisteredTunnelSession, heartbeatTtlMs: number) {
+  const now = new Date();
+  const sessionExpired =
+    !Number.isFinite(Date.parse(session.expiresAt)) || Date.parse(session.expiresAt) <= now.getTime();
+  const heartbeatExpired =
+    session.status === "active" && isHeartbeatExpired(session.lastHeartbeatAt, session.issuedAt, now, heartbeatTtlMs);
+  return {
+    ...session,
+    effectiveStatus: session.status === "revoked" || sessionExpired || heartbeatExpired ? "inactive" : "active",
+    staleReason:
+      session.status === "revoked"
+        ? "revoked"
+        : sessionExpired
+          ? "session_expired"
+          : heartbeatExpired
+            ? "heartbeat_expired"
+            : undefined
+  };
+}
+
+function projectConnector(connector: RegisteredConnector, sessions: RegisteredTunnelSession[], heartbeatTtlMs: number) {
+  const projectedSessions = sessions.map((session) => projectTunnelSession(session, heartbeatTtlMs));
+  const activeSessions = projectedSessions.filter((session) => session.effectiveStatus === "active");
+  const lastHeartbeatAt = sessions
+    .map((session) => session.lastHeartbeatAt)
+    .filter((value): value is string => Boolean(value))
+    .sort()
+    .at(-1);
+  const nextSessionExpiryAt = activeSessions
+    .map((session) => session.expiresAt)
+    .sort()
+    .at(0);
+  return {
+    id: connector.id,
+    displayName: connector.displayName,
+    allowedScopes: [...connector.allowedScopes],
+    status: connector.status,
+    publicKeyFingerprint: createHash("sha256").update(connector.publicKeyPem).digest("base64url"),
+    createdAt: connector.createdAt,
+    updatedAt: connector.updatedAt,
+    sessionCount: sessions.length,
+    activeSessionCount: activeSessions.length,
+    ...(lastHeartbeatAt ? { lastHeartbeatAt } : {}),
+    ...(nextSessionExpiryAt ? { nextSessionExpiryAt } : {})
   };
 }
 

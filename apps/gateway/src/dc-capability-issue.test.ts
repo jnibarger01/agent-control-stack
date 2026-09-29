@@ -169,6 +169,85 @@ describe("POST /dc/capability/issue (lease-bound)", () => {
     }
   });
 
+  it("separates managed executors and tool capabilities from the agent registry", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      await attestRuntime(ctx);
+
+      const agents = await ctx.app.inject({ method: "GET", url: "/api/agents", headers: AUTH });
+      const agentIds = agents.json().agents.map((agent: { id: string }) => agent.id);
+      expect(agentIds).not.toContain("acs-dc-bridge");
+      expect(agentIds).not.toContain("acs-jc-bridge");
+
+      const executors = await ctx.app.inject({ method: "GET", url: "/api/executors", headers: AUTH });
+      expect(executors.statusCode).toBe(200);
+      expect(executors.json().executors).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: "acs-dc-bridge",
+            displayName: "Desktop Commander",
+            contract: "acs.dc.v1",
+            configured: true,
+            status: "active",
+            runtimeId: RUNTIME_ID
+          }),
+          expect.objectContaining({
+            id: "acs-jc-bridge",
+            displayName: "Jace Commander",
+            contract: "acs.jc.v1",
+            configured: false,
+            status: "unconfigured"
+          })
+        ])
+      );
+
+      const detail = await ctx.app.inject({ method: "GET", url: "/api/executors/acs-dc-bridge", headers: AUTH });
+      expect(detail.statusCode).toBe(200);
+      expect(detail.json().runtimes).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ runtimeId: RUNTIME_ID, status: "active", scopes: [...RUNTIME_SCOPES].sort() })
+        ])
+      );
+
+      const dcCapabilities = await ctx.app.inject({
+        method: "GET",
+        url: "/api/executors/acs-dc-bridge/capabilities",
+        headers: AUTH
+      });
+      expect(dcCapabilities.json().capabilities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "read_file",
+            contract: "acs.dc.v1",
+            managed: "capability",
+            scopes: ["fs.read"],
+            requiresApproval: false
+          }),
+          expect.objectContaining({ name: "write_pdf", managed: "unsupported" })
+        ])
+      );
+
+      const jcCapabilities = await ctx.app.inject({
+        method: "GET",
+        url: "/api/executors/acs-jc-bridge/capabilities",
+        headers: AUTH
+      });
+      expect(jcCapabilities.json().capabilities).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            name: "privileged_exec",
+            contract: "acs.jc.v1",
+            scopes: ["process.privileged"],
+            requiresApproval: true
+          })
+        ])
+      );
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a bootstrap completion without matching managed-child identity proof", async () => {
     const ctx = await buildTestGateway();
     try {

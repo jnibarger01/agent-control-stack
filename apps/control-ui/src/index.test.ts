@@ -63,17 +63,118 @@ describe("renderDashboard", () => {
     expect(html).toContain(`data-unblock="wrk_blocked"`);
     expect(html).toContain(`data-reason="wrk_test"`);
     expect(html).toContain("worker lease expired");
-    expect(html).toContain(`data-agent="/repo"`);
-    expect(html).toContain(`data-agent-id="/repo"`);
+    expect(html).not.toContain(`data-agent="/repo"`);
     expect(html).toContain("refreshAgentRoster()");
     expect(html).toContain("fetchJson('/agents')");
-    expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8')");
-    expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities')");
+    expect(html).toContain("fetchJson('/api/agents/' + encodeURIComponent(id))");
+    expect(html).not.toContain("fetchJson('/agents/' + encodeURIComponent(id)");
+    expect(html).not.toContain("fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities')");
+    expect(html).toContain('data-nav="executors"');
+    expect(html).toContain('id="executors"');
+    expect(html).toContain("fetchJson('/api/executors')");
+    expect(html).toContain("fetchJson('/api/executors/' + encodeURIComponent(id))");
+    expect(html).toContain("fetchJson('/api/executors/' + encodeURIComponent(id) + '/capabilities')");
+    expect(html).toContain("Agent capabilities");
+    expect(html).toContain("Recent ACP sessions");
+    expect(html).toContain("Current ACP session");
+    expect(html).toContain("agent-card-grid");
+    expect(html).toContain("agent-summary");
+    expect(html).toContain("Identity, role, activity, and runtime presence");
+    expect(html).toContain("fetchJson('/api/connectors')");
+    expect(html).toContain("fetchJson('/api/connectors/' + encodeURIComponent(id))");
+    expect(html).toContain("Registered connector identities + tunnel sessions");
+    expect(html).not.toContain("No agents or connectors observed.");
+    expect(html).not.toContain("No connectors observed.");
     expect(html).not.toContain("JSON.stringify(await res.json(), null, 2)");
     expect(html).not.toContain("data-approve-all");
     expect(html).toContain("Execution Mode");
     expect(html).toContain("Admin / YOLO");
     expect(html).toContain('data-execution-mode="strict"');
+  });
+
+  it("renders registered agents as status cards with roster summaries", () => {
+    const html = renderDashboard({
+      workItems: [],
+      events: [],
+      agents: [
+        {
+          id: "hermes-local",
+          displayName: "Hermes Agent",
+          kind: "service",
+          status: "online",
+          health: "healthy",
+          currentTask: "Coordinate implementation",
+          lastHeartbeatAt: "2026-07-05T00:00:30.000Z",
+          capabilities: ["orchestrate", "delegate"],
+          metadata: {
+            registered: "true",
+            acpRole: "ORCHESTRATION_LAYER",
+            provider: "local",
+            model: "hermes"
+          }
+        },
+        {
+          id: "codex-cli",
+          displayName: "Codex CLI",
+          kind: "cli",
+          status: "offline",
+          health: "unknown",
+          capabilities: ["code:implement"],
+          metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+        }
+      ],
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain('class="agent-summary"');
+    expect(html).toContain("<span>Registered</span><strong>2</strong>");
+    expect(html).toContain("<span>Online</span><strong>1</strong>");
+    expect(html).toContain("<span>Active tasks</span><strong>1</strong>");
+    expect(html).toContain("<span>Stale / offline</span><strong>1</strong>");
+    expect(html).toContain('class="agent-card" data-agent="hermes-local"');
+    expect(html).toContain("Orchestration Layer");
+    expect(html).toContain("service · local · hermes");
+    expect(html).toContain("Coordinate implementation");
+    expect(html).toContain("2 capabilities");
+    expect(html).toContain('class="agent-card" data-agent="codex-cli"');
+  });
+
+  it("keeps agents, executors, connectors, and admission as distinct overview and system domains", () => {
+    const html = renderDashboard({
+      workItems: [workItem],
+      events: [],
+      executionBackend: "desktop-commander",
+      infrastructure: {
+        agents: { registered: 8, online: 3 },
+        executors: { total: 2, configured: 2, attestedRuntimes: 1 },
+        connectors: { registered: 2, enabled: 1, activeSessions: 4 },
+        admission: { active: 2, capacity: 3, queued: 1, saturated: false }
+      },
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain("<span>Agents</span><strong>3 / 8</strong>");
+    expect(html).toContain("<span>Executors</span><strong>2 / 2</strong>");
+    expect(html).toContain("<span>Connectors</span><strong>4</strong>");
+    expect(html).toContain('data-dashboard-view="agents"');
+    expect(html).toContain('data-dashboard-view="executors"');
+    expect(html).toContain('data-dashboard-view="connectors"');
+    expect(html).toContain('data-dashboard-view="execution" data-dashboard-statuses="running"');
+    expect(html).toContain('data-dashboard-view="queue" data-dashboard-statuses="failed,blocked"');
+    expect(html).toContain('data-dashboard-view="approvals"');
+    expect(html).toContain("1 / 2 registered connectors enabled");
+    expect(html).toContain("Agent heartbeats online");
+    expect(html).toContain("Executors configured");
+    expect(html).toContain("Attested executor runtimes");
+    expect(html).toContain("Connectors enabled");
+    expect(html).toContain("Active tunnel sessions");
+    expect(html).toContain("Execution admission");
+    expect(html).toContain("2 / 3 active");
+    expect(html).toContain("Admission queue");
+    expect(html).toContain("System Status");
+    expect(html).toContain("Dependency checks");
+    expect(html).not.toContain("Total Agents");
+    expect(html).not.toContain("Online Agents");
   });
 
   it("renders an operator metrics panel with lease age, approval wait, and /metrics scrape notes", () => {
@@ -211,9 +312,9 @@ describe("renderDashboard", () => {
     expect(html).not.toContain("button.dataset.reject ? 'cancel'");
   });
 
-  it("projects online status only from recent heartbeat events", () => {
+  it("does not promote connectors or work-item targets into the agent roster", () => {
     const model: MissionControlViewModel = {
-      workItems: [],
+      workItems: [workItem],
       now: new Date("2026-07-05T00:01:00.000Z"),
       events: [
         {
@@ -229,11 +330,7 @@ describe("renderDashboard", () => {
       ]
     };
 
-    expect(projectAgents(model.workItems, model.events, model.now)[0]).toMatchObject({
-      id: "chatgpt-prod",
-      status: "online",
-      health: "healthy"
-    });
+    expect(projectAgents(model.workItems, model.events, model.now)).toEqual([]);
   });
 
   it("visually distinguishes work items that need operator attention from normally running ones", () => {
@@ -384,6 +481,50 @@ describe("renderDashboard", () => {
       status: "offline",
       health: "unknown",
       capabilities: ["code:implement", "code:test", "repo:inspect"]
+    });
+  });
+
+  it("projects registered agent role, runtime identity, and heartbeat task", () => {
+    const agents = projectAgents([], [], new Date("2026-07-05T00:01:00.000Z"), [
+      {
+        id: "hermes-local",
+        name: "Hermes Agent",
+        kind: "service",
+        acpRole: "ORCHESTRATION_LAYER",
+        provider: "local",
+        model: "hermes",
+        capabilities: [],
+        status: "AVAILABLE",
+        lastHeartbeatAt: "2026-07-05T00:00:30.000Z",
+        latestHeartbeat: {
+          id: 1,
+          agentId: "hermes-local",
+          status: "AVAILABLE",
+          currentTask: "coordinate implementation",
+          observedAt: "2026-07-05T00:00:30.000Z",
+          actorId: "actor_system_bootstrap"
+        },
+        createdAt: "2026-07-05T00:00:00.000Z",
+        updatedAt: "2026-07-05T00:00:30.000Z",
+        createdByActorId: "actor_system_bootstrap",
+        updatedByActorId: "actor_system_bootstrap"
+      }
+    ]);
+
+    expect(agents[0]).toMatchObject({
+      id: "hermes-local",
+      displayName: "Hermes Agent",
+      kind: "service",
+      status: "online",
+      health: "healthy",
+      currentTask: "coordinate implementation",
+      metadata: {
+        registered: "true",
+        registryStatus: "AVAILABLE",
+        acpRole: "ORCHESTRATION_LAYER",
+        provider: "local",
+        model: "hermes"
+      }
     });
   });
 });

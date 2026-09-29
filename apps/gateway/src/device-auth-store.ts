@@ -6,7 +6,7 @@
 // infrastructure, a different trust model). It owns exactly two tables: `devices` and
 // `oauth_device_authorizations` (storage/migrations/023_device_auth.sql).
 import { createHash, createPublicKey, randomBytes, randomInt, verify as verifySignature } from "node:crypto";
-import { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { createId } from "@agent-control-stack/shared";
 import { MCP_SCOPES } from "./auth.js";
 
@@ -131,13 +131,32 @@ export interface DeviceAccessIdentity {
 
 export class DeviceAuthStore {
   private readonly db: DatabaseSync;
+  /**
+   * `DatabaseSync.prepare` re-parses and re-compiles the SQL on every call
+   * (~2.5us/op), and `authenticateAccessToken` runs on every authenticated
+   * gateway request with a fixed statement. The store only ever prepares a
+   * fixed set of literal SQL strings, so they are compiled once per
+   * connection and reused. Statements are finalized by `close()`.
+   */
+  private readonly statements = new Map<string, StatementSync>();
 
   constructor(dbPath: string) {
     this.db = new DatabaseSync(dbPath);
     this.db.exec("PRAGMA foreign_keys = ON");
   }
 
+  /** Returns the compiled statement for `sql`, preparing it only on first use. */
+  private stmt(sql: string): StatementSync {
+    let prepared = this.statements.get(sql);
+    if (!prepared) {
+      prepared = this.db.prepare(sql);
+      this.statements.set(sql, prepared);
+    }
+    return prepared;
+  }
+
   close(): void {
+    this.statements.clear();
     this.db.close();
   }
 
@@ -168,26 +187,24 @@ export class DeviceAuthStore {
     const id = createId("devauth");
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      this.db
-        .prepare(
-          `INSERT INTO oauth_device_authorizations
+      this.stmt(
+        `INSERT INTO oauth_device_authorizations
            (id, device_code_hash, user_code_hash, client_id, requested_scopes_json,
             device_public_key_pem, device_name, status, poll_interval_seconds, poll_count,
             created_at, expires_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, ?, ?)`
-        )
-        .run(
-          id,
-          sha256(deviceCode),
-          sha256(userCode),
-          input.clientId,
-          JSON.stringify(scopes),
-          input.devicePublicKeyPem,
-          input.deviceName,
-          DEFAULT_POLL_INTERVAL_SECONDS,
-          now.toISOString(),
-          new Date(now.getTime() + DEVICE_CODE_TTL_SECONDS * 1000).toISOString()
-        );
+      ).run(
+        id,
+        sha256(deviceCode),
+        sha256(userCode),
+        input.clientId,
+        JSON.stringify(scopes),
+        input.devicePublicKeyPem,
+        input.deviceName,
+        DEFAULT_POLL_INTERVAL_SECONDS,
+        now.toISOString(),
+        new Date(now.getTime() + DEVICE_CODE_TTL_SECONDS * 1000).toISOString()
+      );
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -207,9 +224,9 @@ export class DeviceAuthStore {
   findByUserCode(rawUserCode: string, now: Date = new Date()): DeviceAuthorizationSummary | undefined {
     const normalized = normalizeUserCode(rawUserCode);
     if (!normalized) return undefined;
-    const row = this.db
-      .prepare(`SELECT * FROM oauth_device_authorizations WHERE user_code_hash = ?`)
-      .get(sha256(normalized)) as DeviceAuthorizationRow | undefined;
+    const row = this.stmt(`SELECT * FROM oauth_device_authorizations WHERE user_code_hash = ?`).get(
+      sha256(normalized)
+    ) as DeviceAuthorizationRow | undefined;
     if (!row) return undefined;
     this.expireIfNeeded(row, now);
     const fresh = this.getById(row.id);
@@ -223,9 +240,9 @@ export class DeviceAuthStore {
   ): { ok: true } | { ok: false; error: string } {
     const normalized = normalizeUserCode(rawUserCode);
     if (!normalized) return { ok: false, error: "not_found" };
-    const row = this.db
-      .prepare(`SELECT * FROM oauth_device_authorizations WHERE user_code_hash = ?`)
-      .get(sha256(normalized)) as DeviceAuthorizationRow | undefined;
+    const row = this.stmt(`SELECT * FROM oauth_device_authorizations WHERE user_code_hash = ?`).get(
+      sha256(normalized)
+    ) as DeviceAuthorizationRow | undefined;
     if (!row) return { ok: false, error: "not_found" };
     this.expireIfNeeded(row, now);
     const fresh = this.getById(row.id)!;
@@ -234,9 +251,8 @@ export class DeviceAuthStore {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const existing = this.db
-        .prepare(`SELECT * FROM devices WHERE public_key_pem = ?`)
-        .get(fresh.device_public_key_pem) as DeviceRow | undefined;
+      const existing = this.stmt(`SELECT * FROM devices WHERE public_key_pem = ?`).get(fresh.device_public_key_pem) as
+        DeviceRow | undefined;
       if (existing?.status === "revoked") {
         this.db.exec("ROLLBACK");
         return { ok: false, error: "device_revoked" };
@@ -246,13 +262,11 @@ export class DeviceAuthStore {
         return { ok: false, error: "device_key_conflict" };
       }
       const deviceId = this.upsertDeviceForApproval(fresh, principalId, now);
-      this.db
-        .prepare(
-          `UPDATE oauth_device_authorizations
+      this.stmt(
+        `UPDATE oauth_device_authorizations
            SET status = 'approved', principal_id = ?, device_id = ?, approved_at = ?
            WHERE id = ? AND status = 'pending'`
-        )
-        .run(principalId, deviceId, now.toISOString(), fresh.id);
+      ).run(principalId, deviceId, now.toISOString(), fresh.id);
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -264,18 +278,16 @@ export class DeviceAuthStore {
   deny(rawUserCode: string, now: Date = new Date()): { ok: true } | { ok: false; error: string } {
     const normalized = normalizeUserCode(rawUserCode);
     if (!normalized) return { ok: false, error: "not_found" };
-    const row = this.db
-      .prepare(`SELECT * FROM oauth_device_authorizations WHERE user_code_hash = ?`)
-      .get(sha256(normalized)) as DeviceAuthorizationRow | undefined;
+    const row = this.stmt(`SELECT * FROM oauth_device_authorizations WHERE user_code_hash = ?`).get(
+      sha256(normalized)
+    ) as DeviceAuthorizationRow | undefined;
     if (!row) return { ok: false, error: "not_found" };
     this.expireIfNeeded(row, now);
     const fresh = this.getById(row.id)!;
     if (fresh.status !== "pending") return { ok: false, error: "not_pending" };
-    this.db
-      .prepare(
-        `UPDATE oauth_device_authorizations SET status = 'denied', denied_at = ? WHERE id = ? AND status = 'pending'`
-      )
-      .run(now.toISOString(), fresh.id);
+    this.stmt(
+      `UPDATE oauth_device_authorizations SET status = 'denied', denied_at = ? WHERE id = ? AND status = 'pending'`
+    ).run(now.toISOString(), fresh.id);
     return { ok: true };
   }
 
@@ -285,9 +297,9 @@ export class DeviceAuthStore {
     deviceSignature: string | undefined,
     now: Date = new Date()
   ): DeviceTokenPollResult {
-    const row = this.db
-      .prepare(`SELECT * FROM oauth_device_authorizations WHERE device_code_hash = ?`)
-      .get(sha256(deviceCode)) as DeviceAuthorizationRow | undefined;
+    const row = this.stmt(`SELECT * FROM oauth_device_authorizations WHERE device_code_hash = ?`).get(
+      sha256(deviceCode)
+    ) as DeviceAuthorizationRow | undefined;
     if (!row) return { status: "invalid_grant" };
     if (row.client_id !== clientId) return { status: "invalid_grant" };
     if (!verifyDeviceCodeProof(row.device_public_key_pem, deviceCode, deviceSignature)) {
@@ -306,17 +318,15 @@ export class DeviceAuthStore {
         : Number.POSITIVE_INFINITY;
       if (elapsedSeconds < fresh.poll_interval_seconds) {
         const newInterval = fresh.poll_interval_seconds + SLOW_DOWN_INCREMENT_SECONDS;
-        this.db
-          .prepare(
-            `UPDATE oauth_device_authorizations
+        this.stmt(
+          `UPDATE oauth_device_authorizations
              SET poll_interval_seconds = ?, last_polled_at = ?, poll_count = poll_count + 1 WHERE id = ?`
-          )
-          .run(newInterval, now.toISOString(), fresh.id);
+        ).run(newInterval, now.toISOString(), fresh.id);
         return { status: "slow_down", interval: newInterval };
       }
-      this.db
-        .prepare(`UPDATE oauth_device_authorizations SET last_polled_at = ?, poll_count = poll_count + 1 WHERE id = ?`)
-        .run(now.toISOString(), fresh.id);
+      this.stmt(
+        `UPDATE oauth_device_authorizations SET last_polled_at = ?, poll_count = poll_count + 1 WHERE id = ?`
+      ).run(now.toISOString(), fresh.id);
       return { status: "authorization_pending" };
     }
 
@@ -326,33 +336,32 @@ export class DeviceAuthStore {
     const refreshToken = randomBytes(32).toString("base64url");
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const current = this.db.prepare(`SELECT status FROM oauth_device_authorizations WHERE id = ?`).get(fresh.id) as {
+      const current = this.stmt(`SELECT status FROM oauth_device_authorizations WHERE id = ?`).get(fresh.id) as {
         status: string;
       };
       if (current.status !== "approved") {
         this.db.exec("ROLLBACK");
         return current.status === "denied" ? { status: "access_denied" } : { status: "invalid_grant" };
       }
-      this.db
-        .prepare(`UPDATE oauth_device_authorizations SET status = 'consumed', consumed_at = ? WHERE id = ?`)
-        .run(now.toISOString(), fresh.id);
-      this.db
-        .prepare(
-          `UPDATE devices
+      this.stmt(`UPDATE oauth_device_authorizations SET status = 'consumed', consumed_at = ? WHERE id = ?`).run(
+        now.toISOString(),
+        fresh.id
+      );
+      this.stmt(
+        `UPDATE devices
            SET access_token_hash = ?, access_token_expires_at = ?,
                refresh_token_hash = ?, refresh_token_expires_at = ?, previous_refresh_token_hash = NULL,
                last_seen_at = ?, updated_at = ?
            WHERE id = ?`
-        )
-        .run(
-          sha256(accessToken),
-          new Date(now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString(),
-          sha256(refreshToken),
-          new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString(),
-          now.toISOString(),
-          now.toISOString(),
-          fresh.device_id
-        );
+      ).run(
+        sha256(accessToken),
+        new Date(now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString(),
+        sha256(refreshToken),
+        new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString(),
+        now.toISOString(),
+        now.toISOString(),
+        fresh.device_id
+      );
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -389,21 +398,18 @@ export class DeviceAuthStore {
     const hash = sha256(rawRefreshToken);
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const row = this.db.prepare(`SELECT * FROM devices WHERE refresh_token_hash = ?`).get(hash) as
-        DeviceRow | undefined;
+      const row = this.stmt(`SELECT * FROM devices WHERE refresh_token_hash = ?`).get(hash) as DeviceRow | undefined;
       if (!row) {
-        const reused = this.db.prepare(`SELECT * FROM devices WHERE previous_refresh_token_hash = ?`).get(hash) as
+        const reused = this.stmt(`SELECT * FROM devices WHERE previous_refresh_token_hash = ?`).get(hash) as
           DeviceRow | undefined;
         if (reused?.status === "active") {
-          this.db
-            .prepare(
-              `UPDATE devices
+          this.stmt(
+            `UPDATE devices
                SET status = 'revoked', revoked_at = ?, updated_at = ?,
                    access_token_hash = NULL, access_token_expires_at = NULL,
                    refresh_token_hash = NULL, refresh_token_expires_at = NULL
                WHERE id = ? AND status = 'active'`
-            )
-            .run(now.toISOString(), now.toISOString(), reused.id);
+          ).run(now.toISOString(), now.toISOString(), reused.id);
         }
         this.db.exec("COMMIT");
         return { ok: false, error: "invalid_grant" };
@@ -418,25 +424,23 @@ export class DeviceAuthStore {
       }
       const accessToken = randomBytes(32).toString("base64url");
       const refreshToken = randomBytes(32).toString("base64url");
-      const updated = this.db
-        .prepare(
-          `UPDATE devices
+      const updated = this.stmt(
+        `UPDATE devices
            SET access_token_hash = ?, access_token_expires_at = ?,
                previous_refresh_token_hash = refresh_token_hash,
                refresh_token_hash = ?, refresh_token_expires_at = ?,
                last_seen_at = ?, updated_at = ?
            WHERE id = ? AND refresh_token_hash = ? AND status = 'active'`
-        )
-        .run(
-          sha256(accessToken),
-          new Date(now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString(),
-          sha256(refreshToken),
-          new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString(),
-          now.toISOString(),
-          now.toISOString(),
-          row.id,
-          hash
-        );
+      ).run(
+        sha256(accessToken),
+        new Date(now.getTime() + ACCESS_TOKEN_TTL_SECONDS * 1000).toISOString(),
+        sha256(refreshToken),
+        new Date(now.getTime() + REFRESH_TOKEN_TTL_SECONDS * 1000).toISOString(),
+        now.toISOString(),
+        now.toISOString(),
+        row.id,
+        hash
+      );
       if (Number(updated.changes) !== 1) {
         throw new Error("refresh-token rotation invariant violated");
       }
@@ -458,7 +462,7 @@ export class DeviceAuthStore {
   }
 
   authenticateAccessToken(rawAccessToken: string, now: Date = new Date()): DeviceAccessIdentity | undefined {
-    const row = this.db.prepare(`SELECT * FROM devices WHERE access_token_hash = ?`).get(sha256(rawAccessToken)) as
+    const row = this.stmt(`SELECT * FROM devices WHERE access_token_hash = ?`).get(sha256(rawAccessToken)) as
       DeviceRow | undefined;
     if (!row || row.status !== "active" || !row.access_token_expires_at) return undefined;
     if (Date.parse(row.access_token_expires_at) <= now.getTime()) return undefined;
@@ -471,64 +475,62 @@ export class DeviceAuthStore {
   }
 
   getDevice(deviceId: string): DeviceRecord | undefined {
-    const row = this.db.prepare(`SELECT * FROM devices WHERE id = ?`).get(deviceId) as DeviceRow | undefined;
+    const row = this.stmt(`SELECT * FROM devices WHERE id = ?`).get(deviceId) as DeviceRow | undefined;
     return row && toDeviceRecord(row);
   }
 
   revokeDevice(deviceId: string, now: Date = new Date()): boolean {
-    const result = this.db
-      .prepare(
-        `UPDATE devices
+    const result = this.stmt(
+      `UPDATE devices
          SET status = 'revoked', revoked_at = ?, updated_at = ?,
              access_token_hash = NULL, access_token_expires_at = NULL
          WHERE id = ? AND status = 'active'`
-      )
-      .run(now.toISOString(), now.toISOString(), deviceId);
+    ).run(now.toISOString(), now.toISOString(), deviceId);
     return Number(result.changes) > 0;
   }
 
   private upsertDeviceForApproval(auth: DeviceAuthorizationRow, principalId: string, now: Date): string {
-    const existing = this.db
-      .prepare(`SELECT * FROM devices WHERE public_key_pem = ?`)
-      .get(auth.device_public_key_pem) as DeviceRow | undefined;
+    const existing = this.stmt(`SELECT * FROM devices WHERE public_key_pem = ?`).get(auth.device_public_key_pem) as
+      DeviceRow | undefined;
     if (existing) {
       if (existing.status !== "active" || existing.principal_id !== principalId) {
         throw new Error("device approval invariant violated");
       }
-      this.db
-        .prepare(`UPDATE devices SET name = ?, allowed_scopes_json = ?, updated_at = ? WHERE id = ?`)
-        .run(auth.device_name, auth.requested_scopes_json, now.toISOString(), existing.id);
+      this.stmt(`UPDATE devices SET name = ?, allowed_scopes_json = ?, updated_at = ? WHERE id = ?`).run(
+        auth.device_name,
+        auth.requested_scopes_json,
+        now.toISOString(),
+        existing.id
+      );
       return existing.id;
     }
     const id = createId("dev");
-    this.db
-      .prepare(
-        `INSERT INTO devices
+    this.stmt(
+      `INSERT INTO devices
          (id, principal_id, name, public_key_pem, allowed_scopes_json, status, metadata_json, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, 'active', '{}', ?, ?)`
-      )
-      .run(
-        id,
-        principalId,
-        auth.device_name,
-        auth.device_public_key_pem,
-        auth.requested_scopes_json,
-        now.toISOString(),
-        now.toISOString()
-      );
+    ).run(
+      id,
+      principalId,
+      auth.device_name,
+      auth.device_public_key_pem,
+      auth.requested_scopes_json,
+      now.toISOString(),
+      now.toISOString()
+    );
     return id;
   }
 
   private getById(id: string): DeviceAuthorizationRow | undefined {
-    return this.db.prepare(`SELECT * FROM oauth_device_authorizations WHERE id = ?`).get(id) as
+    return this.stmt(`SELECT * FROM oauth_device_authorizations WHERE id = ?`).get(id) as
       DeviceAuthorizationRow | undefined;
   }
 
   private expireIfNeeded(row: DeviceAuthorizationRow, now: Date): void {
     if (row.status === "pending" && Date.parse(row.expires_at) <= now.getTime()) {
-      this.db
-        .prepare(`UPDATE oauth_device_authorizations SET status = 'expired' WHERE id = ? AND status = 'pending'`)
-        .run(row.id);
+      this.stmt(`UPDATE oauth_device_authorizations SET status = 'expired' WHERE id = ? AND status = 'pending'`).run(
+        row.id
+      );
     }
   }
 }

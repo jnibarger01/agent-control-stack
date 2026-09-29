@@ -46,6 +46,7 @@ export {
 export {
   type MissionControlAgent,
   type MissionControlAttemptLease,
+  type MissionControlInfrastructureSummary,
   toMissionControlAttemptLease,
   type MissionControlViewModel,
   type ApprovalActionOption

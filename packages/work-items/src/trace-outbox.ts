@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { closeSync, fsyncSync, mkdirSync, openSync, writeSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
-import { applyControlPlaneMigrations, ControlStackError } from "@agent-control-stack/shared";
+import { applyControlPlaneMigrations, ControlStackError, redactValue } from "@agent-control-stack/shared";
 
 const GENESIS_PREV_HASH = "0".repeat(64);
 /** One hash chain per ACS database. Process id is recorded on the event, not used as the chain key. */
@@ -19,6 +19,42 @@ interface Sql {
     all(...params: unknown[]): unknown[];
     run(...params: unknown[]): unknown;
   };
+}
+
+export interface ResultTraceInput {
+  instance: string;
+  releaseSha: string;
+  workItemId: string;
+  workerId: string;
+  resultId: string;
+  outcome: "succeeded" | "failed" | "cancelled" | "blocked" | "worker_infrastructure_failure" | "lease_expired";
+}
+
+export type WorkItemLifecycleTraceKind =
+  | "run.received"
+  | "approval.requested"
+  | "approval.decided"
+  | "capability.issued"
+  | "executor.started"
+  | "tool.call.started"
+  | "tool.call.finished"
+  | "verification.started"
+  | "verification.finished"
+  | "promotion.blocked"
+  | "promotion.completed"
+  | "run.failed"
+  | "run.completed";
+
+export interface WorkItemLifecycleTraceInput {
+  instance: string;
+  releaseSha: string;
+  workItemId: string;
+  kind: WorkItemLifecycleTraceKind;
+  actorId: string;
+  actorType: "human" | "agent" | "system";
+  component?: string;
+  capabilityId?: string;
+  payload: Record<string, unknown>;
 }
 
 export interface ApprovalTraceInput {
@@ -158,6 +194,76 @@ export function normalizeTraceActorId(id: string): string {
   return `h:${sha256(String(id)).slice(0, 32)}`;
 }
 
+export function enqueueWorkItemLifecycleTraceEvent(db: Sql, rawInput: WorkItemLifecycleTraceInput): string {
+  const producer = validateTraceProducerConfig({ instance: rawInput.instance, releaseSha: rawInput.releaseSha });
+  if (!ID_RE.test(rawInput.workItemId)) fail("trace_producer_invalid", "trace work item id is invalid");
+  if (rawInput.capabilityId !== undefined && !ID_RE.test(rawInput.capabilityId)) {
+    fail("trace_producer_invalid", "trace capability id is invalid");
+  }
+  if (rawInput.kind === "capability.issued" && rawInput.capabilityId === undefined) {
+    fail("trace_event_invalid", "capability.issued requires a capability id");
+  }
+  const actorId = normalizeTraceActorId(rawInput.actorId);
+  const component = rawInput.component ?? "work-items";
+  if (!ID_RE.test(component)) fail("trace_producer_invalid", "trace component id is invalid");
+  const ts = new Date().toISOString();
+  db.prepare(`INSERT OR IGNORE INTO trace_missions (work_item_id, trace_id, created_at) VALUES (?, ?, ?)`).run(
+    rawInput.workItemId,
+    randomBytes(16).toString("hex"),
+    ts
+  );
+  const mission = db.prepare(`SELECT trace_id FROM trace_missions WHERE work_item_id = ?`).get(rawInput.workItemId) as
+    { trace_id: string } | undefined;
+  if (!mission) fail("trace_mission_missing", "trace mission was not recorded");
+  db.prepare(`INSERT OR IGNORE INTO trace_chain_state (producer_key, seq, head_hash) VALUES (?, 0, ?)`).run(
+    TRACE_CHAIN_PRODUCER_KEY,
+    GENESIS_PREV_HASH
+  );
+  const head = db
+    .prepare(`SELECT seq, head_hash FROM trace_chain_state WHERE producer_key = ?`)
+    .get(TRACE_CHAIN_PRODUCER_KEY) as { seq: number; head_hash: string } | undefined;
+  if (!head) fail("trace_chain_missing", "trace chain was not recorded");
+  const seq = head.seq + 1;
+  const redactedPayload = redactValue(rawInput.payload);
+  if (!redactedPayload || typeof redactedPayload !== "object" || Array.isArray(redactedPayload)) {
+    fail("trace_event_invalid", "lifecycle trace payload must remain an object after redaction");
+  }
+  const payload = redactedPayload as Record<string, unknown>;
+  const event = {
+    schema_version: "trace-event/1",
+    event_id: createUlid(),
+    trace_id: mission.trace_id,
+    span_id: randomBytes(8).toString("hex"),
+    source: {
+      system: "acs",
+      component,
+      instance: producer.instance,
+      release_sha: producer.releaseSha
+    },
+    class: "authority",
+    kind: rawInput.kind,
+    actor: { id: actorId, type: rawInput.actorType },
+    subject: {
+      work_item_id: rawInput.workItemId,
+      ...(rawInput.capabilityId ? { capability_id: rawInput.capabilityId } : {})
+    },
+    seq,
+    prev_hash: head.head_hash,
+    ts,
+    payload,
+    payload_hash: sha256(canonicalJson(payload))
+  };
+  const canonical = canonicalJson(event);
+  db.prepare(
+    `INSERT INTO trace_outbox (event_id, work_item_id, seq, canonical_json, created_at) VALUES (?, ?, ?, ?, ?)`
+  ).run(event.event_id, rawInput.workItemId, seq, canonical, ts);
+  const advanced = db
+    .prepare(`UPDATE trace_chain_state SET seq = ?, head_hash = ? WHERE producer_key = ? AND seq = ?`)
+    .run(seq, sha256(canonical), TRACE_CHAIN_PRODUCER_KEY, head.seq) as { changes?: number };
+  if (advanced.changes !== 1) fail("trace_chain_conflict", "trace chain changed while appending a lifecycle event");
+  return mission.trace_id;
+}
+
 export function enqueueApprovalTraceEvent(db: Sql, rawInput: ApprovalTraceInput): void {
   const producer = validateTraceProducerConfig({ instance: rawInput.instance, releaseSha: rawInput.releaseSha });
   const input: ApprovalTraceInput = {
@@ -221,6 +327,60 @@ export function enqueueApprovalTraceEvent(db: Sql, rawInput: ApprovalTraceInput)
     .prepare(`UPDATE trace_chain_state SET seq = ?, head_hash = ? WHERE producer_key = ? AND seq = ?`)
     .run(seq, sha256(canonical), TRACE_CHAIN_PRODUCER_KEY, head.seq) as { changes?: number };
   if (advanced.changes !== 1) fail("trace_chain_conflict", "trace chain changed while appending an approval event");
+}
+
+export function enqueueResultTraceEvent(db: Sql, rawInput: ResultTraceInput): string {
+  const producer = validateTraceProducerConfig({ instance: rawInput.instance, releaseSha: rawInput.releaseSha });
+  if (!ID_RE.test(rawInput.workItemId)) fail("trace_producer_invalid", "trace work item id is invalid");
+  const ts = new Date().toISOString();
+  db.prepare(`INSERT OR IGNORE INTO trace_missions (work_item_id, trace_id, created_at) VALUES (?, ?, ?)`).run(
+    rawInput.workItemId,
+    randomBytes(16).toString("hex"),
+    ts
+  );
+  const mission = db.prepare(`SELECT trace_id FROM trace_missions WHERE work_item_id = ?`).get(rawInput.workItemId) as
+    { trace_id: string } | undefined;
+  if (!mission) fail("trace_mission_missing", "trace mission was not recorded");
+  db.prepare(`INSERT OR IGNORE INTO trace_chain_state (producer_key, seq, head_hash) VALUES (?, 0, ?)`).run(
+    TRACE_CHAIN_PRODUCER_KEY,
+    GENESIS_PREV_HASH
+  );
+  const head = db
+    .prepare(`SELECT seq, head_hash FROM trace_chain_state WHERE producer_key = ?`)
+    .get(TRACE_CHAIN_PRODUCER_KEY) as { seq: number; head_hash: string } | undefined;
+  if (!head) fail("trace_chain_missing", "trace chain was not recorded");
+  const seq = head.seq + 1;
+  const payload = { outcome: rawInput.outcome, result_id: rawInput.resultId };
+  const event = {
+    schema_version: "trace-event/1",
+    event_id: createUlid(),
+    trace_id: mission.trace_id,
+    span_id: randomBytes(8).toString("hex"),
+    source: {
+      system: "acs",
+      component: "work-results",
+      instance: producer.instance,
+      release_sha: producer.releaseSha
+    },
+    class: "authority",
+    kind: rawInput.outcome === "succeeded" ? "run.completed" : "run.failed",
+    actor: { id: normalizeTraceActorId(rawInput.workerId), type: "agent" },
+    subject: { work_item_id: rawInput.workItemId },
+    seq,
+    prev_hash: head.head_hash,
+    ts,
+    payload,
+    payload_hash: sha256(canonicalJson(payload))
+  };
+  const canonical = canonicalJson(event);
+  db.prepare(
+    `INSERT INTO trace_outbox (event_id, work_item_id, seq, canonical_json, created_at) VALUES (?, ?, ?, ?, ?)`
+  ).run(event.event_id, rawInput.workItemId, seq, canonical, ts);
+  const advanced = db
+    .prepare(`UPDATE trace_chain_state SET seq = ?, head_hash = ? WHERE producer_key = ? AND seq = ?`)
+    .run(seq, sha256(canonical), TRACE_CHAIN_PRODUCER_KEY, head.seq) as { changes?: number };
+  if (advanced.changes !== 1) fail("trace_chain_conflict", "trace chain changed while appending a result event");
+  return mission.trace_id;
 }
 
 export interface RelayOptions {

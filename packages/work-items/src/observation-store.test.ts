@@ -30,18 +30,16 @@ function fixture(options: { enabled?: boolean; maxQueued?: number; maxAttempts?:
   return { directory, dbPath, store, workItem, claimed };
 }
 
-function addTraceMission(dbPath: string, workItemId: string, traceId = "ab".repeat(16)): string {
-  const db = new DatabaseSync(dbPath);
+function existingTraceMission(dbPath: string, workItemId: string): string {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
-    db.prepare("INSERT INTO trace_missions (work_item_id, trace_id, created_at) VALUES (?, ?, ?)").run(
-      workItemId,
-      traceId,
-      new Date().toISOString()
-    );
+    const row = db.prepare("SELECT trace_id FROM trace_missions WHERE work_item_id = ?").get(workItemId) as
+      { trace_id: string } | undefined;
+    if (!row) throw new Error("expected lifecycle trace mission");
+    return row.trace_id;
   } finally {
     db.close();
   }
-  return traceId;
 }
 
 function input(claimed: ReturnType<typeof fixture>["claimed"]) {
@@ -95,7 +93,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("queues one observation only after authoritative result acceptance", () => {
     const f = fixture();
     try {
-      const traceId = addTraceMission(f.dbPath, f.workItem.id);
+      const traceId = existingTraceMission(f.dbPath, f.workItem.id);
       expect(rowCount(f.dbPath)).toBe(0);
       const accepted = f.store.submitWorkResult(input(f.claimed));
       expect(accepted.status).toBe("succeeded");
@@ -119,7 +117,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("exact result replay cannot duplicate observation scheduling", () => {
     const f = fixture();
     try {
-      addTraceMission(f.dbPath, f.workItem.id);
+      existingTraceMission(f.dbPath, f.workItem.id);
       const result = input(f.claimed);
       f.store.submitWorkResult(result);
       f.store.submitWorkResult(result);
@@ -133,7 +131,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("remains inert when observation is disabled", () => {
     const f = fixture({ enabled: false });
     try {
-      addTraceMission(f.dbPath, f.workItem.id);
+      existingTraceMission(f.dbPath, f.workItem.id);
       expect(f.store.submitWorkResult(input(f.claimed)).status).toBe("succeeded");
       expect(rowCount(f.dbPath)).toBe(0);
     } finally {
@@ -142,11 +140,14 @@ describe("JEV-4 store-backed observation outbox", () => {
     }
   });
 
-  it("does not invent a trace identity solely for Jev", () => {
+  it("reuses the lifecycle trace identity instead of inventing a Jev-only trace", () => {
     const f = fixture();
     try {
+      const traceId = existingTraceMission(f.dbPath, f.workItem.id);
+      expect(traceId).toMatch(/^[a-f0-9]{32}$/);
       expect(f.store.submitWorkResult(input(f.claimed)).status).toBe("succeeded");
-      expect(rowCount(f.dbPath)).toBe(0);
+      expect(rowCount(f.dbPath)).toBe(1);
+      expect(f.store.claimNextObservation()?.traceId).toBe(traceId);
     } finally {
       f.store.close();
       rmSync(f.directory, { recursive: true, force: true });
@@ -156,7 +157,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("queue saturation cannot block authoritative completion", () => {
     const f = fixture({ maxQueued: 1 });
     try {
-      const traceId = addTraceMission(f.dbPath, f.workItem.id);
+      const traceId = existingTraceMission(f.dbPath, f.workItem.id);
       const db = new DatabaseSync(f.dbPath);
       try {
         const now = new Date().toISOString();
@@ -180,7 +181,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("outbox insertion failure cannot roll back authoritative completion", () => {
     const f = fixture();
     try {
-      addTraceMission(f.dbPath, f.workItem.id);
+      existingTraceMission(f.dbPath, f.workItem.id);
       const db = new DatabaseSync(f.dbPath);
       try {
         db.exec(
@@ -203,7 +204,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("claim is single-owner and increments attempts exactly once", () => {
     const f = fixture();
     try {
-      addTraceMission(f.dbPath, f.workItem.id);
+      existingTraceMission(f.dbPath, f.workItem.id);
       f.store.submitWorkResult(input(f.claimed));
       const first = f.store.claimNextObservation();
       const second = f.store.claimNextObservation();
@@ -219,7 +220,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("retries are bounded by persisted max_attempts", () => {
     const f = fixture({ maxAttempts: 2 });
     try {
-      addTraceMission(f.dbPath, f.workItem.id);
+      existingTraceMission(f.dbPath, f.workItem.id);
       f.store.submitWorkResult(input(f.claimed));
       const first = f.store.claimNextObservation();
       if (!first) throw new Error("missing first claim");
@@ -238,7 +239,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("persists terminal observer result without touching work-item state", () => {
     const f = fixture();
     try {
-      addTraceMission(f.dbPath, f.workItem.id);
+      existingTraceMission(f.dbPath, f.workItem.id);
       f.store.submitWorkResult(input(f.claimed));
       const claimedObservation = f.store.claimNextObservation();
       if (!claimedObservation) throw new Error("missing observation");
@@ -271,13 +272,18 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("loads only canonical rows matching the observation trace", () => {
     const f = fixture();
     try {
-      const traceId = addTraceMission(f.dbPath, f.workItem.id);
+      const traceId = existingTraceMission(f.dbPath, f.workItem.id);
       const db = new DatabaseSync(f.dbPath);
       try {
         const now = new Date().toISOString();
+        const maxSeq = Number(
+          (db.prepare("SELECT coalesce(max(seq), 0) AS seq FROM trace_outbox").get() as { seq: number }).seq
+        );
+        const matchingSeq = maxSeq + 1;
+        const otherSeq = maxSeq + 2;
         const base = {
           schema_version: "trace-event/1",
-          event_id: "evt_1",
+          event_id: "evt_test_match",
           trace_id: traceId,
           span_id: "1".repeat(16),
           source: { system: "acs", component: "test", instance: "acs-test", release_sha: "unreleased" },
@@ -285,7 +291,7 @@ describe("JEV-4 store-backed observation outbox", () => {
           kind: "run.completed",
           actor: { id: "system", type: "system" },
           subject: { work_item_id: f.workItem.id },
-          seq: 1,
+          seq: matchingSeq,
           prev_hash: "0".repeat(64),
           ts: now,
           payload: {},
@@ -293,22 +299,23 @@ describe("JEV-4 store-backed observation outbox", () => {
         };
         db.prepare(
           "INSERT INTO trace_outbox (event_id, work_item_id, seq, canonical_json, created_at) VALUES (?, ?, ?, ?, ?)"
-        ).run("evt_1", f.workItem.id, 1, JSON.stringify(base), now);
+        ).run("evt_test_match", f.workItem.id, matchingSeq, JSON.stringify(base), now);
         db.prepare(
           "INSERT INTO trace_outbox (event_id, work_item_id, seq, canonical_json, created_at) VALUES (?, ?, ?, ?, ?)"
         ).run(
-          "evt_2",
+          "evt_test_other",
           f.workItem.id,
-          2,
-          JSON.stringify({ ...base, event_id: "evt_2", trace_id: "cd".repeat(16), seq: 2 }),
+          otherSeq,
+          JSON.stringify({ ...base, event_id: "evt_test_other", trace_id: "cd".repeat(16), seq: otherSeq }),
           now
         );
       } finally {
         db.close();
       }
       const trace = f.store.loadCanonicalTrace(f.workItem.id, traceId);
-      expect(trace).toHaveLength(1);
-      expect(trace[0]).toMatchObject({ trace_id: traceId, kind: "run.completed", seq: 1 });
+      expect(trace).toHaveLength(2);
+      expect(trace.map((event) => event.kind)).toEqual(["run.received", "run.completed"]);
+      expect(trace.every((event) => event.trace_id === traceId)).toBe(true);
     } finally {
       f.store.close();
       rmSync(f.directory, { recursive: true, force: true });
@@ -318,7 +325,7 @@ describe("JEV-4 store-backed observation outbox", () => {
   it("capacity reports persisted pending/running state and configured queue bound", () => {
     const f = fixture({ maxQueued: 7 });
     try {
-      addTraceMission(f.dbPath, f.workItem.id);
+      existingTraceMission(f.dbPath, f.workItem.id);
       f.store.submitWorkResult(input(f.claimed));
       expect(f.store.getObservationCapacity()).toEqual({ queued: 1, running: 0, maxQueued: 7, saturated: false });
       f.store.claimNextObservation();

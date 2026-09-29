@@ -15,7 +15,7 @@
  *  - losing the executor fails its sessions closed; the bridge respawns one
  *    executor and a new session re-attests before any call executes;
  *  - the device-side managed client (DesktopCommanderIntegration) attaches
- *    once under concurrent initialize() calls and survives request-scoped 503s.
+ *    once under concurrent initialize() calls and survives request-scoped authorization errors.
  */
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -77,9 +77,14 @@ describe.skipIf(!E2E_ENABLED)("E2E 3: managed session and reconnect regressions"
     const before = await bridgeAuthority(bridge);
 
     const denied = await client.call("write_file", { path: join(box.workspace, "held.txt"), content: "x" });
-    expect(denied.status).toBe(503);
+    expect(denied.status).toBe(200);
+    expect(denied.body.error).toMatchObject({
+      code: -32002,
+      data: { kind: "managed_authorization_required", acsCode: "require_approval", retryable: true }
+    });
     const unsupported = await client.call("kill_process", { pid: 1 });
-    expect(unsupported.status).toBe(503);
+    expect(unsupported.status).toBe(200);
+    expect(unsupported.body.error.code).toBe(-32001);
     const toolError = await client.call("read_file", { path: join(box.workspace, "does-not-exist.txt") });
     expect(toolError.status).toBe(200);
 
@@ -88,7 +93,9 @@ describe.skipIf(!E2E_ENABLED)("E2E 3: managed session and reconnect regressions"
     expect(read.body.result.content[0].text).toContain("still usable");
     expect(client.session).toBe(session);
     expect(executorPid(box)).toBe(pid);
-    expect((await bridgeAuthority(bridge)).bridge.spawnCount).toBe(before.bridge.spawnCount);
+    const after = await bridgeAuthority(bridge);
+    expect(after.bridge.spawnCount).toBe(before.bridge.spawnCount);
+    expect(after.bridge.sessionCount).toBe(before.bridge.sessionCount);
     await client.close();
   });
 
@@ -217,13 +224,21 @@ describe.skipIf(!E2E_ENABLED)("E2E 3: managed session and reconnect regressions"
       expect(read.content[0].text).toContain("device read");
     });
 
-    it("a request-scoped 503 from ACS does not drop the attached session", async () => {
+    it("a request-scoped authorization error becomes a tool error without dropping the attached session", async () => {
       const attestedBefore = attestedInitializes(edge);
-      await expect(
-        integration.callClientTool("write_file", { path: join(box.workspace, "device-held.txt"), content: "x" })
-      ).rejects.toThrow();
+      const held = await integration.callClientTool("write_file", {
+        path: join(box.workspace, "device-held.txt"),
+        content: "x"
+      });
+      expect(held.isError).toBe(true);
+      expect(held.content[0].text).toContain("ACS approval required");
+      expect(held.structuredContent).toMatchObject({
+        kind: "managed_authorization_required",
+        acsCode: "require_approval",
+        retryable: true
+      });
       const read = await integration.callClientTool("read_file", {
-        path: workspaceFile("device-after-503.txt", "session survived")
+        path: workspaceFile("device-after-jsonrpc-error.txt", "session survived")
       });
       expect(read.content[0].text).toContain("session survived");
       expect(attestedInitializes(edge)).toBe(attestedBefore);

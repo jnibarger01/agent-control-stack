@@ -1,5 +1,6 @@
 import { mkdtempSync, mkdirSync, writeFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { DatabaseSync } from "node:sqlite";
 import { join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
@@ -140,6 +141,41 @@ describe("desktop_commander worker execution - success path", () => {
         expect(events, name).toContain(name);
       }
       expect(store.verifyAuditChain().ok).toBe(true);
+
+      const db = new DatabaseSync(dbPath);
+      try {
+        const trace = (
+          db.prepare("SELECT canonical_json FROM trace_outbox WHERE work_item_id = ? ORDER BY seq").all(id) as Array<{
+            canonical_json: string;
+          }>
+        ).map((row) => JSON.parse(row.canonical_json) as { kind: string; payload: Record<string, unknown> });
+        expect(trace.map((event) => event.kind)).toEqual([
+          "run.received",
+          "executor.started",
+          "tool.call.started",
+          "tool.call.finished",
+          "run.completed"
+        ]);
+        expect(trace[1]?.payload).toMatchObject({
+          executor: "desktop_commander",
+          tool: "read_file"
+        });
+        expect(trace[2]?.payload).toMatchObject({
+          tool: "read_file",
+          argument_count: 1
+        });
+        expect(trace[3]?.payload).toMatchObject({
+          tool: "read_file",
+          status: "succeeded",
+          result_hash: "f".repeat(64),
+          is_error: false
+        });
+        const serialized = JSON.stringify(trace);
+        expect(serialized).not.toContain("trusted file contents");
+        expect(serialized).not.toContain(join(root, "pkg", "a.txt"));
+      } finally {
+        db.close();
+      }
 
       const resultRef = store.get(id)?.result as { resultId?: string } | undefined;
       const stored = resultRef?.resultId ? store.getExecutionResult(resultRef.resultId) : undefined;
