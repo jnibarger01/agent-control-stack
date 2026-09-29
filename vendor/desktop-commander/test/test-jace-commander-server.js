@@ -34,7 +34,7 @@ const config = loadJcConfig({
 const fetchLog = [];
 const fakeFetch = async (url, init = {}) => {
   fetchLog.push({ url: String(url), method: init.method ?? 'GET', auth: init.headers?.authorization });
-  const body = String(url).endsWith('/health') ? { status: 'ok' } : { url: String(url) };
+  const body = String(url).endsWith('/readyz') ? { status: 'ok' } : { url: String(url) };
   return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } });
 };
 const helperCalls = [];
@@ -85,7 +85,7 @@ await test('managed: a valid capability is granted and attributed', async () => 
   assert.deepEqual(parse(result), { status: 'ok' });
   assert.equal(result._meta.acsAuthorization.decision, 'granted');
   assert.equal(result._meta.acsAuthorization.workItemId, 'wi-123');
-  assert.equal(fetchLog.at(-1).url, 'http://127.0.0.1:3999/health');
+  assert.equal(fetchLog.at(-1).url, 'http://127.0.0.1:3999/readyz');
 });
 
 await test('standalone: integration reads work without a capability; views are allowlisted', async () => {

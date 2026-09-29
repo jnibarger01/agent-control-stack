@@ -103,7 +103,10 @@ const WORK_ITEM_STATUSES = new Set([
 export function acsReadUrl(config: JcConfig, view: AcsView, id?: string, status?: string): string {
   switch (view) {
     case 'health':
-      return `${config.acsUrl}/health`;
+      // Interactive ACS reads need operational readiness, not the expensive
+      // integrity/audit-chain scan behind /health. Deep diagnostics remain
+      // available through jc_doctor and ACS's explicit /health endpoint.
+      return `${config.acsUrl}/readyz`;
     case 'work-items': {
       if (status !== undefined && !WORK_ITEM_STATUSES.has(status)) throw new IntegrationError('invalid_argument', 'unknown work-item status');
       return `${config.acsUrl}/work-items${status ? `?status=${encodeURIComponent(status)}` : ''}`;
