@@ -11,7 +11,7 @@ import {
   DeviceAuthStore,
   type DeviceAuthorizationSummary
 } from "./device-auth-store.js";
-import type { AuthFailureLockout } from "./auth-lockout.js";
+import type { AuthFailureLockout } from "@agent-control-stack/shared";
 import type { SlidingWindowRateLimiter } from "./rate-limit.js";
 import {
   gatewayCredentialCanMutate,
@@ -191,7 +191,11 @@ export function registerDeviceAuthRoutes(app: FastifyInstance, options: DeviceAu
         action === "approve" ? options.store.approve(userCode, credential.actorId) : options.store.deny(userCode);
       if (!result.ok) {
         if (lockout) {
-          const decisions = [lockout.recordFailure(ipKey), lockout.recordFailure(codeKey)];
+          // Record the IP and user-code buckets atomically: admitting only one
+          // of the pair under capacity pressure would let the two buckets
+          // displace each other on later attempts so neither counter ever
+          // reaches maxFailures.
+          const decisions = lockout.recordFailures([ipKey, codeKey]);
           const locked = decisions.find((decision) => decision.locked);
           if (locked) {
             options.onAuthLockout?.("/device/verify");
