@@ -200,7 +200,17 @@ describe("periodic system probes (#10)", () => {
                 write: { ok: status === 200, ...(status === 200 ? {} : { code: "write_unavailable" }) }
               },
               execution: { active: 1, capacity: 2, queued: 0, saturated: false },
-              telemetry: { latestMs: 0.4, p50Ms: 0.35, p95Ms: 0.8, failures, sampleCount: probes.length },
+              telemetry: {
+                latestMs: 0.4,
+                p50Ms: 0.35,
+                p95Ms: 0.8,
+                failures,
+                sampleCount: probes.length,
+                admission: {
+                  jc: { service: { latestMs: 18, p50Ms: 14, p95Ms: 24, sampleCount: 3 } },
+                  dc: { service: { latestMs: 42, p50Ms: 35, p95Ms: 65, sampleCount: 2 } }
+                }
+              },
               deepHealth: { ok: true, checkedAt: NOW.toISOString(), source: "startup" }
             }
           };
@@ -225,6 +235,8 @@ describe("periodic system probes (#10)", () => {
     expect(healthyText).toContain("Gateway0.40ms");
     expect(healthyText).toContain("p50 gateway0.35ms");
     expect(healthyText).toContain("p95 gateway0.80ms");
+    expect(healthyText).toContain("Jace Commander service18ms · p95 24ms · n=3");
+    expect(healthyText).toContain("Desktop Commander service42ms · p95 65ms · n=2");
     expect(healthyText).toContain("Readinesshealthy");
     expect(healthyText).toContain("Dependency checks2 passing");
     expect(healthyText).toContain("Execution admission1 / 2 active · 0 queued");

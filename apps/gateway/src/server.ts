@@ -404,11 +404,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         lane: event.lane,
         class: event.executionClass
       });
+      metrics.observeAdmissionLatency(event.lane, "wait", event.waitMs);
     } else if (event.type === "released") {
       metrics.observeDurationMs("acs_admission_service_ms", event.serviceMs, {
         lane: event.lane,
         class: event.executionClass
       });
+      metrics.observeAdmissionLatency(event.lane, "service", event.serviceMs);
     } else if (event.type === "cancelled") {
       metrics.increment("acs_admission_cancelled_total", { lane: event.lane, class: event.executionClass });
     } else {
@@ -765,7 +767,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const health = mergeSandboxReadyzCheck(workItems.readinessHealth(), sandboxCheck);
     metrics.observeReadiness(performance.now() - startedAt, health.ok);
     metrics.setSqliteReady(health.ok);
-    const telemetry = metrics.readyzSummary();
+    const telemetry = {
+      ...metrics.readyzSummary(),
+      admission: metrics.admissionLatencySummary()
+    };
     reply.header("server-timing", "readyz;dur=" + String(telemetry.latestMs ?? 0));
     reply.header("x-acs-readyz-ms", String(telemetry.latestMs ?? 0));
     return reply.code(health.ok ? 200 : 503).send({

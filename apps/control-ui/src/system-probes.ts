@@ -61,12 +61,20 @@ function formatProbeMs(value) {
   return (number < 10 ? number.toFixed(2) : Math.round(number).toString()) + 'ms';
 }
 
+function formatLaneService(lane) {
+  const service = lane && lane.service ? lane.service : null;
+  const sampleCount = service ? Number(service.sampleCount || 0) : 0;
+  if (!service || sampleCount < 1) return '—';
+  return formatProbeMs(service.latestMs) + ' · p95 ' + formatProbeMs(service.p95Ms) + ' · n=' + String(sampleCount);
+}
+
 function renderProbes() {
   const root = document.querySelector('#system-probes');
   if (!root || !probeHistory.length) return;
   const latest = probeHistory[probeHistory.length - 1];
   const localFailures = probeHistory.filter(function (row) { return row.status < 200 || row.status >= 300; }).length;
   const telemetry = latest.telemetry || null;
+  const admissionLatency = telemetry && telemetry.admission ? telemetry.admission : null;
   const failures = telemetry ? Number(telemetry.failures || 0) : localFailures;
   const sampleCount = telemetry ? Number(telemetry.sampleCount || 0) : probeHistory.length;
   const state = latest.status === 0 ? 'down' : latest.status >= 300 ? 'failing' : latest.ms >= ${PROBE_SLOW_MS} ? 'slow' : 'ok';
@@ -86,6 +94,8 @@ function renderProbes() {
     ['Gateway', formatProbeMs(latest.gatewayMs)],
     ['p50 gateway', formatProbeMs(telemetry && telemetry.p50Ms)],
     ['p95 gateway', formatProbeMs(telemetry && telemetry.p95Ms)],
+    ['Jace Commander service', formatLaneService(admissionLatency && admissionLatency.jc)],
+    ['Desktop Commander service', formatLaneService(admissionLatency && admissionLatency.dc)],
     ['Readiness', readiness],
     ['Dependency checks', checkNames.length ? (failedChecks.length ? 'failed: ' + failedChecks.join(', ') : checkNames.length + ' passing') : '—'],
     ['Execution admission', execution ? String(execution.active) + ' / ' + String(execution.capacity) + ' active · ' + String(execution.queued) + ' queued' + (execution.saturated ? ' · saturated' : '') : '—'],

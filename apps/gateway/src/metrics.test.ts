@@ -46,6 +46,34 @@ describe("GatewayMetrics readiness telemetry", () => {
   });
 });
 
+
+describe("GatewayMetrics admission latency telemetry", () => {
+  it("keeps lane-specific rolling service and wait latency summaries", () => {
+    const metrics = new GatewayMetrics();
+    metrics.observeAdmissionLatency("jc", "wait", 4);
+    metrics.observeAdmissionLatency("jc", "service", 10);
+    metrics.observeAdmissionLatency("jc", "service", 20);
+    metrics.observeAdmissionLatency("jc", "service", 30);
+    metrics.observeAdmissionLatency("dc", "service", 80);
+
+    expect(metrics.admissionLatencySummary()).toEqual({
+      jc: {
+        wait: { latestMs: 4, p50Ms: 4, p95Ms: 4, sampleCount: 1 },
+        service: { latestMs: 30, p50Ms: 20, p95Ms: 30, sampleCount: 3 }
+      },
+      dc: {
+        wait: { latestMs: null, p50Ms: null, p95Ms: null, sampleCount: 0 },
+        service: { latestMs: 80, p50Ms: 80, p95Ms: 80, sampleCount: 1 }
+      }
+    });
+
+    const output = metrics.render();
+    expect(output).toContain('acs_admission_latency_ms{lane="jc",phase="service",stat="latest"} 30');
+    expect(output).toContain('acs_admission_latency_ms{lane="jc",phase="service",stat="p95"} 30');
+    expect(output).toContain('acs_admission_latency_window_samples{lane="dc",phase="service"} 1');
+  });
+});
+
 describe("GatewayMetrics.summary", () => {
   it("sums counters across label sets and filters 429s and 5xx by status", () => {
     const metrics = new GatewayMetrics();

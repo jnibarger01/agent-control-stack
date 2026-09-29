@@ -10,7 +10,23 @@ export interface ReadyzTelemetrySummary {
   sampleCount: number;
 }
 
+export interface LatencyWindowSummary {
+  latestMs: number | null;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  sampleCount: number;
+}
+
+export interface AdmissionLatencySummary {
+  jc: { wait: LatencyWindowSummary; service: LatencyWindowSummary };
+  dc: { wait: LatencyWindowSummary; service: LatencyWindowSummary };
+}
+
+type AdmissionLane = "jc" | "dc";
+type AdmissionPhase = "wait" | "service";
+
 const READYZ_TELEMETRY_WINDOW = 60;
+const ADMISSION_LATENCY_WINDOW = 60;
 
 function roundedMs(value: number): number {
   return Math.round(Math.max(0, value) * 1_000) / 1_000;
@@ -21,6 +37,16 @@ function percentile(values: number[], percentileValue: number): number | null {
   const sorted = [...values].sort((left, right) => left - right);
   const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil(percentileValue * sorted.length) - 1));
   return roundedMs(sorted[index] ?? 0);
+}
+
+function latencyWindowSummary(values: readonly number[]): LatencyWindowSummary {
+  const latest = values[values.length - 1];
+  return {
+    latestMs: latest === undefined ? null : roundedMs(latest),
+    p50Ms: percentile([...values], 0.5),
+    p95Ms: percentile([...values], 0.95),
+    sampleCount: values.length
+  };
 }
 
 export interface GatewayMetricsSummary {
@@ -41,6 +67,13 @@ export class GatewayMetrics {
   private readonly durations = new Map<string, { count: number; sumSeconds: number }>();
   private readonly gauges = new Map<string, number>();
   private readonly readyzSamples: Array<{ durationMs: number; ok: boolean }> = [];
+  private readonly admissionLatencySamples: Record<
+    AdmissionLane,
+    Record<AdmissionPhase, number[]>
+  > = {
+    jc: { wait: [], service: [] },
+    dc: { wait: [], service: [] }
+  };
   private sqliteReady = 0;
 
   increment(name: string, labels: Record<string, string> = {}): void {
@@ -88,6 +121,31 @@ export class GatewayMetrics {
     current.count += 1;
     current.sumSeconds += Math.max(0, durationMs);
     this.durations.set(key, current);
+  }
+
+  observeAdmissionLatency(lane: AdmissionLane, phase: AdmissionPhase, durationMs: number): void {
+    const samples = this.admissionLatencySamples[lane][phase];
+    samples.push(roundedMs(durationMs));
+    while (samples.length > ADMISSION_LATENCY_WINDOW) samples.shift();
+    const summary = latencyWindowSummary(samples);
+    for (const stat of ["latest", "p50", "p95"] as const) {
+      const value = stat === "latest" ? summary.latestMs : stat === "p50" ? summary.p50Ms : summary.p95Ms;
+      this.setGauge("acs_admission_latency_ms", value ?? 0, { lane, phase, stat });
+    }
+    this.setGauge("acs_admission_latency_window_samples", summary.sampleCount, { lane, phase });
+  }
+
+  admissionLatencySummary(): AdmissionLatencySummary {
+    return {
+      jc: {
+        wait: latencyWindowSummary(this.admissionLatencySamples.jc.wait),
+        service: latencyWindowSummary(this.admissionLatencySamples.jc.service)
+      },
+      dc: {
+        wait: latencyWindowSummary(this.admissionLatencySamples.dc.wait),
+        service: latencyWindowSummary(this.admissionLatencySamples.dc.service)
+      }
+    };
   }
 
   setGauge(name: string, value: number, labels: Record<string, string> = {}): void {

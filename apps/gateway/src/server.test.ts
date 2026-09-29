@@ -420,7 +420,17 @@ describe("mission control gateway", () => {
           p50Ms: expect.any(Number),
           p95Ms: expect.any(Number),
           failures: 0,
-          sampleCount: 1
+          sampleCount: 1,
+          admission: {
+            jc: {
+              wait: { sampleCount: 0 },
+              service: { sampleCount: 0 }
+            },
+            dc: {
+              wait: { sampleCount: 0 },
+              service: { sampleCount: 0 }
+            }
+          }
         },
         deepHealth: { ok: true, source: "startup", checkedAt: expect.any(String) }
       });
