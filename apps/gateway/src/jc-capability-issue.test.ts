@@ -3,7 +3,10 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
+import {
+  ExecutionAdmissionScheduler,
+  type ExecutionAdmissionController
+} from "@agent-control-stack/execution-admission";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import {
   jaceCommanderInvocationHash,
@@ -74,10 +77,23 @@ function keys() {
   return { privateKey: pair.privateKey.export({ format: "der", type: "pkcs8" }).toString("base64url") };
 }
 
+function testAdmission(): ExecutionAdmissionScheduler {
+  return new ExecutionAdmissionScheduler({
+    config: {
+      executionMaxInflight: 1_000,
+      executorMaxInflight: 1_000,
+      queueMax: 1_000,
+      queueTimeoutMs: 30_000,
+      waitMaxInflight: 1_000
+    }
+  });
+}
+
 function gateway(
   configured = true,
   fsRoots?: (root: string) => string[],
-  authority: ManagedAuthorityObservation = healthyAuthority
+  authority: ManagedAuthorityObservation = healthyAuthority,
+  executionAdmission: ExecutionAdmissionController = testAdmission()
 ) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-jc-capability-")));
   const signing = keys();
@@ -90,15 +106,7 @@ function gateway(
       : false,
     readManagedAuthority: () => authority,
     jaceCommanderContainment: fsRoots ? { allowedRoots: fsRoots(root), deniedRoots: [] } : false,
-    executionAdmission: new ExecutionAdmissionScheduler({
-      config: {
-        executionMaxInflight: 1_000,
-        executorMaxInflight: 1_000,
-        queueMax: 1_000,
-        queueTimeoutMs: 30_000,
-        waitMaxInflight: 1_000
-      }
-    })
+    executionAdmission
   });
   return { root, signing, app, dbPath: join(root, "control.db") };
 }
@@ -138,9 +146,10 @@ async function withGateway(
   fn: (ctx: Ctx) => Promise<void>,
   configured = true,
   fsRoots?: (root: string) => string[],
-  authority: ManagedAuthorityObservation = healthyAuthority
+  authority: ManagedAuthorityObservation = healthyAuthority,
+  executionAdmission: ExecutionAdmissionController = testAdmission()
 ): Promise<void> {
-  const ctx = gateway(configured, fsRoots, authority);
+  const ctx = gateway(configured, fsRoots, authority, executionAdmission);
   try {
     await fn(ctx);
   } finally {
@@ -463,6 +472,70 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace,
       { ...healthyAuthority, authoritative: false, leaseActive: false, detail: "executor lease inactive" }
     ));
+
+  it("strict mode does not reuse an admin-approved item left behind by failed admission", () => {
+    const delegate = testAdmission();
+    let rejectOnce = true;
+    const executionAdmission: ExecutionAdmissionController = {
+      acquire: async (request) => {
+        if (rejectOnce) {
+          rejectOnce = false;
+          throw new Error("test admission failure");
+        }
+        return delegate.acquire(request);
+      },
+      shutdown: () => delegate.shutdown(),
+      snapshot: () => delegate.snapshot()
+    };
+
+    return withGateway(
+      async (ctx) => {
+        const admin = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${OP_TOKEN}` },
+          payload: { mode: "admin", reason: "seed interrupted admin approval" }
+        });
+        expect(admin.statusCode).toBe(200);
+
+        const args = { path: join(ctx.root, "workspace", "mode-transition") };
+        const interrupted = await issue(ctx, "create_directory", args);
+        expect(interrupted.statusCode).toBe(500);
+
+        const db = new DatabaseSync(ctx.dbPath);
+        let adminWorkItemId: string;
+        try {
+          const row = db
+            .prepare(
+              "SELECT work_item_id AS workItemId FROM execution_plan_approvals WHERE approved_by_actor_id = ? ORDER BY approved_at DESC LIMIT 1"
+            )
+            .get("acs:admin") as { workItemId: string } | undefined;
+          expect(row?.workItemId).toBeTruthy();
+          adminWorkItemId = row!.workItemId;
+        } finally {
+          db.close();
+        }
+
+        const strict = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${OP_TOKEN}` },
+          payload: { mode: "strict", reason: "verify prior admin grant is not reusable" }
+        });
+        expect(strict.statusCode).toBe(200);
+
+        const retry = await issue(ctx, "create_directory", args);
+        expect(retry.statusCode).toBe(409);
+        expect(retry.json().decision).toBe("require_approval");
+        expect(retry.json().workItemId).not.toBe(adminWorkItemId);
+        expect(retry.json().capability).toBeUndefined();
+      },
+      true,
+      workspace,
+      healthyAuthority,
+      executionAdmission
+    );
+  });
 });
 
 describe("POST /jc/capability/issue: filesystem tools (fs.read, ACS containment)", () => {

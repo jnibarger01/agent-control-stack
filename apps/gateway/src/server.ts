@@ -2195,6 +2195,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           requesterSubject: jcActor
         });
 
+        const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
         const existing = workItems
           .list()
           .filter((candidate) => {
@@ -2203,7 +2204,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               candidate.requesterSubject === jcActor &&
               params?.tool === invocation.toolName &&
               params?.bindingHash === bindingHash &&
-              ["needs_approval", "approved"].includes(candidate.status)
+              ["needs_approval", "approved"].includes(candidate.status) &&
+              (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
+                ? true
+                : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
             );
           })
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];

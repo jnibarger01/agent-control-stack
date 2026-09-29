@@ -22,12 +22,12 @@ in every rule not listed below:
 | ---------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | `version`              | `acs.dc.v1`                                                                             | `acs.jc.v1`                                                                                   |
 | `audience`             | `desktop-commander`                                                                     | `jace-commander`                                                                              |
-| scope vocabulary       | `fs.read`, `fs.write`, `process.exec`, `process.spawn`, `network.read`, `network.write` | `fs.read`, `integration.read`, `integration.write`, `process.privileged`                      |
+| scope vocabulary       | `fs.read`, `fs.write`, `process.exec`, `process.spawn`, `network.read`, `network.write` | `fs.read`, `fs.write`, `integration.read`, `integration.write`, `process.read`, `process.exec`, `process.privileged`, `git.read`, `git.write`, `git.network` |
 | `invocationHash`       | `sha256("acs:desktop-commander-invocation:v1\n" + legacyCanonical(...))`                | `sha256("acs:jace-commander-invocation:v1\n" + strictCanonicalJsonV1({toolName, arguments}))` |
 | signing key            | `ACS_DESKTOP_COMMANDER_CAPABILITY_PRIVATE_KEY`                                          | `ACS_JACE_COMMANDER_CAPABILITY_PRIVATE_KEY` (must be a different key)                         |
 | issuer worker identity | `acs-dc-bridge`                                                                         | `acs-jc-bridge`                                                                               |
 | issuance table         | `desktop_commander_capability_issuances`                                                | `jace_commander_capability_issuances` (migration 028)                                         |
-| admin execution mode   | may auto-approve                                                                        | **never** auto-approves                                                                       |
+| admin execution mode   | may auto-approve                                                                        | may auto-approve ordinary gated mutations; **never** `privileged_exec`                         |
 
 Because the version and audience differ, a capability from either contract is
 rejected by the other verifier.
@@ -70,6 +70,22 @@ Interop vectors (the ACS and desktop-commander tests both pin these):
 - `invocationHash("acs_read", {view:"health"})`
   = `92aa7dd353ab8a15eadd7524b00e43aff6287cca90aef6194172861f41991461`
 
+## Ordinary mutation admin-mode rules
+
+For approval-gated non-root JC mutations (`write_file`, `create_directory`,
+`move_file`, `edit_block`, `start_process`, `kill_process`, `git_add`,
+`git_commit`, `git_fetch`, and `git_push`), canonical `admin` mode may
+record an `acs:admin` approval only after the managed-authority gate passes.
+The request then continues through the same lease, capability, containment, and
+audit path as a human-approved request. In `strict` mode, candidate reuse
+explicitly excludes work items carrying an `acs:admin` grant, so an approval
+left behind by an interrupted admin-mode request cannot cross the mode boundary.
+
+Migration 039 updates the durable JC issuance constraint to permit
+`acs:admin` for those ordinary approval-gated tools while retaining the
+human-only constraint for `privileged_exec`. Requester self-approval remains
+forbidden for every approval-gated JC tool.
+
 ## `privileged_exec` approval rules
 
 These are enforced in three independent places.
@@ -84,16 +100,17 @@ These are enforced in three independent places.
      shell-metacharacter and destructive rules still apply to every other
      action kind unchanged.
 2. **Route** (`/jc/capability/issue`):
-   - It has no admin-mode auto-approval branch.
-   - Work items with an `acs:admin` grant are never reused.
+   - The ordinary-JC admin branch explicitly excludes `privileged_exec`.
+   - In strict mode, candidate reuse excludes work items carrying an
+     `acs:admin` grant.
    - An approval-required tool with no `require_approval` evaluation returns
      409, not a signed capability.
 3. **Durable issuance gate** (`SqliteJaceCommanderIssuanceRegistry` plus the
-   migration 028 `CHECK` constraints):
+   migration 039 `CHECK` constraints):
    - The lease-bound approval must be `consumed` and bound to this plan,
      action and request hash, and must not expire before the capability.
-   - `approved_by_actor_id` must not be `acs:admin` or the requesting
-     subject.
+   - For `privileged_exec`, `approved_by_actor_id` must not be
+     `acs:admin` or the requesting subject.
    - At most one capability is issued per approval, and at most one per
      lease/invocation.
    - The nonce hash is unique.
