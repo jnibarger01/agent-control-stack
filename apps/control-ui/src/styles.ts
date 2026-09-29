@@ -210,12 +210,16 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 .execution-mode label { display: block; margin-top: 4px; }
 .admin-mode-banner { margin: 0 0 14px; padding: 12px 14px; border: 2px solid var(--admin-banner-line); background: var(--admin-banner-bg); color: var(--admin-banner-ink); border-radius: 8px; font-weight: 800; letter-spacing: .02em; }
 .admin-mode-banner[hidden] { display: none; }
-.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px var(--shadow); }
 .card { padding: 15px; min-height: 108px; }
+.dashboard-card { display: block; color: inherit; text-decoration: none; cursor: pointer; transition: border-color .15s ease, transform .15s ease, background .15s ease; }
+.dashboard-card:hover { border-color: var(--control-hover-line); background: var(--hover); transform: translateY(-1px); }
+.dashboard-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .card span, .panel-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; }
 .card strong { display: block; font-size: 30px; margin-top: 10px; color: var(--ink); }
 .card p { font-size: 12px; line-height: 1.35; }
+.card-action { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
 .lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .panel { min-width: 0; overflow: hidden; }
@@ -290,6 +294,27 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .approval-item { border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 12px; display: grid; gap: 9px; }
 .approval-item strong, .approval-item small { display: block; }
 .agent-layout { display: grid; }
+.agent-roster { min-width: 0; padding: 12px; display: grid; gap: 12px; align-content: start; }
+.agent-summary { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.agent-summary div { min-width: 0; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); padding: 10px; }
+.agent-summary span { display: block; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.agent-summary strong { display: block; margin-top: 4px; font-size: 18px; color: var(--ink); }
+.agent-card-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; align-items: stretch; }
+.agent-card { min-width: 0; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); padding: 12px; display: grid; gap: 10px; text-align: left; font: inherit; cursor: pointer; }
+.agent-card:hover, .agent-card.selected { background: var(--hover); border-color: var(--control-hover-line); }
+.agent-card.selected { box-shadow: inset 3px 0 0 var(--accent); }
+.agent-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.agent-avatar { flex: 0 0 34px; width: 34px; height: 34px; display: grid; place-items: center; border: 1px solid var(--control-line); border-radius: 9px; background: var(--control-bg); font-weight: 800; }
+.agent-card-identity { flex: 1; min-width: 0; }
+.agent-card-identity strong, .agent-card-identity small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-card-identity small { margin-top: 2px; color: var(--muted); font-size: 11px; }
+.agent-card-meta { display: flex; flex-wrap: wrap; gap: 5px 10px; color: var(--muted); font-size: 11px; }
+.agent-card-task { display: grid; gap: 3px; border-top: 1px solid var(--soft-line); padding-top: 9px; }
+.agent-card-task small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .04em; }
+.agent-card-task > span { line-height: 1.35; overflow-wrap: anywhere; }
+.agent-card-error { margin: 0; color: var(--red); font-size: 11px; overflow-wrap: anywhere; }
+.agent-card-foot { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 10px; }
+.agent-card-foot span { min-width: 0; overflow-wrap: anywhere; }
 .detail-panel { margin: 12px; padding: 14px; max-height: 360px; overflow: auto; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); }
 .detail-empty, .detail-loading, .detail-error { color: var(--muted); }
 .detail-error { color: var(--red); }
@@ -342,7 +367,7 @@ output { color: var(--accent); min-height: 20px; }
 .skip-link:focus { left: 12px; top: 12px; }
 :focus { outline: none; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.approval-actions button:focus-visible, .queue-item:focus-visible, nav a:focus-visible, button[type=submit]:focus-visible, .agent-row:focus-visible, .agent-card:focus-visible, .executor-row:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .reason-field { display: grid; gap: 5px; }
 .reason-label { color: var(--muted); font-size: 12px; }
 .reason-label .req { color: var(--red); font-weight: 600; }
@@ -359,7 +384,7 @@ output { color: var(--accent); min-height: 20px; }
 .approval-confirm-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
 #approval-confirm-ok { background: var(--bad-bg); color: var(--red); border-color: var(--bad-line); font-weight: 700; }
 #approval-confirm-cancel:focus-visible, #approval-confirm-ok:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail { margin-left: 0; max-height: 430px; } }
+@media (min-width: 1520px) { .agent-layout { grid-template-columns: minmax(720px, 1fr) 380px; } .agent-detail, .executor-detail, .connector-detail { margin-left: 0; max-height: 430px; } }
 @media (max-width: 1180px) { body { grid-template-columns: 1fr; } aside { position: static; height: auto; } .cards, .grid, .lower { grid-template-columns: 1fr; } .rail-note { position: static; } }
 @media (max-width: 767px) {
   body { grid-template-columns: 1fr; }
@@ -376,6 +401,8 @@ output { color: var(--accent); min-height: 20px; }
   .approval-actions { flex-direction: column; }
   .approval-actions button { width: 100%; min-height: 44px; font-size: 15px; }
   .table-wrap { max-height: none; }
+  .agent-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .agent-card-grid { grid-template-columns: 1fr; }
   .agent-table th:nth-child(n+5), .agent-table td:nth-child(n+5) { display: none; }
   .queue-filter-fields { grid-template-columns: 1fr; }
   .queue-filter-chip { min-height: 44px; }
@@ -390,6 +417,7 @@ body[data-active-view="queue"] [data-view-panel~="queue"],
 body[data-active-view="execution"] [data-view-panel~="execution"],
 body[data-active-view="approvals"] [data-view-panel~="approvals"],
 body[data-active-view="agents"] [data-view-panel~="agents"],
+body[data-active-view="executors"] [data-view-panel~="executors"],
 body[data-active-view="connectors"] [data-view-panel~="connectors"],
 body[data-active-view="metrics"] [data-view-panel~="metrics"],
 body[data-active-view="audit"] [data-view-panel~="audit"],
@@ -397,6 +425,7 @@ body[data-active-view="policy"] [data-view-panel~="policy"],
 body[data-active-view="system"] [data-view-panel~="system"] { display: block; }
 /* The view rule above must not flatten the overview card grid. */
 body[data-active-view="overview"] #overview.cards { display: grid; }
+body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .approval-item { background: var(--surface); color: var(--ink); border-color: var(--line); }
 .system-probes { padding: 0 18px 16px; }
 .system-probes dl { margin: 0; display: grid; gap: 8px; }

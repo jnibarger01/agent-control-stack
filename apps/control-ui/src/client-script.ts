@@ -46,6 +46,12 @@ const sseEventNames = [
   'agent.updated',
   'agent.heartbeat',
   'agent.capabilities_replaced',
+  'connector.registered',
+  'connector.key_rotated',
+  'tunnel_session.registered',
+  'tunnel_session.revoked',
+  'tunnel_session.reconciled',
+  'desktop_commander.runtime_activated',
   'acp.initialized',
   'acp.disconnected',
   'acp.error',
@@ -103,7 +109,11 @@ function connectSse() {
     scheduleDashboardRefresh(0, { catchUp: reconnected });
     if (reconnected) {
       refreshAgentRoster();
+      refreshExecutorRoster();
+      refreshConnectorRoster();
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
+      if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
+      if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -141,13 +151,23 @@ function appendAuditEvent(event) {
   if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
-  if (eventName.startsWith('agent.') || eventName.startsWith('acp.') || eventName === 'tunnel_session.heartbeat') {
+  if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
+  }
+  if (eventName === 'desktop_commander.runtime_activated') {
+    refreshExecutorRoster();
+    if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
+  }
+  if (eventName.startsWith('connector.') || eventName.startsWith('tunnel_session.')) {
+    refreshConnectorRoster();
+    if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
   }
 }
 
 let selectedAgentId = null;
+let selectedExecutorId = null;
+let selectedConnectorId = null;
 
 function escapeClient(value) {
   return String(value ?? '').replace(/[&<>"']/g, function (char) {
@@ -167,6 +187,7 @@ ${themeClientSource()}
 function onDashboardFragmentsApplied() {
   updateTitleBadge();
   refreshWaitBadges();
+  if (document.body.dataset.activeView === 'connectors') refreshConnectorRoster();
 }
 function onWorkItemControlSucceeded(control, id, body) {
   const created = body && body.workItem && body.workItem.id;
@@ -264,47 +285,70 @@ async function loadWorkDetail(id, options) {
   }
 }
 
-function agentRowsMarkup(agents) {
+function agentRoleLabelClient(role) {
+  if (!role) return 'Role not reported';
+  return String(role).toLowerCase().split('_').map(function (part) {
+    return part.charAt(0).toUpperCase() + part.slice(1);
+  }).join(' ');
+}
+
+function agentSummaryMarkup(agents) {
+  const online = agents.filter(function (agent) { return agent.status === 'online'; }).length;
+  const activeTasks = agents.filter(function (agent) { return Boolean(agent.currentTask); }).length;
+  const unavailable = agents.filter(function (agent) { return agent.status === 'stale' || agent.status === 'offline'; }).length;
+  return '<div class="agent-summary" id="agent-summary">' +
+    '<div><span>Registered</span><strong>' + agents.length + '</strong></div>' +
+    '<div><span>Online</span><strong>' + online + '</strong></div>' +
+    '<div><span>Active tasks</span><strong>' + activeTasks + '</strong></div>' +
+    '<div><span>Stale / offline</span><strong>' + unavailable + '</strong></div>' +
+  '</div>';
+}
+
+function agentCardsMarkup(agents) {
   return agents.map(function (agent) {
     const id = escapeClient(agent.id);
     const name = escapeClient(agent.displayName || agent.name || agent.id);
-    return '<tr class="agent-row" tabindex="0" data-agent="' + id + '" data-agent-id="' + id + '">' +
-      '<td><strong>' + name + '</strong><small>' + id + '</small></td>' +
-      '<td>' + escapeClient(agent.kind || 'observed') + '</td>' +
-      '<td>' + pillMarkup(agent.status || agent.effectiveStatus || 'observed') + '</td>' +
-      '<td>' + pillMarkup(agent.health || 'unknown') + '</td>' +
-      '<td>' + escapeClient(agent.currentTask || '—') + '</td>' +
-      '<td>' + escapeClient(formatClientTime(agent.lastHeartbeatAt)) + '</td>' +
-      '<td>' + escapeClient(redactClient(agent.lastError || '—')) + '</td>' +
-    '</tr>';
+    const metadata = agent.metadata || {};
+    const role = escapeClient(agentRoleLabelClient(metadata.acpRole));
+    const providerModel = [metadata.provider, metadata.model].filter(Boolean).join(' · ');
+    const runtime = escapeClient(providerModel ? ((agent.kind || '—') + ' · ' + providerModel) : (agent.kind || '—'));
+    const initial = escapeClient(String(agent.displayName || agent.name || agent.id || '?').trim().charAt(0).toUpperCase() || '?');
+    const task = escapeClient(agent.currentTask || 'No active task reported');
+    const heartbeat = agent.lastHeartbeatAt ? ('Heartbeat ' + formatClientTime(agent.lastHeartbeatAt)) : 'No heartbeat observed';
+    const capabilityCount = Array.isArray(agent.capabilities) ? agent.capabilities.length : 0;
+    const error = agent.lastError ? '<span class="agent-card-error">' + escapeClient(redactClient(agent.lastError)) + '</span>' : '';
+    return '<button type="button" class="agent-card" data-agent="' + id + '" data-agent-id="' + id + '" aria-label="Open ' + name + '">' +
+      '<span class="agent-card-head">' +
+        '<span class="agent-avatar" aria-hidden="true">' + initial + '</span>' +
+        '<span class="agent-card-identity"><strong>' + name + '</strong><small>' + id + '</small></span>' +
+        pillMarkup(agent.status || 'observed') +
+      '</span>' +
+      '<span class="agent-card-meta"><span>' + role + '</span><span>' + runtime + '</span></span>' +
+      '<span class="agent-card-task"><small>Current task</small><span>' + task + '</span></span>' +
+      error +
+      '<span class="agent-card-foot"><span>' + escapeClient(heartbeat) + '</span><span>' + capabilityCount + ' capabilit' + (capabilityCount === 1 ? 'y' : 'ies') + '</span></span>' +
+    '</button>';
   }).join('');
 }
 
 function renderAgentTable(agents) {
-  const wrap = document.querySelector('#agents .table-wrap');
+  const wrap = document.querySelector('#agents .agent-roster');
   if (!wrap) return;
   if (!agents.length) {
-    wrap.innerHTML = '<p class="empty">No agents or connectors observed.</p>';
+    wrap.innerHTML = '<p class="empty">No registered agents.</p>';
     return;
   }
-  wrap.innerHTML = '<table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">' + agentRowsMarkup(agents) + '</tbody></table>';
+  wrap.innerHTML = agentSummaryMarkup(agents) + '<div class="agent-card-grid" id="agent-roster-body">' + agentCardsMarkup(agents) + '</div>';
   bindAgentRows();
 }
 
 function bindAgentRows() {
-  document.querySelectorAll('[data-agent]').forEach(function (row) {
-    const activate = function () {
-      selectedAgentId = row.dataset.agent;
+  document.querySelectorAll('[data-agent]').forEach(function (card) {
+    card.addEventListener('click', function () {
+      selectedAgentId = card.dataset.agent;
       document.querySelectorAll('[data-agent]').forEach(function (candidate) { candidate.classList.remove('selected'); });
-      row.classList.add('selected');
+      card.classList.add('selected');
       loadAgentDetail(selectedAgentId);
-    };
-    row.addEventListener('click', activate);
-    row.addEventListener('keydown', function (event) {
-      if (event.key === 'Enter' || event.key === ' ') {
-        event.preventDefault();
-        activate();
-      }
     });
   });
 }
@@ -314,7 +358,7 @@ async function refreshAgentRoster() {
     const body = await fetchJson('/agents');
     const agents = Array.isArray(body.agents) ? body.agents : [];
     const count = document.querySelector('#agent-count');
-    if (count) count.textContent = agents.length + ' observed';
+    if (count) count.textContent = agents.length + ' registered';
     renderAgentTable(agents);
     if (selectedAgentId && agents.some(function (agent) { return agent.id === selectedAgentId; })) {
       document.querySelectorAll('[data-agent]').forEach(function (row) {
@@ -334,16 +378,8 @@ async function loadAgentDetail(id) {
   if (!target || !id) return;
   target.innerHTML = '<div class="detail-loading">Loading agent detail...</div>';
   try {
-    const projected = await fetchJson('/agents/' + encodeURIComponent(id) + '?limit=8');
-    const registry = await fetchJson('/api/agents/' + encodeURIComponent(id) + '?limit=8').catch(function () { return null; });
-    const capabilities = await fetchJson('/api/agents/' + encodeURIComponent(id) + '/capabilities').catch(function () { return null; });
-    renderAgentDetail(target, {
-      projected: projected.agent,
-      registry: registry && registry.agent,
-      adapterStatus: (registry && registry.adapterStatus) || projected.adapterStatus,
-      events: (registry && registry.events && registry.events.length ? registry.events : projected.events) || [],
-      capabilities: (capabilities && capabilities.capabilities) || (registry && registry.agent && registry.agent.capabilities) || []
-    });
+    const detail = await fetchJson('/api/agents/' + encodeURIComponent(id));
+    renderAgentDetail(target, detail);
   } catch (error) {
     target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
   }
@@ -356,28 +392,265 @@ function capabilityNames(input) {
 }
 
 function renderAgentDetail(target, detail) {
-  const agent = detail.projected || detail.registry || {};
-  const registry = detail.registry || {};
-  const capabilities = capabilityNames(detail.capabilities).concat(capabilityNames(agent.capabilities || []));
-  const uniqueCapabilities = Array.from(new Set(capabilities)).sort();
+  const agent = detail.agent || {};
+  const activity = detail.activity || {};
+  const capabilities = Array.from(new Set(capabilityNames(agent.capabilities || []))).sort();
+  const sessions = Array.isArray(detail.sessions) ? detail.sessions : [];
   const adapter = detail.adapterStatus ? (detail.adapterStatus.state || detail.adapterStatus.status || 'connected') : 'not configured';
-  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.displayName || registry.name || agent.id) + '</h3><small>' + escapeClient(agent.id || registry.id || '') + '</small></div><div>' + pillMarkup(agent.status || registry.effectiveStatus || registry.status || 'observed') + ' ' + pillMarkup(agent.health || 'unknown') + '</div></div>' +
+  const status = agent.effectiveStatus || agent.status || 'UNKNOWN';
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(agent.name || agent.id || 'Agent') + '</h3><small>' + escapeClient(agent.id || '') + '</small></div><div>' + pillMarkup(status) + '</div></div>' +
     '<dl class="detail-grid">' +
-      detailRow('Type', agent.kind || registry.kind) +
-      detailRow('Provider', registry.provider) +
-      detailRow('Model', registry.model) +
-      detailRow('Endpoint', registry.endpoint ? redactClient(registry.endpoint) : undefined) +
-      detailRow('Current task', agent.currentTask) +
-      detailRow('Current work item', agent.currentWorkItemId) +
-      detailRow('Heartbeat', formatClientTime(agent.lastHeartbeatAt || registry.lastHeartbeatAt)) +
+      detailRow('Role', agent.acpRole) +
+      detailRow('Runtime', agent.kind) +
+      detailRow('Provider', agent.provider) +
+      detailRow('Model', agent.model) +
+      detailRow('Current task', activity.currentTask || (agent.latestHeartbeat && agent.latestHeartbeat.currentTask)) +
+      detailRow('Current work item', activity.currentWorkItemId) +
+      detailRow('Current ACP session', activity.currentSessionId) +
+      detailRow('Active ACP sessions', activity.activeSessionCount) +
+      detailRow('Last heartbeat', formatClientTime(agent.lastHeartbeatAt)) +
+      detailRow('Last activity', formatClientTime(activity.lastActivityAt)) +
       detailRow('Adapter', adapter) +
+      detailRow('Endpoint', agent.endpoint ? redactClient(agent.endpoint) : undefined) +
     '</dl>' +
-    '<div class="detail-section"><h4>Capabilities</h4>' + capabilityList(uniqueCapabilities) + '</div>' +
-    '<div class="detail-section"><h4>Recent Events</h4>' + eventList(detail.events || []) + '</div>';
+    '<div class="detail-section"><h4>Agent capabilities</h4>' + capabilityList(capabilities) + '</div>' +
+    '<div class="detail-section"><h4>Recent ACP sessions</h4>' + agentSessionTable(sessions) + '</div>' +
+    '<div class="detail-section"><h4>Recent agent events</h4>' + eventList(detail.events || []) + '</div>';
+}
+
+function agentSessionTable(sessions) {
+  if (!sessions.length) return '<p class="muted">No ACP sessions observed.</p>';
+  return '<div class="table-wrap"><table class="agent-table agent-session-table"><thead><tr><th>Session</th><th>Status</th><th>Work item</th><th>Last event</th><th>Activity</th></tr></thead><tbody>' +
+    sessions.map(function (session) {
+      return '<tr><td>' + escapeClient(session.sessionId || '—') + '</td>' +
+        '<td>' + pillMarkup(session.status || 'unknown') + '</td>' +
+        '<td>' + escapeClient(session.workItemId || '—') + '</td>' +
+        '<td>' + escapeClient(session.lastEventType || '—') + '</td>' +
+        '<td>' + escapeClient(formatClientTime(session.lastEventAt)) + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function executorRowsMarkup(executors) {
+  return executors.map(function (executor) {
+    const id = escapeClient(executor.id);
+    return '<tr class="agent-row executor-row" tabindex="0" data-executor="' + id + '">' +
+      '<td><strong>' + escapeClient(executor.displayName || executor.id) + '</strong><small>' + id + '</small></td>' +
+      '<td>' + escapeClient(executor.contract || '—') + '</td>' +
+      '<td>' + pillMarkup(executor.status || 'unknown') + '</td>' +
+      '<td>' + escapeClient(executor.runtimeId || '—') + '</td>' +
+      '<td>' + escapeClient(String(executor.capabilityCount || 0)) + '</td>' +
+      '<td>' + escapeClient(String(executor.unsupportedToolCount || 0)) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function renderExecutorTable(executors) {
+  const wrap = document.querySelector('#executors .table-wrap');
+  if (!wrap) return;
+  if (!executors.length) {
+    wrap.innerHTML = '<p class="empty">No managed executors configured.</p>';
+    return;
+  }
+  wrap.innerHTML = '<table class="agent-table executor-table"><thead><tr><th>Executor</th><th>Contract</th><th>Status</th><th>Runtime</th><th>Capabilities</th><th>Unsupported</th></tr></thead><tbody>' + executorRowsMarkup(executors) + '</tbody></table>';
+  bindExecutorRows();
+}
+
+function bindExecutorRows() {
+  document.querySelectorAll('[data-executor]').forEach(function (row) {
+    const activate = function () {
+      selectedExecutorId = row.dataset.executor;
+      document.querySelectorAll('[data-executor]').forEach(function (candidate) { candidate.classList.remove('selected'); });
+      row.classList.add('selected');
+      loadExecutorDetail(selectedExecutorId);
+    };
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+}
+
+async function refreshExecutorRoster() {
+  try {
+    const body = await fetchJson('/api/executors');
+    const executors = Array.isArray(body.executors) ? body.executors : [];
+    const count = document.querySelector('#executor-count');
+    if (count) count.textContent = executors.length + ' managed';
+    renderExecutorTable(executors);
+    if (selectedExecutorId && executors.some(function (executor) { return executor.id === selectedExecutorId; })) {
+      document.querySelectorAll('[data-executor]').forEach(function (row) {
+        if (row.dataset.executor === selectedExecutorId) row.classList.add('selected');
+      });
+    }
+  } catch (error) {
+    const detail = document.querySelector('#executor-detail');
+    if (detail && !selectedExecutorId) {
+      detail.innerHTML = '<div class="detail-error">Executor backend unavailable: ' + escapeClient(error.message) + '</div>';
+    }
+  }
+}
+
+async function loadExecutorDetail(id) {
+  const target = document.querySelector('#executor-detail');
+  if (!target || !id) return;
+  target.innerHTML = '<div class="detail-loading">Loading executor detail...</div>';
+  try {
+    const detail = await fetchJson('/api/executors/' + encodeURIComponent(id));
+    const capabilities = await fetchJson('/api/executors/' + encodeURIComponent(id) + '/capabilities');
+    renderExecutorDetail(target, detail.executor || {}, detail.runtimes || [], capabilities.capabilities || []);
+  } catch (error) {
+    target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
+  }
+}
+
+function renderExecutorDetail(target, executor, runtimes, capabilities) {
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(executor.displayName || executor.id || 'Executor') + '</h3><small>' + escapeClient(executor.id || '') + '</small></div><div>' + pillMarkup(executor.status || 'unknown') + '</div></div>' +
+    '<dl class="detail-grid">' +
+      detailRow('Contract', executor.contract) +
+      detailRow('Type', executor.kind) +
+      detailRow('Configured', executor.configured ? 'yes' : 'no') +
+      detailRow('Runtime', executor.runtimeId) +
+      detailRow('Capabilities', executor.capabilityCount) +
+      detailRow('Unsupported tools', executor.unsupportedToolCount) +
+      detailRow('Attested', formatClientTime(executor.attestedAt)) +
+      detailRow('Granted scopes', Array.isArray(executor.scopes) && executor.scopes.length ? executor.scopes.join(', ') : '—') +
+    '</dl>' +
+    '<div class="detail-section"><h4>Runtime registrations</h4>' + executorRuntimeList(runtimes) + '</div>' +
+    '<div class="detail-section"><h4>Tool capabilities</h4>' + executorCapabilityTable(capabilities) + '</div>';
+}
+
+function executorRuntimeList(runtimes) {
+  if (!Array.isArray(runtimes) || !runtimes.length) return '<p class="muted">No durable runtime registration.</p>';
+  return '<ul class="action-list">' + runtimes.map(function (runtime) {
+    return '<li><strong>' + escapeClient(runtime.runtimeId || 'runtime') + '</strong><small>' +
+      escapeClient((runtime.status || 'unknown') + ' · attested ' + formatClientTime(runtime.attestedAt)) +
+      '</small><small>' + escapeClient(Array.isArray(runtime.scopes) ? runtime.scopes.join(', ') : '') + '</small></li>';
+  }).join('') + '</ul>';
+}
+
+function executorCapabilityTable(capabilities) {
+  if (!Array.isArray(capabilities) || !capabilities.length) return '<p class="muted">No tool capabilities declared.</p>';
+  return '<div class="table-wrap"><table class="agent-table executor-capability-table"><thead><tr><th>Tool</th><th>Managed</th><th>Scope</th><th>Approval</th><th>Risk</th></tr></thead><tbody>' +
+    capabilities.map(function (capability) {
+      const scopes = Array.isArray(capability.scopes) ? capability.scopes.join(', ') : '';
+      const approval = capability.requiresApproval === undefined ? '—' : capability.requiresApproval ? 'required' : 'not required';
+      return '<tr><td><strong>' + escapeClient(capability.name || 'tool') + '</strong><small>' + escapeClient(capability.toolClass || '') + '</small></td>' +
+        '<td>' + pillMarkup(capability.managed || 'unknown') + '</td>' +
+        '<td>' + escapeClient(scopes || '—') + '</td>' +
+        '<td>' + escapeClient(approval) + '</td>' +
+        '<td>' + escapeClient(capability.riskClass || '—') + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
+}
+
+function connectorRowsMarkup(connectors) {
+  return connectors.map(function (connector) {
+    const id = escapeClient(connector.id);
+    const scopes = Array.isArray(connector.allowedScopes) ? connector.allowedScopes.join(', ') : '';
+    return '<tr class="agent-row connector-row" tabindex="0" data-connector="' + id + '">' +
+      '<td><strong>' + escapeClient(connector.displayName || connector.id) + '</strong><small>' + id + '</small></td>' +
+      '<td>' + pillMarkup(connector.status || 'unknown') + '</td>' +
+      '<td>' + escapeClient(String(connector.activeSessionCount || 0) + ' / ' + String(connector.sessionCount || 0)) + '</td>' +
+      '<td>' + escapeClient(scopes || '—') + '</td>' +
+      '<td>' + escapeClient(formatClientTime(connector.lastHeartbeatAt)) + '</td>' +
+    '</tr>';
+  }).join('');
+}
+
+function renderConnectorTable(connectors) {
+  const wrap = document.querySelector('#connectors .table-wrap');
+  if (!wrap) return;
+  if (!connectors.length) {
+    wrap.innerHTML = '<p class="empty">No registered connectors.</p>';
+    return;
+  }
+  wrap.innerHTML = '<table class="agent-table connector-table"><thead><tr><th>Connector</th><th>Status</th><th>Active sessions</th><th>Scopes</th><th>Last heartbeat</th></tr></thead><tbody>' + connectorRowsMarkup(connectors) + '</tbody></table>';
+  bindConnectorRows();
+}
+
+function bindConnectorRows() {
+  document.querySelectorAll('[data-connector]').forEach(function (row) {
+    const activate = function () {
+      selectedConnectorId = row.dataset.connector;
+      document.querySelectorAll('[data-connector]').forEach(function (candidate) { candidate.classList.remove('selected'); });
+      row.classList.add('selected');
+      loadConnectorDetail(selectedConnectorId);
+    };
+    row.addEventListener('click', activate);
+    row.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+}
+
+async function refreshConnectorRoster() {
+  try {
+    const body = await fetchJson('/api/connectors');
+    const connectors = Array.isArray(body.connectors) ? body.connectors : [];
+    const count = document.querySelector('#connector-count');
+    if (count) count.textContent = connectors.length + ' registered';
+    renderConnectorTable(connectors);
+    if (selectedConnectorId && connectors.some(function (connector) { return connector.id === selectedConnectorId; })) {
+      document.querySelectorAll('[data-connector]').forEach(function (row) {
+        if (row.dataset.connector === selectedConnectorId) row.classList.add('selected');
+      });
+    }
+  } catch (error) {
+    const detail = document.querySelector('#connector-detail');
+    if (detail && !selectedConnectorId) {
+      detail.innerHTML = '<div class="detail-error">Connector backend unavailable: ' + escapeClient(error.message) + '</div>';
+    }
+  }
+}
+
+async function loadConnectorDetail(id) {
+  const target = document.querySelector('#connector-detail');
+  if (!target || !id) return;
+  target.innerHTML = '<div class="detail-loading">Loading connector detail...</div>';
+  try {
+    const detail = await fetchJson('/api/connectors/' + encodeURIComponent(id));
+    renderConnectorDetail(target, detail.connector || {}, detail.sessions || []);
+  } catch (error) {
+    target.innerHTML = '<div class="detail-error">' + escapeClient(error.message) + '</div>';
+  }
+}
+
+function renderConnectorDetail(target, connector, sessions) {
+  const scopes = Array.isArray(connector.allowedScopes) ? connector.allowedScopes : [];
+  target.innerHTML = '<div class="detail-head"><div><h3>' + escapeClient(connector.displayName || connector.id || 'Connector') + '</h3><small>' + escapeClient(connector.id || '') + '</small></div><div>' + pillMarkup(connector.status || 'unknown') + '</div></div>' +
+    '<dl class="detail-grid">' +
+      detailRow('Active sessions', String(connector.activeSessionCount || 0) + ' / ' + String(connector.sessionCount || 0)) +
+      detailRow('Last heartbeat', formatClientTime(connector.lastHeartbeatAt)) +
+      detailRow('Next expiry', formatClientTime(connector.nextSessionExpiryAt)) +
+      detailRow('Updated', formatClientTime(connector.updatedAt)) +
+      detailRow('Public key fingerprint', connector.publicKeyFingerprint ? shortHash(connector.publicKeyFingerprint) : '—') +
+    '</dl>' +
+    '<div class="detail-section"><h4>Granted scopes</h4>' + capabilityList(scopes) + '</div>' +
+    '<div class="detail-section"><h4>Tunnel sessions</h4>' + connectorSessionTable(sessions) + '</div>';
+}
+
+function connectorSessionTable(sessions) {
+  if (!Array.isArray(sessions) || !sessions.length) return '<p class="muted">No tunnel sessions registered.</p>';
+  return '<div class="table-wrap"><table class="agent-table connector-session-table"><thead><tr><th>Tunnel</th><th>Session</th><th>Status</th><th>Heartbeat</th><th>Expires</th></tr></thead><tbody>' +
+    sessions.map(function (session) {
+      const status = session.effectiveStatus || session.status || 'unknown';
+      const reason = session.staleReason ? ' · ' + String(session.staleReason).replaceAll('_', ' ') : '';
+      return '<tr><td>' + escapeClient(session.tunnelId || '—') + '</td>' +
+        '<td>' + escapeClient(session.sessionId || '—') + '</td>' +
+        '<td>' + pillMarkup(status) + '<small>' + escapeClient(reason) + '</small></td>' +
+        '<td>' + escapeClient(formatClientTime(session.lastHeartbeatAt)) + '</td>' +
+        '<td>' + escapeClient(formatClientTime(session.expiresAt)) + '</td></tr>';
+    }).join('') + '</tbody></table></div>';
 }
 
 function detailRow(label, value) {
-  return '<div><dt>' + escapeClient(label) + '</dt><dd>' + escapeClient(redactClient(value || '—')) + '</dd></div>';
+  const shown = value === 0 ? '0' : value || '—';
+  return '<div><dt>' + escapeClient(label) + '</dt><dd>' + escapeClient(redactClient(shown)) + '</dd></div>';
 }
 
 function capabilityList(capabilities) {
@@ -964,6 +1237,7 @@ const viewAliases = {
   execution: 'execution',
   approvals: 'approvals',
   agents: 'agents',
+  executors: 'executors',
   connectors: 'connectors',
   'operator-metrics': 'metrics',
   metrics: 'metrics',
@@ -979,10 +1253,45 @@ function showView(name) {
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
   });
+  if (view === 'executors') refreshExecutorRoster();
+  if (view === 'connectors') refreshConnectorRoster();
   syncSystemProbes();
   syncMetricsPolling();
   syncLeaseExpiryWarningRefresh();
 }
+
+function openDashboardDrilldown(link) {
+  const view = link.dataset.dashboardView || 'overview';
+  const rawStatuses = link.dataset.dashboardStatuses;
+  if (rawStatuses !== undefined) {
+    const filter = {
+      statuses: String(rawStatuses).split(',').map(function (value) { return value.trim(); }).filter(Boolean),
+      risks: [],
+      agentId: '',
+      text: ''
+    };
+    syncQueueFilterControls(filter);
+    applyQueueFilterClient(filter);
+    writeQueueFilterToLocation(filter);
+  }
+  showView(view);
+  const url = new URL(location.href);
+  if (rawStatuses === undefined) {
+    url.search = '';
+  } else {
+    url.searchParams.delete('item');
+  }
+  url.hash = '#' + view;
+  history.replaceState(null, '', url.pathname + url.search + url.hash);
+}
+
+document.addEventListener('click', function (event) {
+  const link = event.target && event.target.closest ? event.target.closest('a[data-dashboard-view]') : null;
+  if (!link) return;
+  event.preventDefault();
+  openDashboardDrilldown(link);
+});
+
 document.addEventListener('visibilitychange', syncLeaseExpiryWarningRefresh);
 document.querySelector('aside nav')?.addEventListener('click', (event) => {
   const link = event.target.closest('a[data-nav]');

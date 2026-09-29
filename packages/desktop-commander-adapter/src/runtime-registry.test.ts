@@ -145,6 +145,26 @@ describe("SqliteDesktopCommanderRuntimeRegistry", () => {
     store.close();
   });
 
+  it("exposes read-only runtime records separately from capability issuance", () => {
+    const store = registry();
+    const bootstrap = store.issueBootstrap({
+      runtimeId: "runtime_1",
+      identityConfigFingerprint: identity,
+      scopes: ["fs.read", "fs.write"]
+    });
+    store.completeBootstrap(bootstrap);
+
+    expect(store.getRuntime("runtime_1")).toMatchObject({
+      runtimeId: "runtime_1",
+      identityConfigFingerprint: identity,
+      status: "active",
+      scopes: ["fs.read", "fs.write"]
+    });
+    expect(store.listRuntimes().map((runtime) => runtime.runtimeId)).toEqual(["runtime_1"]);
+    expect(store.getRuntime("missing")).toBeUndefined();
+    store.close();
+  });
+
   it("supersedes an unconsumed bootstrap challenge so immediate startup retry is safe", () => {
     const store = registry();
     const first = store.issueBootstrap({

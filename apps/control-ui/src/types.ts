@@ -23,6 +23,29 @@ export interface MissionControlAgent {
   metadata: Record<string, string>;
 }
 
+export interface MissionControlInfrastructureSummary {
+  agents: {
+    registered: number;
+    online: number;
+  };
+  executors: {
+    total: number;
+    configured: number;
+    attestedRuntimes: number;
+  };
+  connectors: {
+    registered: number;
+    enabled: number;
+    activeSessions: number;
+  };
+  admission: {
+    active: number;
+    capacity: number;
+    queued: number;
+    saturated: boolean;
+  };
+}
+
 export type MissionControlAttemptLease = Omit<AttemptLease, "tokenHash">;
 
 export function toMissionControlAttemptLease(lease: AttemptLease): MissionControlAttemptLease {
@@ -67,6 +90,8 @@ export interface MissionControlViewModel {
   attemptLeasesByWorkItem?: Record<string, MissionControlAttemptLease[]>;
   /** Explicit worker backend label, when the gateway knows it. Never a secret. */
   executionBackend?: string;
+  /** Canonical domain counts kept distinct: agents, executors, connectors, and execution admission. */
+  infrastructure?: MissionControlInfrastructureSummary;
   /** Exact per-status counts across the store. When present, cards use these instead of counting `workItems`. */
   statusCounts?: Record<string, number>;
   /** Recent `policy.decided` events for the Policy panel. Falls back to `events` when absent. */

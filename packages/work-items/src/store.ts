@@ -1081,6 +1081,9 @@ export interface WorkItemStore {
   rejectWorkItem(id: string, input?: unknown, options?: PrivilegedTransitionOptions): WorkItem;
   registerConnector(input: ConnectorRegistration): RegisteredConnector;
   rotateConnectorKey(input: ConnectorKeyRotation): RegisteredConnector;
+  listConnectors(): RegisteredConnector[];
+  getConnector(id: string): RegisteredConnector | undefined;
+  listTunnelSessions(connectorId?: string): RegisteredTunnelSession[];
   registerActor(input: ActorRegistration): RegistryActor;
   listActors(): RegistryActor[];
   resolveActorId(candidates: string[]): string | undefined;
@@ -3575,6 +3578,37 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
         .all(...params, limit) as unknown as EventRow[]
     ).map(rowToEvent);
+  }
+
+  listConnectors(): RegisteredConnector[] {
+    return (
+      this.db
+        .prepare(`SELECT * FROM connector_records ORDER BY display_name ASC, id ASC`)
+        .all() as unknown as ConnectorRow[]
+    ).map(rowToConnector);
+  }
+
+  getConnector(id: string): RegisteredConnector | undefined {
+    const row = this.db.prepare(`SELECT * FROM connector_records WHERE id = ?`).get(id) as unknown as
+      ConnectorRow | undefined;
+    return row ? rowToConnector(row) : undefined;
+  }
+
+  listTunnelSessions(connectorId?: string): RegisteredTunnelSession[] {
+    const rows = connectorId
+      ? (this.db
+          .prepare(
+            `SELECT * FROM tunnel_sessions
+             WHERE connector_id = ?
+             ORDER BY updated_at DESC, tunnel_id ASC, session_id ASC`
+          )
+          .all(connectorId) as unknown as TunnelSessionRow[])
+      : (this.db
+          .prepare(
+            `SELECT * FROM tunnel_sessions ORDER BY updated_at DESC, connector_id ASC, tunnel_id ASC, session_id ASC`
+          )
+          .all() as unknown as TunnelSessionRow[]);
+    return rows.map(rowToTunnelSession);
   }
 
   listActors(): RegistryActor[] {

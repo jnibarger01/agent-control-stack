@@ -65,7 +65,12 @@ export type {
 } from "./capability.js";
 
 export { SqliteDesktopCommanderRuntimeRegistry } from "./runtime-registry.js";
-export type { RuntimeAttestation, RuntimeBootstrapChallenge, CapabilityIssuanceBinding } from "./runtime-registry.js";
+export type {
+  RuntimeAttestation,
+  RuntimeBootstrapChallenge,
+  DesktopCommanderRuntimeRecord,
+  CapabilityIssuanceBinding
+} from "./runtime-registry.js";
 
 export { authorizeDesktopCommanderExecution, isExecutionAuthorization } from "./execution-authorization.js";
 export type { ExecutionAuthorization, AuthorizeExecutionInput } from "./execution-authorization.js";

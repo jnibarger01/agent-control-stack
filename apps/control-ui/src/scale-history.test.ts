@@ -188,7 +188,17 @@ describe("periodic system probes (#10)", () => {
       {
         "/readyz": (url) => {
           probes.push(url);
-          return { status, body: {} };
+          return {
+            status,
+            body: {
+              ok: status === 200,
+              checks: {
+                read: { ok: true },
+                write: { ok: status === 200, ...(status === 200 ? {} : { code: "write_unavailable" }) }
+              },
+              execution: { active: 1, capacity: 2, queued: 0, saturated: false }
+            }
+          };
         }
       }
     );
@@ -201,12 +211,15 @@ describe("periodic system probes (#10)", () => {
     expect(probes).toHaveLength(1);
     await app.advance(PROBE_INTERVAL_MS * 2);
     expect(probes).toHaveLength(3);
-    expect(app.text("#system-probes")).toContain("Failures (last 3)0");
+    expect(app.text("#system-probes")).toContain("Dependency checks2 passing");
+    expect(app.text("#system-probes")).toContain("Execution admission1 / 2 active · 0 queued");
+    expect(app.text("#system-probes")).toContain("Probe failures (last 3)0");
     expect(app.document.querySelector("#system-probes")?.getAttribute("data-state")).toBe("ok");
 
     status = 503;
     await app.advance(PROBE_INTERVAL_MS);
     expect(app.document.querySelector("#system-probes")?.getAttribute("data-state")).toBe("failing");
+    expect(app.text("#system-probes")).toContain("Dependency checksfailed: write");
     expect(app.text("#action-status")).toBe("Gateway readiness degraded");
     expect(app.document.querySelector(".probe-trend")?.textContent).toBe("▮▮▮▯");
 

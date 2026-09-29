@@ -9,7 +9,7 @@ import { nanoToIso } from "./format.js";
 import { type MissionControlAgent } from "./types.js";
 
 export function projectAgents(
-  workItems: WorkItem[],
+  _workItems: WorkItem[],
   events: StoredAuditEvent[],
   now = new Date(),
   registeredAgents: RegistryAgentDetail[] = []
@@ -44,30 +44,28 @@ export function projectAgents(
       status: projected.status,
       health: projected.health,
       capabilities: agent.capabilities.map((capability) => capability.name),
+      currentTask: agent.latestHeartbeat?.currentTask,
       lastHeartbeatAt: agent.lastHeartbeatAt,
       lastEventAt: agent.lastHeartbeatAt ?? agent.updatedAt,
       lastError: agent.lastError,
-      metadata: { registryStatus: agent.status, registered: "true" }
+      metadata: {
+        registryStatus: agent.status,
+        registered: "true",
+        acpRole: agent.acpRole,
+        ...(agent.provider ? { provider: agent.provider } : {}),
+        ...(agent.model ? { model: agent.model } : {})
+      }
     });
-  }
-
-  for (const item of workItems) {
-    const target = item.target.services?.[0] ?? item.target.repo ?? item.target.cwd;
-    if (target) touch(target, { kind: "target", currentTask: item.title, currentWorkItemId: item.id });
-    if (item.requester === "agent") touch("agent", { kind: "requester" });
   }
 
   for (const event of events) {
     const body = asRecord(event.body);
     const attrs = event.attributes ?? {};
-    const ids = [
-      attrs["worker.id"],
-      attrs["connector.id"],
-      attrs["auth.connector_id"],
-      body.connectorId,
-      body.workerId
-    ].filter((value): value is string => typeof value === "string" && value.length > 0);
-    for (const id of ids) {
+    const ids = [attrs["agent.id"], attrs["worker.id"], body.agentId, body.workerId].filter(
+      (value): value is string => typeof value === "string" && value.length > 0
+    );
+    for (const id of new Set(ids)) {
+      if (!agents.has(id)) continue;
       touch(id, eventPatch(id, event, body));
     }
   }
@@ -81,6 +79,13 @@ export function projectAgents(
 }
 function eventPatch(id: string, event: StoredAuditEvent, body: Record<string, unknown>): Partial<MissionControlAgent> {
   const patch: Partial<MissionControlAgent> = { lastEventAt: nanoToIso(event.timeUnixNano) };
+  const workItemId =
+    typeof event.attributes?.["work_item.id"] === "string"
+      ? event.attributes["work_item.id"]
+      : typeof body.workItemId === "string"
+        ? body.workItemId
+        : undefined;
+  if (workItemId) patch.currentWorkItemId = workItemId;
   if (typeof body.displayName === "string") patch.displayName = body.displayName;
   if (event.name.includes("heartbeat")) patch.lastHeartbeatAt = patch.lastEventAt;
   if (event.name.includes("revoked")) patch.status = "offline";

@@ -13,7 +13,16 @@ export const DISCOVERY_ERROR_MAX_LENGTH = 200;
 const EXECUTABLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
 
 export interface CanonicalDiscoveryTarget {
-  id: "codex-cli" | "claude-code" | "gemini-cli" | "opencode-local" | "hermes-local" | "openclaw-bridge" | "grok-cli" | "pi-cli";
+  id:
+    | "codex-cli"
+    | "claude-code"
+    | "gemini-cli"
+    | "opencode-local"
+    | "hermes-local"
+    | "openclaw-bridge"
+    | "muse-code"
+    | "grok-cli"
+    | "pi-cli";
   executable: string;
   probeArgs: readonly ["--version"];
   workerCapacity: boolean;
@@ -26,6 +35,7 @@ export const CANONICAL_DISCOVERY_TARGETS: readonly CanonicalDiscoveryTarget[] = 
   { id: "opencode-local", executable: "opencode", probeArgs: ["--version"], workerCapacity: true },
   { id: "hermes-local", executable: "hermes", probeArgs: ["--version"], workerCapacity: false },
   { id: "openclaw-bridge", executable: "openclaw", probeArgs: ["--version"], workerCapacity: false },
+  { id: "muse-code", executable: "muse", probeArgs: ["--version"], workerCapacity: false },
   { id: "grok-cli", executable: "grok", probeArgs: ["--version"], workerCapacity: true },
   { id: "pi-cli", executable: "pi", probeArgs: ["--version"], workerCapacity: true }
 ];

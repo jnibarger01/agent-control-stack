@@ -16,6 +16,7 @@ import {
   type ApprovalActionOption,
   type MissionControlAgent,
   type MissionControlAttemptLease,
+  type MissionControlInfrastructureSummary,
   type MissionControlViewModel
 } from "../types.js";
 import { auditAttributesHtml } from "../visibility.js";
@@ -70,41 +71,127 @@ export function queueFooter(input: MissionControlViewModel["finishedWorkItems"])
 
 const FINISHED_PAGE_STEP = 50;
 
-export function overviewCards(stats: ReturnType<typeof summarize>): string {
+export function overviewCards(
+  stats: ReturnType<typeof summarize>,
+  infrastructure?: MissionControlInfrastructureSummary
+): string {
+  const agents = infrastructure
+    ? `${toCount(infrastructure.agents.online)} / ${toCount(infrastructure.agents.registered)}`
+    : `${stats.onlineAgents} / ${stats.totalAgents}`;
+  const executors = infrastructure
+    ? `${toCount(infrastructure.executors.configured)} / ${toCount(infrastructure.executors.total)}`
+    : "—";
+  const connectors = infrastructure ? toCount(infrastructure.connectors.activeSessions) : "—";
+  const connectorHelp = infrastructure
+    ? `${toCount(infrastructure.connectors.enabled)} / ${toCount(infrastructure.connectors.registered)} registered connectors enabled`
+    : "Connector state unavailable in this render";
   const cards = [
-    ["Total Agents", stats.totalAgents, "Observed from persisted connector, tunnel, worker, and target events"],
-    ["Online Agents", stats.onlineAgents, "Only recent heartbeats count as online"],
-    ["Running Tasks", stats.running, "Lease-bound work currently running"],
-    [
-      "Needs Operator Attention",
-      stats.attention,
-      "Approvals, blocked, and quarantined work; the same set the queue marks for attention"
-    ],
-    ["Pending Approvals", stats.approvals, "Policy-gated work waiting on a human"],
-    ["Failed / Blocked", stats.failed, "Failed items plus blocked work"]
+    { label: "Agents", value: agents, help: "online by heartbeat / registered", view: "agents" },
+    { label: "Executors", value: executors, help: "configured / known execution bridges", view: "executors" },
+    { label: "Connectors", value: connectors, help: `active tunnel sessions · ${connectorHelp}`, view: "connectors" },
+    {
+      label: "Running Tasks",
+      value: stats.running,
+      help: "Lease-bound work currently running",
+      view: "execution",
+      statuses: "running"
+    },
+    {
+      label: "Needs Operator Attention",
+      value: stats.attention,
+      help: "Approvals, blocked, and quarantined work; the same set the queue marks for attention",
+      view: "queue",
+      statuses: "needs_approval,blocked,quarantined"
+    },
+    {
+      label: "Pending Approvals",
+      value: stats.approvals,
+      help: "Policy-gated work waiting on a human",
+      view: "approvals"
+    },
+    {
+      label: "Failed / Blocked",
+      value: stats.failed,
+      help: "Failed items plus blocked work",
+      view: "queue",
+      statuses: "failed,blocked"
+    }
   ];
   return cards
     .map(
-      ([label, value, help]) =>
-        `<article class="card"><span>${label}</span><strong>${value}</strong><p>${help}</p></article>`
+      ({ label, value, help, view, statuses }) =>
+        `<a class="card dashboard-card" href="#${view}" data-dashboard-view="${view}"${statuses ? ` data-dashboard-statuses="${statuses}"` : ""} aria-label="Open ${label}"><span>${label}</span><strong>${value}</strong><p>${help}</p><small class="card-action">Open →</small></a>`
     )
     .join("");
 }
 
+function agentRoleLabel(role: string | undefined): string {
+  if (!role) return "Role not reported";
+  return role
+    .toLowerCase()
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function agentInitial(agent: MissionControlAgent): string {
+  return (agent.displayName || agent.id).trim().charAt(0).toUpperCase() || "?";
+}
+
+function agentSummary(agents: MissionControlAgent[]): string {
+  const online = agents.filter((agent) => agent.status === "online").length;
+  const activeTasks = agents.filter((agent) => Boolean(agent.currentTask)).length;
+  const unavailable = agents.filter((agent) => agent.status === "stale" || agent.status === "offline").length;
+  return `<div class="agent-summary" id="agent-summary">
+    <div><span>Registered</span><strong>${agents.length}</strong></div>
+    <div><span>Online</span><strong>${online}</strong></div>
+    <div><span>Active tasks</span><strong>${activeTasks}</strong></div>
+    <div><span>Stale / offline</span><strong>${unavailable}</strong></div>
+  </div>`;
+}
+
+function agentCard(agent: MissionControlAgent): string {
+  const role = agentRoleLabel(agent.metadata.acpRole);
+  const providerModel = [agent.metadata.provider, agent.metadata.model].filter(Boolean).join(" · ");
+  const runtime = providerModel ? `${agent.kind} · ${providerModel}` : agent.kind;
+  const task = agent.currentTask ? escapeHtml(agent.currentTask) : "No active task reported";
+  const heartbeat = agent.lastHeartbeatAt ? `Heartbeat ${time(agent.lastHeartbeatAt)}` : "No heartbeat observed";
+  const capabilityCount = agent.capabilities.length;
+  const error = agent.lastError
+    ? `<span class="agent-card-error">${escapeHtml(redactSecrets(agent.lastError))}</span>`
+    : "";
+  return `<button type="button" class="agent-card" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}" aria-label="Open ${escapeHtml(agent.displayName)}">
+    <span class="agent-card-head">
+      <span class="agent-avatar" aria-hidden="true">${escapeHtml(agentInitial(agent))}</span>
+      <span class="agent-card-identity"><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></span>
+      ${pill(agent.status)}
+    </span>
+    <span class="agent-card-meta"><span>${escapeHtml(role)}</span><span>${escapeHtml(runtime)}</span></span>
+    <span class="agent-card-task"><small>Current task</small><span>${task}</span></span>
+    ${error}<span class="agent-card-foot"><span>${heartbeat}</span><span>${capabilityCount} capabilit${capabilityCount === 1 ? "y" : "ies"}</span></span>
+  </button>`;
+}
+
 export function agentTable(agents: MissionControlAgent[]): string {
-  if (!agents.length) return `<div class="table-wrap"><p class="empty">No agents or connectors observed.</p></div>`;
-  return `<div class="table-wrap"><table class="agent-table"><thead><tr><th>Agent</th><th>Type</th><th>Status</th><th>Health</th><th>Current task</th><th>Heartbeat</th><th>Last error</th></tr></thead><tbody id="agent-roster-body">${agents
-    .map(
-      (agent) =>
-        `<tr class="agent-row" tabindex="0" data-agent="${escapeHtml(agent.id)}" data-agent-id="${escapeHtml(agent.id)}"><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${escapeHtml(agent.kind)}</td><td>${pill(agent.status)}</td><td>${pill(agent.health)}</td><td>${agent.currentTask ? escapeHtml(agent.currentTask) : "—"}</td><td>${agent.lastHeartbeatAt ? time(agent.lastHeartbeatAt) : "—"}</td><td>${agent.lastError ? escapeHtml(redactSecrets(agent.lastError)) : "—"}</td></tr>`
-    )
-    .join("")}</tbody></table></div>`;
+  if (!agents.length) return `<div class="agent-roster"><p class="empty">No registered agents.</p></div>`;
+  return `<div class="agent-roster">${agentSummary(agents)}<div class="agent-card-grid" id="agent-roster-body">${agents
+    .map(agentCard)
+    .join("")}</div></div>`;
 }
 
 export function agentDetailPanel(): string {
   return `<section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
-    <div class="detail-empty"><h3>No agent selected</h3><p>Select a row to load the registry record.</p></div>
+    <div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>
   </section>`;
+}
+
+export function executorPanel(): string {
+  return `<div class="agent-layout executor-layout">
+    <div class="table-wrap"><p class="empty">Loading managed executors...</p></div>
+    <section id="executor-detail" class="detail-panel executor-detail" tabindex="-1" aria-live="polite" aria-label="Executor detail">
+      <div class="detail-empty"><h3>No executor selected</h3><p>Select a row to inspect runtime state and tool capabilities.</p></div>
+    </section>
+  </div>`;
 }
 
 export function queueFilterStrip(): string {
@@ -315,23 +402,38 @@ function formatDuration(ageMs: number | undefined): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export function systemStats(stats: ReturnType<typeof summarize>, executionBackend?: string): string {
+export function systemStats(
+  stats: ReturnType<typeof summarize>,
+  infrastructure?: MissionControlInfrastructureSummary,
+  executionBackend?: string
+): string {
   const backend = executionBackend ? escapeHtml(executionBackend) : "unset";
-  return `<dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl>`;
+  if (!infrastructure) {
+    return `<dl><div><dt>Agent heartbeats online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl>`;
+  }
+  const agents = infrastructure.agents;
+  const executors = infrastructure.executors;
+  const connectors = infrastructure.connectors;
+  const admission = infrastructure.admission;
+  return `<dl>
+    <div><dt>Agent heartbeats online</dt><dd>${toCount(agents.online)} / ${toCount(agents.registered)}</dd></div>
+    <div><dt>Executors configured</dt><dd>${toCount(executors.configured)} / ${toCount(executors.total)}</dd></div>
+    <div><dt>Attested executor runtimes</dt><dd>${toCount(executors.attestedRuntimes)}</dd></div>
+    <div><dt>Connectors enabled</dt><dd>${toCount(connectors.enabled)} / ${toCount(connectors.registered)}</dd></div>
+    <div><dt>Active tunnel sessions</dt><dd>${toCount(connectors.activeSessions)}</dd></div>
+    <div><dt>Execution admission</dt><dd>${toCount(admission.active)} / ${toCount(admission.capacity)} active</dd></div>
+    <div><dt>Admission queue</dt><dd>${toCount(admission.queued)}${admission.saturated ? " · saturated" : ""}</dd></div>
+    <div><dt>Execution backend</dt><dd>${backend}</dd></div>
+  </dl>`;
 }
 
-export function connectorsPanel(agents: MissionControlAgent[], executionBackend?: string): string {
-  const connectors = agents.filter((agent) => /connector|tunnel/i.test(agent.kind));
-  const backend = executionBackend ? escapeHtml(executionBackend) : "unset";
-  const rows = connectors.length
-    ? `<div class="table-wrap"><table><thead><tr><th>Connector</th><th>Status</th><th>Last event</th></tr></thead><tbody>${connectors
-        .map(
-          (agent) =>
-            `<tr><td><strong>${escapeHtml(agent.displayName)}</strong><small>${escapeHtml(agent.id)}</small></td><td>${pill(agent.status)}</td><td>${agent.lastEventAt ? time(agent.lastEventAt) : "—"}</td></tr>`
-        )
-        .join("")}</tbody></table></div>`
-    : `<p class="empty">No connectors observed.</p>`;
-  return `${rows}<p class="empty">Execution backend: ${backend}</p>`;
+export function connectorsPanel(): string {
+  return `<div class="agent-layout connector-layout">
+    <div class="table-wrap"><p class="empty">Loading registered connectors...</p></div>
+    <section id="connector-detail" class="detail-panel connector-detail" tabindex="-1" aria-live="polite" aria-label="Connector detail">
+      <div class="detail-empty"><h3>No connector selected</h3><p>Select a connector to inspect tunnel sessions and granted scopes.</p></div>
+    </section>
+  </div>`;
 }
 
 export function eventTimeline(events: StoredAuditEvent[]): string {
