@@ -254,8 +254,8 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .queue-filter { padding: 12px 14px; border-bottom: 1px solid var(--line); background: var(--surface); display: grid; gap: 10px; }
 .queue-filter-row { display: grid; gap: 8px; }
 .queue-filter-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
-.queue-filter-statuses { margin: 0; padding: 0; border: 0; }
-.queue-filter-statuses legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
+.queue-filter-statuses, .queue-filter-risks { margin: 0; padding: 0; border: 0; }
+.queue-filter-statuses legend, .queue-filter-risks legend { color: var(--muted); font-size: 11px; text-transform: uppercase; margin-bottom: 6px; }
 .queue-filter-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .queue-filter-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--control-line); background: var(--control-bg); border-radius: 999px; padding: 4px 10px; font-size: 12px; color: var(--ink); cursor: pointer; }
 .queue-filter-chip:has(input:checked) { border-color: var(--control-hover-line); background: var(--hover); color: var(--accent); }
@@ -456,6 +456,12 @@ body[data-active-view="overview"] #overview.cards { display: grid; }
     <fieldset class="queue-filter-statuses">
       <legend>Status</legend>
       <div class="queue-filter-chips"><label class="queue-filter-chip" for="queue-status-draft"><input type="checkbox" id="queue-status-draft" name="queue-status" value="draft" data-queue-status="draft" /> <span>draft</span></label><label class="queue-filter-chip" for="queue-status-pending_policy"><input type="checkbox" id="queue-status-pending_policy" name="queue-status" value="pending_policy" data-queue-status="pending_policy" /> <span>pending_policy</span></label><label class="queue-filter-chip" for="queue-status-needs_approval"><input type="checkbox" id="queue-status-needs_approval" name="queue-status" value="needs_approval" data-queue-status="needs_approval" /> <span>needs_approval</span></label><label class="queue-filter-chip" for="queue-status-approved"><input type="checkbox" id="queue-status-approved" name="queue-status" value="approved" data-queue-status="approved" /> <span>approved</span></label><label class="queue-filter-chip" for="queue-status-running"><input type="checkbox" id="queue-status-running" name="queue-status" value="running" data-queue-status="running" /> <span>running</span></label><label class="queue-filter-chip" for="queue-status-cancelling"><input type="checkbox" id="queue-status-cancelling" name="queue-status" value="cancelling" data-queue-status="cancelling" /> <span>cancelling</span></label><label class="queue-filter-chip" for="queue-status-succeeded"><input type="checkbox" id="queue-status-succeeded" name="queue-status" value="succeeded" data-queue-status="succeeded" /> <span>succeeded</span></label><label class="queue-filter-chip" for="queue-status-failed"><input type="checkbox" id="queue-status-failed" name="queue-status" value="failed" data-queue-status="failed" /> <span>failed</span></label><label class="queue-filter-chip" for="queue-status-blocked"><input type="checkbox" id="queue-status-blocked" name="queue-status" value="blocked" data-queue-status="blocked" /> <span>blocked</span></label><label class="queue-filter-chip" for="queue-status-cancelled"><input type="checkbox" id="queue-status-cancelled" name="queue-status" value="cancelled" data-queue-status="cancelled" /> <span>cancelled</span></label><label class="queue-filter-chip" for="queue-status-rejected"><input type="checkbox" id="queue-status-rejected" name="queue-status" value="rejected" data-queue-status="rejected" /> <span>rejected</span></label><label class="queue-filter-chip" for="queue-status-unknown"><input type="checkbox" id="queue-status-unknown" name="queue-status" value="unknown" data-queue-status="unknown" /> <span>unknown</span></label><label class="queue-filter-chip" for="queue-status-quarantined"><input type="checkbox" id="queue-status-quarantined" name="queue-status" value="quarantined" data-queue-status="quarantined" /> <span>quarantined</span></label></div>
+    </fieldset>
+  </div>
+  <div class="queue-filter-row">
+    <fieldset class="queue-filter-risks">
+      <legend>Risk</legend>
+      <div class="queue-filter-chips"><label class="queue-filter-chip" for="queue-risk-low"><input type="checkbox" id="queue-risk-low" name="queue-risk" value="low" data-queue-risk="low" /> <span>low</span></label><label class="queue-filter-chip" for="queue-risk-medium"><input type="checkbox" id="queue-risk-medium" name="queue-risk" value="medium" data-queue-risk="medium" /> <span>medium</span></label><label class="queue-filter-chip" for="queue-risk-high"><input type="checkbox" id="queue-risk-high" name="queue-risk" value="high" data-queue-risk="high" /> <span>high</span></label><label class="queue-filter-chip" for="queue-risk-critical"><input type="checkbox" id="queue-risk-critical" name="queue-risk" value="critical" data-queue-risk="critical" /> <span>critical</span></label></div>
     </fieldset>
   </div>
   <div class="queue-filter-row queue-filter-fields">
@@ -1950,15 +1956,24 @@ function knownQueueStatuses() {
   return new Set(['draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'cancelling', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected', 'unknown', 'quarantined']);
 }
 
+function knownQueueRisks() {
+  return new Set(["low","medium","high","critical"]);
+}
+
 function readQueueFilterFromDom() {
   const statuses = [];
   document.querySelectorAll('[data-queue-status]').forEach(function (input) {
     if (input.checked) statuses.push(input.getAttribute('data-queue-status') || input.value || '');
   });
+  const risks = [];
+  document.querySelectorAll('[data-queue-risk]').forEach(function (input) {
+    if (input.checked) risks.push(input.getAttribute('data-queue-risk') || input.value || '');
+  });
   const agentInput = document.querySelector('#queue-filter-agent');
   const textInput = document.querySelector('#queue-filter-text');
   return {
     statuses: statuses.filter(Boolean),
+    risks: risks.filter(Boolean),
     agentId: agentInput ? String(agentInput.value || '').trim() : '',
     text: textInput ? String(textInput.value || '').trim() : ''
   };
@@ -1966,7 +1981,7 @@ function readQueueFilterFromDom() {
 
 function parseQueueFilterFromLocation() {
   const params = new URLSearchParams(location.search || '');
-  if (![...params.keys()].some(function (key) { return key === 'status' || key === 'q' || key === 'text' || key === 'agent'; })) {
+  if (![...params.keys()].some(function (key) { return key === 'status' || key === 'risk' || key === 'q' || key === 'text' || key === 'agent'; })) {
     const hash = String(location.hash || '').replace(/^#/, '');
     const query = hash.includes('?') ? hash.slice(hash.indexOf('?') + 1)
       : hash.includes('=') ? hash.replace(/^[A-Za-z0-9_-]+&/, '')
@@ -1983,8 +1998,16 @@ function parseQueueFilterFromLocation() {
       if (status) statuses.push(status);
     });
   });
+  const risks = [];
+  params.getAll('risk').forEach(function (entry) {
+    String(entry).split(',').forEach(function (part) {
+      const risk = part.trim();
+      if (risk) risks.push(risk);
+    });
+  });
   return {
     statuses: statuses,
+    risks: risks,
     agentId: String(params.get('agent') || '').trim(),
     text: String(params.get('q') || params.get('text') || '').trim()
   };
@@ -1992,12 +2015,49 @@ function parseQueueFilterFromLocation() {
 
 function writeQueueFilterToLocation(filter) {
   const url = new URL(location.href);
-  url.searchParams.delete('status');
-  url.searchParams.delete('q');
-  url.searchParams.delete('text');
-  url.searchParams.delete('agent');
+  const filterKeys = ['status', 'risk', 'q', 'text', 'agent'];
+  filterKeys.forEach(function (key) { url.searchParams.delete(key); });
+
+  // Hash deep links are accepted on read (for example #queue?risk=high), so
+  // remove the same filter keys there before writing canonical query params.
+  // Otherwise a cleared filter reappears after reload when parsing the stale hash.
+  const rawHash = String(url.hash || '').replace(/^#/, '');
+  if (rawHash) {
+    const question = rawHash.indexOf('?');
+    const firstAmp = rawHash.indexOf('&');
+    const firstEq = rawHash.indexOf('=');
+    let anchor = '';
+    let delimiter = '';
+    let hashQuery = '';
+    if (question >= 0) {
+      anchor = rawHash.slice(0, question);
+      delimiter = '?';
+      hashQuery = rawHash.slice(question + 1);
+    } else if (firstAmp >= 0 && firstEq > firstAmp) {
+      anchor = rawHash.slice(0, firstAmp);
+      delimiter = '&';
+      hashQuery = rawHash.slice(firstAmp + 1);
+    } else if (firstEq >= 0) {
+      hashQuery = rawHash;
+    }
+
+    if (hashQuery) {
+      const hashParams = new URLSearchParams(hashQuery);
+      filterKeys.forEach(function (key) { hashParams.delete(key); });
+      const remainingHashParams = hashParams.toString();
+      if (anchor) {
+        url.hash = '#' + anchor + (remainingHashParams ? delimiter + remainingHashParams : '');
+      } else {
+        url.hash = remainingHashParams ? '#' + remainingHashParams : '';
+      }
+    }
+  }
+
   filter.statuses.forEach(function (status) {
     if (status) url.searchParams.append('status', status);
+  });
+  (filter.risks || []).forEach(function (risk) {
+    if (risk) url.searchParams.append('risk', risk);
   });
   if (filter.agentId) url.searchParams.set('agent', filter.agentId);
   if (filter.text) url.searchParams.set('q', filter.text);
@@ -2010,6 +2070,11 @@ function syncQueueFilterControls(filter) {
     const status = input.getAttribute('data-queue-status') || input.value || '';
     input.checked = selected.has(status);
   });
+  const selectedRisks = new Set((filter.risks || []).map(function (risk) { return String(risk).trim().toLowerCase(); }));
+  document.querySelectorAll('[data-queue-risk]').forEach(function (input) {
+    const risk = String(input.getAttribute('data-queue-risk') || input.value || '').trim().toLowerCase();
+    input.checked = selectedRisks.has(risk);
+  });
   const agentInput = document.querySelector('#queue-filter-agent');
   const textInput = document.querySelector('#queue-filter-text');
   if (agentInput) agentInput.value = filter.agentId || '';
@@ -2019,6 +2084,7 @@ function syncQueueFilterControls(filter) {
 function applyQueueFilterClient(filter) {
   const known = knownQueueStatuses();
   const knownStatuses = filter.statuses.filter(function (status) { return known.has(status); });
+  const knownRisks = (filter.risks || []).map(function (risk) { return String(risk).trim().toLowerCase(); }).filter(function (risk) { return knownQueueRisks().has(risk); });
   const text = String(filter.text || '').trim().toLowerCase();
   const agent = String(filter.agentId || '').trim().toLowerCase();
   const buttons = Array.from(document.querySelectorAll('[data-work-item]'));
@@ -2027,9 +2093,11 @@ function applyQueueFilterClient(filter) {
     const id = el.getAttribute('data-work-item') || '';
     const title = el.getAttribute('data-title') || '';
     const status = el.getAttribute('data-status') || '';
+    const risk = String(el.getAttribute('data-risk') || '').trim().toLowerCase();
     const agentId = (el.getAttribute('data-agent-id') || '').toLowerCase();
     let show = true;
     if (knownStatuses.length && knownStatuses.indexOf(status) === -1) show = false;
+    if (show && knownRisks.length && knownRisks.indexOf(risk) === -1) show = false;
     if (show && text) {
       const hay = (title + ' ' + id).toLowerCase();
       if (hay.indexOf(text) === -1) show = false;
@@ -2039,7 +2107,7 @@ function applyQueueFilterClient(filter) {
     el.classList.toggle('queue-item-filtered-out', !show);
     if (show) visible += 1;
   });
-  const effectivelyEmpty = !knownStatuses.length && !text && !agent;
+  const effectivelyEmpty = !knownStatuses.length && !knownRisks.length && !text && !agent;
   const count = document.querySelector('#queue-filter-count');
   if (count) count.textContent = effectivelyEmpty ? (buttons.length + ' items') : (visible + ' of ' + buttons.length + ' items');
   const live = document.querySelector('#queue-filter-live');
@@ -2061,7 +2129,7 @@ function bindQueueFilter() {
     writeQueueFilterToLocation(filter);
     applyQueueFilterClient(filter);
   };
-  document.querySelectorAll('[data-queue-status]').forEach(function (input) {
+  document.querySelectorAll('[data-queue-status], [data-queue-risk]').forEach(function (input) {
     input.addEventListener('change', applyFromDom);
   });
   const agentInput = document.querySelector('#queue-filter-agent');

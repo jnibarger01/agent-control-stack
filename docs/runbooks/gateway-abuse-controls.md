@@ -8,13 +8,13 @@ dashboard login and device-auth user-code entry. Pair with
 
 ## What is bounded by default
 
-| Control                    | Default                                | Effect                                                                                                                                                |
-| -------------------------- | -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Per-principal request rate | 120 requests / 60s                     | Sliding window on mutation, MCP, session login, and webhook routes.                                                                                   |
-| Auth failure lockout       | 5 failures / 15m                       | After N failed `/session/login` or `/device/verify` attempts, return `429 auth_lockout` and skip credential / user-code checks until the window ends. |
-| Pending work-item ceiling  | 1000                                   | Rejects new intake when draft/pending_policy/needs_approval/approved/running count is at the ceiling.                                                 |
-| Default JSON body limit    | 256 KiB                                | Global Fastify `bodyLimit` on the gateway; oversize bodies return `413 body_too_large`.                                                               |
-| Auth                       | Local bearer / credentials (see below) | Mutations and protected MCP tools require a configured principal.                                                                                     |
+| Control                    | Default                                | Effect                                                                                                                                                                                                               |
+| -------------------------- | -------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-principal request rate | 120 requests / 60s                     | Sliding window on mutation, MCP, session login, and webhook routes.                                                                                                                                                  |
+| Auth failure lockout       | 5 failures / 15m; 50,000 tracked keys  | After N failed `/session/login` or `/device/verify` attempts, return `429 auth_lockout`. If the bounded tracker is saturated, fresh keys fail closed until capacity is freed or the earliest tracked window expires. |
+| Pending work-item ceiling  | 1000                                   | Rejects new intake when draft/pending_policy/needs_approval/approved/running count is at the ceiling.                                                                                                                |
+| Default JSON body limit    | 256 KiB                                | Global Fastify `bodyLimit` on the gateway; oversize bodies return `413 body_too_large`.                                                                                                                              |
+| Auth                       | Local bearer / credentials (see below) | Mutations and protected MCP tools require a configured principal.                                                                                                                                                    |
 
 A burst from one principal therefore hits either `429 rate_limited` or
 `429 work_queue_full` instead of growing the queue without bound. Oversize JSON
@@ -47,6 +47,14 @@ checks until the window ends. Lockouts increment
 `acs_auth_lockout_total{route}` on `/metrics`. Raw tokens and user codes are
 never logged or stored in lockout keys—only the IP and a truncated SHA-256 of
 the normalized user code.
+
+The in-memory failure tracker is also bounded (50,000 tracked keys by default). If
+every slot is occupied by a live failure streak, an untracked principal receives
+the same structured `429 auth_lockout` response rather than evicting another
+principal and resetting its guess counter. This saturation-only refusal ends as
+soon as a successful authentication clears a tracked streak or a tracked window
+expires and frees capacity; it is not held until the original saturation marker's
+deadline once capacity is available again.
 
 ## Structured 429 responses
 
@@ -147,7 +155,7 @@ GET health/metrics/read routes are not rate-limited by this hook.
 ```sh
 npx vitest run apps/gateway/src/server.test.ts -t 'gateway abuse controls'
 npx vitest run apps/gateway/src/server.test.ts -t 'auth lockout'
-npx vitest run apps/gateway/src/auth-lockout.test.ts
+npx vitest run packages/shared/src/auth-lockout.test.ts
 npx vitest run apps/gateway/src/result-submission.test.ts -t 'HTTP request body limit'
 ```
 
