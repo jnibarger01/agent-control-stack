@@ -100,6 +100,7 @@ async function startFixture() {
     base,
     sessionId,
     reports,
+    stateDir,
     close: async () => {
       bridge.kill('SIGTERM');
       await new Promise((resolve) => bridge.once('exit', resolve));
@@ -167,6 +168,43 @@ async function waitForReport(fixture, suffix) {
   }
   throw new Error(`result report not observed for ${suffix}`);
 }
+
+test('JC bridge reuses the negotiated initialize result for new same-protocol sessions', async () => {
+  const fixture = await startFixture();
+  try {
+    const before = fs
+      .readFileSync(path.join(fixture.stateDir, 'received.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+      .filter((msg) => msg.method === 'initialize').length;
+    assert.equal(before, 1);
+
+    const response = await fetch(`${fixture.base}/mcp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'initialize',
+        params: { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'test-2', version: '1' } }
+      })
+    });
+    assert.equal(response.status, 200);
+    assert.ok(extractSseData(await response.text())?.result);
+    assert.ok(response.headers.get('mcp-session-id'));
+
+    const after = fs
+      .readFileSync(path.join(fixture.stateDir, 'received.jsonl'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+      .filter((msg) => msg.method === 'initialize').length;
+    assert.equal(after, 1, 'second downstream session should not reinitialize the canonical JC child');
+  } finally {
+    await fixture.close();
+  }
+});
 
 test('JC bridge reports successful governed execution with the JC worker identity', async () => {
   const fixture = await startFixture();
