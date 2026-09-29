@@ -536,6 +536,75 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       executionAdmission
     );
   });
+
+  it("revalidates admin mode after admission before consuming the admin approval", () => {
+    const delegate = testAdmission();
+    let markAdmissionEntered!: () => void;
+    let resumeAdmission!: () => void;
+    const admissionEntered = new Promise<void>((resolve) => {
+      markAdmissionEntered = resolve;
+    });
+    const admissionResume = new Promise<void>((resolve) => {
+      resumeAdmission = resolve;
+    });
+    const executionAdmission: ExecutionAdmissionController = {
+      acquire: async (request) => {
+        markAdmissionEntered();
+        await admissionResume;
+        return delegate.acquire(request);
+      },
+      shutdown: () => delegate.shutdown(),
+      snapshot: () => delegate.snapshot()
+    };
+
+    return withGateway(
+      async (ctx) => {
+        const admin = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${OP_TOKEN}` },
+          payload: { mode: "admin", reason: "queue admin request for mode-fence regression" }
+        });
+        expect(admin.statusCode).toBe(200);
+
+        const args = { path: join(ctx.root, "workspace", "queued-mode-transition") };
+        const pending = issue(ctx, "create_directory", args);
+        await admissionEntered;
+
+        const strict = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${OP_TOKEN}` },
+          payload: { mode: "strict", reason: "switch while JC request is queued" }
+        });
+        expect(strict.statusCode).toBe(200);
+
+        resumeAdmission();
+        const response = await pending;
+        expect(response.statusCode).toBe(403);
+        expect(response.json()).toMatchObject({
+          decision: "deny",
+          code: "admin_authorization_failed"
+        });
+        expect(response.json().capability).toBeUndefined();
+
+        const db = new DatabaseSync(ctx.dbPath);
+        try {
+          const issued = db
+            .prepare("SELECT COUNT(*) AS count FROM jace_commander_capability_issuances WHERE tool_name = ?")
+            .get("create_directory") as { count: number };
+          expect(issued.count).toBe(0);
+        } finally {
+          db.close();
+        }
+      },
+      true,
+      workspace,
+      healthyAuthority,
+      executionAdmission
+    );
+  });
+
 });
 
 describe("POST /jc/capability/issue: filesystem tools (fs.read, ACS containment)", () => {

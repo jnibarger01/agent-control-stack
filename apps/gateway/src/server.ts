@@ -2373,6 +2373,61 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
+          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
+            const modeAfterAdmission = readExecutionModeValue(workItems.getExecutionMode().raw);
+            if (modeAfterAdmission.state !== "ok" || modeAfterAdmission.mode !== "admin") {
+              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+              workItems.recordSystemEvent({
+                name: "execution_mode.auto_authorization_denied",
+                body: {
+                  code: "admin_authorization_failed",
+                  tool: invocation.toolName,
+                  workItemId: workItem.id,
+                  correlationId: body.correlationId ?? null,
+                  phase: "post_admission"
+                },
+                attributes: {
+                  "work_item.id": workItem.id,
+                  "execution_mode.mode":
+                    modeAfterAdmission.state === "ok" ? modeAfterAdmission.mode : modeAfterAdmission.state,
+                  "execution_mode.lane": "jc"
+                }
+              });
+              return reply.code(403).send({
+                decision: "deny",
+                code: "admin_authorization_failed",
+                reason: "canonical execution mode is no longer admin",
+                workItemId: workItem.id
+              });
+            }
+
+            const gateAfterAdmission = adminExecutionGate(readAuthority(), true);
+            if (!gateAfterAdmission.ok) {
+              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+              workItems.recordSystemEvent({
+                name: "execution_mode.auto_authorization_denied",
+                body: {
+                  code: gateAfterAdmission.code,
+                  tool: invocation.toolName,
+                  workItemId: workItem.id,
+                  correlationId: body.correlationId ?? null,
+                  phase: "post_admission"
+                },
+                attributes: {
+                  "work_item.id": workItem.id,
+                  "execution_mode.mode": "admin",
+                  "execution_mode.lane": "jc"
+                }
+              });
+              return reply.code(403).send({
+                decision: "deny",
+                code: gateAfterAdmission.code,
+                reason: gateAfterAdmission.detail,
+                workItemId: workItem.id
+              });
+            }
+          }
+
           const claimed = tools.claim_approved_work_item_by_id({
             id: workItem.id,
             workerId,
