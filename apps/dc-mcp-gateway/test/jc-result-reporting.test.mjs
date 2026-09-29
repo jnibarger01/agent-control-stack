@@ -219,3 +219,53 @@ test('JC bridge reports JSON-RPC executor errors as failed terminal results', as
     await fixture.close();
   }
 });
+
+test('a governed call dropped before routing still reports a failed terminal result', async () => {
+  // Regression: an already-authorized governed call (it carries an ACS-issued
+  // capability) can be dropped by the bridge before the generic result path
+  // runs - here because the session it names is gone. Nothing else would ever
+  // report it, so the attempt-bound execution-admission permit would be held
+  // for the whole ACS lease. The bridge must report the non-delivery, with the
+  // lease binding ACS validates against.
+  const fixture = await startFixture();
+  try {
+    const response = await fetch(`${fixture.base}/mcp`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+        'mcp-session-id': 'session-that-no-longer-exists'
+      },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 'abandoned',
+        method: 'tools/call',
+        params: {
+          name: 'acs_read',
+          arguments: { view: 'health' },
+          _meta: {
+            acsCapability: capability('acs_read', 'abandoned'),
+            acsLeaseBinding: {
+              claimActionHash: 'b'.repeat(64),
+              inputHash: 'd'.repeat(64),
+              workerId: 'acs-jc-bridge'
+            }
+          }
+        }
+      })
+    });
+    assert.equal(response.status, 400);
+    const report = await waitForReport(fixture, 'abandoned');
+    assert.equal(report.auth, 'Bearer jc-worker-token');
+    assert.equal(report.body.workerId, 'acs-jc-bridge');
+    assert.equal(report.body.outcome, 'failed');
+    assert.equal(report.body.attemptId, 'attempt_abandoned');
+    assert.equal(report.body.leaseId, 'lease_abandoned');
+    assert.equal(report.body.planHash, 'a'.repeat(64));
+    assert.equal(report.body.actionHash, 'b'.repeat(64));
+    assert.equal(report.body.inputHash, 'd'.repeat(64));
+    assert.equal(report.body.fencingEpoch, 1);
+  } finally {
+    await fixture.close();
+  }
+});

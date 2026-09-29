@@ -60,6 +60,8 @@ A successful admission permit is held for the real governed execution lifetime, 
 
 The permit is released when the authenticated terminal result callback matches that binding. Claim failure, authorization failure, capability issuance failure, evidence failure, and other pre-execution errors release immediately through `finally` paths. Release is idempotent.
 
+Every governed call that reaches a bridge with an ACS-issued capability must report a terminal result or terminal non-delivery. An already-authorized call that the bridge drops before routing — a session that closed first, a rejected gateway attestation, a fail-closed routing fault — is reported to ACS as a failed terminal result bound to the same attempt/lease/fencing authority, so the permit is not held for the full lease. This is transport reporting only: ACS revalidates every binding field and owns the resulting state transition.
+
 ACS leases remain the sole execution authority. Admission permits cannot execute anything and are intentionally ephemeral. `countActiveAttemptLeases()` is never used as a semaphore because a count-then-claim design would race. It is used only for reconciliation diagnostics.
 
 If bound permit accounting materially diverges from active lease state, ACS emits `scheduler_runtime_reconciliation_required`. The signal does not cancel or create leases, mutate attempts, change policy, alter capacity, or block control traffic.

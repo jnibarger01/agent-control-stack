@@ -17,6 +17,7 @@ import {
   E2E_ENABLED,
   attestDirect,
   dcRejection,
+  directCapabilityAdmission,
   desktopCommanderRuntimeId,
   requireDesktopCommanderBuild,
   sandbox,
@@ -52,7 +53,10 @@ describe.skipIf(!E2E_ENABLED)(
     beforeAll(async () => {
       requireDesktopCommanderBuild();
       box = sandbox("acs-dc-final-e2e-");
-      acs = await startAcs(box, await desktopCommanderRuntimeId(box), { ttlMs: TTL_MS });
+      acs = await startAcs(box, await desktopCommanderRuntimeId(box), {
+        ttlMs: TTL_MS,
+        executionAdmission: directCapabilityAdmission()
+      });
       dc = new DesktopCommanderStdio(box, acs.keys.publicKey);
       await attestDirect(acs, dc);
     }, 60_000);
@@ -162,7 +166,9 @@ describe.skipIf(!E2E_ENABLED)(
       requireDesktopCommanderBuild();
       acsBox = sandbox("acs-dc-runtime-a-");
       otherBox = sandbox("acs-dc-runtime-b-");
-      acs = await startAcs(acsBox, await desktopCommanderRuntimeId(acsBox));
+      acs = await startAcs(acsBox, await desktopCommanderRuntimeId(acsBox), {
+        executionAdmission: directCapabilityAdmission()
+      });
       attested = new DesktopCommanderStdio(acsBox, acs.keys.publicKey);
       await attestDirect(acs, attested);
       // A second, never-attested Desktop Commander runtime that trusts the same ACS key.

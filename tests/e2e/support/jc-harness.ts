@@ -43,6 +43,11 @@ export interface JcAcsHandle {
   app: FastifyInstance;
   publicKey: string;
   approve(workItemId: string, actionHash: string): Promise<number>;
+  /** Execution-admission snapshot: a control-plane read that needs no permit. */
+  admission(): Promise<{
+    global: { active: number; queued: number };
+    wait: { active: number; queued: number };
+  }>;
   close(): Promise<void>;
 }
 
@@ -98,6 +103,12 @@ export async function startJcAcs(box: Sandbox, allowedRoots: string[]): Promise<
           body: JSON.stringify({ actionHash, reason: "e2e operator approval" })
         })
       ).status,
+    admission: async () => {
+      const response = await fetch(`${url}/internal/execution-admission`, {
+        headers: { authorization: `Bearer ${OPERATOR_TOKEN}` }
+      });
+      return (await response.json()) as { global: { active: number; queued: number }; wait: { active: number; queued: number } };
+    },
     close: () => app.close()
   };
 }
@@ -127,7 +138,12 @@ export async function startJcBridge(
       JC_TRACE_ROOTS: join(box.root, "traces"),
       JC_MISSION_ROUTER_DIR: join(box.root, "mission-router"),
       JC_FS_ROOTS: fsRoots.join(":"),
-      DC_GATEWAY_EXECUTION_TOKEN: EXECUTION_TOKEN
+      DC_GATEWAY_EXECUTION_TOKEN: EXECUTION_TOKEN,
+      // The JC bridge reports each governed call's terminal result to ACS, which
+      // releases the attempt-bound execution-admission permit. Without these the
+      // permit is held for the full lease and the executor serializes forever.
+      ACS_GATEWAY_URL: acs.url,
+      ACS_WORKER_TOKEN: JC_BRIDGE_TOKEN
     },
     port,
     "/healthz"

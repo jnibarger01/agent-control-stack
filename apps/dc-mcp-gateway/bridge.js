@@ -270,6 +270,37 @@ function submitAcsFailure(route, reason) {
   });
 }
 
+/**
+ * Terminal-report every governed tools/call that was authorized (carries an ACS
+ * capability) but whose response the bridge drops before the generic result path
+ * can run. Such a call will never be routed, so no terminal result would ever
+ * reach ACS and the attempt-bound execution-admission permit would be held for
+ * the whole lease. ACS still validates the binding and owns the transition; this
+ * only reports observed non-delivery.
+ */
+function reportAbandonedRoutes(routes, reason) {
+  for (const route of routes || []) {
+    if (route?.capability) submitAcsFailure(route, reason);
+  }
+}
+
+/**
+ * Capability route material for the governed tools/call messages in a body:
+ * the ACS capability envelope plus the lease/result binding the edge derived
+ * from ACS's issuance response. Both are transport-only; ACS revalidates every
+ * field before accepting the terminal result.
+ */
+function governedRouteBindings(messages) {
+  return (Array.isArray(messages) ? messages : [messages])
+    .filter((msg) => msg && msg.method === 'tools/call')
+    .map((msg) => ({
+      capability: msg.params?._meta?.[JC ? ACS_GUARD_META_KEY : ACS_CAPABILITY_META_KEY],
+      leaseBinding: msg.params?._meta?.acsLeaseBinding,
+      inputHash: msg.params?._meta?.acsLeaseBinding?.inputHash,
+    }))
+    .filter((route) => route.capability);
+}
+
 function sendJsonRpcError(res, status, code, message) {
   if (res.headersSent) return res.destroy();
   res.writeHead(status, { 'Content-Type': 'application/json' });
@@ -628,21 +659,38 @@ const httpServer = http.createServer(async (req, res) => {
 
   if (EXECUTION_TOKEN && req.method === 'POST') {
     const att = req.headers['x-dc-attestation'];
-    if (att && !verifyAttestation(att, req.headers['x-dc-agent'])) { console.error('bridge: invalid gateway attestation; rejecting without forward'); return sendJsonRpcError(res, 400, -32001, 'gateway attestation invalid'); }
+    if (att && !verifyAttestation(att, req.headers['x-dc-agent'])) {
+      console.error('bridge: invalid gateway attestation; rejecting without forward');
+      let dropped = null;
+      try { dropped = await readJsonBody(req); } catch { /* unreadable body: nothing to report */ }
+      reportAbandonedRoutes(governedRouteBindings(dropped), 'bridge rejected the request before governed execution (attestation invalid)');
+      return sendJsonRpcError(res, 400, -32001, 'gateway attestation invalid');
+    }
   }
 
   const sid = req.headers['mcp-session-id'];
   let session = sid ? pair.sessions.get(sid) : null;
-  if (sid && (!session || session.closed)) return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+  if (sid && (!session || session.closed)) {
+    let dropped = null;
+    try { dropped = await readJsonBody(req); } catch { /* unreadable body: nothing to report */ }
+    reportAbandonedRoutes(governedRouteBindings(dropped), 'bridge dropped the request before governed execution (session closed)');
+    return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+  }
   try {
     let body;
     if (req.method === 'POST') body = await readJsonBody(req);
     if (req.method === 'POST') {
       const messages = Array.isArray(body) ? body : [body];
       const initialization = messages.some(isInitialize);
-      if (!session && !initialization) return sendJsonRpcError(res, 400, -32000, 'Mcp-Session-Id header is required');
+      if (!session && !initialization) {
+        reportAbandonedRoutes(governedRouteBindings(messages), 'bridge dropped the request before governed execution (session id required)');
+        return sendJsonRpcError(res, 400, -32000, 'Mcp-Session-Id header is required');
+      }
       if (!session) session = createSession(req.headers);
-    } else if (!session) return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+    } else if (!session) {
+      reportAbandonedRoutes(governedRouteBindings([body]), 'bridge dropped the request before governed execution (session closed)');
+      return sendJsonRpcError(res, 400, -32001, 'session unknown; reconnect and re-initialize');
+    }
     lastDebug.last_headers = req.headers;
     await session.transport.handleRequest(req, res, body);
   } catch (e) {
