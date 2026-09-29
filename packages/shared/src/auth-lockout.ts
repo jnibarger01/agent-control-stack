@@ -137,8 +137,7 @@ export class AuthFailureLockout {
           // extra guesses, so fail closed: persist the overflow marker and
           // return locked decisions that isLocked will honor until the
           // earliest tracked window expires.
-          const until =
-            earliestExpiry === Infinity ? now + this.options.windowMs : earliestExpiry;
+          const until = earliestExpiry === Infinity ? now + this.options.windowMs : earliestExpiry;
           if (until > this.overflowLockedUntil) this.overflowLockedUntil = until;
           for (const key of fresh) byKey.set(key, this.overflowDecision(now));
         }

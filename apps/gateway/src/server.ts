@@ -78,7 +78,14 @@ import {
   type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
 import { ObservationWorker } from "@agent-control-stack/evidence";
-import { ControlStackError, stableHash } from "@agent-control-stack/shared";
+import {
+  AuthFailureLockout,
+  ControlStackError,
+  DEFAULT_AUTH_LOCKOUT_MAX_FAILURES,
+  DEFAULT_AUTH_LOCKOUT_WINDOW_MS,
+  stableHash,
+  type AuthLockoutOptions
+} from "@agent-control-stack/shared";
 import {
   executionActionHash,
   executionPlanApprovalRequestHash,
@@ -148,12 +155,6 @@ import {
   webhookIngestSchema
 } from "./public-contracts.js";
 import { SlidingWindowRateLimiter, type RateLimitOptions } from "./rate-limit.js";
-import {
-  AuthFailureLockout,
-  DEFAULT_AUTH_LOCKOUT_MAX_FAILURES,
-  DEFAULT_AUTH_LOCKOUT_WINDOW_MS,
-  type AuthLockoutOptions
-} from "./auth-lockout.js";
 import { GatewayMetrics } from "./metrics.js";
 import {
   GATEWAY_SHUTTING_DOWN_CODE,

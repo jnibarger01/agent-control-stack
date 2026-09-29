@@ -11,7 +11,7 @@ import {
   DeviceAuthStore,
   type DeviceAuthorizationSummary
 } from "./device-auth-store.js";
-import type { AuthFailureLockout } from "./auth-lockout.js";
+import type { AuthFailureLockout } from "@agent-control-stack/shared";
 import type { SlidingWindowRateLimiter } from "./rate-limit.js";
 import {
   gatewayCredentialCanMutate,

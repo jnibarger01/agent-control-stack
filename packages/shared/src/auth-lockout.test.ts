@@ -38,9 +38,9 @@ describe("AuthFailureLockout", () => {
 
   it("rejects capacities below the two buckets required by device verification", () => {
     for (const maxBuckets of [0, 1, 1.5]) {
-      expect(
-        () => new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets })
-      ).toThrow("auth-lockout maxBuckets must be an integer of at least 2");
+      expect(() => new AuthFailureLockout({ windowMs: 60_000, maxFailures: 3, maxBuckets })).toThrow(
+        "auth-lockout maxBuckets must be an integer of at least 2"
+      );
     }
   });
 
