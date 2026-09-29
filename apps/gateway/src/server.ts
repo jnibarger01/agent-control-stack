@@ -342,6 +342,30 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
   const observationWorker = new ObservationWorker(workItems, { config: { enabled: jevObservationEnabled } });
   observationWorker.start();
+
+  // Reconciliation mutates registry state and must never be paid by /readyz.
+  // Keep it on a background cadence instead of the request path.
+  const reconcileLiveness = () => {
+    try {
+      workItems.reconcileStaleTunnelSessions();
+      workItems.reconcileStaleAgents();
+    } catch (error) {
+      app.log.warn({ err: error }, "background liveness reconciliation failed");
+    }
+  };
+  const livenessReconcileIntervalMs = Math.max(5_000, Math.min(30_000, Math.floor(heartbeatTtlMs / 3)));
+  const livenessReconcileTimer = setInterval(reconcileLiveness, livenessReconcileIntervalMs);
+  livenessReconcileTimer.unref();
+
+  // Host prerequisites change rarely. Cache the potentially expensive sandbox
+  // probe so readiness never spawns subprocesses on the request path.
+  let cachedSandboxReadyzCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
+
+  // Prime deep database invariants once. /readyz reuses these cached invariant
+  // checks and combines them with a bounded live read/write probe.
+  let cachedDeepHealth = workItems.health();
+  let cachedDeepHealthAt = new Date().toISOString();
+
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
@@ -652,8 +676,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/healthz", async () => ({ ok: true, status: "alive" }));
 
   const readiness = async (_request: FastifyRequest, reply: FastifyReply) => {
+    const startedAt = Date.now();
     const execution = executionAdmission.snapshot();
     const executionView = {
+      accepting: execution.accepting,
       saturated: execution.saturated,
       active: execution.global.active,
       capacity: execution.global.capacity,
@@ -662,31 +688,60 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       waitCapacity: execution.wait.capacity,
       waitQueued: execution.wait.queued
     };
-    const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
-    const initialHealth = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
-    const dependencyChecks = Object.entries(initialHealth.checks)
-      .filter(([name]) => name !== "liveness")
-      .map(([, check]) => check);
-    if (!dependencyChecks.every((check) => check.ok)) {
-      return reply.code(503).send({ ...initialHealth, execution: executionView });
-    }
-    try {
-      workItems.reconcileStaleTunnelSessions();
-      workItems.reconcileStaleAgents();
-    } catch {
-      const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
-      return reply.code(503).send({
-        ...health,
-        execution: executionView,
-        ok: false,
-        checks: { ...health.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
-      });
-    }
-    const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
+
+    const storeStartedAt = Date.now();
+    const quick = workItems.readiness();
+    metrics.observeDurationMs("acs_readyz_store_ms", Date.now() - storeStartedAt);
+
+    // Integrity/FK/migration checks are expensive full-database diagnostics.
+    // Preserve their latest known state without rescanning the database here.
+    const checks = {
+      ...quick.checks,
+      integrity: cachedDeepHealth.checks.integrity,
+      foreignKeys: cachedDeepHealth.checks.foreignKeys,
+      migrations: cachedDeepHealth.checks.migrations,
+      admission: execution.accepting
+        ? ({ ok: true } as const)
+        : ({ ok: false, code: "execution_admission_closed" } as const)
+    };
+    const baseHealth = {
+      ok:
+        checks.read.ok &&
+        checks.write.ok &&
+        checks.auditChain.ok &&
+        checks.integrity.ok &&
+        checks.foreignKeys.ok &&
+        checks.migrations.ok &&
+        checks.admission.ok,
+      checks
+    };
+    const health = mergeSandboxReadyzCheck(baseHealth, cachedSandboxReadyzCheck);
+    metrics.setSqliteReady(health.ok);
+    metrics.observeDurationMs("acs_readyz_total_ms", Date.now() - startedAt);
     return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
   };
+
+  const detailedHealth = async (_request: FastifyRequest, reply: FastifyReply) => {
+    cachedSandboxReadyzCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
+    cachedDeepHealth = workItems.health();
+    cachedDeepHealthAt = new Date().toISOString();
+    const health = mergeSandboxReadyzCheck(cachedDeepHealth, cachedSandboxReadyzCheck);
+    metrics.setSqliteReady(health.ok);
+    return reply.code(health.ok ? 200 : 503).send({ ...health, checkedAt: cachedDeepHealthAt });
+  };
+
+  const cachedHealthDetails = async (_request: FastifyRequest, reply: FastifyReply) => {
+    const health = mergeSandboxReadyzCheck(cachedDeepHealth, cachedSandboxReadyzCheck);
+    return reply.code(health.ok ? 200 : 503).send({
+      ...health,
+      checkedAt: cachedDeepHealthAt,
+      cached: true
+    });
+  };
+
   app.get("/readyz", readiness);
-  app.get("/health", readiness);
+  app.get("/health", detailedHealth);
+  app.get("/health/details", cachedHealthDetails);
 
   const readAuthority = options.readManagedAuthority ?? (() => observeLiveManagedAuthority());
   const executionModeView = () => {
@@ -744,7 +799,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
-    const health = workItems.health();
+    const health = workItems.readiness();
     metrics.setSqliteReady(health.ok);
     refreshAdmissionMetrics();
     return reply.type("text/plain; version=0.0.4").send(metrics.render());
@@ -900,7 +955,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   // Dashboard-internal: operator totals from the same registry /metrics renders.
   app.get("/dashboard/metrics", { preHandler: requireRead }, async (_request, reply) => {
-    metrics.setSqliteReady(workItems.health().ok);
+    metrics.setSqliteReady(workItems.readiness().ok);
     reply.header("cache-control", "no-store");
     return { at: new Date().toISOString(), metrics: metrics.summary() };
   });
@@ -2573,6 +2628,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   app.addHook("onClose", async () => {
+    clearInterval(livenessReconcileTimer);
     executionAdmission.shutdown();
     for (const attemptId of [...admissionPermits.keys()]) releaseAdmissionPermit(attemptId);
     await observationWorker.stop();

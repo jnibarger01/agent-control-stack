@@ -398,6 +398,32 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("keeps deep database health scans off the readiness request path", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-readyz-fast-path-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const deepHealth = vi.spyOn(SqliteWorkItemStore.prototype, "health");
+
+    try {
+      const ready = await app.inject({ method: "GET", url: "/readyz" });
+      expect(ready.statusCode).toBe(200);
+      expect(deepHealth).not.toHaveBeenCalled();
+
+      const details = await app.inject({ method: "GET", url: "/health/details" });
+      expect(details.statusCode).toBe(200);
+      expect(details.json()).toMatchObject({ cached: true, checkedAt: expect.any(String) });
+      expect(deepHealth).not.toHaveBeenCalled();
+
+      const health = await app.inject({ method: "GET", url: "/health" });
+      expect(health.statusCode).toBe(200);
+      expect(deepHealth).toHaveBeenCalledTimes(1);
+    } finally {
+      deepHealth.mockRestore();
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("uses integrity and foreign-key verification in the readiness contract", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-health-foreign-key-"));
     const dbPath = join(dir, "control.db");
@@ -601,11 +627,12 @@ describe("mission control gateway", () => {
     }
   });
 
-  it("reconciles stale tunnel sessions and agents before reporting readiness", async () => {
+  it("keeps stale liveness reconciliation off the readiness request path", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-readiness-liveness-"));
     const dbPath = join(dir, "control.db");
-    const staleAt = new Date(Date.now() - 901_000);
-    const seed = new SqliteWorkItemStore(dbPath);
+    const heartbeatTtlMs = 900_000;
+    const staleAt = new Date(Date.now() - heartbeatTtlMs - 1_000);
+    const seed = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs });
     seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
     seed.registerConnector({
       id: "connector",
@@ -631,26 +658,31 @@ describe("mission control gateway", () => {
     });
     seed.recordAgentHeartbeat("stale-agent", { status: "AVAILABLE", actorId: "user", now: staleAt });
     seed.close();
-    const app = buildTestGateway({ dbPath, logger: false });
+    const app = buildTestGateway({ dbPath, logger: false, heartbeatTtlMs });
     let appClosed = false;
 
     try {
       const ready = await app.inject({ method: "GET", url: "/readyz" });
       expect(ready.statusCode).toBe(200);
-      expect(ready.json()).toMatchObject({ ok: true, checks: { liveness: { ok: true } } });
+      expect(ready.json()).toMatchObject({
+        ok: true,
+        checks: { admission: { ok: true } },
+        execution: { accepting: true }
+      });
+      expect(ready.json().checks.liveness).toBeUndefined();
       await app.close();
       appClosed = true;
 
-      const check = new SqliteWorkItemStore(dbPath);
+      const check = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs });
       try {
-        expect(check.getRegistryAgent("stale-agent")).toMatchObject({ status: "OFFLINE" });
+        expect(check.getRegistryAgent("stale-agent")).toMatchObject({ status: "AVAILABLE" });
         expect(
           check.getTunnelSession({ connectorId: "connector", tunnelId: "tunnel", sessionId: "session" })
         ).toMatchObject({
-          status: "revoked"
+          status: "active"
         });
-        expect(check.readEvents().filter((event) => event.name === "agent.reconciled")).toHaveLength(1);
-        expect(check.readEvents().filter((event) => event.name === "tunnel_session.reconciled")).toHaveLength(1);
+        expect(check.readEvents().filter((event) => event.name === "agent.reconciled")).toHaveLength(0);
+        expect(check.readEvents().filter((event) => event.name === "tunnel_session.reconciled")).toHaveLength(0);
       } finally {
         check.close();
       }

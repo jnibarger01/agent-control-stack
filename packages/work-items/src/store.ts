@@ -463,6 +463,19 @@ export interface StoreHealth {
   };
 }
 
+/**
+ * Bounded-latency readiness contract used by latency-sensitive gateway probes.
+ * Deep integrity / FK / migration scans remain in health().
+ */
+export interface StoreReadiness {
+  ok: boolean;
+  checks: {
+    read: HealthCheck;
+    write: HealthCheck;
+    auditChain: HealthCheck;
+  };
+}
+
 interface EventRow {
   sequence: number;
   id: string;
@@ -1069,6 +1082,7 @@ export interface WorkItemStore {
   }): CommandAuthority | undefined;
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
   health(): StoreHealth;
+  readiness(): StoreReadiness;
   verifyAuditChain(): AuditChainVerification;
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem;
   approveWorkItem(id: string, options?: PrivilegedTransitionOptions): WorkItem;
@@ -3626,6 +3640,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
       liveness: this.livenessHealth()
     };
     return { ok: Object.values(checks).every((check) => check.ok), checks };
+  }
+
+  readiness(): StoreReadiness {
+    const checks = {
+      read: this.readHealth(),
+      write: this.writeHealth(),
+      auditChain: this.auditChainValid ? okHealth() : failHealth("audit_chain_invalid")
+    };
+    return { ok: checks.read.ok && checks.write.ok && checks.auditChain.ok, checks };
   }
 
   transition(id: string, status: WorkItemStatus, options?: PrivilegedTransitionOptions): WorkItem {
