@@ -925,6 +925,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const ids = workItemList.map((workItem) => workItem.id);
     const attempts = executionReads.listExecutionAttemptsForWorkItems(ids);
     const leases = executionReads.listAttemptLeasesForWorkItems(ids);
+    const now = new Date();
+    const events = workItems.readEvents(eventReadOptions(request.query));
+    const registeredAgents = workItems.listRegistryAgents();
+    const projectedAgents = projectAgents(workItemList, events, now, registeredAgents);
+    const executors = executorSummaries();
+    const connectors = workItems.listConnectors();
+    const enabledConnectorIds = new Set(
+      connectors.filter((connector) => connector.status === "active").map((connector) => connector.id)
+    );
+    const tunnelSessions = workItems.listTunnelSessions();
+    const admission = executionAdmission.snapshot();
     return {
       workItems: workItemList,
       statusCounts: dashboard.statusCounts,
@@ -933,8 +944,35 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         total: dashboard.finishedTotal,
         limit: dashboard.finishedLimit
       },
-      events: workItems.readEvents(eventReadOptions(request.query)),
-      registeredAgents: workItems.listRegistryAgents(),
+      events,
+      registeredAgents,
+      agents: projectedAgents,
+      infrastructure: {
+        agents: {
+          registered: registeredAgents.length,
+          online: projectedAgents.filter((agent) => agent.status === "online").length
+        },
+        executors: {
+          total: executors.length,
+          configured: executors.filter((executor) => executor.configured).length,
+          attestedRuntimes: executors.filter((executor) => executor.status === "active").length
+        },
+        connectors: {
+          registered: connectors.length,
+          enabled: enabledConnectorIds.size,
+          activeSessions: tunnelSessions.filter(
+            (session) =>
+              enabledConnectorIds.has(session.connectorId) &&
+              projectTunnelSession(session, heartbeatTtlMs).effectiveStatus === "active"
+          ).length
+        },
+        admission: {
+          active: admission.global.active,
+          capacity: admission.global.capacity,
+          queued: admission.global.queued,
+          saturated: admission.saturated
+        }
+      },
       approvalActionsByWorkItem: approvalActionsByWorkItem(
         policy,
         workItemList,
@@ -947,6 +985,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       executionBackend: reportedExecutionBackend(),
       composerActionKinds: [...SUPPORTED_ACTION_KINDS],
       policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW }),
+      now,
       ...dashboardExecutionMode()
     };
   }

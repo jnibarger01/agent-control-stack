@@ -90,6 +90,38 @@ describe("renderDashboard", () => {
     expect(html).toContain('data-execution-mode="strict"');
   });
 
+  it("keeps agents, executors, connectors, and admission as distinct overview and system domains", () => {
+    const html = renderDashboard({
+      workItems: [workItem],
+      events: [],
+      executionBackend: "desktop-commander",
+      infrastructure: {
+        agents: { registered: 8, online: 3 },
+        executors: { total: 2, configured: 2, attestedRuntimes: 1 },
+        connectors: { registered: 2, enabled: 1, activeSessions: 4 },
+        admission: { active: 2, capacity: 3, queued: 1, saturated: false }
+      },
+      now: new Date("2026-07-05T00:01:00.000Z")
+    });
+
+    expect(html).toContain("<span>Agents</span><strong>3 / 8</strong>");
+    expect(html).toContain("<span>Executors</span><strong>2 / 2</strong>");
+    expect(html).toContain("<span>Connectors</span><strong>4</strong>");
+    expect(html).toContain("1 / 2 registered connectors enabled");
+    expect(html).toContain("Agent heartbeats online");
+    expect(html).toContain("Executors configured");
+    expect(html).toContain("Attested executor runtimes");
+    expect(html).toContain("Connectors enabled");
+    expect(html).toContain("Active tunnel sessions");
+    expect(html).toContain("Execution admission");
+    expect(html).toContain("2 / 3 active");
+    expect(html).toContain("Admission queue");
+    expect(html).toContain("System Status");
+    expect(html).toContain("Dependency checks");
+    expect(html).not.toContain("Total Agents");
+    expect(html).not.toContain("Online Agents");
+  });
+
   it("renders an operator metrics panel with lease age, approval wait, and /metrics scrape notes", () => {
     const lease = {
       leaseId: "lease_ops",

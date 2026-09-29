@@ -48,7 +48,7 @@ export function renderDashboardFragments(
   // panel, and the metrics-panel breach count must always agree.
   const approvalSlaMs = model.approvalSlaMs === undefined ? DEFAULT_APPROVAL_SLA_MS : toCount(model.approvalSlaMs);
   return {
-    cards: overviewCards(stats),
+    cards: overviewCards(stats, model.infrastructure),
     queueList: workQueueItems(
       model.workItems,
       model.executionPlansByWorkItem ?? {},
@@ -65,7 +65,7 @@ export function renderDashboardFragments(
     ),
     approvalsCount: `${approvalItems.length} waiting`,
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now, approvalSlaMs),
-    systemStats: systemStats(stats, model.executionBackend),
+    systemStats: systemStats(stats, model.infrastructure, model.executionBackend),
     policy: policyPanelHtml(
       summarizePolicyDecisions(model.policyDecisionEvents ?? model.events ?? []),
       model.composerActionKinds ?? [],

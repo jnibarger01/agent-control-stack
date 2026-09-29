@@ -80,6 +80,15 @@ describe("mission control gateway", () => {
           allowedScopes: ["acs:work:create", "acs:work:read"]
         }
       });
+      await app.inject({
+        method: "POST",
+        url: "/connectors/chatgpt-prod/tunnel-sessions",
+        payload: {
+          tunnelId: "mission-control-tunnel",
+          sessionId: "mission-control-session",
+          expiresAt: new Date(Date.now() + 60_000).toISOString()
+        }
+      });
       const created = await app.inject({
         method: "POST",
         url: "/work-items",
@@ -99,6 +108,15 @@ describe("mission control gateway", () => {
       expect(page.statusCode).toBe(200);
       expect(page.body).toContain("ACS Mission Control");
       expect(page.body).toContain("Inspect route");
+      expect(page.body).toContain("<span>Agents</span>");
+      expect(page.body).toContain("<span>Executors</span>");
+      expect(page.body).toContain("<span>Connectors</span><strong>1</strong>");
+      expect(page.body).toContain("1 / 1 registered connectors enabled");
+      expect(page.body).toContain("Agent heartbeats online");
+      expect(page.body).toContain("Executors configured");
+      expect(page.body).toContain("Connectors enabled");
+      expect(page.body).toContain("Execution admission");
+      expect(page.body).toContain("System Status");
       const agentIds = agents.json().agents.map((agent: { id: string }) => agent.id);
       expect(agentIds).toEqual(
         expect.arrayContaining(["codex-cli", "claude-code", "hermes-local", "openclaw-bridge", "muse-code"])

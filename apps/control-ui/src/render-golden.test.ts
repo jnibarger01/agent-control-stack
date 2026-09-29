@@ -171,6 +171,35 @@ const richModel: MissionControlViewModel = {
   workItems: [needsApproval, blocked, running, quarantined, succeeded],
   events,
   registeredAgents: [],
+  agents: [
+    {
+      id: "hermes-local",
+      displayName: "Hermes Agent",
+      kind: "service",
+      status: "online",
+      health: "healthy",
+      currentTask: "coordinate implementation",
+      lastHeartbeatAt: "2026-07-05T00:39:30.000Z",
+      lastEventAt: "2026-07-05T00:39:30.000Z",
+      capabilities: ["orchestrate"],
+      metadata: { registered: "true", acpRole: "ORCHESTRATION_LAYER" }
+    },
+    {
+      id: "codex-cli",
+      displayName: "Codex CLI",
+      kind: "cli",
+      status: "offline",
+      health: "unknown",
+      capabilities: ["code:implement"],
+      metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+    }
+  ],
+  infrastructure: {
+    agents: { registered: 2, online: 1 },
+    executors: { total: 2, configured: 1, attestedRuntimes: 1 },
+    connectors: { registered: 1, enabled: 1, activeSessions: 1 },
+    admission: { active: 1, capacity: 2, queued: 0, saturated: false }
+  },
   approvalActionsByWorkItem: {
     [needsApproval.id]: [{ actionHash: "d".repeat(64), kind: "fs.read", description: "inspect source" }]
   },

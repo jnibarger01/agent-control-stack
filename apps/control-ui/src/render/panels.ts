@@ -16,6 +16,7 @@ import {
   type ApprovalActionOption,
   type MissionControlAgent,
   type MissionControlAttemptLease,
+  type MissionControlInfrastructureSummary,
   type MissionControlViewModel
 } from "../types.js";
 import { auditAttributesHtml } from "../visibility.js";
@@ -70,10 +71,24 @@ export function queueFooter(input: MissionControlViewModel["finishedWorkItems"])
 
 const FINISHED_PAGE_STEP = 50;
 
-export function overviewCards(stats: ReturnType<typeof summarize>): string {
+export function overviewCards(
+  stats: ReturnType<typeof summarize>,
+  infrastructure?: MissionControlInfrastructureSummary
+): string {
+  const agents = infrastructure
+    ? `${toCount(infrastructure.agents.online)} / ${toCount(infrastructure.agents.registered)}`
+    : `${stats.onlineAgents} / ${stats.totalAgents}`;
+  const executors = infrastructure
+    ? `${toCount(infrastructure.executors.configured)} / ${toCount(infrastructure.executors.total)}`
+    : "—";
+  const connectors = infrastructure ? toCount(infrastructure.connectors.activeSessions) : "—";
+  const connectorHelp = infrastructure
+    ? `${toCount(infrastructure.connectors.enabled)} / ${toCount(infrastructure.connectors.registered)} registered connectors enabled`
+    : "Connector state unavailable in this render";
   const cards = [
-    ["Total Agents", stats.totalAgents, "Canonical agents from the persisted agent registry"],
-    ["Online Agents", stats.onlineAgents, "Only recent heartbeats count as online"],
+    ["Agents", agents, "online by heartbeat / registered"],
+    ["Executors", executors, "configured / known execution bridges"],
+    ["Connectors", connectors, `active tunnel sessions · ${connectorHelp}`],
     ["Running Tasks", stats.running, "Lease-bound work currently running"],
     [
       "Needs Operator Attention",
@@ -324,9 +339,29 @@ function formatDuration(ageMs: number | undefined): string {
   return `${hours}h ${minutes % 60}m`;
 }
 
-export function systemStats(stats: ReturnType<typeof summarize>, executionBackend?: string): string {
+export function systemStats(
+  stats: ReturnType<typeof summarize>,
+  infrastructure?: MissionControlInfrastructureSummary,
+  executionBackend?: string
+): string {
   const backend = executionBackend ? escapeHtml(executionBackend) : "unset";
-  return `<dl><div><dt>Agents online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Running tasks</dt><dd>${stats.running}</dd></div><div><dt>Pending approvals</dt><dd>${stats.approvals}</dd></div><div><dt>Failed or blocked</dt><dd>${stats.failed}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl>`;
+  if (!infrastructure) {
+    return `<dl><div><dt>Agent heartbeats online</dt><dd>${stats.onlineAgents} / ${stats.totalAgents}</dd></div><div><dt>Execution backend</dt><dd>${backend}</dd></div></dl>`;
+  }
+  const agents = infrastructure.agents;
+  const executors = infrastructure.executors;
+  const connectors = infrastructure.connectors;
+  const admission = infrastructure.admission;
+  return `<dl>
+    <div><dt>Agent heartbeats online</dt><dd>${toCount(agents.online)} / ${toCount(agents.registered)}</dd></div>
+    <div><dt>Executors configured</dt><dd>${toCount(executors.configured)} / ${toCount(executors.total)}</dd></div>
+    <div><dt>Attested executor runtimes</dt><dd>${toCount(executors.attestedRuntimes)}</dd></div>
+    <div><dt>Connectors enabled</dt><dd>${toCount(connectors.enabled)} / ${toCount(connectors.registered)}</dd></div>
+    <div><dt>Active tunnel sessions</dt><dd>${toCount(connectors.activeSessions)}</dd></div>
+    <div><dt>Execution admission</dt><dd>${toCount(admission.active)} / ${toCount(admission.capacity)} active</dd></div>
+    <div><dt>Admission queue</dt><dd>${toCount(admission.queued)}${admission.saturated ? " · saturated" : ""}</dd></div>
+    <div><dt>Execution backend</dt><dd>${backend}</dd></div>
+  </dl>`;
 }
 
 export function connectorsPanel(): string {

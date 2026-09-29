@@ -210,7 +210,7 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 .execution-mode label { display: block; margin-top: 4px; }
 .admin-mode-banner { margin: 0 0 14px; padding: 12px 14px; border: 2px solid var(--admin-banner-line); background: var(--admin-banner-bg); color: var(--admin-banner-ink); border-radius: 8px; font-weight: 800; letter-spacing: .02em; }
 .admin-mode-banner[hidden] { display: none; }
-.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; margin-bottom: 14px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
 .card, .panel { border: 1px solid var(--line); background: var(--surface); border-radius: 8px; box-shadow: 0 10px 24px var(--shadow); }
 .card { padding: 15px; min-height: 108px; }
 .card span, .panel-head span { color: var(--muted); font-size: 12px; text-transform: uppercase; }
