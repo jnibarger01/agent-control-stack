@@ -171,6 +171,7 @@ export function toolCalledEvent(auth: ExecutionAuthorization): AuditEventDraft {
 /** Capability evidence intentionally excludes nonce, signature, and arguments. */
 export function capabilityIssuedEvent(input: {
   auth: ExecutionAuthorization;
+  capabilityId: string;
   runtimeId: string;
   keyId: string;
   requestHash: string;
@@ -182,6 +183,8 @@ export function capabilityIssuedEvent(input: {
       workItemId: input.auth.workItemId,
       attemptId: input.auth.attemptId,
       leaseId: input.auth.leaseId,
+      capabilityId: input.capabilityId,
+      tool: input.auth.toolName,
       runtimeId: input.runtimeId,
       keyId: input.keyId,
       requestHash: input.requestHash,
@@ -189,6 +192,8 @@ export function capabilityIssuedEvent(input: {
     },
     attributes: {
       ...executionAuditAttributes(input.auth),
+      "capability.id": input.capabilityId,
+      "capability.contract": "acs.dc.v1",
       "desktop_commander.runtime_id": input.runtimeId,
       "desktop_commander.key_id": input.keyId,
       "execution.request_hash": input.requestHash

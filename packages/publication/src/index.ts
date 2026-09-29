@@ -1,4 +1,9 @@
 import { runBoundedCommand, subprocessEnv } from "@agent-control-stack/machine-controller";
+import type {
+  PublicationBlockExternalState,
+  PublicationBlockStage,
+  RecordPublicationBlockedInput
+} from "@agent-control-stack/work-items";
 
 const GIT_COMMAND_TIMEOUT_MS = 120_000;
 const GIT_COMMAND_TERMINATION_GRACE_MS = 5_000;
@@ -9,9 +14,30 @@ const DEFAULT_COMMIT_AUTHOR_EMAIL = "acs-bot@users.noreply.github.com";
 const DEFAULT_REMOTE = "origin";
 const CONFIGURED_REMOTE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u;
 
+class PublicationBlockedError extends Error {
+  constructor(
+    readonly stage: PublicationBlockStage,
+    readonly reasonCode: string,
+    readonly externalState: PublicationBlockExternalState,
+    message: string
+  ) {
+    super(message);
+    this.name = "PublicationBlockedError";
+  }
+}
+
+function blocked(
+  stage: PublicationBlockStage,
+  reasonCode: string,
+  message: string,
+  externalState: PublicationBlockExternalState = "none"
+): never {
+  throw new PublicationBlockedError(stage, reasonCode, externalState, message);
+}
+
 function validateGitRemote(remote: string): string {
   if (!CONFIGURED_REMOTE_NAME.test(remote)) {
-    throw new Error("publication refused: git remote must be a configured remote name");
+    blocked("push", "remote_invalid", "publication refused: git remote must be a configured remote name");
   }
   return remote;
 }
@@ -28,6 +54,7 @@ export interface PublicationRecord {
 export interface PublicationStore {
   getByIdempotency(key: string): PublicationRecord | undefined;
   record(record: PublicationRecord): PublicationRecord;
+  recordBlocked(input: Omit<RecordPublicationBlockedInput, "now">): void;
   /**
    * The attempt's own persisted, independently-run validation outcome -
    * never the caller's self-reported claim. Publication trusts only what
@@ -38,7 +65,13 @@ export interface PublicationStore {
   planAllowsPush(workItemId: string): boolean;
 }
 export interface PullRequestClient {
-  createOrUpdate(input: { branch: string; commitSha: string; title: string; body: string; idempotencyKey: string }): Promise<{ url: string }>;
+  createOrUpdate(input: {
+    branch: string;
+    commitSha: string;
+    title: string;
+    body: string;
+    idempotencyKey: string;
+  }): Promise<{ url: string }>;
 }
 export interface PublicationInput {
   workItemId: string;
@@ -73,34 +106,75 @@ const publicationLocks = new Map<string, Promise<void>>();
  * attempt's own convention-owned branch, any workspace with nothing staged to publish,
  * and any lease that goes stale mid-flight all abort before touching the remote.
  */
-export async function publishValidatedAttempt(input: PublicationInput, store: PublicationStore, github: PullRequestClient): Promise<PublicationRecord> {
+export async function publishValidatedAttempt(
+  input: PublicationInput,
+  store: PublicationStore,
+  github: PullRequestClient
+): Promise<PublicationRecord> {
   const idempotencyKey = `publication:${input.workItemId}`;
   const previous = publicationLocks.get(idempotencyKey);
   let release!: () => void;
-  const current = new Promise<void>((resolve) => { release = resolve; });
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
   publicationLocks.set(idempotencyKey, current);
   await previous;
   try {
     return await publishValidatedAttemptUnlocked(input, store, github);
+  } catch (error) {
+    const failure =
+      error instanceof PublicationBlockedError
+        ? error
+        : new PublicationBlockedError("unknown", "unexpected_failure", "unknown", "publication failed");
+    try {
+      store.recordBlocked({
+        workItemId: input.workItemId,
+        attemptId: input.attemptId,
+        stage: failure.stage,
+        reasonCode: failure.reasonCode,
+        externalState: failure.externalState
+      });
+    } catch {
+      // Promotion is already blocked. Audit/trace recording must never mask or
+      // relax the original fail-closed publication decision.
+    }
+    throw error;
   } finally {
     release();
     if (publicationLocks.get(idempotencyKey) === current) publicationLocks.delete(idempotencyKey);
   }
 }
 
-async function publishValidatedAttemptUnlocked(input: PublicationInput, store: PublicationStore, github: PullRequestClient): Promise<PublicationRecord> {
+async function publishValidatedAttemptUnlocked(
+  input: PublicationInput,
+  store: PublicationStore,
+  github: PullRequestClient
+): Promise<PublicationRecord> {
   const validation = store.getValidationRunForAttempt(input.attemptId);
   if (!validation || !validation.passed) {
-    throw new Error("publication requires a persisted, independently-run passing validation for this attempt");
+    blocked(
+      "validation",
+      "validation_not_passed",
+      "publication requires a persisted, independently-run passing validation for this attempt"
+    );
   }
-  if (!(await input.leaseIsCurrent())) throw new Error("publication requires a current lease");
+  if (!(await input.leaseIsCurrent()))
+    blocked("lease_entry", "lease_not_current", "publication requires a current lease");
   if (!store.planAllowsPush(input.workItemId)) {
-    throw new Error("publication refused: the work item's current execution plan does not authorize a push");
+    blocked(
+      "plan_authorization",
+      "push_not_authorized",
+      "publication refused: the work item's current execution plan does not authorize a push"
+    );
   }
 
   const expectedBranch = attemptBranch(input.attemptId);
   if (input.branch !== expectedBranch) {
-    throw new Error(`publication refused: branch "${input.branch}" is not owned by attempt "${input.attemptId}" (expected "${expectedBranch}")`);
+    blocked(
+      "branch_binding",
+      "branch_not_owned",
+      `publication refused: branch "${input.branch}" is not owned by attempt "${input.attemptId}" (expected "${expectedBranch}")`
+    );
   }
 
   const idempotencyKey = `publication:${input.workItemId}`;
@@ -116,54 +190,94 @@ async function publishValidatedAttemptUnlocked(input: PublicationInput, store: P
   // from an unintended base while the check above still reports "passed".
   const actualBranch = await run(["symbolic-ref", "--quiet", "--short", "HEAD"]);
   if (actualBranch.exitCode !== 0 || !actualBranch.stdout.trim()) {
-    throw new Error("publication refused: workspace HEAD is detached, expected a checkout of the attempt's own branch");
+    blocked(
+      "workspace_branch",
+      "workspace_detached",
+      "publication refused: workspace HEAD is detached, expected a checkout of the attempt's own branch"
+    );
   }
   if (actualBranch.stdout.trim() !== expectedBranch) {
-    throw new Error(
+    blocked(
+      "workspace_branch",
+      "workspace_branch_mismatch",
       `publication refused: workspace is actually on branch "${actualBranch.stdout.trim()}", not the attempt's own branch "${expectedBranch}"`
     );
   }
 
   const statusBefore = await run(["status", "--porcelain"]);
-  if (statusBefore.exitCode !== 0) throw new Error(`git status failed: ${statusBefore.stderr}`);
+  if (statusBefore.exitCode !== 0)
+    blocked("workspace_staging", "git_status_failed", `git status failed: ${statusBefore.stderr}`);
 
   const add = await run(["add", "-A"]);
-  if (add.exitCode !== 0) throw new Error(`git add failed: ${add.stderr}`);
+  if (add.exitCode !== 0) blocked("workspace_staging", "git_add_failed", `git add failed: ${add.stderr}`);
 
   const staged = await run(["diff", "--cached", "--name-only"]);
-  if (staged.exitCode !== 0) throw new Error(`git diff --cached --name-only failed: ${staged.stderr}`);
+  if (staged.exitCode !== 0)
+    blocked("workspace_staging", "git_staged_list_failed", `git diff --cached --name-only failed: ${staged.stderr}`);
   let commitSha: string;
   let alreadyPushed = false;
   if (!staged.stdout.trim()) {
     const current = await run(["rev-parse", "HEAD"]);
-    if (current.exitCode !== 0 || !current.stdout.trim()) throw new Error("publication refused: no staged changes to publish after git add -A");
+    if (current.exitCode !== 0 || !current.stdout.trim())
+      blocked(
+        "workspace_staging",
+        "no_staged_changes",
+        "publication refused: no staged changes to publish after git add -A"
+      );
     const remote = validateGitRemote(input.remote ?? DEFAULT_REMOTE);
     const remoteHead = await run(["ls-remote", "--heads", "--", remote, input.branch]);
     const remoteSha = remoteHead.stdout.trim().split(/\s+/u)[0];
     if (remoteHead.exitCode !== 0 || remoteSha !== current.stdout.trim()) {
-      throw new Error("publication refused: no staged changes to publish after git add -A");
+      blocked(
+        "workspace_staging",
+        "no_staged_changes",
+        "publication refused: no staged changes to publish after git add -A"
+      );
     }
     commitSha = current.stdout.trim();
     alreadyPushed = true;
   } else {
     const diffCheck = await run(["diff", "--cached", "--check"]);
-    if (diffCheck.exitCode !== 0) throw new Error(`git diff --cached --check failed: ${diffCheck.stderr || diffCheck.stdout}`);
+    if (diffCheck.exitCode !== 0)
+      blocked(
+        "workspace_staging",
+        "git_diff_check_failed",
+        `git diff --cached --check failed: ${diffCheck.stderr || diffCheck.stdout}`
+      );
     const authorName = input.commitAuthorName ?? DEFAULT_COMMIT_AUTHOR_NAME;
     const authorEmail = input.commitAuthorEmail ?? DEFAULT_COMMIT_AUTHOR_EMAIL;
     const headline = input.commitMessage?.trim() || input.title;
-    const commitResult = await run(["-c", `user.name=${authorName}`, "-c", `user.email=${authorEmail}`, "commit", "-m", headline, "-m", input.body]);
-    if (commitResult.exitCode !== 0) throw new Error(`git commit failed: ${commitResult.stderr || commitResult.stdout}`);
+    const commitResult = await run([
+      "-c",
+      `user.name=${authorName}`,
+      "-c",
+      `user.email=${authorEmail}`,
+      "commit",
+      "-m",
+      headline,
+      "-m",
+      input.body
+    ]);
+    if (commitResult.exitCode !== 0)
+      blocked("commit", "git_commit_failed", `git commit failed: ${commitResult.stderr || commitResult.stdout}`);
     const commit = await run(["rev-parse", "HEAD"]);
-    if (commit.exitCode !== 0 || !commit.stdout.trim()) throw new Error("unable to resolve publication commit");
+    if (commit.exitCode !== 0 || !commit.stdout.trim())
+      blocked("commit", "commit_resolution_failed", "unable to resolve publication commit");
     commitSha = commit.stdout.trim();
   }
 
-  if (!(await input.leaseIsCurrent())) throw new Error("lease became stale before publication push");
+  if (!(await input.leaseIsCurrent()))
+    blocked(
+      "lease_pre_push",
+      "lease_not_current",
+      "lease became stale before publication push",
+      alreadyPushed ? "branch_pushed" : "none"
+    );
 
   if (!alreadyPushed) {
     const remote = validateGitRemote(input.remote ?? DEFAULT_REMOTE);
     const push = await run(["push", "--set-upstream", "--", remote, `HEAD:refs/heads/${input.branch}`]);
-    if (push.exitCode !== 0) throw new Error(`git push failed: ${push.stderr || push.stdout}`);
+    if (push.exitCode !== 0) blocked("push", "git_push_failed", `git push failed: ${push.stderr || push.stdout}`);
   }
 
   // The push already landed and cannot be un-pushed, but every mutation
@@ -173,13 +287,58 @@ async function publishValidatedAttemptUnlocked(input: PublicationInput, store: P
   // (not only once before the first one) bounds how much a lease loss
   // mid-flight can still cause, instead of trusting one stale boolean for
   // the whole remaining sequence.
-  if (!(await input.leaseIsCurrent())) throw new Error("lease became stale after publication push, before PR creation");
+  if (!(await input.leaseIsCurrent()))
+    blocked(
+      "lease_post_push",
+      "lease_not_current",
+      "lease became stale after publication push, before PR creation",
+      "branch_pushed"
+    );
 
-  const pullRequest = await github.createOrUpdate({ branch: input.branch, commitSha, title: input.title, body: input.body, idempotencyKey });
+  let pullRequest: { url: string };
+  try {
+    pullRequest = await github.createOrUpdate({
+      branch: input.branch,
+      commitSha,
+      title: input.title,
+      body: input.body,
+      idempotencyKey
+    });
+  } catch (error) {
+    blocked(
+      "pull_request",
+      "pull_request_failed",
+      error instanceof Error ? error.message : "GitHub pull request operation failed",
+      "branch_pushed"
+    );
+  }
 
-  if (!(await input.leaseIsCurrent())) throw new Error("lease became stale after PR creation, before persisting the publication record");
+  if (!(await input.leaseIsCurrent()))
+    blocked(
+      "lease_post_pr",
+      "lease_not_current",
+      "lease became stale after PR creation, before persisting the publication record",
+      "pull_request_created"
+    );
 
-  return store.record({ publicationId: `publication-${input.workItemId}`, workItemId: input.workItemId, attemptId: input.attemptId, branch: input.branch, commitSha, pullRequestUrl: pullRequest.url, idempotencyKey });
+  try {
+    return store.record({
+      publicationId: `publication-${input.workItemId}`,
+      workItemId: input.workItemId,
+      attemptId: input.attemptId,
+      branch: input.branch,
+      commitSha,
+      pullRequestUrl: pullRequest.url,
+      idempotencyKey
+    });
+  } catch (error) {
+    blocked(
+      "record",
+      "publication_record_failed",
+      error instanceof Error ? error.message : "publication record persistence failed",
+      "pull_request_created"
+    );
+  }
 }
 
 async function runGit(git: string, args: string[], cwd: string) {

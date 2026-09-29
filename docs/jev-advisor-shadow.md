@@ -112,19 +112,24 @@ a separate design/ADR and evidence review.
 
 ## JEV-3 canonical trace observation
 
-JEV-3 extends the same advisory-only boundary to execution evidence. ACS now
-vendors the exact canonical trace-event/1 schema bytes published from LoopTrace
-commit `49aca302a1c5f0d12813c73ca4149f2fc7afefd4`, pinned by SHA-256
-`5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434`; ACS does
-not maintain a private schema fork and does not vendor the LoopTrace commit
-itself.
+JEV-3 extends the same advisory-only boundary to execution evidence. Its
+original LoopTrace lifecycle publication was commit
+`49aca302a1c5f0d12813c73ca4149f2fc7afefd4` with schema SHA-256
+`5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434`.
+Phase 3 extends that canonical source first with ACS-bound
+`capability.issued`; the current ACS vendored schema pin is
+`8b694731594466f5a83d6132df84a07421a472a1d618e34bf74259c9444051a0`.
+ACS does not maintain a private schema fork and does not vendor the LoopTrace
+repository or commit itself.
 
 The lifecycle vocabulary adds source-neutral evidence kinds for run start/end,
 classification and route evidence, approval request/decision, executor start,
 tool start/finish, verification start/finish, promotion block/completion, run
 failure/completion, and replay divergence. Existing
 `acs.approval.granted`/`acs.approval.consumed` remain valid and
-source-bound to ACS.
+source-bound to ACS. Phase 3 adds `capability.issued`, also source-bound to
+ACS; Jev may observe its bounded projection, but it cannot authorize, issue,
+consume, or reject a capability.
 
 Jace Commander's private trace is never sent directly to Jev. The desktop
 commander adapter first verifies the JC private hash chain and maps lifecycle
@@ -132,6 +137,19 @@ events into canonical `trace-event/1` events. A supplied canonical ACS
 `trace_id`/`work_item_id` is reused; otherwise only observational trace
 correlation is derived. Raw argv, credential/token/capability material, and
 secret-shaped values are removed before canonical payload hashing.
+
+Phase 4 additionally projects the lease-authorized Desktop Commander execution
+boundary from ACS audit events: `executor.started`, `tool.call.started`, and
+`tool.call.finished`. Phase 5 adds ACS-owned verification requirement/decision
+facts as `verification.started` and `verification.finished`. Phase 6 adds
+promotion refusal/completion evidence from ACS's PR-only publication boundary.
+The projection keeps only bounded policy/reviewer counts, decision outcome,
+promotion stage/reason/external-state, publication id, commit hash, and evidence
+correlation hashes; it never includes requirement bodies, reviewer prose, PR
+URLs, provider/git error text, raw arguments, filesystem paths, stdout/stderr,
+or result content. Jace Commander's private JSONL remains outside this automatic
+ACS producer path until a reviewed durable post-execution correlation boundary
+exists.
 
 The deterministic canonical projection is bounded and re-redacted before
 transport. Question set `jev-trace@1` uses Choice for the primary failure

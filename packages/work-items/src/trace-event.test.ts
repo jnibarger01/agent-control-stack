@@ -11,7 +11,7 @@ import {
   type CanonicalTraceEvent
 } from "./trace-event.js";
 
-const SCHEMA_PIN = "5c0684ddbf26d3e62148d7d37d1523c9f1adcb9c580835d5f11663241ffb8434";
+const SCHEMA_PIN = "8b694731594466f5a83d6132df84a07421a472a1d618e34bf74259c9444051a0";
 
 function event(kind = "run.started" as const): CanonicalTraceEvent {
   const payload = { status: "started" };
@@ -33,7 +33,7 @@ function event(kind = "run.started" as const): CanonicalTraceEvent {
 }
 
 describe("canonical trace-event/1 helpers", () => {
-  it("matches the exact LoopTrace lifecycle publication", () => {
+  it("matches the exact source-first LoopTrace capability-evidence publication", () => {
     const text = readFileSync(new URL("../contracts/trace-event.v1.schema.json", import.meta.url));
     const schema = JSON.parse(text.toString()) as { properties: { kind: { enum: string[] } } };
     expect(createHash("sha256").update(text).digest("hex")).toBe(SCHEMA_PIN);

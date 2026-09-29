@@ -8,6 +8,8 @@ import {
 import {
   authorizeDesktopCommanderExecution,
   authorizeJaceCommanderExecution,
+  desktopCommanderCapabilityId,
+  jaceCommanderCapabilityId,
   jaceCommanderApprovalSummary,
   jaceCommanderSigningConfigFromEnv,
   jaceCommanderToolNames,
@@ -239,6 +241,16 @@ export interface GatewayAuthOptions {
 
 export { WorkerIdentityRegistry };
 
+export interface JevObservationWorkerLifecycle {
+  start(): void;
+  stop(): Promise<void>;
+}
+
+export interface GatewayJevObservationOptions {
+  enabled?: boolean;
+  createWorker?: (store: SqliteWorkItemStore) => JevObservationWorkerLifecycle;
+}
+
 export interface GatewayOptions {
   dbPath?: string;
   heartbeatTtlMs?: number;
@@ -305,6 +317,12 @@ export interface GatewayOptions {
   shutdownController?: ShutdownController;
   /** Execution admission controller; tests may inject a deterministic controller. */
   executionAdmission?: ExecutionAdmissionController;
+  /**
+   * Post-authority JEV observation worker. false disables it explicitly.
+   * Otherwise production follows ACS_JEV_ENABLED=1; tests may inject a
+   * lifecycle-only worker without changing authority behavior.
+   */
+  jevObservation?: GatewayJevObservationOptions | false;
 }
 
 /**
@@ -337,7 +355,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // bucket without rescanning every open client.
   const sseClientPrincipals = new Map<ServerResponse, string>();
   const sseClientsPerPrincipal = new Map<string, number>();
-  const jevObservationEnabled = process.env.ACS_JEV_ENABLED === "1";
+  const jevObservationOptions = options.jevObservation === false ? undefined : options.jevObservation;
+  const jevObservationEnabled =
+    options.jevObservation === false ? false : (jevObservationOptions?.enabled ?? process.env.ACS_JEV_ENABLED === "1");
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
     heartbeatTtlMs,
@@ -345,8 +365,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     traceConfigValidation: "eager",
     observationEnabled: jevObservationEnabled
   });
-  const observationWorker = new ObservationWorker(workItems, { config: { enabled: jevObservationEnabled } });
-  observationWorker.start();
+  const observationWorker: JevObservationWorkerLifecycle | undefined = jevObservationEnabled
+    ? (jevObservationOptions?.createWorker?.(workItems) ?? new ObservationWorker(workItems))
+    : undefined;
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
@@ -379,6 +400,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     );
   }
   const metrics = new GatewayMetrics();
+  if (observationWorker) {
+    app.addHook("onReady", async () => {
+      try {
+        observationWorker.start();
+      } catch (error) {
+        // JEV is observational only: startup failure must never block ACS readiness.
+        app.log.error({ err: error }, "JEV observation worker failed to initialize");
+      }
+    });
+  }
+
   function refreshAdmissionMetrics(): void {
     const snapshot = executionAdmission.snapshot();
     metrics.setGauge("acs_admission_active", snapshot.global.active, { class: "execution" });
@@ -1965,6 +1997,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             actionHash: payloadActionHash
           });
           const payload = prepareDesktopCommanderCapability(authorization, requestHash, capabilitySigningConfig);
+          const capabilityId = desktopCommanderCapabilityId(payload);
 
           try {
             const recorded = capabilityIssuanceRegistry.recordIssuance({
@@ -2012,6 +2045,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           try {
             const issuanceEvent = capabilityIssuedEvent({
               auth: authorization,
+              capabilityId,
               runtimeId: payload.runtimeId,
               keyId: capabilitySigningConfig.keyId,
               requestHash: payload.requestHash,
@@ -2326,6 +2360,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           }
 
           const payload = prepareJaceCommanderCapability(authorization, jcSigningConfig);
+          const capabilityId = jaceCommanderCapabilityId(payload);
           try {
             const recorded = jcIssuanceRegistry.recordIssuance({
               runtimeId: payload.runtimeId,
@@ -2361,6 +2396,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             recordLeaseAuthorizedExecutionEvent(authority, {
               name: "jace_commander.capability_issued",
               body: {
+                capabilityId,
                 tool: payload.toolName,
                 runtimeId: payload.runtimeId,
                 keyId: jcSigningConfig.keyId,
@@ -2369,6 +2405,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 ...(payload.approvalId ? { approvalId: payload.approvalId } : {})
               },
               attributes: {
+                "capability.id": capabilityId,
                 "jace_commander.tool": payload.toolName,
                 "jace_commander.invocation_hash": payload.invocationHash,
                 "jace_commander.runtime_id": payload.runtimeId,
@@ -2752,7 +2789,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.addHook("onClose", async () => {
     executionAdmission.shutdown();
     for (const attemptId of [...admissionPermits.keys()]) releaseAdmissionPermit(attemptId);
-    await observationWorker.stop();
+    await observationWorker?.stop();
     await acpAdapter?.stop();
     executionReads.close();
     deviceAuthStore.close();

@@ -67,6 +67,24 @@ function manifest(hash = H("e")) {
   };
 }
 
+function verificationTraceRows(): Array<{ kind: string; actor: unknown; payload: Record<string, unknown> }> {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return (
+      db
+        .prepare(
+          `SELECT canonical_json FROM trace_outbox
+           WHERE work_item_id = ?
+             AND json_extract(canonical_json, '$.kind') IN ('verification.started', 'verification.finished')
+           ORDER BY seq`
+        )
+        .all(workItemId) as Array<{ canonical_json: string }>
+    ).map((row) => JSON.parse(row.canonical_json));
+  } finally {
+    db.close();
+  }
+}
+
 function recordManifest(hash = H("e")) {
   return store.recordEvidenceManifest(
     {
@@ -88,7 +106,13 @@ describe("advisory principals cannot mutate the work-item lifecycle (proof 1)", 
   it("recording a plan proposal / review finding never transitions the work item", () => {
     const before = store.get(workItemId)!.status;
     store.recordPlanProposal(
-      { proposalHash: H("9"), proposalId: "plan_proposal_1", workItemId, principalId: "chatgpt", proposal: { goal: "x" } },
+      {
+        proposalHash: H("9"),
+        proposalId: "plan_proposal_1",
+        workItemId,
+        principalId: "chatgpt",
+        proposal: { goal: "x" }
+      },
       via
     );
     recordManifest();
@@ -150,9 +174,7 @@ describe("evidence manifest — content-addressed, immutable, machine-only (proo
     const raw = new DatabaseSync(dbPath);
     try {
       expect(() =>
-        raw
-          .prepare(`UPDATE evidence_manifests SET result_workspace_revision = 'x' WHERE manifest_hash = ?`)
-          .run(H("e"))
+        raw.prepare(`UPDATE evidence_manifests SET result_workspace_revision = 'x' WHERE manifest_hash = ?`).run(H("e"))
       ).toThrow(/immutable/);
       expect(() => raw.prepare(`DELETE FROM evidence_manifests WHERE manifest_hash = ?`).run(H("e"))).toThrow(
         /append-only/
@@ -207,6 +229,115 @@ describe("review findings reference the exact evidence manifest (proof 9)", () =
     );
     expect(finding.evidenceManifestHash).toBe(H("e"));
     expect(store.listReviewFindings(attemptId).map((f) => f.findingHash)).toEqual([H("7")]);
+  });
+});
+
+describe("Phase 5 canonical verification trace evidence", () => {
+  it("emits one verification.started requirement and preserves every durable verification.finished decision", () => {
+    const requirement = {
+      attemptId,
+      workItemId,
+      policyVersion: "acs.verification-policy.v1",
+      reviewersRequired: 1,
+      requirement: { reviewersRequired: 1, secret: "must-not-project" }
+    };
+    store.recordVerificationRequirement(requirement, via);
+    store.recordVerificationRequirement(requirement, via);
+
+    recordManifest(H("e"));
+    store.recordVerificationDecision(
+      {
+        attemptId,
+        workItemId,
+        outcome: "verification_disputed",
+        evidenceManifestHash: H("e"),
+        reviewFindingHashes: [H("7")],
+        verificationPolicyVersion: "acs.verification-policy.v1"
+      },
+      via
+    );
+    store.recordVerificationDecision(
+      {
+        attemptId,
+        workItemId,
+        outcome: "attempt_accepted",
+        evidenceManifestHash: H("e"),
+        reviewFindingHashes: [H("7"), H("8")],
+        verificationPolicyVersion: "acs.verification-policy.v1"
+      },
+      via
+    );
+
+    const trace = verificationTraceRows();
+    expect(trace.map((event) => event.kind)).toEqual([
+      "verification.started",
+      "verification.finished",
+      "verification.finished"
+    ]);
+    expect(trace[0]).toMatchObject({
+      actor: { id: "acs", type: "system" },
+      payload: {
+        attempt_id: attemptId,
+        policy_version: "acs.verification-policy.v1",
+        reviewers_required: 1,
+        mode: "independent_review"
+      }
+    });
+    expect(trace[1]?.payload).toMatchObject({
+      attempt_id: attemptId,
+      outcome: "verification_disputed",
+      accepted: false,
+      evidence_manifest_hash: H("e"),
+      review_finding_count: 1,
+      policy_version: "acs.verification-policy.v1"
+    });
+    expect(trace[2]?.payload).toMatchObject({
+      outcome: "attempt_accepted",
+      accepted: true,
+      review_finding_count: 2
+    });
+    expect(JSON.stringify(trace)).not.toContain("must-not-project");
+  });
+
+  it("keeps verification authority committed when trace persistence fails", () => {
+    const raw = new DatabaseSync(dbPath);
+    try {
+      raw.exec(`CREATE TRIGGER verification_trace_boom BEFORE INSERT ON trace_outbox
+                BEGIN SELECT RAISE(ABORT, 'trace unavailable'); END`);
+    } finally {
+      raw.close();
+    }
+
+    const beforeFailures = store.getTraceEnqueueFailureCount();
+    const requirement = store.recordVerificationRequirement(
+      {
+        attemptId,
+        workItemId,
+        policyVersion: "acs.verification-policy.v1",
+        reviewersRequired: 0,
+        requirement: { reviewersRequired: 0 }
+      },
+      via
+    );
+    expect(requirement.reviewersRequired).toBe(0);
+    expect(store.getVerificationRequirement(attemptId)).toBeDefined();
+
+    recordManifest(H("e"));
+    const decision = store.recordVerificationDecision(
+      {
+        attemptId,
+        workItemId,
+        outcome: "attempt_accepted",
+        evidenceManifestHash: H("e"),
+        reviewFindingHashes: [],
+        verificationPolicyVersion: "acs.verification-policy.v1"
+      },
+      via
+    );
+    expect(decision.outcome).toBe("attempt_accepted");
+    expect(store.getVerificationDecision(attemptId)?.outcome).toBe("attempt_accepted");
+    expect(store.getTraceEnqueueFailureCount()).toBe(beforeFailures + 2);
+    expect(verificationTraceRows()).toEqual([]);
   });
 });
 
@@ -283,9 +414,9 @@ describe("result acceptance stays in packages/work-items, gated by verification 
       expect(() =>
         raw.prepare(`UPDATE verification_requirements SET reviewers_required = 0 WHERE attempt_id = ?`).run(attemptId)
       ).toThrow(/append-only|fixed at admission/i);
-      expect(() =>
-        raw.prepare(`DELETE FROM verification_requirements WHERE attempt_id = ?`).run(attemptId)
-      ).toThrow(/append-only/i);
+      expect(() => raw.prepare(`DELETE FROM verification_requirements WHERE attempt_id = ?`).run(attemptId)).toThrow(
+        /append-only/i
+      );
     } finally {
       raw.close();
       store = new SqliteWorkItemStore(dbPath);
@@ -402,9 +533,7 @@ describe("reviewer grants — single-consume, append-only (proof 4 storage side)
       expect(() =>
         raw.prepare(`UPDATE reviewer_grants SET status = 'issued' WHERE grant_hash = ?`).run(H("a"))
       ).toThrow(/single issued -> terminal|append-only/i);
-      expect(() => raw.prepare(`DELETE FROM reviewer_grants WHERE grant_hash = ?`).run(H("a"))).toThrow(
-        /append-only/
-      );
+      expect(() => raw.prepare(`DELETE FROM reviewer_grants WHERE grant_hash = ?`).run(H("a"))).toThrow(/append-only/);
     } finally {
       raw.close();
       store = new SqliteWorkItemStore(dbPath);

@@ -191,6 +191,14 @@ export function signPreparedDesktopCommanderCapability(
   return Object.freeze({ payload, signature: base64url(signature), keyId: config.keyId });
 }
 
+/** Stable fingerprint used by Desktop Commander's verifier/audit attestation. */
+export function desktopCommanderCapabilityId(payload: DesktopCommanderCapabilityPayload): string {
+  return `${DESKTOP_COMMANDER_CAPABILITY_VERSION}:${createHash("sha256")
+    .update(strictCanonicalJsonV1(payload), "utf8")
+    .digest("hex")
+    .slice(0, 32)}`;
+}
+
 /** Store only this value for audit/provenance; raw nonces must never be persisted. */
 export function desktopCommanderCapabilityNonceHash(nonce: string): string {
   if (!/^[A-Za-z0-9_-]{43}$/u.test(nonce))
