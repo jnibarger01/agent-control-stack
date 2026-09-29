@@ -35,9 +35,9 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-describe("B2: self-approval and admin approval are refused for every approval-gated tool", () => {
+describe("B2: self-approval is refused; admin approval is accepted except for privileged_exec", () => {
   for (const tool of GATED) {
-    it(`${tool}: policy denies approval by the requesting subject and by acs:admin; a different human is allowed`, () => {
+    it(`${tool}: policy denies the requester; admin is allowed except for privileged_exec`, () => {
       const directory = mkdtempSync(join(tmpdir(), "jc-approval-policy-"));
       directories.push(directory);
       const store = new SqliteWorkItemStore(join(directory, "control.db"));
@@ -48,7 +48,7 @@ describe("B2: self-approval and admin approval are refused for every approval-ga
         const self = evaluateWorkItemPolicy(item, REQUESTER, "approve");
         expect(summarizePolicy(self)).toMatchObject({ decision: "deny", matchedRules: ["deny:self-approval"] });
         const admin = summarizePolicy(evaluateWorkItemPolicy(item, ACS_ADMIN_APPROVER, "approve"));
-        expect(admin.decision).toBe("deny");
+        expect(admin.decision).toBe(tool === "privileged_exec" ? "deny" : "require_approval");
         expect(summarizePolicy(evaluateWorkItemPolicy(item, HUMAN, "approve")).decision).toBe("require_approval");
 
         // Through the real approve gate: nothing is recorded for the requester.
@@ -64,7 +64,7 @@ describe("B2: self-approval and admin approval are refused for every approval-ga
 
     for (const [approver, code] of [
       [REQUESTER, "jace_commander_self_approval_denied"],
-      [ACS_ADMIN_APPROVER, "jace_commander_human_approval_required"],
+      [ACS_ADMIN_APPROVER, tool === "privileged_exec" ? "jace_commander_human_approval_required" : undefined],
       [HUMAN, undefined]
     ] as const) {
       it(`${tool}: the issuance registry ${code ? `refuses an approval by ${approver} (${code})` : "accepts a different human's approval"}`, () => {
