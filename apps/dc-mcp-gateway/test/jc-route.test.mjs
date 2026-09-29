@@ -803,6 +803,98 @@ test('privileged_exec awaiting human approval fails closed and surfaces the ACS 
   } finally { close(); }
 });
 
+test('start_process awaiting human approval returns JSON-RPC -32002 with the ACS work item; nothing is spawned', async () => {
+  const { gw, acs, dcUp, jcUp, close } = await lane({
+    // The exact shape ACS answers /jc/capability/issue with for an
+    // approval-gated tool (verified against the live ACS gateway: 409,
+    // decision require_approval, workItemId + actionHash + approvalInstructions).
+    acsHandler: () => ({
+      status: 409,
+      body: {
+        decision: 'require_approval', workItemId: 'wrk_proc_1', actionHash: 'b'.repeat(64),
+        approvalSummary: { tool: 'start_process', argv: ['/usr/bin/node', '--version'], cwd: '/home/jacen/projects' },
+        approvalInstructions: 'A human must POST /work-items/wrk_proc_1/approve with actionHash bbbb..., then retry the identical call',
+      },
+    }),
+  });
+  try {
+    const r = await call(gw.port, '/jc/mcp', jcToken(), {
+      jsonrpc: '2.0', id: 'jc-process-approval', method: 'tools/call',
+      params: { name: 'start_process', arguments: { argv: ['/usr/bin/node', '--version'], cwd: '/home/jacen/projects' } },
+    });
+    // A JSON-RPC authorization error carried on HTTP 200. An HTTP 5xx with a
+    // non-JSON-RPC body is a transport failure to an MCP client: it can only
+    // report a generic internal error and the work item is lost to the caller.
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'jc-process-approval');
+    assert.equal(body.error.code, -32002);
+    assert.match(body.error.message, /approval required/i);
+    assert.equal(body.error.data.kind, 'managed_authorization_required');
+    assert.equal(body.error.data.acsCode, 'require_approval');
+    assert.equal(body.error.data.retryable, true);
+    assert.equal(body.error.data.workItemId, 'wrk_proc_1');
+    assert.equal(body.error.data.actionHash, 'b'.repeat(64));
+    assert.match(body.error.data.approvalInstructions, /approve/u);
+    assert.equal(acs.requests.length, 1, 'ACS was consulted for this call');
+    assert.equal(acs.requests[0].body.tool, 'start_process');
+    assert.equal(mcpRequests(jcUp).length, 0, 'the call was not forwarded: no process can start');
+    assert.equal(dcUp.requests.length, 0);
+  } finally { close(); }
+});
+
+test('a denied start_process returns JSON-RPC -32001 with the ACS reason, never a generic error', async () => {
+  const { gw, jcUp, close } = await lane({
+    acsHandler: () => ({
+      status: 403,
+      body: {
+        decision: 'deny', reason: 'path_not_allowed',
+        code: 'jace_commander_path_not_allowed', detail: 'cwd is outside the configured roots',
+      },
+    }),
+  });
+  try {
+    const r = await call(gw.port, '/jc/mcp', jcToken(), {
+      jsonrpc: '2.0', id: 'jc-process-denied', method: 'tools/call',
+      params: { name: 'start_process', arguments: { argv: ['/usr/bin/node', '--version'], cwd: '/etc' } },
+    });
+    assert.equal(r.status, 200);
+    const body = await r.json();
+    assert.equal(body.jsonrpc, '2.0');
+    assert.equal(body.id, 'jc-process-denied');
+    assert.equal(body.error.code, -32001);
+    assert.match(body.error.message, /denied/i);
+    assert.equal(body.error.data.kind, 'managed_authorization_denied');
+    assert.equal(body.error.data.acsCode, 'jace_commander_path_not_allowed');
+    assert.equal(body.error.data.reason, 'path_not_allowed');
+    assert.equal(body.error.data.retryable, false);
+    assert.equal(mcpRequests(jcUp).length, 0);
+  } finally { close(); }
+});
+
+test('an allowed start_process forwards the issued capability and the exact argv', async () => {
+  const { gw, acs, dcUp, jcUp, close } = await lane();
+  try {
+    const args = { argv: ['/usr/bin/node', '--version'], cwd: '/home/jacen/projects', timeoutMs: 5000 };
+    const r = await call(gw.port, '/jc/mcp', jcToken(), {
+      jsonrpc: '2.0', id: 'jc-process-allowed', method: 'tools/call', params: { name: 'start_process', arguments: args },
+    });
+    assert.equal(r.status, 200);
+    assert.equal(acs.requests.length, 1);
+    assert.equal(acs.requests[0].path, '/jc/capability/issue');
+    assert.equal(acs.requests[0].jcActor, 'chatgpt:jacen');
+    assert.equal(acs.requests[0].body.tool, 'start_process');
+    assert.equal(acs.requests[0].body.argsSummary, JSON.stringify(args));
+    assert.equal(dcUp.requests.length, 0);
+    const forwarded = mcpRequests(jcUp)[0].body;
+    assert.equal(forwarded.params.name, 'start_process');
+    assert.deepEqual(forwarded.params.arguments, args, 'argv-only: arguments are forwarded exactly, never rewritten');
+    assert.equal(forwarded.params._meta.acsCapability.signature, 'acs-sig');
+    assert.equal(forwarded.params._meta.acsCapability.payload.audience, 'jace-commander');
+  } finally { close(); }
+});
+
 test('ACS unreachable fails closed on the jc lane', async () => {
   const jcUp = recorder(() => ({ status: 200, body: {} }));
   const jcPort = await jcUp.listen();

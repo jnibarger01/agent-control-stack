@@ -108,6 +108,30 @@ Filesystem tools are contained twice:
   and PDF/DOCX/spreadsheets over 20 MiB get `file_too_large` rather than
   truncated output.
 
+### Process failures
+
+`start_process` spawns `argv[0]` directly (`shell: false`, allowlisted child
+environment) and answers every failure as a structured tool error
+(`isError: true` with `structuredContent.error.code`):
+
+| Condition | Code |
+| --- | --- |
+| `argv` empty/oversized, entry not a bounded string, relative `argv[0]`, `timeoutMs` out of range | `invalid_argument` |
+| `argv[0]` is a shell or privilege tool (including through a symlink) | `command_denied` |
+| `argv[0]` does not exist | `not_found` |
+| `argv[0]` is not a regular file, or lacks the executable bit | `not_executable` |
+| `cwd` outside `JC_FS_ROOTS` (or a denied root) | `path_not_allowed` |
+| `exec(2)` refused the spawn | `start_failed` |
+| 32 managed processes already running | `too_many_processes` |
+
+`start_failed` is the asynchronous case: the OS reports it through the child's
+`error` event, not a throw. That listener is mandatory — an `error` event with
+no listener is an uncaught exception, so a single failed spawn would kill this
+MCP server and the caller would see a dead session instead of the refusal. A
+spawn failure is recorded on the session (`spawnError`, e.g. `EACCES`) so
+`read_process_output` / `list_processes` report `running: false` rather than a
+process that never existed.
+
 ## CLI (`jace-commander`, alias `jc`)
 
 The CLI is an **MCP client of `/jc/mcp`**, the same path ChatGPT uses:

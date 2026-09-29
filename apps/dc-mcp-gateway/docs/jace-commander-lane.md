@@ -42,6 +42,15 @@ ChatGPT/Claude ─► https://jacen-ubuntu.tailaa6d41.ts.net/jc/mcp
   error `-32002` (`managed_authorization_required`) and carries
   `workItemId`, `actionHash`, and `approvalInstructions` in `error.data`.
   A human approves in ACS, then the client retries the identical call.
+  Every ACS authorization outcome is a JSON-RPC error on HTTP 200 so an MCP
+  client can act on it: `-32001` `managed_authorization_denied` (ACS denied it;
+  `error.data.acsCode`/`reason` say why), `-32002` approval required, `-32003`
+  `managed_authorization_unavailable` (ACS unreachable, identity/containment
+  unconfigured, wrong-audience or malformed envelope, upstream mismatch). An
+  HTTP 5xx with a non-JSON-RPC body is a transport failure to an MCP client,
+  which can only report a generic internal error and loses the work item.
+  Failures *after* authorization (a refused spawn, a missing file) are MCP tool
+  errors (`isError: true`) from Jace Commander, never transport errors.
 * **Bridge profile.**
   * `BRIDGE_PROFILE=jace-commander` requires `ACS_MANAGED_MODE=1` and
     `JC_ACS_PUBLIC_KEY`, `JC_ACS_KEY_ID`, `JC_RUNTIME_ID`.
@@ -85,6 +94,8 @@ worker credential whose actor id is `acs-jc-bridge`.
 * spoofed-meta stripping
 * forwarding to the jc upstream only
 * the approval challenge failing closed
+* a denied call (-32001) and an approval-required call (-32002) carrying the
+  ACS work item / action hash, with nothing forwarded on either
 * ACS being unreachable
 
 It has been verified live against the real ACS gateway, the real bridge and
