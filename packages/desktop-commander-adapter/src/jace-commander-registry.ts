@@ -40,18 +40,28 @@ const HASH = /^[a-f0-9]{64}$/u;
  */
 export class SqliteJaceCommanderIssuanceRegistry {
   private readonly db: DatabaseSync;
+  private readonly ownsDb: boolean;
 
-  constructor(dbPath: string) {
-    this.db = new DatabaseSync(dbPath);
-    this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
-    applyControlPlaneMigrations(this.db);
+  constructor(dbPathOrDb: string | DatabaseSync) {
+    if (typeof dbPathOrDb === "string") {
+      this.db = new DatabaseSync(dbPathOrDb);
+      this.ownsDb = true;
+      this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+      applyControlPlaneMigrations(this.db);
+    } else {
+      this.db = dbPathOrDb;
+      this.ownsDb = false;
+    }
   }
 
   close(): void {
-    this.db.close();
+    if (this.ownsDb) this.db.close();
   }
 
-  recordIssuance(input: JaceCommanderIssuanceBinding): { requestHash: string; approvalId?: string } {
+  recordIssuance(
+    input: JaceCommanderIssuanceBinding,
+    options: { withinTransaction?: boolean } = {}
+  ): { requestHash: string; approvalId?: string } {
     const policy = jaceCommanderToolPolicy(input.toolName);
     if (!policy) throw new ControlStackError("jace_commander_tool_not_allowlisted", "unknown tool");
     for (const [value, label] of [
@@ -67,7 +77,7 @@ export class SqliteJaceCommanderIssuanceRegistry {
       throw new ControlStackError("jace_commander_capability_invalid", "capability expiration is invalid");
     }
 
-    return this.transaction(() => {
+    const record = () => {
       const lease = this.db
         .prepare(
           `SELECT leases.plan_hash, leases.approval_id, attempts.current_fencing_epoch, attempts.claimed_by_worker_id, heads.current_plan_hash
@@ -208,7 +218,8 @@ export class SqliteJaceCommanderIssuanceRegistry {
         throw error;
       }
       return approvalId ? { requestHash, approvalId } : { requestHash };
-    });
+    };
+    return options.withinTransaction ? record() : this.transaction(record);
   }
 
   private transaction<T>(work: () => T): T {

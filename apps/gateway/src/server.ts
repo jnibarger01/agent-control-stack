@@ -548,7 +548,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
   const jcSigningConfig = resolveJaceCommanderSigningConfig(options.jaceCommanderCapability);
   const jcContainment = resolveJcContainment(options.jaceCommanderContainment);
-  const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
 
   const desktopExecutorCapabilities = () =>
     desktopCommanderManagedToolDispositions().map((disposition) => {
@@ -2366,39 +2365,39 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           }
 
           const payload = prepareJaceCommanderCapability(authorization, jcSigningConfig);
+          let issuancePhase = true;
           try {
-            const recorded = jcIssuanceRegistry.recordIssuance({
-              runtimeId: payload.runtimeId,
-              toolName: payload.toolName,
-              leaseId: payload.leaseId,
-              attemptId: payload.attemptId,
-              workItemId: payload.workItemId,
-              workerId,
-              fencingEpoch: payload.leaseEpoch,
-              planHash: payload.planHash,
-              actionHash: payload.actionHash,
-              invocationHash: payload.invocationHash,
-              approvalId: payload.approvalId,
-              requesterSubject: jcActor,
-              keyId: jcSigningConfig.keyId,
-              nonce: payload.nonce,
-              issuedAt: payload.issuedAt,
-              expiresAt: payload.expiresAt
-            });
-            if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
-              throw new ControlStackError(
-                "jace_commander_capability_issuance_rejected",
-                "issuance binding does not match capability payload"
+            workItems.withSqliteTransaction((db) => {
+              const issuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(db);
+              const recorded = issuanceRegistry.recordIssuance(
+                {
+                  runtimeId: payload.runtimeId,
+                  toolName: payload.toolName,
+                  leaseId: payload.leaseId,
+                  attemptId: payload.attemptId,
+                  workItemId: payload.workItemId,
+                  workerId,
+                  fencingEpoch: payload.leaseEpoch,
+                  planHash: payload.planHash,
+                  actionHash: payload.actionHash,
+                  invocationHash: payload.invocationHash,
+                  approvalId: payload.approvalId,
+                  requesterSubject: jcActor,
+                  keyId: jcSigningConfig.keyId,
+                  nonce: payload.nonce,
+                  issuedAt: payload.issuedAt,
+                  expiresAt: payload.expiresAt
+                },
+                { withinTransaction: true }
               );
-            }
-          } catch (error) {
-            return deny(
-              error instanceof ControlStackError ? error.code : "jace_commander_capability_issuance_rejected"
-            );
-          }
+              if (recorded.requestHash !== payload.requestHash || recorded.approvalId !== payload.approvalId) {
+                throw new ControlStackError(
+                  "jace_commander_capability_issuance_rejected",
+                  "issuance binding does not match capability payload"
+                );
+              }
 
-          try {
-            workItems.withTransaction(() => {
+              issuancePhase = false;
               recordLeaseAuthorizedExecutionEvent(authority, {
                 name: "jace_commander.capability_issued",
                 body: {
@@ -2420,6 +2419,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
             });
           } catch (error) {
+            if (issuancePhase) {
+              return deny(
+                error instanceof ControlStackError ? error.code : "jace_commander_capability_issuance_rejected"
+              );
+            }
             return reply.code(503).send({
               error: "capability evidence could not be committed",
               code: "capability_evidence_unavailable",
@@ -2799,7 +2803,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     executionReads.close();
     deviceAuthStore.close();
     capabilityIssuanceRegistry.close();
-    jcIssuanceRegistry.close();
     workItems.close();
   });
 
