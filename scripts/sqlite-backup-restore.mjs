@@ -98,11 +98,12 @@ try {
     const temporaryRoot = into ? null : mkdtempSync(join(tmpdir(), "acs-restore-dry-run-"));
     const destination = resolve(into ?? join(temporaryRoot, "restored.db"));
     if (into) {
-      // A dry-run is rehearsal only. Check before mkdir/copy so even a not-yet-created
-      // live DB reached through a symlinked parent cannot be created by this command.
-      // Relative live paths are anchored to the runtime's own working directory
-      // (--runtime-dir / ACS_RUNTIME_DIR); without one, --into fails closed.
-      assertNotLiveControlPlaneDatabase(destination, resolveRuntimeDir(rest));
+      // A kept dry-run is rehearsal only. Require the stopped service's live
+      // database identity explicitly, then cross-check service env/config aliases.
+      // The guard runs before mkdir/copy so a missing live DB cannot be created here.
+      const runtimeDir = resolveRuntimeDir(rest);
+      const explicitLiveDatabase = optionalFlag(rest, "--live-db");
+      assertNotLiveControlPlaneDatabase(destination, runtimeDir, explicitLiveDatabase);
       mkdirSync(dirname(destination), { recursive: true });
     }
     try {
@@ -215,18 +216,28 @@ function optionalFlag(args, name) {
   return value;
 }
 
-// Return every absolute filesystem path that may name the live database. Direct
-// gateway/worker entry points consume ACS_DB_PATH verbatim, while the managed runtime
-// trims it, so a whitespace-bearing environment value protects both interpretations.
-// The runtime config is also authoritative when ACS_DB_PATH is unset.
+// Return every absolute filesystem path that may name the live database. --live-db
+// is mandatory for a kept rehearsal because a stopped service may have had an
+// ACS_DB_PATH visible only to its service manager. Any ACS_DB_PATH/runtime config
+// visible here is treated as an additional alias to protect.
 //
-// Relative live paths (ACS_DB_PATH, runtime.db_path, and the storage/local.db default)
-// are resolved against the runtime's own working directory, never against this
-// command's cwd: the runtime may have been launched from a different directory, and a
-// stopped process's cwd cannot be recovered. When a relative live path cannot be
-// anchored, --into is refused outright instead of being compared against a guess.
-function liveControlPlaneDatabasePaths(runtimeDir) {
+// Relative live paths and relative runtime-config paths are resolved against the
+// runtime's own working directory, never against this command's cwd. When a relative
+// value cannot be anchored, --into is refused instead of being compared against a guess.
+function liveControlPlaneDatabasePaths(runtimeDir, explicitLiveDatabase) {
+  if (typeof explicitLiveDatabase !== "string" || explicitLiveDatabase.trim() === "") {
+    throw new Error(
+      "restore-dry-run --into refused: --live-db <path> is required to identify the stopped service's authoritative live database"
+    );
+  }
+
   const paths = new Set();
+  const explicit = anchorLivePath(explicitLiveDatabase, runtimeDir, "--live-db");
+  if (explicit === null) {
+    throw new Error("restore-dry-run --into refused: --live-db must identify a filesystem database");
+  }
+  paths.add(explicit);
+
   const configured = process.env.ACS_DB_PATH;
   if (typeof configured === "string" && configured !== "") {
     const variants = [configured];
@@ -237,8 +248,8 @@ function liveControlPlaneDatabasePaths(runtimeDir) {
     }
   }
 
-  const configPath = process.env.ACS_RUNTIME_CONFIG?.trim() || "acs.config.yaml";
-  if (existsSync(configPath)) {
+  const configPath = resolveRuntimeConfigPath(runtimeDir);
+  if (configPath !== null && existsSync(configPath)) {
     const parsed = parseConfigText(readFileSync(configPath, "utf8"));
     if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
       throw new Error(`cannot determine live database from invalid runtime config: ${configPath}`);
@@ -259,12 +270,29 @@ function liveControlPlaneDatabasePaths(runtimeDir) {
     }
   }
 
-  // The managed runtime's default is relative by definition, so without an explicit
-  // runtime working directory the live database cannot be located and --into must be
-  // refused rather than guessed against this process's cwd.
-  const defaultAnchored = anchorLivePath("storage/local.db", runtimeDir, "default live database path");
-  if (defaultAnchored !== null) paths.add(defaultAnchored);
+  // Defense in depth for the managed runtime default when its working directory is
+  // known. --live-db remains mandatory because a stopped standalone service can have
+  // service-local ACS_DB_PATH state that is absent from the later operator shell.
+  if (runtimeDir !== null) {
+    const defaultAnchored = anchorLivePath("storage/local.db", runtimeDir, "default live database path");
+    if (defaultAnchored !== null) paths.add(defaultAnchored);
+  }
   return paths;
+}
+
+function resolveRuntimeConfigPath(runtimeDir) {
+  const configured = process.env.ACS_RUNTIME_CONFIG?.trim();
+  if (configured) {
+    if (isAbsolute(configured)) return resolve(configured);
+    if (runtimeDir === null) {
+      throw new Error(
+        "restore-dry-run --into refused: ACS_RUNTIME_CONFIG is relative and the runtime working directory is unknown " +
+          "(pass --runtime-dir <dir> or set ACS_RUNTIME_DIR)"
+      );
+    }
+    return resolve(runtimeDir, configured);
+  }
+  return runtimeDir === null ? null : resolve(runtimeDir, "acs.config.yaml");
 }
 
 // Resolve one configured live database value to an absolute filesystem path, or null
@@ -336,21 +364,16 @@ function resolveRuntimeDir(args) {
     );
   }
   if (!stat.isDirectory()) {
-    throw new Error(
-      `restore-dry-run --into refused: runtime directory is not a directory: ${absolute}`
-    );
+    throw new Error(`restore-dry-run --into refused: runtime directory is not a directory: ${absolute}`);
   }
   return absolute;
 }
 
-function assertNotLiveControlPlaneDatabase(destination, runtimeDir) {
+function assertNotLiveControlPlaneDatabase(destination, runtimeDir, explicitLiveDatabase) {
   const canonicalDestination = canonicalPath(destination);
-  for (const livePath of liveControlPlaneDatabasePaths(runtimeDir)) {
+  for (const livePath of liveControlPlaneDatabasePaths(runtimeDir, explicitLiveDatabase)) {
     const canonicalLive = canonicalPath(livePath);
-    if (
-      canonicalDestination === canonicalLive ||
-      sameExistingFile(destination, livePath)
-    ) {
+    if (canonicalDestination === canonicalLive || sameFilesystemPathIdentity(destination, livePath)) {
       throw new Error(
         `restore-dry-run --into refuses to overwrite the live control-plane database: ${canonicalLive} ` +
           "(rehearse into a scratch path, or use db-ops.mjs restore with --replace --writers-stopped to replace it deliberately)"
@@ -363,6 +386,25 @@ function assertNotLiveControlPlaneDatabase(destination, runtimeDir) {
 // components. This protects a live path that does not exist yet but is reachable
 // through a symlinked directory. Resolution errors fail closed.
 function canonicalPath(path) {
+  const identity = filesystemPathIdentity(path);
+  return resolve(identity.realPath, ...identity.missing);
+}
+
+// Canonical strings do not collapse bind mounts or hard links. Compare the deepest
+// existing filesystem object's device/inode plus the same remaining missing suffix.
+// That protects a not-yet-created live leaf reached through a bind-mount alias too.
+function sameFilesystemPathIdentity(left, right) {
+  const a = filesystemPathIdentity(left);
+  const b = filesystemPathIdentity(right);
+  return (
+    a.dev === b.dev &&
+    a.ino === b.ino &&
+    a.missing.length === b.missing.length &&
+    a.missing.every((component, index) => component === b.missing[index])
+  );
+}
+
+function filesystemPathIdentity(path) {
   const absolute = resolve(path);
   let existing = absolute;
   const missing = [];
@@ -372,17 +414,9 @@ function canonicalPath(path) {
     missing.unshift(basename(existing));
     existing = parent;
   }
-  const canonicalExisting = realpathSync(existing);
-  return resolve(canonicalExisting, ...missing);
-}
-
-// Canonical path strings do not collapse bind mounts or hard links. When both
-// paths exist, filesystem identity closes that alias class as well.
-function sameExistingFile(left, right) {
-  if (!existsSync(left) || !existsSync(right)) return false;
-  const a = statSync(left);
-  const b = statSync(right);
-  return a.dev === b.dev && a.ino === b.ino;
+  const realPath = realpathSync(existing);
+  const stat = statSync(realPath);
+  return { realPath, dev: stat.dev, ino: stat.ino, missing };
 }
 
 function sidecarSizes(database) {
@@ -416,7 +450,6 @@ function assertNoActiveWriter(destination) {
     db.close();
   }
 }
-
 
 function readLatestPointer(latestPath) {
   try {
@@ -475,7 +508,7 @@ function usage() {
   process.stderr.write(
     "usage: sqlite-backup-restore.mjs create-fixture <path> | " +
       "snapshot <db> [--destination-dir <dir>] (updates latest.db only after integrity_check) | " +
-      "restore-dry-run <backup> [--into <path>] [--runtime-dir <dir>] | " +
+      "restore-dry-run <backup> [--into <path> --live-db <path>] [--runtime-dir <dir>] | " +
       "verify <db> | " +
       "wal-checkpoint <db> [--mode PASSIVE|FULL|RESTART|TRUNCATE] | " +
       "vacuum <db> --writers-stopped\n"
