@@ -2405,22 +2405,29 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.post<{ Params: { id: string } }>("/human-interrupts/:id/resolve", async (request, reply) => {
     try {
-      const actor = requireMutationActor(request, reply, auth);
-      if (!actor) return;
       const body = z
         .object({
           decision: z.enum(["resume", "cancel"]),
           response: z.json().optional(),
-          reason: z.string().min(1).max(2_000).optional()
+          reason: z.string().min(1).max(2_000).optional(),
+          approvalExpiresInMs: z.number().int().positive().max(24 * 60 * 60 * 1_000).optional()
         })
         .strict()
         .parse(requestObject(request.body));
+      const actor = requireMutationActor(
+        request,
+        reply,
+        auth,
+        body.decision === "resume" ? "acs:approve" : undefined
+      );
+      if (!actor) return;
       const result = tools.resolve_human_interrupt({
         interruptId: request.params.id,
         decision: body.decision,
         resolvedByActorId: actor,
         ...(body.response === undefined ? {} : { response: body.response }),
-        ...(body.reason === undefined ? {} : { reason: body.reason })
+        ...(body.reason === undefined ? {} : { reason: body.reason }),
+        ...(body.approvalExpiresInMs === undefined ? {} : { approvalExpiresInMs: body.approvalExpiresInMs })
       });
       return result;
     } catch (error) {

@@ -25,6 +25,7 @@ import {
   type AttemptLease,
   type ClaimedWorkItem,
   type ExecutionBackend,
+  type RequestHumanInterruptInput,
   type WorkItem,
   type WorkItemStore
 } from "@agent-control-stack/work-items";
@@ -50,10 +51,29 @@ import {
 
 export interface WorkerExecuteResult extends SandboxResult {
   usedSkillNames?: string[];
+  humanInterrupt?: {
+    prompt: string;
+    checkpoint: RequestHumanInterruptInput["checkpoint"];
+    responseSpec?: RequestHumanInterruptInput["responseSpec"];
+    idempotencyKey?: string;
+    expiresInMs?: number;
+  };
+}
+
+export interface WorkerResumeContext {
+  interruptId: string;
+  prompt: string;
+  checkpoint: RequestHumanInterruptInput["checkpoint"];
+  response?: unknown;
+  responseHash?: string;
 }
 
 export type WorkerExecute = (
-  workItem: WorkItem & { retrievedSkills: InjectedSkill[]; workspace?: unknown }
+  workItem: WorkItem & {
+    retrievedSkills: InjectedSkill[];
+    workspace?: unknown;
+    resumeContext?: WorkerResumeContext;
+  }
 ) => Promise<WorkerExecuteResult>;
 
 export interface WorkerValidator {
@@ -86,6 +106,7 @@ export interface WorkerResult {
   retrievedSkills?: InjectedSkill[];
   usedSkills?: string[];
   validationPassed?: boolean;
+  humanInterruptId?: string;
 }
 
 export const DRY_RUN_EXECUTION_MODE = "dry_run" as const;
@@ -287,9 +308,55 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     const result = await execute({
       ...running,
       retrievedSkills: prepared.retrievedSkills,
-      ...(workspace ? { workspace } : {})
+      ...(workspace ? { workspace } : {}),
+      ...(resumed
+        ? {
+            resumeContext: {
+              interruptId: resumed.interrupt.interruptId,
+              prompt: resumed.interrupt.prompt,
+              checkpoint: resumed.interrupt.checkpoint,
+              ...(resumed.resolution.response === undefined ? {} : { response: resumed.resolution.response }),
+              ...(resumed.resolution.responseHash ? { responseHash: resumed.resolution.responseHash } : {})
+            }
+          }
+        : {})
     });
     assertExecutionModeForBackend(result.executionMode, executionBackend);
+    if (result.humanInterrupt) {
+      const interrupt = workItems.requestHumanInterrupt(
+        {
+          attemptId: running.attemptId,
+          workItemId: running.id,
+          workerId,
+          fencingEpoch: running.fencingEpoch,
+          leaseToken: running.leaseToken,
+          prompt: result.humanInterrupt.prompt,
+          checkpoint: result.humanInterrupt.checkpoint,
+          ...(result.humanInterrupt.responseSpec ? { responseSpec: result.humanInterrupt.responseSpec } : {}),
+          idempotencyKey:
+            result.humanInterrupt.idempotencyKey ??
+            stableHash({
+              domain: "acs.worker.human-interrupt.v1",
+              attemptId: running.attemptId,
+              fencingEpoch: running.fencingEpoch,
+              checkpoint: result.humanInterrupt.checkpoint
+            }),
+          ...(result.humanInterrupt.expiresInMs ? { expiresInMs: result.humanInterrupt.expiresInMs } : {})
+        },
+        { via: "domain_service", actorId: workerId }
+      );
+      // The active workspace is part of the durable checkpoint. Leave it in
+      // place so a later fenced resumption reuses the same allocation.
+      cleanupWorkspace = undefined;
+      return {
+        executed: false,
+        executionMode: result.executionMode,
+        workItemId: running.id,
+        reason: "awaiting_human_input",
+        retrievedSkills: prepared.retrievedSkills,
+        humanInterruptId: interrupt.interruptId
+      };
+    }
     const completedAt = new Date().toISOString();
     const usedSkills = result.usedSkillNames ?? [];
     const validation = options.validator
