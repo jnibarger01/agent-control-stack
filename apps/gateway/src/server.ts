@@ -375,6 +375,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     );
   }
   const metrics = new GatewayMetrics();
+  const startupHealth = workItems.readinessHealth();
+  let lastDeepHealth = {
+    ok:
+      startupHealth.checks.integrity.ok &&
+      startupHealth.checks.foreignKeys.ok &&
+      startupHealth.checks.migrations.ok &&
+      startupHealth.checks.auditChain.ok,
+    checkedAt: new Date().toISOString(),
+    source: "startup" as "startup" | "deep"
+  };
   function refreshAdmissionMetrics(): void {
     const snapshot = executionAdmission.snapshot();
     metrics.setGauge("acs_admission_active", snapshot.global.active, { class: "execution" });
@@ -653,6 +663,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/healthz", async () => ({ ok: true, status: "alive" }));
 
   const operationalReadiness = async (_request: FastifyRequest, reply: FastifyReply) => {
+    const startedAt = performance.now();
     const execution = executionAdmission.snapshot();
     const executionView = {
       saturated: execution.saturated,
@@ -665,7 +676,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     };
     const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
     const health = mergeSandboxReadyzCheck(workItems.readinessHealth(), sandboxCheck);
-    return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
+    metrics.observeReadiness(performance.now() - startedAt, health.ok);
+    metrics.setSqliteReady(health.ok);
+    const telemetry = metrics.readyzSummary();
+    reply.header("server-timing", "readyz;dur=" + String(telemetry.latestMs ?? 0));
+    reply.header("x-acs-readyz-ms", String(telemetry.latestMs ?? 0));
+    return reply.code(health.ok ? 200 : 503).send({
+      ...health,
+      execution: executionView,
+      telemetry,
+      deepHealth: lastDeepHealth
+    });
+  };
+
+  const recordDeepHealth = (ok: boolean) => {
+    lastDeepHealth = { ok, checkedAt: new Date().toISOString(), source: "deep" };
+    metrics.setSqliteReady(ok);
   };
 
   const deepHealth = async (_request: FastifyRequest, reply: FastifyReply) => {
@@ -685,22 +711,26 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       .filter(([name]) => name !== "liveness")
       .map(([, check]) => check);
     if (!dependencyChecks.every((check) => check.ok)) {
-      return reply.code(503).send({ ...initialHealth, execution: executionView });
+      recordDeepHealth(false);
+      return reply.code(503).send({ ...initialHealth, execution: executionView, deepHealth: lastDeepHealth });
     }
     try {
       workItems.reconcileStaleTunnelSessions();
       workItems.reconcileStaleAgents();
     } catch {
       const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
+      recordDeepHealth(false);
       return reply.code(503).send({
         ...health,
         execution: executionView,
+        deepHealth: lastDeepHealth,
         ok: false,
         checks: { ...health.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
       });
     }
     const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
-    return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
+    recordDeepHealth(health.ok);
+    return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView, deepHealth: lastDeepHealth });
   };
   app.get("/readyz", operationalReadiness);
   app.get("/health", deepHealth);
@@ -761,7 +791,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
   app.get("/metrics", { preHandler: requireRead }, async (_request, reply) => {
-    const health = workItems.health();
+    const health = workItems.readinessHealth();
     metrics.setSqliteReady(health.ok);
     refreshAdmissionMetrics();
     return reply.type("text/plain; version=0.0.4").send(metrics.render());
@@ -917,7 +947,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   // Dashboard-internal: operator totals from the same registry /metrics renders.
   app.get("/dashboard/metrics", { preHandler: requireRead }, async (_request, reply) => {
-    metrics.setSqliteReady(workItems.health().ok);
+    metrics.setSqliteReady(workItems.readinessHealth().ok);
     reply.header("cache-control", "no-store");
     return { at: new Date().toISOString(), metrics: metrics.summary() };
   });

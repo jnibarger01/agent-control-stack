@@ -183,12 +183,25 @@ describe("periodic system probes (#10)", () => {
   it("probes /readyz only while the System view is open, repeats on an interval, and keeps history", async () => {
     let status = 200;
     const probes: string[] = [];
+    let deepHealthCalls = 0;
     const app = bootLive(
       { workItems: [], events: [], now: NOW },
       {
         "/readyz": (url) => {
           probes.push(url);
-          return { status, body: {} };
+          const failures = status >= 300 ? 1 : 0;
+          return {
+            status,
+            headers: { "x-acs-readyz-ms": "0.4" },
+            body: {
+              telemetry: { latestMs: 0.4, p50Ms: 0.35, p95Ms: 0.8, failures, sampleCount: probes.length },
+              deepHealth: { ok: true, checkedAt: NOW.toISOString(), source: "startup" }
+            }
+          };
+        },
+        "/health": () => {
+          deepHealthCalls += 1;
+          return { status: 200, body: { ok: true } };
         }
       }
     );
@@ -201,17 +214,27 @@ describe("periodic system probes (#10)", () => {
     expect(probes).toHaveLength(1);
     await app.advance(PROBE_INTERVAL_MS * 2);
     expect(probes).toHaveLength(3);
-    expect(app.text("#system-probes")).toContain("Failures (last 3)0");
+    const healthyText = app.text("#system-probes");
+    expect(healthyText).toContain("Browser RTT");
+    expect(healthyText).toContain("Gateway0.40ms");
+    expect(healthyText).toContain("p50 gateway0.35ms");
+    expect(healthyText).toContain("p95 gateway0.80ms");
+    expect(healthyText).toContain("Readinesshealthy");
+    expect(healthyText).toContain("Failures0 / 3");
+    expect(healthyText).toContain("Deep healthhealthy");
+    expect(deepHealthCalls).toBe(0);
     expect(app.document.querySelector("#system-probes")?.getAttribute("data-state")).toBe("ok");
 
     status = 503;
     await app.advance(PROBE_INTERVAL_MS);
     expect(app.document.querySelector("#system-probes")?.getAttribute("data-state")).toBe("failing");
+    expect(app.text("#system-probes")).toContain("Failures1 / 4");
     expect(app.text("#action-status")).toBe("Gateway readiness degraded");
     expect(app.document.querySelector(".probe-trend")?.textContent).toBe("▮▮▮▯");
 
     (app.document.querySelector('nav a[data-nav="overview"]') as HTMLElement).click();
     await app.advance(PROBE_INTERVAL_MS * 3);
     expect(probes).toHaveLength(4);
+    expect(deepHealthCalls).toBe(0);
   });
 });

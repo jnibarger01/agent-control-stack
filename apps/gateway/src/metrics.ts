@@ -2,6 +2,27 @@ function label(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
 }
 
+export interface ReadyzTelemetrySummary {
+  latestMs: number | null;
+  p50Ms: number | null;
+  p95Ms: number | null;
+  failures: number;
+  sampleCount: number;
+}
+
+const READYZ_TELEMETRY_WINDOW = 60;
+
+function roundedMs(value: number): number {
+  return Math.round(Math.max(0, value) * 1_000) / 1_000;
+}
+
+function percentile(values: number[], percentileValue: number): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil(percentileValue * sorted.length) - 1));
+  return roundedMs(sorted[index] ?? 0);
+}
+
 export interface GatewayMetricsSummary {
   sqliteReady: boolean;
   httpRequests: number;
@@ -19,6 +40,7 @@ export class GatewayMetrics {
   private readonly counterSeries = new Map<string, { name: string; labels: Record<string, string> }>();
   private readonly durations = new Map<string, { count: number; sumSeconds: number }>();
   private readonly gauges = new Map<string, number>();
+  private readonly readyzSamples: Array<{ durationMs: number; ok: boolean }> = [];
   private sqliteReady = 0;
 
   increment(name: string, labels: Record<string, string> = {}): void {
@@ -70,6 +92,29 @@ export class GatewayMetrics {
 
   setGauge(name: string, value: number, labels: Record<string, string> = {}): void {
     this.gauges.set(metricKey(name, labels), Math.max(0, value));
+  }
+
+  observeReadiness(durationMs: number, ok: boolean): void {
+    this.readyzSamples.push({ durationMs: roundedMs(durationMs), ok });
+    while (this.readyzSamples.length > READYZ_TELEMETRY_WINDOW) this.readyzSamples.shift();
+    const summary = this.readyzSummary();
+    this.setGauge("acs_readyz_gateway_ms", summary.latestMs ?? 0, { stat: "latest" });
+    this.setGauge("acs_readyz_gateway_ms", summary.p50Ms ?? 0, { stat: "p50" });
+    this.setGauge("acs_readyz_gateway_ms", summary.p95Ms ?? 0, { stat: "p95" });
+    this.setGauge("acs_readyz_window_samples", summary.sampleCount);
+    this.setGauge("acs_readyz_window_failures", summary.failures);
+  }
+
+  readyzSummary(): ReadyzTelemetrySummary {
+    const durations = this.readyzSamples.map((sample) => sample.durationMs);
+    const latest = this.readyzSamples[this.readyzSamples.length - 1];
+    return {
+      latestMs: latest ? roundedMs(latest.durationMs) : null,
+      p50Ms: percentile(durations, 0.5),
+      p95Ms: percentile(durations, 0.95),
+      failures: this.readyzSamples.filter((sample) => !sample.ok).length,
+      sampleCount: this.readyzSamples.length
+    };
   }
 
   setSqliteReady(ready: boolean): void {

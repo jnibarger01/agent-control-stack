@@ -21,6 +21,31 @@ describe("GatewayMetrics", () => {
   });
 });
 
+describe("GatewayMetrics readiness telemetry", () => {
+  it("tracks a bounded readiness window with latest, p50, p95, failures, and sample count", () => {
+    const metrics = new GatewayMetrics();
+    metrics.observeReadiness(1, true);
+    metrics.observeReadiness(2, true);
+    metrics.observeReadiness(3, false);
+    metrics.observeReadiness(4, true);
+    metrics.observeReadiness(5, true);
+
+    expect(metrics.readyzSummary()).toEqual({
+      latestMs: 5,
+      p50Ms: 3,
+      p95Ms: 5,
+      failures: 1,
+      sampleCount: 5
+    });
+    const output = metrics.render();
+    expect(output).toContain('acs_readyz_gateway_ms{stat="latest"} 5');
+    expect(output).toContain('acs_readyz_gateway_ms{stat="p50"} 3');
+    expect(output).toContain('acs_readyz_gateway_ms{stat="p95"} 5');
+    expect(output).toContain("acs_readyz_window_failures 1");
+    expect(output).toContain("acs_readyz_window_samples 5");
+  });
+});
+
 describe("GatewayMetrics.summary", () => {
   it("sums counters across label sets and filters 429s and 5xx by status", () => {
     const metrics = new GatewayMetrics();
