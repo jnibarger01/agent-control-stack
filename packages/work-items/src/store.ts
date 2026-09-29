@@ -1168,7 +1168,7 @@ export interface WorkItemStore {
   retryObservation(observationId: string, error: string, now?: Date): "pending" | "failed";
   getObservationCapacity(): ObservationCapacity;
   getExecutionResult(resultId: string): StoredExecutionResult | undefined;
-  getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined;
+  getExecutionResultForIdempotency(idempotencyKey: string): StoredExecutionResult | undefined;
   retryWorkItem(id: string, input: RetryWorkItemInput): WorkItem;
   cloneWorkItem(id: string, input: CloneWorkItemInput): WorkItem;
 }
@@ -5515,10 +5515,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return row ? rowToExecutionResult(row) : undefined;
   }
 
-  getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined {
+  getExecutionResultForIdempotency(idempotencyKey: string): StoredExecutionResult | undefined {
     const row = this.db
-      .prepare(`SELECT * FROM execution_results WHERE worker_id = ? AND idempotency_key = ?`)
-      .get(workerId, idempotencyKey) as unknown as ExecutionResultRow | undefined;
+      .prepare(`SELECT * FROM execution_results WHERE idempotency_key = ?`)
+      .get(idempotencyKey) as unknown as ExecutionResultRow | undefined;
     return row ? rowToExecutionResult(row) : undefined;
   }
 
@@ -5543,8 +5543,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       );
     }
     const existingByKey = this.db
-      .prepare(`SELECT * FROM execution_results WHERE worker_id = ? AND idempotency_key = ?`)
-      .get(input.workerId, input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
+      .prepare(`SELECT * FROM execution_results WHERE idempotency_key = ?`)
+      .get(input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
     if (existingByKey) {
       if (existingByKey.payload_hash !== payloadHash || existingByKey.work_item_id !== input.workItemId) {
         throw new ControlStackError("result_conflict", "result idempotency key conflicts with an accepted result");
@@ -5602,15 +5602,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
       ...transitionWorkItem(rowToWorkItem(row), resultStatus(input.outcome), now),
       result: compactResult(input, payloadHash, now, resultId)
     };
-    this.db
-      .prepare(
-        `INSERT INTO execution_results
-         (result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome,
-          started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json,
-          artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
+    try {
+      this.db.prepare(
+        "INSERT INTO execution_results " +
+          "(result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome, " +
+          "started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json, " +
+          "artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at) " +
+          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+      ).run(
         resultId,
         input.workItemId,
         input.leaseId,
@@ -5632,6 +5631,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
         payloadHash,
         now
       );
+    } catch (insertError) {
+      const err = insertError as NodeJS.ErrnoException;
+      if (err.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed/.test(err.message)) {
+        const existing = this.db
+          .prepare("SELECT * FROM execution_results WHERE idempotency_key = ?")
+          .get(input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
+        if (existing && existing.payload_hash === payloadHash && existing.work_item_id === input.workItemId) {
+          const replayed = this.getRequired(input.workItemId);
+          return { value: replayed, events: [] };
+        }
+        throw new ControlStackError("result_conflict", "result idempotency key conflicts with an accepted result");
+      }
+      throw insertError;
+    }
 
     const updatedWorkItem = this.db
       .prepare(

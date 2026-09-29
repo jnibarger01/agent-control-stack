@@ -2670,7 +2670,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           admissionBinding.inputHash === body.inputHash
         );
         try {
-          const replay = workItems.getExecutionResultForIdempotency(body.workerId, body.idempotencyKey);
+          const replay = workItems.getExecutionResultForIdempotency(body.idempotencyKey);
           const workItem = workItems.submitWorkResult(body);
           const resultId = typeof workItem.result?.resultId === "string" ? workItem.result.resultId : undefined;
           const result = resultId ? workItems.getExecutionResult(resultId) : undefined;
