@@ -261,6 +261,9 @@ export function gateHumanInterruptResolution(
     }
 
     const required = approvalRequired(evaluations);
+    if (required.length > 0 && workItem.requesterSubject === parsed.resolvedByActorId) {
+      throw new ControlStackError("approval_self_denied", "requester cannot approve its own interrupted execution");
+    }
     const approvals: ApprovalGrant[] = [];
     for (const evaluation of required) {
       approvals.push(
