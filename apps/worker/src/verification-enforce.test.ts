@@ -4,11 +4,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { workspaceIdentityFromContainment } from "@agent-control-stack/advisory";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
-import {
-  SqliteWorkItemStore,
-  executionActionHash,
-  type WorkItem
-} from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore, executionActionHash, type WorkItem } from "@agent-control-stack/work-items";
 import type {
   AuthorizedExecutionRequest,
   MachineExecutor,
@@ -131,6 +127,19 @@ function seedWrite(): string {
   }
 }
 
+function canonicalTrace(workItemId: string): Array<{ kind: string; payload: Record<string, unknown> }> {
+  const db = new DatabaseSync(dbPath, { readOnly: true });
+  try {
+    return (
+      db
+        .prepare("SELECT canonical_json FROM trace_outbox WHERE work_item_id = ? ORDER BY seq")
+        .all(workItemId) as Array<{ canonical_json: string }>
+    ).map((row) => JSON.parse(row.canonical_json));
+  } finally {
+    db.close();
+  }
+}
+
 function attemptIdFor(workItemId: string): string {
   const db = new DatabaseSync(dbPath, { readOnly: true });
   try {
@@ -144,7 +153,10 @@ function attemptIdFor(workItemId: string): string {
   }
 }
 
-function attemptAuthority(workItemId: string, store: SqliteWorkItemStore): {
+function attemptAuthority(
+  workItemId: string,
+  store: SqliteWorkItemStore
+): {
   attemptId: string;
   planHash: string;
   inputHash: string;
@@ -289,6 +301,23 @@ describe("ADR 0015 worker verification enforcement", () => {
       expect(events).toContain("evidence.manifest_recorded");
       expect(events).toContain("verification.decision");
       expect(events).toContain("work_item.succeeded");
+
+      const trace = canonicalTrace(id);
+      const verificationKinds = trace
+        .filter((event) => event.kind.startsWith("verification."))
+        .map((event) => event.kind);
+      expect(verificationKinds).toEqual(["verification.started", "verification.finished"]);
+      const startedIndex = trace.findIndex((event) => event.kind === "verification.started");
+      const finishedIndex = trace.findIndex((event) => event.kind === "verification.finished");
+      const completedIndex = trace.findIndex((event) => event.kind === "run.completed");
+      expect(startedIndex).toBeGreaterThanOrEqual(0);
+      expect(finishedIndex).toBeGreaterThan(startedIndex);
+      expect(completedIndex).toBeGreaterThan(finishedIndex);
+      expect(trace[finishedIndex]?.payload).toMatchObject({
+        outcome: "attempt_accepted",
+        accepted: true,
+        review_finding_count: 0
+      });
     } finally {
       store.close();
     }
@@ -344,6 +373,15 @@ describe("ADR 0015 worker verification enforcement", () => {
       expect(events).toContain("attempt.phase.reviewing");
       expect(events).not.toContain("execution.result_persisted");
       expect(events).not.toContain("work_item.succeeded");
+
+      const trace = canonicalTrace(id);
+      const verificationEvents = trace.filter((event) => event.kind.startsWith("verification."));
+      expect(verificationEvents.map((event) => event.kind)).toEqual(["verification.started"]);
+      expect(verificationEvents[0]?.payload).toMatchObject({
+        reviewers_required: expect.any(Number),
+        mode: "independent_review"
+      });
+      expect(trace.some((event) => event.kind === "run.completed")).toBe(false);
     } finally {
       store.close();
     }

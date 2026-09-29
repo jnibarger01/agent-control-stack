@@ -116,7 +116,11 @@ describe("gateway trace producer config (PR #212 B4)", () => {
       try {
         const approval = check.prepare(`SELECT approved_by FROM approval_records`).get() as { approved_by: string };
         expect(approval.approved_by).toBe(actorId);
-        const row = check.prepare(`SELECT canonical_json FROM trace_outbox`).get() as { canonical_json: string };
+        const row = check
+          .prepare(
+            `SELECT canonical_json FROM trace_outbox WHERE json_extract(canonical_json, '$.kind') = 'acs.approval.granted'`
+          )
+          .get() as { canonical_json: string };
         const event = JSON.parse(row.canonical_json) as {
           actor: { id: string };
           source: { instance: string; release_sha: string };

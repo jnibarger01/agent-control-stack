@@ -26,7 +26,7 @@ import {
   type ObservationCompletion,
   type ObservationOutboxEntry
 } from "./observation-outbox.js";
-import type { CanonicalTraceEvent } from "./trace-event.js";
+import type { CanonicalTraceEvent, CanonicalTraceEventKind } from "./trace-event.js";
 import {
   claimNextObservation as claimNextObservationRow,
   completeObservation as completeObservationRow,
@@ -55,9 +55,13 @@ import {
 } from "./work-item.js";
 import {
   enqueueApprovalTraceEvent,
+  enqueueResultTraceEvent,
+  enqueueWorkItemLifecycleTraceEvent,
   rawTraceProducerConfig,
   validateTraceProducerConfig,
-  type ApprovalTraceInput
+  type ApprovalTraceInput,
+  type ResultTraceInput,
+  type WorkItemLifecycleTraceInput
 } from "./trace-outbox.js";
 import {
   DEFAULT_HEARTBEAT_TTL_MS,
@@ -131,8 +135,11 @@ import {
 } from "./recovery.js";
 import {
   publicationRecordSchema,
+  recordPublicationBlockedInputSchema,
   recordPublicationInputSchema,
+  type PublicationBlockedRecord,
   type PublicationRecord,
+  type RecordPublicationBlockedInput,
   type RecordPublicationInput
 } from "./publication.js";
 import {
@@ -943,7 +950,7 @@ export interface SqliteWorkItemStoreOptions {
 }
 
 export interface TraceEnqueueFailure {
-  kind: ApprovalTraceInput["kind"];
+  kind: CanonicalTraceEventKind;
   workItemId: string;
   code: string;
   message: string;
@@ -988,6 +995,10 @@ export interface WorkItemStore {
   recordRecoveryDecision(input: RecordRecoveryDecisionInput, options: PrivilegedTransitionOptions): RecoveryRecord;
   getRecoveryDecisionForAttempt(attemptId: string): RecoveryRecord | undefined;
   recordPublication(input: RecordPublicationInput, options: PrivilegedTransitionOptions): PublicationRecord;
+  recordPublicationBlocked(
+    input: RecordPublicationBlockedInput,
+    options: PrivilegedTransitionOptions
+  ): PublicationBlockedRecord;
   getPublicationByIdempotency(idempotencyKey: string): PublicationRecord | undefined;
   listPublications(workItemId?: string): PublicationRecord[];
 
@@ -1268,7 +1279,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
           workItem.createdAt,
           workItem.updatedAt
         );
-      return { value: workItem, events: [this.appendAuditEvent(workItemCreatedEvent(workItem))] };
+      const event = this.appendAuditEvent(workItemCreatedEvent(workItem));
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: workItem.id,
+        kind: "run.received",
+        actorId: "acs",
+        actorType: "system",
+        payload: { status: workItem.status, risk: workItem.risk }
+      });
+      return { value: workItem, events: [event] };
     });
   }
 
@@ -2806,6 +2827,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: parsed.workItemId,
+        kind: "verification.started",
+        component: "verification",
+        actorId: "acs",
+        actorType: "system",
+        payload: {
+          attempt_id: parsed.attemptId,
+          policy_version: parsed.policyVersion,
+          reviewers_required: parsed.reviewersRequired,
+          mode: parsed.reviewersRequired === 0 ? "automatic" : "independent_review"
+        }
+      });
       return { value, events: [event] };
     });
   }
@@ -2885,6 +2921,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }
         )
       );
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: parsed.workItemId,
+        kind: "verification.finished",
+        component: "verification",
+        actorId: "acs",
+        actorType: "system",
+        payload: {
+          attempt_id: parsed.attemptId,
+          outcome: parsed.outcome,
+          accepted: parsed.outcome === "attempt_accepted",
+          evidence_manifest_hash: parsed.evidenceManifestHash,
+          review_finding_count: parsed.reviewFindingHashes.length,
+          policy_version: parsed.verificationPolicyVersion
+        }
+      });
       return { value, events: [event] };
     });
   }
@@ -2976,6 +3029,77 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "publication.id": record.publicationId
         })
       );
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: record.workItemId,
+        kind: "promotion.completed",
+        component: "publication",
+        actorId: options.actorId ?? "acs",
+        actorType: "system",
+        payload: {
+          attempt_id: record.attemptId,
+          publication_id: record.publicationId,
+          commit_sha: record.commitSha,
+          transport: "pull_request"
+        }
+      });
+      return { value: record, events: [event] };
+    });
+  }
+
+  recordPublicationBlocked(
+    input: RecordPublicationBlockedInput,
+    options: PrivilegedTransitionOptions
+  ): PublicationBlockedRecord {
+    requirePrivilegedTransition(options, "record_publication_blocked");
+    const parsed = recordPublicationBlockedInputSchema.parse(input);
+    return this.write(() => {
+      this.getRequired(parsed.workItemId);
+      const attempt = this.getAttempt(parsed.attemptId);
+      if (!attempt || attempt.workItemId !== parsed.workItemId) {
+        throw new ControlStackError(
+          "publication_block_attempt_mismatch",
+          "promotion block must reference an attempt owned by the work item"
+        );
+      }
+
+      const record: PublicationBlockedRecord = {
+        workItemId: parsed.workItemId,
+        attemptId: parsed.attemptId,
+        stage: parsed.stage,
+        reasonCode: parsed.reasonCode,
+        externalState: parsed.externalState,
+        recordedAt: (parsed.now ?? new Date()).toISOString()
+      };
+      const event = this.appendAuditEvent(
+        createEvent(
+          "publication.blocked",
+          { ...record },
+          {
+            "work_item.id": record.workItemId,
+            "attempt.id": record.attemptId,
+            "publication.stage": record.stage,
+            "publication.reason_code": record.reasonCode,
+            "publication.external_state": record.externalState
+          }
+        )
+      );
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: record.workItemId,
+        kind: "promotion.blocked",
+        component: "publication",
+        actorId: options.actorId ?? "acs",
+        actorType: "system",
+        payload: {
+          attempt_id: record.attemptId,
+          stage: record.stage,
+          reason_code: record.reasonCode,
+          external_state: record.externalState
+        }
+      });
       return { value: record, events: [event] };
     });
   }
@@ -4393,6 +4517,135 @@ export class SqliteWorkItemStore implements WorkItemStore {
           attributes
         )
       );
+      const body = input.body ?? {};
+      const bodyString = (key: string): string => {
+        const value = body[key];
+        return typeof value === "string" ? value : "";
+      };
+      const bodyNumber = (key: string): number | undefined => {
+        const value = body[key];
+        return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+      };
+      const bodyBoolean = (key: string): boolean | undefined => {
+        const value = body[key];
+        return typeof value === "boolean" ? value : undefined;
+      };
+      if (input.name === "desktop_commander.capability_issued" || input.name === "jace_commander.capability_issued") {
+        const isDc = input.name === "desktop_commander.capability_issued";
+        this.enqueueWorkItemLifecycleTraceNonBlocking({
+          instance: this.traceInstance,
+          releaseSha: this.releaseSha,
+          workItemId,
+          kind: "capability.issued",
+          component: "capability-issuer",
+          capabilityId: bodyString("capabilityId") || attributeString("capability.id"),
+          actorId: workerId,
+          actorType: "agent",
+          payload: {
+            contract: isDc ? "acs.dc.v1" : "acs.jc.v1",
+            tool: bodyString("tool") || attributeString(isDc ? "desktop_commander.tool" : "jace_commander.tool"),
+            runtime_id: bodyString("runtimeId"),
+            attempt_id: attemptId,
+            lease_id: leaseId,
+            lease_epoch: fencingEpoch,
+            action_hash: attributeString("action.hash"),
+            invocation_hash: attributeString(
+              isDc ? "desktop_commander.invocation_hash" : "jace_commander.invocation_hash"
+            ),
+            request_hash: bodyString("requestHash") || attributeString("execution.request_hash"),
+            key_id: bodyString("keyId"),
+            expires_at: bodyString("expiresAt"),
+            approval_bound: attributeString("approval.id").length > 0
+          }
+        });
+      }
+
+      const traceExecutionBoundary = (
+        kind: "executor.started" | "tool.call.started" | "tool.call.finished",
+        payload: Record<string, unknown>
+      ): void => {
+        const tool = typeof payload.tool === "string" ? payload.tool : "";
+        const actionHash = attributeString("action.hash");
+        const invocationHash = attributeString("desktop_commander.invocation_hash");
+        const argumentsDigest = typeof payload.arguments_digest === "string" ? payload.arguments_digest : "";
+        const argumentCount = payload.argument_count;
+        const durationMs = payload.duration_ms;
+        const truncated = payload.truncated;
+        const isError = payload.is_error;
+        const status = payload.status;
+        const resultHash = payload.result_hash;
+        const hashPattern = /^[a-f0-9]{64}$/u;
+        const invalidStart =
+          kind === "tool.call.started" &&
+          (!hashPattern.test(argumentsDigest) || !Number.isSafeInteger(argumentCount) || (argumentCount as number) < 0);
+        const invalidFinish =
+          kind === "tool.call.finished" &&
+          (!Number.isFinite(durationMs) ||
+            (durationMs as number) < 0 ||
+            typeof truncated !== "boolean" ||
+            typeof isError !== "boolean" ||
+            (status !== "succeeded" && status !== "failed") ||
+            typeof resultHash !== "string" ||
+            (resultHash.length > 0 && !hashPattern.test(resultHash)));
+        if (
+          tool.length === 0 ||
+          !hashPattern.test(actionHash) ||
+          !hashPattern.test(invocationHash) ||
+          invalidStart ||
+          invalidFinish
+        ) {
+          this.reportTraceFailure(
+            { kind, workItemId },
+            "trace_execution_evidence_incomplete",
+            "execution trace correlation fields are missing or invalid"
+          );
+          return;
+        }
+        this.enqueueWorkItemLifecycleTraceNonBlocking({
+          instance: this.traceInstance,
+          releaseSha: this.releaseSha,
+          workItemId,
+          kind,
+          component: "execution",
+          actorId: workerId,
+          actorType: "agent",
+          payload: {
+            executor: "desktop_commander",
+            attempt_id: attemptId,
+            lease_id: leaseId,
+            lease_epoch: fencingEpoch,
+            action_hash: actionHash,
+            invocation_hash: invocationHash,
+            ...payload
+          }
+        });
+      };
+
+      if (input.name === "execution.started") {
+        traceExecutionBoundary("executor.started", {
+          tool: bodyString("toolName") || attributeString("desktop_commander.tool")
+        });
+      } else if (input.name === "desktop_commander.tool_called") {
+        traceExecutionBoundary("tool.call.started", {
+          tool: bodyString("toolName") || attributeString("desktop_commander.tool"),
+          arguments_digest: bodyString("argumentsDigest"),
+          argument_count: bodyNumber("argumentCount")
+        });
+      } else if (input.name === "desktop_commander.tool_succeeded" || input.name === "desktop_commander.tool_failed") {
+        const durationMs = bodyNumber("durationMs");
+        const truncated = bodyBoolean("truncated");
+        const isError = bodyBoolean("isError");
+        traceExecutionBoundary("tool.call.finished", {
+          tool: bodyString("toolName") || attributeString("desktop_commander.tool"),
+          status: input.name === "desktop_commander.tool_succeeded" ? "succeeded" : "failed",
+          duration_ms: durationMs,
+          result_hash: bodyString("resultHash") || attributeString("execution.result_hash"),
+          truncated,
+          is_error: isError,
+          ...(bodyString("outcome") ? { outcome: bodyString("outcome") } : {}),
+          ...(bodyString("errorCode") ? { error_code: bodyString("errorCode") } : {})
+        });
+      }
       return { value: event, events: [event] };
     });
   }
@@ -5122,7 +5375,22 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   submitWorkResult(input: unknown): WorkItem {
     const parsed = submitWorkResultSchema.parse(input);
-    const accepted = this.write(() => this.acceptResultInTransaction(parsed));
+    const accepted = this.write(() => {
+      const result = this.acceptResultInTransaction(parsed);
+      const isNewResult = result.events.some((event) => event.name === "execution_result.accepted");
+      if (isNewResult) {
+        const resultId = typeof result.value.result?.resultId === "string" ? result.value.result.resultId : "";
+        this.enqueueResultTraceNonBlocking({
+          instance: this.traceInstance,
+          releaseSha: this.releaseSha,
+          workItemId: parsed.workItemId,
+          workerId: parsed.workerId,
+          resultId,
+          outcome: parsed.outcome
+        });
+      }
+      return result;
+    });
     this.enqueueObservationAfterAuthority(accepted.id);
     return accepted;
   }
@@ -5768,6 +6036,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
       );
       const createdEvent = this.appendAuditEvent(workItemCreatedEvent(linked));
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: linked.id,
+        kind: "run.received",
+        actorId: "acs",
+        actorType: "system",
+        payload: {
+          status: linked.status,
+          risk: linked.risk,
+          lineage_type: lineageType,
+          source_work_item_id: source.id
+        }
+      });
       return { value: linked, events: [createdEvent, event] };
     });
   }
@@ -5963,17 +6245,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
             .run(updated.updatedAt, updated.updatedAt, id);
         }
       }
-      return {
-        value: updated,
-        events: [
-          this.appendAuditEvent(
-            workItemStatusEvent(updated, options.eventBody, {
-              ...options.eventAttributes,
-              ...(actorId ? { "actor.id": actorId } : {})
-            })
-          )
-        ]
-      };
+      const event = this.appendAuditEvent(
+        workItemStatusEvent(updated, options.eventBody, {
+          ...options.eventAttributes,
+          ...(actorId ? { "actor.id": actorId } : {})
+        })
+      );
+      this.enqueueWorkItemTransitionTraceNonBlocking(current, updated, {
+        actorId,
+        eventBody: options.eventBody
+      });
+      return { value: updated, events: [event] };
     });
   }
 
@@ -6168,7 +6450,116 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => ({ value: operation(), events: [] }));
   }
 
-  /** Number of approval trace events that failed to enqueue in this process (non-blocking). */
+  private enqueueWorkItemLifecycleTraceNonBlocking(input: WorkItemLifecycleTraceInput): string | null {
+    const configError = this.checkTraceConfig();
+    if (configError) {
+      this.reportTraceFailure(input, configError.code, configError.message);
+      return null;
+    }
+    this.db.exec("SAVEPOINT acs_lifecycle_trace_enqueue");
+    try {
+      const traceId = enqueueWorkItemLifecycleTraceEvent(this.db, input);
+      this.db.exec("RELEASE SAVEPOINT acs_lifecycle_trace_enqueue");
+      return traceId;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO SAVEPOINT acs_lifecycle_trace_enqueue");
+      this.db.exec("RELEASE SAVEPOINT acs_lifecycle_trace_enqueue");
+      this.reportTraceFailure(
+        input,
+        error instanceof ControlStackError ? error.code : "trace_enqueue_failed",
+        error instanceof Error ? error.message : "lifecycle trace enqueue failed"
+      );
+      return null;
+    }
+  }
+
+  private enqueueWorkItemTransitionTraceNonBlocking(
+    current: WorkItem,
+    updated: WorkItem,
+    options: { actorId?: string; eventBody?: Record<string, unknown> }
+  ): void {
+    const explicitActor =
+      typeof options.eventBody?.actor === "string" && options.eventBody.actor.length > 0
+        ? options.eventBody.actor
+        : undefined;
+    const actorId = explicitActor ?? options.actorId ?? "acs";
+    const actorType = explicitActor ? "human" : "system";
+    const basePayload = { previous_status: current.status, status: updated.status };
+
+    if (updated.status === "needs_approval") {
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: updated.id,
+        kind: "approval.requested",
+        actorId: "acs",
+        actorType: "system",
+        payload: basePayload
+      });
+      return;
+    }
+    if (updated.status === "rejected") {
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: updated.id,
+        kind: "approval.decided",
+        actorId,
+        actorType,
+        payload: { ...basePayload, decision: "rejected" }
+      });
+      return;
+    }
+    if (updated.status === "cancelled" || updated.status === "failed") {
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: updated.id,
+        kind: "run.failed",
+        actorId,
+        actorType,
+        payload: { ...basePayload, outcome: updated.status }
+      });
+      return;
+    }
+    if (updated.status === "succeeded") {
+      this.enqueueWorkItemLifecycleTraceNonBlocking({
+        instance: this.traceInstance,
+        releaseSha: this.releaseSha,
+        workItemId: updated.id,
+        kind: "run.completed",
+        actorId,
+        actorType,
+        payload: { ...basePayload, outcome: "succeeded" }
+      });
+    }
+  }
+
+  private enqueueResultTraceNonBlocking(input: ResultTraceInput): string | null {
+    const kind = input.outcome === "succeeded" ? "run.completed" : "run.failed";
+    const configError = this.checkTraceConfig();
+    if (configError) {
+      this.reportTraceFailure({ kind, workItemId: input.workItemId }, configError.code, configError.message);
+      return null;
+    }
+    this.db.exec("SAVEPOINT acs_result_trace_enqueue");
+    try {
+      const traceId = enqueueResultTraceEvent(this.db, input);
+      this.db.exec("RELEASE SAVEPOINT acs_result_trace_enqueue");
+      return traceId;
+    } catch (error) {
+      this.db.exec("ROLLBACK TO SAVEPOINT acs_result_trace_enqueue");
+      this.db.exec("RELEASE SAVEPOINT acs_result_trace_enqueue");
+      this.reportTraceFailure(
+        { kind, workItemId: input.workItemId },
+        error instanceof ControlStackError ? error.code : "trace_enqueue_failed",
+        error instanceof Error ? error.message : "result trace enqueue failed"
+      );
+      return null;
+    }
+  }
+
+  /** Number of trace events that failed to enqueue in this process (non-blocking). */
   getTraceEnqueueFailureCount(): number {
     return this.traceEnqueueFailures;
   }
@@ -6192,6 +6583,23 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.db.exec("SAVEPOINT acs_trace_enqueue");
     try {
       enqueueApprovalTraceEvent(this.db, input);
+      if (input.kind === "acs.approval.granted") {
+        enqueueWorkItemLifecycleTraceEvent(this.db, {
+          instance: input.instance,
+          releaseSha: input.releaseSha,
+          workItemId: input.workItemId,
+          component: "approvals",
+          kind: "approval.decided",
+          actorId: input.actorId,
+          actorType: input.actorType,
+          payload: {
+            decision: "approved",
+            status: input.status,
+            action_hash: input.actionHash,
+            request_hash: input.requestHash
+          }
+        });
+      }
       this.db.exec("RELEASE SAVEPOINT acs_trace_enqueue");
       return;
     } catch (error) {
@@ -6222,7 +6630,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.traceConfigError;
   }
 
-  private reportTraceFailure(input: ApprovalTraceInput, code: string, message: string): void {
+  private reportTraceFailure(
+    input: { kind: CanonicalTraceEventKind; workItemId: string },
+    code: string,
+    message: string
+  ): void {
     this.traceEnqueueFailures += 1;
     const failure: TraceEnqueueFailure = {
       kind: input.kind,

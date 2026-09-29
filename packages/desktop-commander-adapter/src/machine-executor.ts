@@ -19,7 +19,11 @@ import {
 } from "./mcp-stdio-client.js";
 import { normalizeToolResult, type MachineExecutionResult } from "./result.js";
 import { desktopCommanderToolPolicy, isAllowlistedDesktopCommanderTool } from "./tool-policy.js";
-import { prepareDesktopCommanderCapability, signPreparedDesktopCommanderCapability } from "./capability.js";
+import {
+  desktopCommanderCapabilityId,
+  prepareDesktopCommanderCapability,
+  signPreparedDesktopCommanderCapability
+} from "./capability.js";
 import { capabilityDeniedEvent, capabilityIssuedEvent, type AuditEventDraft } from "./audit.js";
 import type { CapabilityIssuanceBinding, RuntimeBootstrapRegistry } from "./runtime-registry.js";
 import { SqliteDesktopCommanderRuntimeRegistry } from "./runtime-registry.js";
@@ -335,6 +339,7 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
       );
     }
     const payload = prepareDesktopCommanderCapability(auth, auth.requestHash, this.config.capability, this.now());
+    const capabilityId = desktopCommanderCapabilityId(payload);
     try {
       const recorded = this.capabilityRegistry.recordIssuance({
         runtimeId: payload.runtimeId,
@@ -364,6 +369,7 @@ export class DesktopCommanderMachineExecutor implements MachineExecutor {
       await this.persistAuditEvent(
         capabilityIssuedEvent({
           auth,
+          capabilityId,
           runtimeId: payload.runtimeId,
           keyId: this.config.capability.keyId,
           requestHash: payload.requestHash,

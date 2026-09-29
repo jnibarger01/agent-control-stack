@@ -94,6 +94,159 @@ describe("canonical trace projection for Jev", () => {
     expect(first.truncated).toBe(true);
   });
 
+  it("keeps bounded execution correlation without exposing raw tool material", () => {
+    const events = trace(["executor.started", "tool.call.started", "tool.call.finished"], {
+      0: {
+        executor: "desktop_commander",
+        tool: "read_file",
+        action_hash: "a".repeat(64),
+        invocation_hash: "b".repeat(64),
+        path: "/secret/path"
+      },
+      1: {
+        tool: "read_file",
+        invocation_hash: "b".repeat(64),
+        arguments_digest: "c".repeat(64),
+        argument_count: 1,
+        arguments: { path: "/secret/path" }
+      },
+      2: {
+        tool: "read_file",
+        status: "failed",
+        invocation_hash: "b".repeat(64),
+        result_hash: "d".repeat(64),
+        duration_ms: 17,
+        truncated: false,
+        is_error: true,
+        outcome: "runtime_error",
+        stdout: "must-not-project"
+      }
+    });
+    const projection = projectCanonicalTraceForJev(events);
+    expect(projection.events).toHaveLength(3);
+    expect(projection.events[0]?.detail).toMatchObject({
+      executor: "desktop_commander",
+      tool: "read_file",
+      action_hash: "a".repeat(64),
+      invocation_hash: "b".repeat(64)
+    });
+    expect(projection.events[1]?.detail).toMatchObject({
+      tool: "read_file",
+      invocation_hash: "b".repeat(64),
+      arguments_digest: "c".repeat(64),
+      argument_count: 1
+    });
+    expect(projection.events[2]?.detail).toMatchObject({
+      tool: "read_file",
+      status: "failed",
+      result_hash: "d".repeat(64),
+      duration_ms: 17,
+      truncated: false,
+      is_error: true,
+      outcome: "runtime_error"
+    });
+    const serialized = JSON.stringify(projection);
+    expect(serialized).not.toContain("/secret/path");
+    expect(serialized).not.toContain("must-not-project");
+    expect(serialized).not.toContain('"arguments":');
+  });
+
+  it("keeps bounded promotion evidence without exposing publication/provider details", () => {
+    const events = trace(["promotion.blocked", "promotion.completed"], {
+      0: {
+        stage: "pull_request",
+        reason_code: "pull_request_failed",
+        external_state: "branch_pushed",
+        provider_error: "must-not-project",
+        pull_request_url: "https://example.invalid/private"
+      },
+      1: {
+        publication_id: "publication-work-1",
+        commit_sha: "a".repeat(40),
+        transport: "pull_request",
+        pull_request_url: "https://example.invalid/private"
+      }
+    });
+    const projection = projectCanonicalTraceForJev(events);
+    expect(projection.events[0]?.detail).toMatchObject({
+      stage: "pull_request",
+      reason_code: "pull_request_failed",
+      external_state: "branch_pushed"
+    });
+    expect(projection.events[1]?.detail).toMatchObject({
+      publication_id: "publication-work-1",
+      commit_sha: "a".repeat(40),
+      transport: "pull_request"
+    });
+    const serialized = JSON.stringify(projection);
+    expect(serialized).not.toContain("must-not-project");
+    expect(serialized).not.toContain("example.invalid");
+    expect(serialized).not.toContain("pull_request_url");
+  });
+
+  it("keeps bounded verification evidence without exposing requirement or finding content", () => {
+    const events = trace(["verification.started", "verification.finished"], {
+      0: {
+        mode: "independent_review",
+        policy_version: "acs.verification-policy.v1",
+        reviewers_required: 1,
+        requirement: { secret: "must-not-project" }
+      },
+      1: {
+        outcome: "attempt_accepted",
+        accepted: true,
+        evidence_manifest_hash: "e".repeat(64),
+        review_finding_count: 2,
+        policy_version: "acs.verification-policy.v1",
+        finding: { prose: "must-not-project" }
+      }
+    });
+    const projection = projectCanonicalTraceForJev(events);
+    expect(projection.events).toHaveLength(2);
+    expect(projection.events[0]?.detail).toMatchObject({
+      mode: "independent_review",
+      policy_version: "acs.verification-policy.v1",
+      reviewers_required: 1
+    });
+    expect(projection.events[1]?.detail).toMatchObject({
+      outcome: "attempt_accepted",
+      accepted: true,
+      evidence_manifest_hash: "e".repeat(64),
+      review_finding_count: 2,
+      policy_version: "acs.verification-policy.v1"
+    });
+    const serialized = JSON.stringify(projection);
+    expect(serialized).not.toContain("must-not-project");
+    expect(serialized).not.toContain('"requirement":');
+    expect(serialized).not.toContain('"finding":');
+  });
+
+  it("keeps bounded capability issuance evidence without exposing capability material", () => {
+    const events = trace(["capability.issued"], {
+      0: {
+        contract: "acs.dc.v1",
+        tool: "read_file",
+        runtime_id: "dc-runtime",
+        lease_epoch: 2,
+        approval_bound: false,
+        capability_secret: "must-not-project"
+      }
+    });
+    const projection = projectCanonicalTraceForJev(events);
+    expect(projection.events).toHaveLength(1);
+    expect(projection.events[0]).toMatchObject({
+      kind: "capability.issued",
+      detail: {
+        contract: "acs.dc.v1",
+        tool: "read_file",
+        runtime_id: "dc-runtime",
+        lease_epoch: 2,
+        approval_bound: false
+      }
+    });
+    expect(JSON.stringify(projection)).not.toContain("must-not-project");
+  });
+
   it("re-applies redaction and strips raw argument material", () => {
     const secret = "«redacted:token…»";
     const events = trace(["tool.call.started", "tool.call.finished"], {

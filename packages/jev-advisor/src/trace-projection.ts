@@ -38,6 +38,7 @@ const SENSITIVE_KEY =
 const RAW_ARGUMENT_KEY = /^(?:argv|args|arguments|command|stdin|environment|env)$/i;
 const DETAIL_KEYS = new Set([
   "tool",
+  "executor",
   "status",
   "outcome",
   "result",
@@ -56,10 +57,33 @@ const DETAIL_KEYS = new Set([
   "replay",
   "route",
   "risk",
+  "contract",
+  "runtime_id",
+  "lease_epoch",
+  "approval_bound",
+  "action_hash",
+  "invocation_hash",
+  "arguments_digest",
+  "argument_count",
+  "result_hash",
+  "truncated",
+  "is_error",
   "taskType",
   "task_type",
   "verifier",
   "check",
+  "mode",
+  "policy_version",
+  "reviewers_required",
+  "accepted",
+  "evidence_manifest_hash",
+  "review_finding_count",
+  "stage",
+  "reason_code",
+  "external_state",
+  "publication_id",
+  "commit_sha",
+  "transport",
   "attempt",
   "count",
   "jc_event_type",
@@ -161,7 +185,8 @@ function eventPriority(kind: CanonicalTraceEventKind): number {
     kind === "tool.call.started" ||
     kind === "verification.started" ||
     kind === "promotion.completed" ||
-    kind === "executor.started"
+    kind === "executor.started" ||
+    kind === "capability.issued"
   ) {
     return 3;
   }
