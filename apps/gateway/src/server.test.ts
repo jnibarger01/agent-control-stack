@@ -412,10 +412,34 @@ describe("mission control gateway", () => {
       const elapsedMs = performance.now() - startedAt;
       expect(ready.statusCode).toBe(200);
       expect(elapsedMs).toBeLessThan(2_000);
+      expect(ready.headers["server-timing"]).toMatch(/^readyz;dur=/);
+      expect(ready.headers["x-acs-readyz-ms"]).toBeDefined();
+      expect(ready.json()).toMatchObject({
+        telemetry: {
+          latestMs: expect.any(Number),
+          p50Ms: expect.any(Number),
+          p95Ms: expect.any(Number),
+          failures: 0,
+          sampleCount: 1
+        },
+        deepHealth: { ok: true, source: "startup", checkedAt: expect.any(String) }
+      });
+      expect(deepHealth).not.toHaveBeenCalled();
+
+      const operatorMetrics = await app.inject({
+        method: "GET",
+        url: "/dashboard/metrics",
+        headers: { authorization: "Bearer t" }
+      });
+      expect(operatorMetrics.statusCode).toBe(200);
+      const prometheus = await app.inject({ method: "GET", url: "/metrics", headers: { authorization: "Bearer t" } });
+      expect(prometheus.statusCode).toBe(200);
+      expect(prometheus.body).toContain('acs_readyz_gateway_ms{stat="p95"}');
       expect(deepHealth).not.toHaveBeenCalled();
 
       const health = await app.inject({ method: "GET", url: "/health" });
       expect(health.statusCode).toBe(200);
+      expect(health.json()).toMatchObject({ deepHealth: { ok: true, source: "deep", checkedAt: expect.any(String) } });
       expect(deepHealth).toHaveBeenCalled();
     } finally {
       deepHealth.mockRestore();
