@@ -28,6 +28,11 @@ function change(overrides: Partial<ProposedChange> & { id: string }): ProposedCh
       description: `write ${overrides.id}`,
       params: { path: `/repo/${overrides.id}.ts`, contents: "x" }
     },
+    // Stand-in for the Policy Gate fingerprint, fixed rather than derived from the id so
+    // that "same operation, different label" cases are expressible. The authorization
+    // path recomputes the real fingerprint from the live operation, so these tests
+    // exercise the manifest/delta plumbing, not the fingerprint itself.
+    actionHash: "a1b2c3d4".repeat(8),
     risk: "medium",
     destructive: false,
     network: false,
@@ -236,7 +241,15 @@ describe("revisions and delta", () => {
       expectedRevision: 1,
       changes: [
         change({ id: "keep" }),
-        change({ id: "edit", target: "/repo/edited-elsewhere.ts" }),
+        change({
+          id: "edit",
+          target: "/repo/edited-elsewhere.ts",
+          action: {
+            kind: "fs.write",
+            description: "write edit",
+            params: { path: "/repo/edited-elsewhere.ts", contents: "x" }
+          }
+        }),
         change({ id: "fresh" })
       ],
       createdByActorId: "agent:backend-api"

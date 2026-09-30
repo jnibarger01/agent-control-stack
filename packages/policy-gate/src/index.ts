@@ -8,6 +8,7 @@ export * from "./policy.js";
 export * from "./preview.js";
 export * from "./rules.js";
 export * from "./tools.js";
+export * from "./approval-bundle-tools.js";
 export * from "./verification-policy.js";
 export * from "./pending-approval-digest.js";
 export * from "./execution-mode.js";

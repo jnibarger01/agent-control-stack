@@ -55,6 +55,17 @@ export const proposedChangeSchema = z
     /** Human-readable target: a file path, service name, host, repo or endpoint. */
     target: z.string().min(1).max(2_000),
     action: proposedChangeActionSchema,
+    /**
+     * The Policy Gate `actionFingerprint` for this change's action.
+     *
+     * Required rather than derived here because `work-items` cannot import
+     * `policy-gate` (the dependency runs the other way). Policy Gate is the only
+     * producer, and the authorization path recomputes the fingerprint from the live
+     * operation rather than trusting this stored value, so a wrong value here cannot
+     * widen what may execute. Recording it in the manifest is still correct: the
+     * fingerprint is part of what the reviewer is approving.
+     */
+    actionHash: hashSchema,
     /** Present when the change is a command; kept explicit for the review UI. */
     command: z.array(z.string().min(1).max(4_000)).max(512).optional(),
     cwd: z.string().min(1).max(2_000).optional(),

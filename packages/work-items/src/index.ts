@@ -25,3 +25,4 @@ export * from "./observation-outbox.js";
 export * from "./observation-store.js";
 export * from "./work-item.js";
 export * from "./worker-identity.js";
+export * from "./approval-bundle-rows.js";

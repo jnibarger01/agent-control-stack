@@ -77,7 +77,11 @@ const migrationFiles = [
   { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" },
   { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" },
   { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" },
-  { version: 37, name: "execution_results_idempotency_unique", filename: "037_execution_results_idempotency_unique.sql" }
+  { version: 37, name: "execution_results_idempotency_unique", filename: "037_execution_results_idempotency_unique.sql" },
+  // 038_admission_permits.sql exists on disk but is deliberately not registered here:
+  // it belongs to an in-flight workstream and this feature must not adopt or activate
+  // another branch's schema. Registering 39 directly after 37 is intentional.
+  { version: 39, name: "approval_bundles", filename: "039_approval_bundles.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

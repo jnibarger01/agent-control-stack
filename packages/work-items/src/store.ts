@@ -17,6 +17,33 @@ import {
   type AuditChainVerification,
   type AuditEvent
 } from "@agent-control-stack/shared";
+import {
+  approvalChangeDigest,
+  approvalManifestHash,
+  serializeApprovalManifest,
+  approvalBundleRevisionSchema,
+  approvalBundleStatusSchema,
+  approvalDecisionSchema,
+  type ApprovalBundle,
+  type ApprovalBundleRevision,
+  type ApprovalBundleStatus,
+  type ApprovalDecision,
+  type ApprovalDecisionKind,
+  type ProposedChange
+} from "@agent-control-stack/approval-bundles";
+import type { ApprovalGrantRecord } from "@agent-control-stack/approval-bundles";
+import {
+  ACS_ADMIN_APPROVER,
+  approvalStrategySchema,
+  readApprovalStrategy,
+  rowToApprovalBundleDecision,
+  rowToApprovalBundleGrant,
+  type ApprovalBundleDecisionRow,
+  type ApprovalBundleGrantRow,
+  type ApprovalBundleRevisionRow,
+  type ApprovalBundleRow,
+  type ApprovalStrategy
+} from "./approval-bundle-rows.js";
 import { transitionWorkItem } from "./state-machine.js";
 import {
   OBSERVATION_OUTBOX_MAX_ATTEMPTS,
@@ -975,6 +1002,45 @@ export interface WorkItemStore {
   getExecutionPlanApproval(workItemId: string, planHash: string, actionHash: string): ExecutionPlanApproval | undefined;
   /** Read one execution-plan approval by its identifier (no state checks). */
   getExecutionPlanApprovalById(approvalId: string): ExecutionPlanApproval | undefined;
+
+  // ---- Approval bundles / change sets -------------------------------------
+  // A bundle is a review artifact. These methods persist revisions, decisions and
+  // the mapping from a bundle change to the authoritative `execution_plan_approvals`
+  // row that carries the real authority. Nothing here grants authority by itself.
+
+  createApprovalBundle(revision: ApprovalBundleRevision): ApprovalBundleRevision;
+  addApprovalBundleRevision(revision: ApprovalBundleRevision, expectedRevision: number): ApprovalBundleRevision;
+  getApprovalBundle(bundleId: string): ApprovalBundle | undefined;
+  getApprovalBundleRevision(bundleId: string, revision: number): ApprovalBundleRevision | undefined;
+  listApprovalBundles(filter?: { missionId?: string; status?: string; limit?: number }): ApprovalBundle[];
+  listApprovalBundleRevisions(bundleId: string): ApprovalBundleRevision[];
+  listApprovalBundleDecisions(bundleId: string): ApprovalDecision[];
+  setApprovalBundleStatus(bundleId: string, status: ApprovalBundleStatus, options: PrivilegedTransitionOptions): void;
+  recordApprovalBundleDecision(input: {
+    bundleId: string;
+    revision: number;
+    kind: ApprovalDecisionKind;
+    approvedByActorId: string;
+    reason: string;
+    changeIds: string[];
+    approvalIdsByChange: Record<string, string>;
+    workItemId: string;
+    planHash: string;
+    now?: Date;
+  }): ApprovalDecision;
+  listApprovalBundleGrants(filter?: {
+    bundleId?: string;
+    workItemId?: string;
+    actionHash?: string;
+  }): ApprovalGrantRecord[];
+  invalidateApprovalBundle(bundleId: string, reason: string, options: PrivilegedTransitionOptions): void;
+  getApprovalStrategy(): {
+    strategy: ApprovalStrategy;
+    updatedAt: string;
+    updatedBy: string;
+    reason: string;
+  };
+  setApprovalStrategy(input: { strategy: ApprovalStrategy; updatedBy: string; reason: string }): void;
   hasExecutionPlanApproval(workItemId: string, planHash: string, actionHash: string): boolean;
   createAttempt(input: CreateAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
   getAttempt(attemptId: string): ExecutionAttempt | undefined;
@@ -1706,6 +1772,704 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(`SELECT * FROM execution_plan_approvals WHERE approval_id = ?`)
       .get(approvalId) as unknown as ExecutionPlanApprovalRow | undefined;
     return row ? rowToExecutionPlanApproval(row) : undefined;
+  }
+
+  // -------------------------------------------------------------------------
+  // Approval bundles / change sets
+  //
+  // A bundle is a review artifact. Nothing here mints authority: approving a bundle
+  // writes one `execution_plan_approvals` row per covered change (through the
+  // existing grantExecutionPlanApproval) and records a `approval_bundle_grants` row
+  // that points at it. Execution authority continues to flow through
+  // `attempt_lease_approvals` exactly as it did before bundles existed.
+  // -------------------------------------------------------------------------
+
+  createApprovalBundle(revision: ApprovalBundleRevision): ApprovalBundleRevision {
+    const parsed = approvalBundleRevisionSchema.parse(revision);
+    // Recompute rather than trust the caller's hash: a caller must not be able to
+    // name a manifest it did not actually produce.
+    const manifestHash = approvalManifestHash(parsed);
+    if (manifestHash !== parsed.manifestHash) {
+      throw new ControlStackError(
+        "approval_manifest_hash_mismatch",
+        "approval bundle manifest hash does not match its contents"
+      );
+    }
+    const serialized = serializeApprovalManifest(parsed);
+    const now = new Date().toISOString();
+
+    return this.write(() => {
+      const events: StoredAuditEvent[] = [];
+      this.db
+        .prepare(
+          `INSERT INTO approval_bundles
+           (bundle_id, mission_id, execution_id, agent_id, status, current_revision,
+            current_manifest_hash, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parsed.bundleId,
+          parsed.missionId,
+          parsed.executionId,
+          parsed.agentId,
+          parsed.status,
+          parsed.revision,
+          parsed.manifestHash,
+          parsed.createdAt,
+          parsed.createdAt
+        );
+      this.insertApprovalBundleRevisionRow(parsed, serialized);
+      events.push(...this.insertApprovalBundleChangeRows(parsed));
+      events.push(
+        this.appendAuditEvent(
+          createEvent(
+            "approval_bundle.created",
+            {
+              bundleId: parsed.bundleId,
+              revision: parsed.revision,
+              manifestHash: parsed.manifestHash,
+              missionId: parsed.missionId,
+              executionId: parsed.executionId,
+              agentId: parsed.agentId
+            },
+            {
+              "approval_bundle.id": parsed.bundleId,
+              "approval_bundle.revision": String(parsed.revision),
+              "approval_bundle.manifest_hash": parsed.manifestHash,
+              "work_item.mission_id": parsed.missionId,
+              "work_item.execution_id": parsed.executionId,
+              "agent.id": parsed.agentId,
+              "actor.id": parsed.createdByActorId
+            }
+          )
+        )
+      );
+      return { value: { ...parsed, manifestHash }, events };
+    });
+  }
+
+  /**
+   * Append the next revision of a bundle.
+   *
+   * The caller states which revision it believes is current. A mismatch throws rather
+   * than overwriting, so two agents revising the same bundle concurrently cannot
+   * interleave into a corrupt history.
+   */
+  addApprovalBundleRevision(revision: ApprovalBundleRevision, expectedRevision: number): ApprovalBundleRevision {
+    const parsed = approvalBundleRevisionSchema.parse(revision);
+    const manifestHash = approvalManifestHash(parsed);
+    if (manifestHash !== parsed.manifestHash) {
+      throw new ControlStackError(
+        "approval_manifest_hash_mismatch",
+        "approval bundle manifest hash does not match its contents"
+      );
+    }
+    const head = this.db
+      .prepare(`SELECT current_revision, status FROM approval_bundles WHERE bundle_id = ?`)
+      .get(parsed.bundleId) as { current_revision: number; status: string } | undefined;
+    if (!head) {
+      throw new ControlStackError("approval_bundle_not_found", `approval bundle not found: ${parsed.bundleId}`);
+    }
+    if (head.current_revision !== expectedRevision || parsed.revision !== expectedRevision + 1) {
+      throw new ControlStackError(
+        "approval_bundle_revision_conflict",
+        `approval bundle ${parsed.bundleId} is at revision ${head.current_revision}, not ${expectedRevision}`
+      );
+    }
+    const serialized = serializeApprovalManifest(parsed);
+
+    return this.write(() => {
+      const events: StoredAuditEvent[] = [];
+      this.insertApprovalBundleRevisionRow(parsed, serialized);
+      events.push(...this.insertApprovalBundleChangeRows(parsed));
+      this.db
+        .prepare(
+          `UPDATE approval_bundles
+           SET current_revision = ?, current_manifest_hash = ?, status = ?, updated_at = ?
+           WHERE bundle_id = ?`
+        )
+        .run(parsed.revision, parsed.manifestHash, parsed.status, parsed.createdAt, parsed.bundleId);
+      events.push(
+        this.appendAuditEvent(
+          createEvent(
+            "approval_bundle.revised",
+            {
+              bundleId: parsed.bundleId,
+              revision: parsed.revision,
+              parentManifestHash: parsed.parentManifestHash ?? null,
+              manifestHash: parsed.manifestHash,
+              missionId: parsed.missionId,
+              executionId: parsed.executionId,
+              agentId: parsed.agentId,
+              changeIds: parsed.changes.map((change) => change.id)
+            },
+            {
+              "approval_bundle.id": parsed.bundleId,
+              "approval_bundle.revision": String(parsed.revision),
+              "approval_bundle.manifest_hash": parsed.manifestHash,
+              "approval_bundle.parent_manifest_hash": parsed.parentManifestHash ?? "",
+              "work_item.mission_id": parsed.missionId,
+              "work_item.execution_id": parsed.executionId,
+              "actor.id": parsed.createdByActorId
+            }
+          )
+        )
+      );
+      return { value: { ...parsed, manifestHash }, events };
+    });
+  }
+
+  private insertApprovalBundleRevisionRow(revision: ApprovalBundleRevision, manifestJson: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO approval_bundle_revisions
+         (bundle_id, revision, manifest_hash, parent_manifest_hash, manifest_json, title,
+          rationale, status, base_state_json, scope_json, created_at, created_by_actor_id, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        revision.bundleId,
+        revision.revision,
+        revision.manifestHash,
+        revision.parentManifestHash ?? null,
+        manifestJson,
+        revision.title,
+        revision.rationale,
+        revision.status,
+        JSON.stringify(revision.baseState),
+        JSON.stringify(revision.scope),
+        revision.createdAt,
+        revision.createdByActorId,
+        revision.expiresAt ?? null
+      );
+  }
+
+  private insertApprovalBundleChangeRows(revision: ApprovalBundleRevision): StoredAuditEvent[] {
+    const events: StoredAuditEvent[] = [];
+    for (const change of revision.changes) {
+      this.db
+        .prepare(
+          `INSERT INTO approval_bundle_changes
+           (bundle_id, revision, change_id, change_digest, action_hash, change_type, target,
+            summary, risk, destructive, network, depends_on_json, command_json, change_json)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          revision.bundleId,
+          revision.revision,
+          change.id,
+          approvalChangeDigest(change),
+          // The Policy Gate fingerprint for this change's action, supplied by Policy Gate
+          // at bundle creation. `work-items` cannot derive it: the dependency runs the
+          // other way. The authorization path recomputes the fingerprint from the live
+          // operation, so this column is an index, not a source of authority.
+          change.actionHash,
+          change.type,
+          change.target,
+          change.summary,
+          change.risk,
+          change.destructive ? 1 : 0,
+          change.network ? 1 : 0,
+          JSON.stringify(change.dependsOn),
+          change.command ? JSON.stringify(change.command) : null,
+          JSON.stringify(change)
+        );
+    }
+    void events;
+    return events;
+  }
+
+  getApprovalBundle(bundleId: string): ApprovalBundle | undefined {
+    const head = this.db.prepare(`SELECT * FROM approval_bundles WHERE bundle_id = ?`).get(bundleId) as unknown as
+      ApprovalBundleRow | undefined;
+    if (!head) {
+      return undefined;
+    }
+    const revision = this.getApprovalBundleRevision(bundleId, head.current_revision);
+    if (!revision) {
+      return undefined;
+    }
+    return { ...revision, approvals: this.listApprovalBundleDecisions(bundleId) };
+  }
+
+  listApprovalBundles(filter: { missionId?: string; status?: string; limit?: number } = {}): ApprovalBundle[] {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (filter.missionId !== undefined) {
+      clauses.push("mission_id = ?");
+      params.push(filter.missionId);
+    }
+    if (filter.status !== undefined) {
+      clauses.push("status = ?");
+      params.push(filter.status);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const limit = Math.min(Math.max(filter.limit ?? 100, 1), 500);
+    const rows = this.db
+      .prepare(`SELECT bundle_id FROM approval_bundles ${where} ORDER BY updated_at DESC LIMIT ?`)
+      .all(...params, limit) as Array<{ bundle_id: string }>;
+    return rows
+      .map((row) => this.getApprovalBundle(row.bundle_id))
+      .filter((bundle): bundle is ApprovalBundle => bundle !== undefined);
+  }
+
+  getApprovalBundleRevision(bundleId: string, revision: number): ApprovalBundleRevision | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM approval_bundle_revisions WHERE bundle_id = ? AND revision = ?`)
+      .get(bundleId, revision) as unknown as ApprovalBundleRevisionRow | undefined;
+    if (!row) {
+      return undefined;
+    }
+    const changes = this.db
+      .prepare(
+        `SELECT change_json FROM approval_bundle_changes
+         WHERE bundle_id = ? AND revision = ? ORDER BY change_id ASC`
+      )
+      .all(bundleId, revision) as Array<{ change_json: string }>;
+    const parsed = approvalBundleRevisionSchema.parse({
+      bundleId: row.bundle_id,
+      missionId: this.bundleMissionId(bundleId),
+      executionId: this.bundleExecutionId(bundleId),
+      agentId: this.bundleAgentId(bundleId),
+      title: row.title,
+      rationale: row.rationale,
+      revision: row.revision,
+      changes: changes.map((change) => JSON.parse(change.change_json) as ProposedChange),
+      scope: JSON.parse(row.scope_json) as ApprovalBundleRevision["scope"],
+      baseState: JSON.parse(row.base_state_json) as ApprovalBundleRevision["baseState"],
+      parentManifestHash: row.parent_manifest_hash ?? undefined,
+      manifestHash: row.manifest_hash,
+      status: row.status,
+      createdAt: row.created_at,
+      createdByActorId: row.created_by_actor_id,
+      expiresAt: row.expires_at ?? undefined
+    });
+    return parsed;
+  }
+
+  listApprovalBundleRevisions(bundleId: string): ApprovalBundleRevision[] {
+    const rows = this.db
+      .prepare(`SELECT revision FROM approval_bundle_revisions WHERE bundle_id = ? ORDER BY revision ASC`)
+      .all(bundleId) as Array<{ revision: number }>;
+    return rows
+      .map((row) => this.getApprovalBundleRevision(bundleId, row.revision))
+      .filter((revision): revision is ApprovalBundleRevision => revision !== undefined);
+  }
+
+  private bundleMissionId(bundleId: string): string {
+    const row = this.db.prepare(`SELECT mission_id FROM approval_bundles WHERE bundle_id = ?`).get(bundleId) as
+      { mission_id: string } | undefined;
+    return row?.mission_id ?? "";
+  }
+
+  private bundleExecutionId(bundleId: string): string {
+    const row = this.db.prepare(`SELECT execution_id FROM approval_bundles WHERE bundle_id = ?`).get(bundleId) as
+      { execution_id: string } | undefined;
+    return row?.execution_id ?? "";
+  }
+
+  private bundleAgentId(bundleId: string): string {
+    const row = this.db.prepare(`SELECT agent_id FROM approval_bundles WHERE bundle_id = ?`).get(bundleId) as
+      { agent_id: string } | undefined;
+    return row?.agent_id ?? "";
+  }
+
+  setApprovalBundleStatus(bundleId: string, status: ApprovalBundleStatus, options: PrivilegedTransitionOptions): void {
+    requirePrivilegedTransition(options, "set_approval_bundle_status");
+    const parsedStatus = approvalBundleStatusSchema.parse(status);
+    this.write(() => {
+      const result = this.db
+        .prepare(`UPDATE approval_bundles SET status = ?, updated_at = ? WHERE bundle_id = ?`)
+        .run(parsedStatus, new Date().toISOString(), bundleId);
+      if (result.changes !== 1) {
+        throw new ControlStackError("approval_bundle_not_found", `approval bundle not found: ${bundleId}`);
+      }
+      return {
+        value: undefined,
+        events: [
+          this.appendAuditEvent(
+            createEvent(
+              "approval_bundle.status_changed",
+              {
+                bundleId,
+                status: parsedStatus
+              },
+              {
+                "approval_bundle.id": bundleId,
+                "approval_bundle.status": parsedStatus,
+                "actor.id": options.via
+              }
+            )
+          )
+        ]
+      };
+    });
+  }
+
+  listApprovalBundleDecisions(bundleId: string): ApprovalDecision[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM approval_bundle_decisions WHERE bundle_id = ? ORDER BY decided_at ASC, decision_id ASC`)
+      .all(bundleId) as unknown as ApprovalBundleDecisionRow[];
+    return rows.map(rowToApprovalBundleDecision);
+  }
+
+  /**
+   * Record a human decision over one bundle revision.
+   *
+   * `approvalIdsByChange` carries the authoritative `execution_plan_approvals` row
+   * minted for each approved change. The bundle records which row stands for which
+   * change; it never issues authority itself.
+   */
+  recordApprovalBundleDecision(input: {
+    bundleId: string;
+    revision: number;
+    kind: ApprovalDecisionKind;
+    approvedByActorId: string;
+    reason: string;
+    changeIds: string[];
+    approvalIdsByChange: Record<string, string>;
+    workItemId: string;
+    planHash: string;
+    now?: Date;
+  }): ApprovalDecision {
+    const now = (input.now ?? new Date()).toISOString();
+    const revisionRow = this.getApprovalBundleRevision(input.bundleId, input.revision);
+    if (!revisionRow) {
+      throw new ControlStackError(
+        "approval_bundle_revision_not_found",
+        `approval bundle ${input.bundleId} has no revision ${input.revision}`
+      );
+    }
+
+    return this.write(() => {
+      const events: StoredAuditEvent[] = [];
+
+      if (input.kind === "approve_all" || input.kind === "approve_selected") {
+        // A decision is idempotent per (revision, kind, actor): a retried request
+        // must not manufacture a second set of grants from the same human act.
+        const existing = this.db
+          .prepare(
+            `SELECT * FROM approval_bundle_decisions
+             WHERE bundle_id = ? AND revision = ? AND kind = ? AND approved_by_actor_id = ?`
+          )
+          .get(input.bundleId, input.revision, input.kind, input.approvedByActorId) as
+          ApprovalBundleDecisionRow | undefined;
+        if (existing) {
+          return { value: rowToApprovalBundleDecision(existing), events: [] };
+        }
+
+        for (const changeId of input.changeIds) {
+          const approvalId = input.approvalIdsByChange[changeId];
+          if (!approvalId) {
+            throw new ControlStackError(
+              "approval_bundle_grant_missing",
+              `no authoritative approval was minted for change ${changeId}`
+            );
+          }
+          this.insertApprovalBundleGrant({
+            bundleId: input.bundleId,
+            revision: input.revision,
+            changeId,
+            manifestHash: revisionRow.manifestHash,
+            actionHash: revisionRow.changes.find((change) => change.id === changeId)?.actionHash ?? "",
+            missionId: revisionRow.missionId,
+            executionId: revisionRow.executionId,
+            workItemId: input.workItemId,
+            planHash: input.planHash,
+            approvalId,
+            approvedByActorId: input.approvedByActorId,
+            baseState: revisionRow.baseState
+          });
+        }
+      }
+
+      const decision = approvalDecisionSchema.parse({
+        id: createId("bundle_decision"),
+        revision: input.revision,
+        kind: input.kind,
+        approvedByActorId: input.approvedByActorId,
+        reason: input.reason,
+        changeIds: [...input.changeIds].sort((left, right) => left.localeCompare(right, "en")),
+        manifestHash: revisionRow.manifestHash,
+        decidedAt: now
+      });
+
+      this.db
+        .prepare(
+          `INSERT INTO approval_bundle_decisions
+           (decision_id, bundle_id, revision, kind, approved_by_actor_id, reason,
+            change_ids_json, manifest_hash, decided_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          decision.id,
+          input.bundleId,
+          input.revision,
+          decision.kind,
+          decision.approvedByActorId,
+          decision.reason,
+          JSON.stringify(decision.changeIds),
+          decision.manifestHash,
+          decision.decidedAt
+        );
+
+      const eventName =
+        decision.kind === "approve_all"
+          ? "approval_bundle.approved"
+          : decision.kind === "approve_selected"
+            ? "approval_bundle.partially_approved"
+            : decision.kind === "reject"
+              ? "approval_bundle.rejected"
+              : "approval_bundle.invalidated";
+      events.push(
+        this.appendAuditEvent(
+          createEvent(
+            eventName,
+            {
+              bundleId: input.bundleId,
+              revision: input.revision,
+              kind: decision.kind,
+              manifestHash: decision.manifestHash,
+              missionId: revisionRow.missionId,
+              executionId: revisionRow.executionId,
+              agentId: revisionRow.agentId,
+              changeIds: decision.changeIds,
+              approvedByActorId: decision.approvedByActorId,
+              reason: decision.reason
+            },
+            {
+              "approval_bundle.id": input.bundleId,
+              "approval_bundle.revision": String(input.revision),
+              "approval_bundle.manifest_hash": decision.manifestHash,
+              "approval_bundle.decision": decision.kind,
+              "work_item.mission_id": revisionRow.missionId,
+              "work_item.execution_id": revisionRow.executionId,
+              "agent.id": revisionRow.agentId,
+              "actor.id": decision.approvedByActorId,
+              "approval.approved_by": decision.approvedByActorId
+            }
+          )
+        )
+      );
+      return { value: decision, events };
+    });
+  }
+
+  private insertApprovalBundleGrant(grant: {
+    bundleId: string;
+    revision: number;
+    changeId: string;
+    manifestHash: string;
+    actionHash: string;
+    missionId: string;
+    executionId: string;
+    workItemId: string;
+    planHash: string;
+    approvalId: string;
+    approvedByActorId: string;
+    baseState: ApprovalBundleRevision["baseState"];
+  }): void {
+    // A change is granted at most once per revision; a re-approval is a no-op rather
+    // than a second grant.
+    const existing = this.db
+      .prepare(`SELECT 1 FROM approval_bundle_grants WHERE bundle_id = ? AND revision = ? AND change_id = ?`)
+      .get(grant.bundleId, grant.revision, grant.changeId);
+    if (existing) {
+      return;
+    }
+    const authoritative = this.getExecutionPlanApprovalById(grant.approvalId);
+    if (!authoritative) {
+      throw new ControlStackError(
+        "approval_bundle_grant_missing",
+        `no authoritative approval exists for ${grant.approvalId}`
+      );
+    }
+    // A bundle grant may never outlive the authoritative approval it points at; the
+    // authoritative row's expiry is the single source of truth for how long the grant
+    // is usable.
+    const expiresAt = authoritative.expiresAt;
+    if (Date.parse(expiresAt) <= Date.now()) {
+      throw new ControlStackError(
+        "approval_bundle_grant_expired",
+        `authoritative approval ${grant.approvalId} has already expired`
+      );
+    }
+    if (authoritative.approvedByActorId === ACS_ADMIN_APPROVER) {
+      throw new ControlStackError(
+        "approval_bundle_admin_approval_denied",
+        "a bundle may not be granted by the admin auto-approver"
+      );
+    }
+    this.db
+      .prepare(
+        `INSERT INTO approval_bundle_grants
+         (grant_id, bundle_id, revision, change_id, manifest_hash, action_hash, mission_id,
+          execution_id, work_item_id, plan_hash, approval_id, approved_by_actor_id, status,
+          base_state_json, granted_at, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'granted', ?, ?, ?)`
+      )
+      .run(
+        createId("bundle_grant"),
+        grant.bundleId,
+        grant.revision,
+        grant.changeId,
+        grant.manifestHash,
+        grant.actionHash,
+        grant.missionId,
+        grant.executionId,
+        grant.workItemId,
+        grant.planHash,
+        grant.approvalId,
+        grant.approvedByActorId,
+        JSON.stringify(grant.baseState),
+        new Date().toISOString(),
+        expiresAt
+      );
+  }
+
+  listApprovalBundleGrants(
+    filter: {
+      bundleId?: string;
+      workItemId?: string;
+      actionHash?: string;
+    } = {}
+  ): ApprovalGrantRecord[] {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (filter.bundleId !== undefined) {
+      clauses.push("bundle_id = ?");
+      params.push(filter.bundleId);
+    }
+    if (filter.workItemId !== undefined) {
+      clauses.push("work_item_id = ?");
+      params.push(filter.workItemId);
+    }
+    if (filter.actionHash !== undefined) {
+      clauses.push("action_hash = ?");
+      params.push(filter.actionHash);
+    }
+    const where = clauses.length > 0 ? `WHERE ${clauses.join(" AND ")}` : "";
+    const rows = this.db
+      .prepare(`SELECT * FROM approval_bundle_grants ${where} ORDER BY granted_at ASC`)
+      .all(...params) as unknown as ApprovalBundleGrantRow[];
+    return rows.map(rowToApprovalBundleGrant);
+  }
+
+  /**
+   * Revoke every grant a bundle has issued.
+   *
+   * Invalidation is fail-closed: the grant stops covering immediately, and the
+   * authoritative `execution_plan_approvals` rows are marked invalidated in the same
+   * transaction so the existing lease-binding triggers also stop accepting them.
+   */
+  invalidateApprovalBundle(bundleId: string, reason: string, options: PrivilegedTransitionOptions): void {
+    requirePrivilegedTransition(options, "invalidate_approval_bundle");
+    this.write(() => {
+      const now = new Date().toISOString();
+      const grants = this.db
+        .prepare(`SELECT grant_id, approval_id FROM approval_bundle_grants WHERE bundle_id = ? AND status = 'granted'`)
+        .all(bundleId) as Array<{ grant_id: string; approval_id: string }>;
+      for (const grant of grants) {
+        this.db
+          .prepare(
+            `UPDATE approval_bundle_grants
+             SET status = 'invalidated', invalidated_at = ?, invalidation_reason = ?
+             WHERE grant_id = ? AND status = 'granted'`
+          )
+          .run(now, reason, grant.grant_id);
+        this.db
+          .prepare(
+            `UPDATE execution_plan_approvals
+             SET status = 'invalidated', invalidated_at = ?, invalidation_reason = ?
+             WHERE approval_id = ? AND status = 'granted'`
+          )
+          .run(now, reason, grant.approval_id);
+      }
+      this.db
+        .prepare(`UPDATE approval_bundles SET status = 'invalidated', updated_at = ? WHERE bundle_id = ?`)
+        .run(now, bundleId);
+      return {
+        value: undefined,
+        events: [
+          this.appendAuditEvent(
+            createEvent(
+              "approval_bundle.invalidated",
+              { bundleId, reason, revokedGrants: grants.length },
+              {
+                "approval_bundle.id": bundleId,
+                "approval_bundle.status": "invalidated",
+                "actor.id": options.via
+              }
+            )
+          )
+        ]
+      };
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Approval strategy
+  // -------------------------------------------------------------------------
+
+  /**
+   * Read the canonical approval strategy.
+   *
+   * A missing or unreadable row is `PER_ACTION`, the pre-bundle behaviour, so a
+   * deployment that predates bundles keeps today's semantics and never widens
+   * authority by accident.
+   */
+  getApprovalStrategy(): { strategy: ApprovalStrategy; updatedAt: string; updatedBy: string; reason: string } {
+    const row = this.db
+      .prepare(`SELECT strategy, updated_at, updated_by, reason FROM approval_strategy_state WHERE id = 1`)
+      .get() as { strategy: string; updated_at: string; updated_by: string; reason: string } | undefined;
+    const parsed = readApprovalStrategy(row?.strategy);
+    if (!parsed.ok) {
+      return {
+        strategy: "PER_ACTION",
+        updatedAt: row?.updated_at ?? "1970-01-01T00:00:00.000Z",
+        updatedBy: row?.updated_by ?? "system",
+        reason: row?.reason ?? "approval strategy unreadable; failing closed to per-action"
+      };
+    }
+    return {
+      strategy: parsed.strategy,
+      updatedAt: row?.updated_at ?? "1970-01-01T00:00:00.000Z",
+      updatedBy: row?.updated_by ?? "system",
+      reason: row?.reason ?? ""
+    };
+  }
+
+  setApprovalStrategy(input: { strategy: ApprovalStrategy; updatedBy: string; reason: string }): void {
+    const parsed = approvalStrategySchema.parse(input.strategy);
+    this.write(() => {
+      const now = new Date().toISOString();
+      this.db
+        .prepare(
+          `INSERT INTO approval_strategy_state (id, strategy, updated_at, updated_by, reason)
+           VALUES (1, ?, ?, ?, ?)
+           ON CONFLICT (id) DO UPDATE SET
+             strategy = excluded.strategy,
+             updated_at = excluded.updated_at,
+             updated_by = excluded.updated_by,
+             reason = excluded.reason`
+        )
+        .run(parsed, now, input.updatedBy, input.reason);
+      return {
+        value: undefined,
+        events: [
+          this.appendAuditEvent(
+            createEvent(
+              "approval_strategy.changed",
+              { strategy: parsed, reason: input.reason },
+              {
+                "approval_strategy.value": parsed,
+                "actor.id": input.updatedBy
+              }
+            )
+          )
+        ]
+      };
+    });
   }
 
   createAttempt(input: CreateAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt {
@@ -5603,34 +6367,36 @@ export class SqliteWorkItemStore implements WorkItemStore {
       result: compactResult(input, payloadHash, now, resultId)
     };
     try {
-      this.db.prepare(
-        "INSERT INTO execution_results " +
-          "(result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome, " +
-          "started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json, " +
-          "artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at) " +
-          "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-      ).run(
-        resultId,
-        input.workItemId,
-        input.leaseId,
-        input.workerId,
-        input.idempotencyKey,
-        input.actionHash,
-        input.outcome,
-        input.startedAt,
-        input.finishedAt,
-        input.exitCode ?? null,
-        input.summary,
-        input.stdout ?? null,
-        input.stderr ?? null,
-        JSON.stringify(input.structuredOutput),
-        JSON.stringify(input.artifacts),
-        input.error ?? null,
-        input.resourceUsage ? JSON.stringify(input.resourceUsage) : null,
-        JSON.stringify(input.simulationMetadata),
-        payloadHash,
-        now
-      );
+      this.db
+        .prepare(
+          "INSERT INTO execution_results " +
+            "(result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome, " +
+            "started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json, " +
+            "artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .run(
+          resultId,
+          input.workItemId,
+          input.leaseId,
+          input.workerId,
+          input.idempotencyKey,
+          input.actionHash,
+          input.outcome,
+          input.startedAt,
+          input.finishedAt,
+          input.exitCode ?? null,
+          input.summary,
+          input.stdout ?? null,
+          input.stderr ?? null,
+          JSON.stringify(input.structuredOutput),
+          JSON.stringify(input.artifacts),
+          input.error ?? null,
+          input.resourceUsage ? JSON.stringify(input.resourceUsage) : null,
+          JSON.stringify(input.simulationMetadata),
+          payloadHash,
+          now
+        );
     } catch (insertError) {
       const err = insertError as NodeJS.ErrnoException;
       if (err.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed/.test(err.message)) {

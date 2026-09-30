@@ -430,7 +430,13 @@ function gateWorkerClaimByIdInTransaction(
   return running;
 }
 
-function ensureExecutionPlan(store: WorkItemStore, workItem: WorkItem, actor: string) {
+/**
+ * Get or create the work item's default execution plan.
+ *
+ * Exported so the bundle approval path binds its grants to exactly the same plan the
+ * per-action route would have produced, rather than minting a parallel plan shape.
+ */
+export function ensureExecutionPlan(store: WorkItemStore, workItem: WorkItem, actor: string) {
   return (
     store.getCurrentExecutionPlan(workItem.id) ??
     store.createExecutionPlan({

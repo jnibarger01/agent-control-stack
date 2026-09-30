@@ -30,6 +30,7 @@ export interface CanonicalChange {
   type: ProposedChange["type"];
   target: string;
   action: { kind: string; description: string; params: Record<string, unknown> };
+  actionHash: string;
   command?: string[];
   cwd?: string;
   paths?: string[];
@@ -68,6 +69,7 @@ function canonicalizeChange(change: ProposedChange): CanonicalChange {
       description: change.action.description,
       params: { ...change.action.params }
     },
+    actionHash: change.actionHash,
     risk: change.risk,
     destructive: change.destructive,
     network: change.network,
