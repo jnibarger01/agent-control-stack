@@ -422,6 +422,19 @@ A task is complete only when:
 7. The final Git diff contains only authorized changes.
 8. No unresolved custody or concurrency issue remains.
 
+## Instruction Precedence
+
+When instructions conflict, use this order:
+
+1. Security and authority invariants in this file.
+2. More-specific AGENTS.md files for the affected path.
+3. Architecture and protocol contracts.
+4. Existing executable behavior and tests.
+5. Task-specific user instructions.
+6. Documentation and examples.
+
+A lower-precedence instruction must never weaken a higher-precedence security invariant.
+
 Final reports must use one verdict:
 
 * `PASS`: complete and verified.
