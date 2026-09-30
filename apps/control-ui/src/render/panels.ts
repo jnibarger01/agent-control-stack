@@ -250,7 +250,7 @@ export function workQueueItems(
 }
 
 export function workDetailPanel(): string {
-  return `<section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section>`;
+  return `<section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-label="Work item detail"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section>`;
 }
 
 function attentionBadge(): string {
@@ -317,9 +317,9 @@ export function approvalsPanel(
       const wait = waitBadge(item, now, slaMs);
       const cardAttrs = `class="approval-item${wait.overdue ? " overdue" : ""}" role="listitem" data-risk="${escapeHtml(item.risk)}" data-status="${escapeHtml(item.status)}" data-work-item-ref="${escapeHtml(item.id)}"`;
       if (item.status === "blocked") {
-        return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+        return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}<button type="button" data-inspect-work="${escapeHtml(item.id)}">Review details</button>${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }
-      return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(redactSecrets(approvalSummary))}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
+      return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(redactSecrets(approvalSummary))}</small>` : ""}<button type="button" data-inspect-work="${escapeHtml(item.id)}">Review details</button>${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}">${approvalButtons}<button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
     })
     .join("")}</div>`;
 }

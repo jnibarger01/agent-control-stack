@@ -280,6 +280,14 @@ describe("mission control gateway", () => {
 
       expect(Object.keys(fragments).sort()).toEqual(
         [
+          "overviewOperations",
+          "executionOperations",
+          "approvalSummary",
+          "metricsOperations",
+          "agentOperations",
+          "auditOperations",
+          "systemOperations",
+          "executionModeState",
           "approvalsCount",
           "approvalsList",
           "cards",
@@ -294,6 +302,11 @@ describe("mission control gateway", () => {
         ].sort()
       );
       expect(fragments.queueList).toContain("Fragment route");
+      expect(fragments.overviewOperations).toContain("Fragment route");
+      expect(fragments.executionOperations).toContain("Fragment route");
+      expect(fragments.auditOperations).toContain("work_item.created");
+      expect(fragments.systemOperations).toContain("Passing");
+      expect(fragments.executionModeState).toBe("strict");
       const page = await app.inject({ method: "GET", url: "/" });
       expect(page.body).toContain(`<div class="queue" id="queue-list">${fragments.queueList}</div>`);
     } finally {

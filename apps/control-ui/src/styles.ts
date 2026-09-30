@@ -1,3 +1,4 @@
+import { premiumStyles } from "./premium-styles.js";
 export function styles(): string {
   return `
 :root {
@@ -432,5 +433,6 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .system-probes div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
 .system-probes dt { color: var(--muted); }
 .system-probes dd { margin: 0; }
+${premiumStyles()}
 `;
 }

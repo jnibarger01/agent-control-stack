@@ -1,3 +1,4 @@
+import { executionPlanAdmissionSchema, type ExecutionPlanAdmission } from "./execution-plan.js";
 import { DatabaseSync } from "node:sqlite";
 import { attemptLeaseSchema, executionAttemptSchema, type AttemptLease, type ExecutionAttempt } from "./attempt.js";
 
@@ -37,6 +38,18 @@ interface AttemptLeaseRow {
   last_renewed_at: string;
   status: string;
   closed_at: string | null;
+}
+
+export interface ExecutionTelemetry {
+  windowStart: string;
+  windowEnd: string;
+  succeeded: number;
+  failed: number;
+  averageRunMs: number | null;
+  averageQueueMs: number | null;
+  approvalsGranted?: number;
+  averageApprovalMs?: number | null;
+  throughput: Array<{ at: string; started: number; completed: number; failed: number }>;
 }
 
 /**
@@ -92,6 +105,134 @@ export class SqliteExecutionReadStore {
         `SELECT * FROM attempt_leases WHERE work_item_id IN (${placeholders}) ORDER BY issued_at ASC, fencing_epoch ASC`,
       (row: AttemptLeaseRow) => rowToAttemptLease(row)
     );
+  }
+
+  /** Latest admission for each current plan, in the same bounded batches as attempts. */
+  listCurrentPlanAdmissionsForWorkItems(workItemIds: readonly string[]): Map<string, ExecutionPlanAdmission> {
+    type Row = {
+      work_item_id: string;
+      admission_id: string;
+      plan_id: string;
+      plan_hash: string;
+      policy_version: string;
+      policy_decision_hash: string;
+      requires_approval: number;
+      admitted_by_actor_id: string;
+      admitted_at: string;
+    };
+    const groups = this.groupByWorkItem(
+      workItemIds,
+      (placeholders) => `
+      SELECT admission.* FROM execution_plan_admissions admission
+      JOIN execution_plan_heads head ON head.work_item_id = admission.work_item_id
+        AND head.current_plan_id = admission.plan_id AND head.current_plan_hash = admission.plan_hash
+      WHERE admission.work_item_id IN (${placeholders}) ORDER BY admission.admitted_at, admission.admission_id`,
+      (row: Row) =>
+        executionPlanAdmissionSchema.parse({
+          admissionId: row.admission_id,
+          workItemId: row.work_item_id,
+          planId: row.plan_id,
+          planHash: row.plan_hash,
+          policyVersion: row.policy_version,
+          policyDecisionHash: row.policy_decision_hash,
+          requiresApproval: row.requires_approval === 1,
+          admittedByActorId: row.admitted_by_actor_id,
+          admittedAt: row.admitted_at
+        })
+    );
+    return new Map(
+      [...groups].flatMap(([id, admissions]) => {
+        const admission = admissions.at(-1);
+        return admission ? [[id, admission] as const] : [];
+      })
+    );
+  }
+
+  /** Full-store rolling 24-hour telemetry; independent of dashboard pagination.
+   * Completion is a terminal attempt transition, never a fabricated tool stage.
+   * Only attempts with a persisted start contribute to run/queue latency.
+   */
+  telemetry(now: Date = new Date()): ExecutionTelemetry {
+    const end = now.toISOString();
+    const start = new Date(now.getTime() - 86_400_000).toISOString();
+    const row = this.db
+      .prepare(
+        `
+      SELECT
+        COALESCE(SUM(status = 'succeeded'), 0) AS succeeded,
+        COALESCE(SUM(status = 'failed'), 0) AS failed,
+        AVG(CASE WHEN started_at IS NOT NULL AND status IN ('succeeded', 'failed')
+          AND julianday(updated_at) >= julianday(started_at)
+          THEN (julianday(updated_at) - julianday(started_at)) * 86400000 END) AS run_ms,
+        AVG(CASE WHEN started_at IS NOT NULL AND julianday(started_at) >= julianday(created_at)
+          THEN (julianday(started_at) - julianday(created_at)) * 86400000 END) AS queue_ms
+      FROM execution_attempts WHERE updated_at >= ? AND updated_at <= ?
+    `
+      )
+      .get(start, end) as { succeeded: number; failed: number; run_ms: number | null; queue_ms: number | null };
+    const throughput: ExecutionTelemetry["throughput"] = Array.from({ length: 24 }, (_, i) => ({
+      at: new Date(now.getTime() - 86_400_000 + i * 3_600_000).toISOString(),
+      started: 0,
+      completed: 0,
+      failed: 0
+    }));
+    const buckets = this.db
+      .prepare(
+        `
+      SELECT CAST((julianday(at) - julianday(?)) * 86400000 + 0.5 AS INTEGER) / 3600000 AS bucket, kind, COUNT(*) AS count
+      FROM (
+        SELECT started_at AS at, 'started' AS kind FROM execution_attempts WHERE started_at >= ? AND started_at <= ?
+        UNION ALL
+        SELECT updated_at AS at, 'completed' AS kind FROM execution_attempts WHERE status = 'succeeded' AND updated_at >= ? AND updated_at <= ?
+        UNION ALL
+        SELECT updated_at AS at, 'failed' AS kind FROM execution_attempts WHERE status = 'failed' AND updated_at >= ? AND updated_at <= ?
+      ) GROUP BY bucket, kind
+    `
+      )
+      .all(start, start, end, start, end, start, end) as Array<{
+      bucket: number;
+      kind: "started" | "completed" | "failed";
+      count: number;
+    }>;
+    for (const bucket of buckets) {
+      const target = throughput[Math.min(23, Math.max(0, bucket.bucket))];
+      if (target) target[bucket.kind] += bucket.count;
+    }
+    // Match each recorded grant to its latest preceding approval requirement.
+    // Unmatched legacy grants still count, but cannot claim a decision latency.
+    const approvals = this.db
+      .prepare(
+        `
+      WITH grants AS (
+        SELECT sequence, CAST(time_unix_nano AS REAL) / 1000000 AS granted_ms,
+          json_extract(attributes, '$."work_item.id"') AS work_item_id
+        FROM audit_events WHERE name = 'approval.granted'
+          AND CAST(time_unix_nano AS REAL) / 1000000 BETWEEN ? AND ?
+      ), matched AS (
+        SELECT granted_ms, (
+          SELECT CAST(request.time_unix_nano AS REAL) / 1000000
+          FROM audit_events request WHERE (request.name = 'work_item.needs_approval' OR
+            (request.name = 'work_item.created' AND json_extract(request.attributes, '$."work_item.status"') = 'needs_approval'))
+            AND request.sequence < grants.sequence
+            AND json_extract(request.attributes, '$."work_item.id"') = grants.work_item_id
+          ORDER BY request.sequence DESC LIMIT 1
+        ) AS requested_ms FROM grants
+      ) SELECT COUNT(*) AS granted, AVG(CASE WHEN requested_ms <= granted_ms
+          THEN granted_ms - requested_ms END) AS latency_ms FROM matched
+    `
+      )
+      .get(now.getTime() - 86_400_000, now.getTime()) as { granted: number; latency_ms: number | null };
+    return {
+      windowStart: start,
+      windowEnd: end,
+      approvalsGranted: approvals.granted,
+      averageApprovalMs: approvals.latency_ms === null ? null : Math.round(approvals.latency_ms),
+      succeeded: row.succeeded,
+      failed: row.failed,
+      averageRunMs: row.run_ms === null ? null : Math.round(row.run_ms),
+      averageQueueMs: row.queue_ms === null ? null : Math.round(row.queue_ms),
+      throughput
+    };
   }
 
   private groupByWorkItem<Row extends { work_item_id: string }, T>(

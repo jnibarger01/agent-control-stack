@@ -970,6 +970,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const admission = executionAdmission.snapshot();
     return {
       workItems: workItemList,
+      executionPlansByWorkItem: Object.fromEntries(
+        ids.flatMap((id) => {
+          const plan = workItems.getCurrentExecutionPlan(id);
+          return plan ? [[id, plan]] : [];
+        })
+      ),
+      executionPlanAdmissionsByWorkItem: Object.fromEntries(executionReads.listCurrentPlanAdmissionsForWorkItems(ids)),
       statusCounts: dashboard.statusCounts,
       finishedWorkItems: {
         shown: dashboard.finished.length,
@@ -1015,6 +1022,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         ids.map((id) => [id, (leases.get(id) ?? []).map(toMissionControlAttemptLease)])
       ),
       executionBackend: reportedExecutionBackend(),
+      executionTelemetry: executionReads.telemetry(now),
+      readiness: mergeSandboxReadyzCheck(
+        workItems.readinessHealth(),
+        evaluateSandboxReadyzCheck(options.sandboxReadiness)
+      ),
       composerActionKinds: [...SUPPORTED_ACTION_KINDS],
       policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW }),
       now,
