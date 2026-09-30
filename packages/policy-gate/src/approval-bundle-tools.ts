@@ -562,3 +562,7 @@ export function buildDeltaRevision(
 }
 
 export { overallBundleRisk };
+
+// Re-exported so API layers that already depend on Policy Gate can compute a delta for
+// display without taking a second dependency on the domain package.
+export { approvalDelta };

@@ -1,3 +1,8 @@
+import type {
+  ApprovalBundle,
+  ApprovalBundleRevision,
+  ApprovalGrantRecord
+} from "@agent-control-stack/approval-bundles";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
@@ -69,6 +74,9 @@ import {
 } from "@agent-control-stack/machine-controller";
 import {
   createPolicyEngine,
+  approvalDelta,
+  gateApproveBundle,
+  gateReviseBundle,
   createWorkItemTools,
   explainPolicy,
   previewWorkItemPolicy,
@@ -142,6 +150,10 @@ import {
   agentBodySchema,
   agentPatchSchema,
   approvalBodySchema,
+  approvalBundleDecisionBodySchema,
+  approvalBundleRevisionBodySchema,
+  approvalStrategyBodySchema,
+  listApprovalBundlesQuerySchema,
   cancelBodySchema,
   capabilitiesBodySchema,
   connectorBodySchema,
@@ -2594,6 +2606,148 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  // ---- Approval bundles / change sets ------------------------------------
+  //
+  // Read surface for Mission Control. Every mutation routes through Policy Gate,
+  // which re-evaluates each selected change; none of these handlers grants authority
+  // by itself.
+
+  app.get("/approval-strategy", async (request, reply) => {
+    if (await requireRead(request, reply)) {
+      return;
+    }
+    return reply.send(approvalStrategyView(workItems));
+  });
+
+  app.post("/approval-strategy", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth, "acs:write");
+      if (!actor) {
+        return;
+      }
+      const body = approvalStrategyBodySchema.parse(requestObject(request.body));
+      workItems.setApprovalStrategy({ strategy: body.strategy, updatedBy: actor, reason: body.reason });
+      return reply.send(approvalStrategyView(workItems));
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get("/approval-bundles", async (request, reply) => {
+    if (await requireRead(request, reply)) {
+      return;
+    }
+    const query = listApprovalBundlesQuerySchema.parse(request.query ?? {});
+    const bundles = workItems.listApprovalBundles({
+      ...(query.missionId !== undefined ? { missionId: query.missionId } : {}),
+      ...(query.status !== undefined ? { status: query.status } : {}),
+      ...(query.limit !== undefined ? { limit: query.limit } : {})
+    });
+    return reply.send({
+      bundles: bundles.map(approvalBundleView),
+      approvalStrategy: workItems.getApprovalStrategy().strategy
+    });
+  });
+
+  app.get<{ Params: { id: string } }>("/approval-bundles/:id", async (request, reply) => {
+    if (await requireRead(request, reply)) {
+      return;
+    }
+    const bundle = workItems.getApprovalBundle(request.params.id);
+    if (!bundle) {
+      return reply.code(404).send({ error: "approval bundle not found" });
+    }
+    const revisions = workItems.listApprovalBundleRevisions(bundle.bundleId);
+    const approved = revisions.filter((revision) => revision.revision < bundle.revision);
+    const previous = approved.length > 0 ? approved[approved.length - 1] : undefined;
+    return reply.send({
+      bundle: approvalBundleView(bundle),
+      revisions: revisions.map(approvalBundleRevisionView),
+      // "Previously approved" vs "new since approval" is computed from the manifest
+      // change digests, so a relabelled-but-identical change is not reported as new and
+      // an edited change is never reported as unchanged.
+      delta: previous ? approvalDelta(previous, bundle) : null,
+      grants: workItems.listApprovalBundleGrants({ bundleId: bundle.bundleId }).map(approvalGrantView)
+    });
+  });
+
+  app.get<{ Params: { id: string } }>("/approval-bundles/:id/delta", async (request, reply) => {
+    if (await requireRead(request, reply)) {
+      return;
+    }
+    const bundle = workItems.getApprovalBundle(request.params.id);
+    if (!bundle) {
+      return reply.code(404).send({ error: "approval bundle not found" });
+    }
+    const revisionQuery = requestObject(request.query).revision;
+    const targetRevision = typeof revisionQuery === "string" ? Number(revisionQuery) : bundle.revision;
+    const target = workItems.getApprovalBundleRevision(bundle.bundleId, targetRevision);
+    if (!target) {
+      return reply.code(404).send({ error: "approval bundle revision not found" });
+    }
+    const earlier = workItems
+      .listApprovalBundleRevisions(bundle.bundleId)
+      .filter((revision) => revision.revision < target.revision);
+    const previous = earlier.length > 0 ? earlier[earlier.length - 1] : undefined;
+    return reply.send({
+      delta: previous ? approvalDelta(previous, target) : null,
+      fromRevision: previous?.revision ?? null,
+      toRevision: target.revision
+    });
+  });
+
+  app.post<{ Params: { id: string } }>("/approval-bundles/:id/approve", async (request, reply) => {
+    try {
+      // Approving a bundle is approving privileged work, so it requires acs:approve,
+      // exactly like the per-action route. The admin auto-approver is refused inside
+      // the gate, not merely by scope.
+      const actor = requireMutationActor(request, reply, auth, "acs:approve");
+      if (!actor) {
+        return;
+      }
+      const body = approvalBundleDecisionBodySchema.parse(requestObject(request.body));
+      const result = gateApproveBundle(workItems, policy, {
+        bundleId: request.params.id,
+        revision: body.revision,
+        kind: body.kind,
+        approvedBy: actor,
+        reason: body.reason,
+        ...(body.changeIds !== undefined ? { changeIds: body.changeIds } : {})
+      });
+      return reply.code(200).send({
+        decision: result.decision,
+        bundle: approvalBundleView(result.bundle),
+        deniedChangeIds: result.deniedChangeIds
+      });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/approval-bundles/:id/revisions", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth, "acs:write");
+      if (!actor) {
+        return;
+      }
+      const body = approvalBundleRevisionBodySchema.parse(requestObject(request.body));
+      const result = gateReviseBundle(workItems, {
+        bundleId: request.params.id,
+        expectedRevision: body.expectedRevision,
+        changes: body.changes,
+        createdByActorId: actor,
+        ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.rationale !== undefined ? { rationale: body.rationale } : {})
+      });
+      return reply.code(201).send({
+        bundle: approvalBundleView(result.bundle),
+        delta: result.delta
+      });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post<{ Params: { id: string } }>("/work-items/:id/cancel", async (request, reply) => {
     try {
       const actor = requireMutationActor(request, reply, auth);
@@ -3501,7 +3655,10 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/dc/runtime/bootstrap/complete" ||
     path === "/policy/explain" ||
     path === "/dashboard/policy-preview" ||
+    path === "/approval-bundles" ||
+    path === "/approval-strategy" ||
     path.startsWith("/work-items/") ||
+    path.startsWith("/approval-bundles/") ||
     path.startsWith("/webhooks/")
   );
 }
@@ -3509,7 +3666,9 @@ function isRateLimitedRoute(url: string): boolean {
 function isRateLimitedGetRoute(url: string): boolean {
   // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
   const path = url.split("?", 1)[0];
-  return path === "/execution-mode" || path === "/authority";
+  return (
+    path === "/execution-mode" || path === "/authority" || path === "/approval-strategy" || path === "/approval-bundles"
+  );
 }
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
@@ -3547,6 +3706,91 @@ function isJsonParseError(error: unknown): boolean {
 
 function isBodyTooLargeError(error: unknown): boolean {
   return (error as { code?: string }).code === "FST_ERR_CTP_BODY_TOO_LARGE";
+}
+
+/**
+ * Read-model projections for approval bundles.
+ *
+ * These are display shapes only. `approvalManifestHash` is included on every view so
+ * an operator can confirm which manifest they are looking at, and `actionHash` is
+ * included per change so the UI can show the exact fingerprint a grant will be bound
+ * to rather than a human-readable label that might not match.
+ */
+function approvalBundleRevisionView(revision: ApprovalBundleRevision) {
+  return {
+    bundleId: revision.bundleId,
+    missionId: revision.missionId,
+    executionId: revision.executionId,
+    agentId: revision.agentId,
+    title: revision.title,
+    rationale: revision.rationale,
+    revision: revision.revision,
+    status: revision.status,
+    manifestHash: revision.manifestHash,
+    parentManifestHash: revision.parentManifestHash ?? null,
+    scope: revision.scope,
+    baseState: revision.baseState,
+    createdAt: revision.createdAt,
+    createdByActorId: revision.createdByActorId,
+    expiresAt: revision.expiresAt ?? null,
+    changes: revision.changes.map((change) => ({
+      id: change.id,
+      type: change.type,
+      summary: change.summary,
+      target: change.target,
+      risk: change.risk,
+      destructive: change.destructive,
+      network: change.network,
+      dependsOn: change.dependsOn,
+      actionHash: change.actionHash,
+      actionKind: change.action.kind,
+      command: change.command ?? null,
+      paths: change.paths ?? null,
+      cwd: change.cwd ?? null
+    }))
+  };
+}
+
+function approvalBundleView(bundle: ApprovalBundle) {
+  return {
+    ...approvalBundleRevisionView(bundle),
+    approvals: bundle.approvals.map((decision) => ({
+      id: decision.id,
+      revision: decision.revision,
+      kind: decision.kind,
+      approvedByActorId: decision.approvedByActorId,
+      reason: decision.reason,
+      changeIds: decision.changeIds,
+      manifestHash: decision.manifestHash,
+      decidedAt: decision.decidedAt
+    }))
+  };
+}
+
+function approvalGrantView(grant: ApprovalGrantRecord) {
+  return {
+    changeId: grant.changeId,
+    actionHash: grant.actionHash,
+    manifestHash: grant.manifestHash,
+    revision: grant.revision,
+    status: grant.status,
+    approvedByActorId: grant.approvedByActorId,
+    approvalId: grant.approvalId,
+    planHash: grant.planHash,
+    grantedAt: grant.grantedAt,
+    expiresAt: grant.expiresAt,
+    baseState: grant.baseState
+  };
+}
+
+function approvalStrategyView(store: SqliteWorkItemStore) {
+  const strategy = store.getApprovalStrategy();
+  return {
+    approvalStrategy: strategy.strategy,
+    updatedAt: strategy.updatedAt,
+    updatedBy: strategy.updatedBy,
+    reason: strategy.reason
+  };
 }
 
 function jsonRpcError(id: string | number | null, code: number, message: string, data?: unknown) {

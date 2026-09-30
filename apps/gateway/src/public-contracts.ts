@@ -29,6 +29,92 @@ export const approvalBodySchema = z.object({
   actionHash: z.string().min(1)
 });
 export const cancelBodySchema = z.object({ reason: z.string().min(1).optional() });
+
+// ---- Approval bundles / change sets ---------------------------------------
+
+/**
+ * A decision over one bundle revision.
+ *
+ * `approve_all` and `approve_selected` are the only kinds that mint authority, and
+ * both route through Policy Gate, which re-evaluates every selected change. A caller
+ * cannot widen scope through this body: `changeIds` can only narrow an
+ * `approve_selected` relative to the reviewed revision.
+ */
+export const approvalBundleDecisionBodySchema = z
+  .object({
+    revision: z.number().int().positive(),
+    kind: z.enum(["approve_all", "approve_selected", "reject", "invalidate"]),
+    reason: z.string().min(1).max(2_000),
+    changeIds: z.array(z.string().min(1)).max(512).optional()
+  })
+  .strict();
+
+/** Create the next revision of a bundle, i.e. a delta after new work is discovered. */
+export const approvalBundleRevisionBodySchema = z
+  .object({
+    expectedRevision: z.number().int().positive(),
+    reason: z.string().min(1).max(2_000).optional(),
+    title: z.string().min(1).max(500).optional(),
+    rationale: z.string().min(1).max(8_000).optional(),
+    changes: z
+      .array(
+        z
+          .object({
+            id: z.string().min(1).max(200),
+            type: z.enum([
+              "file_write",
+              "command",
+              "service_restart",
+              "service_control",
+              "deployment",
+              "config_change",
+              "external_write",
+              "destructive_action",
+              "other_privileged_action"
+            ]),
+            summary: z.string().min(1).max(1_000),
+            target: z.string().min(1).max(2_000),
+            action: z
+              .object({
+                kind: z.string().min(1).max(200),
+                description: z.string().min(1).max(4_000),
+                params: z.record(z.string(), z.unknown()).default({})
+              })
+              .strict(),
+            actionHash: z
+              .string()
+              .length(64)
+              .regex(/^[a-f0-9]{64}$/),
+            command: z.array(z.string().min(1).max(4_000)).max(512).optional(),
+            cwd: z.string().min(1).max(2_000).optional(),
+            paths: z.array(z.string().min(1).max(2_000)).max(512).optional(),
+            risk: z.enum(["low", "medium", "high", "critical"]),
+            destructive: z.boolean().default(false),
+            network: z.boolean().default(false),
+            dependsOn: z.array(z.string().min(1).max(200)).max(64).default([]),
+            metadata: z.record(z.string(), z.unknown()).optional()
+          })
+          .strict()
+      )
+      .min(1)
+      .max(512)
+  })
+  .strict();
+
+export const approvalStrategyBodySchema = z
+  .object({
+    strategy: z.enum(["PER_ACTION", "BUNDLE", "POLICY_AUTONOMOUS"]),
+    reason: z.string().min(1).max(2_000)
+  })
+  .strict();
+
+export const listApprovalBundlesQuerySchema = z
+  .object({
+    missionId: z.string().min(1).optional(),
+    status: z.string().min(1).optional(),
+    limit: z.coerce.number().int().positive().max(500).optional()
+  })
+  .strict();
 export const unblockBodySchema = z.object({}).passthrough();
 export const mcpScopeSchema = z.enum(MCP_SCOPES);
 export const connectorBodySchema = z.object({

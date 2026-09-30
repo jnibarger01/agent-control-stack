@@ -1989,7 +1989,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
     if (!revision) {
       return undefined;
     }
-    return { ...revision, approvals: this.listApprovalBundleDecisions(bundleId) };
+    // A revision's own status is frozen history, because revisions are immutable. The
+    // bundle's *live* status is the head row's, which is what a decision advances.
+    // Returning the revision status here would leave an approved bundle looking pending.
+    return {
+      ...revision,
+      status: approvalBundleStatusSchema.parse(head.status),
+      approvals: this.listApprovalBundleDecisions(bundleId)
+    };
   }
 
   listApprovalBundles(filter: { missionId?: string; status?: string; limit?: number } = {}): ApprovalBundle[] {
