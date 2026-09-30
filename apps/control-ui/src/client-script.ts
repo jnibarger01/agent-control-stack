@@ -1,6 +1,7 @@
 import { CONFIRM_COPY } from "./approval-actions.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
 import { composerClientSource } from "./composer.js";
+import { approvalBundlesClientSource } from "./approval-bundles-client.js";
 import { liveDashboardClientSource } from "./live-dashboard.js";
 import { operatorWorkflowClientSource } from "./operator-workflow.js";
 import { WORK_ITEM_RISK_VALUES } from "./queue-filter.js";
@@ -178,6 +179,7 @@ function escapeClient(value) {
 ${redactionClientSource()}
 ${workItemControlsClientSource()}
 ${liveDashboardClientSource()}
+${approvalBundlesClientSource()}
 ${auditTimelineClientSource()}
 ${systemProbesClientSource()}
 ${operatorWorkflowClientSource()}

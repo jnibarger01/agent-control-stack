@@ -16,6 +16,7 @@ export const DASHBOARD_FRAGMENT_TARGETS = {
   queueFooter: "#queue-footer",
   approvalsList: "#approvals-list",
   approvalsCount: "#approvals-count",
+  approvalBundles: "#approval-bundles-body",
   metrics: "#operator-metrics-body",
   systemStats: "#system-stats",
   policy: "#policy-body"
@@ -164,11 +165,30 @@ function captureOperatorState() {
   document.querySelectorAll('.approval-result[id]').forEach(function (output) {
     if (output.textContent) outputs[output.id] = output.textContent;
   });
+  // Bundle review state is captured too: a typed reason, a rendered result, and above
+  // all the operator's unticked changes. Without this, a live refresh would silently
+  // re-tick everything the reviewer deliberately excluded before they pressed approve.
+  const bundleReasons = {};
+  document.querySelectorAll('[data-bundle-reason]').forEach(function (input) {
+    if (input.value) bundleReasons[input.dataset.bundleReason] = input.value;
+  });
+  const bundleUnticked = {};
+  document.querySelectorAll('[data-bundle-ref]').forEach(function (card) {
+    const bundleId = card.dataset.bundleRef;
+    if (!bundleId) return;
+    bundleUnticked[bundleId] = Array.prototype.slice
+      .call(card.querySelectorAll('[data-bundle-select]'))
+      .filter(function (input) { return !input.checked; })
+      .map(function (input) { return input.dataset.bundleSelect; })
+      .filter(function (value) { return typeof value === 'string' && value.length > 0; });
+  });
   return {
     activeId: active && active.id ? active.id : null,
     activeSelector: active && active.dataset && active.dataset.workItem ? '[data-work-item="' + cssAttr(active.dataset.workItem) + '"]' : null,
     reasons: reasons,
-    outputs: outputs
+    outputs: outputs,
+    bundleReasons: bundleReasons,
+    bundleUnticked: bundleUnticked
   };
 }
 
@@ -180,6 +200,17 @@ function restoreOperatorState(state) {
   Object.keys(state.outputs).forEach(function (id) {
     const output = document.getElementById(id);
     if (output && !output.textContent) output.textContent = state.outputs[id];
+  });
+  Object.keys(state.bundleReasons || {}).forEach(function (id) {
+    const input = document.querySelector('[data-bundle-reason="' + cssAttr(id) + '"]');
+    if (input && !input.value) input.value = state.bundleReasons[id];
+  });
+  Object.keys(state.bundleUnticked || {}).forEach(function (bundleId) {
+    var unticked = state.bundleUnticked[bundleId] || [];
+    document.querySelectorAll('[data-bundle-ref="' + cssAttr(bundleId) + '"] [data-bundle-select]').forEach(function (input) {
+      var id = input.dataset.bundleSelect;
+      if (id) input.checked = unticked.indexOf(id) === -1;
+    });
   });
   if (selectedWorkItemId) {
     const selected = document.querySelector('[data-work-item="' + cssAttr(selectedWorkItemId) + '"]');

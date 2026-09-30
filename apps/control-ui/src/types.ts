@@ -102,11 +102,17 @@ export interface MissionControlViewModel {
   approvalSlaMs?: number;
   /** Present when `workItems` carries only a window of finished items. */
   finishedWorkItems?: { shown: number; total: number; limit: number };
+  /** PR-style approval bundles awaiting or past human review. */
+  approvalBundles?: ApprovalBundleReview[];
+  /** Active approval strategy. Absent when the row is missing or unreadable. */
+  approvalStrategy?: string;
   /** Canonical execution mode. Absent when the row is missing or corrupt. */
   executionMode?: "strict" | "admin";
   executionModeProblem?: "missing" | "corrupt";
   now?: Date;
 }
+
+import type { ApprovalBundleReview } from "./approval-bundles.js";
 
 /** One approvable action: the policy fingerprint plus the requested action it fingerprints. */
 export interface ApprovalActionOption {

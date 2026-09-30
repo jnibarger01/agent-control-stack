@@ -361,6 +361,47 @@ textarea[aria-invalid="true"] { border-color: var(--red); }
 .composer-preview p { margin: 0 0 4px; }
 .composer-preview[data-outcome="auto_admitted"] { border-color: var(--green); }
 .composer-preview[data-outcome="needs_approval"] { border-color: var(--amber); }
+
+/* Approval bundles: a PR-style change set review. Only design tokens are used so the
+   light theme keeps working. */
+.bundle-review { display: grid; gap: 9px; }
+.bundle-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bundle-title { display: block; }
+.bundle-rationale { margin: 0; }
+.bundle-change-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.bundle-change {
+  display: grid; gap: 4px; padding: 8px 10px;
+  border: 1px solid var(--soft-line); border-radius: 8px; background: var(--surface-2);
+}
+.bundle-change-select { display: flex; align-items: center; gap: 7px; }
+.bundle-change-title { font-weight: 600; }
+.bundle-change-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
+.bundle-change-target { font-size: 0.82em; word-break: break-all; }
+.bundle-command {
+  margin: 0; padding: 6px 8px; background: var(--control-bg);
+  border: 1px solid var(--control-line); border-radius: 6px;
+  font-size: 0.82em; white-space: pre-wrap; word-break: break-all;
+}
+/* A destructive or externally-visible change must never read as routine. */
+.bundle-change[data-risk="critical"] { border-color: var(--bad-line); }
+.bundle-change[data-risk="high"] { border-color: var(--warn-line); }
+.chip-danger { color: var(--red); border-color: var(--bad-line); }
+.chip-warn { color: var(--amber); border-color: var(--warn-line); }
+.chip-ok { color: var(--green); border-color: var(--ok-line); }
+.bundle-scope { display: flex; flex-wrap: wrap; gap: 12px; margin: 0; }
+.bundle-scope > div { display: flex; gap: 5px; align-items: baseline; }
+.bundle-scope dt { color: var(--muted); }
+.bundle-scope dd { margin: 0; font-weight: 600; }
+.bundle-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.bundle-tabpanel { display: grid; gap: 7px; }
+.bundle-history { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.approval-strategy {
+  display: grid; gap: 6px; margin: 0 0 12px;
+  border: 1px solid var(--soft-line); border-radius: 8px; padding: 10px 12px;
+}
+.approval-strategy legend { color: var(--muted-strong); padding: 0 4px; }
+.strategy-option { display: grid; grid-template-columns: auto 1fr; gap: 4px 7px; align-items: center; }
+.strategy-option small { grid-column: 2; }
 .composer-preview[data-outcome="blocked"], .composer-preview[data-outcome="rejected"] { border-color: var(--red); }
 .preview-actions { margin: 4px 0; padding-left: 16px; }
 .form-row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; }
@@ -510,6 +551,18 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
   </div>
   <p id="queue-filter-live" class="queue-filter-live" aria-live="polite">Showing all work items</p>
 </div><div class="queue" id="queue-list"><p class="empty">No work items.</p></div><div id="queue-footer" class="queue-footer"></div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section></article>
+      </section>
+      <section class="grid approvals-grid">
+        <article id="approval-bundles" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Change sets</h2><span id="approval-bundles-count">0 awaiting review</span></div><div id="approval-bundles-body"><div id="approval-bundles-body">
+    <fieldset class="approval-strategy" id="approval-strategy">
+    <legend>Approval strategy</legend>
+    <label class="strategy-option"><input type="radio" name="approval-strategy" value="PER_ACTION" data-approval-strategy checked /> <span>Per action</span><small class="muted">Each privileged operation is approved on its own. Unchanged ACS behaviour.</small></label>
+    <label class="strategy-option"><input type="radio" name="approval-strategy" value="BUNDLE" data-approval-strategy /> <span>Change-set approval</span><small class="muted">Privileged work is collected into one reviewable change set and approved together.</small></label>
+    <label class="strategy-option"><input type="radio" name="approval-strategy" value="POLICY_AUTONOMOUS" data-approval-strategy /> <span>Policy autonomous</span><small class="muted">Executes without a human only where policy already allows it. Never allow-all.</small></label>
+    <output id="approval-strategy-result" class="approval-result" aria-live="polite"></output>
+  </fieldset>
+    <div id="approval-bundles-list"><p class="empty">No approval bundles are awaiting review.</p></div>
+  </div></div></article>
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">0 waiting</span></div><div id="approvals-list"><p class="empty">No approvals or blocked work.</p></div></article>
@@ -816,7 +869,7 @@ document.addEventListener('click', async function (event) {
 });
 
 
-const dashboardFragmentTargets = {"cards":"#overview","queueList":"#queue-list","queueFooter":"#queue-footer","approvalsList":"#approvals-list","approvalsCount":"#approvals-count","metrics":"#operator-metrics-body","systemStats":"#system-stats","policy":"#policy-body"};
+const dashboardFragmentTargets = {"cards":"#overview","queueList":"#queue-list","queueFooter":"#queue-footer","approvalsList":"#approvals-list","approvalsCount":"#approvals-count","approvalBundles":"#approval-bundles-body","metrics":"#operator-metrics-body","systemStats":"#system-stats","policy":"#policy-body"};
 const dashboardCatchUpTargets = {"eventsTimeline":"#events-timeline","connectors":"#connectors-body"};
 const workEventPrefixes = ["work_item.","execution_attempt.","attempt_lease."];
 const appliedFragments = {};
@@ -918,11 +971,30 @@ function captureOperatorState() {
   document.querySelectorAll('.approval-result[id]').forEach(function (output) {
     if (output.textContent) outputs[output.id] = output.textContent;
   });
+  // Bundle review state is captured too: a typed reason, a rendered result, and above
+  // all the operator's unticked changes. Without this, a live refresh would silently
+  // re-tick everything the reviewer deliberately excluded before they pressed approve.
+  const bundleReasons = {};
+  document.querySelectorAll('[data-bundle-reason]').forEach(function (input) {
+    if (input.value) bundleReasons[input.dataset.bundleReason] = input.value;
+  });
+  const bundleUnticked = {};
+  document.querySelectorAll('[data-bundle-ref]').forEach(function (card) {
+    const bundleId = card.dataset.bundleRef;
+    if (!bundleId) return;
+    bundleUnticked[bundleId] = Array.prototype.slice
+      .call(card.querySelectorAll('[data-bundle-select]'))
+      .filter(function (input) { return !input.checked; })
+      .map(function (input) { return input.dataset.bundleSelect; })
+      .filter(function (value) { return typeof value === 'string' && value.length > 0; });
+  });
   return {
     activeId: active && active.id ? active.id : null,
     activeSelector: active && active.dataset && active.dataset.workItem ? '[data-work-item="' + cssAttr(active.dataset.workItem) + '"]' : null,
     reasons: reasons,
-    outputs: outputs
+    outputs: outputs,
+    bundleReasons: bundleReasons,
+    bundleUnticked: bundleUnticked
   };
 }
 
@@ -934,6 +1006,17 @@ function restoreOperatorState(state) {
   Object.keys(state.outputs).forEach(function (id) {
     const output = document.getElementById(id);
     if (output && !output.textContent) output.textContent = state.outputs[id];
+  });
+  Object.keys(state.bundleReasons || {}).forEach(function (id) {
+    const input = document.querySelector('[data-bundle-reason="' + cssAttr(id) + '"]');
+    if (input && !input.value) input.value = state.bundleReasons[id];
+  });
+  Object.keys(state.bundleUnticked || {}).forEach(function (bundleId) {
+    var unticked = state.bundleUnticked[bundleId] || [];
+    document.querySelectorAll('[data-bundle-ref="' + cssAttr(bundleId) + '"] [data-bundle-select]').forEach(function (input) {
+      var id = input.dataset.bundleSelect;
+      if (id) input.checked = unticked.indexOf(id) === -1;
+    });
   });
   if (selectedWorkItemId) {
     const selected = document.querySelector('[data-work-item="' + cssAttr(selectedWorkItemId) + '"]');
@@ -1024,6 +1107,42 @@ function renderLiveStatus() {
 }
 
 setInterval(renderLiveStatus, 1000);
+
+
+    'approval_bundle.created',
+    'approval_bundle.revised',
+    'approval_bundle.approved',
+    'approval_bundle.partially_approved',
+    'approval_bundle.rejected',
+    'approval_bundle.invalidated',
+    'approval_strategy.changed',
+document.addEventListener('click', function (event) {
+  var button = event.target && event.target.closest
+    ? event.target.closest('[data-bundle-decision],[data-bundle-tab]')
+    : null;
+  if (!button || button.disabled) return;
+  if (button.dataset.bundleTab) {
+    event.preventDefault();
+    selectBundleTab(button);
+    return;
+  }
+  if (!sseConnected) {
+    var gate = bundleOutputFor(button.dataset.bundleId);
+    if (gate) gate.textContent = 'Reconnect before deciding';
+    return;
+  }
+  event.preventDefault();
+  postBundleDecision(button);
+});
+document.addEventListener('change', function (event) {
+  var input = event.target && event.target.closest ? event.target.closest('[data-approval-strategy]') : null;
+  if (!input) return;
+  if (!sseConnected) {
+    input.checked = false;
+    return;
+  }
+  postApprovalStrategy(input);
+});
 
 
 let timelinePaused = false;

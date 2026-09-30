@@ -2,6 +2,7 @@ import { type WorkItem } from "@agent-control-stack/work-items";
 import { projectAgents } from "../agents.js";
 import { nanoToIso, time } from "../format.js";
 import { type DashboardFragments } from "../live-dashboard.js";
+import { approvalBundlePanel } from "../approval-bundles.js";
 import { DEFAULT_APPROVAL_SLA_MS, sortApprovalItems } from "../operator-workflow.js";
 import { type MissionControlAgent, type MissionControlViewModel } from "../types.js";
 import { policyPanelHtml, summarizePolicyDecisions } from "../visibility.js";
@@ -64,6 +65,7 @@ export function renderDashboardFragments(
       approvalSlaMs
     ),
     approvalsCount: `${approvalItems.length} waiting`,
+    approvalBundles: approvalBundlePanel(model.approvalBundles ?? [], model.approvalStrategy),
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now, approvalSlaMs),
     systemStats: systemStats(stats, model.infrastructure, model.executionBackend),
     policy: policyPanelHtml(

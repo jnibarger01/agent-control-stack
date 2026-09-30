@@ -1,7 +1,9 @@
 import type {
   ApprovalBundle,
   ApprovalBundleRevision,
-  ApprovalGrantRecord
+  ApprovalDeltaClass,
+  ApprovalGrantRecord,
+  ProposedChange
 } from "@agent-control-stack/approval-bundles";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
@@ -1017,6 +1019,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           saturated: admission.saturated
         }
       },
+      approvalBundles: approvalBundleReviews(workItems),
+      approvalStrategy: workItems.getApprovalStrategy().strategy,
       approvalActionsByWorkItem: approvalActionsByWorkItem(
         policy,
         workItemList,
@@ -2666,7 +2670,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       // "Previously approved" vs "new since approval" is computed from the manifest
       // change digests, so a relabelled-but-identical change is not reported as new and
       // an edited change is never reported as unchanged.
-      delta: previous ? approvalDelta(previous, bundle) : null,
+      delta: previous ? approvalDeltaView(previous, bundle) : null,
       grants: workItems.listApprovalBundleGrants({ bundleId: bundle.bundleId }).map(approvalGrantView)
     });
   });
@@ -2690,7 +2694,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       .filter((revision) => revision.revision < target.revision);
     const previous = earlier.length > 0 ? earlier[earlier.length - 1] : undefined;
     return reply.send({
-      delta: previous ? approvalDelta(previous, target) : null,
+      delta: previous ? approvalDeltaView(previous, target) : null,
       fromRevision: previous?.revision ?? null,
       toRevision: target.revision
     });
@@ -3733,21 +3737,25 @@ function approvalBundleRevisionView(revision: ApprovalBundleRevision) {
     createdAt: revision.createdAt,
     createdByActorId: revision.createdByActorId,
     expiresAt: revision.expiresAt ?? null,
-    changes: revision.changes.map((change) => ({
-      id: change.id,
-      type: change.type,
-      summary: change.summary,
-      target: change.target,
-      risk: change.risk,
-      destructive: change.destructive,
-      network: change.network,
-      dependsOn: change.dependsOn,
-      actionHash: change.actionHash,
-      actionKind: change.action.kind,
-      command: change.command ?? null,
-      paths: change.paths ?? null,
-      cwd: change.cwd ?? null
-    }))
+    changes: revision.changes.map(approvalChangeView)
+  };
+}
+
+function approvalChangeView(change: ProposedChange) {
+  return {
+    id: change.id,
+    type: change.type,
+    summary: change.summary,
+    target: change.target,
+    risk: change.risk,
+    destructive: change.destructive,
+    network: change.network,
+    dependsOn: change.dependsOn,
+    actionHash: change.actionHash,
+    actionKind: change.action.kind,
+    command: change.command ?? null,
+    paths: change.paths ?? null,
+    cwd: change.cwd ?? null
   };
 }
 
@@ -3780,6 +3788,61 @@ function approvalGrantView(grant: ApprovalGrantRecord) {
     grantedAt: grant.grantedAt,
     expiresAt: grant.expiresAt,
     baseState: grant.baseState
+  };
+}
+
+/**
+ * Bundle review projections for Mission Control.
+ *
+ * Each bundle is paired with the delta against the last revision that was actually
+ * approved, which is what lets the UI separate "previously approved" from "new since
+ * approval" without re-deriving anything client-side.
+ */
+function approvalBundleReviews(store: SqliteWorkItemStore) {
+  return store.listApprovalBundles({ limit: 100 }).map((bundle) => {
+    const revisions = store.listApprovalBundleRevisions(bundle.bundleId);
+    const earlier = revisions.filter((revision) => revision.revision < bundle.revision);
+    const previous = earlier.length > 0 ? earlier[earlier.length - 1] : undefined;
+    return {
+      bundle: approvalBundleView(bundle),
+      delta: previous ? approvalDeltaView(previous, bundle) : null,
+      grants: store.listApprovalBundleGrants({ bundleId: bundle.bundleId }).map(approvalGrantView)
+    };
+  });
+}
+
+/**
+ * Project a domain delta into the display shape.
+ *
+ * The UI is given exactly the change rows it renders and never the raw
+ * `ProposedChange`, so the client cannot accidentally depend on a field that is not
+ * part of the review surface.
+ */
+function approvalDeltaView(previous: ApprovalBundleRevision, next: ApprovalBundleRevision) {
+  const project = (entry: {
+    changeId: string;
+    digest: string;
+    classification: ApprovalDeltaClass;
+    previousDigest?: string;
+    change?: ProposedChange;
+  }) => ({
+    changeId: entry.changeId,
+    digest: entry.digest,
+    classification: entry.classification,
+    previousDigest: entry.previousDigest ?? null,
+    change: entry.change ? approvalChangeView(entry.change) : null
+  });
+  const delta = approvalDelta(previous, next);
+  return {
+    fromRevision: delta.fromRevision,
+    toRevision: delta.toRevision,
+    fromManifestHash: delta.fromManifestHash,
+    toManifestHash: delta.toManifestHash,
+    unchanged: delta.unchanged.map(project),
+    modified: delta.modified.map(project),
+    added: delta.added.map(project),
+    removed: delta.removed.map(project),
+    requiresApproval: delta.requiresApproval.map(project)
   };
 }
 

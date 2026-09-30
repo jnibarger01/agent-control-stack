@@ -355,6 +355,47 @@ textarea[aria-invalid="true"] { border-color: var(--red); }
 .composer-preview p { margin: 0 0 4px; }
 .composer-preview[data-outcome="auto_admitted"] { border-color: var(--green); }
 .composer-preview[data-outcome="needs_approval"] { border-color: var(--amber); }
+
+/* Approval bundles: a PR-style change set review. Only design tokens are used so the
+   light theme keeps working. */
+.bundle-review { display: grid; gap: 9px; }
+.bundle-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.bundle-title { display: block; }
+.bundle-rationale { margin: 0; }
+.bundle-change-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.bundle-change {
+  display: grid; gap: 4px; padding: 8px 10px;
+  border: 1px solid var(--soft-line); border-radius: 8px; background: var(--surface-2);
+}
+.bundle-change-select { display: flex; align-items: center; gap: 7px; }
+.bundle-change-title { font-weight: 600; }
+.bundle-change-meta { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 0.82em; }
+.bundle-change-target { font-size: 0.82em; word-break: break-all; }
+.bundle-command {
+  margin: 0; padding: 6px 8px; background: var(--control-bg);
+  border: 1px solid var(--control-line); border-radius: 6px;
+  font-size: 0.82em; white-space: pre-wrap; word-break: break-all;
+}
+/* A destructive or externally-visible change must never read as routine. */
+.bundle-change[data-risk="critical"] { border-color: var(--bad-line); }
+.bundle-change[data-risk="high"] { border-color: var(--warn-line); }
+.chip-danger { color: var(--red); border-color: var(--bad-line); }
+.chip-warn { color: var(--amber); border-color: var(--warn-line); }
+.chip-ok { color: var(--green); border-color: var(--ok-line); }
+.bundle-scope { display: flex; flex-wrap: wrap; gap: 12px; margin: 0; }
+.bundle-scope > div { display: flex; gap: 5px; align-items: baseline; }
+.bundle-scope dt { color: var(--muted); }
+.bundle-scope dd { margin: 0; font-weight: 600; }
+.bundle-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+.bundle-tabpanel { display: grid; gap: 7px; }
+.bundle-history { list-style: none; margin: 0; padding: 0; display: grid; gap: 7px; }
+.approval-strategy {
+  display: grid; gap: 6px; margin: 0 0 12px;
+  border: 1px solid var(--soft-line); border-radius: 8px; padding: 10px 12px;
+}
+.approval-strategy legend { color: var(--muted-strong); padding: 0 4px; }
+.strategy-option { display: grid; grid-template-columns: auto 1fr; gap: 4px 7px; align-items: center; }
+.strategy-option small { grid-column: 2; }
 .composer-preview[data-outcome="blocked"], .composer-preview[data-outcome="rejected"] { border-color: var(--red); }
 .preview-actions { margin: 4px 0; padding-left: 16px; }
 .form-row { display: grid; grid-template-columns: 160px 1fr; gap: 10px; }

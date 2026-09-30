@@ -66,6 +66,9 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
         <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">${escapeHtml(String(model.workItems.length))} items</span></div>${queueFilterStrip()}<div class="queue" id="queue-list">${fragments.queueList}</div><div id="queue-footer" class="queue-footer">${fragments.queueFooter}</div>${workDetailPanel()}</article>
       </section>
       <section class="grid approvals-grid">
+        <article id="approval-bundles" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Change sets</h2><span id="approval-bundles-count">${fragments.approvalBundles.match(/data-bundle-ref="/g)?.length ?? 0} awaiting review</span></div><div id="approval-bundles-body">${fragments.approvalBundles}</div></article>
+      </section>
+      <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
       </section>
       <section class="grid lower">
