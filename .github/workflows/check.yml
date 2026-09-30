@@ -2,6 +2,10 @@ name: check
 
 on:
   pull_request:
+    paths-ignore:
+      - "*.md"
+      - "**/*.md"
+      - "docs/**"
   push:
     branches:
       - main
