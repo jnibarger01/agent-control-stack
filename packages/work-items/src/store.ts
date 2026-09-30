@@ -1324,6 +1324,35 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return rows.map(rowToWorkItem);
   }
 
+  findReusableBoundWorkItem(input: {
+    requesterSubject: string;
+    tool: string;
+    bindingHash: string;
+    excludedApprover: string;
+  }): WorkItem | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT *
+         FROM work_items
+         WHERE requester_subject = ?
+           AND status IN ('needs_approval', 'approved')
+           AND json_extract(requested_actions_json, '$[0].params.tool') = ?
+           AND json_extract(requested_actions_json, '$[0].params.bindingHash') = ?
+           AND NOT EXISTS (
+             SELECT 1
+             FROM approval_records
+             WHERE approval_records.work_item_id = work_items.id
+               AND approval_records.approved_by = ?
+               AND approval_records.status = 'granted'
+           )
+         ORDER BY created_at DESC
+         LIMIT 1`
+      )
+      .get(input.requesterSubject, input.tool, input.bindingHash, input.excludedApprover) as unknown as
+      WorkItemRow | undefined;
+    return row ? rowToWorkItem(row) : undefined;
+  }
+
   listDashboardWorkItems(options: DashboardWorkItemsOptions = {}): DashboardWorkItems {
     const requested = options.finishedLimit ?? DEFAULT_DASHBOARD_FINISHED_LIMIT;
     if (!Number.isInteger(requested) || requested < 0) {

@@ -191,6 +191,22 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(Date.parse(payload.expiresAt) - Date.parse(payload.issuedAt)).toBeLessThanOrEqual(30_000);
       expect(capability.keyId).toBe("jc-test-key");
       expect(signatureValid(ctx, capability)).toBe(true);
+
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        const evidence = db
+          .prepare(
+            "SELECT name, body FROM audit_events WHERE name IN ('jace_commander.capability_issued', 'connector.requested') ORDER BY sequence"
+          )
+          .all() as Array<{ name: string; body: string }>;
+        expect(evidence.map((event) => event.name)).toEqual([
+          "jace_commander.capability_issued",
+          "connector.requested"
+        ]);
+        expect(JSON.parse(evidence[1]!.body)).toMatchObject({ source: "jc-capability-issued" });
+      } finally {
+        db.close();
+      }
     }));
 
   it("denies unknown tools and invalid arguments deterministically", () =>

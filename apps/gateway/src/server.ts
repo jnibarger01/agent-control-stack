@@ -2226,20 +2226,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           requesterSubject: jcActor
         });
 
-        const existing = workItems
-          .list()
-          .filter((candidate) => {
-            const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
-            return (
-              candidate.requesterSubject === jcActor &&
-              params?.tool === invocation.toolName &&
-              params?.bindingHash === bindingHash &&
-              ["needs_approval", "approved"].includes(candidate.status) &&
-              // An admin auto-grant never counts toward a jc capability.
-              !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER)
-            );
-          })
-          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+        const existing = workItems.findReusableBoundWorkItem({
+          requesterSubject: jcActor,
+          tool: invocation.toolName,
+          bindingHash,
+          // An admin auto-grant never counts toward a jc capability.
+          excludedApprover: ACS_ADMIN_APPROVER
+        });
 
         if (!existing && !hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
           return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
