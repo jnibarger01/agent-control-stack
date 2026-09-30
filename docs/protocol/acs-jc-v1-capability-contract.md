@@ -77,12 +77,14 @@ For approval-gated non-root JC mutations (`write_file`, `create_directory`,
 `git_commit`, `git_fetch`, and `git_push`), canonical `admin` mode may
 record an `acs:admin` approval only after the managed-authority gate passes.
 The request then continues through the same lease, capability, containment, and
-audit path as a human-approved request. After any admission wait, ACS re-reads
-the canonical execution mode and managed authority immediately before claim;
-an `acs:admin` approval is not consumed unless both are still valid. In
-`strict` mode, candidate reuse explicitly excludes work items carrying an
-`acs:admin` grant, so an approval left behind by an interrupted admin-mode
-request cannot cross the mode boundary.
+audit path as a human-approved request. After any admission wait, ACS performs
+a defense-in-depth mode/authority recheck, then the exact-id claim enforces the
+canonical `admin` mode and `acs:admin` approval origin inside the same
+`BEGIN IMMEDIATE` SQLite transaction that creates the lease and consumes the
+approval. A concurrent switch to `strict` therefore cannot interleave between
+the fence and approval consumption. In `strict` mode, candidate reuse also
+excludes work items carrying an `acs:admin` grant, so an approval left behind
+by an interrupted admin-mode request cannot cross the mode boundary.
 
 Migration 039 updates the durable JC issuance constraint to permit
 `acs:admin` for those ordinary approval-gated tools while retaining the

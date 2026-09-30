@@ -2373,7 +2373,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
+          const adminApprovalAtClaim = workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
+          if (adminApprovalAtClaim) {
             const modeAfterAdmission = readExecutionModeValue(workItems.getExecutionMode().raw);
             if (modeAfterAdmission.state !== "ok" || modeAfterAdmission.mode !== "admin") {
               recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
@@ -2431,7 +2432,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           const claimed = tools.claim_approved_work_item_by_id({
             id: workItem.id,
             workerId,
-            leaseMs: JC_BRIDGE_LEASE_MS
+            leaseMs: JC_BRIDGE_LEASE_MS,
+            ...(adminApprovalAtClaim ? { executionModeFence: "admin" as const } : {})
           });
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);

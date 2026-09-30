@@ -871,6 +871,15 @@ export interface ClaimOptions {
   leaseMs?: number;
   allowDirectStartForTests?: true;
   allowLegacyClaimForTests?: true;
+  /**
+   * Additive claim precondition for admin-auto-approved work. Evaluated from
+   * canonical rows inside the same BEGIN IMMEDIATE transaction that creates
+   * the lease and consumes the approval.
+   */
+  executionModeFence?: {
+    mode: "admin";
+    approvedByActorId: string;
+  };
   attemptAuthority?: {
     planHash: string;
     admissionId: string;
@@ -5116,6 +5125,45 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "execution_action_hash_mismatch",
           `execution action hash does not match the current work item: ${id}`
         );
+      }
+
+      if (options.executionModeFence) {
+        const mode = this.db
+          .prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`)
+          .get() as { mode?: string } | undefined;
+        if (mode?.mode !== options.executionModeFence.mode) {
+          throw new ControlStackError(
+            "execution_mode_fence_mismatch",
+            `execution mode changed before claim: expected ${options.executionModeFence.mode}`
+          );
+        }
+
+        const approvalId = options.attemptAuthority?.approvalId;
+        if (!approvalId) {
+          throw new ControlStackError(
+            "execution_approval_fence_mismatch",
+            "admin-mode claim fence requires a lease-bound approval"
+          );
+        }
+        const approval = this.db
+          .prepare(
+            `SELECT status, approved_by_actor_id
+             FROM execution_plan_approvals
+             WHERE work_item_id = ? AND approval_id = ?`
+          )
+          .get(current.id, approvalId) as
+          | { status: string; approved_by_actor_id: string }
+          | undefined;
+        if (
+          !approval ||
+          approval.status !== "granted" ||
+          approval.approved_by_actor_id !== options.executionModeFence.approvedByActorId
+        ) {
+          throw new ControlStackError(
+            "execution_approval_fence_mismatch",
+            "claim approval no longer matches the required admin-mode approval"
+          );
+        }
       }
 
       if (options.attemptAuthority) {

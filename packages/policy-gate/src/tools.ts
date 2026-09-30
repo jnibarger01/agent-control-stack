@@ -17,6 +17,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
+import { ACS_ADMIN_APPROVER } from "./execution-mode.js";
 import { explainPolicy } from "./explain.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
 
@@ -44,7 +45,8 @@ const claimInputSchema = z.object({
 });
 const claimByIdInputSchema = idInputSchema.extend({
   workerId: z.string().min(1),
-  leaseMs: z.number().int().positive().optional()
+  leaseMs: z.number().int().positive().optional(),
+  executionModeFence: z.literal("admin").optional()
 });
 const approvalInputSchema = idInputSchema.merge(approvalRequestSchema);
 const cancelInputSchema = idInputSchema.merge(cancelRequestSchema);
@@ -410,6 +412,9 @@ function gateWorkerClaimByIdInTransaction(
   const [firstApproval, ...restApprovals] = planApprovals;
   const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
+    ...(parsed.executionModeFence === "admin"
+      ? { executionModeFence: { mode: "admin" as const, approvedByActorId: ACS_ADMIN_APPROVER } }
+      : {}),
     attemptAuthority: {
       planHash: plan.planHash,
       admissionId: admission.admissionId,
