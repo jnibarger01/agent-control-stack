@@ -5151,9 +5151,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
              FROM execution_plan_approvals
              WHERE work_item_id = ? AND approval_id = ?`
           )
-          .get(current.id, approvalId) as
-          | { status: string; approved_by_actor_id: string }
-          | undefined;
+          .get(current.id, approvalId) as { status: string; approved_by_actor_id: string } | undefined;
         if (
           !approval ||
           approval.status !== "granted" ||
