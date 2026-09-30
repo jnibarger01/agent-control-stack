@@ -1796,7 +1796,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       );
     }
     const serialized = serializeApprovalManifest(parsed);
-    const now = new Date().toISOString();
 
     return this.write(() => {
       const events: StoredAuditEvent[] = [];

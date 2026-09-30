@@ -1,7 +1,6 @@
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
   approvalBundleRevisionSchema,
-  identifierSchema,
   overallBundleRisk,
   type ApprovalBundleRevision,
   type ProposedChange

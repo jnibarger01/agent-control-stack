@@ -450,7 +450,10 @@ export interface AuthorizeBundleOperationInput {
  * 4. Anything not covered fails closed and requires a delta approval.
  */
 export function authorizeBundleOperation(input: AuthorizeBundleOperationInput): BundleAuthorizationVerdict {
-  const { store, policy, workItem, action, actor } = input;
+  // `policy` is intentionally not consulted here: `evaluatePolicy` is the same pure
+  // function the engine wraps, so using it directly keeps this check usable from any
+  // caller without constructing an engine.
+  const { store, workItem, action, actor } = input;
   const now = input.now ?? new Date();
   const decision: PolicyDecision = evaluatePolicy(policyContextFromAction(workItem, action, actor, "claim"));
 
