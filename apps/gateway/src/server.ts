@@ -970,12 +970,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const admission = executionAdmission.snapshot();
     return {
       workItems: workItemList,
-      executionPlansByWorkItem: Object.fromEntries(
-        ids.flatMap((id) => {
-          const plan = workItems.getCurrentExecutionPlan(id);
-          return plan ? [[id, plan]] : [];
-        })
-      ),
+      executionPlansByWorkItem: Object.fromEntries(workItems.listCurrentExecutionPlansForWorkItems(ids)),
       executionPlanAdmissionsByWorkItem: Object.fromEntries(executionReads.listCurrentPlanAdmissionsForWorkItems(ids)),
       statusCounts: dashboard.statusCounts,
       finishedWorkItems: {
