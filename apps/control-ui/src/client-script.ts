@@ -741,12 +741,11 @@ function leaseWarningTick() {
   refreshLeaseExpiryWarnings(leaseWarningRoot);
 }
 
-// The work-item detail panel is only visible while the queue or execution
-// view is active. Pause the refresh while it is hidden and resume on return
-// so an off-screen detail never keeps refreshing.
+// The global drawer can be opened from any page. Its visibility, rather than
+// the underlying route, determines whether lease warnings need a timer.
 function leaseWarningViewActive() {
-  const view = document.body.dataset.activeView;
-  return (view === 'queue' || view === 'execution') && document.visibilityState !== 'hidden';
+  const drawer = document.getElementById('work-drawer');
+  return Boolean(drawer && !drawer.hidden) && document.visibilityState !== 'hidden';
 }
 
 function syncLeaseExpiryWarningRefresh() {

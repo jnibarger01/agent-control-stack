@@ -47,6 +47,19 @@ describe("Mission Control operational slices", () => {
     app.key("Escape");
     expect((app.document.querySelector("#audit-drawer") as HTMLElement).hidden).toBe(true);
     expect(app.document.activeElement).toBe(button);
+    button.click();
+    const audit =
+      app.document.querySelector("#auditOperations") || app.document.querySelector("[data-audit-name]")?.parentElement;
+    if (!audit) throw new Error("audit rows missing");
+    audit.replaceChildren(...Array.from(audit.childNodes, (node) => node.cloneNode(true)));
+    app.key("Escape");
+    expect(app.document.activeElement).toBe(app.document.querySelector('[data-inspect-audit="evt_review"]'));
+    (app.document.activeElement as HTMLElement).click();
+    audit.replaceChildren();
+    app.key("Escape");
+    expect(app.document.activeElement).toBe(
+      app.document.querySelector("#audit-search") || app.document.querySelector("#main-content")
+    );
   });
   it("opens a meaningful work drawer from the board without changing views, closes with focus restored", async () => {
     const app = bootLive(model);
@@ -62,6 +75,41 @@ describe("Mission Control operational slices", () => {
     expect((app.document.querySelector("#work-drawer") as HTMLElement).hidden).toBe(true);
     expect(app.document.activeElement).toBe(card);
     expect(app.window.location.search).toBe("");
+    expect(app.document.querySelector('[data-work-item="wrk_ops"].selected')).toBeNull();
+    expect(app.document.querySelector('[data-work-item="wrk_ops"][aria-current]')).toBeNull();
+  });
+  it.each(["work", "audit"])("keeps the %s drawer open while shortcut help consumes keyboard events", async (kind) => {
+    const app = bootLive({
+      ...model,
+      events: [
+        {
+          sequence: 1,
+          id: "evt_modal",
+          name: "policy.decided",
+          timeUnixNano: String(now.getTime() * 1e6),
+          attributes: {},
+          body: {},
+          previousHash: "prior",
+          eventHash: "current"
+        }
+      ]
+    });
+    const trigger = app.document.querySelector(
+      kind === "work" ? '[data-inspect-work="wrk_ops"]' : '[data-inspect-audit="evt_modal"]'
+    ) as HTMLElement;
+    trigger.click();
+    await app.flush();
+    app.key("?");
+    const help = app.document.querySelector("#shortcut-help") as HTMLElement;
+    expect(help.hidden).toBe(false);
+    const helpClose = app.document.querySelector("#shortcut-help-close");
+    app.key("Tab");
+    expect(app.document.activeElement).toBe(helpClose);
+    app.key("Escape");
+    expect(help.hidden).toBe(true);
+    expect((app.document.querySelector("#" + kind + "-drawer") as HTMLElement).hidden).toBe(false);
+    app.key("Escape");
+    expect((app.document.querySelector("#" + kind + "-drawer") as HTMLElement).hidden).toBe(true);
   });
   it("renders execution on a direct hash URL and keeps the correct heading during history navigation", async () => {
     const app = bootLive(model, {}, { url: "https://acs.local/#execution" });

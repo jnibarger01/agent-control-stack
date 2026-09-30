@@ -1,3 +1,4 @@
+import { ControlStackError } from "@agent-control-stack/shared";
 import { executionPlanAdmissionSchema, type ExecutionPlanAdmission } from "./execution-plan.js";
 import { DatabaseSync } from "node:sqlite";
 import { attemptLeaseSchema, executionAttemptSchema, type AttemptLease, type ExecutionAttempt } from "./attempt.js";
@@ -127,8 +128,11 @@ export class SqliteExecutionReadStore {
       JOIN execution_plan_heads head ON head.work_item_id = admission.work_item_id
         AND head.current_plan_id = admission.plan_id AND head.current_plan_hash = admission.plan_hash
       WHERE admission.work_item_id IN (${placeholders}) ORDER BY admission.admitted_at, admission.admission_id`,
-      (row: Row) =>
-        executionPlanAdmissionSchema.parse({
+      (row: Row) => {
+        if (row.requires_approval !== 0 && row.requires_approval !== 1) {
+          throw new ControlStackError("execution_plan_admission_invalid", "stored approval requirement is invalid");
+        }
+        return executionPlanAdmissionSchema.parse({
           admissionId: row.admission_id,
           workItemId: row.work_item_id,
           planId: row.plan_id,
@@ -138,7 +142,8 @@ export class SqliteExecutionReadStore {
           requiresApproval: row.requires_approval === 1,
           admittedByActorId: row.admitted_by_actor_id,
           admittedAt: row.admitted_at
-        })
+        });
+      }
     );
     return new Map(
       [...groups].flatMap(([id, admissions]) => {

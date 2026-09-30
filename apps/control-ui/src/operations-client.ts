@@ -17,7 +17,10 @@ function closeAuditDrawer() {
   document.querySelector('aside').inert = false;
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
-  if (auditReturnFocus?.isConnected) auditReturnFocus.focus({ preventScroll: true });
+  const replacement = auditReturnFocus?.dataset.inspectAudit
+    ? document.querySelector('[data-inspect-audit="' + cssAttr(auditReturnFocus.dataset.inspectAudit) + '"]') : null;
+  const target = auditReturnFocus?.isConnected ? auditReturnFocus : replacement || document.getElementById('audit-search') || document.getElementById('main-content');
+  target?.focus({ preventScroll: true });
 }
 document.getElementById('audit-drawer-close')?.addEventListener('click', closeAuditDrawer);
 document.addEventListener('click', function (event) {
@@ -37,7 +40,7 @@ document.addEventListener('click', function (event) {
 });
 document.addEventListener('keydown', function (event) {
   const drawer = document.getElementById('audit-drawer');
-  if (drawer.hidden) return;
+  if (event.defaultPrevented || drawer.hidden || (document.getElementById('shortcut-help') && !document.getElementById('shortcut-help').hidden) || document.getElementById('approval-confirm-dialog')) return;
   if (event.key === 'Escape') { event.preventDefault(); closeAuditDrawer(); }
   if (event.key === 'Tab') {
     const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
@@ -63,6 +66,9 @@ function closeWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
   selectedWorkItemId = null;
+  document.querySelectorAll('[data-work-item]').forEach(function (row) {
+    row.classList.remove('selected'); row.removeAttribute('aria-current');
+  });
   workDetailGeneration += 1;
   stopLeaseExpiryWarningRefresh();
   writeSelectedItemToLocation(null);
@@ -72,7 +78,7 @@ function closeWorkDrawer() {
 document.getElementById('work-drawer-close')?.addEventListener('click', closeWorkDrawer);
 document.addEventListener('keydown', function (event) {
   const drawer = document.getElementById('work-drawer');
-  if (!drawer || drawer.hidden || document.getElementById('approval-confirm-dialog')) return;
+  if (event.defaultPrevented || !drawer || drawer.hidden || (document.getElementById('shortcut-help') && !document.getElementById('shortcut-help').hidden) || document.getElementById('approval-confirm-dialog')) return;
   if (event.key === 'Escape') { event.preventDefault(); closeWorkDrawer(); }
   if (event.key === 'Tab') {
     const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
