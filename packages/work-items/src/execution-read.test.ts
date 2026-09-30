@@ -84,6 +84,10 @@ describe("SqliteExecutionReadStore", () => {
           status: "active"
         })
       ]);
+      expect(reads.listCurrentPlanAdmissionsForWorkItems([workItem.id, "wrk_missing"]).get(workItem.id)).toEqual(
+        admission
+      );
+      expect(reads.listCurrentPlanAdmissionsForWorkItems(["wrk_missing"]).size).toBe(0);
       expect(reads.listExecutionAttempts("wrk_missing")).toEqual([]);
       expect(reads.listAttemptLeases("wrk_missing")).toEqual([]);
     } finally {

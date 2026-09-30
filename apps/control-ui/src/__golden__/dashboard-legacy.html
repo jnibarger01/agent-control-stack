@@ -438,31 +438,174 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 .system-probes div { display: flex; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); padding-bottom: 6px; }
 .system-probes dt { color: var(--muted); }
 .system-probes dd { margin: 0; }
+
+:root:not([data-theme="light"]) {
+  --bg: #030d18; --surface: #071726; --surface-2: #102334; --ink: #edf4ff;
+  --muted: #a6bbd5; --muted-strong: #b8cae2; --line: #1b344b; --soft-line: #142a3e;
+  --side: #041321; --side-line: #173047; --side-muted: #a6bbd5; --brand: #f3f7ff;
+  --nav-active-ink: #ffffff; --nav-ink: #b9cee7; --nav-active: #112f53; --accent: #58b8ff; --primary: #1263db;
+  --control-bg: #0b1d2e; --control-line: #284359; --control-hover-line: #58b8ff;
+  --pill-bg: #132c42; --pill-ink: #c3d7ef; --pill-line: #28465f;
+  --hover: #132c42; --green: #36dfad; --amber: #ffce58; --red: #ff6d80;
+  --attention-bg: #221b2c; --ok-bg: #063127; --ok-line: #146348;
+  --warn-bg: #302714; --warn-line: #796024; --bad-bg: #341e2b; --bad-line: #783147;
+  color-scheme: dark; color: var(--ink); background: var(--bg);
+}
+:root {
+  --mc-ambient: #11345b66;
+  --mc-nav-start: #0b2949;
+  --mc-nav-border: #265585;
+  --mc-cyan: #4ccaff;
+  --mc-primary-bright: #1263db;
+  --mc-primary-edge: #4197ff;
+  --mc-command-ambient: #12508955;
+  --mc-icon-blue-bg: #1262bf33;
+  --mc-icon-blue: #59baff;
+  --mc-icon-green-bg: #10a58126;
+  --mc-icon-red-bg: #ff406526;
+  --mc-icon-amber-bg: #ffb92f26;
+  --mc-violet: #bd9aff;
+  --mc-icon-violet-bg: #8c55ff26;
+  --mc-board-wash: #708aa20a;
+  --mc-failure-wash: #ff57710b;
+  --mc-approval-wash: #ffce580b;
+  --mc-policy-ink: #d4b7ff;
+  --mc-policy-bg: #482d6929;
+  --mc-policy-line: #705099;
+  --mc-avatar-bg: #19394e;
+  --mc-alert-bg: #ff557d33;
+  --mc-pipeline-arrow: #6488ac;
+  --mc-stage-bg: #0085ff16;
+  --mc-violet-strong: #ac86ff;
+  --mc-chart-start: #499fff;
+  --mc-chart-complete: #30dfb0;
+  --mc-chart-fail: #ff6d80;
+  --mc-chart-label: #6abaff;
+  --mc-drawer-overlay: #0007;
+  --mc-search-shadow: #0008;
+}
+.ui-icon { width: 21px; height: 21px; display: inline-block; vertical-align: middle; } .metric-icon .ui-icon { width: 25px; height: 25px; }
+body { background: radial-gradient(ellipse at 60% -15%, var(--mc-ambient), transparent 65%), var(--bg); grid-template-columns: 218px minmax(0, 1fr); font-size: 13px; }
+aside { box-sizing: border-box; padding: 18px 10px; background: linear-gradient(150deg, var(--side), var(--bg)); height: 100dvh; overflow-y: auto; z-index: 5; }
+.brand { display: flex; gap: 12px; align-items: center; padding: 0 10px 20px; border-bottom: 1px solid var(--soft-line); font-size: 21px; letter-spacing: .02em; }
+.brand span { font-size: 12px; font-weight: 500; letter-spacing: 0; margin-top: 3px; }
+nav { margin-top: 18px; gap: 5px; }
+nav a { min-height: 43px; padding: 0 15px; display: flex; gap: 16px; align-items: center; border: 1px solid transparent; border-radius: 7px; font-weight: 500; }
+nav a.active { background: linear-gradient(100deg,var(--mc-nav-start),var(--nav-active)); border-color: var(--mc-nav-border); box-shadow: inset 2px 0 var(--mc-cyan); }
+.nav-icon { width: 18px; font-size: 21px; text-align: center; line-height: 1; }
+.rail-note { margin: 35px 10px 12px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 11px; line-height: 1.65; }
+main { padding: 18px 20px 32px; }
+header { min-height: 70px; border-bottom: 1px solid var(--line); padding-bottom: 15px; align-items: center; gap: 20px; }
+h1 { font-size: 27px; letter-spacing: -.02em; line-height: 1.2; margin: 0 0 5px; }
+h2 { font-size: 16px; letter-spacing: -.01em; } h3 { font-size: 13px; }
+.page-heading p { font-size: 13px; max-width: 650px; }
+.header-controls { align-items: center; gap: 13px; flex-wrap: wrap; justify-content: end; }
+.global-search { display: flex; gap: 8px; align-items: center; border: 1px solid var(--control-line); border-radius: 8px; background: var(--control-bg); padding: 6px 10px; width: 240px; }
+.global-search input { border: 0; background: transparent; padding: 3px; min-width: 0; font-size: 11px; box-shadow: none; }
+.global-search kbd { font-size: 10px; white-space: nowrap; }
+.execution-mode { display: flex; flex-wrap: wrap; min-width: 190px; max-width: none; gap: 5px 9px; border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 11px; }
+.execution-mode legend { font-size: 10px; color: var(--muted); } .execution-mode label { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; margin: 0; } .execution-mode input { width: auto; margin: 0; } .execution-mode p:empty { display: none; }
+.header-tools button { padding: 3px 6px; font-size: 10px; min-height: 27px; }
+.live { font-size: 11px; max-width: 200px; white-space: normal; } .dashboard-updated { font-size: 10px; }
+.page-actions { display: flex; gap: 8px; align-items: center; justify-content: end; margin: 0 0 12px; }
+.page-actions .muted { margin-right: auto; order: -1; font-size: 11px; }
+button, input, select, textarea { border-radius: 6px; font: inherit; }
+button { border-color: var(--control-line); } button:hover { border-color: var(--accent); }
+.approval-actions [data-approve] .hash-prefix { color: inherit; opacity: 1; }
+.primary-button, .approval-actions [data-approve] { background: var(--mc-primary-bright); color: white; border: 1px solid var(--mc-primary-edge); padding: 8px 15px; }
+button { background-color: var(--control-bg); color: var(--ink); border: 1px solid var(--control-line); }
+.card, .panel, .section-card, .command-summary { border: 1px solid var(--line); background: linear-gradient(130deg,var(--surface),var(--bg)); border-radius: 11px; box-shadow: none; overflow: hidden; min-width: 0; }
+.panel-head { border-bottom: 1px solid var(--soft-line); padding: 13px 15px; background: transparent; }
+.panel-head a { color: var(--accent); font-size: 11px; white-space: nowrap; text-decoration: none; }
+.panel-head p { margin: 4px 0 0; color: var(--muted); }
+.section-card { margin-bottom: 13px; } .empty { padding: 16px; font-size: 12px; line-height: 1.6; }
+.eyebrow { font-size: 10px; color: var(--muted); letter-spacing: .07em; }
+.command-summary { margin-bottom: 14px; background: radial-gradient(ellipse at 80% 0%,var(--mc-command-ambient),transparent 60%),var(--surface); }
+.metric-grid { display: grid; grid-template-columns: repeat(5,minmax(0,1fr)); gap: 12px; margin: 0 0 14px; }
+.metric-card { border: 1px solid var(--line); border-radius: 10px; padding: 15px 12px; display: flex; gap: 13px; min-width: 0; background: linear-gradient(130deg,var(--surface-2),var(--surface)); align-items: start; }
+.metric-card strong { display: block; font-size: 27px; font-weight: 650; line-height: 1.2; letter-spacing: -.03em; }
+.metric-card span:not(.metric-icon) { display: block; font-size: 12px; margin-top: 4px; }
+.metric-card small { display: block; color: var(--muted); font-size: 10px; margin-top: 10px; line-height: 1.5; }
+.metric-icon { font-variant-emoji: text; border-radius: 13px; background: var(--mc-icon-blue-bg); color: var(--mc-icon-blue); width: 43px; height: 43px; display: grid; place-items: center; font-size: 24px; flex-shrink: 0; }
+.green .metric-icon { font-variant-emoji: text; color: var(--green); background: var(--mc-icon-green-bg); } .red .metric-icon { font-variant-emoji: text; color: var(--red); background: var(--mc-icon-red-bg); } .amber .metric-icon { font-variant-emoji: text; color: var(--amber); background: var(--mc-icon-amber-bg); } .violet .metric-icon { font-variant-emoji: text; color: var(--mc-violet); background: var(--mc-icon-violet-bg); }
+.command-metrics { grid-template-columns: repeat(4,minmax(0,1fr)); margin: 0; padding: 12px 6px 17px; }
+.command-metrics .metric-card { border: 0; border-right: 1px solid var(--line); border-radius: 0; background: transparent; padding: 12px; }
+.command-metrics .metric-card:last-child { border-right: 0; }
+.operations-layout { display: grid; grid-template-columns: minmax(0,1fr) minmax(280px, .37fr); gap: 14px; }
+.operations-main, .operations-rail { min-width: 0; }
+.overview-bottom { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
+.mission-board { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; padding: 11px; }
+.board-column { border: 1px solid var(--line); border-radius: 10px; background: var(--mc-board-wash); padding: 8px; min-width: 0; max-height: 400px; overflow-y: auto; }
+.board-column h3 { display: flex; gap: 8px; align-items: center; margin: 3px 0 12px; white-space: nowrap; font-size: 11px; }
+.board-column h3 span { font-size: 10px; padding: 2px 6px; border-radius: 12px; background: var(--surface-2); color: var(--muted); }
+.board-column h3 i, .health-dot { border-radius: 50%; width: 10px; height: 10px; display: inline-block; background: var(--accent); }
+.board-column.green h3 i, .health-dot.green { background: var(--green); } .board-column.amber h3 i { background: var(--amber); } .board-column.red h3 i, .health-dot.red { background: var(--red); }
+.mission-card { display: block; width: 100%; text-align: left; padding: 10px; margin-bottom: 8px; background: linear-gradient(140deg,var(--surface-2),var(--surface)); border: 1px solid var(--line); border-radius: 8px; color: var(--ink); min-width: 0; }
+.mission-card strong { font-size: 11px; font-weight: 600; display: block; line-height: 1.5; }
+.mission-card small { font-size: 9px; color: var(--accent); display: block; overflow-wrap: anywhere; margin-top: 3px; }
+.mission-card p { font-size: 10px; color: var(--muted); line-height: 1.4; margin: 5px 0 8px; overflow-wrap: anywhere; }
+.mission-card footer { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 5px; font-size: 9px; color: var(--muted); margin-top: 10px; overflow-wrap: anywhere; }
+.board-column.red .mission-card { background: var(--mc-failure-wash); } .board-column.amber .mission-card { background: var(--mc-approval-wash); }
+.pill { font-size: 10px; padding: 3px 8px; border-radius: 14px; } .pill.pending_policy { color: var(--mc-policy-ink); background: var(--mc-policy-bg); border-color: var(--mc-policy-line); }
+.rail-list { padding: 0 14px; } .health-row, .failure-row { display: flex; align-items: center; gap: 9px; padding: 12px 0; border-bottom: 1px solid var(--soft-line); min-width: 0; color: var(--ink); text-decoration: none; }
+.health-row > span:nth-child(2), .failure-row > div { flex: 1; min-width: 0; }
+.health-row strong, .failure-row strong { font-size: 11px; display: block; overflow-wrap: anywhere; } .health-row small, .failure-row small { font-size: 10px; color: var(--muted); display: block; line-height: 1.5; margin-top: 3px; overflow-wrap: anywhere; }
+.health-row .agent-avatar { width: 25px; height: 25px; font-size: 12px; border: 1px solid var(--line); background: var(--mc-avatar-bg); }
+.failure-icon { width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: var(--mc-alert-bg); color: var(--red); }
+.failure-row button { font-size: 10px; padding: 5px 7px; white-space: nowrap; }
+.approval-preview { width: 100%; padding: 13px 0; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; background: transparent; text-align: left; }
+.approval-preview strong, .approval-preview small, .approval-preview span { display: block; } .approval-preview strong { font-size: 12px; } .approval-preview small { font-size: 10px; margin-top: 6px; color: var(--muted); } .approval-preview span { color: var(--accent); font-size: 10px; margin-top: 8px; }
+.system-check-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; padding: 14px; }
+.system-check-grid > div { border: 1px solid var(--line); border-radius: 7px; padding: 10px; font-size: 11px; }
+.system-check-grid strong { margin-left: 7px; font-weight: 500; overflow-wrap: anywhere; } .system-check-grid small { display: block; color: var(--muted); margin-top: 8px; }
+.execution-pipeline { display: grid; grid-template-columns: repeat(7,minmax(0,1fr)); padding: 20px 10px 8px; gap: 9px; }
+.pipeline-stage { position: relative; text-decoration: none; color: var(--ink); display: grid; place-items: center; gap: 9px; text-align: center; }
+.pipeline-stage:not(:last-child)::after { content: '→'; position: absolute; top: 16px; right: -12px; color: var(--mc-pipeline-arrow); }
+.stage-icon { display: grid; place-items: center; width: 44px; height: 44px; border: 2px solid var(--accent); background: var(--mc-stage-bg); border-radius: 50%; font-size: 23px; color: var(--accent); }
+.green .stage-icon { border-color: var(--green); color: var(--green); } .amber .stage-icon { border-color: var(--amber); color: var(--amber); } .red .stage-icon { border-color: var(--red); color: var(--red); } .violet .stage-icon { border-color: var(--mc-violet-strong); color: var(--mc-violet-strong); }
+.pipeline-stage strong { font-size: 10px; font-weight: 500; } .pipeline-stage b { font-size: 18px; }
+.panel-note { padding: 6px 15px 12px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.execution-filter, .audit-filters { display: flex; align-items: end; gap: 12px; padding: 12px 15px; border-bottom: 1px solid var(--line); }
+.execution-filter label, .audit-filters label { display: grid; gap: 6px; font-size: 11px; color: var(--muted); }
+.execution-filter input, .audit-filters input { width: 230px; } .execution-filter select { min-width: 150px; }
+.section-card:has(.runs-table) .table-wrap { max-height: 440px; }
+.table-wrap { overflow: auto; max-height: 680px; } table { border-collapse: collapse; width: 100%; font-size: 11px; } th { padding: 10px 13px; text-align: left; color: var(--muted); font-size: 10px; font-weight: 500; background: var(--surface); position: sticky; top: 0; } td { border-top: 1px solid var(--soft-line); padding: 9px 13px; overflow-wrap: anywhere; }
+.runs-table td:first-child { min-width: 180px; color: var(--accent); } td strong, td small { display: block; } td strong { font-weight: 500; } td small { color: var(--muted); margin-top: 3px; } td button { font-size: 10px; padding: 5px 8px; }
+.chart-wrap { padding: 10px 14px; } .chart-wrap svg { width: 100%; height: auto; max-height: 200px; } .chart-grid { stroke: var(--line); fill: none; } .chart-0 { fill: var(--mc-chart-start); } .chart-1 { fill: var(--mc-chart-complete); } .chart-2 { fill: var(--mc-chart-fail); } svg text { fill: var(--muted); font-size: 10px; }
+.chart-legend { display: flex; justify-content: end; gap: 18px; font-size: 10px; } .chart-legend span:nth-child(1) { color: var(--mc-chart-label); } .chart-legend span:nth-child(2) { color: var(--green); } .chart-legend span:nth-child(3) { color: var(--red); } .chart-wrap summary { color: var(--muted); font-size: 10px; cursor: pointer; padding: 8px 0; }
+.admission-meter { padding: 18px; } .admission-meter > div { display: flex; justify-content: space-between; margin-bottom: 12px; } .admission-meter span, .admission-meter p, .admission-meter a, .admission-meter small { font-size: 11px; color: var(--muted); } .admission-meter small { display: block; margin-top: 10px; } progress { width: 100%; accent-color: var(--accent); height: 8px; }
+.approval-metrics { grid-template-columns: repeat(4,minmax(0,1fr)); } .capability-coverage { padding: 12px 16px; } .capability-coverage div { display: flex; justify-content: space-between; border-bottom: 1px solid var(--line); padding: 10px 0; font-size: 11px; }
+.overview-bottom .timeline, .operations-rail .timeline { max-height: 275px; overflow-y: auto; }
+.activity-timeline { list-style: none; padding: 8px 15px; margin: 0; max-height: 250px; overflow-y: auto; } .activity-timeline li { display: flex; align-items: center; gap: 10px; padding: 10px 0; border-bottom: 1px solid var(--soft-line); } .activity-timeline li > div { flex: 1; min-width: 0; } .activity-timeline strong, .activity-timeline small, .activity-timeline time { display: block; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; } .activity-timeline small, .activity-timeline time { color: var(--muted); font-size: 10px; } .activity-timeline button { font-size: 10px; padding: 4px 6px; } .activity-marker { width: 7px; height: 7px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+.timeline { padding: 12px 15px; } .timeline li { padding: 9px 0; font-size: 11px; } .timeline time { font-size: 10px; color: var(--muted); } .timeline strong { font-size: 11px; font-weight: 500; } .event-attrs { font-size: 10px; }
+.grid { grid-template-columns: minmax(0,1fr); } .grid:has(> [data-view-panel]) { margin-bottom: 0; } .grid > [data-view-panel] { margin-bottom: 14px; } .lower { grid-template-columns: minmax(0,1fr); }
+.cards { grid-template-columns: repeat(7,minmax(0,1fr)); gap: 8px; } .card { padding: 12px; } .card strong { font-size: 21px; } .card > span { font-size: 9px; } .card p { font-size: 10px; } .card-action { font-size: 10px; }
+.agent-card-grid { grid-template-columns: repeat(3,minmax(0,1fr)); } .agent-card { border-radius: 10px; background: linear-gradient(130deg,var(--surface-2),var(--surface)); } .agent-layout { grid-template-columns: minmax(0,1fr) minmax(260px,.45fr); }
+.queue-filter { gap: 7px; } .queue-filter-chip { font-size: 10px; padding: 4px 8px; } .queue-item { display: grid; grid-template-columns: 220px minmax(130px,1fr) minmax(120px,.7fr); gap: 7px 14px; align-items: center; } .queue-item > small { font-size: 11px; } .queue-item strong { font-size: 13px; }
+.entity-drawer { position: fixed; z-index: 25; inset: 0 0 0 auto; width: min(640px,100vw); background: var(--surface); border-left: 1px solid var(--control-line); box-shadow: -100vw 0 0 100vw var(--mc-drawer-overlay); overflow-y: auto; padding: 0 8px 15px; box-sizing: border-box; }
+.entity-drawer[hidden] { display: none; } .drawer-head { position: sticky; top: 0; z-index: 1; background: var(--surface); padding: 15px; border-bottom: 1px solid var(--line); display: flex; justify-content: space-between; align-items: center; } .drawer-head button { font-size: 22px; min-width: 35px; } .entity-drawer .detail-panel { max-height: none; margin: 8px; border: 0; padding: 14px; background: transparent; }
+.command-results { position: fixed; z-index: 30; top: 85px; right: 20px; width: min(520px,calc(100vw - 40px)); max-height: 65vh; overflow-y: auto; background: var(--surface); border: 1px solid var(--control-line); border-radius: 10px; box-shadow: 0 20px 60px var(--mc-search-shadow); padding: 10px; }
+.command-results button { display: block; width: 100%; text-align: left; padding: 10px; margin-bottom: 5px; } .command-results small { display: block; color: var(--muted); font-size: 10px; margin-top: 4px; }
+.admin-mode-banner { padding: 7px 12px; font-size: 11px; border-radius: 6px; margin-bottom: 10px; }
+.action-status:empty { display: none; } :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 1250px) { .operations-layout { grid-template-columns: minmax(0,1fr); } .operations-rail { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; } .metric-card { gap: 8px; } .metric-icon { font-variant-emoji: text; width: 32px; height: 32px; font-size: 20px; } .metric-card strong { font-size: 23px; } .global-search { width: 180px; } .cards { grid-template-columns: repeat(4,minmax(0,1fr)); } }
+@media (max-width: 1000px) { body { grid-template-columns: 180px minmax(0,1fr); } nav a { padding: 0 8px; gap: 10px; } main { padding: 15px; } header { align-items: start; flex-direction: column; } .header-controls { justify-content: start; } .agent-card-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } .agent-layout { grid-template-columns: 1fr; } .metric-grid { grid-template-columns: repeat(3,minmax(0,1fr)); } .command-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .mission-board { grid-template-columns: repeat(2,minmax(0,1fr)); } .operations-rail { grid-template-columns: 1fr; } }
+@media (max-width: 767px) { body { display: block; } aside { position: static; height: auto; padding: 10px; } .brand { padding-bottom: 10px; } nav { display: flex; overflow-x: auto; margin-top: 10px; } nav a { flex-shrink: 0; min-height: 44px; } .rail-note { display: none; } main { padding: 12px; } .header-controls { width: 100%; } .global-search { width: 100%; } .metric-grid, .command-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .overview-bottom { grid-template-columns: 1fr; } .mission-board { grid-template-columns: 1fr; } .execution-pipeline { overflow-x: auto; grid-template-columns: repeat(7,90px); } .execution-filter, .audit-filters { flex-wrap: wrap; } .execution-filter input, .audit-filters input { width: 100%; } .queue-item { grid-template-columns: 1fr; } .cards { grid-template-columns: repeat(2,minmax(0,1fr)); } .agent-card-grid { grid-template-columns: 1fr; } button, input, select { min-height: 44px; } .system-panel { grid-template-columns: 1fr; } .runs-table { min-width: 760px; } .command-metrics .metric-card { border: 0; } .eyebrow { display: none; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; } }
+
 </style>
   </head>
   <body data-active-view="overview">
     <a class="skip-link" href="#main-content">Skip to main content</a>
     <aside aria-label="Mission control navigation">
-      <div class="brand">ACS<span>MISSION CONTROL</span></div>
-      <nav aria-label="Primary">
-        <a href="#overview" class="active" data-nav="overview">Overview</a>
-        <a href="#queue" data-nav="queue">Work Queue</a>
-        <a href="#queue" data-nav="execution">Execution</a>
-        <a href="#approvals" data-nav="approvals">Approvals</a>
-        <a href="#agents" data-nav="agents">Agents</a>
-        <a href="#executors" data-nav="executors">Executors</a>
-        <a href="#connectors" data-nav="connectors">Connectors</a>
-        <a href="#operator-metrics" data-nav="metrics">Metrics</a>
-        <a href="#events" data-nav="audit">Audit</a>
-        <a href="#policy" data-nav="policy">Policy</a>
-        <a href="#system" data-nav="system">System</a>
-      </nav>
+      <div class="brand"><svg viewBox="0 0 40 42" width="36" height="38" aria-hidden="true"><path fill="#3da4ff" d="M18 3a3 3 0 0 1 5 0l7 12H11z"/><path fill="#257cff" d="M9 19h12L10 38H0z"/><path fill="#70cfff" d="M24 19h8l8 19H30z"/></svg><div>ACS<span>Mission Control</span></div></div>
+      <nav aria-label="Primary"><a href="#overview" class="active" aria-current="page" data-nav="overview"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 10 9-7 9 7v10H3z"/><path d="M9 20v-7h6v7"/></svg></span>Overview</a><a href="#queue" data-nav="queue"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 12h8M8 17h5"/></svg></span>Work Queue</a><a href="#execution" data-nav="execution"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m8 4 12 8-12 8z"/></svg></span>Execution</a><a href="#approvals" data-nav="approvals"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 9-9 9-9-9z"/><path d="m8 12 3 3 5-6"/></svg></span>Approvals</a><a href="#agents" data-nav="agents"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="7" r="3"/><circle cx="5" cy="15" r="2"/><circle cx="19" cy="15" r="2"/><path d="M7 21v-2a5 5 0 0 1 10 0v2M3 11l4-3M21 11l-4-3"/></svg></span>Agents</a><a href="#executors" data-nav="executors"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2 9 5v10l-9 5-9-5V7z"/><path d="m7 9 5 3 5-3M12 12v6"/></svg></span>Executors</a><a href="#connectors" data-nav="connectors"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="18" r="3"/><path d="m8 8 8 8M13 6h8M18 3v6M3 18h8M6 15v6"/></svg></span>Connectors</a><a href="#metrics" data-nav="metrics"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 21V3M4 21h17M8 17v-6M13 17V6M18 17v-9"/></svg></span>Metrics</a><a href="#audit" data-nav="audit"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 7h8M8 11h8M8 15h8M8 19h4"/></svg></span>Audit</a><a href="#policy" data-nav="policy"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 9 4v5c0 5-9 9-9 9s-9-4-9-9V7z"/><path d="m8 12 3 3 5-6"/></svg></span>Policy</a><a href="#system" data-nav="system"><span class="nav-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/></svg></span>System</a></nav>
       <p class="rail-note">Local-first control plane. Live state comes from the registry, work-item store, and audit stream. Press <kbd>?</kbd> for keyboard shortcuts.</p>
     </aside>
     <main id="main-content" tabindex="-1">
       <header>
-        <div><h1>Mission Control</h1><p>Agents, executors, work items, approvals, and audit events.</p></div>
-        <div class="header-controls">
+        <div class="page-heading"><h1 id="page-title">Mission Control</h1><p id="page-description">Coordinate work, agents, and outcomes across the control plane.</p></div>
+        <div class="header-controls"><label class="global-search" for="command-search"><span aria-hidden="true">⌕</span><input id="command-search" type="search" placeholder="Search work, agents, pages…" autocomplete="off"><kbd>Ctrl K</kbd></label>
           <fieldset class="execution-mode" id="execution-mode-control">
             <legend>Execution Mode</legend>
             <label><input type="radio" name="executionMode" value="strict" data-execution-mode="strict"> Strict</label>
@@ -476,9 +619,16 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
       <div id="admin-mode-banner" class="admin-mode-banner" role="alert" hidden></div>
       <div id="execution-mode-problem" class="admin-mode-banner" role="alert" hidden></div>
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
+      <div id="command-results" class="command-results" hidden role="region" aria-label="Search results"></div>
+      <div class="page-actions"><button type="button" data-create-task class="primary-button">＋ Create Task</button><button type="button" data-refresh-dashboard>↻ Refresh</button><span class="muted">Governed by ACS</span></div>
+      <section id="overview-operations" data-view-panel="overview"><section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>2</strong><span>Active Work Items</span><small>Current control-plane work</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>Unknown</strong><span>System Readiness</span><small>Persisted dependency checks</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>0</strong><span>Agents Online</span><small>0 registered / observed</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div></div></section><div class="operations-layout"><div class="operations-main"><section class="section-card"><div class="panel-head"><h2>Missions · Work Items</h2><a href="#queue" data-dashboard-view="queue">View all →</a></div><div class="mission-board"><section class="board-column green"><h3><i aria-hidden="true"></i>Ready<span>0</span></h3><p class="empty">No work in this stage.</p></section><section class="board-column blue"><h3><i aria-hidden="true"></i>Running<span>0</span></h3><p class="empty">No work in this stage.</p></section><section class="board-column amber"><h3><i aria-hidden="true"></i>Waiting Approval<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>wrk_approve</small><p>/repo · 1 actions</p><span><span class="pill high">high</span> </span><footer><span>Unassigned</span><span>needs_approval</span></footer></button></section><section class="board-column red"><h3><i aria-hidden="true"></i>Blocked<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_blocked"><strong>Blocked task</strong><small>wrk_blocked</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></span><footer><span>Unassigned</span><span>blocked</span></footer></button></section></div></section><div class="overview-bottom"><section class="section-card"><div class="panel-head"><h2>Recent Activity</h2><a href="#audit" data-dashboard-view="audit">View all →</a></div><p class="empty">No recorded activity in this window.</p></section><section class="section-card"><div class="panel-head"><h2>Systems Overview</h2><a href="#system" data-dashboard-view="system">View all →</a></div><div class="system-check-grid"><p class="empty">Readiness checks unavailable.</p></div></section></div></div><div class="operations-rail"><section class="section-card"><div class="panel-head"><h2>Agent Health</h2><a href="#agents" data-dashboard-view="agents">View all →</a></div><div class="rail-list"><p class="empty">No agents registered.</p></div></section><section class="section-card"><div class="panel-head"><h2>Critical Alerts</h2><a href="#execution" data-dashboard-view="execution">View all →</a></div><div class="rail-list"><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Blocked task</strong><small>worker lease expired token=[redacted]</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></div><button data-inspect-work="wrk_blocked">Inspect</button></div></div></section><section class="section-card"><div class="panel-head"><h2>Approval Requests</h2><a href="#approvals" data-dashboard-view="approvals">View all →</a></div><div class="rail-list"><button class="approval-preview" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>user · high risk · 40m</small><span>Review request →</span></button></div></section></div></div></section>
+      <section id="execution-operations" data-view-panel="execution"><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>0</strong><span>Active Runs</span><small>Current running work items</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>—</strong><span>Queued Runs</span><small>Admission scheduler queue</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Success Rate</span><small>Succeeded / succeeded + failed · 24h</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>—</strong><span>Failed · 24h</span><small>Persisted failed attempts</small></div></div></div><div class="operations-layout"><div class="operations-main"><section class="section-card"><div class="panel-head"><h2>Execution Pipeline</h2></div><div class="execution-pipeline"><a class="pipeline-stage blue" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="draft"><span class="stage-icon" aria-hidden="true">◇</span><strong>Pending</strong><b>0</b></a><a class="pipeline-stage violet" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="pending_policy"><span class="stage-icon" aria-hidden="true">◇</span><strong>Policy Check</strong><b>0</b></a><a class="pipeline-stage amber" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="needs_approval"><span class="stage-icon" aria-hidden="true">◇</span><strong>Waiting Approval</strong><b>1</b></a><a class="pipeline-stage green" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="approved"><span class="stage-icon" aria-hidden="true">✓</span><strong>Approved</strong><b>0</b></a><a class="pipeline-stage blue" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="running,cancelling"><span class="stage-icon" aria-hidden="true">◇</span><strong>Running</strong><b>0</b></a><a class="pipeline-stage green" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="succeeded"><span class="stage-icon" aria-hidden="true">✓</span><strong>Completed</strong><b>0</b></a><a class="pipeline-stage red" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="failed,blocked,unknown,quarantined"><span class="stage-icon" aria-hidden="true">!</span><strong>Failed / Blocked</strong><b>1</b></a></div><p class="panel-note">Current work-item states · completed and failed counts include retained store history. Tool wait is not a persisted ACS stage.</p></section><section class="section-card"><div class="panel-head"><h2>Live Runs</h2></div><div class="execution-filter"><label>Search runs <input type="search" id="execution-search" placeholder="Title, ID, agent, or executor"></label><label>Stage <select id="execution-stage"><option value="">All stages</option><option>Waiting Approval</option><option>Blocked</option></select></label><span id="execution-filter-count" role="status"></span></div><div class="table-wrap"><table class="runs-table"><thead><tr><th>Run / Work Item</th><th>Agent</th><th>Executor / Worker</th><th>Stage</th><th>Elapsed</th><th>Queue Age</th><th>Risk</th><th>Detail</th></tr></thead><tbody><tr data-run-stage="Waiting Approval"><td><strong>wrk_approve</strong><small>Approve me</small></td><td>Unassigned</td><td>Unclaimed</td><td><span class="pill needs_approval">needs_approval</span><small>Waiting Approval</small></td><td>—</td><td>40m</td><td><span class="pill high">high</span></td><td><button data-inspect-work="wrk_approve" aria-label="Inspect Approve me">Inspect</button></td></tr><tr data-run-stage="Blocked"><td><strong>wrk_blocked</strong><small>Blocked task</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></td><td>Unassigned</td><td>Unclaimed</td><td><span class="pill blocked">blocked</span><small>Blocked</small></td><td>—</td><td>—</td><td><span class="pill low">low</span></td><td><button data-inspect-work="wrk_blocked" aria-label="Inspect Blocked task">Inspect</button></td></tr></tbody></table></div></section><section class="section-card"><div class="panel-head"><h2>Execution Throughput · Last 24 hours</h2></div><p class="empty">Persisted execution telemetry unavailable.</p></section></div><div class="operations-rail"><section class="section-card"><div class="panel-head"><h2>Failures &amp; Retries</h2></div><div class="rail-list"><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Blocked task</strong><small>worker lease expired token=[redacted]</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></div><button data-inspect-work="wrk_blocked">Inspect</button></div></div></section><section class="section-card"><div class="panel-head"><h2>Execution Admission</h2></div><p class="empty">Execution capacity unavailable.</p></section><section class="section-card"><div class="panel-head"><h2>Recent Execution Events</h2><a href="#audit" data-dashboard-view="audit">View all →</a></div><p class="empty">No recorded activity in this window.</p></section></div></div></section>
+      <section id="approval-summary" data-view-panel="approvals"><div class="metric-grid approval-metrics"><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>1</strong><span>Pending</span><small>Human decisions required</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>1</strong><span>Over SLA</span><small>SLA 30m</small></div></div><div class="metric-card violet"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>1</strong><span>High Risk</span><small>Pending high / critical requests</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>40m</strong><span>Oldest Wait</span><small>Current approval inbox</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Approval Grants · 24h</span><small>Recorded action grants</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Grant Latency</span><small>Matched requirement → grant · 24h</small></div></div></div></section>
+      <section id="metrics-operations" data-view-panel="metrics"><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>0</strong><span>Active Runs</span><small>Current running work items</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>—</strong><span>Queued Runs</span><small>Admission scheduler queue</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Success Rate</span><small>Succeeded / succeeded + failed · 24h</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>—</strong><span>Failed · 24h</span><small>Persisted failed attempts</small></div></div></div><section class="section-card"><div class="panel-head"><h2>Execution Throughput · Last 24 hours</h2></div><p class="empty">Persisted execution telemetry unavailable.</p></section><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Queue Latency</span><small>Started attempts updated in last 24h</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Execution Admission</span><small>Global execution slots</small></div></div></div></section>
+      <section id="agent-operations" data-view-panel="agents"><div class="overview-bottom"><section class="section-card"><div class="panel-head"><h2>Capability Coverage</h2></div><div class="capability-coverage"><p class="empty">No capabilities registered.</p></div></section><section class="section-card"><div class="panel-head"><h2>Recent Agent Activity</h2></div><p class="empty">No audit events recorded.</p></section></div></section>
       <section id="overview" class="cards" data-view-panel="overview"><a class="card dashboard-card" href="#agents" data-dashboard-view="agents" aria-label="Open Agents"><span>Agents</span><strong>0 / 0</strong><p>online by heartbeat / registered</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#executors" data-dashboard-view="executors" aria-label="Open Executors"><span>Executors</span><strong>—</strong><p>configured / known execution bridges</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#connectors" data-dashboard-view="connectors" aria-label="Open Connectors"><span>Connectors</span><strong>—</strong><p>active tunnel sessions · Connector state unavailable in this render</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#execution" data-dashboard-view="execution" data-dashboard-statuses="running" aria-label="Open Running Tasks"><span>Running Tasks</span><strong>0</strong><p>Lease-bound work currently running</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="needs_approval,blocked,quarantined" aria-label="Open Needs Operator Attention"><span>Needs Operator Attention</span><strong>2</strong><p>Approvals, blocked, and quarantined work; the same set the queue marks for attention</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#approvals" data-dashboard-view="approvals" aria-label="Open Pending Approvals"><span>Pending Approvals</span><strong>1</strong><p>Policy-gated work waiting on a human</p><small class="card-action">Open →</small></a><a class="card dashboard-card" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="failed,blocked" aria-label="Open Failed / Blocked"><span>Failed / Blocked</span><strong>1</strong><p>Failed items plus blocked work</p><small class="card-action">Open →</small></a></section>
       <section class="grid">
-        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Identity, role, activity, and runtime presence</p></div><span id="agent-count">0 registered</span></div><div class="agent-layout"><div class="agent-roster"><p class="empty">No registered agents.</p></div><section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
+        <article id="agents" class="panel wide roster-panel" data-view-panel="agents"><div class="panel-head"><div><h2>Agent Roster</h2><p>Identity, role, activity, and runtime presence</p></div><span id="agent-count">0 observed identities</span></div><div class="agent-layout"><div class="agent-roster"><p class="empty">No registered agents.</p></div><section id="agent-detail" class="detail-panel agent-detail" tabindex="-1" aria-live="polite" aria-label="Agent detail">
     <div class="detail-empty"><h3>No agent selected</h3><p>Select an agent card to inspect identity, activity, sessions, and capabilities.</p></div>
   </section></div></article>
         <article id="executors" class="panel wide roster-panel" data-view-panel="executors"><div class="panel-head"><div><h2>Executors</h2><p>Managed execution bridges, runtime state, and tool capabilities</p></div><span id="executor-count">loading</span></div><div class="agent-layout executor-layout">
@@ -487,7 +637,7 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
       <div class="detail-empty"><h3>No executor selected</h3><p>Select a row to inspect runtime state and tool capabilities.</p></div>
     </section>
   </div></article>
-        <article id="queue" class="panel queue-panel" data-view-panel="queue execution"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">2 items</span></div><div class="queue-filter" id="queue-filter" role="search" aria-label="Filter work queue">
+        <article id="queue" class="panel queue-panel" data-view-panel="queue"><div class="panel-head"><h2>Work Queue</h2><span id="queue-filter-count">2 items</span></div><div class="queue-filter" id="queue-filter" role="search" aria-label="Filter work queue">
   <div class="queue-filter-row">
     <fieldset class="queue-filter-statuses">
       <legend>Status</legend>
@@ -509,10 +659,10 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
     </label>
   </div>
   <p id="queue-filter-live" class="queue-filter-live" aria-live="polite">Showing all work items</p>
-</div><div class="queue" id="queue-list"><button class="queue-item attention" data-work-item="wrk_approve" data-status="needs_approval" data-risk="high" data-title="Approve me" data-agent-id="/repo"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Approve me</strong><small>verify rendering</small></button><button class="queue-item attention" data-work-item="wrk_blocked" data-status="blocked" data-risk="low" data-title="Blocked task" data-agent-id="/repo"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Blocked task</strong><small>verify rendering</small><small class="error-line">worker lease expired token=[redacted]</small></button></div><div id="queue-footer" class="queue-footer"></div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section></article>
+</div><div class="queue" id="queue-list"><button class="queue-item attention" data-work-item="wrk_approve" data-status="needs_approval" data-risk="high" data-title="Approve me" data-agent-id="/repo"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Approve me</strong><small>verify rendering</small></button><button class="queue-item attention" data-work-item="wrk_blocked" data-status="blocked" data-risk="low" data-title="Blocked task" data-agent-id="/repo"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Blocked task</strong><small>verify rendering</small><small class="error-line">worker lease expired token=[redacted]</small></button></div><div id="queue-footer" class="queue-footer"></div></article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
+        <article id="approvals" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><button type="button" data-inspect-work="wrk_approve">Review details</button><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><button type="button" data-inspect-work="wrk_blocked">Review details</button><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body"><div class="operator-metrics"><dl>
@@ -523,11 +673,11 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
     <div class="overdue" title="Waiting longer than the 30m approval SLA"><dt>Approvals over SLA</dt><dd>1 of 2</dd></div>
   </dl>
   </div></div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>
-        <article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline"><p class="empty">No audit events recorded.</p></div><button type="button" id="events-load-older" class="load-more" disabled>Load older</button></article>
-        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Status</h2><span>readiness · infrastructure</span></div><div class="system-panel"><div id="system-stats"><dl><div><dt>Agent heartbeats online</dt><dd>0 / 0</dd></div><div><dt>Execution backend</dt><dd>unset</dd></div></dl></div><div id="system-probes" class="system-probes"></div></div></article>
+        <section data-view-panel="audit" class="panel wide"><div class="audit-filters"><label>Search audit events <input id="audit-search" type="search" placeholder="Actor, action, resource, correlation ID"></label><label>Event type <input id="audit-type" type="search" placeholder="e.g. policy.decided"></label><span id="audit-filter-count" role="status"></span></div><div id="audit-operations"><div class="table-wrap"><table class="audit-table"><thead><tr><th>Timestamp</th><th>Actor</th><th>Action</th><th>Resource</th><th>Result</th><th>Correlation</th><th>Details</th></tr></thead><tbody><tr><td colspan="7" class="empty">No audit events recorded.</td></tr></tbody></table></div></div></section><article id="events" class="panel" data-view-panel="audit"><div class="panel-head"><h2>Recent Events</h2><span class="panel-tools"><span>append-only</span><button type="button" id="events-pause" class="tool-button" aria-pressed="false">Pause</button></span></div><div id="events-timeline"><p class="empty">No audit events recorded.</p></div><button type="button" id="events-load-older" class="load-more" disabled>Load older</button></article>
+        <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Status</h2><span>readiness · infrastructure</span></div><div id="system-operations"><div class="system-check-grid"><p class="empty">Readiness checks unavailable.</p></div></div><div class="system-panel"><div id="system-stats"><dl><div><dt>Agent heartbeats online</dt><dd>0 / 0</dd></div><div><dt>Execution backend</dt><dd>unset</dd></div></dl></div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
-        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>New Task Composer</h2><span>authenticated session</span></div><form id="task-form" novalidate data-known-action-kinds="[]">
+        <details id="dispatch" class="panel composer" data-view-panel="overview"><summary class="panel-head">New Task Composer · authenticated session</summary><form id="task-form" novalidate data-known-action-kinds="[]">
     <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
     <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
     <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
@@ -539,7 +689,7 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
     <small id="composer-params-error" class="field-error" role="alert"></small>
     <section id="composer-preview" class="composer-preview" aria-live="polite" aria-label="Policy preview"><p class="muted">Fill in a title and instructions to preview policy.</p></section>
     <div class="composer-actions"><button type="button" id="composer-preview-button" class="tool-button">Check policy</button><button type="submit">Create Work Item</button></div><output id="task-result"></output>
-  </form></article>
+  </form></details>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><div><h2>Connectors</h2><p>Registered connector identities + tunnel sessions</p></div><span id="connector-count">loading</span></div><div id="connectors-body"><div class="agent-layout connector-layout">
     <div class="table-wrap"><p class="empty">Loading registered connectors...</p></div>
     <section id="connector-detail" class="detail-panel connector-detail" tabindex="-1" aria-live="polite" aria-label="Connector detail">
@@ -547,8 +697,10 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
     </section>
   </div></div></article>
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>recent decisions</span></div><div id="policy-body" class="policy-body"><p class="empty">No policy decisions in the recent window.</p></div></article>
-        <article class="panel" data-view-panel="overview"><div class="panel-head"><h2>Safety Notes</h2><span>fail closed</span></div><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></article>
+        <details class="panel" data-view-panel="overview"><summary class="panel-head">Operational controls · authority</summary><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></details>
       </section>
+      <div id="audit-drawer" class="entity-drawer" role="dialog" aria-modal="true" aria-label="Audit event detail" hidden><div class="drawer-head"><span>Immutable audit event</span><button type="button" id="audit-drawer-close" aria-label="Close audit detail">×</button></div><section id="audit-detail" class="detail-panel" tabindex="-1"></section></div>
+      <div id="work-drawer" class="entity-drawer" role="dialog" aria-modal="true" aria-label="Work item inspection" hidden><div class="drawer-head"><span>Work item detail</span><button type="button" id="work-drawer-close" aria-label="Close work item detail">×</button></div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-label="Work item detail"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section></div>
     </main>
     <script>
 let sseSource = null;
@@ -601,7 +753,10 @@ const sseEventNames = [
   'attempt_lease.issued',
   'attempt_lease.renewed',
   'attempt_lease.stolen',
-  'attempt_lease.expired'
+  'attempt_lease.expired',
+  'execution_mode.changed',
+  'approval.granted',
+  'policy.decided'
 ];
 
 function nextSseReconnectDelayMs(attempt) {
@@ -816,7 +971,7 @@ document.addEventListener('click', async function (event) {
 });
 
 
-const dashboardFragmentTargets = {"cards":"#overview","queueList":"#queue-list","queueFooter":"#queue-footer","approvalsList":"#approvals-list","approvalsCount":"#approvals-count","metrics":"#operator-metrics-body","systemStats":"#system-stats","policy":"#policy-body"};
+const dashboardFragmentTargets = {"cards":"#overview","queueList":"#queue-list","queueFooter":"#queue-footer","approvalsList":"#approvals-list","approvalsCount":"#approvals-count","metrics":"#operator-metrics-body","systemStats":"#system-stats","policy":"#policy-body","overviewOperations":"#overview-operations","executionOperations":"#execution-operations","approvalSummary":"#approval-summary","metricsOperations":"#metrics-operations","agentOperations":"#agent-operations","auditOperations":"#audit-operations","systemOperations":"#system-operations"};
 const dashboardCatchUpTargets = {"eventsTimeline":"#events-timeline","connectors":"#connectors-body"};
 const workEventPrefixes = ["work_item.","execution_attempt.","attempt_lease."];
 const appliedFragments = {};
@@ -950,6 +1105,10 @@ function restoreOperatorState(state) {
 }
 
 function applyDashboardFragments(fragments, options) {
+  if (typeof fragments.executionModeState === 'string' && !executionModeInFlight) {
+    const mode = fragments.executionModeState;
+    applyConfirmedExecutionMode(mode, mode === 'strict' || mode === 'admin' ? undefined : mode);
+  }
   const targets = Object.assign({}, dashboardFragmentTargets, options && options.catchUp ? dashboardCatchUpTargets : {});
   const changed = Object.keys(targets).filter(function (name) {
     return typeof fragments[name] === 'string' && appliedFragments[name] !== fragments[name];
@@ -986,6 +1145,8 @@ function onLiveAuditEvent(name, data) {
     scheduleDashboardRefresh(250);
     const id = eventWorkItemId(data);
     if (selectedWorkItemId && id === selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+  } else if (name === 'execution_mode.changed' || name === 'approval.granted' || name === 'policy.decided') {
+    scheduleDashboardRefresh(250);
   } else if (name.indexOf('agent.') === 0 || name.indexOf('acp.') === 0 || name === 'tunnel_session.heartbeat') {
     scheduleDashboardRefresh(5000);
   }
@@ -1269,6 +1430,7 @@ function selectWorkItem(id, options) {
     candidate.classList.toggle('selected', match);
     if (match) candidate.setAttribute('aria-current', 'true'); else candidate.removeAttribute('aria-current');
   });
+  openWorkDrawer();
   selectedWorkItemId = id;
   writeSelectedItemToLocation(id);
   if (options && options.scroll) {
@@ -1575,7 +1737,187 @@ document.getElementById('theme-toggle')?.addEventListener('click', function () {
 });
 renderThemeToggle();
 
+
+const pageMeta = {"overview":{"title":"Mission Control","description":"Coordinate work, agents, and outcomes across the control plane.","icon":"⌂"},"queue":{"title":"Work Queue","description":"Inspect work, admission, policy, and the next action that needs your attention.","icon":"▤"},"execution":{"title":"Execution","description":"Monitor live attempts, queues, failures, and throughput across the control plane.","icon":"▷"},"approvals":{"title":"Approvals","description":"Review policy-bound requests and record an explicit operator decision.","icon":"◇"},"agents":{"title":"Agents","description":"Registry identities, capability coverage, assignments, and observed health.","icon":"♧"},"executors":{"title":"Executors","description":"Inspect managed bridges, attested runtimes, and execution capabilities.","icon":"⬡"},"connectors":{"title":"Connectors","description":"Registered integrations, granted scopes, and authenticated tunnel sessions.","icon":"⌘"},"metrics":{"title":"Metrics","description":"Persisted execution telemetry and observed control-plane counters.","icon":"▥"},"audit":{"title":"Audit","description":"Investigate immutable events, actors, resources, and correlated decisions.","icon":"▦"},"policy":{"title":"Policy","description":"Understand evaluations, matched rules, and fail-closed decisions.","icon":"⛨"},"system":{"title":"System","description":"Readiness checks, execution admission, and connected infrastructure.","icon":"⚙"}};
+let drawerReturnFocus = null;
+let executionSearch = '';
+let executionStageFilter = '';
+let auditSearchText = '';
+let auditTypeFilter = '';
+let auditReturnFocus = null;
+function closeAuditDrawer() {
+  const drawer = document.getElementById('audit-drawer');
+  if (drawer.hidden) return;
+  drawer.hidden = true;
+  document.querySelector('aside').inert = false;
+  Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
+  document.body.style.overflow = '';
+  if (auditReturnFocus?.isConnected) auditReturnFocus.focus({ preventScroll: true });
+}
+document.getElementById('audit-drawer-close')?.addEventListener('click', closeAuditDrawer);
+document.addEventListener('click', function (event) {
+  const button = event.target.closest?.('[data-inspect-audit]');
+  if (!button) return;
+  const row = button.closest('tr');
+  const template = row.querySelector('template[data-audit-detail]');
+  if (!template) return;
+  auditReturnFocus = button;
+  const drawer = document.getElementById('audit-drawer');
+  const detail = document.getElementById('audit-detail');
+  detail.replaceChildren(template.content.cloneNode(true));
+  drawer.hidden = false;
+  document.querySelector('aside').inert = true;
+  Array.from(document.getElementById('main-content').children).forEach(function (child) { if (child !== drawer) child.inert = true; });
+  document.body.style.overflow = 'hidden'; detail.focus();
+});
+document.addEventListener('keydown', function (event) {
+  const drawer = document.getElementById('audit-drawer');
+  if (drawer.hidden) return;
+  if (event.key === 'Escape') { event.preventDefault(); closeAuditDrawer(); }
+  if (event.key === 'Tab') {
+    const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
+    const first = fields[0], last = fields[fields.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !fields.includes(document.activeElement))) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || !fields.includes(document.activeElement))) { event.preventDefault(); first?.focus(); }
+  }
+});
+function openWorkDrawer() {
+  const drawer = document.getElementById('work-drawer');
+  if (!drawer) return;
+  if (drawer.hidden) drawerReturnFocus = document.activeElement;
+  drawer.hidden = false;
+  document.querySelector('aside').inert = true;
+  Array.from(document.getElementById('main-content').children).forEach(function (child) { if (child !== drawer) child.inert = true; });
+  document.body.style.overflow = 'hidden';
+}
+function closeWorkDrawer() {
+  const drawer = document.getElementById('work-drawer');
+  if (!drawer || drawer.hidden) return;
+  drawer.hidden = true;
+  document.querySelector('aside').inert = false;
+  Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
+  document.body.style.overflow = '';
+  selectedWorkItemId = null;
+  workDetailGeneration += 1;
+  stopLeaseExpiryWarningRefresh();
+  writeSelectedItemToLocation(null);
+  if (drawerReturnFocus && drawerReturnFocus.isConnected) drawerReturnFocus.focus({ preventScroll: true });
+  else document.getElementById('main-content').focus({ preventScroll: true });
+}
+document.getElementById('work-drawer-close')?.addEventListener('click', closeWorkDrawer);
+document.addEventListener('keydown', function (event) {
+  const drawer = document.getElementById('work-drawer');
+  if (!drawer || drawer.hidden || document.getElementById('approval-confirm-dialog')) return;
+  if (event.key === 'Escape') { event.preventDefault(); closeWorkDrawer(); }
+  if (event.key === 'Tab') {
+    const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
+    const first = fields[0], last = fields[fields.length - 1];
+    if (event.shiftKey && (document.activeElement === first || !fields.includes(document.activeElement))) { event.preventDefault(); last?.focus(); }
+    else if (!event.shiftKey && (document.activeElement === last || !fields.includes(document.activeElement))) { event.preventDefault(); first?.focus(); }
+  }
+});
+function syncPageHeading(view) {
+  const meta = pageMeta[view] || pageMeta.overview;
+  document.getElementById('page-title').textContent = meta.title;
+  document.getElementById('page-description').textContent = meta.description;
+  document.querySelectorAll('nav a[data-nav]').forEach(function (link) {
+    if (link.dataset.nav === view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
+  });
+}
+function applyOperationFilters() {
+  const text = executionSearch.toLowerCase();
+  let runs = 0, runTotal = 0;
+  document.querySelectorAll('[data-run-stage]').forEach(function (row) {
+    row.hidden = !!((executionStageFilter && row.dataset.runStage !== executionStageFilter) || (text && !row.textContent.toLowerCase().includes(text)));
+    runTotal += 1; if (!row.hidden) runs += 1;
+  });
+  const runCount = document.getElementById('execution-filter-count');
+  if (runCount) runCount.textContent = runs + ' / ' + runTotal + ' work items';
+  const runSearch = document.getElementById('execution-search');
+  if (runSearch) runSearch.value = executionSearch;
+  const runStage = document.getElementById('execution-stage');
+  if (runStage) {
+    if (executionStageFilter && !Array.from(runStage.options).some(function (o) { return o.value === executionStageFilter; })) {
+      const option = document.createElement('option'); option.textContent = executionStageFilter; runStage.append(option);
+    }
+    runStage.value = executionStageFilter;
+  }
+  let shown = 0, total = 0;
+  document.querySelectorAll('[data-audit-name]').forEach(function (row) {
+    row.hidden = !!((auditTypeFilter && !row.dataset.auditName.toLowerCase().includes(auditTypeFilter.toLowerCase())) || (auditSearchText && !(row.textContent + ' ' + (row.querySelector('template')?.content.textContent || '')).toLowerCase().includes(auditSearchText.toLowerCase())));
+    total += 1; if (!row.hidden) shown += 1;
+  });
+  const auditCount = document.getElementById('audit-filter-count');
+  if (auditCount) auditCount.textContent = shown + ' / ' + total + ' retained events';
+}
+document.addEventListener('input', function (event) {
+  const id = event.target.id;
+  if (id === 'execution-search') executionSearch = event.target.value;
+  else if (id === 'execution-stage') executionStageFilter = event.target.value;
+  else if (id === 'audit-search') auditSearchText = event.target.value;
+  else if (id === 'audit-type') auditTypeFilter = event.target.value;
+  else return;
+  applyOperationFilters();
+});
+document.addEventListener('change', function (event) {
+  if (event.target.id === 'execution-stage') { executionStageFilter = event.target.value; applyOperationFilters(); }
+});
+document.addEventListener('click', function (event) {
+  const node = event.target.closest ? event.target.closest('[data-review-approval], [data-inspect-work], [data-inspect-agent], [data-create-task], [data-refresh-dashboard], [data-search-view]') : null;
+  if (!node) return;
+  if (node.dataset.reviewApproval) {
+    const id = node.dataset.reviewApproval; closeWorkDrawer(); showView('approvals'); history.pushState(null, '', '#approvals');
+    document.querySelector('[data-reason="' + cssAttr(id) + '"]')?.focus();
+  } else if (node.dataset.inspectWork) {
+    selectWorkItem(node.dataset.inspectWork);
+  } else if (node.dataset.inspectAgent) {
+    event.preventDefault(); showView('agents'); history.pushState(null, '', '#agents');
+    selectedAgentId = node.dataset.inspectAgent; void loadAgentDetail(selectedAgentId);
+  } else if (node.hasAttribute('data-create-task')) {
+    showView('overview'); history.pushState(null, '', '#overview');
+    const composer = document.getElementById('dispatch');
+    composer.open = true;
+    composer.scrollIntoView?.({ block: 'start' }); composer.querySelector('input')?.focus();
+  } else if (node.hasAttribute('data-refresh-dashboard')) {
+    announce('Refreshing backend state…'); scheduleDashboardRefresh(0, { catchUp: true });
+  } else if (node.dataset.searchView) {
+    showView(node.dataset.searchView); history.pushState(null, '', '#' + node.dataset.searchView);
+  }
+  document.getElementById('command-results').hidden = true;
+});
+function searchCommands() {
+  const query = document.getElementById('command-search').value.trim().toLowerCase();
+  const results = document.getElementById('command-results');
+  results.hidden = !query;
+  if (!query) return;
+  const rows = [];
+  Object.keys(pageMeta).forEach(function (view) {
+    const meta = pageMeta[view];
+    if ((meta.title + ' ' + meta.description).toLowerCase().includes(query)) rows.push('<button data-search-view="' + view + '">' + escapeClient(meta.title) + '<small>Open page</small></button>');
+  });
+  const seen = new Set();
+  document.querySelectorAll('#queue-list [data-work-item]').forEach(function (row) {
+    const id = row.dataset.workItem;
+    if (seen.has(id) || !row.textContent.toLowerCase().includes(query)) return;
+    seen.add(id); rows.push('<button data-inspect-work="' + escapeClient(id) + '">' + escapeClient(row.dataset.title) + '<small>' + escapeClient(id) + '</small></button>');
+  });
+  document.querySelectorAll('#agent-roster-body [data-agent]').forEach(function (row) {
+    if (row.textContent.toLowerCase().includes(query)) rows.push('<button data-inspect-agent="' + escapeClient(row.dataset.agent) + '">' + escapeClient(row.querySelector('strong')?.textContent || row.dataset.agent) + '<small>Agent detail</small></button>');
+  });
+  results.innerHTML = '<p class="muted">Pages and currently loaded ACS entities</p>' + (rows.slice(0, 20).join('') || '<p class="empty">No matching loaded entities.</p>');
+}
+document.getElementById('command-search')?.addEventListener('input', searchCommands);
+document.addEventListener('keydown', function (event) {
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('command-search').focus(); }
+  if (event.key === 'Escape') document.getElementById('command-results').hidden = true;
+});
+window.addEventListener('hashchange', function () { showView(location.hash.slice(1)); });
+window.addEventListener('popstate', function () { showView(location.hash.slice(1)); if (!workItemIdFromLocation()) closeWorkDrawer(); });
+window.addEventListener('pagehide', function () { if (sseSource) sseSource.close(); });
+applyOperationFilters();
+
 function onDashboardFragmentsApplied() {
+  applyOperationFilters();
   updateTitleBadge();
   refreshWaitBadges();
   if (document.body.dataset.activeView === 'connectors') refreshConnectorRoster();
@@ -2265,10 +2607,14 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +
-      detailRow('Target', workItem.target ? redactedAttributesJsonClient(workItem.target) : '—') +
+      detailRow('Project', workItem.target?.repo || '—') +
+      detailRow('Working directory', workItem.target?.cwd || '—') +
+      detailRow('Services', Array.isArray(workItem.target?.services) ? workItem.target.services.join(', ') : '—') +
+      detailRow('Files', Array.isArray(workItem.target?.files) ? workItem.target.files.join(', ') : '—') +
       detailRow('Created', formatClientTime(workItem.createdAt)) +
     '</dl>' +
     '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(redactClient(action.description)) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
+    (workItem.status === 'needs_approval' || workItem.status === 'blocked' ? '<button type="button" data-review-approval="' + escapeClient(workItem.id) + '">Open approval inbox</button>' : '') +
     renderExecutionAuthority(executionAttempts, attemptLeases) +
     workItemControlsMarkup(workItem, sseConnected) +
     '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
@@ -2276,7 +2622,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
 }
 
 function knownQueueStatuses() {
-  return new Set(['draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'cancelling', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected', 'unknown', 'quarantined']);
+  return new Set(["draft","pending_policy","needs_approval","approved","running","cancelling","succeeded","failed","blocked","cancelled","rejected","unknown","quarantined"]);
 }
 
 function knownQueueRisks() {
@@ -2543,29 +2889,39 @@ function requestApprovalConfirm(request) {
   });
 }
 
-document.querySelectorAll('[data-execution-mode]').forEach((input) => {
-  input.addEventListener('change', async () => {
-    if (!input.checked) return;
-    const output = document.querySelector('#execution-mode-result');
-    const headers = { 'content-type': 'application/json' };
-    const res = await fetch('/execution-mode', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ mode: input.value, reason: 'operator set ' + input.value + ' from mission control' })
-    });
-    const body = await res.json().catch(() => ({}));
-    if (output) output.textContent = res.ok ? 'mode ' + body.executionMode : 'Rejected: ' + (body.error || body.code || res.status);
-    if (res.ok) {
-      // Update in place (no hard reload): banners follow the confirmed mode.
-      const admin = document.querySelector('#admin-mode-banner');
-      const problem = document.querySelector('#execution-mode-problem');
-      if (admin) {
-        admin.hidden = body.executionMode !== 'admin';
-        admin.textContent = body.executionMode === 'admin' ? "ACS ADMIN MODE -- human approval disabled" : '';
-      }
-      if (problem) problem.hidden = true;
-    }
-  });
+let executionModeInFlight = false;
+let confirmedExecutionMode = document.querySelector('input[name="executionMode"]:checked')?.value || '';
+function applyConfirmedExecutionMode(mode, problem) {
+  confirmedExecutionMode = mode === 'strict' || mode === 'admin' ? mode : '';
+  document.querySelectorAll('input[name="executionMode"]').forEach(function (input) { input.checked = input.value === confirmedExecutionMode; });
+  const admin = document.querySelector('#admin-mode-banner');
+  const issue = document.querySelector('#execution-mode-problem');
+  if (admin) { admin.hidden = mode !== 'admin'; admin.textContent = mode === 'admin' ? "ACS ADMIN MODE -- human approval disabled" : ''; }
+  if (issue) { issue.hidden = !problem; issue.textContent = problem ? 'ACS execution mode ' + problem + ' -- fail closed' : ''; }
+}
+document.addEventListener('change', async function (event) {
+  const input = event.target;
+  if (!input.matches('input[name="executionMode"]') || !input.checked || executionModeInFlight) return;
+  const output = document.querySelector('#execution-mode-result');
+  const nextMode = input.value;
+  executionModeInFlight = true;
+  document.querySelectorAll('input[name="executionMode"]').forEach(function (radio) { radio.disabled = true; });
+  if (output) output.textContent = 'Saving mode…';
+  try {
+    const res = await fetch('/execution-mode', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: nextMode, reason: 'operator set ' + nextMode + ' from mission control' }) });
+    const body = await res.json().catch(function () { return {}; });
+    if (!res.ok || (body.executionMode !== 'strict' && body.executionMode !== 'admin')) throw new Error(body.error || body.code || 'Mode change rejected (' + res.status + ')');
+    applyConfirmedExecutionMode(body.executionMode);
+    if (output) output.textContent = 'mode ' + body.executionMode;
+    scheduleDashboardRefresh(0);
+  } catch (error) {
+    applyConfirmedExecutionMode(confirmedExecutionMode);
+    if (output) output.textContent = 'Rejected: ' + redactClient(error.message);
+  } finally {
+    executionModeInFlight = false;
+    document.querySelectorAll('input[name="executionMode"]').forEach(function (radio) { radio.disabled = false; });
+  }
 });
 
 // Delegated: approval cards are replaced by live fragment patches.
@@ -2785,6 +3141,7 @@ const viewAliases = {
 };
 function showView(name) {
   const view = viewAliases[name] || 'overview';
+  syncPageHeading(view);
   document.body.dataset.activeView = view;
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
@@ -2835,7 +3192,7 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   event.preventDefault();
   showView(link.dataset.nav);
   const href = link.getAttribute('href') || '#overview';
-  history.replaceState(null, '', href);
+  history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
 openWorkItemFromLocation();</script>
