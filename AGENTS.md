@@ -426,14 +426,16 @@ A task is complete only when:
 
 When instructions conflict, use this order:
 
-1. Security and authority invariants in this file.
-2. More-specific AGENTS.md files for the affected path.
-3. Architecture and protocol contracts.
-4. Existing executable behavior and tests.
-5. Task-specific user instructions.
+1. Security and authority invariants that the task is not authorized to weaken.
+2. Task-specific user instructions.
+3. More-specific AGENTS.md files for the affected path.
+4. Architecture and protocol contracts.
+5. Existing executable behavior and tests as evidence of the current implementation.
 6. Documentation and examples.
 
-A lower-precedence instruction must never weaken a higher-precedence security invariant.
+Repository-local guidance constrains implementation but must not silently override the user's requested outcome. A lower-precedence instruction must never weaken a higher-precedence security invariant.
+
+When architecture, protocol contracts, executable behavior, tests, or documentation disagree, investigate and reconcile the discrepancy explicitly. Do not assume either documentation or current runtime behavior is automatically authoritative.
 
 Final reports must use one verdict:
 
