@@ -793,26 +793,33 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       waitQueued: execution.wait.queued
     };
     const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
-    const initialHealth = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
-    const dependencyChecks = Object.entries(initialHealth.checks)
+    // Gate reconciliation on the cached readiness view so a healthy request performs exactly one
+    // deep database inspection. Each inspection re-verifies the full control-plane database,
+    // including the audit chain, so repeating it here pushed /health past the 2000 ms budget that
+    // ACS clients use to probe reachability. Reconciliation appends audit events, so the
+    // authoritative deep inspection still runs after it rather than reusing the gate.
+    const readinessGate = mergeSandboxReadyzCheck(workItems.readinessHealth(), sandboxCheck);
+    const dependencyChecks = Object.entries(readinessGate.checks)
       .filter(([name]) => name !== "liveness")
       .map(([, check]) => check);
     if (!dependencyChecks.every((check) => check.ok)) {
-      recordDeepHealth(false);
-      return reply.code(503).send({ ...initialHealth, execution: executionView, deepHealth: lastDeepHealth });
+      // Readiness already failed, so take the authoritative inspection once to report precise
+      // dependency failure codes instead of the coarser cached readiness codes.
+      const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
+      recordDeepHealth(health.ok);
+      return reply.code(503).send({ ...health, execution: executionView, deepHealth: lastDeepHealth });
     }
     try {
       workItems.reconcileStaleTunnelSessions();
       workItems.reconcileStaleAgents();
     } catch {
-      const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
       recordDeepHealth(false);
       return reply.code(503).send({
-        ...health,
+        ...readinessGate,
         execution: executionView,
         deepHealth: lastDeepHealth,
         ok: false,
-        checks: { ...health.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
+        checks: { ...readinessGate.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
       });
     }
     const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
