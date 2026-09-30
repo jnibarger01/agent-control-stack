@@ -812,14 +812,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       // Readiness already failed, so take the authoritative inspection once to report precise
       // dependency failure codes instead of the coarser cached readiness codes.
       const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
-      recordDeepHealth(health.ok);
-      return reply.code(503).send({ ...health, execution: executionView, deepHealth: lastDeepHealth });
+      return reply.code(503).send({ ...health, execution: executionView });
     }
     try {
       workItems.reconcileStaleTunnelSessions();
       workItems.reconcileStaleAgents();
     } catch {
-      recordDeepHealth(false);
       return reply.code(503).send({
         ...readinessGate,
         execution: executionView,

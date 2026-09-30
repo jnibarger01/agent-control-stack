@@ -449,8 +449,7 @@ describe("mission control gateway", () => {
       expect(health.statusCode).toBe(200);
       expect(health.json()).toMatchObject({
         ok: true,
-        checks: { integrity: { ok: true }, foreignKeys: { ok: true }, auditChain: { ok: true } },
-        deepHealth: { ok: true, source: "deep", checkedAt: expect.any(String) }
+        checks: { integrity: { ok: true }, foreignKeys: { ok: true }, auditChain: { ok: true } }
       });
       // /health must stay inside the 2000 ms reachability budget that ACS clients probe with, so a
       // healthy request may not repeat the full database verification.
