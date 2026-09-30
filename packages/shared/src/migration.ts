@@ -82,9 +82,9 @@ const migrationFiles = [
     name: "execution_results_idempotency_unique",
     filename: "037_execution_results_idempotency_unique.sql"
   },
-  // 038_admission_permits.sql exists on disk but is deliberately not registered here:
-  // it belongs to an in-flight workstream and this feature must not adopt or activate
-  // another branch's schema. Registering 39 directly after 37 is intentional.
+  // Version 38 is reserved for an in-flight admission-permits workstream. Its migration
+  // is not present in this checkout and must not be adopted here. Registering 39
+  // directly after 37 is intentional.
   { version: 39, name: "approval_bundles", filename: "039_approval_bundles.sql" }
 ] as const;
 

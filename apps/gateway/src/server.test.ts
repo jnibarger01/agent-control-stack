@@ -280,6 +280,7 @@ describe("mission control gateway", () => {
 
       expect(Object.keys(fragments).sort()).toEqual(
         [
+          "approvalBundles",
           "approvalsCount",
           "approvalsList",
           "cards",

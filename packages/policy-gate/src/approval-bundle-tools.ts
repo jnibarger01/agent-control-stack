@@ -2,6 +2,7 @@ import { z } from "zod";
 import { ControlStackError } from "@agent-control-stack/shared";
 import {
   activeGrantCovers,
+  approvalChangeDigest,
   approvalDelta,
   assertSelectionDependenciesSatisfied,
   createApprovalBundleRevision,
@@ -61,7 +62,7 @@ const changeTypeByActionKind: Record<string, ProposedChange["type"]> = {
   "net.write": "external_write"
 };
 
-function changeTypeFor(action: ActionRequest, declared: ProposedChange["type"]): ProposedChange["type"] {
+function changeTypeFor(action: ActionRequest, declared?: ProposedChange["type"]): ProposedChange["type"] {
   if (declared) {
     return declared;
   }
@@ -132,7 +133,7 @@ export function buildBundleFromWorkItem(input: {
     const risk = context.risk;
     return {
       id: `change-${String(index + 1).padStart(3, "0")}`,
-      type: changeTypeFor(action, undefined as never),
+      type: changeTypeFor(action),
       summary: action.description,
       target: primaryTarget(context),
       action: {
@@ -216,6 +217,13 @@ export interface BundleDecisionResult {
   deniedChangeIds: string[];
 }
 
+export function gateApproveBundle(store: WorkItemStore, policy: PolicyEngine, rawInput: unknown): BundleDecisionResult {
+  // All authoritative plan approvals and bundle decision/grant rows commit or roll
+  // back together. A late policy or integrity failure must not leave orphaned plan
+  // approvals that can be consumed outside the bundle review record.
+  return store.withTransaction(() => gateApproveBundleInTransaction(store, policy, rawInput));
+}
+
 /**
  * Apply a human decision to one bundle revision.
  *
@@ -223,7 +231,11 @@ export interface BundleDecisionResult {
  * selected change. The bundle then records which row stands for which change. The
  * bundle itself confers nothing.
  */
-export function gateApproveBundle(store: WorkItemStore, policy: PolicyEngine, rawInput: unknown): BundleDecisionResult {
+function gateApproveBundleInTransaction(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  rawInput: unknown
+): BundleDecisionResult {
   const input = bundleDecisionInputSchema.parse(rawInput);
   const bundle = store.getApprovalBundle(input.bundleId);
   if (!bundle) {
@@ -261,8 +273,8 @@ export function gateApproveBundle(store: WorkItemStore, policy: PolicyEngine, ra
   if (!workItem) {
     throw new ControlStackError("work_item_not_found", `work item not found: ${bundle.missionId}`);
   }
-
   if (input.kind === "reject" || input.kind === "invalidate") {
+    const decisionTransition = { via: "policy_gate" as const, actorId: input.approvedBy };
     const decision = store.recordApprovalBundleDecision({
       bundleId: input.bundleId,
       revision: input.revision,
@@ -276,9 +288,14 @@ export function gateApproveBundle(store: WorkItemStore, policy: PolicyEngine, ra
       ...(input.now ? { now: input.now } : {})
     });
     if (input.kind === "invalidate") {
-      store.invalidateApprovalBundle(input.bundleId, input.reason, planTransition);
+      store.invalidateApprovalBundle(input.bundleId, input.reason, decisionTransition);
     } else {
-      store.setApprovalBundleStatus(input.bundleId, "rejected", planTransition);
+      const activeChangeIds = store
+        .listApprovalBundleGrants({ bundleId: input.bundleId })
+        .filter((grant) => grant.status === "granted")
+        .map((grant) => grant.changeId);
+      store.revokeApprovalBundleChanges(input.bundleId, activeChangeIds, input.reason, decisionTransition);
+      store.setApprovalBundleStatus(input.bundleId, "rejected", decisionTransition);
     }
     return {
       decision,
@@ -286,6 +303,23 @@ export function gateApproveBundle(store: WorkItemStore, policy: PolicyEngine, ra
       approvalIdsByChange: {},
       deniedChangeIds: []
     };
+  }
+
+  if (bundle.expiresAt && Date.parse(bundle.expiresAt) <= (input.now ?? new Date()).getTime()) {
+    throw new ControlStackError("approval_bundle_expired", `approval bundle ${input.bundleId} has expired`);
+  }
+
+  if (bundle.executionId !== `${workItem.id}-plan`) {
+    throw new ControlStackError(
+      "approval_bundle_execution_mismatch",
+      `approval bundle ${input.bundleId} is not bound to the current work-item plan execution`
+    );
+  }
+  if (bundle.baseState.gitSha !== undefined || bundle.baseState.configHash !== undefined) {
+    throw new ControlStackError(
+      "approval_bundle_base_state_unverified",
+      "gateway execution does not currently provide a live base-state verifier; remove the pin before approval"
+    );
   }
 
   const candidates =
@@ -307,6 +341,22 @@ export function gateApproveBundle(store: WorkItemStore, policy: PolicyEngine, ra
   const approvalIdsByChange: Record<string, string> = {};
   const deniedChangeIds: string[] = [];
   for (const change of candidates) {
+    // The grant is bound to an action hash, and the reviewer only ever sees
+    // `change.action` rendered as summary/target/command. `change.actionHash` is part of
+    // the agent-supplied manifest, so trusting it verbatim would let a manifest that
+    // *displays* one operation be used to mint authority for a different one: the
+    // manifest self-hash stays consistent because it hashes the forged field like any
+    // other, so `verifyApprovalManifest` cannot catch it. The authorization identity is
+    // therefore re-derived here from the action the reviewer actually saw, and any
+    // disagreement fails the whole approval closed rather than silently re-binding.
+    const derivedHash = bundleChangeActionHash(workItem, change);
+    if (derivedHash !== change.actionHash) {
+      throw new ControlStackError(
+        "approval_bundle_action_hash_mismatch",
+        `change ${change.id} in bundle ${input.bundleId} records an action hash that does not match its action`
+      );
+    }
+    assertReviewProjectionMatchesAction(workItem, change);
     const decision = evaluatePolicy(policyContextForBundleChange(workItem, change, input.approvedBy, "approve"));
     if (decision.decision === "deny") {
       deniedChangeIds.push(change.id);
@@ -317,12 +367,18 @@ export function gateApproveBundle(store: WorkItemStore, policy: PolicyEngine, ra
       {
         workItemId: workItem.id,
         planHash,
-        actionHash: change.actionHash,
+        actionHash: derivedHash,
         approvedByActorId: input.approvedBy,
         reason: input.reason
       },
       planTransition
     );
+    store.recordApproval({
+      workItemId: workItem.id,
+      actionHash: derivedHash,
+      approvedBy: input.approvedBy,
+      reason: input.reason
+    });
     approvalIdsByChange[change.id] = planApproval.approvalId;
   }
 
@@ -348,7 +404,21 @@ export function gateApproveBundle(store: WorkItemStore, policy: PolicyEngine, ra
   });
 
   const partial = approvedChangeIds.length < bundle.changes.length;
-  store.setApprovalBundleStatus(input.bundleId, partial ? "partially_approved" : "approved", planTransition);
+  store.setApprovalBundleStatus(input.bundleId, partial ? "partially_approved" : "approved", {
+    via: "policy_gate",
+    actorId: input.approvedBy
+  });
+  const requiredHashes = policy
+    .evaluateWorkItem(workItem, input.approvedBy, "claim")
+    .filter((evaluation) => evaluation.decision.decision === "require_approval")
+    .map((evaluation) => evaluation.actionHash);
+  const currentWorkItem = store.get(workItem.id);
+  if (
+    currentWorkItem?.status === "needs_approval" &&
+    requiredHashes.every((actionHash) => store.hasApproval(workItem.id, actionHash))
+  ) {
+    store.approveWorkItem(workItem.id, planTransition);
+  }
 
   return {
     decision,
@@ -374,6 +444,104 @@ function currentPlanHash(store: WorkItemStore, workItem: WorkItem, actor: string
   return ensureExecutionPlan(store, workItem, actor).planHash;
 }
 
+function assertReviewProjectionMatchesAction(workItem: WorkItem, change: ProposedChange): void {
+  const context = policyContextForBundleChange(workItem, change, workItem.requester);
+  const sameArray = (left: string[] | undefined, right: string[] | undefined) =>
+    left === undefined ? right === undefined : right !== undefined && left.length === right.length && left.every((v, i) => v === right[i]);
+  const expectedType = changeTypeByActionKind[context.action.kind] ?? "other_privileged_action";
+  if (
+    change.summary !== change.action.description ||
+    change.type !== expectedType ||
+    change.target !== primaryTarget(context) ||
+    change.risk !== context.risk ||
+    change.destructive !== (context.destructive === true) ||
+    change.network !== (context.network === true) ||
+    !sameArray(change.command, context.command) ||
+    !sameArray(change.cwd === undefined ? undefined : [change.cwd], context.cwd === undefined ? undefined : [context.cwd]) ||
+    !sameArray(change.paths, context.paths)
+  ) {
+    throw new ControlStackError(
+      "approval_bundle_review_projection_mismatch",
+      `change ${change.id} review fields do not match the operation Policy Gate will authorize`
+    );
+  }
+}
+
+/** Validate that a persisted grant still points to a reviewed, current bundle change. */
+function grantStillMatchesBundle(
+  store: WorkItemStore,
+  grant: ApprovalGrantRecord,
+  workItemId: string,
+  now: Date
+): boolean {
+  try {
+    if (grant.workItemId !== workItemId || grant.missionId !== workItemId) return false;
+    const bundle = store.getApprovalBundle(grant.bundleId);
+    if (
+      !bundle ||
+      bundle.missionId !== grant.missionId ||
+      bundle.executionId !== grant.executionId ||
+      bundle.status === "invalidated" ||
+      bundle.status === "rejected" ||
+      (bundle.expiresAt !== undefined && Date.parse(bundle.expiresAt) <= now.getTime())
+    ) {
+      return false;
+    }
+
+    const revisions = store.listApprovalBundleRevisions(grant.bundleId);
+    if (revisions.length !== bundle.revision) return false;
+    for (let index = 0; index < revisions.length; index += 1) {
+      const revision = revisions[index]!;
+      if (
+        revision.revision !== index + 1 ||
+        !verifyApprovalManifest(revision).ok ||
+        revision.bundleId !== bundle.bundleId ||
+        revision.missionId !== bundle.missionId ||
+        revision.executionId !== bundle.executionId ||
+        (index === 0
+          ? revision.parentManifestHash !== undefined
+          : revision.parentManifestHash !== revisions[index - 1]!.manifestHash)
+      ) {
+        return false;
+      }
+    }
+    const current = revisions[revisions.length - 1];
+    const approved = revisions[grant.revision - 1];
+    if (
+      !current ||
+      !approved ||
+      bundle.manifestHash !== current.manifestHash ||
+      grant.manifestHash !== approved.manifestHash ||
+      grant.revision !== approved.revision
+    ) {
+      return false;
+    }
+    const approvedChange = approved.changes.find((change) => change.id === grant.changeId);
+    if (!approvedChange || approvedChange.actionHash !== grant.actionHash) return false;
+    const digest = approvalChangeDigest(approvedChange);
+    if (!current.changes.some((change) => approvalChangeDigest(change) === digest)) return false;
+    if (
+      grant.baseState.gitSha !== approved.baseState.gitSha ||
+      grant.baseState.configHash !== approved.baseState.configHash
+    ) {
+      return false;
+    }
+
+    const decisionExists = store.listApprovalBundleDecisions(grant.bundleId).some(
+      (decision) =>
+        decision.revision === grant.revision &&
+        decision.manifestHash === grant.manifestHash &&
+        (decision.kind === "approve_all" || decision.kind === "approve_selected") &&
+        decision.approvedByActorId === grant.approvedByActorId &&
+        decision.changeIds.includes(grant.changeId)
+    );
+    return decisionExists;
+  } catch {
+    // Corrupt, missing, or unreadable persisted authorization state is never authority.
+    return false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Revisions and delta
 // ---------------------------------------------------------------------------
@@ -396,6 +564,22 @@ export function gateReviseBundle(
     now?: Date;
   }
 ): BundleRevisionResult {
+  return store.withTransaction(() => gateReviseBundleInTransaction(store, input));
+}
+
+function gateReviseBundleInTransaction(
+  store: WorkItemStore,
+  input: {
+    bundleId: string;
+    expectedRevision: number;
+    changes: ProposedChange[];
+    title?: string;
+    rationale?: string;
+    baseState?: ApprovalBundleRevision["baseState"];
+    createdByActorId: string;
+    now?: Date;
+  }
+): BundleRevisionResult {
   const previous = store.getApprovalBundleRevision(input.bundleId, input.expectedRevision);
   if (!previous) {
     throw new ControlStackError(
@@ -406,6 +590,24 @@ export function gateReviseBundle(
   const next = reviseApprovalBundle(previous, input);
   const stored = store.addApprovalBundleRevision(next, input.expectedRevision);
   const delta = approvalDelta(previous, stored);
+  const retainedDigests = new Set(stored.changes.map((change) => approvalChangeDigest(change)));
+  const revokedChangeIds = new Set<string>();
+  for (const grant of store.listApprovalBundleGrants({ bundleId: input.bundleId })) {
+    if (grant.status !== "granted") continue;
+    const source = store.getApprovalBundleRevision(input.bundleId, grant.revision);
+    const approvedChange = source?.changes.find((change) => change.id === grant.changeId);
+    if (!approvedChange || !retainedDigests.has(approvalChangeDigest(approvedChange))) {
+      revokedChangeIds.add(grant.changeId);
+    }
+  }
+  if (revokedChangeIds.size > 0) {
+    store.revokeApprovalBundleChanges(
+      input.bundleId,
+      [...revokedChangeIds],
+      `revision ${stored.revision} removed or changed the approved operation`,
+      { via: "policy_gate", actorId: input.createdByActorId }
+    );
+  }
   return { bundle: store.getApprovalBundle(input.bundleId) as ApprovalBundle, delta };
 }
 
@@ -498,6 +700,31 @@ export function authorizeBundleOperation(input: AuthorizeBundleOperationInput): 
   );
 
   if (coverage.covered) {
+    // A bundle grant is a pointer, never the authority itself. The authoritative
+    // `execution_plan_approvals` row is re-checked here, at the point of use, because it
+    // can be invalidated or expired by a path that knows nothing about bundles (per-action
+    // revocation, plan replacement, expiry sweep). Without this check a revoked approval
+    // would keep authorizing privileged work through the bundle that referenced it.
+    const underlying = store.getExecutionPlanApprovalById(coverage.grant.approvalId);
+    if (
+      !underlying ||
+      underlying.status !== "granted" ||
+      Date.parse(underlying.expiresAt) <= now.getTime() ||
+      underlying.workItemId !== coverage.grant.workItemId ||
+      underlying.actionHash !== coverage.grant.actionHash ||
+      underlying.planHash !== coverage.grant.planHash ||
+      underlying.approvedByActorId !== coverage.grant.approvedByActorId ||
+      underlying.expiresAt !== coverage.grant.expiresAt ||
+      !grantStillMatchesBundle(store, coverage.grant, workItem.id, now)
+    ) {
+      return {
+        allowed: false,
+        reason: "delta_approval_required",
+        code: "bundle_underlying_approval_invalid",
+        matchedRules: decision.matchedRules,
+        coverageReason: "underlying_approval_not_valid"
+      };
+    }
     return {
       allowed: true,
       reason: "covered_by_approved_bundle",
@@ -523,8 +750,12 @@ export function authorizeBundleOperation(input: AuthorizeBundleOperationInput): 
  * only ever produce more human approval, never less.
  */
 export function resolveStrategy(store: WorkItemStore, _now: Date = new Date()): ApprovalStrategy {
-  const parsed = approvalStrategySchema.safeParse(store.getApprovalStrategy().strategy);
-  return parsed.success ? parsed.data : "PER_ACTION";
+  try {
+    const parsed = approvalStrategySchema.safeParse(store.getApprovalStrategy().strategy);
+    return parsed.success ? parsed.data : "PER_ACTION";
+  } catch {
+    return "PER_ACTION";
+  }
 }
 
 /**
@@ -537,20 +768,24 @@ export function buildDeltaRevision(
   operation: { id: string; action: ActionRequest; target: string; summary: string; risk: ProposedChange["risk"] },
   now: Date = new Date()
 ): { revision: ApprovalBundleRevision; delta: ApprovalDelta } {
+  const context = policyContextFromAction(workItem, operation.action, workItem.requester, "claim");
   const change: ProposedChange = {
     id: operation.id,
-    type: changeTypeFor(operation.action, operation.risk ? "other_privileged_action" : "other_privileged_action"),
-    summary: operation.summary,
-    target: operation.target,
+    type: changeTypeFor(operation.action),
+    summary: operation.action.description,
+    target: primaryTarget(context),
     action: {
       kind: operation.action.kind,
       description: operation.action.description,
       params: { ...operation.action.params }
     },
-    actionHash: actionFingerprint(policyContextFromAction(workItem, operation.action, workItem.requester, "claim")),
-    risk: operation.risk,
-    destructive: false,
-    network: false,
+    actionHash: actionFingerprint(context),
+    risk: context.risk,
+    ...(context.command ? { command: [...context.command] } : {}),
+    ...(context.cwd ? { cwd: context.cwd } : {}),
+    ...(context.paths ? { paths: [...context.paths] } : {}),
+    destructive: context.destructive === true,
+    network: context.network === true,
     dependsOn: []
   };
   const next = reviseApprovalBundle(bundle, {

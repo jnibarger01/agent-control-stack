@@ -1,12 +1,14 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { SqliteWorkItemStore, type ActionRequest, type WorkItem } from "@agent-control-stack/work-items";
 import {
   activeGrantsForMission,
   approvalDelta,
   createApprovalBundleRevision,
-  type ApprovalBundleRevision
+  type ApprovalBundleRevision,
+  type ProposedChange
 } from "@agent-control-stack/approval-bundles";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPolicyEngine, type PolicyEngine } from "./policy.js";
@@ -15,6 +17,7 @@ import {
   authorizeBundleOperation,
   buildBundleFromWorkItem,
   buildDeltaRevision,
+  bundleChangeActionHash,
   gateApproveBundle,
   gateReviseBundle,
   resolveStrategy
@@ -175,6 +178,34 @@ describe("one human approval authorizes the whole reviewed set", () => {
       expect(verdict.allowed, `${change.action.description}: ${JSON.stringify(verdict)}`).toBe(true);
     }
   });
+
+  it("unblocks the real multi-action worker claim after the full bundle is approved", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-worker-claim");
+    gateApproveBundle(store, policy, {
+      bundleId: bundle.bundleId,
+      revision: bundle.revision,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed the complete change set"
+    });
+
+    expect(store.get(workItem.id)?.status).toBe("approved");
+    const claimed = createWorkItemTools(store, policy).claim_approved_work_item_by_id({
+      id: workItem.id,
+      workerId: "agent:backend-api"
+    });
+    expect(claimed?.status).toBe("running");
+    const raw = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const consumed = raw
+        .prepare(`SELECT COUNT(*) AS count FROM execution_plan_approvals WHERE work_item_id = ? AND status = 'consumed'`)
+        .get(workItem.id) as { count: number };
+      expect(consumed.count).toBe(bundle.changes.length);
+    } finally {
+      raw.close();
+    }
+  });
 });
 
 describe("unapproved and modified operations fail closed", () => {
@@ -298,7 +329,7 @@ describe("unapproved and modified operations fail closed", () => {
 });
 
 describe("TOCTOU protection", () => {
-  it("stops covering an operation once the pinned base state moves", () => {
+  it("refuses to mint gateway execution authority for an unverified base-state pin", () => {
     const workItem = backendFixMission();
     const built = buildBundleFromWorkItem({
       store,
@@ -309,42 +340,64 @@ describe("TOCTOU protection", () => {
       createdByActorId: "agent:backend-api"
     });
     store.createApprovalBundle({ ...built.revision, status: "pending" });
+    expect(() =>
+      gateApproveBundle(store, policy, {
+        bundleId: "A-toctou",
+        revision: 1,
+        kind: "approve_all",
+        approvedBy: "user",
+        reason: "reviewed at sha-before"
+      })
+    ).toThrow(/does not currently provide a live base-state verifier/);
+    expect(store.listApprovalBundleGrants({ bundleId: "A-toctou" })).toHaveLength(0);
+  });
+});
+
+describe("delta approval", () => {
+  it("revokes the old authority for removed or changed operations while retaining unchanged grants", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-revision-revokes");
     gateApproveBundle(store, policy, {
-      bundleId: "A-toctou",
-      revision: 1,
+      bundleId: bundle.bundleId,
+      revision: bundle.revision,
       kind: "approve_all",
       approvedBy: "user",
-      reason: "reviewed at sha-before"
+      reason: "reviewed"
     });
-    const action = built.revision.changes[0]!.action as ActionRequest;
+    const unchanged = bundle.changes[0]!;
+    const removed = bundle.changes[1]!;
+    const removedGrant = store.listApprovalBundleGrants({ bundleId: bundle.bundleId }).find(
+      (grant) => grant.changeId === removed.id
+    )!;
 
+    gateReviseBundle(store, {
+      bundleId: bundle.bundleId,
+      expectedRevision: 1,
+      changes: bundle.changes.filter((change) => change.id !== removed.id),
+      createdByActorId: "agent:backend-api"
+    });
+
+    expect(store.getExecutionPlanApprovalById(removedGrant.approvalId)?.status).toBe("invalidated");
     expect(
       authorizeBundleOperation({
         store,
         policy,
         workItem: store.get(workItem.id)!,
-        action,
-        actor: "agent:backend-api",
-        observedBaseState: { gitSha: "sha-before" }
+        action: removed.action as ActionRequest,
+        actor: "agent:backend-api"
+      }).allowed
+    ).toBe(false);
+    expect(
+      authorizeBundleOperation({
+        store,
+        policy,
+        workItem: store.get(workItem.id)!,
+        action: unchanged.action as ActionRequest,
+        actor: "agent:backend-api"
       }).allowed
     ).toBe(true);
-
-    const afterMove = authorizeBundleOperation({
-      store,
-      policy,
-      workItem: store.get(workItem.id)!,
-      action,
-      actor: "agent:backend-api",
-      observedBaseState: { gitSha: "sha-after" }
-    });
-    expect(afterMove.allowed).toBe(false);
-    if (!afterMove.allowed) {
-      expect(afterMove.coverageReason).toBe("base_state_changed");
-    }
   });
-});
 
-describe("delta approval", () => {
   it("separates previously approved work from newly discovered work", () => {
     const workItem = backendFixMission();
     const bundle = makeBundle(workItem);
@@ -438,6 +491,33 @@ describe("delta approval", () => {
 });
 
 describe("partial approval and dependencies", () => {
+  it("authorizes only the selected operation and keeps the mission unclaimable while work remains unapproved", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-partial-only");
+    const selected = bundle.changes[0]!;
+    gateApproveBundle(store, policy, {
+      bundleId: bundle.bundleId,
+      revision: bundle.revision,
+      kind: "approve_selected",
+      approvedBy: "user",
+      reason: "approve only the first operation",
+      changeIds: [selected.id]
+    });
+
+    expect(store.get(workItem.id)?.status).toBe("needs_approval");
+    for (const change of bundle.changes) {
+      const verdict = authorizeBundleOperation({
+        store,
+        policy,
+        workItem: store.get(workItem.id)!,
+        action: change.action as ActionRequest,
+        actor: "agent:backend-api"
+      });
+      expect(verdict.allowed, change.id).toBe(change.id === selected.id);
+      expect(store.hasApproval(workItem.id, change.actionHash)).toBe(change.id === selected.id);
+    }
+  });
+
   it("refuses to approve a change whose dependency was not selected", () => {
     const workItem = backendFixMission();
     const built = buildBundleFromWorkItem({
@@ -546,6 +626,39 @@ describe("invalidation, expiry and restart", () => {
     }
   });
 
+  it("revoking a previously approved bundle prevents its plan approvals from being reused", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-reject-approved");
+    gateApproveBundle(store, policy, {
+      bundleId: bundle.bundleId,
+      revision: 1,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed"
+    });
+    const grant = store.listApprovalBundleGrants({ bundleId: bundle.bundleId })[0]!;
+
+    gateApproveBundle(store, policy, {
+      bundleId: bundle.bundleId,
+      revision: 1,
+      kind: "reject",
+      approvedBy: "user",
+      reason: "withdraw approval"
+    });
+
+    expect(store.getExecutionPlanApprovalById(grant.approvalId)?.status).toBe("invalidated");
+    expect(store.getApprovalBundle(bundle.bundleId)?.status).toBe("rejected");
+    expect(
+      authorizeBundleOperation({
+        store,
+        policy,
+        workItem: store.get(workItem.id)!,
+        action: bundle.changes[0]!.action as ActionRequest,
+        actor: "agent:backend-api"
+      }).allowed
+    ).toBe(false);
+  });
+
   it("survives a process restart", () => {
     const workItem = backendFixMission();
     const bundle = makeBundle(workItem, "A-restart");
@@ -646,9 +759,37 @@ describe("approval strategies", () => {
     expect(resolveStrategy(store)).toBe("PER_ACTION");
   });
 
+  it("fails closed when the strategy store is unreadable", () => {
+    expect(
+      resolveStrategy({ getApprovalStrategy: () => { throw new Error("database read failed"); } } as never)
+    ).toBe("PER_ACTION");
+  });
+
   it("fails closed to PER_ACTION when the stored value is unreadable", () => {
     store.setApprovalStrategy({ strategy: "BUNDLE", updatedBy: "user", reason: "reduce prompt fatigue" });
     expect(resolveStrategy(store)).toBe("BUNDLE");
+  });
+
+  it("fails closed when persisted strategy state is corrupt", () => {
+    store.setApprovalStrategy({ strategy: "POLICY_AUTONOMOUS", updatedBy: "user", reason: "test" });
+    const raw = new DatabaseSync(dbPath);
+    try {
+      raw.exec("PRAGMA ignore_check_constraints = ON");
+      raw.prepare(`UPDATE approval_strategy_state SET strategy = 'UNKNOWN' WHERE id = 1`).run();
+    } finally {
+      raw.close();
+    }
+    expect(store.getApprovalStrategy().strategy).toBe("PER_ACTION");
+    expect(resolveStrategy(store)).toBe("PER_ACTION");
+    const workItem = backendFixMission();
+    const verdict = authorizeBundleOperation({
+      store,
+      policy,
+      workItem: store.get(workItem.id)!,
+      action: { kind: "fs.write", description: "modify file A", params: { paths: ["services/a.ts"] } },
+      actor: "agent:backend-api"
+    });
+    expect(verdict.allowed).toBe(false);
   });
 
   it("still requires a human for require_approval under POLICY_AUTONOMOUS", () => {
@@ -684,6 +825,354 @@ describe("approval strategies", () => {
         expect(verdict.reason).toBe("policy_allows_without_approval");
       }
     }
+  });
+});
+
+describe("a grant is bound to the reviewed action, not to a claimed one", () => {
+  /**
+   * `change.actionHash` is part of the agent-supplied manifest, while the reviewer only
+   * ever sees `change.action` rendered as summary/target/command. If the minted grant
+   * trusted the claimed hash, a manifest that *displays* a README write could be used to
+   * mint authority for restarting a production service, and the manifest self-hash would
+   * stay consistent because it hashes the forged field like any other.
+   */
+  function forgedManifestBundle(workItem: WorkItem, bundleId: string) {
+    const reviewed: ProposedChange = {
+      id: "change-001",
+      type: "file_write",
+      summary: "Update README.md",
+      target: "README.md",
+      action: { kind: "fs.write", description: "modify file A", params: { paths: ["services/a.ts"] } },
+      // Attacker-chosen placeholder that describes no action at all.
+      actionHash: "0".repeat(64),
+      risk: "low",
+      destructive: false,
+      network: false,
+      dependsOn: []
+    };
+    // The operation the attacker actually wants authorized.
+    const wanted = { kind: "shell", description: "restart service D", params: { command: ["systemctl", "restart", "auth-proxy"] } };
+    const wantedHash = bundleChangeActionHash(workItem, { ...reviewed, action: wanted } as ProposedChange);
+
+    const revision = createApprovalBundleRevision(
+      {
+        bundleId,
+        missionId: workItem.id,
+        executionId: `${workItem.id}-plan`,
+        agentId: "agent:backend-api",
+        title: "Update README.md",
+        rationale: "just a readme",
+        // The manifest shows the README write but claims the restart's fingerprint.
+        changes: [{ ...reviewed, actionHash: wantedHash }],
+        scope: {},
+        baseState: {},
+        createdByActorId: "agent:backend-api"
+      },
+      new Date()
+    );
+    store.createApprovalBundle({ ...revision, status: "pending" });
+    return { revision, wanted, wantedHash };
+  }
+
+  it("refuses to mint authority when a change's action hash contradicts its action", () => {
+    const workItem = backendFixMission();
+    const { wantedHash } = forgedManifestBundle(workItem, "A-forged");
+
+    expect(() =>
+      gateApproveBundle(store, policy, {
+        bundleId: "A-forged",
+        revision: 1,
+        kind: "approve_all",
+        approvedBy: "user",
+        reason: "reviewed"
+      })
+    ).toThrow(/action hash that does not match its action/);
+
+    // No grant may exist, and therefore no operation may run under this bundle.
+    expect(store.listApprovalBundleGrants({ bundleId: "A-forged" })).toHaveLength(0);
+    const verdict = authorizeBundleOperation({
+      store,
+      policy,
+      workItem: store.get(workItem.id)!,
+      action: { kind: "shell", description: "restart service D", params: { command: ["systemctl", "restart", "auth-proxy"] } },
+      actor: "agent:backend-api",
+      bundleId: "A-forged"
+    });
+    expect(verdict.allowed).toBe(false);
+    expect(wantedHash).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("still approves the genuine manifest produced by policy evaluation", () => {
+    // The guard must key off disagreement, not off hand-written bundles in general.
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-genuine");
+    const result = gateApproveBundle(store, policy, {
+      bundleId: "A-genuine",
+      revision: 1,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed"
+    });
+    expect(Object.keys(result.approvalIdsByChange)).toHaveLength(bundle.changes.length);
+  });
+
+  it("rejects a valid action hash when human-facing fields describe a different operation", () => {
+    const workItem = backendFixMission();
+    const change: ProposedChange = {
+      id: "change-display-forgery",
+      type: "command",
+      summary: "Update README.md",
+      target: "README.md",
+      action: {
+        kind: "shell",
+        description: "restart production auth proxy",
+        params: { command: ["systemctl", "restart", "auth-proxy"] }
+      },
+      actionHash: "0".repeat(64),
+      command: ["echo", "safe preview"],
+      cwd: "/repo",
+      risk: "medium",
+      destructive: false,
+      network: false,
+      dependsOn: []
+    };
+    change.actionHash = bundleChangeActionHash(workItem, change);
+    const revision = createApprovalBundleRevision(
+      {
+        bundleId: "A-display-forgery",
+        missionId: workItem.id,
+        executionId: `${workItem.id}-plan`,
+        agentId: "agent:backend-api",
+        title: "Update README.md",
+        rationale: "small documentation change",
+        changes: [change],
+        scope: {},
+        baseState: {},
+        createdByActorId: "agent:backend-api"
+      },
+      new Date()
+    );
+    store.createApprovalBundle({ ...revision, status: "pending" });
+
+    expect(() =>
+      gateApproveBundle(store, policy, {
+        bundleId: revision.bundleId,
+        revision: 1,
+        kind: "approve_all",
+        approvedBy: "user",
+        reason: "reviewed"
+      })
+    ).toThrow(/review fields do not match the operation/);
+    expect(store.listApprovalBundleGrants({ bundleId: revision.bundleId })).toHaveLength(0);
+  });
+
+  it("rejects a bundle replayed against a different execution identity", () => {
+    const workItem = backendFixMission();
+    const built = buildBundleFromWorkItem({
+      store,
+      policy,
+      workItem,
+      bundleId: "A-execution-replay",
+      createdByActorId: "agent:backend-api"
+    });
+    const { revision: _revision, manifestHash: _manifestHash, status: _status, createdAt: _createdAt, ...input } =
+      built.revision;
+    const replayed = createApprovalBundleRevision({ ...input, executionId: "another-execution" });
+    store.createApprovalBundle({ ...replayed, status: "pending" });
+
+    expect(() =>
+      gateApproveBundle(store, policy, {
+        bundleId: replayed.bundleId,
+        revision: 1,
+        kind: "approve_all",
+        approvedBy: "user",
+        reason: "reviewed"
+      })
+    ).toThrow(/not bound to the current work-item plan execution/);
+    expect(store.listApprovalBundleGrants({ bundleId: replayed.bundleId })).toHaveLength(0);
+  });
+
+  it("rolls back earlier plan approvals when a later manifest change is forged", () => {
+    const workItem = backendFixMission();
+    const built = buildBundleFromWorkItem({
+      store,
+      policy,
+      workItem,
+      bundleId: "A-atomic-approval",
+      createdByActorId: "agent:backend-api"
+    });
+    const changes = built.revision.changes.map((change, index) =>
+      index === 0 ? change : { ...change, actionHash: "0".repeat(64) }
+    );
+    const { revision: _revision, manifestHash: _manifestHash, status: _status, createdAt: _createdAt, ...input } =
+      built.revision;
+    const forged = createApprovalBundleRevision({ ...input, changes });
+    store.createApprovalBundle({ ...forged, status: "pending" });
+
+    expect(() =>
+      gateApproveBundle(store, policy, {
+        bundleId: forged.bundleId,
+        revision: 1,
+        kind: "approve_all",
+        approvedBy: "user",
+        reason: "reviewed"
+      })
+    ).toThrow(/action hash that does not match its action/);
+    const raw = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const count = raw
+        .prepare(`SELECT COUNT(*) AS count FROM execution_plan_approvals WHERE work_item_id = ?`)
+        .get(workItem.id) as { count: number };
+      expect(count.count).toBe(0);
+    } finally {
+      raw.close();
+    }
+    expect(store.listApprovalBundleGrants({ bundleId: forged.bundleId })).toHaveLength(0);
+  });
+});
+
+describe("the authoritative plan approval is re-verified at the point of use", () => {
+  it("stops covering an operation once its execution plan approval is invalidated elsewhere", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-revoked");
+    gateApproveBundle(store, policy, {
+      bundleId: "A-revoked",
+      revision: 1,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed"
+    });
+    const action = bundle.changes[0]!.action as ActionRequest;
+    const current = store.get(workItem.id)!;
+    expect(authorizeBundleOperation({ store, policy, workItem: current, action, actor: "a" }).allowed).toBe(true);
+
+    // Revoke only the underlying authority, by a path that knows nothing about bundles.
+    // The bundle grant row is deliberately left as-is: the bundle is a pointer, and the
+    // pointer must not be sufficient on its own.
+    const raw = new DatabaseSync(dbPath);
+    try {
+      for (const grant of store.listApprovalBundleGrants({ bundleId: "A-revoked" })) {
+        raw.prepare(
+          `UPDATE execution_plan_approvals
+           SET status = 'invalidated', invalidated_at = ?, invalidation_reason = ?
+           WHERE approval_id = ?`
+        ).run(new Date().toISOString(), "revoked by an independent path", grant.approvalId);
+      }
+    } finally {
+      raw.close();
+    }
+    expect(store.listApprovalBundleGrants({ bundleId: "A-revoked" })[0]!.status).toBe("granted");
+
+    const after = authorizeBundleOperation({ store, policy, workItem: current, action, actor: "a" });
+    expect(after.allowed).toBe(false);
+    if (!after.allowed) {
+      expect(after.code).toBe("bundle_underlying_approval_invalid");
+      expect(after.coverageReason).toBe("underlying_approval_not_valid");
+    }
+  });
+
+  it("stops covering an operation once its execution plan approval has been consumed", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-consumed");
+    gateApproveBundle(store, policy, {
+      bundleId: "A-consumed",
+      revision: 1,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed"
+    });
+    const action = bundle.changes[0]!.action as ActionRequest;
+    const current = store.get(workItem.id)!;
+    // `granted` -> `consumed` is a legal transition of the underlying approval, and it
+    // is what a real attempt consumption does. The bundle row stays `granted`.
+    const raw = new DatabaseSync(dbPath);
+    try {
+      raw.prepare(
+        `UPDATE execution_plan_approvals SET status = 'consumed', consumed_at = ? WHERE work_item_id = ?`
+      ).run(new Date().toISOString(), workItem.id);
+    } finally {
+      raw.close();
+    }
+    expect(store.listApprovalBundleGrants({ bundleId: "A-consumed" })[0]!.status).toBe("granted");
+
+    const after = authorizeBundleOperation({ store, policy, workItem: current, action, actor: "a" });
+    expect(after.allowed).toBe(false);
+    if (!after.allowed) {
+      expect(after.code).toBe("bundle_underlying_approval_invalid");
+    }
+  });
+
+  it("stops covering an operation once its execution plan approval has expired", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-expired");
+    gateApproveBundle(store, policy, {
+      bundleId: "A-expired",
+      revision: 1,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed"
+    });
+    const action = bundle.changes[0]!.action as ActionRequest;
+    const current = store.get(workItem.id)!;
+    const raw = new DatabaseSync(dbPath);
+    try {
+      raw.prepare(`UPDATE execution_plan_approvals SET status = 'expired' WHERE work_item_id = ?`).run(workItem.id);
+    } finally {
+      raw.close();
+    }
+    const after = authorizeBundleOperation({ store, policy, workItem: current, action, actor: "a" });
+    expect(after.allowed).toBe(false);
+    if (!after.allowed) {
+      expect(after.code).toBe("bundle_underlying_approval_invalid");
+    }
+  });
+
+  it("fails closed when a persisted grant plan binding is tampered with", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-tampered-grant");
+    gateApproveBundle(store, policy, {
+      bundleId: bundle.bundleId,
+      revision: 1,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed"
+    });
+    const action = bundle.changes[0]!.action as ActionRequest;
+    const raw = new DatabaseSync(dbPath);
+    try {
+      raw.exec("DROP TRIGGER approval_bundle_grants_binding_guard");
+      raw.prepare(`UPDATE approval_bundle_grants SET plan_hash = ? WHERE bundle_id = ?`).run("d".repeat(64), bundle.bundleId);
+    } finally {
+      raw.close();
+    }
+    const verdict = authorizeBundleOperation({ store, policy, workItem: store.get(workItem.id)!, action, actor: "a" });
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) expect(verdict.code).toBe("bundle_underlying_approval_invalid");
+  });
+
+  it("fails closed when the current persisted manifest no longer verifies", () => {
+    const workItem = backendFixMission();
+    const bundle = makeBundle(workItem, "A-tampered-manifest");
+    gateApproveBundle(store, policy, {
+      bundleId: bundle.bundleId,
+      revision: 1,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed"
+    });
+    const action = bundle.changes[0]!.action as ActionRequest;
+    const raw = new DatabaseSync(dbPath);
+    try {
+      raw.prepare(`UPDATE approval_bundles SET current_manifest_hash = ? WHERE bundle_id = ?`).run(
+        "e".repeat(64),
+        bundle.bundleId
+      );
+    } finally {
+      raw.close();
+    }
+    const verdict = authorizeBundleOperation({ store, policy, workItem: store.get(workItem.id)!, action, actor: "a" });
+    expect(verdict.allowed).toBe(false);
+    if (!verdict.allowed) expect(verdict.code).toBe("bundle_underlying_approval_invalid");
   });
 });
 

@@ -3753,6 +3753,8 @@ function approvalChangeView(change: ProposedChange) {
     dependsOn: change.dependsOn,
     actionHash: change.actionHash,
     actionKind: change.action.kind,
+    actionDescription: change.action.description,
+    actionParams: change.action.params,
     command: change.command ?? null,
     paths: change.paths ?? null,
     cwd: change.cwd ?? null

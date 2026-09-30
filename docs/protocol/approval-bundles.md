@@ -1,6 +1,6 @@
 # Approval Bundles (Change Sets) — Design
 
-Status: implemented on `feat/approval-bundles-v1`.
+Status: partial on `feat/approval-bundles-v1`; see the implementation limits below.
 Contract version: `acs.approval-bundle.v1`.
 
 This document first records the flow that **actually exists** in ACS today, because
@@ -229,25 +229,36 @@ the new manifest hash and the grant is bound to the manifest hash it was issued 
 
 ### 2.6 TOCTOU
 
-`baseState` binds a revision to `gitSha` and `configHash` when supplied. The active
-grant records the base state observed at approval time; `activeGrantCovers()` reports
-`base_state_changed` when the live value differs, which the executor treats as not
-covered. Anything materially relevant that changes after approval invalidates the
-grant for that operation.
+The contract and pure coverage helper can compare `gitSha` and `configHash` when a
+runtime caller supplies an observed value. The current gateway execution path does not
+have a trusted live repository/configuration observer and does not pass such a value to
+that helper. To avoid presenting a metadata pin as enforced authority, Policy Gate
+rejects approval of any bundle with a non-empty `baseState`; Mission Control disables
+approval controls and explains the limitation. This feature therefore does not claim
+to pin mutable repository or deployment state. Exact action/work-item/plan bindings
+remain enforced. A future observer must be control-plane-derived and checked at the
+execution boundary before non-empty base-state pins can be approved.
+
+The `scope` object is included in the reviewed, hashed manifest for context. It does
+not add permission or expand an operation; runtime authority continues to be the exact
+action fingerprint bound to the work item and execution plan. No wildcard or prefix
+matching is applied to the scope fields.
 
 ### 2.7 Approval strategies
 
-Implemented in `packages/policy-gate/src/approval-strategy.ts` and persisted on the
-canonical `execution_mode_state` row as a separate, defaulting column.
+The strategy enum is defined in `packages/work-items/src/approval-bundle-rows.ts`
+and persisted in the singleton `approval_strategy_state` table. Unreadable or corrupt
+values resolve to `PER_ACTION` in the bundle authorization helper.
 
 | Strategy            | Behaviour                                                                                                                                                 |
 | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `PER_ACTION`        | Default. Unchanged existing behaviour; every privileged action approved independently.                                                                    |
-| `BUNDLE`            | Privileged actions accumulate into a bundle and are approved together.                                                                                    |
-| `POLICY_AUTONOMOUS` | Executes without human approval **only** where `evaluatePolicy` already returned `allow`. `require_approval` still requires a human; `deny` still denies. |
+| `BUNDLE`            | Bundle revisions can group and approve selected privileged changes. Automatic proposal creation and worker-claim integration are not wired yet.          |
+| `POLICY_AUTONOMOUS` | The bundle authorization helper treats only explicit policy `allow` as sufficient. General worker-claim strategy integration is not wired yet.             |
 
-`POLICY_AUTONOMOUS` is not "allow everything". It is exactly "treat an explicit
-policy allow as sufficient", and the mode is fail-closed on a missing or corrupt row.
+`POLICY_AUTONOMOUS` is not "allow everything". The helper keeps `require_approval`
+human-gated and fails closed on a missing or corrupt row. The existing worker claim
+path still uses its normal per-action approval checks.
 
 ### 2.8 JEV
 
@@ -259,8 +270,11 @@ can reach bundle state. `approval-bundles` has no dependency on `jev-advisor`.
 
 - New tables only. No existing table is altered, so no existing row or consumer is
   affected.
-- `execution_mode_state` gains a nullable `approval_strategy` column with
-  `DEFAULT 'PER_ACTION'`, so every existing deployment keeps today's behaviour.
+- `approval_strategy_state` is a separate singleton table seeded to `PER_ACTION`, so
+  every existing deployment keeps today's behaviour.
 - `PER_ACTION` never constructs a bundle; the existing `POST /work-items/:id/approve`
   path is untouched and remains the route used in that mode.
+- There is no public bundle-proposal creation endpoint yet. Bundles can currently be
+  created through the work-item store API; automatic strategy-driven proposal creation
+  and end-to-end delta execution remain incomplete.
 - Existing audit consumers keep working: new events are additive.

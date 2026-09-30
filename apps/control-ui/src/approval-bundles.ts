@@ -26,6 +26,8 @@ export interface ApprovalBundleChangeView {
   dependsOn: string[];
   actionHash: string;
   actionKind: string;
+  actionDescription: string;
+  actionParams: Record<string, unknown>;
   command: string[] | null;
   paths: string[] | null;
   cwd: string | null;
@@ -134,7 +136,12 @@ function changeRow(change: ApprovalBundleChangeView, options: { classification?:
   const classification = options.classification
     ? `<span class="chip chip-${options.classification === "unchanged" ? "ok" : "warn"}">${escapeHtml(deltaLabel(options.classification))}</span>`
     : "";
-  const command = change.command ? `<pre class="bundle-command">${escapeHtml(change.command.join(" "))}</pre>` : "";
+  const command = change.command
+    ? `<pre class="bundle-command">${escapeHtml(redactSecrets(change.command.join(" ")))}</pre>`
+    : "";
+  const operation = `<details class="bundle-operation"><summary>Exact operation: ${escapeHtml(change.actionKind)}</summary><pre>${escapeHtml(
+    redactSecrets(JSON.stringify({ description: change.actionDescription, params: change.actionParams }, null, 2))
+  )}</pre></details>`;
   const dependencies =
     change.dependsOn.length > 0
       ? `<small class="muted">depends on ${escapeHtml(change.dependsOn.join(", "))}</small>`
@@ -144,6 +151,7 @@ function changeRow(change: ApprovalBundleChangeView, options: { classification?:
     <span class="bundle-change-meta">${pill(change.risk)} ${escapeHtml(change.type)} ${classification} ${flags.join(" ")}</span>
     <code class="bundle-change-target">${escapeHtml(change.target)}</code>
     ${command}
+    ${operation}
     ${dependencies}
   </li>`;
 }
@@ -270,15 +278,17 @@ export function approvalBundleReviewCard(review: ApprovalBundleReview): string {
         change
       }));
   const awaiting = bundle.status === "pending" || bundle.status === "modified" || bundle.status === "draft";
+  const baseStateBlocked = bundle.baseState.gitSha !== undefined || bundle.baseState.configHash !== undefined;
   const reasonId = `bundle-reason-${escapeHtml(bundle.bundleId)}`;
 
   const controls = awaiting
     ? `<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(bundle.title)}">
         <label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="${reasonId}" data-bundle-reason="${escapeHtml(bundle.bundleId)}" required placeholder="Why approve, reject, or narrow this change set" autocomplete="off" /></label>
         <button type="button" class="tool-button" data-bundle-decision="reject" data-bundle-id="${escapeHtml(bundle.bundleId)}" data-bundle-revision="${bundle.revision}" aria-describedby="${reasonId}">Reject</button>
-        <button type="button" class="tool-button" data-bundle-decision="approve_selected" data-bundle-id="${escapeHtml(bundle.bundleId)}" data-bundle-revision="${bundle.revision}" aria-describedby="${reasonId}">Approve selected</button>
-        <button type="button" data-bundle-decision="approve_all" data-bundle-id="${escapeHtml(bundle.bundleId)}" data-bundle-revision="${bundle.revision}" aria-describedby="${reasonId}">Approve all</button>
+        ${baseStateBlocked ? "" : `<button type="button" class="tool-button" data-bundle-decision="approve_selected" data-bundle-id="${escapeHtml(bundle.bundleId)}" data-bundle-revision="${bundle.revision}" aria-describedby="${reasonId}">Approve selected</button>
+        <button type="button" data-bundle-decision="approve_all" data-bundle-id="${escapeHtml(bundle.bundleId)}" data-bundle-revision="${bundle.revision}" aria-describedby="${reasonId}">Approve all</button>`}
       </div>
+      ${baseStateBlocked ? '<p class="muted bundle-base-state-warning">Approval is blocked because gateway execution cannot verify this pinned base state. Revise the bundle or add a trusted runtime verifier.</p>' : ""}
       <output id="bundle-result-${escapeHtml(bundle.bundleId)}" class="approval-result" aria-live="polite"></output>`
     : `<p class="muted">This change set is ${escapeHtml(bundle.status)}.</p>`;
 

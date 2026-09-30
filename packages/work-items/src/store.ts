@@ -24,6 +24,7 @@ import {
   approvalBundleRevisionSchema,
   approvalBundleStatusSchema,
   approvalDecisionSchema,
+  proposedChangeSchema,
   type ApprovalBundle,
   type ApprovalBundleRevision,
   type ApprovalBundleStatus,
@@ -1034,6 +1035,12 @@ export interface WorkItemStore {
     actionHash?: string;
   }): ApprovalGrantRecord[];
   invalidateApprovalBundle(bundleId: string, reason: string, options: PrivilegedTransitionOptions): void;
+  revokeApprovalBundleChanges(
+    bundleId: string,
+    changeIds: string[],
+    reason: string,
+    options: PrivilegedTransitionOptions
+  ): void;
   getApprovalStrategy(): {
     strategy: ApprovalStrategy;
     updatedAt: string;
@@ -1988,6 +1995,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
     if (!revision) {
       return undefined;
     }
+    if (head.current_manifest_hash !== revision.manifestHash) {
+      throw new ControlStackError(
+        "approval_manifest_hash_mismatch",
+        `approval bundle ${bundleId} head hash does not match revision ${head.current_revision}`
+      );
+    }
     // A revision's own status is frozen history, because revisions are immutable. The
     // bundle's *live* status is the head row's, which is what a decision advances.
     // Returning the revision status here would leave an approved bundle looking pending.
@@ -2028,10 +2041,29 @@ export class SqliteWorkItemStore implements WorkItemStore {
     }
     const changes = this.db
       .prepare(
-        `SELECT change_json FROM approval_bundle_changes
+        `SELECT change_id, change_digest, action_hash, change_json FROM approval_bundle_changes
          WHERE bundle_id = ? AND revision = ? ORDER BY change_id ASC`
       )
-      .all(bundleId, revision) as Array<{ change_json: string }>;
+      .all(bundleId, revision) as Array<{
+        change_id: string;
+        change_digest: string;
+        action_hash: string;
+        change_json: string;
+      }>;
+    const parsedChanges = changes.map((change) => {
+      const parsed = proposedChangeSchema.parse(JSON.parse(change.change_json) as ProposedChange);
+      if (
+        parsed.id !== change.change_id ||
+        parsed.actionHash !== change.action_hash ||
+        approvalChangeDigest(parsed) !== change.change_digest
+      ) {
+        throw new ControlStackError(
+          "approval_manifest_hash_mismatch",
+          `approval bundle ${bundleId} revision ${revision} change ${change.change_id} has inconsistent persisted bindings`
+        );
+      }
+      return parsed;
+    });
     const parsed = approvalBundleRevisionSchema.parse({
       bundleId: row.bundle_id,
       missionId: this.bundleMissionId(bundleId),
@@ -2040,7 +2072,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       title: row.title,
       rationale: row.rationale,
       revision: row.revision,
-      changes: changes.map((change) => JSON.parse(change.change_json) as ProposedChange),
+      changes: parsedChanges,
       scope: JSON.parse(row.scope_json) as ApprovalBundleRevision["scope"],
       baseState: JSON.parse(row.base_state_json) as ApprovalBundleRevision["baseState"],
       parentManifestHash: row.parent_manifest_hash ?? undefined,
@@ -2050,6 +2082,12 @@ export class SqliteWorkItemStore implements WorkItemStore {
       createdByActorId: row.created_by_actor_id,
       expiresAt: row.expires_at ?? undefined
     });
+    if (serializeApprovalManifest(parsed) !== row.manifest_json || approvalManifestHash(parsed) !== row.manifest_hash) {
+      throw new ControlStackError(
+        "approval_manifest_hash_mismatch",
+        `approval bundle ${bundleId} revision ${revision} does not match its persisted manifest`
+      );
+    }
     return parsed;
   }
 
@@ -2103,7 +2141,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
               {
                 "approval_bundle.id": bundleId,
                 "approval_bundle.status": parsedStatus,
-                "actor.id": options.via
+                "actor.id": options.actorId ?? options.via
               }
             )
           )
@@ -2172,12 +2210,21 @@ export class SqliteWorkItemStore implements WorkItemStore {
               `no authoritative approval was minted for change ${changeId}`
             );
           }
+          const change = revisionRow.changes.find((candidate) => candidate.id === changeId);
+          if (!change) {
+            // A grant with no resolvable action would carry an empty authorization
+            // identity. Refuse rather than persist a grant nothing can be bound to.
+            throw new ControlStackError(
+              "approval_bundle_grant_missing",
+              `change ${changeId} is not part of revision ${input.revision} of bundle ${input.bundleId}`
+            );
+          }
           this.insertApprovalBundleGrant({
             bundleId: input.bundleId,
             revision: input.revision,
             changeId,
             manifestHash: revisionRow.manifestHash,
-            actionHash: revisionRow.changes.find((change) => change.id === changeId)?.actionHash ?? "",
+            actionHash: change.actionHash,
             missionId: revisionRow.missionId,
             executionId: revisionRow.executionId,
             workItemId: input.workItemId,
@@ -2362,6 +2409,59 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   /**
+   * Revoke selected change grants and their authoritative plan approvals together.
+   */
+  revokeApprovalBundleChanges(
+    bundleId: string,
+    changeIds: string[],
+    reason: string,
+    options: PrivilegedTransitionOptions
+  ): void {
+    requirePrivilegedTransition(options, "revoke_approval_bundle_changes");
+    const ids = [...new Set(changeIds)];
+    if (ids.length === 0) return;
+    this.write(() => {
+      const placeholders = ids.map(() => "?").join(", ");
+      const grants = this.db
+        .prepare(
+          `SELECT grant_id, approval_id, change_id FROM approval_bundle_grants
+           WHERE bundle_id = ? AND status = 'granted' AND change_id IN (${placeholders})`
+        )
+        .all(bundleId, ...ids) as Array<{ grant_id: string; approval_id: string; change_id: string }>;
+      if (grants.length === 0) return { value: undefined, events: [] };
+      const now = new Date().toISOString();
+      for (const grant of grants) {
+        this.db
+          .prepare(
+            `UPDATE approval_bundle_grants
+             SET status = 'invalidated', invalidated_at = ?, invalidation_reason = ?
+             WHERE grant_id = ? AND status = 'granted'`
+          )
+          .run(now, reason, grant.grant_id);
+        this.db
+          .prepare(
+            `UPDATE execution_plan_approvals
+             SET status = 'invalidated', invalidated_at = ?, invalidation_reason = ?
+             WHERE approval_id = ? AND status = 'granted'`
+          )
+          .run(now, reason, grant.approval_id);
+      }
+      const event = this.appendAuditEvent(
+        createEvent(
+          "approval_bundle.grants_revoked",
+          { bundleId, changeIds: grants.map((grant) => grant.change_id), reason },
+          {
+            "approval_bundle.id": bundleId,
+            "approval_bundle.revoked_change_count": String(grants.length),
+            "actor.id": options.actorId ?? options.via
+          }
+        )
+      );
+      return { value: undefined, events: [event] };
+    });
+  }
+
+  /**
    * Revoke every grant a bundle has issued.
    *
    * Invalidation is fail-closed: the grant stops covering immediately, and the
@@ -2404,7 +2504,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
               {
                 "approval_bundle.id": bundleId,
                 "approval_bundle.status": "invalidated",
-                "actor.id": options.via
+                "actor.id": options.actorId ?? options.via
               }
             )
           )

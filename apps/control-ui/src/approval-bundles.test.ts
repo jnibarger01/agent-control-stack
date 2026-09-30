@@ -31,6 +31,8 @@ function change(overrides: Partial<ApprovalBundleView["changes"][number]> = {}) 
     dependsOn: [] as string[],
     actionHash: "a".repeat(64),
     actionKind: "fs.write",
+    actionDescription: overrides.summary ?? "Modify packages/gateway/src/router.ts",
+    actionParams: overrides.actionParams ?? { paths: overrides.paths ?? ["packages/gateway/src/router.ts"] },
     command: null,
     paths: ["packages/gateway/src/router.ts"],
     cwd: "/repo",
@@ -51,7 +53,7 @@ function bundle(overrides: Partial<ApprovalBundleView> = {}): ApprovalBundleView
     manifestHash: "b".repeat(64),
     parentManifestHash: "c".repeat(64),
     scope: { repos: ["agent-control-stack"] },
-    baseState: { gitSha: "ea29197" },
+    baseState: {},
     createdAt: NOW.toISOString(),
     createdByActorId: "backend-api",
     changes: [change()],
@@ -129,6 +131,17 @@ describe("approval bundle review card", () => {
     expect(card).toContain("destructive");
     expect(card).toContain("Destructive");
     expect(card).toContain("Yes");
+  });
+
+  it("shows the exact operation inputs and warns when a pinned base state cannot be verified", () => {
+    const html = approvalBundleReviewCard(
+      review({ bundle: bundle({ baseState: { gitSha: "abc123" } }) })
+    );
+    expect(html).toContain("Exact operation: fs.write");
+    expect(html).toContain("&quot;paths&quot;");
+    expect(html).toContain("Approval is blocked because gateway execution cannot verify this pinned base state");
+    expect(html).not.toContain('data-bundle-decision="approve_all"');
+    expect(html).not.toContain('data-bundle-decision="approve_selected"');
   });
 
   it("separates previously approved from new since approval", () => {
