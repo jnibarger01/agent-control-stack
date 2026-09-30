@@ -437,6 +437,31 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("verifies the control-plane database once per healthy /health request", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-health-single-deep-inspection-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const deepHealth = vi.spyOn(SqliteWorkItemStore.prototype, "health");
+
+    try {
+      const health = await app.inject({ method: "GET", url: "/health" });
+
+      expect(health.statusCode).toBe(200);
+      expect(health.json()).toMatchObject({
+        ok: true,
+        checks: { integrity: { ok: true }, foreignKeys: { ok: true }, auditChain: { ok: true } },
+        deepHealth: { ok: true, source: "deep", checkedAt: expect.any(String) }
+      });
+      // /health must stay inside the 2000 ms reachability budget that ACS clients probe with, so a
+      // healthy request may not repeat the full database verification.
+      expect(deepHealth).toHaveBeenCalledTimes(1);
+    } finally {
+      deepHealth.mockRestore();
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("separates process liveness from dependency readiness", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-health-separation-"));
     const dbPath = join(dir, "control.db");
