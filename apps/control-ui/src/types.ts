@@ -1,6 +1,7 @@
 import {
   type AttemptLease,
   type ExecutionAttempt,
+  type ExecutionTelemetry,
   type ExecutionPlanAdmission,
   type ExecutionPlanRecord,
   type RegistryAgentDetail,
@@ -105,6 +106,9 @@ export interface MissionControlViewModel {
   /** Canonical execution mode. Absent when the row is missing or corrupt. */
   executionMode?: "strict" | "admin";
   executionModeProblem?: "missing" | "corrupt";
+  executionTelemetry?: ExecutionTelemetry;
+  /** Readiness checks from the same store used by /readyz; no health inferred from configuration. */
+  readiness?: { ok: boolean; checks: Record<string, { ok: boolean; code?: string }> };
   now?: Date;
 }
 

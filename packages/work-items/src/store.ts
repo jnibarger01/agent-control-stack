@@ -965,6 +965,7 @@ export interface WorkItemStore {
   createExecutionPlan(input: CreateExecutionPlanInput): ExecutionPlanRecord;
   getExecutionPlan(planId: string): ExecutionPlanRecord | undefined;
   getCurrentExecutionPlan(workItemId: string): ExecutionPlanRecord | undefined;
+  listCurrentExecutionPlansForWorkItems(workItemIds: readonly string[]): Map<string, ExecutionPlanRecord>;
   listExecutionPlans(workItemId: string): ExecutionPlanRecord[];
   admitExecutionPlan(input: AdmitExecutionPlanInput, options: PrivilegedTransitionOptions): ExecutionPlanAdmission;
   getExecutionPlanAdmission(admissionId: string): ExecutionPlanAdmission | undefined;
@@ -1501,6 +1502,30 @@ export class SqliteWorkItemStore implements WorkItemStore {
       )
       .get(workItemId) as unknown as ExecutionPlanRow | undefined;
     return row ? rowToExecutionPlan(row) : undefined;
+  }
+
+  /** Bounded projection reads retain the same canonical head and content integrity checks as single reads. */
+  listCurrentExecutionPlansForWorkItems(workItemIds: readonly string[]): Map<string, ExecutionPlanRecord> {
+    const result = new Map<string, ExecutionPlanRecord>();
+    const ids = [...new Set(workItemIds)];
+    const batchSize = 500;
+    for (let offset = 0; offset < ids.length; offset += batchSize) {
+      const batch = ids.slice(offset, offset + batchSize);
+      const placeholders = batch.map(() => "?").join(",");
+      const rows = this.db
+        .prepare(
+          `SELECT plans.*
+           FROM execution_plan_heads AS heads
+           JOIN execution_plans AS plans ON plans.plan_id = heads.current_plan_id
+           WHERE heads.work_item_id IN (${placeholders}) AND plans.plan_hash = heads.current_plan_hash`
+        )
+        .all(...batch) as unknown as ExecutionPlanRow[];
+      for (const row of rows) {
+        const plan = rowToExecutionPlan(row);
+        result.set(plan.workItemId, plan);
+      }
+    }
+    return result;
   }
 
   listExecutionPlans(workItemId: string): ExecutionPlanRecord[] {
