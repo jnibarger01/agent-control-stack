@@ -4865,10 +4865,38 @@ export class SqliteWorkItemStore implements WorkItemStore {
       for (const lease of rows) {
         const currentRow = this.getRowRequired(lease.work_item_id);
         if (currentRow.status !== "running" || currentRow.worker_id !== lease.worker_id) {
-          throw new ControlStackError(
-            "lease_state_inconsistent",
-            `active lease state is inconsistent: ${lease.lease_id}`
+          const attemptLease = this.db
+            .prepare(`SELECT * FROM attempt_leases WHERE lease_id = ? AND status = 'active'`)
+            .get(lease.lease_id) as unknown as AttemptLeaseRow | undefined;
+          this.db
+            .prepare(`UPDATE leases SET status = 'expired' WHERE lease_id = ? AND status = 'active'`)
+            .run(lease.lease_id);
+          if (attemptLease) {
+            this.db
+              .prepare(`UPDATE attempt_leases SET status = 'expired', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+              .run(nowIso, attemptLease.lease_id);
+          }
+          events.push(
+            this.appendAuditEvent(
+              createEvent(
+                "lease.reap_inconsistent",
+                {
+                  leaseId: lease.lease_id,
+                  workItemId: lease.work_item_id,
+                  leaseWorkerId: lease.worker_id,
+                  observedStatus: currentRow.status,
+                  observedWorkerId: currentRow.worker_id,
+                  disposition: "quarantine_required"
+                },
+                {
+                  "work_item.id": lease.work_item_id,
+                  "lease.id": lease.lease_id,
+                  "worker.id": lease.worker_id
+                }
+              )
+            )
           );
+          continue;
         }
         const input = this.derivedResultInput(lease, "lease_expired", nowIso, "worker lease expired");
         const attemptLease = this.db

@@ -216,6 +216,31 @@ describe("attempt lease renewal, expiry, and steal", () => {
     expect(fixture.store.readEvents().filter((event) => event.name === "attempt_lease.expired")).toHaveLength(1);
   });
 
+  it("skips and audits an inconsistent expired lease without wedging future reaps", () => {
+    const fixture = createFixture({ leaseMs: 10 });
+    directory = fixture.directory;
+    const claimed = claimAuthoritative(fixture, "worker-1", 10);
+    const db = (fixture.store as unknown as {
+      db: { prepare: (sql: string) => { run: (...args: unknown[]) => unknown } };
+    }).db;
+
+    db.prepare(`UPDATE work_items SET worker_id = ? WHERE id = ?`).run("worker-other", claimed.id);
+
+    const now = new Date(Date.parse(claimed.leaseExpiresAt) + 1);
+    expect(() => fixture.store.failExpiredLeases(now)).not.toThrow();
+    expect(fixture.store.failExpiredLeases(now)).toHaveLength(0);
+
+    const events = fixture.store.readEvents().filter((event) => event.name === "lease.reap_inconsistent");
+    expect(events).toHaveLength(1);
+    expect(events[0]?.body).toEqual(
+      expect.objectContaining({
+        leaseId: claimed.leaseId,
+        workItemId: claimed.id,
+        disposition: "quarantine_required"
+      })
+    );
+  });
+
   it("steals an interrupted attempt lease so the prior worker cannot complete", () => {
     const fixture = createFixture();
     directory = fixture.directory;

@@ -5,6 +5,7 @@ import {
   GATEWAY_SHUTTING_DOWN_CODE,
   installGracefulShutdown,
   ShutdownController,
+  startLeaseReaper,
   waitForLeaseDrain,
   type GatewayProcess
 } from "./lifecycle.js";
@@ -73,6 +74,42 @@ describe("waitForLeaseDrain", () => {
     expect(result.timedOut).toBe(true);
     expect(result.activeLeases).toBe(3);
     expect(result.waitedMs).toBeGreaterThanOrEqual(30);
+  });
+});
+
+
+
+describe("lease reaper", () => {
+  it("runs on the configured cadence, reports reaped counts, and can be stopped", () => {
+    let tick: (() => void) | undefined;
+    let observedInterval = 0;
+    let cleared = false;
+    const reap = vi.fn(() => 2);
+    const onRun = vi.fn();
+
+    const reaper = startLeaseReaper({
+      intervalMs: 250,
+      reap,
+      onRun,
+      setIntervalFn: ((fn: () => void, ms: number) => {
+        tick = fn;
+        observedInterval = ms;
+        return { unref: vi.fn() } as never;
+      }) as unknown as typeof setInterval,
+      clearIntervalFn: (() => {
+        cleared = true;
+      }) as typeof clearInterval
+    });
+
+    expect(observedInterval).toBe(250);
+    tick?.();
+    tick?.();
+    expect(reap).toHaveBeenCalledTimes(2);
+    expect(onRun).toHaveBeenNthCalledWith(1, { reapedCount: 2, ok: true });
+    expect(onRun).toHaveBeenNthCalledWith(2, { reapedCount: 2, ok: true });
+
+    reaper.stop();
+    expect(cleared).toBe(true);
   });
 });
 

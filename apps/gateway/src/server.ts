@@ -2363,8 +2363,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.decorate("acsShutdown", {
     controller: shutdownController,
     countActiveLeases: () => workItems.countActiveAttemptLeases(),
-    failExpiredLeases: () => {
-      workItems.failExpiredLeases();
+    failExpiredLeases: () => workItems.failExpiredLeases().length,
+    recordLeaseReaperRun: (details) => {
+      try {
+        workItems.recordSystemEvent({
+          name: "gateway.lease_reaper.run",
+          body: { ...details },
+          attributes: {
+            "gateway.lease_reaper.ok": details.ok,
+            "gateway.lease_reaper.reaped_count": details.reapedCount
+          }
+        });
+      } catch (error) {
+        app.log.warn({ error }, "failed to record lease reaper audit event");
+      }
     },
     recordDrainStart: (details: DrainStartInfo) => recordShutdownDrain("start", details),
     recordDrainFinish: (details: DrainFinishInfo) =>

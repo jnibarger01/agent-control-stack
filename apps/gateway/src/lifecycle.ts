@@ -4,6 +4,7 @@ import { ControlStackError } from "@agent-control-stack/shared";
 export const DEFAULT_SHUTDOWN_TIMEOUT_MS = 10_000;
 export const DEFAULT_DRAIN_TIMEOUT_MS = 8_000;
 export const DEFAULT_DRAIN_POLL_MS = 50;
+export const DEFAULT_LEASE_REAPER_INTERVAL_MS = 5_000;
 export const SHUTDOWN_DRAIN_METRIC = "acs_shutdown_drain_total";
 export const GATEWAY_SHUTTING_DOWN_CODE = "gateway_shutting_down";
 
@@ -55,6 +56,48 @@ export interface DrainFinishInfo {
   activeLeases: number;
   timedOut: boolean;
   waitedMs: number;
+}
+
+export interface LeaseReaperRunInfo {
+  reapedCount: number;
+  ok: boolean;
+  error?: string;
+}
+
+export interface LeaseReaperOptions {
+  intervalMs?: number;
+  reap: () => number;
+  onRun?: (info: LeaseReaperRunInfo) => void;
+  setIntervalFn?: typeof setInterval;
+  clearIntervalFn?: typeof clearInterval;
+}
+
+export function startLeaseReaper(options: LeaseReaperOptions): { run: () => void; stop: () => void } {
+  const intervalMs = options.intervalMs ?? DEFAULT_LEASE_REAPER_INTERVAL_MS;
+  const setIntervalFn = options.setIntervalFn ?? setInterval;
+  const clearIntervalFn = options.clearIntervalFn ?? clearInterval;
+
+  const run = () => {
+    let info: LeaseReaperRunInfo;
+    try {
+      info = { reapedCount: Math.max(0, options.reap()), ok: true };
+    } catch (error) {
+      info = {
+        reapedCount: 0,
+        ok: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+    try {
+      options.onRun?.(info);
+    } catch {
+      // Audit emission must never stop lease recovery.
+    }
+  };
+
+  const timer = setIntervalFn(run, intervalMs);
+  timer.unref?.();
+  return { run, stop: () => clearIntervalFn(timer) };
 }
 
 export interface GracefulShutdownOptions {
@@ -273,7 +316,8 @@ export function resolveShutdownTimeoutMs(
 export interface GatewayShutdownHooks {
   controller: ShutdownController;
   countActiveLeases: () => number;
-  failExpiredLeases: () => void;
+  failExpiredLeases: () => number;
+  recordLeaseReaperRun: (details: LeaseReaperRunInfo) => void;
   recordDrainStart: (details: DrainStartInfo) => void;
   recordDrainFinish: (details: DrainFinishInfo) => void;
 }
