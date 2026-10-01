@@ -1152,6 +1152,13 @@ export interface WorkItemStore {
     body?: Record<string, unknown>;
     attributes?: Record<string, string | number | boolean>;
   }): StoredAuditEvent;
+  /** Append a system event once for a work item, deduplicated atomically by event name and work item id. */
+  recordSystemEventOnceForWorkItem(input: {
+    name: string;
+    workItemId: string;
+    body?: Record<string, unknown>;
+    attributes?: Record<string, string | number | boolean>;
+  }): StoredAuditEvent;
   /** Read the single canonical execution-mode row. null mode means missing or corrupt. */
   getExecutionMode(): {
     mode: "strict" | "admin" | null;
@@ -5253,6 +5260,26 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return this.write(() => {
       const name = requiredString(input.name, "name");
       const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, input.attributes ?? {}));
+      return { value: event, events: [event] };
+    });
+  }
+
+  recordSystemEventOnceForWorkItem(input: {
+    name: string;
+    workItemId: string;
+    body?: Record<string, unknown>;
+    attributes?: Record<string, string | number | boolean>;
+  }): StoredAuditEvent {
+    return this.write(() => {
+      const name = requiredString(input.name, "name");
+      const workItemId = requiredString(input.workItemId, "workItemId");
+      const existing = this.db
+        .prepare(`SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, '$."work_item.id"') = ? LIMIT 1`)
+        .get(name, workItemId) as unknown as EventRow | undefined;
+      if (existing) return { value: rowToEvent(existing), events: [] };
+
+      const attributes = { ...(input.attributes ?? {}), "work_item.id": workItemId };
+      const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, attributes));
       return { value: event, events: [event] };
     });
   }

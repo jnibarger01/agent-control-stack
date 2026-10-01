@@ -447,6 +447,52 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
+  it("records a missing auto-authorization audit event when retrying an admin-approved item", () =>
+    withGateway(
+      async (ctx) => {
+        const switched = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${OP_TOKEN}` },
+          payload: { mode: "admin", reason: "test auto-authorization audit recovery" }
+        });
+        expect(switched.statusCode).toBe(200);
+
+        const db = new DatabaseSync(ctx.dbPath);
+        db.exec(`
+          CREATE TRIGGER fail_auto_authorized_event
+          BEFORE INSERT ON audit_events
+          WHEN NEW.name = 'execution_mode.auto_authorized'
+          BEGIN
+            SELECT RAISE(ABORT, 'injected audit write failure');
+          END;
+        `);
+        try {
+          const args = { path: join(ctx.root, "workspace", "audit-retry") };
+          const failed = await issue(ctx, "create_directory", args);
+          expect(failed.statusCode).toBe(403);
+          expect(failed.json().workItemId).toBeTruthy();
+
+          db.exec("DROP TRIGGER fail_auto_authorized_event");
+          const retried = await issue(ctx, "create_directory", args);
+          expect(retried.statusCode, retried.body).toBe(200);
+
+          const detail = await ctx.app.inject({
+            method: "GET",
+            url: `/work-items/${failed.json().workItemId}`,
+            headers: { authorization: `Bearer ${OP_TOKEN}` }
+          });
+          expect(
+            detail.json().events.filter((event: { name: string }) => event.name === "execution_mode.auto_authorized")
+          ).toHaveLength(1);
+        } finally {
+          db.close();
+        }
+      },
+      true,
+      workspace
+    ));
+
   it("fails closed in admin mode when managed authority is not active", () =>
     withGateway(
       async (ctx) => {

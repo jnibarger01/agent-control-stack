@@ -1854,8 +1854,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 });
               }
               workItem = approved.workItem;
-              workItems.recordSystemEvent({
+            } catch (error) {
+              recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
+                reason: "acs admin auto-authorization failed closed",
+                workItemId: workItem.id
+              });
+            }
+          }
+          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
+            try {
+              workItems.recordSystemEventOnceForWorkItem({
                 name: "execution_mode.auto_authorized",
+                workItemId: workItem.id,
                 body: {
                   workItemId: workItem.id,
                   tool: body.tool,
@@ -1863,7 +1876,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   approvalPolicy: "auto",
                   approvedBy: ACS_ADMIN_APPROVER
                 },
-                attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+                attributes: { "execution_mode.mode": "admin" }
               });
             } catch (error) {
               recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
@@ -2329,8 +2342,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 });
               }
               workItem = approved.workItem;
-              workItems.recordSystemEvent({
+            } catch (error) {
+              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
+                reason: "acs admin auto-authorization failed closed",
+                workItemId: workItem.id
+              });
+            }
+          }
+          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
+            try {
+              workItems.recordSystemEventOnceForWorkItem({
                 name: "execution_mode.auto_authorized",
+                workItemId: workItem.id,
                 body: {
                   workItemId: workItem.id,
                   tool: invocation.toolName,
@@ -2339,7 +2365,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   approvedBy: ACS_ADMIN_APPROVER,
                   lane: "jc"
                 },
-                attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin", "execution_mode.lane": "jc" }
+                attributes: { "execution_mode.mode": "admin", "execution_mode.lane": "jc" }
               });
             } catch (error) {
               recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
