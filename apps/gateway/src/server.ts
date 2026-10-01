@@ -687,9 +687,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     if (!dependencyChecks.every((check) => check.ok)) {
       return reply.code(503).send({ ...initialHealth, execution: executionView });
     }
+    // Both reconcilers return exactly the rows they changed. When neither changed
+    // anything, the registry rows the deep checks read (tunnel sessions, agents)
+    // are still the ones the snapshot above was taken from, so re-running the whole
+    // verification (PRAGMA integrity_check, the foreign-key scan and the O(audit
+    // events) chain re-hash) would only duplicate work on the single event loop.
+    // Re-verify only when reconciliation actually moved state; the failure path
+    // still re-reads health so a reconciliation fault is reported against fresh
+    // checks.
+    let reconciledLiveness: boolean;
     try {
-      workItems.reconcileStaleTunnelSessions();
-      workItems.reconcileStaleAgents();
+      const revokedSessions = workItems.reconcileStaleTunnelSessions();
+      const offlineAgents = workItems.reconcileStaleAgents();
+      reconciledLiveness = revokedSessions.length > 0 || offlineAgents.length > 0;
     } catch {
       const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
       return reply.code(503).send({
@@ -699,7 +709,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         checks: { ...health.checks, liveness: { ok: false, code: "liveness_reconciliation_failed" } }
       });
     }
-    const health = mergeSandboxReadyzCheck(workItems.health(), sandboxCheck);
+    const health = reconciledLiveness ? mergeSandboxReadyzCheck(workItems.health(), sandboxCheck) : initialHealth;
     return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
   };
   app.get("/readyz", operationalReadiness);

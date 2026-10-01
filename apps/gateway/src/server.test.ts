@@ -402,6 +402,78 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("verifies the deep database contract once per /health request when reconciliation changes nothing", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-deep-health-single-pass-"));
+    const dbPath = join(dir, "control.db");
+    const app = buildGateway({ dbPath, logger: false, auth: testAuth });
+    const deepHealth = vi.spyOn(SqliteWorkItemStore.prototype, "health");
+
+    try {
+      const health = await app.inject({ method: "GET", url: "/health" });
+
+      expect(health.statusCode).toBe(200);
+      expect(health.json()).toMatchObject({ ok: true, checks: { liveness: { ok: true } } });
+      // Nothing stale to reconcile, so the snapshot taken before reconciliation is
+      // still the database the contract describes: a second full verification would
+      // only repeat PRAGMA integrity_check, the foreign-key scan and the O(audit
+      // events) chain re-hash on the gateway's single event loop.
+      expect(deepHealth).toHaveBeenCalledTimes(1);
+    } finally {
+      deepHealth.mockRestore();
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("re-verifies deep health when /health reconciliation moved liveness state", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-deep-health-reconciled-"));
+    const dbPath = join(dir, "control.db");
+    const staleAt = new Date(Date.now() - 901_000);
+    const seed = new SqliteWorkItemStore(dbPath);
+    seed.registerActor({ id: "user", actorType: "HUMAN", displayName: "Jace" });
+    seed.registerConnector({
+      id: "connector",
+      publicKeyPem: "public-key",
+      allowedScopes: ["acs:work:read"],
+      actorId: "user",
+      now: staleAt
+    });
+    seed.registerTunnelSession({
+      connectorId: "connector",
+      tunnelId: "tunnel",
+      sessionId: "session",
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      actorId: "user",
+      now: staleAt
+    });
+    seed.createRegistryAgent({
+      id: "stale-agent",
+      name: "Stale Agent",
+      kind: "cli",
+      acpRole: "IMPLEMENTATION_AGENT",
+      actorId: "user"
+    });
+    seed.recordAgentHeartbeat("stale-agent", { status: "AVAILABLE", actorId: "user", now: staleAt });
+    seed.close();
+    const app = buildTestGateway({ dbPath, logger: false });
+    const deepHealth = vi.spyOn(SqliteWorkItemStore.prototype, "health");
+
+    try {
+      const health = await app.inject({ method: "GET", url: "/health" });
+
+      expect(health.statusCode).toBe(200);
+      expect(health.json()).toMatchObject({ ok: true, checks: { liveness: { ok: true } } });
+      // Reconciliation revoked the stale session and took the stale agent offline
+      // after the first snapshot, so the reported contract must be the re-verified
+      // one rather than the pre-reconciliation snapshot.
+      expect(deepHealth).toHaveBeenCalledTimes(2);
+    } finally {
+      deepHealth.mockRestore();
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("separates process liveness from dependency readiness", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-health-separation-"));
     const dbPath = join(dir, "control.db");
