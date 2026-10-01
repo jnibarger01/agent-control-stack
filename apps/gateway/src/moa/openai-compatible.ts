@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Readable } from "node:stream";
 import type { ReadableStream as NodeReadableStream } from "node:stream/web";
@@ -7,6 +7,7 @@ import { auditEventHash, createEvent, type AuditChainEvent } from "@agent-contro
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { SlidingWindowRateLimiter, type RateLimitOptions } from "../rate-limit.js";
+import { readLastJsonlLine } from "./audit-tail-reader.js";
 
 const DEFAULT_UPSTREAM_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MAX_BODY_BYTES = 16 * 1024 * 1024;
@@ -87,10 +88,7 @@ export function openAiCompatibleConfigFromEnv(
   };
 }
 
-export function registerOpenAiCompatibleGateway(
-  app: FastifyInstance,
-  deps: OpenAiCompatibleGatewayDeps
-): void {
+export function registerOpenAiCompatibleGateway(app: FastifyInstance, deps: OpenAiCompatibleGatewayDeps): void {
   const fetchImpl = deps.fetchImpl ?? fetch;
   const newRequestId = deps.newRequestId ?? (() => `inf_${randomUUID()}`);
   const bodyLimit = deps.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
@@ -107,9 +105,7 @@ export function registerOpenAiCompatibleGateway(
 
     if (isRecursiveRequest(request)) {
       recordDenied(deps.audit, requestId, auth.actor, request.method, path, "recursion_rejected");
-      return reply
-        .code(508)
-        .send(openAiError("recursive ACS inference proxy hop rejected", "acs_recursion_rejected"));
+      return reply.code(508).send(openAiError("recursive ACS inference proxy hop rejected", "acs_recursion_rejected"));
     }
 
     const parsed = responseCreateSchema.safeParse(request.body);
@@ -158,9 +154,7 @@ export function registerOpenAiCompatibleGateway(
     if (!auth) return reply;
     if (isRecursiveRequest(request)) {
       recordDenied(deps.audit, requestId, auth.actor, request.method, path, "recursion_rejected");
-      return reply
-        .code(508)
-        .send(openAiError("recursive ACS inference proxy hop rejected", "acs_recursion_rejected"));
+      return reply.code(508).send(openAiError("recursive ACS inference proxy hop rejected", "acs_recursion_rejected"));
     }
     deps.audit.record({
       type: "request_allowed",
@@ -375,8 +369,7 @@ export class HashChainedInferenceAuditSink implements InferenceAuditSink {
 }
 
 function readAuditTail(path: string): { sequence: number; previousHash: string } {
-  if (!existsSync(path)) return { sequence: 0, previousHash: "" };
-  const last = readFileSync(path, "utf8").trim().split("\n").filter(Boolean).at(-1);
+  const last = readLastJsonlLine(path);
   if (!last) return { sequence: 0, previousHash: "" };
   const parsed = JSON.parse(last) as { sequence?: unknown; eventHash?: unknown };
   if (typeof parsed.sequence !== "number" || typeof parsed.eventHash !== "string") {

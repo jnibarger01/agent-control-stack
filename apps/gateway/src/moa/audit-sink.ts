@@ -1,7 +1,8 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import type { AuditSink, MoaAuditEvent } from "@agent-control-stack/moa-orchestrator";
 import { auditEventHash, createEvent, type AuditChainEvent } from "@agent-control-stack/shared";
+import { readLastJsonlLine } from "./audit-tail-reader.js";
 
 export class HashChainedJsonlAuditSink implements AuditSink {
   private sequence: number;
@@ -35,8 +36,7 @@ export class HashChainedJsonlAuditSink implements AuditSink {
 }
 
 function readTail(path: string): { sequence: number; previousHash: string } {
-  if (!existsSync(path)) return { sequence: 0, previousHash: "" };
-  const last = readFileSync(path, "utf8").trim().split("\n").filter(Boolean).at(-1);
+  const last = readLastJsonlLine(path);
   if (!last) return { sequence: 0, previousHash: "" };
   const parsed = JSON.parse(last) as { sequence?: unknown; eventHash?: unknown };
   if (typeof parsed.sequence !== "number" || typeof parsed.eventHash !== "string") {
