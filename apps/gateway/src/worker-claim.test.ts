@@ -202,6 +202,10 @@ describe("authenticated worker claims", () => {
       risk: "low"
     });
     store.approveWorkItem(item.id, { via: "domain_service" });
+    store.assignWorkItem(
+      { workItemId: item.id, selectedWorkerId: "worker-race", assignedByActorId: "operator" },
+      { via: "domain_service", actorId: "operator" }
+    );
     store.close();
 
     const identities = new WorkerIdentityRegistry();

@@ -53,7 +53,9 @@ authoritative. A persisted work-item assignment is a routing constraint created
 before execution ownership: only its selected worker may claim the item. An
 assignment is not a lease. The lease and execution attempt are created
 atomically only after the authenticated worker passes claim-time checks.
-Unassigned legacy items remain available to any authenticated worker.
+Unassigned items cannot be claimed through the worker HTTP endpoint. Route
+approved work through the semantic routing protocol first; see
+[`semantic-agent-routing.md`](./semantic-agent-routing.md).
 
 Remote MCP claim tooling is not present in this checkout; claims use the
 gateway HTTP pull endpoint. Authenticated worker selection is enforceable, but

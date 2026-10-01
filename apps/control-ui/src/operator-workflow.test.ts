@@ -222,6 +222,34 @@ describe("deep links (#15)", () => {
     const html = renderDashboard({ workItems: [], events: [], now: new Date(HARNESS_NOW) });
     expect(html).toContain("Press <kbd>?</kbd> for keyboard shortcuts");
   });
+
+  it("shows Nimble candidate evidence and the resolved worker in work-item detail", () => {
+    const html = renderWorkItemDetailHtml(item("wrk_route"), [
+      {
+        name: "agent.routing.candidate_evaluated",
+        timeUnixNano: String(HARNESS_NOW * 1_000_000),
+        attributes: {
+          "work_item.id": "wrk_route",
+          "agent.id": "infra-platform",
+          "routing.score": "0.94",
+          "routing.match": "MATCH"
+        }
+      },
+      {
+        name: "agent.routing.selected",
+        timeUnixNano: String(HARNESS_NOW * 1_000_000),
+        attributes: { "agent.id": "infra-platform", "worker.id": "worker-infra-7" }
+      },
+      {
+        name: "work_item.running",
+        timeUnixNano: String(HARNESS_NOW * 1_000_000),
+        attributes: { "work_item.id": "wrk_route", "worker.id": "worker-infra-7" }
+      }
+    ]);
+    expect(html).toContain("infra-platform · score 0.94 · match yes");
+    expect(html).toContain("infra-platform → worker-infra-7 · awaiting claim");
+    expect(html).toContain("Worker claimed item; execution running");
+  });
 });
 
 describe("keyboard shortcuts (#13)", () => {

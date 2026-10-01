@@ -4,6 +4,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   resolve: {
     alias: {
+      "@agent-control-stack/actor-router": fileURLToPath(new URL("./packages/actor-router/src/index.ts", import.meta.url)),
       "@agent-control-stack/vercel-bridge-contract": fileURLToPath(
         new URL("./packages/vercel-bridge-contract/src/index.ts", import.meta.url)
       ),

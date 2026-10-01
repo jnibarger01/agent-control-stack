@@ -31,8 +31,9 @@ must be a positive integer no greater than one hour. The request body is:
 The response is `{ "claimed": false }` when no item is available to that
 worker. A persisted assignment determines which worker may claim; it is
 separate from a lease, which records active execution ownership after a
-successful, policy-checked claim. Unassigned legacy items remain claimable by
-any authenticated worker. Remote MCP claim tooling is not present in this
+successful, policy-checked claim. Unassigned items cannot be claimed through
+the worker HTTP endpoint; route approved items before polling. See
+[`semantic-agent-routing.md`](./semantic-agent-routing.md). Remote MCP claim tooling is not present in this
 checkout. Policy or approval-binding rejection returns HTTP 409 with code
 `worker_claim_blocked`. The executor backend remains process-wide and pull-based.
 

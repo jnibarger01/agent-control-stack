@@ -7,6 +7,7 @@
   },
   "include": ["src/**/*.ts"],
   "references": [
+    { "path": "../../packages/actor-router" },
     { "path": "../../apps/control-ui" },
     { "path": "../../packages/acp-adapter" },
     { "path": "../../packages/evidence" },

@@ -671,8 +671,25 @@ function eventList(events) {
   return '<ol class="detail-events">' + events.slice(0, 8).map(function (event) {
     const attrs = event.attributes || {};
     const ref = attrs['work_item.id'] || attrs['agent.id'] || attrs['connector.id'] || '';
-    return '<li><time>' + escapeClient(eventClientTime(event)) + '</time><strong>' + escapeClient(event.name || 'event') + '</strong><small>' + escapeClient(redactClient(ref)) + '</small></li>';
+    return '<li><time>' + escapeClient(eventClientTime(event)) + '</time><strong>' + escapeClient(event.name || 'event') + '</strong><small>' + escapeClient(redactClient(workItemEventSummary(event.name || '', attrs, ref))) + '</small></li>';
   }).join('') + '</ol>';
+}
+
+function workItemEventSummary(name, attrs, fallback) {
+  if (name === 'agent.routing.candidate_evaluated') {
+    const match = attrs['routing.match'] || 'DEGRADED';
+    return (attrs['agent.id'] || 'candidate') + ' · score ' + (attrs['routing.score'] || '—') + ' · match ' + (match === 'MATCH' ? 'yes' : match === 'NO_MATCH' ? 'no' : 'degraded');
+  }
+  if (name === 'agent.routing.selected' || name === 'work_item.worker_assigned') {
+    return (attrs['agent.id'] || 'agent unavailable') + ' → ' + (attrs['worker.id'] || 'worker unavailable') + ' · awaiting claim';
+  }
+  if (name === 'work_item.running') return 'Worker claimed item; execution running';
+  if (name === 'execution_attempt.created') return 'Execution attempt created; lease active';
+  if (name === 'agent.routing.no_match') return 'No candidate met the semantic threshold';
+  if (name === 'agent.routing.no_eligible_agents') return 'No eligible agent has a dispatchable worker path';
+  if (name === 'agent.routing.degraded') return 'Nimble unavailable or response invalid; item remains retryable';
+  if (name === 'agent.routing.assignment_failed') return 'Selected route could not be assigned';
+  return fallback;
 }
 
 function eventClientTime(event) {

@@ -55,6 +55,11 @@ import {
   type ExecutionAdmissionController
 } from "@agent-control-stack/execution-admission";
 import {
+  dispatchApprovedWorkItem,
+  nimbleDispatchOptionsFromEnv,
+  type NimbleDispatchOptions
+} from "./semantic-dispatch.js";
+import {
   projectAgents,
   renderDashboard,
   renderDashboardFragments,
@@ -317,6 +322,8 @@ export interface GatewayOptions {
   shutdownController?: ShutdownController;
   /** Execution admission controller; tests may inject a deterministic controller. */
   executionAdmission?: ExecutionAdmissionController;
+  /** Nimble semantic routing and explicit agent-to-worker resolution. */
+  nimbleRouting?: NimbleDispatchOptions;
   /**
    * Post-authority JEV observation worker. false disables it explicitly.
    * Otherwise production follows ACS_JEV_ENABLED=1; tests may inject a
@@ -377,6 +384,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const auth = resolvedAuth
     ? { ...resolvedAuth, deviceAccessTokenResolver: (token: string) => deviceAuthStore.authenticateAccessToken(token) }
     : resolvedAuth;
+  const nimbleRouting = { ...(options.nimbleRouting ?? nimbleDispatchOptionsFromEnv()) };
+  nimbleRouting.heartbeatTtlMs ??= heartbeatTtlMs;
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
   const mcpToolAllowlist = resolveMcpToolAllowlist({
@@ -1384,6 +1393,35 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/work-items", { preHandler: requireRead }, async (request, reply) => {
     try {
       return { workItems: tools.list_work_items(listWorkItemsSchema.parse(request.query)) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/routing/dispatch", async (request, reply) => {
+    try {
+      const actorId = requireMutationActor(request, reply, auth);
+      if (!actorId) return;
+      const body = z
+        .object({ workItemId: z.string().min(1).max(128) })
+        .strict()
+        .parse(requestObject(request.body));
+      const workItem = workItems.get(body.workItemId);
+      if (!workItem) return reply.code(404).send({ error: "work item not found", code: "work_item_not_found" });
+      if (workItem.status !== "approved") {
+        return reply
+          .code(409)
+          .send({ error: "only approved work items can be routed", code: "work_item_not_assignable" });
+      }
+      const result = await dispatchApprovedWorkItem({
+        store: workItems,
+        policy,
+        workItem,
+        actorId,
+        options: nimbleRouting,
+        isWorkerDispatchable: (workerId, now) => workerIdentityIsDispatchable(workerId, auth, now)
+      });
+      return reply.code(result.state === "ASSIGNMENT_FAILED" ? 409 : 200).send(result);
     } catch (error) {
       return sendError(reply, error);
     }
@@ -2745,10 +2783,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         .object({ leaseMs: z.number().int().positive().max(3_600_000).optional() })
         .strict()
         .parse(requestObject(request.body));
-      const claim = tools.claim_next_approved_work_item({
-        workerId,
-        ...(body.leaseMs ? { leaseMs: body.leaseMs } : {})
-      });
+      const assigned = workItems
+        .list({ status: "approved" })
+        .filter((item) => workItems.getWorkItemAssignment(item.id)?.selectedWorkerId === workerId)
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))[0];
+      const claim = assigned
+        ? tools.claim_approved_work_item_by_id({
+            id: assigned.id,
+            workerId,
+            ...(body.leaseMs ? { leaseMs: body.leaseMs } : {})
+          })
+        : undefined;
       if (!claim) return { claimed: false };
       if (claim.status !== "running") {
         return reply
@@ -3821,6 +3866,21 @@ function requireWorkerIdentity(
     return undefined;
   }
   return matched.actorId;
+}
+
+function workerIdentityIsDispatchable(workerId: string, auth: GatewayAuthOptions | undefined, now: Date): boolean {
+  if (!auth) return false;
+  if (auth.workerIdentities?.getActive(workerId, now)) return true;
+  return Boolean(
+    auth.credentials?.some(
+      (credential) =>
+        credential.actorId === workerId &&
+        credential.status !== "revoked" &&
+        (!credential.expiresAt || Date.parse(credential.expiresAt) > now.getTime()) &&
+        credential.roles.includes("worker") &&
+        credential.scopes.includes("acs:worker")
+    )
+  );
 }
 
 function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {
