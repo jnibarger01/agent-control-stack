@@ -33,7 +33,7 @@ function adapters(overrides: Partial<AcsAdapters> = {}): AcsAdapters {
       }
     ]),
     runWorkerOnce: vi.fn(async () => ({ executed: false, reason: "no approved work item" })),
-    runSchedulerOnce: vi.fn(async () => ({ firings: [] })),
+    runSchedulerOnce: vi.fn(async () => ({ firings: [], failures: [] })),
     startMcp: vi.fn(),
     startGateway: vi.fn(async () => undefined),
     readStatus: vi.fn(() => ({ health: { ok: true }, audit: { ok: true } })),
@@ -108,6 +108,36 @@ describe("runAcsCli", () => {
     expect(JSON.parse(collected.stdout.trim().split("\n")[0] ?? "")).toEqual({
       executed: false,
       reason: "no approved work item"
+    });
+  });
+
+  it("fails the scheduler command when a schedule reports a failure", async () => {
+    const collected = collectIo();
+    const injected = adapters({
+      runSchedulerOnce: vi.fn(async () => ({
+        firings: [],
+        failures: [
+          {
+            scheduleId: "nightly-repo-scan",
+            scheduledFiringTime: "2026-07-23T00:00:00.000Z",
+            stage: "callback" as const,
+            error: "simulated controller crash"
+          }
+        ]
+      }))
+    });
+
+    expect(await runAcsCli(["scheduler"], collected.io, injected)).toBe(1);
+    expect(JSON.parse(collected.stdout.trim())).toEqual({
+      firings: [],
+      failures: [
+        {
+          scheduleId: "nightly-repo-scan",
+          scheduledFiringTime: "2026-07-23T00:00:00.000Z",
+          stage: "callback",
+          error: "simulated controller crash"
+        }
+      ]
     });
   });
 

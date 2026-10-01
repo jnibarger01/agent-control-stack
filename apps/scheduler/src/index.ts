@@ -96,8 +96,33 @@ export interface SchedulerFiring {
   workItemId?: string;
 }
 
+/**
+ * The step of a firing that threw. Every stage leaves the firing `claimed` and
+ * never `completed`, so a later invocation reclaims it and retries the work
+ * that is still owed (the callback alone once the work item is recorded).
+ */
+export type SchedulerFailureStage = "claim" | "create" | "callback" | "complete";
+
+export interface SchedulerFailure {
+  scheduleId: string;
+  scheduledFiringTime: string;
+  stage: SchedulerFailureStage;
+  error: string;
+  workItemId?: string;
+}
+
 export interface SchedulerResult {
   firings: SchedulerFiring[];
+  /**
+   * One entry per schedule whose firing threw during this invocation.
+   *
+   * A failing schedule is isolated: it never aborts the schedules listed after
+   * it, so every configured schedule is attempted on every invocation. Because
+   * the failed firing stays `claimed`, its own retry semantics are unchanged.
+   * Callers must treat a non-empty list as a failed run (a non-zero exit code):
+   * a schedule that fails silently is a schedule that stops running.
+   */
+  failures: SchedulerFailure[];
 }
 
 /**
@@ -157,6 +182,7 @@ export async function runSchedulerOnce(options: SchedulerOptions = {}): Promise<
 
   try {
     const firings: SchedulerFiring[] = [];
+    const failures: SchedulerFailure[] = [];
 
     for (const schedule of schedules) {
       const scheduledFiringTime = mostRecentScheduledFiring(schedule, now);
@@ -165,66 +191,88 @@ export async function runSchedulerOnce(options: SchedulerOptions = {}): Promise<
       }
 
       const idempotencyKey = scheduledFiringIdempotencyKey(schedule.scheduleId, scheduledFiringTime);
-      // The store's own UNIQUE(schedule_id, scheduled_firing_time) constraint
-      // (storage/migrations/008) is the actual race resolver across
-      // concurrent scheduler invocations - not this application-level
-      // check-then-act sequence, which exists only to decide what *this*
-      // call should do once the store has already settled who owns the firing.
-      const claim = store.claimSchedulerFiring(
-        { scheduleId: schedule.scheduleId, scheduledFiringTime, idempotencyKey, now },
-        { via: "domain_service" }
-      );
+      // Each schedule is attempted in its own try/catch: one schedule whose
+      // firing throws (a store error, a refused work item, a rejecting
+      // controller callback) must not stop the schedules listed after it from
+      // firing on this invocation - the failure is reported instead, and the
+      // caller still fails the run.
+      let stage: SchedulerFailureStage = "claim";
+      let workItemId: string | undefined;
+      try {
+        // The store's own UNIQUE(schedule_id, scheduled_firing_time) constraint
+        // (storage/migrations/008) is the actual race resolver across
+        // concurrent scheduler invocations - not this application-level
+        // check-then-act sequence, which exists only to decide what *this*
+        // call should do once the store has already settled who owns the firing.
+        const claim = store.claimSchedulerFiring(
+          { scheduleId: schedule.scheduleId, scheduledFiringTime, idempotencyKey, now },
+          { via: "domain_service" }
+        );
 
-      if (!claim.owned) {
+        if (!claim.owned) {
+          firings.push({
+            scheduleId: schedule.scheduleId,
+            scheduledFiringTime: scheduledFiringTime.toISOString(),
+            idempotencyKey,
+            created: false,
+            workItemId: claim.firing.workItemId
+          });
+          continue;
+        }
+
+        // A reclaim of a stale firing may already carry the work item created
+        // by a prior attempt that crashed (or whose callback rejected) before
+        // completion - reuse it instead of creating a duplicate. Only a fresh
+        // claim, or a reclaim that never got as far as recording a work item,
+        // creates one now.
+        workItemId = claim.firing.workItemId;
+        if (!workItemId) {
+          stage = "create";
+          const template = schedule.workItemTemplate;
+          const workItem = tools.create_work_item({
+            title: template.title,
+            requester: template.requester,
+            intent: template.intent,
+            target: template.target,
+            requestedActions: template.requestedActions,
+            risk: template.risk
+          });
+          workItemId = workItem.id;
+          store.recordSchedulerFiringWorkItem(claim.firing.firingId, workItemId, { via: "domain_service" });
+        }
+
+        // The firing is only marked 'completed' once the controller callback
+        // has actually succeeded. If this throws (rejection or process
+        // crash), the firing stays in 'claimed' with work_item_id already
+        // recorded, so a later invocation reclaims it and retries the
+        // callback alone rather than losing the handoff or duplicating the
+        // work item.
+        if (options.onWorkItemCreated) {
+          stage = "callback";
+          await options.onWorkItemCreated(workItemId);
+        }
+        stage = "complete";
+        store.completeSchedulerFiring(claim.firing.firingId, workItemId, { via: "domain_service" });
+
         firings.push({
           scheduleId: schedule.scheduleId,
           scheduledFiringTime: scheduledFiringTime.toISOString(),
           idempotencyKey,
-          created: false,
-          workItemId: claim.firing.workItemId
+          created: true,
+          workItemId
         });
-        continue;
-      }
-
-      // A reclaim of a stale firing may already carry the work item created
-      // by a prior attempt that crashed (or whose callback rejected) before
-      // completion - reuse it instead of creating a duplicate. Only a fresh
-      // claim, or a reclaim that never got as far as recording a work item,
-      // creates one now.
-      let workItemId = claim.firing.workItemId;
-      if (!workItemId) {
-        const template = schedule.workItemTemplate;
-        const workItem = tools.create_work_item({
-          title: template.title,
-          requester: template.requester,
-          intent: template.intent,
-          target: template.target,
-          requestedActions: template.requestedActions,
-          risk: template.risk
+      } catch (error) {
+        failures.push({
+          scheduleId: schedule.scheduleId,
+          scheduledFiringTime: scheduledFiringTime.toISOString(),
+          stage,
+          error: error instanceof Error ? error.message : String(error),
+          ...(workItemId === undefined ? {} : { workItemId })
         });
-        workItemId = workItem.id;
-        store.recordSchedulerFiringWorkItem(claim.firing.firingId, workItemId, { via: "domain_service" });
       }
-
-      // The firing is only marked 'completed' once the controller callback
-      // has actually succeeded. If this throws (rejection or process
-      // crash), the firing stays in 'claimed' with work_item_id already
-      // recorded, so a later invocation reclaims it and retries the
-      // callback alone rather than losing the handoff or duplicating the
-      // work item.
-      if (options.onWorkItemCreated) await options.onWorkItemCreated(workItemId);
-      store.completeSchedulerFiring(claim.firing.firingId, workItemId, { via: "domain_service" });
-
-      firings.push({
-        scheduleId: schedule.scheduleId,
-        scheduledFiringTime: scheduledFiringTime.toISOString(),
-        idempotencyKey,
-        created: true,
-        workItemId
-      });
     }
 
-    return { firings };
+    return { firings, failures };
   } finally {
     store.close();
   }

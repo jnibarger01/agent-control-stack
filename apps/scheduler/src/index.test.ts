@@ -243,7 +243,7 @@ describe("runSchedulerOnce", () => {
     });
   });
 
-  it("does not durably complete the firing when the controller callback rejects, and retries the callback (without duplicating the work item) once the claim goes stale", async () => {
+  it("reports a rejecting controller callback as a failure, keeps the firing uncompleted, and retries the callback (without duplicating the work item) once the claim goes stale", async () => {
     await withTempDb(async (dbPath) => {
       const dailySchedule: ScheduleConfig = [
         {
@@ -254,16 +254,23 @@ describe("runSchedulerOnce", () => {
       ];
       const firstAttempt = new Date("2026-07-23T00:01:00.000Z");
 
-      await expect(
-        runSchedulerOnce({
-          dbPath,
-          schedules: dailySchedule,
-          now: firstAttempt,
-          onWorkItemCreated: async () => {
-            throw new Error("simulated controller crash");
-          }
-        })
-      ).rejects.toThrow("simulated controller crash");
+      const crashed = await runSchedulerOnce({
+        dbPath,
+        schedules: dailySchedule,
+        now: firstAttempt,
+        onWorkItemCreated: async () => {
+          throw new Error("simulated controller crash");
+        }
+      });
+      // The callback rejection is reported rather than thrown, so the other
+      // configured schedules are not skipped because of it.
+      expect(crashed.firings).toHaveLength(0);
+      expect(crashed.failures).toHaveLength(1);
+      expect(crashed.failures[0]?.scheduleId).toBe("daily-report");
+      expect(crashed.failures[0]?.stage).toBe("callback");
+      expect(crashed.failures[0]?.error).toBe("simulated controller crash");
+      expect(crashed.failures[0]?.scheduledFiringTime).toBe("2026-07-23T00:00:00.000Z");
+      expect(crashed.failures[0]?.workItemId).toBeDefined();
 
       const afterCrash = new SqliteWorkItemStore(dbPath);
       try {
@@ -286,6 +293,7 @@ describe("runSchedulerOnce", () => {
         }
       });
       expect(tooSoon.firings[0]?.created).toBe(false);
+      expect(tooSoon.failures).toEqual([]);
 
       // Once the claim goes stale (default staleClaimMs is 5 minutes), a
       // retry reclaims the same firing, reuses the already-created work
@@ -308,6 +316,83 @@ describe("runSchedulerOnce", () => {
         expect(items).toHaveLength(1);
         expect(items[0]?.id).toBe(seen[0]);
         expect(items[0]?.id).toBe(retried.firings[0]?.workItemId);
+      } finally {
+        finalStore.close();
+      }
+    });
+  });
+
+  it("keeps firing the schedules listed after a schedule that fails", async () => {
+    await withTempDb(async (dbPath) => {
+      const daily = 24 * 60 * 60 * 1_000;
+      const schedules: ScheduleConfig = [
+        { ...readOnlySchedule[0]!, intervalMs: daily },
+        {
+          ...readOnlySchedule[0]!,
+          intervalMs: daily,
+          scheduleId: "second-scan",
+          workItemTemplate: { ...readOnlySchedule[0]!.workItemTemplate, title: "Second scan" }
+        },
+        {
+          ...readOnlySchedule[0]!,
+          intervalMs: daily,
+          scheduleId: "third-scan",
+          workItemTemplate: { ...readOnlySchedule[0]!.workItemTemplate, title: "Third scan" }
+        }
+      ];
+      const now = new Date("2026-07-23T00:01:00.000Z");
+
+      // The controller callback fails for the first schedule only.
+      const callbackAttempts: string[] = [];
+      const result = await runSchedulerOnce({
+        dbPath,
+        schedules,
+        now,
+        onWorkItemCreated: async (workItemId) => {
+          callbackAttempts.push(workItemId);
+          if (callbackAttempts.length === 1) throw new Error("simulated controller crash");
+        }
+      });
+
+      // The failure is reported, not swallowed - and it does not stop the
+      // schedules listed after it from firing in the same invocation.
+      expect(result.failures.map((failure) => failure.scheduleId)).toEqual(["nightly-repo-scan"]);
+      expect(result.failures[0]?.stage).toBe("callback");
+      expect(result.firings.map((firing) => firing.scheduleId)).toEqual(["second-scan", "third-scan"]);
+      expect(result.firings.every((firing) => firing.created)).toBe(true);
+
+      // The failing schedule's handoff was not lost: its work item exists too.
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(store.list()).toHaveLength(3);
+      } finally {
+        store.close();
+      }
+
+      // Once its claim goes stale (default 5 minutes), only the failed schedule
+      // is retried; the two that already fired are not duplicated.
+      const retriedCallbacks: string[] = [];
+      const retried = await runSchedulerOnce({
+        dbPath,
+        schedules,
+        now: new Date(now.getTime() + 6 * 60 * 1_000),
+        onWorkItemCreated: async (workItemId) => {
+          retriedCallbacks.push(workItemId);
+        }
+      });
+      expect(retried.failures).toEqual([]);
+      expect(retriedCallbacks).toHaveLength(1);
+      expect(retried.firings.map((firing) => firing.scheduleId)).toEqual([
+        "nightly-repo-scan",
+        "second-scan",
+        "third-scan"
+      ]);
+      expect(retried.firings.map((firing) => firing.created)).toEqual([true, false, false]);
+      expect(retried.firings[0]?.workItemId).toBe(result.failures[0]?.workItemId);
+
+      const finalStore = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(finalStore.list()).toHaveLength(3);
       } finally {
         finalStore.close();
       }

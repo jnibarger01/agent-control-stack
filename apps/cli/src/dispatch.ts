@@ -191,7 +191,10 @@ async function executeCommand(command: AcsCommand, io: AcsIo, adapters: AcsAdapt
     case "scheduler": {
       const result = await adapters.runSchedulerOnce();
       io.stdout.write(`${JSON.stringify(result)}\n`);
-      return 0;
+      // Schedules that failed are reported in the result rather than thrown, so
+      // the command still has to fail: an `acs scheduler` unit that exits 0
+      // while a schedule did not fire is a silent outage.
+      return result.failures.length === 0 ? 0 : 1;
     }
     case "mcp":
       adapters.startMcp(command.forwarded);
