@@ -86,7 +86,10 @@ describe("renderDashboard", () => {
     expect(html).not.toContain("No agents or connectors observed.");
     expect(html).not.toContain("No connectors observed.");
     expect(html).not.toContain("JSON.stringify(await res.json(), null, 2)");
-    expect(html).not.toContain("data-approve-all");
+    expect(html).toContain("data-approve-all");
+    expect(html).toContain("Approve all (1)");
+    expect(html).toContain('Reason <span class="req">(optional)</span>');
+    expect(html).not.toContain('data-reason="wrk_test" required');
     expect(html).toContain("Execution Mode");
     expect(html).toContain("Admin / YOLO");
     expect(html).toContain('data-execution-mode="strict"');
@@ -773,7 +776,7 @@ describe("high-risk approval confirm", () => {
     expect(html).toContain("event.key === 'Escape'");
   });
 
-  it("requires a second confirm click before posting high-risk approve; low-risk posts immediately", async () => {
+  it("requires a second confirm click for high-risk approve; low-risk posts without a reason", async () => {
     const highHtml = renderDashboard({
       workItems: [highItem],
       events: [],
@@ -833,8 +836,7 @@ describe("high-risk approval confirm", () => {
     });
     const lowDom = new JSDOM(lowHtml);
     const lowDoc = lowDom.window.document;
-    (lowDoc.querySelector('[data-reason="wrk_low"]') as HTMLInputElement).value = "ok";
-    const lowFetchCalls: string[] = [];
+    const lowFetchCalls: Array<{ url: string; body: string }> = [];
     const lowResult = await handleApprovalActionClick({
       document: lowDoc as unknown as Parameters<typeof handleApprovalActionClick>[0]["document"],
       button: {
@@ -845,13 +847,15 @@ describe("high-risk approval confirm", () => {
         }
       },
       connected: true,
-      fetchImpl: async (url) => {
-        lowFetchCalls.push(url);
+      fetchImpl: async (url, init) => {
+        lowFetchCalls.push({ url, body: init.body });
         return { ok: true, status: 200, json: async () => ({}) };
       }
     });
     expect(lowResult.posted).toBe(true);
-    expect(lowFetchCalls).toEqual(["/work-items/wrk_low/approve"]);
+    expect(lowFetchCalls).toEqual([
+      { url: "/work-items/wrk_low/approve", body: JSON.stringify({ actionHash: "lowhash0123456789" }) }
+    ]);
     expect(lowDoc.getElementById("approval-confirm-dialog")).toBeNull();
   });
 

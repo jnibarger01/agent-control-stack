@@ -85,6 +85,15 @@ function applySseConnectionState(root, connected) {
     const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
     button.disabled = !connected || approveWithoutHash;
   });
+  const pendingApprovalCards = Array.from(root.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"]'));
+  const approvalActionCount = root.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"] [data-approve][data-action-hash]').length;
+  const incompleteApprovals = pendingApprovalCards.some(function (card) {
+    const buttons = Array.from(card.querySelectorAll('[data-approve]'));
+    return buttons.length === 0 || buttons.some(function (button) { return !button.dataset.actionHash; });
+  });
+  root.querySelectorAll('[data-approve-all]').forEach(function (button) {
+    button.disabled = !connected || approvalActionCount === 0 || incompleteApprovals;
+  });
   renderLiveStatus();
 }
 
@@ -1177,6 +1186,108 @@ document.querySelectorAll('[data-execution-mode]').forEach((input) => {
   });
 });
 
+// Bulk approval snapshots only the currently waiting cards. Each action keeps
+// its exact action hash and high/critical actions retain their per-action confirm.
+document.addEventListener('click', async (event) => {
+  const bulkButton = event.target && event.target.closest ? event.target.closest('[data-approve-all]') : null;
+  if (!bulkButton || bulkButton.disabled) return;
+  event.preventDefault();
+  const status = document.querySelector('#action-status');
+  if (!sseConnected) {
+    if (status) status.textContent = 'Disconnected: approvals disabled until reconnect';
+    return;
+  }
+
+  const pendingCards = Array.from(document.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"]'));
+  const approvalButtons = [];
+  const incomplete = pendingCards.some(function (card) {
+    const buttons = Array.from(card.querySelectorAll('[data-approve]'));
+    if (buttons.length === 0 || buttons.some(function (button) { return !button.dataset.actionHash; })) return true;
+    approvalButtons.push.apply(approvalButtons, buttons);
+    return false;
+  });
+  if (incomplete) {
+    if (status) status.textContent = 'Cannot approve all: a waiting item is missing an approval action hash.';
+    return;
+  }
+  if (!approvalButtons.length) {
+    bulkButton.disabled = true;
+    if (status) status.textContent = 'No waiting approvals.';
+    return;
+  }
+
+  bulkButton.disabled = true;
+  let accepted = 0;
+  let failed = 0;
+  let cancelled = 0;
+  for (let index = 0; index < approvalButtons.length; index += 1) {
+    if (!sseConnected) {
+      failed += approvalButtons.length - index;
+      break;
+    }
+    const approvalButton = approvalButtons[index];
+    const id = approvalButton.dataset.approve;
+    const risk = approvalButton.dataset.risk || '';
+    const output = document.querySelector('#approval-result-' + id);
+    if ((risk === 'high' || risk === 'critical') && isElevatedApprovalRisk(risk)) {
+      if (document.getElementById('approval-confirm-dialog')) {
+        cancelled += 1;
+        continue;
+      }
+      const confirmed = await requestApprovalConfirm({
+        workItemId: id,
+        action: 'approve',
+        actionHash: approvalButton.dataset.actionHash,
+        actionKind: approvalButton.dataset.actionKind,
+        risk: risk
+      });
+      if (!confirmed) {
+        cancelled += 1;
+        continue;
+      }
+    }
+
+    const reasonInput = document.querySelector('[data-reason="' + id + '"]');
+    const reason = reasonInput ? reasonInput.value.trim() : '';
+    const payload = { actionHash: approvalButton.dataset.actionHash };
+    if (reason) payload.reason = reason;
+    try {
+      const res = await fetch('/work-items/' + encodeURIComponent(id) + '/approve', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        accepted += 1;
+        if (output) output.textContent = 'approve accepted';
+      } else {
+        failed += 1;
+        if (output) output.textContent = 'Rejected: ' + (body.error || body.code || res.status);
+      }
+    } catch (error) {
+      failed += 1;
+      if (output) output.textContent = 'Request failed: ' + (error && error.message ? error.message : 'network error');
+    }
+  }
+
+  const summary = 'Approve all: ' + accepted + ' of ' + approvalButtons.length + ' action approvals accepted' +
+    (failed ? '; ' + failed + ' failed' : '') + (cancelled ? '; ' + cancelled + ' cancelled' : '');
+  if (status) status.textContent = summary;
+  announce(summary);
+  if (accepted) scheduleDashboardRefresh(0);
+  const refreshedButton = document.querySelector('[data-approve-all]');
+  if (refreshedButton) {
+    const refreshedCards = Array.from(document.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"]'));
+    const remainingActions = document.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"] [data-approve][data-action-hash]').length;
+    const hasIncomplete = refreshedCards.some(function (card) {
+      const buttons = Array.from(card.querySelectorAll('[data-approve]'));
+      return buttons.length === 0 || buttons.some(function (button) { return !button.dataset.actionHash; });
+    });
+    refreshedButton.disabled = !sseConnected || remainingActions === 0 || hasIncomplete;
+  }
+});
+
 // Delegated: approval cards are replaced by live fragment patches.
 document.addEventListener('click', async (event) => {
     const button = event.target && event.target.closest ? event.target.closest('[data-approve],[data-reject],[data-unblock]') : null;
@@ -1192,11 +1303,6 @@ document.addEventListener('click', async (event) => {
     const reasonInput = document.querySelector('[data-reason="' + id + '"]');
     const reason = reasonInput ? reasonInput.value.trim() : '';
     const output = document.querySelector('#approval-result-' + id);
-    if (action !== 'unblock' && !reason) {
-      output.textContent = 'Reason required';
-      if (reasonInput) reasonInput.focus();
-      return;
-    }
     if ((action === 'approve' || action === 'reject') && isElevatedApprovalRisk(risk)) {
       if (document.getElementById('approval-confirm-dialog')) {
         return;
@@ -1211,7 +1317,8 @@ document.addEventListener('click', async (event) => {
       if (!confirmed) return;
     }
     const headers = { 'content-type': 'application/json' };
-    const payload = action === 'unblock' ? {} : { reason };
+    const payload = {};
+    if (reason && action !== 'unblock') payload.reason = reason;
     if (action === 'approve') {
       if (!button.dataset.actionHash) {
         output.textContent = 'Approval action hash unavailable';

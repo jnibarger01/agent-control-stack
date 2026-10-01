@@ -300,8 +300,10 @@ export function approvalsPanel(
   now: Date,
   slaMs: number
 ): string {
-  if (!items.length) return `<p class="empty">No approvals or blocked work.</p>`;
-  return `<div class="approvals-list" role="list">${items
+  const waitingCount = items.filter((item) => item.status === "needs_approval").length;
+  const bulkApproval = `<div class="approval-bulk-actions"><button type="button" data-approve-all${waitingCount ? "" : " disabled"}>Approve all (${waitingCount})</button></div>`;
+  if (!items.length) return `${bulkApproval}<p class="empty">No approvals or blocked work.</p>`;
+  return `${bulkApproval}<div class="approvals-list" role="list">${items
     .map((item) => {
       const actions = item.requestedActions.map((action) => action.kind).join(", ") || "none";
       const approvalSummary =
@@ -311,7 +313,7 @@ export function approvalsPanel(
       const error = workItemResultError(item);
       const reasonId = `reason-${escapeHtml(item.id)}`;
       const resultId = `approval-result-${escapeHtml(item.id)}`;
-      const reason = `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="${reasonId}" data-reason="${escapeHtml(item.id)}" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label>`;
+      const reason = `<label class="reason-field" for="${reasonId}"><span class="reason-label">Reason <span class="req">(optional)</span></span><input id="${reasonId}" data-reason="${escapeHtml(item.id)}" placeholder="Why approve, reject, or unblock" autocomplete="off" /></label>`;
       const outcome = `<output id="${resultId}" class="approval-result" aria-live="polite"></output>`;
       const approvalButtons = approvalButtonsFor(item, approvalActionsByWorkItem[item.id] ?? [], reasonId);
       const wait = waitBadge(item, now, slaMs);

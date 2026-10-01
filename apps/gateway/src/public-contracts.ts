@@ -25,7 +25,7 @@ export const PUBLIC_CONTRACT_VERSION = "1.0.0";
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
 
 export const approvalBodySchema = z.object({
-  reason: z.string().min(1),
+  reason: z.string().min(1).optional(),
   actionHash: z.string().min(1)
 });
 export const cancelBodySchema = z.object({ reason: z.string().min(1).optional() });

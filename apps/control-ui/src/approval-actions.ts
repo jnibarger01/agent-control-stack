@@ -167,11 +167,7 @@ export async function handleApprovalActionClick(options: ApprovalActionClickOpti
   }
   const reasonInput = doc.querySelector('[data-reason="' + id + '"]');
   const reason = reasonInput && typeof reasonInput.value === "string" ? reasonInput.value.trim() : "";
-  if (action !== "unblock" && !reason) {
-    if (output) output.textContent = "Reason required";
-    reasonInput?.focus?.();
-    return { posted: false, error: "reason required" };
-  }
+  // Reasons are optional for approvals, rejections, and unblocks.
 
   if ((action === "approve" || action === "reject") && isElevatedApprovalRisk(risk)) {
     if (doc.getElementById("approval-confirm-dialog")) {
@@ -192,7 +188,8 @@ export async function handleApprovalActionClick(options: ApprovalActionClickOpti
   }
 
   const headers = { "content-type": "application/json" };
-  const payload: Record<string, string> = action === "unblock" ? {} : { reason };
+  const payload: Record<string, string> = {};
+  if (reason && action !== "unblock") payload.reason = reason;
   if (action === "approve") {
     const actionHash = button.dataset.actionHash;
     if (!actionHash) {
