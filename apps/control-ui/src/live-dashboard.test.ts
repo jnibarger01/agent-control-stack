@@ -361,13 +361,33 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
   });
 
   it("clears the composer and refreshes after creating a work item (#7)", async () => {
-    const app = bootLive({ workItems: [], events: [], now: NOW });
+    const app = bootLive(
+      { workItems: [], events: [], now: NOW },
+      {
+        "/agents": () => ({
+          body: {
+            agents: [
+              {
+                id: "codex-cli",
+                displayName: "Codex CLI",
+                kind: "cli",
+                status: "online",
+                health: "healthy",
+                capabilities: ["code:implement"],
+                metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+              }
+            ]
+          }
+        })
+      }
+    );
     app.open();
     await app.advance(2_000);
     app.setPostResponse({ status: 201, body: { id: "wrk_made" } });
     const form = app.document.querySelector("#task-form") as HTMLFormElement;
     (form.querySelector('[name="title"]') as HTMLInputElement).value = "Composer task";
     (form.querySelector('[name="intent"]') as HTMLTextAreaElement).value = "do the thing";
+    (form.querySelector('[name="service"]') as HTMLSelectElement).value = "codex-cli";
     form.dispatchEvent(new app.window.Event("submit", { bubbles: true, cancelable: true }));
     await app.advance(1_500);
 

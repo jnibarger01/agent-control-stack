@@ -20,7 +20,22 @@ function bootComposer(
         const call = app.calls.at(-1);
         previews.push(call?.body);
         return { body: preview(call?.body) };
-      }
+      },
+      "/agents": () => ({
+        body: {
+          agents: [
+            {
+              id: "codex-cli",
+              displayName: "Codex CLI",
+              kind: "cli",
+              status: "online",
+              health: "healthy",
+              capabilities: ["code:implement"],
+              metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+            }
+          ]
+        }
+      })
     }
   );
   const form = app.document.getElementById("task-form") as HTMLFormElement;
