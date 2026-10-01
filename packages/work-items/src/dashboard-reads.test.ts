@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_DASHBOARD_FINISHED_LIMIT,
@@ -173,6 +174,46 @@ describe("batched execution reads", () => {
       expect(reads.listExecutionAttemptsForWorkItems(many).get(withAttempt.id)).toHaveLength(1);
     } finally {
       reads.close();
+    }
+  });
+});
+
+describe("attempt lease reads stay indexed by work item", () => {
+  // Both dashboard lease reads filter on work_item_id. attempt_leases is
+  // append-only and grows with every lease ever issued, so a missing index
+  // turns every Mission Control render and poll into a full-table scan.
+  it("serves the per-item and batched lease reads from an index on work_item_id", () => {
+    const { store, dbPath } = openStore();
+    store.close();
+
+    const db = new DatabaseSync(dbPath);
+    try {
+      const indexes = db
+        .prepare(`SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'attempt_leases'`)
+        .all() as Array<{ name: string }>;
+      expect(indexes.map((row) => row.name)).toContain("idx_attempt_leases_work_item");
+
+      const plans = [
+        db
+          .prepare(
+            `EXPLAIN QUERY PLAN SELECT * FROM attempt_leases WHERE work_item_id = ? ORDER BY issued_at ASC, fencing_epoch ASC`
+          )
+          .all("wrk_1"),
+        db
+          .prepare(
+            `EXPLAIN QUERY PLAN SELECT * FROM attempt_leases WHERE work_item_id IN (?, ?) ORDER BY issued_at ASC, fencing_epoch ASC`
+          )
+          .all("wrk_1", "wrk_2")
+      ] as Array<Array<{ detail: string }>>;
+
+      for (const plan of plans) {
+        const detail = plan.map((row) => row.detail).join(" | ");
+        expect(detail).toContain("idx_attempt_leases_work_item");
+        // "SCAN attempt_leases USING INDEX ..." is still a full index walk.
+        expect(detail).not.toMatch(/SCAN attempt_leases(?! USING INDEX)/);
+      }
+    } finally {
+      db.close();
     }
   });
 });
