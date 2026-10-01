@@ -103,7 +103,7 @@ export interface MissionControlViewModel {
   /** Present when `workItems` carries only a window of finished items. */
   finishedWorkItems?: { shown: number; total: number; limit: number };
   /** Canonical execution mode. Absent when the row is missing or corrupt. */
-  executionMode?: "strict" | "admin";
+  executionMode?: "strict" | "admin" | "full_auto";
   executionModeProblem?: "missing" | "corrupt";
   now?: Date;
 }

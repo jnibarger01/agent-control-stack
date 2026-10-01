@@ -107,8 +107,9 @@ export const cloneBodySchema = z.object({
 
 export const executionModeBodySchema = z
   .object({
-    mode: z.enum(["strict", "admin"]),
-    reason: z.string().min(1).max(512).optional()
+    mode: z.enum(["strict", "admin", "full_auto"]),
+    reason: z.string().min(1).max(512).optional(),
+    expectedRevision: z.number().int().nonnegative().optional()
   })
   .strict();
 

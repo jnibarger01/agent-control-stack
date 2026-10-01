@@ -1,10 +1,10 @@
 import type { PolicyDecision } from "./policy.js";
 
-/** The only two execution-policy states. Missing or any other value is not a mode. */
-export type ExecutionMode = "strict" | "admin";
+/** Canonical execution-policy states. Missing or any other value is not a mode. */
+export type ExecutionMode = "strict" | "admin" | "full_auto";
 
 export type ExecutionModeRead =
-  | { state: "ok"; mode: ExecutionMode; approvalPolicy: "policy" | "auto" }
+  | { state: "ok"; mode: ExecutionMode; approvalPolicy: "policy" | "auto" | "binding" }
   | { state: "missing"; approvalPolicy: "deny" }
   | { state: "corrupt"; approvalPolicy: "deny"; raw: string };
 
@@ -36,6 +36,9 @@ export function readExecutionModeValue(raw: string | null | undefined): Executio
   }
   if (raw === "admin") {
     return { state: "ok", mode: "admin", approvalPolicy: "auto" };
+  }
+  if (raw === "full_auto") {
+    return { state: "ok", mode: "full_auto", approvalPolicy: "binding" };
   }
   return { state: "corrupt", approvalPolicy: "deny", raw };
 }
@@ -111,6 +114,19 @@ export function authorizeUnderExecutionMode(
   }
   if (mode.mode === "strict") {
     return { effect: "unchanged", decision };
+  }
+  // A full-auto row alone is never authority. Until the claim-time binding
+  // verifier is supplied, deny instead of entering the admin approval path.
+  if (mode.mode === "full_auto") {
+    return {
+      effect: "deny",
+      code: "full_auto_binding_required",
+      decision: {
+        decision: "deny",
+        reason: "full-auto execution requires a verified authorization binding",
+        matchedRules: ["deny:full-auto-binding-required"]
+      }
+    };
   }
   if (!authority.ok) {
     return {

@@ -1145,15 +1145,22 @@ export interface WorkItemStore {
   }): StoredAuditEvent;
   /** Read the single canonical execution-mode row. null mode means missing or corrupt. */
   getExecutionMode(): {
-    mode: "strict" | "admin" | null;
+    mode: "strict" | "admin" | "full_auto" | null;
     raw: string | null;
+    revision: number | null;
     updatedAt: string | null;
     updatedBy: string | null;
     reason: string | null;
   };
   /** Persist the canonical execution mode and append an audit event. */
-  setExecutionMode(input: { mode: "strict" | "admin"; updatedBy: string; reason: string }): {
-    mode: "strict" | "admin";
+  setExecutionMode(input: {
+    mode: "strict" | "admin" | "full_auto";
+    updatedBy: string;
+    reason: string;
+    expectedRevision?: number;
+  }): {
+    mode: "strict" | "admin" | "full_auto";
+    revision: number;
     updatedAt: string;
     updatedBy: string;
     reason: string;
@@ -5212,64 +5219,84 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   getExecutionMode(): {
-    mode: "strict" | "admin" | null;
+    mode: "strict" | "admin" | "full_auto" | null;
     raw: string | null;
+    revision: number | null;
     updatedAt: string | null;
     updatedBy: string | null;
     reason: string | null;
   } {
     const row = this.db
-      .prepare(`SELECT mode, updated_at, updated_by, reason FROM execution_mode_state WHERE id = 1`)
-      .get() as { mode?: string; updated_at?: string; updated_by?: string; reason?: string } | undefined;
+      .prepare(`SELECT mode, revision, updated_at, updated_by, reason FROM execution_mode_state WHERE id = 1`)
+      .get() as { mode?: string; revision?: number; updated_at?: string; updated_by?: string; reason?: string } | undefined;
     if (!row || typeof row.mode !== "string") {
-      return { mode: null, raw: null, updatedAt: null, updatedBy: null, reason: null };
+      return { mode: null, raw: null, revision: null, updatedAt: null, updatedBy: null, reason: null };
     }
-    const mode = row.mode === "strict" || row.mode === "admin" ? row.mode : null;
+    const mode = row.mode === "strict" || row.mode === "admin" || row.mode === "full_auto" ? row.mode : null;
     return {
       mode,
       raw: row.mode,
+      revision: Number.isSafeInteger(row.revision) && (row.revision as number) >= 0 ? (row.revision ?? null) : null,
       updatedAt: typeof row.updated_at === "string" ? row.updated_at : null,
       updatedBy: typeof row.updated_by === "string" ? row.updated_by : null,
       reason: typeof row.reason === "string" ? row.reason : null
     };
   }
 
-  setExecutionMode(input: { mode: "strict" | "admin"; updatedBy: string; reason: string }): {
-    mode: "strict" | "admin";
+  setExecutionMode(input: {
+    mode: "strict" | "admin" | "full_auto";
+    updatedBy: string;
+    reason: string;
+    expectedRevision?: number;
+  }): {
+    mode: "strict" | "admin" | "full_auto";
+    revision: number;
     updatedAt: string;
     updatedBy: string;
     reason: string;
   } {
     return this.write(() => {
-      if (input.mode !== "strict" && input.mode !== "admin") {
-        throw new ControlStackError("execution_mode_invalid", "execution mode must be strict or admin");
+      if (input.mode !== "strict" && input.mode !== "admin" && input.mode !== "full_auto") {
+        throw new ControlStackError("execution_mode_invalid", "execution mode must be strict, admin, or full_auto");
+      }
+      if (input.expectedRevision !== undefined && (!Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 0)) {
+        throw new ControlStackError("execution_mode_revision_invalid", "expected execution mode revision must be a non-negative integer");
       }
       const updatedBy = requiredString(input.updatedBy, "updatedBy");
       const reason = requiredString(input.reason, "reason");
       const updatedAt = new Date().toISOString();
-      this.db
+      const current = this.db.prepare(`SELECT revision FROM execution_mode_state WHERE id = 1`).get() as
+        | { revision?: number }
+        | undefined;
+      const currentRevision = current?.revision;
+      if (!Number.isSafeInteger(currentRevision) || (currentRevision as number) < 0) {
+        throw new ControlStackError("execution_mode_corrupt", "canonical execution mode is missing or corrupt");
+      }
+      const expectedRevision = input.expectedRevision ?? (currentRevision as number);
+      const result = this.db
         .prepare(
-          `INSERT INTO execution_mode_state (id, mode, updated_at, updated_by, reason)
-           VALUES (1, ?, ?, ?, ?)
-           ON CONFLICT(id) DO UPDATE SET
-             mode = excluded.mode,
-             updated_at = excluded.updated_at,
-             updated_by = excluded.updated_by,
-             reason = excluded.reason`
+          `UPDATE execution_mode_state
+           SET mode = ?, updated_at = ?, updated_by = ?, reason = ?, revision = revision + 1
+           WHERE id = 1 AND revision = ?`
         )
-        .run(input.mode, updatedAt, updatedBy, reason);
+        .run(input.mode, updatedAt, updatedBy, reason, expectedRevision) as { changes: number };
+      if (result.changes !== 1) {
+        throw new ControlStackError("execution_mode_revision_conflict", "execution mode revision changed; read and retry");
+      }
+      const revision = expectedRevision + 1;
       const event = this.appendAuditEvent(
         createEvent(
           "execution_mode.changed",
-          { mode: input.mode, updatedBy, reason },
+          { mode: input.mode, updatedBy, reason, revision },
           {
             "execution_mode.mode": input.mode,
-            "execution_mode.actor": updatedBy
+            "execution_mode.actor": updatedBy,
+            "execution_mode.revision": revision
           }
         )
       );
       return {
-        value: { mode: input.mode, updatedAt, updatedBy, reason },
+        value: { mode: input.mode, revision, updatedAt, updatedBy, reason },
         events: [event]
       };
     });

@@ -19,11 +19,12 @@ function withStore(run: (store: SqliteWorkItemStore, dbPath: string) => void): v
 }
 
 describe("canonical execution mode store", () => {
-  it("defaults to strict from migration 027", () => {
+  it("defaults to strict with revision zero after migration 037", () => {
     withStore((store) => {
       expect(store.getExecutionMode()).toEqual({
         mode: "strict",
         raw: "strict",
+        revision: 0,
         updatedAt: "1970-01-01T00:00:00.000Z",
         updatedBy: "system",
         reason: "default strict"
@@ -38,7 +39,7 @@ describe("canonical execution mode store", () => {
       expect(store.getExecutionMode()).toMatchObject({ mode: "admin", raw: "admin", updatedBy: "operator" });
       const changed = store.readEvents().at(-1);
       expect(changed?.name).toBe("execution_mode.changed");
-      expect(changed?.body).toEqual({ mode: "admin", updatedBy: "operator", reason: "maintenance window" });
+      expect(changed?.body).toEqual({ mode: "admin", updatedBy: "operator", reason: "maintenance window", revision: 1 });
 
       store.setExecutionMode({ mode: "strict", updatedBy: "operator", reason: "window closed" });
       expect(store.getExecutionMode()).toMatchObject({ mode: "strict", reason: "window closed" });
@@ -71,10 +72,24 @@ describe("canonical execution mode store", () => {
       expect(store.getExecutionMode()).toEqual({
         mode: null,
         raw: null,
+        revision: null,
         updatedAt: null,
         updatedBy: null,
         reason: null
       });
+    });
+  });
+
+  it("uses the revision as an atomic compare-and-swap fence", () => {
+    withStore((store) => {
+      expect(store.setExecutionMode({ mode: "full_auto", updatedBy: "operator", reason: "enable", expectedRevision: 0 })).toMatchObject({
+        revision: 1
+      });
+      expect(() => store.setExecutionMode({ mode: "strict", updatedBy: "operator", reason: "stale", expectedRevision: 0 })).toThrow(
+        /revision changed/u
+      );
+      expect(store.getExecutionMode()).toMatchObject({ mode: "full_auto", revision: 1 });
+      expect(store.readEvents().filter((event) => event.name === "execution_mode.changed")).toHaveLength(1);
     });
   });
 

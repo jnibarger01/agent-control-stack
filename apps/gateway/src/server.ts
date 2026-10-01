@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { ServerResponse } from "node:http";
 import {
   acpAdapterConfigFromEnv,
@@ -207,6 +208,8 @@ const sessionCookiePayloadSchema = z.object({
 const gatewayCredentialSchema = z.object({
   id: z.string().min(1),
   token: z.string().min(32),
+  /** Credential-registry provenance. Required for owner-mode matching. */
+  issuer: z.string().min(1).max(256).optional(),
   actor: z.string().min(1),
   actorId: z.string().min(1),
   roles: z.array(z.enum(["operator", "service", "worker"])).min(1),
@@ -216,6 +219,25 @@ const gatewayCredentialSchema = z.object({
   status: z.enum(["active", "revoked"]).optional()
 });
 export type GatewayCredential = z.infer<typeof gatewayCredentialSchema>;
+const ownerPrincipalSchema = z
+  .object({
+    schemaVersion: z.literal("acs.full-auto-owner.v1"),
+    issuer: z.string().min(1).max(256),
+    subject: z.string().min(1).max(256),
+    actorId: z.string().min(1).max(256),
+    requiredRole: z.literal("operator"),
+    requiredScopes: z.array(z.enum(["acs:write", "acs:approve"])).length(2)
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if (value.subject !== value.actorId) {
+      context.addIssue({ code: "custom", message: "subject must equal actorId" });
+    }
+    if (new Set(value.requiredScopes).size !== 2) {
+      context.addIssue({ code: "custom", message: "requiredScopes must not contain duplicates" });
+    }
+  });
+type OwnerPrincipal = z.infer<typeof ownerPrincipalSchema>;
 export interface GatewayAuthOptions {
   token: string;
   actor: string;
@@ -256,6 +278,8 @@ export interface GatewayOptions {
   heartbeatTtlMs?: number;
   logger?: boolean;
   auth?: GatewayAuthOptions;
+  /** Deployment-owned immutable owner identity file; absent disables full_auto mutation. */
+  ownerPrincipalFile?: string;
   mcpAuth?: McpAuthOptions;
   mcpOAuth?: McpOAuthOptions;
   mcpAllowedOrigins?: string[];
@@ -377,6 +401,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const auth = resolvedAuth
     ? { ...resolvedAuth, deviceAccessTokenResolver: (token: string) => deviceAuthStore.authenticateAccessToken(token) }
     : resolvedAuth;
+  // This snapshot is deliberately read once at startup. A mutable file must
+  // never race a mode mutation or become an environment-only mode switch.
+  const ownerPrincipal = loadOwnerPrincipal(options.ownerPrincipalFile ?? process.env.ACS_OWNER_PRINCIPAL_FILE);
   const mcpAuth = resolveMcpAuth(options, workItems);
   const mcpAllowedOrigins = resolveMcpAllowedOrigins(options);
   const mcpToolAllowlist = resolveMcpToolAllowlist({
@@ -852,10 +879,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         const actor = requireMutationActor(request, reply, auth);
         if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
+        const currentMode = workItems.getExecutionMode().mode;
+        if (body.mode === "full_auto" || (body.mode === "strict" && currentMode === "full_auto")) {
+          if (!requireOwnerModeMutation(request, reply, auth, ownerPrincipal)) return;
+        }
         workItems.setExecutionMode({
           mode: body.mode,
           updatedBy: actor,
-          reason: body.reason ?? `operator set ${body.mode}`
+          reason: body.reason ?? `operator set ${body.mode}`,
+          ...(body.expectedRevision === undefined ? {} : { expectedRevision: body.expectedRevision })
         });
         return executionModeView();
       } catch (error) {
@@ -3627,6 +3659,44 @@ function requireMutationActor(
     return undefined;
   }
   return mutationActorForCredential(credential);
+}
+
+function loadOwnerPrincipal(path: string | undefined): OwnerPrincipal | undefined {
+  if (!path) return undefined;
+  try {
+    return ownerPrincipalSchema.parse(JSON.parse(readFileSync(path, "utf8")));
+  } catch {
+    // Deliberately do not expose a path, parser details, or file contents.
+    return undefined;
+  }
+}
+
+function requireOwnerModeMutation(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined,
+  owner: OwnerPrincipal | undefined
+): boolean {
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (!credential) {
+    reply.code(401).send({ error: "unauthorized" });
+    return false;
+  }
+  const ownerMatch =
+    owner !== undefined &&
+    credential.issuer === owner.issuer &&
+    credential.actorId === owner.actorId &&
+    credential.actorId === owner.subject &&
+    credential.roles.includes("operator") &&
+    !credential.roles.includes("service") &&
+    !credential.roles.includes("worker") &&
+    credential.scopes.includes("acs:write") &&
+    credential.scopes.includes("acs:approve");
+  if (!ownerMatch) {
+    reply.code(403).send({ error: "configured owner authority is required", code: "execution_mode_owner_required" });
+    return false;
+  }
+  return true;
 }
 
 export function gatewayCredentialCanMutate(credential: GatewayCredential): boolean {
