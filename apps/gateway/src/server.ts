@@ -1055,10 +1055,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const credential = gatewayCredentialForRequest(request, auth);
       reply.header("cache-control", "no-store");
-      return previewWorkItemPolicy(policy, {
+      const previewInput = createWorkItemSchema.parse({
         ...requestObject(request.body),
         requester: credential ? requesterForCredential(credential) : "user"
       });
+      assertRegisteredAgentPromptTargets(workItems, previewInput);
+      return previewWorkItemPolicy(policy, previewInput);
     } catch (error) {
       return sendError(reply, error);
     }
@@ -1516,13 +1518,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
       const credential = gatewayCredentialForRequest(request, auth);
       if (!credential) return reply.code(401).send({ error: "unauthorized" });
-      const workItem = tools.create_work_item(
-        createWorkItemSchema.parse({
-          ...requestObject(request.body),
-          requester: requesterForCredential(credential),
-          requesterSubject: actor
-        })
-      );
+      const createInput = createWorkItemSchema.parse({
+        ...requestObject(request.body),
+        requester: requesterForCredential(credential),
+        requesterSubject: actor
+      });
+      assertRegisteredAgentPromptTargets(workItems, createInput);
+      const workItem = tools.create_work_item(createInput);
       return reply.code(201).send(workItem);
     } catch (error) {
       return sendError(reply, error);
@@ -3099,6 +3101,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   return app;
+}
+
+function assertRegisteredAgentPromptTargets(
+  store: Pick<SqliteWorkItemStore, "getRegistryAgent">,
+  input: Pick<WorkItem, "target" | "requestedActions">
+): void {
+  if (!input.requestedActions.some((action) => action.kind === "agent.prompt")) return;
+  for (const agentId of input.target.services ?? []) {
+    if (!store.getRegistryAgent(agentId)) {
+      throw new ControlStackError("agent_target_not_registered", `agent target is not registered: ${agentId}`);
+    }
+  }
 }
 
 function sendError(reply: FastifyReply, error: unknown) {

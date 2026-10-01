@@ -359,10 +359,24 @@ function bindAgentRows() {
   });
 }
 
+function refreshComposerAgentOptions(agents) {
+  const select = document.querySelector('#task-form select[name="service"]');
+  if (!select) return;
+  const current = select.value;
+  const registered = agents.filter(function (agent) {
+    return agent && agent.metadata && agent.metadata.registered === 'true';
+  });
+  select.innerHTML = '<option value="">Choose an agent</option>' + registered.map(function (agent) {
+    return '<option value="' + escapeClient(agent.id) + '">' + escapeClient(agent.displayName || agent.id) + '</option>';
+  }).join('');
+  if (registered.some(function (agent) { return agent.id === current; })) select.value = current;
+}
+
 async function refreshAgentRoster() {
   try {
     const body = await fetchJson('/agents');
     const agents = Array.isArray(body.agents) ? body.agents : [];
+    refreshComposerAgentOptions(agents);
     const count = document.querySelector('#agent-count');
     if (count) count.textContent = agents.length + ' registered';
     renderAgentTable(agents);

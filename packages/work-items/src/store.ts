@@ -4954,6 +4954,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  private registeredAgentTargets(workItem: WorkItem): string[] {
+    return (workItem.target.services ?? []).filter((serviceId) => this.getRegistryAgent(serviceId) !== undefined);
+  }
+
+  private assertWorkerMatchesRegisteredAgentTarget(workItem: WorkItem, workerId: string): void {
+    const targetedAgents = this.registeredAgentTargets(workItem);
+    if (targetedAgents.length > 0 && !targetedAgents.includes(workerId)) {
+      throw new ControlStackError(
+        "worker_target_mismatch",
+        `worker ${workerId} is not an assigned registered agent for work item ${workItem.id}`
+      );
+    }
+  }
+
   private assertAdminApprovalModeFence(workItemId: string, options: ClaimOptions): void {
     const authority = options.attemptAuthority;
     const actorId = options.adminApprovalActorId;
@@ -5018,6 +5032,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
 
       const current = rowToWorkItem(row);
+      this.assertWorkerMatchesRegisteredAgentTarget(current, workerId);
       if (options.attemptAuthority) {
         this.assertAdminApprovalModeFence(current.id, options);
         return this.claimAttemptAuthoritatively(current, workerId, options);
@@ -5244,6 +5259,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
 
       const current = rowToWorkItem(row);
+      this.assertWorkerMatchesRegisteredAgentTarget(current, workerId);
       const actualActionHash = executionActionHash(current);
       if (actualActionHash !== expectedActionHash) {
         throw new ControlStackError(

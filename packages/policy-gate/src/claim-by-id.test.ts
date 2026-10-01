@@ -205,6 +205,48 @@ describe("gateWorkerClaimById (claim_approved_work_item_by_id)", () => {
     }
   });
 
+  it("binds registered agent targets to the matching worker at claim time", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-target-claim-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+
+    try {
+      expect(store.getRegistryAgent("codex-cli")).toBeDefined();
+      expect(store.getRegistryAgent("claude-code")).toBeDefined();
+
+      const codex = tools.create_work_item({
+        title: "Codex target",
+        requester: "user",
+        intent: "dispatch only to codex",
+        target: { services: ["codex-cli"] },
+        requestedActions: [{ kind: "agent.prompt", description: "dispatch", params: {} }],
+        risk: "medium"
+      });
+      const claude = tools.create_work_item({
+        title: "Claude target",
+        requester: "user",
+        intent: "dispatch only to claude",
+        target: { services: ["claude-code"] },
+        requestedActions: [{ kind: "agent.prompt", description: "dispatch", params: {} }],
+        risk: "medium"
+      });
+      expect(codex.status).toBe("approved");
+      expect(claude.status).toBe("approved");
+
+      expect(() =>
+        tools.claim_approved_work_item_by_id({ id: codex.id, workerId: "claude-code" })
+      ).toThrowError(expect.objectContaining({ code: "worker_target_mismatch" }));
+      expect(store.get(codex.id)?.status).toBe("approved");
+
+      const claimed = tools.claim_next_approved_work_item({ workerId: "claude-code" });
+      expect(claimed?.id).toBe(claude.id);
+      expect(store.get(codex.id)?.status).toBe("approved");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("atomically fences an admin-approved claim to canonical admin mode", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-claim-by-id-admin-fence-"));
     const dbPath = join(dir, "control.db");

@@ -51,7 +51,7 @@ describe("renderDashboard", () => {
     expect(html).toContain("ACS Mission Control");
     expect(html).toContain("Inspect me");
     expect(html).toContain("Live state comes from the registry");
-    expect(html).toContain("New Task Composer");
+    expect(html).toContain("Create task");
     expect(html).toContain("authenticated session");
     expect(html).not.toContain("ACS_GATEWAY_TOKEN");
     expect(html).toContain("agent.prompt");
