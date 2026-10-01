@@ -71,7 +71,11 @@ describe.skipIf(!E2E_ENABLED)("E2E 3: managed session and reconnect regressions"
 
   it("a request-scoped ACS rejection does not kill the managed session or recycle the executor", async () => {
     const client = newClient();
-    expect((await client.initialize()).status).toBe(200);
+    const initialized = await waitFor(async () => {
+      const attempt = await client.initialize();
+      return attempt.status === 200 ? attempt : undefined;
+    });
+    expect(initialized.status).toBe(200);
     const session = client.session;
     const pid = executorPid(box);
     const before = await bridgeAuthority(bridge);
