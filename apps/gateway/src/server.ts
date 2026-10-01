@@ -849,9 +849,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       try {
-        const actor = requireMutationActor(request, reply, auth);
-        if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
+        // Strict is the fail-safe direction and remains available to ordinary
+        // mutation principals. Every non-strict target relaxes authorization
+        // and therefore requires the dedicated execution-mode capability.
+        const actor =
+          body.mode === "strict"
+            ? requireMutationActor(request, reply, auth)
+            : requireExecutionModeAdministratorActor(request, reply, auth);
+        if (!actor) return;
         workItems.setExecutionMode({
           mode: body.mode,
           updatedBy: actor,
@@ -3631,6 +3637,44 @@ function requireMutationActor(
   }
   if (!credential.scopes.includes(requiredScope)) {
     reply.code(403).send({ error: `${requiredScope} scope is required`, code: "insufficient_gateway_scope" });
+    return undefined;
+  }
+  return mutationActorForCredential(credential);
+}
+
+/**
+ * Global execution-mode changes can remove human approval from future work.
+ * They require a separately granted scope on a human operator credential;
+ * acs:approve is limited to approving individual bounded actions.
+ */
+function requireExecutionModeAdministratorActor(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  if (!auth) {
+    reply.code(503).send({ error: "mutation auth is not configured" });
+    return undefined;
+  }
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (!credential) {
+    reply.code(401).send({ error: "unauthorized" });
+    return undefined;
+  }
+  if (
+    (credential.actor !== "user" && credential.actor !== "operator") ||
+    !credential.roles.includes("operator") ||
+    credential.roles.includes("service") ||
+    credential.roles.includes("worker")
+  ) {
+    reply.code(403).send({ error: "human operator credential is required", code: "execution_mode_admin_required" });
+    return undefined;
+  }
+  if (!credential.scopes.includes("acs:write") || !credential.scopes.includes("acs:execution-mode:admin")) {
+    reply.code(403).send({
+      error: "acs:execution-mode:admin scope is required",
+      code: "insufficient_gateway_scope"
+    });
     return undefined;
   }
   return mutationActorForCredential(credential);
