@@ -12,6 +12,7 @@
     }
   },
   "dependencies": {
+    "@agent-control-stack/actor-router": "0.1.0",
     "@agent-control-stack/engine-adapter": "0.1.0",
     "@agent-control-stack/procedural-learning": "0.1.0",
     "@agent-control-stack/result-validation": "0.1.0",

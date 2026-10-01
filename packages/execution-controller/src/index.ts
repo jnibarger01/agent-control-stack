@@ -7,10 +7,26 @@ import type {
   IssueLeaseInput,
   PrivilegedTransitionOptions,
   TransitionAttemptInput,
-  WorkItemStore
+  WorkItemStore,
+  type RegistryAgentDetail
 } from "@agent-control-stack/work-items";
-import type { EngineAdapter, EngineOutcome, EngineTask } from "@agent-control-stack/engine-adapter";
-import { ExecutionLearningBridge, type InjectedSkill, type ProceduralLearning } from "@agent-control-stack/procedural-learning";
+import {
+  EngineAdapterRegistry,
+  type EngineAdapter,
+  type EngineOutcome,
+  type EngineTask
+} from "@agent-control-stack/engine-adapter";
+import {
+  routeAndPersistActor,
+  type ActorRoutingInput,
+  type ActorRoutingJevShadowOptions,
+  type ActorRoutingDecision
+} from "@agent-control-stack/actor-router";
+import {
+  ExecutionLearningBridge,
+  type InjectedSkill,
+  type ProceduralLearning
+} from "@agent-control-stack/procedural-learning";
 import type { Workspace, WorkspaceManager } from "@agent-control-stack/workspace-manager";
 import { ResultValidator, type ValidationInput, type ValidationResult } from "@agent-control-stack/result-validation";
 import { createHash } from "node:crypto";
@@ -56,7 +72,12 @@ export interface ExecutionControllerOptions {
    * that treats an agent's exit code as the final word.
    */
   validator: ResultValidator;
-  buildValidationInput: (input: { outcome: EngineOutcome; workspace: Workspace; attempt: ExecutionAttempt; plan: ExecutionPlanRecord }) => ValidationInput;
+  buildValidationInput: (input: {
+    outcome: EngineOutcome;
+    workspace: Workspace;
+    attempt: ExecutionAttempt;
+    plan: ExecutionPlanRecord;
+  }) => ValidationInput;
   now?: () => Date;
   learning?: ProceduralLearning;
   describeWorkItem?: (workItemId: string) => {
@@ -166,7 +187,9 @@ export class ExecutionController {
       retrievedSkills = prepared.retrievedSkills;
       if (retrievedSkills.length > 0) {
         const guidance = retrievedSkills
-          .map((skill) => `${skill.skillId}@${skill.version} confidence=${skill.confidence}\n${skill.guidance.join("\n")}`)
+          .map(
+            (skill) => `${skill.skillId}@${skill.version} confidence=${skill.confidence}\n${skill.guidance.join("\n")}`
+          )
           .join("\n\n");
         task = {
           ...task,
@@ -263,7 +286,14 @@ export class ExecutionController {
         validationPassed: validation?.passed
       });
     }
-    return { attempt: terminalAttempt, lease, workspace, outcome, ...(validation ? { validation } : {}), ...(retrievedSkills.length ? { retrievedSkills } : {}) };
+    return {
+      attempt: terminalAttempt,
+      lease,
+      workspace,
+      outcome,
+      ...(validation ? { validation } : {}),
+      ...(retrievedSkills.length ? { retrievedSkills } : {})
+    };
   }
 }
 
@@ -294,4 +324,150 @@ function planAllowedWritePaths(plan: ExecutionPlanRecord): string[] {
 
 export function executionControllerInputHash(workItemId: string, planHash: string): string {
   return createHash("sha256").update(`acs.execution-controller:${workItemId}:${planHash}`).digest("hex");
+}
+
+export const DEFAULT_ACTOR_ENGINE_ADAPTER_IDS: Readonly<Record<string, string>> = Object.freeze({
+  "codex-cli": "codex",
+  "claude-code": "claude",
+  "gemini-cli": "gemini",
+  "opencode-local": "opencode",
+  "grok-cli": "grok",
+  "pi-cli": "pi"
+});
+
+export type RoutedExecutionControllerStore = ExecutionControllerStore &
+  Pick<
+    WorkItemStore,
+    | "get"
+    | "listRegistryAgents"
+    | "getActorReliability"
+    | "recordActorRoutingDecision"
+    | "recordActorRoutingShadowObservation"
+  >;
+
+export interface RoutedExecutionOptions extends Pick<
+  ActorRoutingInput,
+  "requiredCapabilities" | "requiredRole" | "taskType" | "heartbeatTtlMs" | "freeCapacity" | "estimatedCost"
+> {
+  actorToEngineAdapterId?: Readonly<Record<string, string>>;
+  policyEligible?: (agent: RegistryAgentDetail) => boolean;
+  jevShadow?: ActorRoutingJevShadowOptions;
+}
+
+export interface RoutedExecutionControllerOptions extends Omit<ExecutionControllerOptions, "store" | "engine"> {
+  store: RoutedExecutionControllerStore;
+  engineRegistry: EngineAdapterRegistry;
+  routing: RoutedExecutionOptions;
+}
+
+export interface RoutedExecutionSelection {
+  decision: ActorRoutingDecision;
+  decisionId: string;
+  actorId: string;
+  engineId: string;
+}
+
+export interface RoutedExecutionControllerResult extends ExecutionControllerResult {
+  routing: RoutedExecutionSelection;
+}
+
+/**
+ * Deterministic actor selection for the execution-controller boundary.
+ * Only actors with a registered engine adapter can be selected. The route is
+ * persisted before ExecutionController creates an attempt/lease. JEV remains
+ * an asynchronous comparison observer and cannot alter the selected engine.
+ */
+export class RoutedExecutionController {
+  constructor(private readonly options: RoutedExecutionControllerOptions) {}
+
+  async execute(workItemId: string, signal?: AbortSignal): Promise<RoutedExecutionControllerResult> {
+    const { store, routing, engineRegistry } = this.options;
+    const workItem = store.get(workItemId);
+    if (!workItem) throw new Error("work item not found: " + workItemId);
+    const plan = store.getCurrentExecutionPlan(workItemId);
+    if (!plan) throw new Error("execution plan is required for work item " + workItemId);
+
+    const actorToEngineAdapterId = routing.actorToEngineAdapterId ?? DEFAULT_ACTOR_ENGINE_ADAPTER_IDS;
+    const agents = store.listRegistryAgents();
+    const successRate: Record<string, number> = {};
+    for (const agent of agents) {
+      const reliability = store.getActorReliability(agent.id);
+      if (!reliability) continue;
+      const total = reliability.successCount + reliability.failureCount;
+      if (total > 0) successRate[agent.id] = reliability.successCount / total;
+    }
+
+    const persistedRoute = routeAndPersistActor(
+      agents,
+      {
+        requiredCapabilities: [...routing.requiredCapabilities],
+        ...(routing.requiredRole ? { requiredRole: routing.requiredRole } : {}),
+        ...(routing.taskType ? { taskType: routing.taskType } : {}),
+        ...(routing.heartbeatTtlMs ? { heartbeatTtlMs: routing.heartbeatTtlMs } : {}),
+        ...(routing.freeCapacity ? { freeCapacity: routing.freeCapacity } : {}),
+        ...(routing.estimatedCost ? { estimatedCost: routing.estimatedCost } : {}),
+        ...(Object.keys(successRate).length > 0 ? { successRate } : {}),
+        policyEligible: (agent) => {
+          const engineId = actorToEngineAdapterId[agent.id];
+          if (!engineId || !engineRegistry.get(engineId)) return false;
+          return routing.policyEligible ? routing.policyEligible(agent) : true;
+        },
+        now: this.options.now?.() ?? new Date(),
+        workItemId,
+        idempotencyKey: executionControllerRoutingIdempotencyKey(workItemId, plan.planHash),
+        jevShadow: {
+          goal: routingGoal(workItem),
+          options: routing.jevShadow
+        }
+      },
+      store,
+      { via: "domain_service" }
+    );
+
+    const actorId = persistedRoute.decision.selected;
+    if (!actorId) {
+      throw new Error("no eligible execution actor for work item " + workItemId);
+    }
+    const engineId = actorToEngineAdapterId[actorId];
+    if (!engineId) {
+      throw new Error("selected actor " + actorId + " has no engine adapter binding");
+    }
+    const engine = engineRegistry.require(engineId);
+
+    const controller = new ExecutionController({
+      ...this.options,
+      store,
+      engine
+    });
+    const result = await controller.execute(workItemId, signal);
+    return {
+      ...result,
+      routing: {
+        decision: persistedRoute.decision,
+        decisionId: persistedRoute.persisted.decisionId,
+        actorId,
+        engineId
+      }
+    };
+  }
+}
+
+export function executionControllerRoutingIdempotencyKey(workItemId: string, planHash: string): string {
+  return createHash("sha256")
+    .update("acs.execution-controller-route.v1:" + workItemId + ":" + planHash)
+    .digest("hex");
+}
+
+function routingGoal(workItem: {
+  title: string;
+  intent: string;
+  requestedActions: Array<{ kind: string; description: string }>;
+}): string {
+  const actions = workItem.requestedActions
+    .slice(0, 16)
+    .map((action) => action.kind + ": " + action.description)
+    .join("\n");
+  return actions.length > 0
+    ? workItem.title + "\n" + workItem.intent + "\nRequested actions:\n" + actions
+    : workItem.title + "\n" + workItem.intent;
 }

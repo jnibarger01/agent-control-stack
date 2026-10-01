@@ -1,9 +1,11 @@
 # ACS autonomous execution control plane progress
 
 ## Milestone
+
 Implement the first verified ACS execution path: approved work item -> authoritative attempt/lease/fenced workspace -> sandboxed engine -> independent validation -> durable result/audit -> cleanup, with no automatic merge/deploy.
 
 ## Repository findings
+
 - Canonical checkout: `~/projects/agent-control-stack`, branch `feat/webhook-ingress-generic`.
 - `SqliteWorkItemStore` already owns execution plans, attempts, attempt leases, workspace allocations, result submission, actor registry, heartbeats, scheduler firings, and audit events.
 - `WorkspaceManager` already enforces persisted attempt-scoped allocation ownership and fenced cleanup.
@@ -12,8 +14,9 @@ Implement the first verified ACS execution path: approved work item -> authorita
 - Existing execution plans are constrained to `dry_run`, `network:none`, local Git, and no push; the first implementation slice must extend these contracts deliberately rather than bypassing them.
 
 ## Implementation order
+
 1. **DONE (focused slice)** — execution-controller kernel and attempt lifecycle transition API. SQLite-backed controller test passes; result remains pending independent validation.
-2. **DONE (routing slice)** — deterministic actor router plus migration-backed, audited, idempotent routing decisions and reliability counters. Controller selection wiring remains TODO.
+2. **DONE (routing + controller-selection slices)** — deterministic actor router plus migration-backed, audited, idempotent routing decisions and reliability counters. RoutedExecutionController now resolves only deterministically eligible registry actors with registered engine adapters, persists the selected route, and delegates attempt/lease/workspace/validation authority to ExecutionController; production worker adoption remains TODO.
 3. **DONE (adapter boundary slice)** — common CLI adapter/registry plus Claude/Gemini/Grok/OpenCode/Pi classes through `EngineIsolation`; provider integration and registry wiring remain TODO.
 4. **DONE (validation slice)** — independent validator rejects forbidden paths and failed checks; validation runs/checks are migration-backed, audited, idempotent, and controller integration transitions attempts from engine execution to validated success/failure.
 5. **IN_PROGRESS (recovery slice)** — bounded retry planner, non-retryable classifications, durable recovery decisions, and startup orphan reconciliation are implemented and tested. Automatic retry-attempt creation, lease-aware cleanup execution, and service startup wiring remain TODO.
@@ -21,6 +24,7 @@ Implement the first verified ACS execution path: approved work item -> authorita
 7. **DONE (Phase A acceptance)** — the full scheduler → controller → validation → publication → cleanup E2E passes against a real local Git repository and bare remote; operator health/publication CLI surfaces and repository-wide verification pass.
 
 ## Verification
+
 - Execution kernel focused: **47 tests passed** across controller, attempts, workspace manager, and Codex adapter.
 - Focused #6/#7 tests: **50 passed**.
 - Broader repository tests: **731 passed, 18 skipped** (93 test files passed; 2 integration files skipped).
@@ -30,15 +34,16 @@ Implement the first verified ACS execution path: approved work item -> authorita
 - Repository typecheck: **passed**.
 
 ## Exact next action
+
 Wire `reconcileStartup()` into the controller/worker service startup path, expose publication/recovery/validation state in the control UI, and add a real local Git/bare-remote publication E2E covering crash/retry/concurrency and at-most-one PR behavior.
 
-
 ## External review note (independent reviewer, appended, not authored by the implementing agent)
+
 Reviewed the repository state mid-implementation (phase 5 in progress) and applied two small,
 isolated fixes on top of the existing work. No other change in this note's scope.
 
 1. **Fixed**: `packages/result-validation/src/index.ts` `expectedArtifacts` containment check had
-   inverted boolean logic - `isAbsolute(artifact)` short-circuited the AND, so an *absolute*
+   inverted boolean logic - `isAbsolute(artifact)` short-circuited the AND, so an _absolute_
    artifact path (e.g. `/etc/shadow`) bypassed the "escapes workspace" check entirely and reached
    `access()` directly. Changed the AND to an OR and renamed `safe` -> `escapesWorkspace`. Added
    3 regression tests (absolute escape, relative `../` traversal, in-workspace success). Verified:
@@ -74,16 +79,17 @@ This is unrelated to the two fixes above and was mid-edit by the implementing ag
 this review (phase 7 operator-CLI slice); flagging rather than fixing since it's someone else's
 active edit.
 
-
 ## External review follow-up: reconcileStartup now inspects real evidence (independent reviewer)
+
 Patched the blocking gap from the previous review note: `packages/recovery/src/startup.ts`
 previously hardcoded every `RecoveryInput` field (`validationPresent: false`, `leaseActive: false`,
-`leaseExpired: true`, `cleanupComplete: false`) for *every* orphaned workspace, regardless of what
+`leaseExpired: true`, `cleanupComplete: false`) for _every_ orphaned workspace, regardless of what
 actually happened to that attempt. That meant a crash occurring just after a passing independent
 validation would have been silently reclassified as a plain `process_gone` retry candidate -
 exactly the double-execution risk the validation-before-success invariant exists to prevent.
 
 Changes:
+
 - Added `SqliteWorkItemStore.getActiveLeaseForAttempt(attemptId)` (most recent lease row for an
   attempt, whatever its status) alongside the existing `getValidationRunForAttempt` and
   `getActiveWorkspaceAllocationForAttempt`, which were already present but never called from
@@ -120,6 +126,7 @@ and push either entirely absent or gated behind an easy-to-forget opt-in flag. A
 agent in parallel) would have opened/updated PRs referencing unpushed or stale content.
 
 Patched `packages/publication/src/index.ts`:
+
 - Branch-ownership check: `input.branch` must equal `acs/attempt/${attemptId}` (the
   convention `WorkspaceManager` already checks out branches under, confirmed via
   `packages/workspace-manager/src/index.ts:173`). Fails closed before any git call.
@@ -127,7 +134,7 @@ Patched `packages/publication/src/index.ts`:
   diff (`git diff --cached --name-only`) -> `git diff --cached --check` -> `git commit`
   with an explicit bot author identity -> `git rev-parse HEAD` for the real new SHA ->
   re-check `leaseIsCurrent()` immediately before the push -> `git push --set-upstream
-  <remote> HEAD:refs/heads/<branch>`.
+<remote> HEAD:refs/heads/<branch>`.
 - "No staged changes after `git add -A`" is now a hard failure, not a silent no-op.
 
 Added 6 tests to `packages/publication/src/index.test.ts` (9 total, all real assertions

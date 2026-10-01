@@ -113,12 +113,16 @@ import {
 import {
   actorReliabilitySchema,
   actorRoutingDecisionSchema,
+  actorRoutingShadowObservationSchema,
   recordActorReliabilityInputSchema,
   recordActorRoutingDecisionInputSchema,
+  recordActorRoutingShadowObservationInputSchema,
   type ActorReliability,
   type ActorRoutingDecision,
+  type ActorRoutingShadowObservation,
   type RecordActorReliabilityInput,
-  type RecordActorRoutingDecisionInput
+  type RecordActorRoutingDecisionInput,
+  type RecordActorRoutingShadowObservationInput
 } from "./routing.js";
 import {
   recordValidationRunInputSchema,
@@ -985,6 +989,10 @@ export interface WorkItemStore {
     input: RecordActorRoutingDecisionInput,
     options: PrivilegedTransitionOptions
   ): ActorRoutingDecision;
+  recordActorRoutingShadowObservation(
+    input: RecordActorRoutingShadowObservationInput,
+    options: PrivilegedTransitionOptions
+  ): ActorRoutingShadowObservation;
   getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined;
   getActorRoutingDecisionForWorkItem(workItemId: string): ActorRoutingDecision | undefined;
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability;
@@ -2156,6 +2164,27 @@ export class SqliteWorkItemStore implements WorkItemStore {
         })
       );
       return { value: decision, events: [event] };
+    });
+  }
+
+  recordActorRoutingShadowObservation(
+    input: RecordActorRoutingShadowObservationInput,
+    options: PrivilegedTransitionOptions
+  ): ActorRoutingShadowObservation {
+    requirePrivilegedTransition(options, "record_actor_routing_shadow_observation");
+    const parsed = recordActorRoutingShadowObservationInputSchema.parse(input);
+    return this.write(() => {
+      const createdAt = (parsed.now ?? new Date()).toISOString();
+      const observation = actorRoutingShadowObservationSchema.parse({ ...parsed, createdAt });
+      const event = this.appendAuditEvent(
+        createEvent("actor.routing_shadow.observed", observation, {
+          "work_item.id": observation.workItemId,
+          "routing.decision_id": observation.routingDecisionId,
+          "routing.shadow.degraded": observation.degraded,
+          "actor.id": observation.semanticSelectedActorId ?? "none"
+        })
+      );
+      return { value: observation, events: [event] };
     });
   }
 

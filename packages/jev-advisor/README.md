@@ -159,6 +159,27 @@ Jev is not consumed by classifyMissionIntake, policy evaluation,
 approval/capability issuance, executor selection, lifecycle state, or
 promotion.
 
+## Actor-routing shadow (JEV-R1)
+
+The actor-router package can opt into a JEV shadow after it persists its
+authoritative deterministic route. JEV receives only the already-eligible,
+bounded candidate set and performs one Choice judgment over opaque candidate
+IDs. Its result is comparison evidence only; it cannot add candidates, grant
+authority, change policy eligibility or capacity, or replace the persisted
+selected actor.
+
+Successful and degraded comparisons are written as append-only
+actor.routing_shadow.observed audit events. They contain the deterministic
+selection, eligible actor IDs, semantic recommendation and probabilities when
+available, model/capability outcome, latency, and degradation status. Raw goal
+text is not written to the audit event.
+
+The deployed local binary remains Noul-only, so this slice records
+INCOMPATIBLE_MODEL without transport when that profile is used. A trusted
+runtime that advertises Choice support can produce semantic comparison
+evidence. Transport, model, telemetry, or persistence failures are fail-open
+and leave routing unchanged.
+
 ## CLI
 
     acs-jev classify --state-file <state.txt> \
