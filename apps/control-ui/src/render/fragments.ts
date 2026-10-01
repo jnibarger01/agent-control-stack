@@ -1,3 +1,12 @@
+import {
+  overviewOperations,
+  executionOperations,
+  approvalSummary,
+  metricsOperations,
+  agentOperations,
+  auditOperations,
+  systemOperations
+} from "./operations.js";
 import { type WorkItem } from "@agent-control-stack/work-items";
 import { projectAgents } from "../agents.js";
 import { nanoToIso, time } from "../format.js";
@@ -73,6 +82,14 @@ export function renderDashboardFragments(
     ),
     eventsTimeline: eventTimeline([...(model.events ?? [])].reverse()),
     connectors: connectorsPanel(),
+    overviewOperations: overviewOperations(model, agents),
+    executionOperations: executionOperations(model),
+    approvalSummary: approvalSummary(model),
+    metricsOperations: metricsOperations(model),
+    agentOperations: agentOperations(agents, model),
+    auditOperations: auditOperations(model),
+    systemOperations: systemOperations(model),
+    executionModeState: model.executionMode ?? model.executionModeProblem ?? "missing",
     generatedAt: now.toISOString()
   };
 }

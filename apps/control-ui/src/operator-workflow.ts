@@ -115,6 +115,7 @@ function selectWorkItem(id, options) {
     candidate.classList.toggle('selected', match);
     if (match) candidate.setAttribute('aria-current', 'true'); else candidate.removeAttribute('aria-current');
   });
+  openWorkDrawer();
   selectedWorkItemId = id;
   writeSelectedItemToLocation(id);
   if (options && options.scroll) {

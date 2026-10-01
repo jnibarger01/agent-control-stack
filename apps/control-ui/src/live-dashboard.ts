@@ -18,7 +18,14 @@ export const DASHBOARD_FRAGMENT_TARGETS = {
   approvalsCount: "#approvals-count",
   metrics: "#operator-metrics-body",
   systemStats: "#system-stats",
-  policy: "#policy-body"
+  policy: "#policy-body",
+  overviewOperations: "#overview-operations",
+  executionOperations: "#execution-operations",
+  approvalSummary: "#approval-summary",
+  metricsOperations: "#metrics-operations",
+  agentOperations: "#agent-operations",
+  auditOperations: "#audit-operations",
+  systemOperations: "#system-operations"
 } as const;
 
 /**
@@ -32,7 +39,10 @@ export const DASHBOARD_CATCH_UP_TARGETS = {
 } as const;
 
 export type DashboardFragmentName = keyof typeof DASHBOARD_FRAGMENT_TARGETS | keyof typeof DASHBOARD_CATCH_UP_TARGETS;
-export type DashboardFragments = Record<DashboardFragmentName, string> & { generatedAt: string };
+export type DashboardFragments = Record<DashboardFragmentName, string> & {
+  generatedAt: string;
+  executionModeState: string;
+};
 
 /** Debounce for work-item events, so a burst of transitions costs one fetch. */
 export const WORK_ITEM_REFRESH_DEBOUNCE_MS = 250;
@@ -196,6 +206,10 @@ function restoreOperatorState(state) {
 }
 
 function applyDashboardFragments(fragments, options) {
+  if (typeof fragments.executionModeState === 'string' && !executionModeInFlight) {
+    const mode = fragments.executionModeState;
+    applyConfirmedExecutionMode(mode, mode === 'strict' || mode === 'admin' ? undefined : mode);
+  }
   const targets = Object.assign({}, dashboardFragmentTargets, options && options.catchUp ? dashboardCatchUpTargets : {});
   const changed = Object.keys(targets).filter(function (name) {
     return typeof fragments[name] === 'string' && appliedFragments[name] !== fragments[name];
@@ -232,6 +246,8 @@ function onLiveAuditEvent(name, data) {
     scheduleDashboardRefresh(${WORK_ITEM_REFRESH_DEBOUNCE_MS});
     const id = eventWorkItemId(data);
     if (selectedWorkItemId && id === selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
+  } else if (name === 'execution_mode.changed' || name === 'approval.granted' || name === 'policy.decided') {
+    scheduleDashboardRefresh(${WORK_ITEM_REFRESH_DEBOUNCE_MS});
   } else if (name.indexOf('agent.') === 0 || name.indexOf('acp.') === 0 || name === 'tunnel_session.heartbeat') {
     scheduleDashboardRefresh(${AGENT_REFRESH_DEBOUNCE_MS});
   }
