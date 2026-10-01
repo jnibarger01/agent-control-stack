@@ -205,6 +205,91 @@ describe("gateWorkerClaimById (claim_approved_work_item_by_id)", () => {
     }
   });
 
+  it("atomically fences an admin-approved claim to canonical admin mode", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-claim-by-id-admin-fence-"));
+    const dbPath = join(dir, "control.db");
+    const firstStore = new SqliteWorkItemStore(dbPath);
+    const secondStore = new SqliteWorkItemStore(dbPath);
+    const policy = createPolicyEngine();
+    const tools = createWorkItemTools(firstStore, policy);
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Admin-fenced exact-id claim",
+        requester: "agent",
+        requesterSubject: "chatgpt:test",
+        intent: "verify admin mode is part of approval consumption authority",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "jc.fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+        risk: "high"
+      });
+      const evaluation = policy.evaluateWorkItem(workItem, "acs:admin", "approve")[0]!;
+      const approved = tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "acs:admin",
+        reason: "canonical admin-mode approval",
+        actionHash: evaluation.actionHash
+      });
+      expect(approved.workItem.status).toBe("approved");
+
+      firstStore.setExecutionMode({ mode: "admin", updatedBy: "operator", reason: "test admin fence" });
+      secondStore.setExecutionMode({ mode: "strict", updatedBy: "operator", reason: "race before claim" });
+
+      expect(() =>
+        tools.claim_approved_work_item_by_id({
+          id: workItem.id,
+          workerId: "worker-a",
+          executionModeFence: "admin"
+        })
+      ).toThrowError(expect.objectContaining({ code: "execution_mode_fence_mismatch" }));
+
+      expect(firstStore.get(workItem.id)?.status).toBe("approved");
+      expect(firstStore.readEvents().filter((event) => event.name === "approval.consumed")).toHaveLength(0);
+    } finally {
+      firstStore.close();
+      secondStore.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("generic worker claims skip items carrying an ACS admin approval in strict mode", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-claim-next-admin-fence-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const policy = createPolicyEngine();
+    const tools = createWorkItemTools(store, policy);
+
+    try {
+      const workItem = tools.create_work_item({
+        title: "Generic admin claim fence",
+        requester: "agent",
+        requesterSubject: "chatgpt:test",
+        intent: "ensure generic claims cannot consume admin approval in strict mode",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "jc.fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+        risk: "high"
+      });
+      const evaluation = policy.evaluateWorkItem(workItem, "acs:admin", "approve")[0]!;
+      store.setExecutionMode({ mode: "admin", updatedBy: "operator", reason: "seed admin grant" });
+      const approved = tools.approve_work_item({
+        id: workItem.id,
+        approvedBy: "acs:admin",
+        reason: "admin-mode authorization",
+        actionHash: evaluation.actionHash
+      });
+      expect(approved.workItem.status).toBe("approved");
+      store.setExecutionMode({ mode: "strict", updatedBy: "operator", reason: "return to strict" });
+      expect(store.getExecutionMode().mode).toBe("strict");
+      expect(store.hasGrantedApprovalBy(workItem.id, "acs:admin")).toBe(true);
+
+      expect(tools.claim_next_approved_work_item({ workerId: "worker-a" })).toBeUndefined();
+      expect(store.get(workItem.id)?.status).toBe("approved");
+      expect(store.readEvents().filter((event) => event.name === "approval.consumed")).toHaveLength(0);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("cannot replay a consumed approval by claiming the same item a second time", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-claim-by-id-tools-replay-"));
     const store = new SqliteWorkItemStore(join(dir, "control.db"));
