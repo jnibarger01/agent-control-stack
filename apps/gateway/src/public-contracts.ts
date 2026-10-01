@@ -201,17 +201,24 @@ export const portfolioToolNames = [
   "portfolio.list_pending_work",
   "portfolio.list_recent_progress"
 ] as const;
+/**
+ * The WebMCP browser lane is reached through exactly these two tools. Discovery
+ * never grants invocation, and every call is bound to an ACS work item.
+ */
+export const webmcpToolNames = ["webmcp.list_tools", "webmcp.call_tool"] as const;
 export const mcpToolNames = [
   ...workItemToolNames,
   ...dashboardToolNames,
   ...portfolioToolNames,
+  ...webmcpToolNames,
   directAgentToolName
 ] as const;
 export type McpToolName = (typeof mcpToolNames)[number];
 export const remoteMcpToolNames = [
   ...workItemToolNames.filter((name) => name !== "approve_work_item"),
   ...dashboardToolNames,
-  ...portfolioToolNames
+  ...portfolioToolNames,
+  ...webmcpToolNames
 ];
 
 export const toolsCallParamsSchema = z.object({
@@ -221,6 +228,18 @@ export const toolsCallParamsSchema = z.object({
 
 const idSchema = z.object({ id: z.string().min(1) });
 const reasonSchema = idSchema.extend({ reason: z.string().min(1).optional() });
+/**
+ * Invoking a page tool requires the exact discovery handle issued by
+ * `webmcp.list_tools`. The handle carries the browser/session/page identity and
+ * navigation generation, so a stale or hand-crafted id cannot bind.
+ */
+const webmcpCallToolInputSchema = z
+  .object({
+    discoveryId: z.string().regex(/^[0-9a-f]{64}$/u),
+    arguments: z.record(z.string(), z.unknown()).default({})
+  })
+  .strict();
+
 const directAgentInputSchema = z.object({
   agent: z.enum(directAgentNames),
   prompt: z.string().min(1).max(32_000),
@@ -247,7 +266,9 @@ export const gatewayMcpInputSchemas = {
   "portfolio.list_failures": portfolioLimitInputSchema,
   "portfolio.list_pending_work": portfolioLimitInputSchema,
   "portfolio.list_recent_progress": portfolioLimitInputSchema,
-  [directAgentToolName]: directAgentInputSchema
+  [directAgentToolName]: directAgentInputSchema,
+  "webmcp.list_tools": z.object({}).strict(),
+  "webmcp.call_tool": webmcpCallToolInputSchema
 } satisfies Record<McpToolName, z.ZodType>;
 
 export function mcpRequiredScopes(name: McpToolName): McpScope[] {
@@ -267,7 +288,10 @@ export function mcpRequiredScopes(name: McpToolName): McpScope[] {
     case "portfolio.list_failures":
     case "portfolio.list_pending_work":
     case "portfolio.list_recent_progress":
+    case "webmcp.list_tools":
       return ["acs:work:read"];
+    case "webmcp.call_tool":
+      return ["acs:work:create"];
     case "approve_work_item":
     case "unblock_work_item":
     case "reject_work_item":
@@ -291,7 +315,12 @@ export function mcpToolAnnotations(name: McpToolName): Record<string, boolean> {
     case "portfolio.list_failures":
     case "portfolio.list_pending_work":
     case "portfolio.list_recent_progress":
+    case "webmcp.list_tools":
       return { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
+    case "webmcp.call_tool":
+      // Never destructive in itself: it opens a governed work item that must be
+      // approved before a page mutation can run.
+      return { readOnlyHint: false, destructiveHint: false, openWorldHint: true };
     case "cancel_work_item":
     case "reject_work_item":
       return { readOnlyHint: false, destructiveHint: true, openWorldHint: false };
@@ -339,6 +368,10 @@ export function mcpToolDescription(name: McpToolName): string {
       return "List pending GitHub pull requests and issues from Visualizer. This never mutates GitHub.";
     case "portfolio.list_recent_progress":
       return "List recent GitHub portfolio progress events from Visualizer. This never mutates GitHub.";
+    case "webmcp.list_tools":
+      return "List the page tools the isolated ACS browser currently exposes, with normalized schemas and a discovery handle. Discovery never grants invocation.";
+    case "webmcp.call_tool":
+      return "Bind one page tool invocation to an exact ACS work item. Mutating calls stay pending until approved; nothing runs on page metadata alone.";
   }
 }
 

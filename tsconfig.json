@@ -15,6 +15,7 @@
     { "path": "packages/sandbox" },
     { "path": "packages/dc-tool-manifest" },
     { "path": "packages/desktop-commander-adapter" },
+    { "path": "packages/webmcp-adapter" },
     { "path": "packages/workspace-manager" },
     { "path": "packages/engine-adapter" },
     { "path": "./packages/execution-controller" },

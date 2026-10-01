@@ -52,6 +52,11 @@ export interface GatewayDirectAgentController {
   ): Promise<unknown> | unknown;
 }
 
+export interface GatewayWebMcpController {
+  listTools(args: unknown, context: { actor: string }): Promise<unknown> | unknown;
+  callTool(args: unknown, context: { actor: string }): Promise<unknown> | unknown;
+}
+
 export interface LocalAgentAuditEvent {
   eventType: LocalAgentEventType;
   actor: string;
@@ -102,6 +107,7 @@ export async function handleMcpHttpRequest(input: {
   tools: GatewayWorkItemTools;
   store: WorkItemStore;
   directAgentController?: GatewayDirectAgentController;
+  webmcpController?: GatewayWebMcpController;
   auth?: McpAuthOptions;
   requireAuthentication?: boolean;
   resourceMetadataUrl?: string;
@@ -168,6 +174,7 @@ export async function handleMcpHttpRequest(input: {
         tools: input.tools,
         store: input.store,
         directAgentController: input.directAgentController,
+        webmcpController: input.webmcpController,
         remoteAddress: input.remoteAddress,
         auditAuthenticatedRequest: input.auditAuthenticatedRequest,
         auditLocalAgentEvent: input.auditLocalAgentEvent,
@@ -234,6 +241,7 @@ async function handleToolsCall(input: {
   tools: GatewayWorkItemTools;
   store: WorkItemStore;
   directAgentController?: GatewayDirectAgentController;
+  webmcpController?: GatewayWebMcpController;
   remoteAddress?: string;
   auditAuthenticatedRequest?: (event: AuthenticatedMcpRequestAudit) => void;
   auditLocalAgentEvent?: (event: LocalAgentAuditEvent) => void;
@@ -390,6 +398,7 @@ async function handleToolsCall(input: {
       tools: input.tools,
       store: input.store,
       directAgentController: input.directAgentController,
+      webmcpController: input.webmcpController,
       portfolioClient,
       name: parsed.data.name,
       args: parsed.data.arguments ?? {},
@@ -503,6 +512,7 @@ async function callMcpTool(input: {
   tools: GatewayWorkItemTools;
   store: WorkItemStore;
   directAgentController?: GatewayDirectAgentController;
+  webmcpController?: GatewayWebMcpController;
   portfolioClient: PortfolioClient;
   name: McpToolName;
   args: unknown;
@@ -517,6 +527,14 @@ async function callMcpTool(input: {
       requestHash: directAgentRequestHash(input.args, input.actor, input.auth.scopes),
       actor: input.actor
     });
+  }
+  if (input.name === "webmcp.list_tools" || input.name === "webmcp.call_tool") {
+    if (!input.webmcpController) {
+      throw new ControlStackError("webmcp_not_configured", `${input.name} is not configured on this gateway`);
+    }
+    return input.name === "webmcp.list_tools"
+      ? await input.webmcpController.listTools(input.args, { actor: input.actor })
+      : await input.webmcpController.callTool(input.args, { actor: input.actor });
   }
   if (input.name === "open_acs_dashboard") return dashboardOverview(input.store);
   if (input.name === "get_execution_detail") {
@@ -612,9 +630,14 @@ function mcpToolDefinitions(includeDirectAgent: boolean, advertiseOAuth: boolean
 function isMutatingTool(name: McpToolName): boolean {
   if (name === directAgentToolName) return true;
   if (isPortfolioTool(name)) return false;
-  return !["get_work_item", "list_work_items", "explain_policy", "open_acs_dashboard", "get_execution_detail"].includes(
-    name
-  );
+  return ![
+    "get_work_item",
+    "list_work_items",
+    "explain_policy",
+    "open_acs_dashboard",
+    "get_execution_detail",
+    "webmcp.list_tools"
+  ].includes(name);
 }
 
 function isPortfolioTool(name: McpToolName): name is (typeof portfolioToolNames)[number] {
