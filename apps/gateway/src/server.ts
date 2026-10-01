@@ -970,6 +970,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const admission = executionAdmission.snapshot();
     return {
       workItems: workItemList,
+      executionPlansByWorkItem: Object.fromEntries(workItems.listCurrentExecutionPlansForWorkItems(ids)),
+      executionPlanAdmissionsByWorkItem: Object.fromEntries(executionReads.listCurrentPlanAdmissionsForWorkItems(ids)),
       statusCounts: dashboard.statusCounts,
       finishedWorkItems: {
         shown: dashboard.finished.length,
@@ -1015,6 +1017,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         ids.map((id) => [id, (leases.get(id) ?? []).map(toMissionControlAttemptLease)])
       ),
       executionBackend: reportedExecutionBackend(),
+      executionTelemetry: executionReads.telemetry(now),
+      readiness: mergeSandboxReadyzCheck(
+        workItems.readinessHealth(),
+        evaluateSandboxReadyzCheck(options.sandboxReadiness)
+      ),
       composerActionKinds: [...SUPPORTED_ACTION_KINDS],
       policyDecisionEvents: workItems.readEvents({ name: "policy.decided", limit: POLICY_SUMMARY_WINDOW }),
       now,
@@ -1048,10 +1055,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     try {
       const credential = gatewayCredentialForRequest(request, auth);
       reply.header("cache-control", "no-store");
-      return previewWorkItemPolicy(policy, {
+      const previewInput = createWorkItemSchema.parse({
         ...requestObject(request.body),
         requester: credential ? requesterForCredential(credential) : "user"
       });
+      assertRegisteredAgentPromptTargets(workItems, previewInput);
+      return previewWorkItemPolicy(policy, previewInput);
     } catch (error) {
       return sendError(reply, error);
     }
@@ -1509,13 +1518,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
       const credential = gatewayCredentialForRequest(request, auth);
       if (!credential) return reply.code(401).send({ error: "unauthorized" });
-      const workItem = tools.create_work_item(
-        createWorkItemSchema.parse({
-          ...requestObject(request.body),
-          requester: requesterForCredential(credential),
-          requesterSubject: actor
-        })
-      );
+      const createInput = createWorkItemSchema.parse({
+        ...requestObject(request.body),
+        requester: requesterForCredential(credential),
+        requesterSubject: actor
+      });
+      assertRegisteredAgentPromptTargets(workItems, createInput);
+      const workItem = tools.create_work_item(createInput);
       return reply.code(201).send(workItem);
     } catch (error) {
       return sendError(reply, error);
@@ -1822,7 +1831,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               workItemId: workItem.id
             });
           }
-          if (workItem.status !== "approved") {
+          const currentPlan = workItems.getCurrentExecutionPlan(workItem.id);
+          const hasCurrentApproval =
+            required.length > 0 &&
+            currentPlan !== undefined &&
+            required.every(
+              (evaluation) =>
+                workItems.hasApproval(workItem.id, evaluation.actionHash) &&
+                workItems.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, evaluation.actionHash)
+            );
+          if (workItem.status !== "approved" || !hasCurrentApproval) {
             try {
               const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
               const adminRequired = adminEvaluations.filter(
@@ -1854,8 +1872,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 });
               }
               workItem = approved.workItem;
-              workItems.recordSystemEvent({
+            } catch (error) {
+              recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
+                reason: "acs admin auto-authorization failed closed",
+                workItemId: workItem.id
+              });
+            }
+          }
+          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
+            try {
+              workItems.recordSystemEventOnceForWorkItem({
                 name: "execution_mode.auto_authorized",
+                workItemId: workItem.id,
                 body: {
                   workItemId: workItem.id,
                   tool: body.tool,
@@ -1863,7 +1894,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   approvalPolicy: "auto",
                   approvedBy: ACS_ADMIN_APPROVER
                 },
-                attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+                attributes: { "execution_mode.mode": "admin" }
               });
             } catch (error) {
               recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
@@ -2101,11 +2132,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // ACS-issued Jace Commander capability issuance (acs.jc.v1, lease-bound, per call).
   //
   // Mirrors /dc/capability/issue with a separate worker identity, signing key,
-  // tool table and issuance table. privileged_exec (root execution of one exact
-  // argv) is ALWAYS approval-gated by a human: policy-gate returns
-  // require_approval for `privileged.exec`, admin execution mode never
-  // auto-approves it, and the durable issuance gate rejects `acs:admin` and
-  // self-approvals before anything is signed.
+  // tool table and issuance table. Canonical admin mode auto-authorizes
+  // ordinary approval-gated JC mutations through the normal approval record,
+  // lease, capability and audit path. privileged_exec (root execution of one
+  // exact argv) remains human-only, and requester self-approval is always denied.
   app.post(
     "/jc/capability/issue",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
@@ -2196,6 +2226,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           requesterSubject: jcActor
         });
 
+        const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
         const existing = workItems
           .list()
           .filter((candidate) => {
@@ -2205,8 +2236,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               params?.tool === invocation.toolName &&
               params?.bindingHash === bindingHash &&
               ["needs_approval", "approved"].includes(candidate.status) &&
-              // An admin auto-grant never counts toward a jc capability.
-              !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER)
+              (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
+                ? true
+                : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
             );
           })
           .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
@@ -2263,9 +2295,116 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             detail: policy.summarize(evaluations).reason
           });
         }
-        // Deliberately NO admin-mode auto-approval here (unlike /dc/capability/issue):
-        // Jace Commander capabilities only ride approvals granted through the
-        // normal human approval path.
+
+        const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
+        if (mode.state !== "ok") {
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          return reply.code(403).send({
+            decision: "deny",
+            code: mode.state === "missing" ? "execution_mode_missing" : "execution_mode_corrupt",
+            reason: "canonical execution mode is not usable",
+            workItemId: workItem.id
+          });
+        }
+
+        if (mode.mode === "admin" && invocation.toolName !== "privileged_exec") {
+          const gate = adminExecutionGate(readAuthority(), true);
+          if (!gate.ok) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+            workItems.recordSystemEvent({
+              name: "execution_mode.auto_authorization_denied",
+              body: {
+                code: gate.code,
+                tool: invocation.toolName,
+                workItemId: workItem.id,
+                correlationId: body.correlationId ?? null
+              },
+              attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin", "execution_mode.lane": "jc" }
+            });
+            return reply.code(403).send({
+              decision: "deny",
+              code: gate.code,
+              reason: gate.detail,
+              workItemId: workItem.id
+            });
+          }
+          const currentPlan = workItems.getCurrentExecutionPlan(workItem.id);
+          const hasCurrentApproval =
+            required.length > 0 &&
+            currentPlan !== undefined &&
+            required.every(
+              (evaluation) =>
+                workItems.hasApproval(workItem.id, evaluation.actionHash) &&
+                workItems.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, evaluation.actionHash)
+            );
+          if (workItem.status !== "approved" || !hasCurrentApproval) {
+            try {
+              const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
+              const adminRequired = adminEvaluations.filter(
+                (evaluation) => evaluation.decision.decision === "require_approval"
+              );
+              const adminActionHash = adminRequired[0]?.actionHash;
+              if (!adminActionHash || policy.summarize(adminEvaluations).decision === "deny") {
+                recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+                return reply.code(403).send({
+                  decision: "deny",
+                  code: "admin_authorization_failed",
+                  reason: policy.summarize(adminEvaluations).reason,
+                  workItemId: workItem.id
+                });
+              }
+              const approved = tools.approve_work_item({
+                id: workItem.id,
+                actionHash: adminActionHash,
+                approvedBy: ACS_ADMIN_APPROVER,
+                reason: ACS_ADMIN_APPROVAL_REASON
+              });
+              if (approved.decision.decision === "deny" || approved.workItem.status !== "approved") {
+                recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+                return reply.code(403).send({
+                  decision: "deny",
+                  code: "admin_authorization_failed",
+                  reason: approved.decision.reason,
+                  workItemId: workItem.id
+                });
+              }
+              workItem = approved.workItem;
+            } catch (error) {
+              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
+                reason: "acs admin auto-authorization failed closed",
+                workItemId: workItem.id
+              });
+            }
+          }
+          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
+            try {
+              workItems.recordSystemEventOnceForWorkItem({
+                name: "execution_mode.auto_authorized",
+                workItemId: workItem.id,
+                body: {
+                  workItemId: workItem.id,
+                  tool: invocation.toolName,
+                  correlationId: body.correlationId ?? null,
+                  approvalPolicy: "auto",
+                  approvedBy: ACS_ADMIN_APPROVER,
+                  lane: "jc"
+                },
+                attributes: { "execution_mode.mode": "admin", "execution_mode.lane": "jc" }
+              });
+            } catch (error) {
+              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+              return reply.code(403).send({
+                decision: "deny",
+                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
+                reason: "acs admin auto-authorization failed closed",
+                workItemId: workItem.id
+              });
+            }
+          }
+        }
         if (workItem.status !== "approved" || (toolPolicy.requiresApproval && required.length === 0)) {
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
           return reply.code(409).send({
@@ -2287,10 +2426,67 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
+          const adminApprovalAtClaim = workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
+          if (adminApprovalAtClaim) {
+            const modeAfterAdmission = readExecutionModeValue(workItems.getExecutionMode().raw);
+            if (modeAfterAdmission.state !== "ok" || modeAfterAdmission.mode !== "admin") {
+              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+              workItems.recordSystemEvent({
+                name: "execution_mode.auto_authorization_denied",
+                body: {
+                  code: "admin_authorization_failed",
+                  tool: invocation.toolName,
+                  workItemId: workItem.id,
+                  correlationId: body.correlationId ?? null,
+                  phase: "post_admission"
+                },
+                attributes: {
+                  "work_item.id": workItem.id,
+                  "execution_mode.mode":
+                    modeAfterAdmission.state === "ok" ? modeAfterAdmission.mode : modeAfterAdmission.state,
+                  "execution_mode.lane": "jc"
+                }
+              });
+              return reply.code(403).send({
+                decision: "deny",
+                code: "admin_authorization_failed",
+                reason: "canonical execution mode is no longer admin",
+                workItemId: workItem.id
+              });
+            }
+
+            const gateAfterAdmission = adminExecutionGate(readAuthority(), true);
+            if (!gateAfterAdmission.ok) {
+              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+              workItems.recordSystemEvent({
+                name: "execution_mode.auto_authorization_denied",
+                body: {
+                  code: gateAfterAdmission.code,
+                  tool: invocation.toolName,
+                  workItemId: workItem.id,
+                  correlationId: body.correlationId ?? null,
+                  phase: "post_admission"
+                },
+                attributes: {
+                  "work_item.id": workItem.id,
+                  "execution_mode.mode": "admin",
+                  "execution_mode.lane": "jc"
+                }
+              });
+              return reply.code(403).send({
+                decision: "deny",
+                code: gateAfterAdmission.code,
+                reason: gateAfterAdmission.detail,
+                workItemId: workItem.id
+              });
+            }
+          }
+
           const claimed = tools.claim_approved_work_item_by_id({
             id: workItem.id,
             workerId,
-            leaseMs: JC_BRIDGE_LEASE_MS
+            leaseMs: JC_BRIDGE_LEASE_MS,
+            ...(adminApprovalAtClaim ? { executionModeFence: "admin" as const } : {})
           });
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
@@ -2905,6 +3101,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
   return app;
+}
+
+function assertRegisteredAgentPromptTargets(
+  store: Pick<SqliteWorkItemStore, "getRegistryAgent">,
+  input: Pick<WorkItem, "target" | "requestedActions">
+): void {
+  if (!input.requestedActions.some((action) => action.kind === "agent.prompt")) return;
+  for (const agentId of input.target.services ?? []) {
+    if (!store.getRegistryAgent(agentId)) {
+      throw new ControlStackError("agent_target_not_registered", `agent target is not registered: ${agentId}`);
+    }
+  }
 }
 
 function sendError(reply: FastifyReply, error: unknown) {

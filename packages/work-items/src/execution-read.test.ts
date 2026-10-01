@@ -1,4 +1,5 @@
 import { mkdtempSync, rmSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -84,8 +85,26 @@ describe("SqliteExecutionReadStore", () => {
           status: "active"
         })
       ]);
+      expect(reads.listCurrentPlanAdmissionsForWorkItems([workItem.id, "wrk_missing"]).get(workItem.id)).toEqual(
+        admission
+      );
+      expect(reads.listCurrentPlanAdmissionsForWorkItems(["wrk_missing"]).size).toBe(0);
       expect(reads.listExecutionAttempts("wrk_missing")).toEqual([]);
       expect(reads.listAttemptLeases("wrk_missing")).toEqual([]);
+      // Simulate an out-of-band corrupt database, bypassing only the fixture's
+      // write guards; the production read must independently reject it.
+      const corrupt = new DatabaseSync(dbPath);
+      try {
+        corrupt.exec("PRAGMA ignore_check_constraints = ON; DROP TRIGGER execution_plan_admissions_immutable_guard");
+        corrupt
+          .prepare("UPDATE execution_plan_admissions SET requires_approval = 2 WHERE admission_id = ?")
+          .run(admission.admissionId);
+      } finally {
+        corrupt.close();
+      }
+      expect(() => reads.listCurrentPlanAdmissionsForWorkItems([workItem.id])).toThrow(
+        "stored approval requirement is invalid"
+      );
     } finally {
       reads.close();
     }

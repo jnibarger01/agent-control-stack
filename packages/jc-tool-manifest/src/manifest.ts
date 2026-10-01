@@ -10,7 +10,8 @@ import { JC_FS_LIMITS, JC_TOOL_ARGUMENT_SCHEMAS, JC_TOOL_NAMES, type JcToolName 
  *  - which Jace Commander tools exist,
  *  - the acs.jc.v1 scope(s) each tool requires,
  *  - the policy-gate action kind and risk class ACS evaluates,
- *  - whether ACS requires a recorded human approval before issuing a capability,
+ *  - whether ACS requires an approval before issuing a capability (human in
+ *    strict mode; ACS may record it in admin mode for eligible mutations),
  *  - the strict argument schema ACS validates before signing,
  *  - the MCP `inputSchema` Jace Commander itself advertises via tools/list.
  *
@@ -84,7 +85,7 @@ export interface JcToolContract {
   readonly scopes: readonly JcScope[];
   readonly actionKind: JcActionKind;
   readonly risk: JcRiskClass;
-  /** ACS requires a recorded human approval before it will issue a capability. */
+  /** ACS requires approval before issuance; privileged_exec is always human-only. */
   readonly requiresApproval: boolean;
   /** Strict argument schema; unknown keys are rejected. */
   readonly argsSchema: z.ZodTypeAny;
@@ -385,7 +386,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.fs.write",
     "medium",
     true,
-    "mutation; human approval required; contained"
+    "mutation; approval required in strict mode; contained"
   ),
   create_directory: row(
     "Create a directory under an allowed root.",
@@ -399,7 +400,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.fs.write",
     "medium",
     true,
-    "mutation; human approval required; contained"
+    "mutation; approval required in strict mode; contained"
   ),
   move_file: row(
     "Rename a file or directory inside allowed roots. Does not overwrite.",
@@ -413,7 +414,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.fs.write",
     "medium",
     true,
-    "mutation; human approval required; both paths contained"
+    "mutation; approval required in strict mode; both paths contained"
   ),
   edit_block: row(
     "Replace one exact occurrence of old text in a file under an allowed root.",
@@ -431,7 +432,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.fs.write",
     "medium",
     true,
-    "mutation; human approval required; contained"
+    "mutation; approval required in strict mode; contained"
   ),
   start_process: row(
     "Start one executable with an argv array and a contained cwd, with an allowlisted environment. Approval binds the exact argv; shells and privilege tools are refused.",
@@ -449,7 +450,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.process.exec",
     "medium",
     true,
-    "execution; human approval required; no shell"
+    "execution; approval required in strict mode; no shell"
   ),
   read_process_output: row(
     "Read buffered stdout and stderr for a process this server started.",
@@ -485,7 +486,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.process.exec",
     "medium",
     true,
-    "termination of a managed process; human approval required"
+    "termination of a managed process; approval required in strict mode"
   ),
   git_status: row(
     "Structured git status for a repository inside an allowed root.",
@@ -572,7 +573,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.git.write",
     "medium",
     true,
-    "stages named paths only; human approval required"
+    "stages named paths only; approval required in strict mode"
   ),
   git_commit: row(
     "Commit whatever is already staged. Does not run git add.",
@@ -586,7 +587,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.git.write",
     "medium",
     true,
-    "creates a commit; human approval required"
+    "creates a commit; approval required in strict mode"
   ),
   git_fetch: row(
     "Fetch one named remote. Does not merge.",
@@ -600,7 +601,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.git.network",
     "medium",
     true,
-    "network read of a remote; human approval required"
+    "network read of a remote; approval required in strict mode"
   ),
   git_push: row(
     "Push exactly expectedHead to the current branch on a configured remote after a secret scan. Detached HEAD, a moved HEAD, and force push are refused.",
@@ -619,7 +620,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "jc.git.network",
     "medium",
     true,
-    "updates a remote branch to an approved commit; human approval required; secret-scanned; no force"
+    "updates a remote branch to an approved commit; approval required in strict mode; secret-scanned; no force"
   ),
   jc_doctor: row(
     "Diagnose the serving JC process: manifest vs live handlers, capability verification, filesystem roots, served code path (bridge), ACS reachability, git/process/privileged backends, and release identity. No secrets.",

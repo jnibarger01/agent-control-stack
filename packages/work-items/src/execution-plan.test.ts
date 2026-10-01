@@ -471,6 +471,10 @@ describe("immutable execution plans", () => {
       expect(changed.planHash).not.toBe(initial.planHash);
       expect(store.listExecutionPlans(workItem.id)).toEqual([initial, changed]);
       expect(store.getCurrentExecutionPlan(workItem.id)).toEqual(changed);
+      const ids = Array.from({ length: 1001 }, (_, index) => `missing-${index}`);
+      ids.push(workItem.id, workItem.id);
+      expect(store.listCurrentExecutionPlansForWorkItems(ids)).toEqual(new Map([[workItem.id, changed]]));
+      expect(store.listCurrentExecutionPlansForWorkItems([]).size).toBe(0);
 
       const check = new DatabaseSync(dbPath);
       try {
@@ -631,6 +635,20 @@ describe("immutable execution plans", () => {
         db.close();
       }
 
+      const headDb = new DatabaseSync(dbPath);
+      try {
+        headDb
+          .prepare(
+            `INSERT INTO execution_plan_heads (work_item_id, current_plan_id, current_plan_hash, revision, updated_at)
+           VALUES (?, ?, ?, 1, ?)`
+          )
+          .run(workItem.id, badPlanId, hex("f"), new Date().toISOString());
+      } finally {
+        headDb.close();
+      }
+      expect(() => store.listCurrentExecutionPlansForWorkItems([workItem.id])).toThrowError(
+        expect.objectContaining<Partial<ControlStackError>>({ code: "execution_plan_hash_mismatch" })
+      );
       expect(() => store.getExecutionPlan(badPlanId)).toThrowError(
         expect.objectContaining<Partial<ControlStackError>>({ code: "execution_plan_hash_mismatch" })
       );

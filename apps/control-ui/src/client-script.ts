@@ -1,9 +1,10 @@
+import { operationsClientSource } from "./operations-client.js";
 import { CONFIRM_COPY } from "./approval-actions.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
 import { composerClientSource } from "./composer.js";
 import { liveDashboardClientSource } from "./live-dashboard.js";
 import { operatorWorkflowClientSource } from "./operator-workflow.js";
-import { WORK_ITEM_RISK_VALUES } from "./queue-filter.js";
+import { WORK_ITEM_RISK_VALUES, WORK_ITEM_STATUS_VALUES } from "./queue-filter.js";
 import { redactionClientSource } from "./redaction.js";
 import { systemProbesClientSource } from "./system-probes.js";
 import { ADMIN_MODE_BANNER_TEXT } from "./types.js";
@@ -62,7 +63,10 @@ const sseEventNames = [
   'attempt_lease.issued',
   'attempt_lease.renewed',
   'attempt_lease.stolen',
-  'attempt_lease.expired'
+  'attempt_lease.expired',
+  'execution_mode.changed',
+  'approval.granted',
+  'policy.decided'
 ];
 
 function nextSseReconnectDelayMs(attempt) {
@@ -184,7 +188,9 @@ ${operatorWorkflowClientSource()}
 ${auditRowsClientSource()}
 ${metricsClientSource()}
 ${themeClientSource()}
+${operationsClientSource()}
 function onDashboardFragmentsApplied() {
+  applyOperationFilters();
   updateTitleBadge();
   refreshWaitBadges();
   if (document.body.dataset.activeView === 'connectors') refreshConnectorRoster();
@@ -353,10 +359,24 @@ function bindAgentRows() {
   });
 }
 
+function refreshComposerAgentOptions(agents) {
+  const select = document.querySelector('#task-form select[name="service"]');
+  if (!select) return;
+  const current = select.value;
+  const registered = agents.filter(function (agent) {
+    return agent && agent.metadata && agent.metadata.registered === 'true';
+  });
+  select.innerHTML = '<option value="">Choose an agent</option>' + registered.map(function (agent) {
+    return '<option value="' + escapeClient(agent.id) + '">' + escapeClient(agent.displayName || agent.id) + '</option>';
+  }).join('');
+  if (registered.some(function (agent) { return agent.id === current; })) select.value = current;
+}
+
 async function refreshAgentRoster() {
   try {
     const body = await fetchJson('/agents');
     const agents = Array.isArray(body.agents) ? body.agents : [];
+    refreshComposerAgentOptions(agents);
     const count = document.querySelector('#agent-count');
     if (count) count.textContent = agents.length + ' registered';
     renderAgentTable(agents);
@@ -735,12 +755,11 @@ function leaseWarningTick() {
   refreshLeaseExpiryWarnings(leaseWarningRoot);
 }
 
-// The work-item detail panel is only visible while the queue or execution
-// view is active. Pause the refresh while it is hidden and resume on return
-// so an off-screen detail never keeps refreshing.
+// The global drawer can be opened from any page. Its visibility, rather than
+// the underlying route, determines whether lease warnings need a timer.
 function leaseWarningViewActive() {
-  const view = document.body.dataset.activeView;
-  return (view === 'queue' || view === 'execution') && document.visibilityState !== 'hidden';
+  const drawer = document.getElementById('work-drawer');
+  return Boolean(drawer && !drawer.hidden) && document.visibilityState !== 'hidden';
 }
 
 function syncLeaseExpiryWarningRefresh() {
@@ -874,10 +893,14 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
     '<dl class="detail-grid">' +
       detailRow('Requester', workItem.requester) +
       detailRow('Intent', workItem.intent) +
-      detailRow('Target', workItem.target ? redactedAttributesJsonClient(workItem.target) : '—') +
+      detailRow('Project', workItem.target?.repo || '—') +
+      detailRow('Working directory', workItem.target?.cwd || '—') +
+      detailRow('Services', Array.isArray(workItem.target?.services) ? workItem.target.services.join(', ') : '—') +
+      detailRow('Files', Array.isArray(workItem.target?.files) ? workItem.target.files.join(', ') : '—') +
       detailRow('Created', formatClientTime(workItem.createdAt)) +
     '</dl>' +
     '<div class="detail-section"><h4>Requested Actions</h4>' + (actions.length ? '<ul class="action-list">' + actions.map(function (action) { return '<li><strong>' + escapeClient(action.kind) + '</strong><small>' + escapeClient(redactClient(action.description)) + '</small></li>'; }).join('') + '</ul>' : '<p class="muted">No requested actions.</p>') + '</div>' +
+    (workItem.status === 'needs_approval' || workItem.status === 'blocked' ? '<button type="button" data-review-approval="' + escapeClient(workItem.id) + '">Open approval inbox</button>' : '') +
     renderExecutionAuthority(executionAttempts, attemptLeases) +
     workItemControlsMarkup(workItem, sseConnected) +
     '<div class="detail-section"><h4>Timeline</h4>' + eventList(events || []) + '</div>';
@@ -885,7 +908,7 @@ function renderWorkDetail(target, workItem, events, executionAttempts, attemptLe
 }
 
 function knownQueueStatuses() {
-  return new Set(['draft', 'pending_policy', 'needs_approval', 'approved', 'running', 'cancelling', 'succeeded', 'failed', 'blocked', 'cancelled', 'rejected', 'unknown', 'quarantined']);
+  return new Set(${JSON.stringify(WORK_ITEM_STATUS_VALUES)});
 }
 
 function knownQueueRisks() {
@@ -1152,29 +1175,39 @@ function requestApprovalConfirm(request) {
   });
 }
 
-document.querySelectorAll('[data-execution-mode]').forEach((input) => {
-  input.addEventListener('change', async () => {
-    if (!input.checked) return;
-    const output = document.querySelector('#execution-mode-result');
-    const headers = { 'content-type': 'application/json' };
-    const res = await fetch('/execution-mode', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ mode: input.value, reason: 'operator set ' + input.value + ' from mission control' })
-    });
-    const body = await res.json().catch(() => ({}));
-    if (output) output.textContent = res.ok ? 'mode ' + body.executionMode : 'Rejected: ' + (body.error || body.code || res.status);
-    if (res.ok) {
-      // Update in place (no hard reload): banners follow the confirmed mode.
-      const admin = document.querySelector('#admin-mode-banner');
-      const problem = document.querySelector('#execution-mode-problem');
-      if (admin) {
-        admin.hidden = body.executionMode !== 'admin';
-        admin.textContent = body.executionMode === 'admin' ? ${JSON.stringify(ADMIN_MODE_BANNER_TEXT)} : '';
-      }
-      if (problem) problem.hidden = true;
-    }
-  });
+let executionModeInFlight = false;
+let confirmedExecutionMode = document.querySelector('input[name="executionMode"]:checked')?.value || '';
+function applyConfirmedExecutionMode(mode, problem) {
+  confirmedExecutionMode = mode === 'strict' || mode === 'admin' ? mode : '';
+  document.querySelectorAll('input[name="executionMode"]').forEach(function (input) { input.checked = input.value === confirmedExecutionMode; });
+  const admin = document.querySelector('#admin-mode-banner');
+  const issue = document.querySelector('#execution-mode-problem');
+  if (admin) { admin.hidden = mode !== 'admin'; admin.textContent = mode === 'admin' ? ${JSON.stringify(ADMIN_MODE_BANNER_TEXT)} : ''; }
+  if (issue) { issue.hidden = !problem; issue.textContent = problem ? 'ACS execution mode ' + problem + ' -- fail closed' : ''; }
+}
+document.addEventListener('change', async function (event) {
+  const input = event.target;
+  if (!input.matches('input[name="executionMode"]') || !input.checked || executionModeInFlight) return;
+  const output = document.querySelector('#execution-mode-result');
+  const nextMode = input.value;
+  executionModeInFlight = true;
+  document.querySelectorAll('input[name="executionMode"]').forEach(function (radio) { radio.disabled = true; });
+  if (output) output.textContent = 'Saving mode…';
+  try {
+    const res = await fetch('/execution-mode', { method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ mode: nextMode, reason: 'operator set ' + nextMode + ' from mission control' }) });
+    const body = await res.json().catch(function () { return {}; });
+    if (!res.ok || (body.executionMode !== 'strict' && body.executionMode !== 'admin')) throw new Error(body.error || body.code || 'Mode change rejected (' + res.status + ')');
+    applyConfirmedExecutionMode(body.executionMode);
+    if (output) output.textContent = 'mode ' + body.executionMode;
+    scheduleDashboardRefresh(0);
+  } catch (error) {
+    applyConfirmedExecutionMode(confirmedExecutionMode);
+    if (output) output.textContent = 'Rejected: ' + redactClient(error.message);
+  } finally {
+    executionModeInFlight = false;
+    document.querySelectorAll('input[name="executionMode"]').forEach(function (radio) { radio.disabled = false; });
+  }
 });
 
 // Delegated: approval cards are replaced by live fragment patches.
@@ -1249,6 +1282,7 @@ const viewAliases = {
 };
 function showView(name) {
   const view = viewAliases[name] || 'overview';
+  syncPageHeading(view);
   document.body.dataset.activeView = view;
   document.querySelectorAll('nav a[data-nav]').forEach((link) => {
     link.classList.toggle('active', link.dataset.nav === view);
@@ -1299,7 +1333,7 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   event.preventDefault();
   showView(link.dataset.nav);
   const href = link.getAttribute('href') || '#overview';
-  history.replaceState(null, '', href);
+  history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
 openWorkItemFromLocation();`;

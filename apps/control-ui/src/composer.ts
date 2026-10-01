@@ -75,7 +75,7 @@ function composerDraft(form) {
       title: String(data.get('title') || ''),
       intent: intent + (newWorktree ? '\\n\\nWorktree preference: use a new git worktree for this task.' : '\\n\\nWorktree preference: use the selected project checkout.'),
       risk: String(data.get('risk') || 'medium'),
-      target: { services: [service], ...(repo ? { repo } : {}) },
+      target: { services: [service], ...(repo ? { repo } : {}), ...(repo.startsWith("/") ? { cwd: repo } : {}) },
       requestedActions: [{ kind: kind, description: description, params: paramsError ? {} : params }]
     }
   };

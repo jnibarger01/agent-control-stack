@@ -126,6 +126,7 @@ describe("task composer (#17)", () => {
     c.type("title", "Read");
     c.type("intent", "read a file");
     c.type("service", "codex-cli");
+    c.type("repo", "/home/jacen/projects/agent-control-stack");
     c.type("actionKind", "fs.read");
     c.type("actionParams", '{"paths": ["README.md"]}');
     c.submit();
@@ -139,7 +140,11 @@ describe("task composer (#17)", () => {
           title: "Read",
           intent: "read a file\n\nWorktree preference: use a new git worktree for this task.",
           risk: "medium",
-          target: { services: ["codex-cli"] },
+          target: {
+            services: ["codex-cli"],
+            repo: "/home/jacen/projects/agent-control-stack",
+            cwd: "/home/jacen/projects/agent-control-stack"
+          },
           requestedActions: [
             { kind: "fs.read", description: "Dispatch prompt to selected agent", params: { paths: ["README.md"] } }
           ]

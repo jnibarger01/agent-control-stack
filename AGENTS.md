@@ -422,6 +422,21 @@ A task is complete only when:
 7. The final Git diff contains only authorized changes.
 8. No unresolved custody or concurrency issue remains.
 
+## Instruction Precedence
+
+When instructions conflict, use this order:
+
+1. Security and authority invariants that the task is not authorized to weaken.
+2. Task-specific user instructions.
+3. More-specific AGENTS.md files for the affected path.
+4. Architecture and protocol contracts.
+5. Existing executable behavior and tests as evidence of the current implementation.
+6. Documentation and examples.
+
+Repository-local guidance constrains implementation but must not silently override the user's requested outcome. A lower-precedence instruction must never weaken a higher-precedence security invariant.
+
+When architecture, protocol contracts, executable behavior, tests, or documentation disagree, investigate and reconcile the discrepancy explicitly. Do not assume either documentation or current runtime behavior is automatically authoritative.
+
 Final reports must use one verdict:
 
 * `PASS`: complete and verified.

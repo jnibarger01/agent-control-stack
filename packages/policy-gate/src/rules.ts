@@ -57,13 +57,10 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
     ]);
   }
   if (JC_APPROVAL_KINDS.has(context.action.kind)) {
-    if (context.operation === "approve" && context.actor === ACS_ADMIN_APPROVER) {
-      return risk("forbidden", "Jace Commander mutations require a human approver", ["deny:jc-admin-approval"]);
-    }
     if (context.operation === "approve" && isRequestingActor(context)) {
       return risk("forbidden", "Jace Commander mutations cannot be self-approved", ["deny:self-approval"]);
     }
-    return risk("requires_approval", "Jace Commander mutation requires human approval", ["approval:jc-mutation"]);
+    return risk("requires_approval", "Jace Commander mutation requires approval", ["approval:jc-mutation"]);
   }
   if (JC_READ_KINDS.has(context.action.kind) && context.write !== true && context.destructive !== true) {
     return risk("read_only", "Jace Commander read-only integration view is allowed", ["allow:jc-read"]);

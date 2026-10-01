@@ -13,6 +13,11 @@ requires a healthy managed authority: authentication, one unambiguous executor
 lease, no break-glass marker, and the managed runtime. Policy denials stay
 denials. A missing or corrupt mode row fails closed.
 
+The same admin policy applies to Desktop Commander and ordinary approval-gated
+Jace Commander mutations: ACS records an `acs:admin` approval, then continues
+through the normal lease, capability, and audit path. Jace Commander
+`privileged_exec` remains human-only even in admin mode.
+
 Consumers:
 
 - `acs mode status|strict|admin` reads and writes the same row (`ACS_DB_PATH`).

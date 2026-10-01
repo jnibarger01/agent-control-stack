@@ -184,6 +184,31 @@ describe("trace outbox", () => {
     }
   );
 
+  it("records an ACS admin grant as a system approval in LoopTrace", () => {
+    const dir = tempDir();
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath, { traceInstance: "acs-test", releaseSha: "unreleased" });
+    try {
+      const item = workItem(store);
+      store.recordApproval({ workItemId: item.id, actionHash: "hash_admin", approvedBy: "acs:admin" });
+    } finally {
+      store.close();
+    }
+
+    const check = new DatabaseSync(dbPath, { readOnly: true });
+    try {
+      const row = check
+        .prepare(
+          `SELECT canonical_json FROM trace_outbox WHERE json_extract(canonical_json, '$.kind') = 'acs.approval.granted'`
+        )
+        .get() as { canonical_json: string };
+      const event = JSON.parse(row.canonical_json) as { actor: { id: string; type: string } };
+      expect(event.actor).toEqual({ id: normalizeTraceActorId("acs:admin"), type: "system" });
+    } finally {
+      check.close();
+    }
+  });
+
   it("passes trace-grammar actor ids through unchanged and hashes deterministically", () => {
     expect(normalizeTraceActorId("user")).toBe("user");
     expect(normalizeTraceActorId("worker:local-1")).toBe("worker:local-1");

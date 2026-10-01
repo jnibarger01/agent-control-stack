@@ -1,22 +1,13 @@
-import { workItemRiskSchema, type ExecutionAttempt, type WorkItem } from "@agent-control-stack/work-items";
+import {
+  workItemRiskSchema,
+  workItemStatusSchema,
+  type ExecutionAttempt,
+  type WorkItem
+} from "@agent-control-stack/work-items";
 import { type MissionControlAttemptLease } from "./types.js";
 
 /** Canonical work-item statuses used by the queue filter chips. Unknown values are ignored (no-op). */
-export const WORK_ITEM_STATUS_VALUES = [
-  "draft",
-  "pending_policy",
-  "needs_approval",
-  "approved",
-  "running",
-  "cancelling",
-  "succeeded",
-  "failed",
-  "blocked",
-  "cancelled",
-  "rejected",
-  "unknown",
-  "quarantined"
-] as const;
+export const WORK_ITEM_STATUS_VALUES = workItemStatusSchema.options;
 
 const KNOWN_WORK_ITEM_STATUSES: ReadonlySet<string> = new Set(WORK_ITEM_STATUS_VALUES);
 

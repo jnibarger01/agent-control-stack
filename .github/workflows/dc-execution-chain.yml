@@ -9,6 +9,10 @@ name: dc-execution-chain
 
 on:
   pull_request:
+    paths-ignore:
+      - "*.md"
+      - "**/*.md"
+      - "docs/**"
   push:
     branches:
       - main

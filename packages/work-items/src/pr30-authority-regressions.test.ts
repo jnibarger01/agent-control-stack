@@ -167,4 +167,47 @@ describe("PR30 authority review regressions", () => {
     db.close();
     f.store.close();
   });
+
+  it("replaces an ACS admin plan approval when a human approves the same action", () => {
+    const f = fixture();
+    directory = f.directory;
+    const actionHash = hex("d");
+    f.store.recordApproval({ workItemId: f.workItem.id, actionHash, approvedBy: "acs:admin" });
+    const adminGrant = f.store.grantExecutionPlanApproval(
+      {
+        workItemId: f.workItem.id,
+        planHash: f.plan.planHash,
+        actionHash,
+        approvedByActorId: "acs:admin"
+      },
+      { via: "domain_service" }
+    );
+
+    f.store.recordApproval({ workItemId: f.workItem.id, actionHash, approvedBy: "human-approver" });
+    const humanGrant = f.store.grantExecutionPlanApproval(
+      {
+        workItemId: f.workItem.id,
+        planHash: f.plan.planHash,
+        actionHash,
+        approvedByActorId: "human-approver"
+      },
+      { via: "domain_service" }
+    );
+
+    expect(humanGrant.approvalId).not.toBe(adminGrant.approvalId);
+    expect(humanGrant.approvedByActorId).toBe("human-approver");
+    expect(f.store.getExecutionPlanApprovalById(adminGrant.approvalId)?.status).toBe("invalidated");
+    const approvalEvents = f.store.readEvents().filter((event) => event.name.startsWith("execution_plan_approval."));
+    expect(approvalEvents.map((event) => event.name)).toEqual([
+      "execution_plan_approval.granted",
+      "execution_plan_approval.invalidated",
+      "execution_plan_approval.granted"
+    ]);
+    expect(approvalEvents[1]?.body).toMatchObject({
+      approvalId: adminGrant.approvalId,
+      status: "invalidated",
+      invalidationReason: "superseded_by_new_approver"
+    });
+    f.store.close();
+  });
 });
