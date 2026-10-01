@@ -18,29 +18,35 @@ in every rule not listed below:
 
 ## Differences from `acs.dc.v1`
 
-| Field                  | `acs.dc.v1`                                                                             | `acs.jc.v1`                                                                                   |
-| ---------------------- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------- |
-| `version`              | `acs.dc.v1`                                                                             | `acs.jc.v1`                                                                                   |
-| `audience`             | `desktop-commander`                                                                     | `jace-commander`                                                                              |
+| Field                  | `acs.dc.v1`                                                                             | `acs.jc.v1`                                                                                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `version`              | `acs.dc.v1`                                                                             | `acs.jc.v1`                                                                                                                                                  |
+| `audience`             | `desktop-commander`                                                                     | `jace-commander`                                                                                                                                             |
 | scope vocabulary       | `fs.read`, `fs.write`, `process.exec`, `process.spawn`, `network.read`, `network.write` | `fs.read`, `fs.write`, `integration.read`, `integration.write`, `process.read`, `process.exec`, `process.privileged`, `git.read`, `git.write`, `git.network` |
-| `invocationHash`       | `sha256("acs:desktop-commander-invocation:v1\n" + legacyCanonical(...))`                | `sha256("acs:jace-commander-invocation:v1\n" + strictCanonicalJsonV1({toolName, arguments}))` |
-| signing key            | `ACS_DESKTOP_COMMANDER_CAPABILITY_PRIVATE_KEY`                                          | `ACS_JACE_COMMANDER_CAPABILITY_PRIVATE_KEY` (must be a different key)                         |
-| issuer worker identity | `acs-dc-bridge`                                                                         | `acs-jc-bridge`                                                                               |
-| issuance table         | `desktop_commander_capability_issuances`                                                | `jace_commander_capability_issuances` (migration 028)                                         |
-| admin execution mode   | may auto-approve                                                                        | may auto-approve ordinary gated mutations; **never** `privileged_exec`                         |
+| `invocationHash`       | `sha256("acs:desktop-commander-invocation:v1\n" + legacyCanonical(...))`                | `sha256("acs:jace-commander-invocation:v1\n" + strictCanonicalJsonV1({toolName, arguments}))`                                                                |
+| signing key            | `ACS_DESKTOP_COMMANDER_CAPABILITY_PRIVATE_KEY`                                          | `ACS_JACE_COMMANDER_CAPABILITY_PRIVATE_KEY` (must be a different key)                                                                                        |
+| issuer worker identity | `acs-dc-bridge`                                                                         | `acs-jc-bridge`                                                                                                                                              |
+| issuance table         | `desktop_commander_capability_issuances`                                                | `jace_commander_capability_issuances` (migration 028)                                                                                                        |
+| admin execution mode   | may auto-approve                                                                        | may auto-approve ordinary gated mutations; **never** `privileged_exec`                                                                                       |
 
 Because the version and audience differ, a capability from either contract is
 rejected by the other verifier.
 
 ## Tools
 
-| Tool                                                                  | Scopes               | Approval          | Policy action kind     | Work-item risk |
-| --------------------------------------------------------------------- | -------------------- | ----------------- | ---------------------- | -------------- |
-| `jc_status`, `acs_read`, `swarm_read`, `visualizer_read`              | `integration.read`   | no                | `jc.integration.read`  | low            |
-| `acs_submit_mission`                                                  | `integration.write`  | no                | `jc.integration.write` | low            |
-| `mission_router_list`, `looptrace_verify`                             | `fs.read`            | no                | `jc.fs.read`           | low            |
-| `list_directory`, `get_file_info`, `read_file`, `read_multiple_files` | `fs.read`            | no                | `jc.fs.read`           | low            |
-| `privileged_exec`                                                     | `process.privileged` | **human, always** | `privileged.exec`      | critical       |
+| Tool                                                                  | Scopes               | Approval                                        | Policy action kind     | Work-item risk |
+| --------------------------------------------------------------------- | -------------------- | ----------------------------------------------- | ---------------------- | -------------- |
+| `jc_status`, `acs_read`, `swarm_read`, `visualizer_read`              | `integration.read`   | no                                              | `jc.integration.read`  | low            |
+| `acs_submit_mission`                                                  | `integration.write`  | no                                              | `jc.integration.write` | low            |
+| `mission_router_list`, `looptrace_verify`                             | `fs.read`            | no                                              | `jc.fs.read`           | low            |
+| `list_directory`, `get_file_info`, `read_file`, `read_multiple_files` | `fs.read`            | no                                              | `jc.fs.read`           | low            |
+| Ordinary gated mutations (see manifest)                               | tool-specific        | required in strict; ACS may grant in admin mode | tool-specific          | medium/high    |
+| `privileged_exec`                                                     | `process.privileged` | **human, always**                               | `privileged.exec`      | critical       |
+
+In the canonical manifest, `requiresApproval` means policy requires approval
+in strict mode. It does not mean every approval must come from a human: eligible
+managed mutations may receive an ACS `acs:admin` approval in admin mode.
+`privileged_exec` is the sole human-only approval tool.
 
 The argument schemas are strict (unknown keys are rejected) and **are never
 rewritten**. `normalizedArguments` equals the delivered arguments. For

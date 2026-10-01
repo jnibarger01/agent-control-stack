@@ -583,6 +583,59 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
     );
   });
 
+  it("renews expired admin approvals when retrying an interrupted JC request", () => {
+    const delegate = testAdmission();
+    let rejectOnce = true;
+    const executionAdmission: ExecutionAdmissionController = {
+      acquire: async (request) => {
+        if (rejectOnce) {
+          rejectOnce = false;
+          throw new Error("test admission failure before claim");
+        }
+        return delegate.acquire(request);
+      },
+      shutdown: () => delegate.shutdown(),
+      snapshot: () => delegate.snapshot()
+    };
+
+    return withGateway(
+      async (ctx) => {
+        const admin = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${OP_TOKEN}` },
+          payload: { mode: "admin", reason: "seed expired admin approval retry" }
+        });
+        expect(admin.statusCode).toBe(200);
+
+        const args = { path: join(ctx.root, "workspace", "expired-admin-grant") };
+        const interrupted = await issue(ctx, "create_directory", args);
+        expect(interrupted.statusCode).toBe(500);
+
+        const db = new DatabaseSync(ctx.dbPath);
+        try {
+          db.prepare("UPDATE approval_records SET expires_at = ? WHERE approved_by = ?").run(
+            "2000-01-01T00:00:00.000Z",
+            "acs:admin"
+          );
+          db.prepare("UPDATE execution_plan_approvals SET status = 'expired' WHERE approved_by_actor_id = ?").run(
+            "acs:admin"
+          );
+        } finally {
+          db.close();
+        }
+
+        const retried = await issue(ctx, "create_directory", args);
+        expect(retried.statusCode, retried.body).toBe(200);
+        expect(retried.json().capability.payload.approvalId).toEqual(expect.any(String));
+      },
+      true,
+      workspace,
+      healthyAuthority,
+      executionAdmission
+    );
+  });
+
   it("revalidates admin mode after admission before consuming the admin approval", () => {
     const delegate = testAdmission();
     let markAdmissionEntered!: () => void;

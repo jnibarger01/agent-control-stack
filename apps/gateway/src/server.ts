@@ -1822,7 +1822,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               workItemId: workItem.id
             });
           }
-          if (workItem.status !== "approved") {
+          const currentPlan = workItems.getCurrentExecutionPlan(workItem.id);
+          const hasCurrentApproval =
+            required.length > 0 &&
+            currentPlan !== undefined &&
+            required.every(
+              (evaluation) =>
+                workItems.hasApproval(workItem.id, evaluation.actionHash) &&
+                workItems.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, evaluation.actionHash)
+            );
+          if (workItem.status !== "approved" || !hasCurrentApproval) {
             try {
               const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
               const adminRequired = adminEvaluations.filter(
@@ -2310,7 +2319,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               workItemId: workItem.id
             });
           }
-          if (workItem.status !== "approved") {
+          const currentPlan = workItems.getCurrentExecutionPlan(workItem.id);
+          const hasCurrentApproval =
+            required.length > 0 &&
+            currentPlan !== undefined &&
+            required.every(
+              (evaluation) =>
+                workItems.hasApproval(workItem.id, evaluation.actionHash) &&
+                workItems.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, evaluation.actionHash)
+            );
+          if (workItem.status !== "approved" || !hasCurrentApproval) {
             try {
               const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
               const adminRequired = adminEvaluations.filter(

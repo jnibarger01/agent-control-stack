@@ -869,6 +869,8 @@ export interface ConsumeApprovalOptions {
 
 export interface ClaimOptions {
   leaseMs?: number;
+  /** Reserved approver used to fence ACS-generated approvals at claim time. */
+  adminApprovalActorId?: string;
   allowDirectStartForTests?: true;
   allowLegacyClaimForTests?: true;
   /**
@@ -1176,6 +1178,8 @@ export interface WorkItemStore {
   };
   /** True when a granted approval row was recorded by the given approver. */
   hasGrantedApprovalBy(workItemId: string, approvedBy: string): boolean;
+  /** True when any unconsumed execution-plan grant for this item has this approver. */
+  hasGrantedExecutionPlanApprovalBy(workItemId: string, approvedByActorId: string): boolean;
   submitWorkResult(input: unknown): WorkItem;
   recordDerivedWorkResult(input: unknown): WorkItem;
   claimNextObservation(now?: Date): ObservationOutboxEntry | undefined;
@@ -1621,18 +1625,29 @@ export class SqliteWorkItemStore implements WorkItemStore {
         )
         .get(parsed.workItemId, parsed.planHash, parsed.actionHash) as unknown as ExecutionPlanApprovalRow | undefined;
       if (existing) {
-        if (Date.parse(existing.expires_at) > Date.parse(createdAt)) {
+        if (
+          Date.parse(existing.expires_at) > Date.parse(createdAt) &&
+          existing.approved_by_actor_id === parsed.approvedByActorId
+        ) {
           return { value: rowToExecutionPlanApproval(existing), events: [] };
         }
-        const expired = this.db
+        const replacementStatus = Date.parse(existing.expires_at) <= Date.parse(createdAt) ? "expired" : "invalidated";
+        const replaced = this.db
           .prepare(
-            `UPDATE execution_plan_approvals SET status = 'expired' WHERE approval_id = ? AND status = 'granted' AND expires_at <= ?`
+            `UPDATE execution_plan_approvals
+             SET status = ?, invalidated_at = ?, invalidation_reason = ?
+             WHERE approval_id = ? AND status = 'granted'`
           )
-          .run(existing.approval_id, createdAt);
-        if (expired.changes !== 1) {
+          .run(
+            replacementStatus,
+            replacementStatus === "invalidated" ? createdAt : null,
+            replacementStatus === "invalidated" ? "superseded_by_new_approver" : null,
+            existing.approval_id
+          );
+        if (replaced.changes !== 1) {
           throw new ControlStackError(
             "execution_plan_approval_conflict",
-            "expired approval changed while replacing it"
+            "existing approval changed while replacing it"
           );
         }
       }
@@ -4743,7 +4758,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         actionHash: input.actionHash,
         requestHash,
         actorId: input.approvedBy,
-        actorType: "human",
+        actorType: input.approvedBy === "acs:admin" ? "system" : "human",
         kind: "acs.approval.granted",
         reason,
         status: "granted"
@@ -4891,17 +4906,72 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  private assertAdminApprovalModeFence(workItemId: string, options: ClaimOptions): void {
+    const authority = options.attemptAuthority;
+    const actorId = options.adminApprovalActorId;
+    if (!authority || !actorId) return;
+    const approvalIds = [
+      ...(authority.approvalId ? [authority.approvalId] : []),
+      ...(authority.additionalApprovals ?? []).map((approval) => approval.approvalId)
+    ];
+    if (approvalIds.length === 0) return;
+    if (approvalIds.some((approvalId) => typeof approvalId !== "string" || approvalId.length === 0)) {
+      throw new ControlStackError("execution_approval_fence_mismatch", "claim approval identifiers are malformed");
+    }
+    const adminApproval = approvalIds.some((approvalId) => {
+      const approval = this.getExecutionPlanApprovalById(approvalId);
+      return approval?.workItemId === workItemId && approval.approvedByActorId === actorId;
+    });
+    if (!adminApproval) return;
+    const mode = this.db.prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`).get() as
+      { mode?: string } | undefined;
+    if (mode?.mode !== "admin") {
+      throw new ControlStackError(
+        "execution_mode_fence_mismatch",
+        "admin approval cannot be consumed unless canonical execution mode is admin"
+      );
+    }
+  }
+
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
     return this.write(() => {
-      const row = this.db
-        .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
-        .get() as unknown as WorkItemRow | undefined;
+      const mode = options.adminApprovalActorId
+        ? (this.db.prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`).get() as { mode?: string } | undefined)
+        : undefined;
+      const row = options.adminApprovalActorId
+        ? (this.db
+            .prepare(
+              `SELECT item.* FROM work_items AS item
+               WHERE item.status = 'approved'
+                 AND (
+                   ? = 'admin'
+                   OR (
+                     NOT EXISTS (
+                       SELECT 1 FROM approval_records AS approval
+                       WHERE approval.work_item_id = item.id
+                         AND approval.approved_by = ? AND approval.status = 'granted'
+                     )
+                     AND NOT EXISTS (
+                       SELECT 1 FROM execution_plan_approvals AS approval
+                       WHERE approval.work_item_id = item.id
+                         AND approval.approved_by_actor_id = ? AND approval.status = 'granted'
+                     )
+                   )
+                 )
+               ORDER BY item.created_at ASC LIMIT 1`
+            )
+            .get(mode?.mode ?? null, options.adminApprovalActorId, options.adminApprovalActorId) as
+            (WorkItemRow & Record<string, unknown>) | undefined)
+        : (this.db
+            .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
+            .get() as unknown as WorkItemRow | undefined);
       if (!row) {
         return { value: undefined, events: [] };
       }
 
       const current = rowToWorkItem(row);
       if (options.attemptAuthority) {
+        this.assertAdminApprovalModeFence(current.id, options);
         return this.claimAttemptAuthoritatively(current, workerId, options);
       }
       if (options.allowLegacyClaimForTests !== true) {
@@ -5171,6 +5241,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
 
       if (options.attemptAuthority) {
+        this.assertAdminApprovalModeFence(current.id, options);
         return this.claimAttemptAuthoritatively(current, workerId, options);
       }
       if (options.allowLegacyClaimForTests !== true) {
@@ -5352,9 +5423,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
   hasGrantedApprovalBy(workItemId: string, approvedBy: string): boolean {
     const row = this.db
       .prepare(
-        `SELECT 1 AS found FROM approval_records WHERE work_item_id = ? AND approved_by = ? AND status = 'granted'`
+        `SELECT 1 AS found FROM approval_records
+         WHERE work_item_id = ? AND approved_by = ? AND status = 'granted' AND expires_at > ?`
       )
-      .get(workItemId, approvedBy) as { found?: number } | undefined;
+      .get(workItemId, approvedBy, new Date().toISOString()) as { found?: number } | undefined;
+    return row?.found === 1;
+  }
+
+  hasGrantedExecutionPlanApprovalBy(workItemId: string, approvedByActorId: string): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS found FROM execution_plan_approvals
+         WHERE work_item_id = ? AND approved_by_actor_id = ? AND status = 'granted' LIMIT 1`
+      )
+      .get(workItemId, approvedByActorId) as { found?: number } | undefined;
     return row?.found === 1;
   }
 

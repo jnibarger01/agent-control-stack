@@ -261,8 +261,15 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
+  const adminMode = store.getExecutionMode().mode === "admin";
   const candidate = store
     .list({ status: "approved" })
+    .filter(
+      (workItem) =>
+        adminMode ||
+        (!store.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) &&
+          !store.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER))
+    )
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
   if (!candidate) {
     return undefined;
@@ -319,6 +326,7 @@ function gateWorkerClaimInTransaction(
   const [firstApproval, ...restApprovals] = planApprovals;
   const running = store.claimNextApprovedWorkItem(parsed.workerId, {
     leaseMs: parsed.leaseMs,
+    adminApprovalActorId: ACS_ADMIN_APPROVER,
     attemptAuthority: {
       planHash: plan.planHash,
       admissionId: admission.admissionId,
@@ -412,6 +420,7 @@ function gateWorkerClaimByIdInTransaction(
   const [firstApproval, ...restApprovals] = planApprovals;
   const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
+    adminApprovalActorId: ACS_ADMIN_APPROVER,
     ...(parsed.executionModeFence === "admin"
       ? { executionModeFence: { mode: "admin" as const, approvedByActorId: ACS_ADMIN_APPROVER } }
       : {}),

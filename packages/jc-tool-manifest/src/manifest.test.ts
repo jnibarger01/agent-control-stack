@@ -42,7 +42,7 @@ describe("jc-tool-manifest", () => {
     }
   });
 
-  it("requires human approval for mutations and not for reads", () => {
+  it("marks approval-required tools separately from the human-only privileged tool", () => {
     const approval = new Set([
       "privileged_exec",
       "write_file",
@@ -59,6 +59,10 @@ describe("jc-tool-manifest", () => {
     for (const entry of jcToolContracts()) {
       expect(entry.requiresApproval, entry.name).toBe(approval.has(entry.name));
     }
+    expect(jcToolContracts().filter((entry) => entry.requiresApproval && entry.name !== "privileged_exec").length).toBe(
+      10
+    );
+    expect(jcToolContract("privileged_exec")?.description).toContain("human approvalId");
     expect(jcToolContracts().length).toBeGreaterThanOrEqual(30);
   });
 

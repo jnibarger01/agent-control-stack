@@ -78,6 +78,9 @@ describe("B2: self-approval is refused; admin approval is accepted except for pr
           const policy = createPolicyEngine();
           const tools = createWorkItemTools(store, policy);
           const item = tools.create_work_item(jcWorkItemInput(invocation, REQUESTER));
+          if (approver === ACS_ADMIN_APPROVER) {
+            store.setExecutionMode({ mode: "admin", updatedBy: "test-operator", reason: "exercise admin grant" });
+          }
           // Simulate a policy regression: record the approval with a gate that
           // does not know the approver (the registry must still refuse it).
           const permissive: PolicyEngine = {
