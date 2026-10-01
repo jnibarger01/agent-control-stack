@@ -384,7 +384,7 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     method: "post",
     path: "/execution-mode",
     operationId: "setExecutionMode",
-    summary: "Set the canonical strict/admin execution mode.",
+    summary: "Set the canonical execution mode; non-strict modes require acs:execution-mode:admin.",
     requestSchema: executionModeBodySchema
   },
   {

@@ -31,7 +31,7 @@ const credentials: GatewayCredential[] = [
     actor: "user",
     actorId: "user",
     roles: ["operator"],
-    scopes: ["acs:read", "acs:write", "acs:approve"]
+    scopes: ["acs:read", "acs:write", "acs:approve", "acs:execution-mode:admin"]
   },
   // An approver whose actor id equals the requesting subject: self-approval.
   {
