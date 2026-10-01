@@ -1,9 +1,10 @@
-import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   clearSession,
+  CredentialsFileCorruptError,
   deleteCredentials,
   readCredentials,
   writeCredentials,
@@ -43,6 +44,44 @@ describe("credential-store", () => {
   it("returns undefined when no credentials file exists", () => {
     const file = path();
     expect(readCredentials(file)).toBeUndefined();
+  });
+
+  it("fails closed with an actionable error when the file is not valid JSON", () => {
+    const file = path();
+    const truncated = '{"v":1,"devicePrivateKeyPem":"LEAKED-PRIVATE-KEY"';
+    writeFileSync(file, truncated);
+
+    let thrown: unknown;
+    try {
+      readCredentials(file);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(CredentialsFileCorruptError);
+    const corrupt = thrown as CredentialsFileCorruptError;
+    expect(corrupt.code).toBe("credentials_file_corrupt");
+    expect(corrupt.message).toContain(file);
+    expect(corrupt.message).toContain("acs auth login"); // tells the operator how to recover
+    expect(corrupt.message).not.toContain("LEAKED-PRIVATE-KEY"); // never echo file contents
+    expect(readFileSync(file, "utf8")).toBe(truncated); // the unusable file is left for the operator
+  });
+
+  it("fails closed instead of reporting 'no credentials' when the file has the wrong shape", () => {
+    const file = path();
+    // Valid JSON, but not a v1 credentials record. Treating this as "no credentials" would let
+    // `acs auth login` silently mint and persist a brand-new device identity over it.
+    writeFileSync(file, JSON.stringify({ v: 2, acsUrl: "https://acs.example.com" }));
+
+    expect(() => readCredentials(file)).toThrow(CredentialsFileCorruptError);
+    expect(() => readCredentials(file)).toThrow(/schema/);
+  });
+
+  it("fails closed when the credentials path cannot be read as a file", () => {
+    const file = path();
+    const asDirectory = join(file, "..");
+    // A directory (or any unreadable path) is an operator-fixable state, not an ENOENT.
+    expect(() => readCredentials(asDirectory)).toThrow(CredentialsFileCorruptError);
   });
 
   it("writeSession attaches a session to an existing device identity", () => {

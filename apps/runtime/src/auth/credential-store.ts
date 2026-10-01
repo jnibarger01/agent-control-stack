@@ -33,16 +33,57 @@ const credentialSchema = z.object({
 export type StoredCredentials = z.infer<typeof credentialSchema>;
 export type StoredSession = NonNullable<StoredCredentials["session"]>;
 
+/**
+ * Raised when the credentials file exists but cannot be used (unreadable, not JSON,
+ * or not the v1 credentials shape). Callers must fail closed rather than treat this
+ * as "no credentials": regenerating a device identity would silently replace the
+ * operator's keypair and re-register the device on the server. The message never
+ * includes file contents - the file holds a private key and session tokens.
+ */
+export class CredentialsFileCorruptError extends Error {
+  readonly code = "credentials_file_corrupt";
+
+  constructor(
+    readonly path: string,
+    readonly reason: string
+  ) {
+    super(
+      `ACS CLI credentials file is unusable: ${path} (${reason}). ` +
+        "Move or delete that file, then run `acs auth login` to register this device again."
+    );
+    this.name = "CredentialsFileCorruptError";
+  }
+}
+
 export function credentialsPath(env: NodeJS.ProcessEnv = process.env): string {
   if (env.ACS_CLI_CREDENTIALS_PATH) return env.ACS_CLI_CREDENTIALS_PATH;
   const configHome = env.XDG_CONFIG_HOME?.trim() || join(homedir(), ".config");
   return join(configHome, "acs", "credentials.json");
 }
 
+/** Returns undefined only when the file is absent. A present-but-unusable file throws
+ * `CredentialsFileCorruptError` so the CLI can print an actionable message instead of a
+ * raw JSON parse error, and so no caller silently overwrites the operator's identity. */
 export function readCredentials(path: string): StoredCredentials | undefined {
-  if (!existsSync(path)) return undefined;
-  const parsed = credentialSchema.safeParse(JSON.parse(readFileSync(path, "utf8")));
-  return parsed.success ? parsed.data : undefined;
+  let raw: string;
+  try {
+    raw = readFileSync(path, "utf8");
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (code === "ENOENT") return undefined;
+    throw new CredentialsFileCorruptError(path, `cannot read the file (${code ?? "unknown error"})`);
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(raw);
+  } catch {
+    throw new CredentialsFileCorruptError(path, "the file is not valid JSON");
+  }
+  const parsed = credentialSchema.safeParse(decoded);
+  if (!parsed.success) {
+    throw new CredentialsFileCorruptError(path, "the file does not match the stored-credentials schema (v1)");
+  }
+  return parsed.data;
 }
 
 export function writeCredentials(path: string, credentials: StoredCredentials): void {

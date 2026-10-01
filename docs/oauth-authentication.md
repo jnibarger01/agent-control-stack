@@ -185,7 +185,7 @@ acs auth logout
 
 ### `acs auth status`
 
-Prints only non-secret information: authenticated user, device name/ID, requested scopes, token expiry, the configured ACS endpoint, and a connection state (`authenticated`, `token_expired`, or `not_authenticated`). It never prints the raw access or refresh token.
+Prints only non-secret information: authenticated user, device name/ID, requested scopes, token expiry, the configured ACS endpoint, and a connection state (`authenticated`, `token_expired`, `not_authenticated`, or `credentials_corrupt`). It never prints the raw access or refresh token. A corrupt credentials file is reported as the `credentials_corrupt` state with the file path and the remediation, so the diagnostic command still works when local state is broken.
 
 ### `acs auth logout`
 
@@ -199,6 +199,8 @@ curl -X POST https://gateway.example.com/devices/<device-id>/revoke \
 ### Credential storage
 
 The CLI stores its device keypair and session (`~/.config/acs/credentials.json` by default, override with `ACS_CLI_CREDENTIALS_PATH` or `XDG_CONFIG_HOME`) in a file created with `0600` permissions. No OS keychain integration exists in this workspace today; this is a documented limitation, not a silent gap. Never commit this file, put it in `.env`, or leave it world-readable.
+
+If that file exists but is unreadable, is not valid JSON, or does not match the stored-credentials schema, every `acs auth` command **fails closed** with the file path and the remediation (move or delete the file, then run `acs auth login`) instead of a raw parse error. The file is never rewritten or deleted by the CLI in that state: regenerating a device identity over an unreadable file would silently replace the keypair and re-enroll the device, so recovery is an explicit operator action.
 
 ### Server-side model
 

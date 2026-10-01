@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { readCredentials } from "./credential-store.js";
+import { CredentialsFileCorruptError, readCredentials } from "./credential-store.js";
 import { runLogin } from "./login.js";
 
 function jsonResponse(status: number, body: unknown) {
@@ -126,5 +126,22 @@ describe("runLogin", () => {
     });
     expect(result).toEqual({ ok: false, reason: "denied" });
     expect(readCredentials(file)?.session).toBeUndefined();
+  });
+
+  it("aborts before any network call when the stored credentials file is unusable", async () => {
+    const file = path();
+    writeFileSync(file, '{"v":1,"devicePrivateKeyPem":"PARTIAL-KEY"');
+    const fetchImpl = vi.fn();
+
+    await expect(
+      runLogin({
+        acsUrl: "https://acs.example.com",
+        credentialsPathOverride: file,
+        deps: { fetchImpl, sleepImpl: vi.fn().mockResolvedValue(undefined) },
+        print: () => {},
+        openBrowserImpl: () => {}
+      })
+    ).rejects.toThrow(CredentialsFileCorruptError);
+    expect(fetchImpl).not.toHaveBeenCalled(); // nothing is sent to the server for a broken local state
   });
 });

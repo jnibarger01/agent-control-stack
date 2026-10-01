@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { writeCredentials, writeSession, readCredentials } from "./credential-store.js";
+import { CredentialsFileCorruptError, writeCredentials, writeSession, readCredentials } from "./credential-store.js";
 import { runLogout } from "./logout.js";
 import { runStatus } from "./status.js";
 
@@ -93,5 +93,30 @@ describe("acs auth status / logout", () => {
     const file = path();
     const result = runLogout({ credentialsPathOverride: file, print: () => {} });
     expect(result.hadSession).toBe(false);
+  });
+
+  it("reports a corrupt credentials file as a state instead of crashing status", () => {
+    const file = path();
+    const unusable = '{"v":1,"session":{"accessToken":"super-secret-access-token"';
+    writeFileSync(file, unusable);
+    const lines: string[] = [];
+
+    const report = runStatus({ credentialsPathOverride: file, print: (line) => lines.push(line) });
+
+    expect(report.connectionState).toBe("credentials_corrupt");
+    const output = lines.join("\n");
+    expect(output).toContain(file);
+    expect(output).toContain("acs auth login");
+    expect(output).not.toContain("super-secret-access-token"); // no file contents in the message
+    expect(output).not.toContain("SyntaxError"); // an actionable message, not a raw parse error
+  });
+
+  it("logout fails closed on a corrupt credentials file and leaves it untouched", () => {
+    const file = path();
+    const unusable = '{"v":1,"devicePrivateKeyPem":"PARTIAL-KEY"';
+    writeFileSync(file, unusable);
+
+    expect(() => runLogout({ credentialsPathOverride: file, print: () => {} })).toThrow(CredentialsFileCorruptError);
+    expect(readFileSync(file, "utf8")).toBe(unusable);
   });
 });

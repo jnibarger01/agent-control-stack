@@ -1,8 +1,8 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCredentials } from "./credential-store.js";
+import { CredentialsFileCorruptError, readCredentials } from "./credential-store.js";
 import { loadOrCreateDeviceIdentity } from "./device-identity.js";
 
 describe("loadOrCreateDeviceIdentity", () => {
@@ -42,5 +42,17 @@ describe("loadOrCreateDeviceIdentity", () => {
       credentialsPathOverride: file
     });
     expect(second.devicePublicKeyPem).not.toBe(first.devicePublicKeyPem);
+  });
+
+  it("refuses to overwrite an unusable credentials file with a new device identity", () => {
+    const file = path();
+    const unusable = '{"v":1,"devicePrivateKeyPem":"PARTIAL-KEY"';
+    writeFileSync(file, unusable);
+
+    expect(() =>
+      loadOrCreateDeviceIdentity("https://acs.example.com", "acs-cli", { credentialsPathOverride: file })
+    ).toThrow(CredentialsFileCorruptError);
+    // The operator's file is preserved byte-for-byte: no silent keypair replacement.
+    expect(readFileSync(file, "utf8")).toBe(unusable);
   });
 });

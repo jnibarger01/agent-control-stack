@@ -4,6 +4,7 @@ import { startAcsRuntime } from "./index.js";
 import { runLogin } from "./auth/login.js";
 import { runLogout } from "./auth/logout.js";
 import { runStatus } from "./auth/status.js";
+import { CredentialsFileCorruptError } from "./auth/credential-store.js";
 
 const USAGE = "Usage: acs serve | acs auth login [--acs-url <url>] [--no-open] | acs auth status | acs auth logout";
 
@@ -45,4 +46,13 @@ function flagValue(args: string[], flag: string): string | undefined {
   return index >= 0 ? args[index + 1] : undefined;
 }
 
-process.exitCode = await main(process.argv.slice(2));
+try {
+  process.exitCode = await main(process.argv.slice(2));
+} catch (error) {
+  // An unusable credentials file is an operator-fixable state, not a crash: print the
+  // remediation (path + reason, never file contents) instead of an unhandled parse error.
+  // Every other error keeps its stack trace so real bugs stay diagnosable.
+  if (!(error instanceof CredentialsFileCorruptError)) throw error;
+  console.error(error.message);
+  process.exitCode = 1;
+}
