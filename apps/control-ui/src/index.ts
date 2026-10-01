@@ -40,8 +40,15 @@ export {
   type SseConnectionElement,
   type SseConnectionButton,
   nextSseReconnectDelayMs,
+  applyMutationGate,
   applySseConnectionState
 } from "./sse-connection.js";
+export {
+  MUTATING_CONTROL_SELECTOR,
+  MUTATING_CONTROL_SELECTORS,
+  MUTATION_GATE_MARKER_ATTRIBUTE,
+  MUTATION_GATE_WAS_DISABLED_ATTRIBUTE
+} from "./mutation-gate.js";
 export {
   type MissionControlAgent,
   type MissionControlAttemptLease,

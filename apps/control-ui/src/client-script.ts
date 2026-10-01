@@ -2,6 +2,11 @@ import { CONFIRM_COPY } from "./approval-actions.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
 import { composerClientSource } from "./composer.js";
 import { liveDashboardClientSource } from "./live-dashboard.js";
+import {
+  MUTATING_CONTROL_SELECTOR,
+  MUTATION_GATE_MARKER_ATTRIBUTE,
+  MUTATION_GATE_WAS_DISABLED_ATTRIBUTE
+} from "./mutation-gate.js";
 import { operatorWorkflowClientSource } from "./operator-workflow.js";
 import { redactionClientSource } from "./redaction.js";
 import { systemProbesClientSource } from "./system-probes.js";
@@ -63,6 +68,35 @@ function nextSseReconnectDelayMs(attempt) {
   return Math.min(30000, 1000 * Math.pow(2, Math.min(n, 5)));
 }
 
+const MUTATING_CONTROL_SELECTOR = '${MUTATING_CONTROL_SELECTOR}';
+const MUTATION_GATE_MARKER = '${MUTATION_GATE_MARKER_ATTRIBUTE}';
+const MUTATION_GATE_WAS_DISABLED = '${MUTATION_GATE_WAS_DISABLED_ATTRIBUTE}';
+
+// Fail-closed gate over every mutating control (wave-2 #18). Mirrors
+// applyMutationGate in ./mutation-gate.ts; mutation-gate.test.ts asserts both
+// cover the same control set.
+function applyMutationGate(root, enabled) {
+  root.querySelectorAll(MUTATING_CONTROL_SELECTOR).forEach(function (control) {
+    const gated = control.getAttribute(MUTATION_GATE_MARKER) !== null;
+    if (!enabled) {
+      if (!gated) {
+        control.setAttribute(MUTATION_GATE_MARKER, '1');
+        if (control.disabled) control.setAttribute(MUTATION_GATE_WAS_DISABLED, '1');
+      }
+      control.disabled = true;
+      return;
+    }
+    if (gated) {
+      control.disabled = control.getAttribute(MUTATION_GATE_WAS_DISABLED) !== null;
+      control.removeAttribute(MUTATION_GATE_MARKER);
+      control.removeAttribute(MUTATION_GATE_WAS_DISABLED);
+    }
+    if (control.getAttribute('data-approve') !== null && control.getAttribute('data-action-hash') === null) {
+      control.disabled = true;
+    }
+  });
+}
+
 function applySseConnectionState(root, connected) {
   sseConnected = connected;
   const banner = root.querySelector('#sse-stale-banner');
@@ -74,10 +108,7 @@ function applySseConnectionState(root, connected) {
       ? '<span aria-hidden="true"></span> Live'
       : '<span aria-hidden="true"></span> Disconnected';
   }
-  root.querySelectorAll('[data-approve],[data-reject],[data-unblock],[data-work-control]').forEach(function (button) {
-    const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
-    button.disabled = !connected || approveWithoutHash;
-  });
+  applyMutationGate(root, connected);
   renderLiveStatus();
 }
 
@@ -819,6 +850,13 @@ function requestApprovalConfirm(request) {
 document.querySelectorAll('[data-execution-mode]').forEach((input) => {
   input.addEventListener('change', async () => {
     if (!input.checked) return;
+    // Defense in depth: the stale-stream gate disables this input, but a change
+    // that races the gate must not reach the route either.
+    if (!sseConnected) {
+      const stale = document.querySelector('#execution-mode-result');
+      if (stale) stale.textContent = 'Disconnected: execution mode change disabled until reconnect';
+      return;
+    }
     const output = document.querySelector('#execution-mode-result');
     const headers = { 'content-type': 'application/json' };
     const res = await fetch('/execution-mode', {

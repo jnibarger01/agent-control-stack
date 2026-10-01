@@ -147,6 +147,12 @@ composerForm?.addEventListener('submit', async function (event) {
   event.preventDefault();
   const form = composerForm;
   const result = document.getElementById('task-result');
+  // Defense in depth: the stale-stream gate disables this submit button, but a
+  // submit that races the gate must not create a work item either.
+  if (!sseConnected) {
+    if (result) result.textContent = 'Disconnected: submit disabled until reconnect';
+    return;
+  }
   const draft = composerDraft(form);
   showComposerParamsError(form, draft.paramsError);
   if (!draft.ready) {
