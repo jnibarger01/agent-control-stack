@@ -2736,6 +2736,31 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  app.post("/worker/claim", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    try {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) return;
+      const body = z
+        .object({ leaseMs: z.number().int().positive().max(3_600_000).optional() })
+        .strict()
+        .parse(requestObject(request.body));
+      const claim = tools.claim_next_approved_work_item({
+        workerId,
+        ...(body.leaseMs ? { leaseMs: body.leaseMs } : {})
+      });
+      if (!claim) return { claimed: false };
+      if (claim.status !== "running") {
+        return reply
+          .code(409)
+          .send({ error: "claim was rejected by policy or approval binding", code: "worker_claim_blocked" });
+      }
+      return { claimed: true, workItem: claim };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post<{ Params: { id: string } }>(
     "/work-items/:id/results",
     { bodyLimit: MAX_RESULT_BODY_BYTES },
@@ -3589,6 +3614,7 @@ function isRateLimitedRoute(url: string): boolean {
   const path = url.split("?", 1)[0];
   return (
     path === "/mcp" ||
+    path === "/worker/claim" ||
     path === "/execution-mode" ||
     path === "/authority" ||
     path === "/session/login" ||

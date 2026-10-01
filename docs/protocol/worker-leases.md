@@ -17,14 +17,24 @@ created -> pending_policy -> approved -> claimed -> running -> succeeded
 
 Only approved work can be claimed.
 
-Claim request:
+Workers poll `POST /worker/claim` using a worker bearer credential. The
+authenticated credential determines `workerId`; the JSON body cannot choose
+the identity. Responses use `Cache-Control: no-store`. The optional `leaseMs`
+must be a positive integer no greater than one hour. The request body is:
 
 ```json
 {
-  "worker_id": "worker_local_1",
-  "capabilities": ["command", "filesystem"]
+  "leaseMs": 300000
 }
 ```
+
+The response is `{ "claimed": false }` when no item is available to that
+worker. A persisted assignment determines which worker may claim; it is
+separate from a lease, which records active execution ownership after a
+successful, policy-checked claim. Unassigned legacy items remain claimable by
+any authenticated worker. Remote MCP claim tooling is not present in this
+checkout. Policy or approval-binding rejection returns HTTP 409 with code
+`worker_claim_blocked`. The executor backend remains process-wide and pull-based.
 
 Claim response:
 

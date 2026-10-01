@@ -8,7 +8,7 @@ Bearer tokens that prove the identity also need an independent lifecycle —
 TTL, rotation, and revoke — before real execution.
 
 This document covers the worker credential registry used by the gateway when
-authenticating `POST /work-items/:id/results`.
+authenticating `POST /worker/claim` and `POST /work-items/:id/results`.
 
 ## Credential lifecycle
 
@@ -37,6 +37,28 @@ for authentication lookups; prefer hashing at any durable persistence boundary.
 A matching active lease is still required after identity authentication. Identity
 without a lease is not authority; a lease without a live identity is not
 authority either.
+
+## Worker pull claims
+
+The supported worker pull surface is `POST /worker/claim`. The request accepts
+an optional positive integer `leaseMs` capped at one hour; it does not accept a
+worker ID. Responses include `Cache-Control: no-store`. The gateway resolves
+the bearer credential to a worker identity using the same resolver as result
+submission. Unknown and revoked credentials are rejected before claim
+processing. A policy or approval-binding rejection returns `409` with code
+`worker_claim_blocked`.
+
+Claim-time policy, approval, capability, state, and lease checks remain
+authoritative. A persisted work-item assignment is a routing constraint created
+before execution ownership: only its selected worker may claim the item. An
+assignment is not a lease. The lease and execution attempt are created
+atomically only after the authenticated worker passes claim-time checks.
+Unassigned legacy items remain available to any authenticated worker.
+
+Remote MCP claim tooling is not present in this checkout; claims use the
+gateway HTTP pull endpoint. Authenticated worker selection is enforceable, but
+execution still uses the existing process-local pull executor. The gateway
+does not route a worker claim to a per-worker backend.
 
 ## Acceptance
 

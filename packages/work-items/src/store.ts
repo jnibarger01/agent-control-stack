@@ -19,6 +19,12 @@ import {
 } from "@agent-control-stack/shared";
 import { transitionWorkItem } from "./state-machine.js";
 import {
+  assignWorkItemInputSchema,
+  workItemAssignmentSchema,
+  type AssignWorkItemInput,
+  type WorkItemAssignment
+} from "./assignment.js";
+import {
   OBSERVATION_OUTBOX_MAX_ATTEMPTS,
   OBSERVATION_OUTBOX_MAX_PROJECTION_EVENTS,
   OBSERVATION_OUTBOX_MAX_QUEUE,
@@ -970,6 +976,9 @@ export interface TraceEnqueueFailure {
 }
 
 export interface WorkItemStore {
+  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment;
+  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined;
+  findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined;
   withTransaction<T>(operation: () => T): T;
   create(input: unknown): WorkItem;
   get(id: string): WorkItem | undefined;
@@ -2211,6 +2220,109 @@ export class SqliteWorkItemStore implements WorkItemStore {
       );
       return { value: decision, events: [event] };
     });
+  }
+
+  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment {
+    requirePrivilegedTransition(options, "assign_work_item");
+    const parsed = assignWorkItemInputSchema.parse(input);
+    if (!options.actorId || options.actorId !== parsed.assignedByActorId) {
+      throw new ControlStackError("assignment_actor_mismatch", "assignment actor must match the authorized caller");
+    }
+    return this.write(() => {
+      const workItem = this.get(parsed.workItemId);
+      if (!workItem || workItem.status !== "approved") {
+        throw new ControlStackError("work_item_not_assignable", "only approved work items can be assigned");
+      }
+      if (parsed.selectedAgentId) {
+        const agent = this.getRegistryAgent(parsed.selectedAgentId);
+        if (!agent || agent.status !== "AVAILABLE") {
+          throw new ControlStackError("agent_not_available", "selected agent is not available");
+        }
+      }
+      if (parsed.routingDecisionId) {
+        const decision = this.getActorRoutingDecision(parsed.routingDecisionId);
+        if (
+          !decision ||
+          decision.workItemId !== parsed.workItemId ||
+          decision.selectedActorId !== parsed.selectedAgentId
+        ) {
+          throw new ControlStackError("routing_decision_mismatch", "assignment does not match its routing decision");
+        }
+      }
+      const assignment = workItemAssignmentSchema.parse({
+        workItemId: parsed.workItemId,
+        selectedWorkerId: parsed.selectedWorkerId,
+        ...(parsed.selectedAgentId ? { selectedAgentId: parsed.selectedAgentId } : {}),
+        ...(parsed.routingDecisionId ? { routingDecisionId: parsed.routingDecisionId } : {}),
+        assignedByActorId: parsed.assignedByActorId,
+        assignedAt: (parsed.now ?? new Date()).toISOString()
+      });
+      this.db
+        .prepare(
+          `INSERT INTO work_item_assignments
+         (work_item_id, selected_worker_id, selected_agent_id, routing_decision_id, assigned_by_actor_id, assigned_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(work_item_id) DO UPDATE SET
+           selected_worker_id = excluded.selected_worker_id,
+           selected_agent_id = excluded.selected_agent_id,
+           routing_decision_id = excluded.routing_decision_id,
+           assigned_by_actor_id = excluded.assigned_by_actor_id,
+           assigned_at = excluded.assigned_at`
+        )
+        .run(
+          assignment.workItemId,
+          assignment.selectedWorkerId,
+          assignment.selectedAgentId ?? null,
+          assignment.routingDecisionId ?? null,
+          assignment.assignedByActorId,
+          assignment.assignedAt
+        );
+      const event = this.appendAuditEvent(
+        createEvent("work_item.assigned", assignment, {
+          "work_item.id": assignment.workItemId,
+          "worker.id": assignment.selectedWorkerId,
+          ...(assignment.selectedAgentId ? { "agent.id": assignment.selectedAgentId } : {}),
+          ...(assignment.routingDecisionId ? { "routing.decision_id": assignment.routingDecisionId } : {})
+        })
+      );
+      return { value: assignment, events: [event] };
+    });
+  }
+
+  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined {
+    const row = this.db.prepare(`SELECT * FROM work_item_assignments WHERE work_item_id = ?`).get(workItemId) as
+      | {
+          work_item_id: string;
+          selected_worker_id: string;
+          selected_agent_id: string | null;
+          routing_decision_id: string | null;
+          assigned_by_actor_id: string;
+          assigned_at: string;
+        }
+      | undefined;
+    return row
+      ? workItemAssignmentSchema.parse({
+          workItemId: row.work_item_id,
+          selectedWorkerId: row.selected_worker_id,
+          ...(row.selected_agent_id === null ? {} : { selectedAgentId: row.selected_agent_id }),
+          ...(row.routing_decision_id === null ? {} : { routingDecisionId: row.routing_decision_id }),
+          assignedByActorId: row.assigned_by_actor_id,
+          assignedAt: row.assigned_at
+        })
+      : undefined;
+  }
+
+  findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT wi.* FROM work_items AS wi
+       LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
+       WHERE wi.status = 'approved'
+         AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)
+       ORDER BY wi.created_at ASC LIMIT 1`
+      )
+      .get(workerId) as unknown as WorkItemRow | undefined;
+    return row ? rowToWorkItem(row) : undefined;
   }
 
   getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined {
@@ -4932,8 +5044,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
     return this.write(() => {
       const row = this.db
-        .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
-        .get() as unknown as WorkItemRow | undefined;
+        .prepare(
+          `SELECT wi.* FROM work_items AS wi
+           LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
+           WHERE wi.status = 'approved'
+             AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)
+           ORDER BY wi.created_at ASC LIMIT 1`
+        )
+        .get(workerId) as unknown as WorkItemRow | undefined;
       if (!row) {
         return { value: undefined, events: [] };
       }
@@ -4996,6 +5114,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     workerId: string,
     options: ClaimOptions
   ): { value: ClaimedWorkItem; events: StoredAuditEvent[] } {
+    const assignment = this.getWorkItemAssignment(current.id);
+    if (assignment && assignment.selectedWorkerId !== workerId) {
+      throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
+    }
     const authority = options.attemptAuthority;
     if (!authority) {
       throw new ControlStackError("attempt_authority_required", "persisted attempt authority is required");
@@ -5157,8 +5279,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
   ): ClaimedWorkItem | undefined {
     return this.write(() => {
       const row = this.db
-        .prepare(`SELECT * FROM work_items WHERE id = ? AND status = 'approved'`)
-        .get(id) as unknown as WorkItemRow | undefined;
+        .prepare(
+          `SELECT wi.* FROM work_items AS wi
+           LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
+           WHERE wi.id = ? AND wi.status = 'approved'
+             AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)`
+        )
+        .get(id, workerId) as unknown as WorkItemRow | undefined;
       if (!row) {
         return { value: undefined, events: [] };
       }

@@ -226,6 +226,11 @@ bridge methods and contains no approval, cancellation, or other mutation path.
 
 Backed by `createWorkItemTools` (`packages/policy-gate/src/tools.ts`) over a `WorkItemStore`. These tools create and manage work items; they do not execute anything themselves. Execution happens later, out of band, when a worker calls `claim_next_approved_work_item` and `submit_work_result` — those two are **not** exposed as MCP tools (neither locally nor remotely); they're internal harness/worker calls, reached through the gateway's own HTTP endpoints, not `tools/call`.
 
+The supported worker pull surface in this checkout is `POST /worker/claim`.
+There is no remote MCP claim surface. Worker credentials determine the identity
+used for polling and result submission; the executor remains process-wide and
+pull-based.
+
 Remote (HTTP/OAuth) callers get `remoteMcpToolNames`: everything below except `approve_work_item`. Calling `approve_work_item` over MCP — local or remote — is unconditionally rejected with JSON-RPC error `-32002` ("MCP identities cannot grant approval"); approval must go through an authenticated gateway mutation actor via `/work-items/:id/approve`, per [ADR 0004](../adr/0004-request-bound-approval-tokens.md).
 
 ### Visualizer portfolio intelligence (read-only)
