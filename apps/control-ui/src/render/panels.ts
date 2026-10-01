@@ -208,6 +208,13 @@ export function approvalsPanel(
       const approvalButtons = approvalButtonsFor(item, approvalActionsByWorkItem[item.id] ?? [], reasonId);
       const wait = waitBadge(item, now, slaMs);
       const cardAttrs = `class="approval-item${wait.overdue ? " overdue" : ""}" role="listitem" data-risk="${escapeHtml(item.risk)}" data-status="${escapeHtml(item.status)}" data-work-item-ref="${escapeHtml(item.id)}"`;
+      // Quarantined items are flagged "needs attention" in the queue and recover
+      // through an operator-only `quarantined -> pending_policy` transition, but
+      // the gateway exposes no approve/reject/unblock route for them. List them
+      // for triage with no mutating control so they stop being invisible here.
+      if (item.status === "quarantined") {
+        return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${wait.html}${attentionBadge()}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Requester: ${escapeHtml(item.requesterSubject ?? item.requester)} · Actions: ${escapeHtml(actions)}</small>${approvalSummary ? `<small class="approval-summary">${escapeHtml(redactSecrets(approvalSummary))}</small>` : ""}${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}<small class="quarantine-note">Quarantined after recovery reclassification. Returning it to policy is an operator action outside Mission Control; no approval is pending.</small></article>`;
+      }
       if (item.status === "blocked") {
         return `<article ${cardAttrs}><span>${pill(item.status)} ${pill(item.risk)} ${executionModeChip(item)}${wait.html}</span><strong id="approval-title-${escapeHtml(item.id)}">${escapeHtml(item.title)}</strong><small>Actions: ${escapeHtml(actions)}</small>${error ? `<small class="error-line">${escapeHtml(error)}</small>` : ""}${reason}<div class="approval-actions" role="group" aria-label="Actions for ${escapeHtml(item.title)}"><button type="button" data-unblock="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Unblock</button><button type="button" data-reject="${escapeHtml(item.id)}" data-risk="${escapeHtml(item.risk)}" aria-describedby="${reasonId}">Reject</button></div>${outcome}</article>`;
       }

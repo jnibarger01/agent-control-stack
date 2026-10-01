@@ -42,8 +42,14 @@ export function renderDashboardFragments(
   const model = dashboardModel(input);
   const now = model.now ?? new Date();
   const stats = summarize(model.workItems, agents, model.statusCounts);
-  const approvalItems = model.workItems.filter((item) => item.status === "needs_approval" || item.status === "blocked");
+  const approvalItems = model.workItems.filter(
+    (item) => item.status === "needs_approval" || item.status === "blocked" || item.status === "quarantined"
+  );
   const attemptLeasesByWorkItem = model.attemptLeasesByWorkItem ?? {};
+  // Quarantined rows inform triage but grant nothing, so the header count keeps
+  // "waiting" for grantable items and names quarantined ones separately.
+  const quarantinedCount = approvalItems.filter((item) => item.status === "quarantined").length;
+  const waitingCount = approvalItems.length - quarantinedCount;
   return {
     cards: overviewCards(stats),
     queueList: workQueueItems(
@@ -60,7 +66,9 @@ export function renderDashboardFragments(
       now,
       model.approvalSlaMs === undefined ? DEFAULT_APPROVAL_SLA_MS : toCount(model.approvalSlaMs)
     ),
-    approvalsCount: `${approvalItems.length} waiting`,
+    approvalsCount: quarantinedCount
+      ? `${waitingCount} waiting · ${quarantinedCount} quarantined`
+      : `${waitingCount} waiting`,
     metrics: operatorMetricsPanel(model.workItems, attemptLeasesByWorkItem, now),
     systemStats: systemStats(stats, model.executionBackend),
     policy: policyPanelHtml(
