@@ -250,15 +250,30 @@ The strategy enum is defined in `packages/work-items/src/approval-bundle-rows.ts
 and persisted in the singleton `approval_strategy_state` table. Unreadable or corrupt
 values resolve to `PER_ACTION` in the bundle authorization helper.
 
-| Strategy            | Behaviour                                                                                                                                                 |
-| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PER_ACTION`        | Default. Unchanged existing behaviour; every privileged action approved independently.                                                                    |
-| `BUNDLE`            | Bundle revisions can group and approve selected privileged changes. Automatic proposal creation and worker-claim integration are not wired yet.          |
-| `POLICY_AUTONOMOUS` | The bundle authorization helper treats only explicit policy `allow` as sufficient. General worker-claim strategy integration is not wired yet.             |
+| Strategy            | Behaviour                                                                                                                                                                                                                                                                       |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PER_ACTION`        | Default. Unchanged existing behaviour; every privileged action approved independently.                                                                                                                                                                                          |
+| `BUNDLE`            | A policy-required work item creates or reuses a pending proposal in the same transaction. Bundle approval mints the same per-action execution-plan rows, which the ordinary worker claim consumes. DC/JC capability issuance also checks exact bundle coverage before claiming. |
+| `POLICY_AUTONOMOUS` | Only explicit policy `allow` is sufficient. `require_approval` remains human-gated; corrupt strategy state resolves to `PER_ACTION`.                                                                                                                                            |
 
-`POLICY_AUTONOMOUS` is not "allow everything". The helper keeps `require_approval`
-human-gated and fails closed on a missing or corrupt row. The existing worker claim
-path still uses its normal per-action approval checks.
+`POLICY_AUTONOMOUS` is not "allow everything". It does not change the existing
+work-item decision path: `require_approval` remains human-gated and the worker claim
+still requires its normal authoritative per-action approval rows.
+
+`POST /work-items/:id/approval-bundles` is available to `acs:write` callers while
+`BUNDLE` is active. Its strict body accepts only review title/rationale; mission,
+execution plan, agent and action fingerprints are loaded or derived by ACS. Repeated
+requests reuse the deterministic proposal for the current immutable plan. Proposal
+creation writes no grant. DC and JC privileged capability issuance revalidates the
+current bundle and underlying `execution_plan_approvals` rows in the same transaction
+that issues the lease.
+
+Delta revisions are represented and their coverage/revocation rules are tested, but
+live delta execution remains incomplete. DC and JC currently create one work item per
+invocation, while execution plans are immutable and there is no authoritative mission
+container that safely links a later invocation to the earlier bundle. A newly
+discovered invocation therefore gets its own pending bundle under `BUNDLE`; it is not
+represented as a same-mission delta revision.
 
 ### 2.8 JEV
 
@@ -274,7 +289,7 @@ can reach bundle state. `approval-bundles` has no dependency on `jev-advisor`.
   every existing deployment keeps today's behaviour.
 - `PER_ACTION` never constructs a bundle; the existing `POST /work-items/:id/approve`
   path is untouched and remains the route used in that mode.
-- There is no public bundle-proposal creation endpoint yet. Bundles can currently be
-  created through the work-item store API; automatic strategy-driven proposal creation
-  and end-to-end delta execution remain incomplete.
+- Public and automatic proposal creation are available under `BUNDLE`. End-to-end
+  same-mission delta execution remains incomplete because the current work-item and
+  immutable-plan model has no secure association for later invocations.
 - Existing audit consumers keep working: new events are additive.

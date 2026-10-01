@@ -49,6 +49,14 @@ export const approvalBundleDecisionBodySchema = z
   })
   .strict();
 
+/** Caller may supply review prose only; all authorization bindings come from ACS state. */
+export const approvalBundleProposalBodySchema = z
+  .object({
+    title: z.string().min(1).max(500).optional(),
+    rationale: z.string().min(1).max(8_000).optional()
+  })
+  .strict();
+
 /** Create the next revision of a bundle, i.e. a delta after new work is discovered. */
 export const approvalBundleRevisionBodySchema = z
   .object({

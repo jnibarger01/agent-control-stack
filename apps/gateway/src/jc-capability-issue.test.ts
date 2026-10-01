@@ -258,6 +258,36 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(again.json().workItemId).not.toBe(pending.workItemId);
     }));
 
+  it("uses BUNDLE review and validates it before issuing a Jace Commander capability", () =>
+    withGateway(async (ctx) => {
+      const strategy = await ctx.app.inject({
+        method: "POST",
+        url: "/approval-strategy",
+        headers: { authorization: `Bearer ${OP_TOKEN}` },
+        payload: { strategy: "BUNDLE", reason: "review privileged calls as a bundle" }
+      });
+      expect(strategy.statusCode).toBe(200);
+
+      const pendingResponse = await issue(ctx, "privileged_exec", PRIV_ARGS);
+      expect(pendingResponse.statusCode).toBe(409);
+      const pending = pendingResponse.json();
+      expect(pending.approvalBundleId).toMatch(/^bundle-/);
+      expect(pending.approvalInstructions).toContain(`/approval-bundles/${pending.approvalBundleId}/approve`);
+
+      const approved = await ctx.app.inject({
+        method: "POST",
+        url: `/approval-bundles/${pending.approvalBundleId}/approve`,
+        headers: { authorization: `Bearer ${OP_TOKEN}` },
+        payload: { revision: 1, kind: "approve_all", reason: "reviewed exact privileged invocation" }
+      });
+      expect(approved.statusCode).toBe(200);
+
+      const issued = await issue(ctx, "privileged_exec", PRIV_ARGS);
+      expect(issued.statusCode).toBe(200);
+      expect(issued.json().capability.payload.approvalId).toEqual(expect.any(String));
+      expect(signatureValid(ctx, issued.json().capability)).toBe(true);
+    }));
+
   it("an approval for one argv never authorizes a different argv", () =>
     withGateway(async (ctx) => {
       const first = (await issue(ctx, "privileged_exec", PRIV_ARGS)).json();

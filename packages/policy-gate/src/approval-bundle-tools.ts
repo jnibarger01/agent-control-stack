@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ControlStackError } from "@agent-control-stack/shared";
+import { ControlStackError, stableHash } from "@agent-control-stack/shared";
 import {
   activeGrantCovers,
   approvalChangeDigest,
@@ -108,6 +108,7 @@ export function buildBundleFromWorkItem(input: {
   now?: Date;
 }): { revision: ApprovalBundleRevision; requiredActionHashes: string[] } {
   const { store, policy, workItem } = input;
+  const executionPlan = ensureExecutionPlan(store, workItem, input.createdByActorId);
   const evaluations = policy.evaluateWorkItem(workItem, workItem.requester, "create");
   // Deny is checked first: a work item policy rejects is not a bundle awaiting review,
   // and reporting it as "nothing to approve" would hide a hard block behind a
@@ -156,7 +157,8 @@ export function buildBundleFromWorkItem(input: {
     {
       bundleId: input.bundleId,
       missionId: workItem.id,
-      executionId: `${workItem.id}-plan`,
+      // The bundle is bound to the immutable, authoritative ACS execution plan.
+      executionId: executionPlan.planId,
       agentId: workItem.requesterSubject ?? workItem.requester,
       title: input.title ?? workItem.title,
       rationale: input.rationale ?? workItem.intent,
@@ -167,8 +169,58 @@ export function buildBundleFromWorkItem(input: {
     },
     input.now
   );
-  void store;
   return { revision, requiredActionHashes: required.map((evaluation) => evaluation.actionHash) };
+}
+
+/**
+ * Create the deterministic pending proposal for this work item's current plan, or
+ * return the proposal already associated with it. This operation persists review
+ * state only; execution-plan approvals are created exclusively by gateApproveBundle.
+ */
+export function createOrReuseBundleProposal(input: {
+  store: WorkItemStore;
+  policy: PolicyEngine;
+  workItem: WorkItem;
+  createdByActorId: string;
+  title?: string;
+  rationale?: string;
+  now?: Date;
+}): ApprovalBundle {
+  const plan = ensureExecutionPlan(input.store, input.workItem, input.createdByActorId);
+  const bundleId = `bundle-${stableHash({
+    domain: "acs:approval-bundle-for-plan:v1",
+    workItemId: input.workItem.id,
+    planId: plan.planId
+  }).slice(0, 40)}`;
+  const existing = input.store.getApprovalBundle(bundleId);
+  if (existing) {
+    if (
+      existing.missionId !== input.workItem.id ||
+      existing.executionId !== plan.planId ||
+      existing.agentId !== (input.workItem.requesterSubject ?? input.workItem.requester)
+    ) {
+      throw new ControlStackError(
+        "approval_bundle_binding_mismatch",
+        `existing proposal ${bundleId} does not match the authoritative work item and execution plan`
+      );
+    }
+    return existing;
+  }
+
+  const { revision } = buildBundleFromWorkItem({
+    ...input,
+    bundleId,
+    createdByActorId: input.createdByActorId
+  });
+  input.store.createApprovalBundle({ ...revision, status: "pending" });
+  const created = input.store.getApprovalBundle(bundleId);
+  if (!created) {
+    throw new ControlStackError(
+      "approval_bundle_persistence_failed",
+      `proposal ${bundleId} was not available after its transaction committed`
+    );
+  }
+  return created;
 }
 
 function primaryTarget(context: PolicyContext): string {
@@ -296,6 +348,19 @@ function gateApproveBundleInTransaction(
         .map((grant) => grant.changeId);
       store.revokeApprovalBundleChanges(input.bundleId, activeChangeIds, input.reason, decisionTransition);
       store.setApprovalBundleStatus(input.bundleId, "rejected", decisionTransition);
+      if (workItem.status === "approved") {
+        store.blockWorkItem(workItem.id, decisionTransition);
+      } else if (workItem.status !== "needs_approval" && workItem.status !== "blocked") {
+        throw new ControlStackError(
+          "approval_bundle_work_item_not_rejectable",
+          `work item ${workItem.id} in ${workItem.status} cannot be rejected through its bundle`
+        );
+      }
+      store.rejectWorkItem(
+        workItem.id,
+        { actor: input.approvedBy, reason: input.reason },
+        { via: "policy_gate", actorId: input.approvedBy }
+      );
     }
     return {
       decision,
@@ -309,7 +374,7 @@ function gateApproveBundleInTransaction(
     throw new ControlStackError("approval_bundle_expired", `approval bundle ${input.bundleId} has expired`);
   }
 
-  if (bundle.executionId !== `${workItem.id}-plan`) {
+  if (bundle.executionId !== ensureExecutionPlan(store, workItem, input.approvedBy).planId) {
     throw new ControlStackError(
       "approval_bundle_execution_mismatch",
       `approval bundle ${input.bundleId} is not bound to the current work-item plan execution`
@@ -447,7 +512,9 @@ function currentPlanHash(store: WorkItemStore, workItem: WorkItem, actor: string
 function assertReviewProjectionMatchesAction(workItem: WorkItem, change: ProposedChange): void {
   const context = policyContextForBundleChange(workItem, change, workItem.requester);
   const sameArray = (left: string[] | undefined, right: string[] | undefined) =>
-    left === undefined ? right === undefined : right !== undefined && left.length === right.length && left.every((v, i) => v === right[i]);
+    left === undefined
+      ? right === undefined
+      : right !== undefined && left.length === right.length && left.every((v, i) => v === right[i]);
   const expectedType = changeTypeByActionKind[context.action.kind] ?? "other_privileged_action";
   if (
     change.summary !== change.action.description ||
@@ -457,7 +524,10 @@ function assertReviewProjectionMatchesAction(workItem: WorkItem, change: Propose
     change.destructive !== (context.destructive === true) ||
     change.network !== (context.network === true) ||
     !sameArray(change.command, context.command) ||
-    !sameArray(change.cwd === undefined ? undefined : [change.cwd], context.cwd === undefined ? undefined : [context.cwd]) ||
+    !sameArray(
+      change.cwd === undefined ? undefined : [change.cwd],
+      context.cwd === undefined ? undefined : [context.cwd]
+    ) ||
     !sameArray(change.paths, context.paths)
   ) {
     throw new ControlStackError(
@@ -527,14 +597,16 @@ function grantStillMatchesBundle(
       return false;
     }
 
-    const decisionExists = store.listApprovalBundleDecisions(grant.bundleId).some(
-      (decision) =>
-        decision.revision === grant.revision &&
-        decision.manifestHash === grant.manifestHash &&
-        (decision.kind === "approve_all" || decision.kind === "approve_selected") &&
-        decision.approvedByActorId === grant.approvedByActorId &&
-        decision.changeIds.includes(grant.changeId)
-    );
+    const decisionExists = store
+      .listApprovalBundleDecisions(grant.bundleId)
+      .some(
+        (decision) =>
+          decision.revision === grant.revision &&
+          decision.manifestHash === grant.manifestHash &&
+          (decision.kind === "approve_all" || decision.kind === "approve_selected") &&
+          decision.approvedByActorId === grant.approvedByActorId &&
+          decision.changeIds.includes(grant.changeId)
+      );
     return decisionExists;
   } catch {
     // Corrupt, missing, or unreadable persisted authorization state is never authority.

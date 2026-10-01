@@ -77,6 +77,8 @@ import {
 import {
   createPolicyEngine,
   approvalDelta,
+  createOrReuseBundleProposal,
+  authorizeBundleOperation,
   gateApproveBundle,
   gateReviseBundle,
   createWorkItemTools,
@@ -89,6 +91,8 @@ import {
   adminExecutionGate,
   observeLiveManagedAuthority,
   readExecutionModeValue,
+  resolveStrategy,
+  type BundleAuthorizationVerdict,
   type ManagedAuthorityObservation
 } from "@agent-control-stack/policy-gate";
 import { ObservationWorker } from "@agent-control-stack/evidence";
@@ -153,6 +157,7 @@ import {
   agentPatchSchema,
   approvalBodySchema,
   approvalBundleDecisionBodySchema,
+  approvalBundleProposalBodySchema,
   approvalBundleRevisionBodySchema,
   approvalStrategyBodySchema,
   listApprovalBundlesQuerySchema,
@@ -1817,7 +1822,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
-        if (mode.mode === "admin") {
+        const approvalStrategy = resolveStrategy(workItems);
+        if (mode.mode === "admin" && approvalStrategy !== "BUNDLE") {
           const gate = adminExecutionGate(readAuthority(), true);
           if (!gate.ok) {
             recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
@@ -1895,6 +1901,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
         if (workItem.status !== "approved" || (dcPolicy.requiresApproval && required.length === 0)) {
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          if (approvalStrategy === "BUNDLE" && required.length > 0) {
+            const bundle = currentBundleForWorkItem(workItems, workItem);
+            return reply.code(409).send({
+              decision: "require_approval",
+              workItemId: workItem.id,
+              actionHash,
+              ...(bundle ? { approvalBundleId: bundle.bundleId, revision: bundle.revision } : {}),
+              approvalInstructions: bundle
+                ? `A human must POST /approval-bundles/${bundle.bundleId}/approve with { revision: ${bundle.revision}, kind: "approve_all", reason: "..." }`
+                : "ACS could not resolve the current approval bundle; execution is blocked"
+            });
+          }
           return reply.code(409).send({
             decision: "require_approval",
             workItemId: workItem.id,
@@ -1913,11 +1931,31 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-          const claimed = tools.claim_approved_work_item_by_id({
-            id: workItem.id,
-            workerId,
-            leaseMs: DC_BRIDGE_LEASE_MS
+          let bundleVerdict: ReturnType<typeof authorizeBundleOperation> | undefined;
+          const claimed = workItems.withTransaction(() => {
+            if (approvalStrategy === "BUNDLE") {
+              bundleVerdict = authorizeCurrentBundleOperation(workItems, policy, workItem, workerId);
+              if (!bundleVerdict.allowed) return undefined;
+            }
+            return tools.claim_approved_work_item_by_id({
+              id: workItem.id,
+              workerId,
+              leaseMs: DC_BRIDGE_LEASE_MS
+            });
           });
+          if (bundleVerdict && !bundleVerdict.allowed) {
+            const status = bundleVerdict.reason === "policy_denied" ? 403 : 409;
+            recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+            return reply.code(status).send({
+              decision: status === 403 ? "deny" : "require_approval",
+              reason: bundleVerdict.reason,
+              code: bundleVerdict.code,
+              workItemId: workItem.id,
+              ...(currentBundleForWorkItem(workItems, workItem)
+                ? { approvalBundleId: currentBundleForWorkItem(workItems, workItem)!.bundleId }
+                : {})
+            });
+          }
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
             return reply.code(409).send({
@@ -2282,8 +2320,22 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         // Deliberately NO admin-mode auto-approval here (unlike /dc/capability/issue):
         // Jace Commander capabilities only ride approvals granted through the
         // normal human approval path.
+        const approvalStrategy = resolveStrategy(workItems);
         if (workItem.status !== "approved" || (toolPolicy.requiresApproval && required.length === 0)) {
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          if (approvalStrategy === "BUNDLE" && required.length > 0) {
+            const bundle = currentBundleForWorkItem(workItems, workItem);
+            return reply.code(409).send({
+              decision: "require_approval",
+              workItemId: workItem.id,
+              actionHash,
+              approvalSummary: jaceCommanderApprovalSummary(invocation),
+              ...(bundle ? { approvalBundleId: bundle.bundleId, revision: bundle.revision } : {}),
+              approvalInstructions: bundle
+                ? `A human must POST /approval-bundles/${bundle.bundleId}/approve with { revision: ${bundle.revision}, kind: "approve_all", reason: "..." }`
+                : "ACS could not resolve the current approval bundle; execution is blocked"
+            });
+          }
           return reply.code(409).send({
             decision: "require_approval",
             workItemId: workItem.id,
@@ -2303,11 +2355,30 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-          const claimed = tools.claim_approved_work_item_by_id({
-            id: workItem.id,
-            workerId,
-            leaseMs: JC_BRIDGE_LEASE_MS
+          let bundleVerdict: ReturnType<typeof authorizeBundleOperation> | undefined;
+          const claimed = workItems.withTransaction(() => {
+            if (approvalStrategy === "BUNDLE") {
+              bundleVerdict = authorizeCurrentBundleOperation(workItems, policy, workItem, workerId);
+              if (!bundleVerdict.allowed) return undefined;
+            }
+            return tools.claim_approved_work_item_by_id({
+              id: workItem.id,
+              workerId,
+              leaseMs: JC_BRIDGE_LEASE_MS
+            });
           });
+          if (bundleVerdict && !bundleVerdict.allowed) {
+            const status = bundleVerdict.reason === "policy_denied" ? 403 : 409;
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+            const bundle = currentBundleForWorkItem(workItems, workItem);
+            return reply.code(status).send({
+              decision: status === 403 ? "deny" : "require_approval",
+              reason: bundleVerdict.reason,
+              code: bundleVerdict.code,
+              workItemId: workItem.id,
+              ...(bundle ? { approvalBundleId: bundle.bundleId } : {})
+            });
+          }
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
             return reply.code(409).send({
@@ -2632,6 +2703,45 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const body = approvalStrategyBodySchema.parse(requestObject(request.body));
       workItems.setApprovalStrategy({ strategy: body.strategy, updatedBy: actor, reason: body.reason });
       return reply.send(approvalStrategyView(workItems));
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/approval-bundles", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth, "acs:write");
+      if (!actor) {
+        return;
+      }
+      const body = approvalBundleProposalBodySchema.parse(requestObject(request.body));
+      if (workItems.getApprovalStrategy().strategy !== "BUNDLE") {
+        return reply.code(409).send({
+          error: "approval bundle proposals require BUNDLE strategy",
+          code: "approval_bundle_strategy_required"
+        });
+      }
+      const workItem = workItems.get(request.params.id);
+      if (!workItem) {
+        return reply.code(404).send({ error: "work item not found" });
+      }
+      if (workItem.status !== "needs_approval") {
+        return reply.code(409).send({
+          error: "only a work item awaiting approval can have a proposal created",
+          code: "approval_bundle_work_item_not_pending"
+        });
+      }
+      const bundle = workItems.withTransaction(() =>
+        createOrReuseBundleProposal({
+          store: workItems,
+          policy,
+          workItem,
+          createdByActorId: actor,
+          ...(body.title !== undefined ? { title: body.title } : {}),
+          ...(body.rationale !== undefined ? { rationale: body.rationale } : {})
+        })
+      );
+      return reply.send({ bundle: approvalBundleView(bundle) });
     } catch (error) {
       return sendError(reply, error);
     }
@@ -3775,6 +3885,34 @@ function approvalBundleView(bundle: ApprovalBundle) {
       decidedAt: decision.decidedAt
     }))
   };
+}
+
+function currentBundleForWorkItem(store: SqliteWorkItemStore, workItem: WorkItem): ApprovalBundle | undefined {
+  const plan = store.getCurrentExecutionPlan(workItem.id);
+  if (!plan) return undefined;
+  return store
+    .listApprovalBundles({ missionId: workItem.id, limit: 100 })
+    .find((bundle) => bundle.executionId === plan.planId);
+}
+
+/** Check the bridge's exact persisted invocation before its plan approval is consumed into a lease. */
+function authorizeCurrentBundleOperation(
+  store: SqliteWorkItemStore,
+  policy: ReturnType<typeof createPolicyEngine>,
+  workItem: WorkItem,
+  actor: string
+): BundleAuthorizationVerdict {
+  const action = workItem.requestedActions.length === 1 ? workItem.requestedActions[0] : undefined;
+  const bundle = currentBundleForWorkItem(store, workItem);
+  if (!action || !bundle) {
+    return {
+      allowed: false,
+      reason: "delta_approval_required",
+      code: "approval_bundle_proposal_missing",
+      matchedRules: ["approval:bundle-required"]
+    };
+  }
+  return authorizeBundleOperation({ store, policy, workItem, action, actor, bundleId: bundle.bundleId });
 }
 
 function approvalGrantView(grant: ApprovalGrantRecord) {

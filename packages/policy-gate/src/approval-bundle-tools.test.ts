@@ -12,7 +12,7 @@ import {
 } from "@agent-control-stack/approval-bundles";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { createPolicyEngine, type PolicyEngine } from "./policy.js";
-import { createWorkItemTools } from "./tools.js";
+import { createWorkItemTools, ensureExecutionPlan } from "./tools.js";
 import {
   authorizeBundleOperation,
   buildBundleFromWorkItem,
@@ -199,7 +199,9 @@ describe("one human approval authorizes the whole reviewed set", () => {
     const raw = new DatabaseSync(dbPath, { readOnly: true });
     try {
       const consumed = raw
-        .prepare(`SELECT COUNT(*) AS count FROM execution_plan_approvals WHERE work_item_id = ? AND status = 'consumed'`)
+        .prepare(
+          `SELECT COUNT(*) AS count FROM execution_plan_approvals WHERE work_item_id = ? AND status = 'consumed'`
+        )
         .get(workItem.id) as { count: number };
       expect(consumed.count).toBe(bundle.changes.length);
     } finally {
@@ -366,9 +368,9 @@ describe("delta approval", () => {
     });
     const unchanged = bundle.changes[0]!;
     const removed = bundle.changes[1]!;
-    const removedGrant = store.listApprovalBundleGrants({ bundleId: bundle.bundleId }).find(
-      (grant) => grant.changeId === removed.id
-    )!;
+    const removedGrant = store
+      .listApprovalBundleGrants({ bundleId: bundle.bundleId })
+      .find((grant) => grant.changeId === removed.id)!;
 
     gateReviseBundle(store, {
       bundleId: bundle.bundleId,
@@ -761,8 +763,34 @@ describe("approval strategies", () => {
 
   it("fails closed when the strategy store is unreadable", () => {
     expect(
-      resolveStrategy({ getApprovalStrategy: () => { throw new Error("database read failed"); } } as never)
+      resolveStrategy({
+        getApprovalStrategy: () => {
+          throw new Error("database read failed");
+        }
+      } as never)
     ).toBe("PER_ACTION");
+  });
+
+  it("creates one pending proposal for BUNDLE work and claims it after one bundle approval", () => {
+    store.setApprovalStrategy({ strategy: "BUNDLE", updatedBy: "user", reason: "group related privileged work" });
+    const workItem = backendFixMission();
+    const [bundle] = store.listApprovalBundles({ missionId: workItem.id });
+    expect(bundle?.status).toBe("pending");
+    expect(store.listApprovalBundleGrants({ workItemId: workItem.id })).toHaveLength(0);
+
+    gateApproveBundle(store, policy, {
+      bundleId: bundle!.bundleId,
+      revision: bundle!.revision,
+      kind: "approve_all",
+      approvedBy: "user",
+      reason: "reviewed the proposed operations"
+    });
+    const claimed = createWorkItemTools(store, policy).claim_approved_work_item_by_id({
+      id: workItem.id,
+      workerId: "agent:backend-api"
+    });
+    expect(claimed?.status).toBe("running");
+    expect(store.listApprovalBundleGrants({ workItemId: workItem.id })).toHaveLength(bundle!.changes.length);
   });
 
   it("fails closed to PER_ACTION when the stored value is unreadable", () => {
@@ -851,14 +879,18 @@ describe("a grant is bound to the reviewed action, not to a claimed one", () => 
       dependsOn: []
     };
     // The operation the attacker actually wants authorized.
-    const wanted = { kind: "shell", description: "restart service D", params: { command: ["systemctl", "restart", "auth-proxy"] } };
+    const wanted = {
+      kind: "shell",
+      description: "restart service D",
+      params: { command: ["systemctl", "restart", "auth-proxy"] }
+    };
     const wantedHash = bundleChangeActionHash(workItem, { ...reviewed, action: wanted } as ProposedChange);
 
     const revision = createApprovalBundleRevision(
       {
         bundleId,
         missionId: workItem.id,
-        executionId: `${workItem.id}-plan`,
+        executionId: ensureExecutionPlan(store, workItem, "agent:backend-api").planId,
         agentId: "agent:backend-api",
         title: "Update README.md",
         rationale: "just a readme",
@@ -894,7 +926,11 @@ describe("a grant is bound to the reviewed action, not to a claimed one", () => 
       store,
       policy,
       workItem: store.get(workItem.id)!,
-      action: { kind: "shell", description: "restart service D", params: { command: ["systemctl", "restart", "auth-proxy"] } },
+      action: {
+        kind: "shell",
+        description: "restart service D",
+        params: { command: ["systemctl", "restart", "auth-proxy"] }
+      },
       actor: "agent:backend-api",
       bundleId: "A-forged"
     });
@@ -941,7 +977,7 @@ describe("a grant is bound to the reviewed action, not to a claimed one", () => 
       {
         bundleId: "A-display-forgery",
         missionId: workItem.id,
-        executionId: `${workItem.id}-plan`,
+        executionId: ensureExecutionPlan(store, workItem, "agent:backend-api").planId,
         agentId: "agent:backend-api",
         title: "Update README.md",
         rationale: "small documentation change",
@@ -975,8 +1011,13 @@ describe("a grant is bound to the reviewed action, not to a claimed one", () => 
       bundleId: "A-execution-replay",
       createdByActorId: "agent:backend-api"
     });
-    const { revision: _revision, manifestHash: _manifestHash, status: _status, createdAt: _createdAt, ...input } =
-      built.revision;
+    const {
+      revision: _revision,
+      manifestHash: _manifestHash,
+      status: _status,
+      createdAt: _createdAt,
+      ...input
+    } = built.revision;
     const replayed = createApprovalBundleRevision({ ...input, executionId: "another-execution" });
     store.createApprovalBundle({ ...replayed, status: "pending" });
 
@@ -1004,8 +1045,13 @@ describe("a grant is bound to the reviewed action, not to a claimed one", () => 
     const changes = built.revision.changes.map((change, index) =>
       index === 0 ? change : { ...change, actionHash: "0".repeat(64) }
     );
-    const { revision: _revision, manifestHash: _manifestHash, status: _status, createdAt: _createdAt, ...input } =
-      built.revision;
+    const {
+      revision: _revision,
+      manifestHash: _manifestHash,
+      status: _status,
+      createdAt: _createdAt,
+      ...input
+    } = built.revision;
     const forged = createApprovalBundleRevision({ ...input, changes });
     store.createApprovalBundle({ ...forged, status: "pending" });
 
@@ -1052,11 +1098,13 @@ describe("the authoritative plan approval is re-verified at the point of use", (
     const raw = new DatabaseSync(dbPath);
     try {
       for (const grant of store.listApprovalBundleGrants({ bundleId: "A-revoked" })) {
-        raw.prepare(
-          `UPDATE execution_plan_approvals
+        raw
+          .prepare(
+            `UPDATE execution_plan_approvals
            SET status = 'invalidated', invalidated_at = ?, invalidation_reason = ?
            WHERE approval_id = ?`
-        ).run(new Date().toISOString(), "revoked by an independent path", grant.approvalId);
+          )
+          .run(new Date().toISOString(), "revoked by an independent path", grant.approvalId);
       }
     } finally {
       raw.close();
@@ -1087,9 +1135,9 @@ describe("the authoritative plan approval is re-verified at the point of use", (
     // is what a real attempt consumption does. The bundle row stays `granted`.
     const raw = new DatabaseSync(dbPath);
     try {
-      raw.prepare(
-        `UPDATE execution_plan_approvals SET status = 'consumed', consumed_at = ? WHERE work_item_id = ?`
-      ).run(new Date().toISOString(), workItem.id);
+      raw
+        .prepare(`UPDATE execution_plan_approvals SET status = 'consumed', consumed_at = ? WHERE work_item_id = ?`)
+        .run(new Date().toISOString(), workItem.id);
     } finally {
       raw.close();
     }
@@ -1141,7 +1189,9 @@ describe("the authoritative plan approval is re-verified at the point of use", (
     const raw = new DatabaseSync(dbPath);
     try {
       raw.exec("DROP TRIGGER approval_bundle_grants_binding_guard");
-      raw.prepare(`UPDATE approval_bundle_grants SET plan_hash = ? WHERE bundle_id = ?`).run("d".repeat(64), bundle.bundleId);
+      raw
+        .prepare(`UPDATE approval_bundle_grants SET plan_hash = ? WHERE bundle_id = ?`)
+        .run("d".repeat(64), bundle.bundleId);
     } finally {
       raw.close();
     }
@@ -1163,10 +1213,9 @@ describe("the authoritative plan approval is re-verified at the point of use", (
     const action = bundle.changes[0]!.action as ActionRequest;
     const raw = new DatabaseSync(dbPath);
     try {
-      raw.prepare(`UPDATE approval_bundles SET current_manifest_hash = ? WHERE bundle_id = ?`).run(
-        "e".repeat(64),
-        bundle.bundleId
-      );
+      raw
+        .prepare(`UPDATE approval_bundles SET current_manifest_hash = ? WHERE bundle_id = ?`)
+        .run("e".repeat(64), bundle.bundleId);
     } finally {
       raw.close();
     }

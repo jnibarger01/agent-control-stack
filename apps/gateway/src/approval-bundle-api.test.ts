@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SqliteWorkItemStore, type WorkItem } from "@agent-control-stack/work-items";
-import { buildBundleFromWorkItem, createPolicyEngine } from "@agent-control-stack/policy-gate";
+import { buildBundleFromWorkItem, createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import type { FastifyInstance } from "fastify";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { buildGateway } from "./server.js";
@@ -93,7 +93,7 @@ function call(
 function seedBundle(bundleId = "A-184"): { bundleId: string; workItem: WorkItem } {
   const store = new SqliteWorkItemStore(dbPath);
   try {
-    const workItem = store.create({
+    const workItem = createWorkItemTools(store, policy).create_work_item({
       title: "Backend config fix",
       requester: "user",
       intent: "repair the backend auth configuration",
@@ -103,7 +103,7 @@ function seedBundle(bundleId = "A-184"): { bundleId: string; workItem: WorkItem 
         { kind: "fs.write", description: "modify file B", params: { paths: ["services/b.ts"] } }
       ],
       risk: "medium"
-    } as never) as WorkItem;
+    });
     const built = buildBundleFromWorkItem({
       store,
       policy,
@@ -170,6 +170,163 @@ describe("approval strategy API", () => {
       expect(events[0]!.body.strategy).toBe("POLICY_AUTONOMOUS");
     } finally {
       store.close();
+    }
+  });
+
+  it.each(["PER_ACTION", "BUNDLE", "POLICY_AUTONOMOUS"] as const)(
+    "creates proposals only for BUNDLE strategy when policy requires approval (%s)",
+    (strategy) => {
+      const store = new SqliteWorkItemStore(dbPath);
+      try {
+        store.setApprovalStrategy({ strategy, updatedBy: "writer", reason: "strategy coverage" });
+        const tools = createWorkItemTools(store, policy);
+        const workItem = tools.create_work_item({
+          title: "Write an application file",
+          requester: "agent",
+          requesterSubject: "agent-17",
+          intent: "apply a reviewed configuration change",
+          target: { cwd: "/repo" },
+          requestedActions: [{ kind: "fs.write", description: "write config", params: { paths: ["app/config.ts"] } }],
+          risk: "medium"
+        });
+        const bundles = store.listApprovalBundles({ missionId: workItem.id });
+        if (strategy === "BUNDLE") {
+          expect(workItem.status).toBe("needs_approval");
+          expect(store.getApprovalStrategy().strategy).toBe("BUNDLE");
+          expect(bundles).toHaveLength(1);
+          expect(bundles[0]).toMatchObject({
+            status: "pending",
+            missionId: workItem.id,
+            executionId: store.getCurrentExecutionPlan(workItem.id)?.planId,
+            agentId: "agent-17"
+          });
+          expect(store.listApprovalBundleGrants({ workItemId: workItem.id })).toHaveLength(0);
+          expect(
+            store.getExecutionPlanApproval(
+              workItem.id,
+              store.getCurrentExecutionPlan(workItem.id)!.planHash,
+              bundles[0]!.changes[0]!.actionHash
+            )
+          ).toBeUndefined();
+        } else {
+          expect(bundles).toHaveLength(0);
+        }
+      } finally {
+        store.close();
+      }
+    }
+  );
+});
+
+describe("approval bundle proposal API", () => {
+  function createBundleWorkItem(): WorkItem {
+    const store = new SqliteWorkItemStore(dbPath);
+    try {
+      store.setApprovalStrategy({ strategy: "BUNDLE", updatedBy: "writer", reason: "proposal API test" });
+      return createWorkItemTools(store, policy).create_work_item({
+        title: "Bundle API change",
+        requester: "agent",
+        requesterSubject: "agent-17",
+        intent: "apply a reviewed configuration change",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.write", description: "write config", params: { paths: ["app/config.ts"] } }],
+        risk: "medium"
+      });
+    } finally {
+      store.close();
+    }
+  }
+
+  it("requires acs:write and rejects spoofed authority fields", async () => {
+    const workItem = createBundleWorkItem();
+    expect((await call("POST", `/work-items/${workItem.id}/approval-bundles`, "reader-token", {})).statusCode).toBe(
+      403
+    );
+    const spoofed = await call("POST", `/work-items/${workItem.id}/approval-bundles`, "writer-token", {
+      missionId: "other-mission",
+      executionId: "other-execution",
+      manifestHash: "0".repeat(64),
+      actionHash: "0".repeat(64),
+      grantId: "forged"
+    });
+    expect(spoofed.statusCode).toBe(400);
+  });
+
+  it("creates or reuses the server-bound proposal without minting authority", async () => {
+    const workItem = createBundleWorkItem();
+    const first = await call("POST", `/work-items/${workItem.id}/approval-bundles`, "writer-token", {
+      title: "Reviewed application configuration"
+    });
+    const second = await call("POST", `/work-items/${workItem.id}/approval-bundles`, "writer-token", {});
+    expect(first.statusCode, first.body).toBe(200);
+    expect(second.statusCode).toBe(200);
+    const firstBundle = (
+      first.json() as {
+        bundle: {
+          bundleId: string;
+          missionId: string;
+          executionId: string;
+          agentId: string;
+          revision: number;
+          status: string;
+        };
+      }
+    ).bundle;
+    const secondBundle = (second.json() as { bundle: { bundleId: string; revision: number } }).bundle;
+    expect(secondBundle).toMatchObject({ bundleId: firstBundle.bundleId, revision: 1 });
+    expect(firstBundle).toMatchObject({
+      missionId: workItem.id,
+      executionId: expect.any(String),
+      agentId: "agent-17",
+      revision: 1,
+      status: "pending"
+    });
+    const store = new SqliteWorkItemStore(dbPath);
+    try {
+      expect(firstBundle.executionId).toBe(store.getCurrentExecutionPlan(workItem.id)?.planId);
+      expect(store.listApprovalBundles({ missionId: workItem.id })).toHaveLength(1);
+      expect(store.listApprovalBundleGrants({ workItemId: workItem.id })).toHaveLength(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("refuses manual proposal creation when BUNDLE strategy is inactive", async () => {
+    const store = new SqliteWorkItemStore(dbPath);
+    let workItem: WorkItem;
+    try {
+      workItem = createWorkItemTools(store, policy).create_work_item({
+        title: "Per action change",
+        requester: "agent",
+        intent: "change one file",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.write", description: "write config", params: { paths: ["app/config.ts"] } }],
+        risk: "medium"
+      });
+    } finally {
+      store.close();
+    }
+    const response = await call("POST", `/work-items/${workItem.id}/approval-bundles`, "writer-token", {});
+    expect(response.statusCode).toBe(409);
+  });
+
+  it("keeps the legacy per-action approval route closed while a BUNDLE proposal is active", async () => {
+    const workItem = createBundleWorkItem();
+    const store = new SqliteWorkItemStore(dbPath);
+    const bundle = store.listApprovalBundles({ missionId: workItem.id })[0]!;
+    const actionHash = bundle.changes[0]!.actionHash;
+    store.close();
+
+    const response = await call("POST", `/work-items/${workItem.id}/approve`, "approver-token", {
+      actionHash,
+      reason: "try to bypass bundle review"
+    });
+    expect(response.statusCode).toBe(409);
+    const check = new SqliteWorkItemStore(dbPath);
+    try {
+      expect(check.listApprovalBundleGrants({ workItemId: workItem.id })).toHaveLength(0);
+    } finally {
+      check.close();
     }
   });
 });
@@ -295,6 +452,8 @@ describe("approval bundle decision API", () => {
     const store = new SqliteWorkItemStore(dbPath);
     try {
       expect(store.listApprovalBundleGrants({ bundleId })).toHaveLength(0);
+      const missionId = store.getApprovalBundle(bundleId)!.missionId;
+      expect(store.get(missionId)?.status).toBe("rejected");
     } finally {
       store.close();
     }

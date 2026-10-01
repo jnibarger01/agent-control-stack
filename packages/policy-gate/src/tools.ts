@@ -19,6 +19,7 @@ import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
 import { explainPolicy } from "./explain.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
+import { createOrReuseBundleProposal, resolveStrategy } from "./approval-bundle-tools.js";
 
 export const workItemToolNames = [
   "create_work_item",
@@ -138,6 +139,21 @@ function gateApprovalInTransaction(
   const workItem = store.get(parsed.id);
   if (!workItem) {
     throw new ControlStackError("work_item_not_found", `work item not found: ${parsed.id}`);
+  }
+
+  if (resolveStrategy(store) === "BUNDLE") {
+    const currentPlan = store.getCurrentExecutionPlan(workItem.id);
+    const proposalExists =
+      currentPlan !== undefined &&
+      store
+        .listApprovalBundles({ missionId: workItem.id, limit: 500 })
+        .some((bundle) => bundle.executionId === currentPlan.planId);
+    throw new ControlStackError(
+      "approval_bundle_review_required",
+      proposalExists
+        ? `work item ${workItem.id} must be approved through its current approval bundle`
+        : `work item ${workItem.id} requires a proposal before bundle approval`
+    );
   }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, workItem, parsed.approvedBy, "approve");
@@ -458,7 +474,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
         evaluateContractAdmission(input);
         const workItem = store.create(input);
         const { decision } = evaluateAndRecordPolicy(store, policy, workItem, workItem.requester, "create");
-        return applyPolicyStatus(store, workItem, decision);
+        return maybeCreateBundleProposal(store, policy, applyPolicyStatus(store, workItem, decision), decision);
       });
     },
     get_work_item(input: unknown): WorkItem | undefined {
@@ -506,7 +522,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
           risk: workItem.risk
         });
         const { decision } = evaluateAndRecordPolicy(store, policy, workItem, parsed.actor, "create");
-        return applyPolicyStatus(store, workItem, decision);
+        return maybeCreateBundleProposal(store, policy, applyPolicyStatus(store, workItem, decision), decision);
       });
     },
     clone_work_item(input: unknown): WorkItem {
@@ -524,7 +540,7 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
           risk: workItem.risk
         });
         const { decision } = evaluateAndRecordPolicy(store, policy, workItem, parsed.actor, "create");
-        return applyPolicyStatus(store, workItem, decision);
+        return maybeCreateBundleProposal(store, policy, applyPolicyStatus(store, workItem, decision), decision);
       });
     },
     claim_next_approved_work_item(input: unknown): ClaimedWorkItem | undefined {
@@ -537,6 +553,23 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.submitWorkResult(input);
     }
   };
+}
+
+function maybeCreateBundleProposal(
+  store: WorkItemStore,
+  policy: PolicyEngine,
+  workItem: WorkItem,
+  decision: PolicyDecision
+): WorkItem {
+  if (decision.decision === "require_approval" && resolveStrategy(store) === "BUNDLE") {
+    createOrReuseBundleProposal({
+      store,
+      policy,
+      workItem,
+      createdByActorId: workItem.requesterSubject ?? workItem.requester
+    });
+  }
+  return workItem;
 }
 
 export function approvalRequired(evaluations: PolicyEvaluation[]): PolicyEvaluation[] {

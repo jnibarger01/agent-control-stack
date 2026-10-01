@@ -499,6 +499,44 @@ describe("POST /dc/capability/issue (lease-bound)", () => {
     }
   });
 
+  it("uses one BUNDLE approval at the live capability boundary without per-action prompts", async () => {
+    const ctx = await buildTestGateway();
+    try {
+      await attestRuntime(ctx);
+      const strategy = await ctx.app.inject({
+        method: "POST",
+        url: "/approval-strategy",
+        headers: AUTH,
+        payload: { strategy: "BUNDLE", reason: "review related privileged changes together" }
+      });
+      expect(strategy.statusCode).toBe(200);
+
+      const args = { path: join(ctx.root, "bundle-out.txt"), content: "reviewed content" };
+      const pending = await issuePayload(ctx.app, "write_file", args);
+      expect(pending.statusCode).toBe(409);
+      const pendingBody = pending.json();
+      expect(pendingBody.decision).toBe("require_approval");
+      expect(pendingBody.approvalBundleId).toMatch(/^bundle-/);
+      expect(pendingBody.approvalInstructions).toContain(`/approval-bundles/${pendingBody.approvalBundleId}/approve`);
+
+      const approved = await ctx.app.inject({
+        method: "POST",
+        url: `/approval-bundles/${pendingBody.approvalBundleId}/approve`,
+        headers: AUTH,
+        payload: { revision: 1, kind: "approve_all", reason: "reviewed exact invocation" }
+      });
+      expect(approved.statusCode).toBe(200);
+
+      const issued = await issuePayload(ctx.app, "write_file", args);
+      expect(issued.statusCode).toBe(200);
+      expect(issued.json().capability.payload.approvalId).toEqual(expect.any(String));
+      expect(issued.json().workItemId).toBe(pendingBody.workItemId);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
   it("denies unknown tools with 403 unknown_tool", async () => {
     const ctx = await buildTestGateway();
     try {
