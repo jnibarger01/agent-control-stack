@@ -132,6 +132,79 @@ describe("MCP stdio server", () => {
   });
 });
 
+describe("MCP stdio server malformed input", () => {
+  function makeServer(): { input: PassThrough; output: PassThrough } {
+    const dir = mkdtempSync(join(tmpdir(), "acs-mcp-malformed-"));
+    const allowed = join(dir, "allowed");
+    mkdirSync(allowed);
+    const configPath = join(dir, "config.json");
+    writeFileSync(
+      configPath,
+      JSON.stringify({
+        paths: { allow: [allowed], deny: [] },
+        commands: { allow_readonly: ["node"], deny: ["rm"] },
+        audit: { log_path: join(dir, "audit.jsonl") }
+      })
+    );
+    const input = new PassThrough();
+    const output = new PassThrough();
+    new McpStdioServer(input, output, new MachineController(loadMachineControllerConfig(configPath))).start();
+    return { input, output };
+  }
+
+  it("answers a malformed JSON body with a parse error and keeps serving the session", async () => {
+    const { input, output } = makeServer();
+    const badBody = "{not json";
+
+    const parseError = await sendRaw(
+      input,
+      output,
+      `Content-Length: ${Buffer.byteLength(badBody, "utf8")}\r\n\r\n${badBody}`
+    );
+    expect(parseError).toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "Parse error: invalid JSON body" }
+    });
+
+    // The very next well-formed frame must still be served.
+    const tools = await request(input, output, { jsonrpc: "2.0", id: 31, method: "tools/list" });
+    expect(tools.result.tools.map((tool: { name: string }) => tool.name)).toContain("fs.read");
+  });
+
+  it("answers a well-formed frame with an invalid request shape instead of rejecting", async () => {
+    const { input, output } = makeServer();
+
+    const invalid = await request(input, output, { jsonrpc: "2.0", id: 41 });
+    expect(invalid.error.code).toBe(-32602);
+
+    const status = await request(input, output, {
+      jsonrpc: "2.0",
+      id: 42,
+      method: "tools/call",
+      params: { name: "system.status", arguments: {} }
+    });
+    expect(status.result.structuredContent.server.transport).toBe("stdio");
+  });
+
+  it("answers a frame with no Content-Length header with a parse error instead of crashing", async () => {
+    const { input, output } = makeServer();
+
+    const parseError = await sendRaw(input, output, "X-Not-A-Frame: 1\r\n\r\n{}");
+    expect(parseError).toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32700, message: "Parse error: invalid Content-Length header" }
+    });
+  });
+});
+
+async function sendRaw(input: PassThrough, output: PassThrough, frame: string): Promise<any> {
+  const response = readFrame(output);
+  input.write(frame);
+  return await response;
+}
+
 async function request(input: PassThrough, output: PassThrough, message: unknown): Promise<any> {
   const response = readFrame(output);
   input.write(frameMessage(message));

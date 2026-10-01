@@ -22,6 +22,8 @@ const toolsCallSchema = z.object({
 
 export class McpStdioServer {
   private buffer = Buffer.alloc(0);
+  /** Set once the stream can no longer be re-framed; further input is ignored. */
+  private framingLost = false;
 
   constructor(
     private readonly input: Readable,
@@ -31,24 +33,48 @@ export class McpStdioServer {
 
   start(): void {
     this.input.on("data", (chunk: Buffer) => {
+      if (this.framingLost) return;
       this.buffer = Buffer.concat([this.buffer, chunk]);
-      void this.drain();
+      void this.drain().catch((error: unknown) => {
+        // A single bad frame must never take the whole stdio session down with
+        // an unhandled rejection; answer with a JSON-RPC error and stay up.
+        this.output.write(frameMessage(failure(null, -32603, errorMessage(error))));
+      });
     });
   }
 
   private async drain(): Promise<void> {
-    while (true) {
+    while (!this.framingLost) {
       const headerEnd = this.buffer.indexOf("\r\n\r\n");
       if (headerEnd < 0) return;
       const header = this.buffer.subarray(0, headerEnd).toString("utf8");
-      const length = contentLength(header);
+      let length: number;
+      try {
+        length = contentLength(header);
+      } catch {
+        // Without a valid Content-Length the next frame boundary is unknowable,
+        // so the session cannot be resynchronized. Report the parse error and
+        // stop reading rather than letting the rejection crash the process.
+        this.framingLost = true;
+        this.output.write(frameMessage(failure(null, -32700, "Parse error: invalid Content-Length header")));
+        return;
+      }
       const bodyStart = headerEnd + 4;
       const bodyEnd = bodyStart + length;
       if (this.buffer.length < bodyEnd) return;
 
       const body = this.buffer.subarray(bodyStart, bodyEnd).toString("utf8");
       this.buffer = this.buffer.subarray(bodyEnd);
-      const response = await handleMcpRequest(this.controller, JSON.parse(body));
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        // Framing is still intact, so the session survives: answer with the
+        // JSON-RPC parse error and keep serving the next frame.
+        this.output.write(frameMessage(failure(null, -32700, "Parse error: invalid JSON body")));
+        continue;
+      }
+      const response = await handleMcpRequest(this.controller, parsed);
       if (response) {
         this.output.write(frameMessage(response));
       }
@@ -57,12 +83,14 @@ export class McpStdioServer {
 }
 
 export async function handleMcpRequest(controller: MachineController, body: unknown): Promise<unknown | undefined> {
-  const request = requestSchema.parse(body);
-  if (request.id === undefined) {
-    return undefined;
-  }
-
+  let id: JsonRpcId = null;
   try {
+    const request = requestSchema.parse(body);
+    id = request.id ?? null;
+    if (request.id === undefined) {
+      return undefined;
+    }
+
     switch (request.method) {
       case "initialize":
         return result(request.id, {
@@ -84,7 +112,7 @@ export async function handleMcpRequest(controller: MachineController, body: unkn
         return failure(request.id, -32601, `unsupported MCP method: ${request.method}`);
     }
   } catch (error) {
-    return failure(request.id, errorCode(error), errorMessage(error));
+    return failure(id, errorCode(error), errorMessage(error));
   }
 }
 
