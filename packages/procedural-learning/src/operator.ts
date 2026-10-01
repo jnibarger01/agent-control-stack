@@ -20,7 +20,11 @@ export function runSkillsCommand(
     io.stderr.write("acs skills --db requires a path\n");
     return 1;
   }
-  const commandArgs = args.filter((arg, index) => arg !== "--db" && index !== dbIndex + 1);
+  // Strip the --db flag and its value only when the flag is present. When it is
+  // omitted, dbIndex is -1 and `index !== dbIndex + 1` would drop args[0] — the
+  // subcommand itself — so every documented `acs skills <command>` failed with a
+  // usage error unless the caller happened to pass --db.
+  const commandArgs = dbIndex >= 0 ? args.filter((arg, index) => arg !== "--db" && index !== dbIndex + 1) : args;
   const [command, ...rest] = commandArgs;
   const learning = open(dbPath);
   try {

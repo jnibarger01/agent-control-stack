@@ -1,4 +1,4 @@
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -61,5 +61,44 @@ describe("acs skills operator", () => {
     expect(brief.authorization).toBe("guidance_only");
     expect(brief.approvedActions).toEqual([]);
     expect(stderr).toBe("");
+  });
+
+  it("keeps the subcommand when --db is omitted and resolves the documented default database path", () => {
+    const dbPath = join(mkdtempSync(join(tmpdir(), "acs-skills-default-")), "learning.db");
+    const previousLearningDbPath = process.env.ACS_LEARNING_DB_PATH;
+    process.env.ACS_LEARNING_DB_PATH = dbPath;
+    let stdout = "";
+    let stderr = "";
+    const io = {
+      stdout: { write: (chunk: string) => (stdout += chunk) },
+      stderr: { write: (chunk: string) => (stderr += chunk) }
+    };
+    try {
+      // Documented form: `acs skills <command>` with no --db at all.
+      expect(runSkillsCommand(["list"], io)).toBe(0);
+      expect(JSON.parse(stdout)).toEqual([]);
+      stdout = "";
+      expect(runSkillsCommand(["targets"], io)).toBe(0);
+      expect(Array.isArray(JSON.parse(stdout))).toBe(true);
+      stdout = "";
+      expect(runSkillsCommand(["retrieve", "--problem", "invalid hook call vite"], io)).toBe(0);
+      expect((JSON.parse(stdout) as { authorization: string }).authorization).toBe("guidance_only");
+      // The documented default path is honoured; no stray file named after a flag.
+      expect(existsSync(dbPath)).toBe(true);
+      expect(stderr).toBe("");
+      // An explicit --db after the subcommand still works and still wins.
+      stdout = "";
+      expect(runSkillsCommand(["list", "--db", dbPath], io)).toBe(0);
+      expect(JSON.parse(stdout)).toEqual([]);
+      expect(stderr).toBe("");
+      // A --db with no value is still a usage error, not a silent default.
+      stdout = "";
+      expect(runSkillsCommand(["list", "--db"], io)).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("--db requires a path");
+    } finally {
+      if (previousLearningDbPath === undefined) delete process.env.ACS_LEARNING_DB_PATH;
+      else process.env.ACS_LEARNING_DB_PATH = previousLearningDbPath;
+    }
   });
 });
