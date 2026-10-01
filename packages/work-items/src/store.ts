@@ -5135,9 +5135,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
 
       if (options.executionModeFence) {
-        const mode = this.db
-          .prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`)
-          .get() as { mode?: string } | undefined;
+        const mode = this.db.prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`).get() as
+          { mode?: string } | undefined;
         if (mode?.mode !== options.executionModeFence.mode) {
           throw new ControlStackError(
             "execution_mode_fence_mismatch",
@@ -5274,7 +5273,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const name = requiredString(input.name, "name");
       const workItemId = requiredString(input.workItemId, "workItemId");
       const existing = this.db
-        .prepare(`SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, '$."work_item.id"') = ? LIMIT 1`)
+        .prepare(
+          `SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, '$."work_item.id"') = ? LIMIT 1`
+        )
         .get(name, workItemId) as unknown as EventRow | undefined;
       if (existing) return { value: rowToEvent(existing), events: [] };
 

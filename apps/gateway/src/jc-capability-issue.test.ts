@@ -650,7 +650,6 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       executionAdmission
     );
   });
-
 });
 
 describe("POST /jc/capability/issue: filesystem tools (fs.read, ACS containment)", () => {
