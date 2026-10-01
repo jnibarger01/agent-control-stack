@@ -4,7 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
-import { DeviceAuthStore } from "./device-auth-store.js";
+import { DeviceAuthStore, DEVICE_AUTHORIZATION_RETENTION_MS } from "./device-auth-store.js";
+
+/** `DEVICE_CODE_TTL_SECONDS` (15 min) in ms; the store does not export it. */
+const CODE_TTL_MS = 15 * 60 * 1000;
 
 const DEVICE_PAIR_A = generateKeyPairSync("ed25519");
 const DEVICE_PAIR_B = generateKeyPairSync("ed25519");
@@ -317,5 +320,95 @@ describe("DeviceAuthStore", () => {
     const summary = store.findByUserCode(issued.userCode);
     expect(JSON.stringify(summary)).not.toContain(issued.deviceCode);
     expect(JSON.stringify(summary)).not.toContain(issued.userCode);
+  });
+
+  describe("authorization retention", () => {
+    it("sweeps codes that expired beyond the retention window when a new code is issued", () => {
+      ({ directory, workItems, store } = setup());
+      const start = new Date("2026-01-01T00:00:00.000Z");
+      const denied = requestCode(store, { now: start });
+      const abandoned = requestCode(store, { now: start });
+      if (!denied.ok || !abandoned.ok) throw new Error("setup failed");
+      expect(store.deny(denied.userCode, start)).toEqual({ ok: true });
+
+      const wellPast = new Date(start.getTime() + CODE_TTL_MS + DEVICE_AUTHORIZATION_RETENTION_MS + 1_000);
+      const fresh = requestCode(store, { now: wellPast });
+      if (!fresh.ok) throw new Error("setup failed");
+
+      // Both stale rows are gone: the denied one and the one nobody ever approved.
+      expect(store.findByUserCode(denied.userCode, wellPast)).toBeUndefined();
+      expect(store.findByUserCode(abandoned.userCode, wellPast)).toBeUndefined();
+      // A swept code still fails closed and reveals nothing about its old decision.
+      expect(store.pollToken(denied.deviceCode, "acs-cli", proof(denied.deviceCode), wellPast)).toEqual({
+        status: "invalid_grant"
+      });
+      expect(store.approve(denied.userCode, "operator-1", wellPast)).toEqual({ ok: false, error: "not_found" });
+      // The just-issued code is untouched and still pollable.
+      expect(store.pollToken(fresh.deviceCode, "acs-cli", proof(fresh.deviceCode), wellPast)).toEqual({
+        status: "authorization_pending"
+      });
+    });
+
+    it("keeps a terminal authorization until its code has been expired for longer than the retention window", () => {
+      ({ directory, workItems, store } = setup());
+      const start = new Date("2026-01-01T00:00:00.000Z");
+      const issued = requestCode(store, { now: start });
+      if (!issued.ok) throw new Error("setup failed");
+      expect(store.deny(issued.userCode, start)).toEqual({ ok: true });
+      const boundary = new Date(start.getTime() + CODE_TTL_MS + DEVICE_AUTHORIZATION_RETENTION_MS);
+
+      // At exactly the boundary the row survives and its poll answer is unchanged.
+      expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), boundary)).toEqual({
+        status: "access_denied"
+      });
+      expect(requestCode(store, { now: boundary }).ok).toBe(true);
+      expect(store.findByUserCode(issued.userCode, boundary)?.status).toBe("denied");
+
+      // One millisecond past it, the next issuance sweeps the row.
+      const past = new Date(boundary.getTime() + 1);
+      expect(requestCode(store, { now: past }).ok).toBe(true);
+      expect(store.findByUserCode(issued.userCode, past)).toBeUndefined();
+      expect(store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), past)).toEqual({
+        status: "invalid_grant"
+      });
+    });
+
+    it("reports how many rows it expired and deleted, and is a no-op inside the window", () => {
+      ({ directory, workItems, store } = setup());
+      const start = new Date("2026-01-01T00:00:00.000Z");
+      const abandoned = requestCode(store, { now: start });
+      const denied = requestCode(store, { now: start });
+      if (!abandoned.ok || !denied.ok) throw new Error("setup failed");
+      expect(store.deny(denied.userCode, start)).toEqual({ ok: true });
+
+      const inside = new Date(start.getTime() + CODE_TTL_MS + DEVICE_AUTHORIZATION_RETENTION_MS - 1);
+      expect(store.pruneExpiredAuthorizations(inside)).toEqual({ expiredPending: 0, deleted: 0 });
+
+      const outside = new Date(inside.getTime() + 2);
+      // The abandoned pending row is moved to `expired` and deleted with the denied row.
+      expect(store.pruneExpiredAuthorizations(outside)).toEqual({ expiredPending: 1, deleted: 2 });
+      expect(store.pruneExpiredAuthorizations(outside)).toEqual({ expiredPending: 0, deleted: 0 });
+    });
+
+    it("keeps device credentials usable after the authorization row that issued them is swept", () => {
+      ({ directory, workItems, store } = setup());
+      const start = new Date("2026-01-01T00:00:00.000Z");
+      const issued = requestCode(store, { now: start });
+      if (!issued.ok) throw new Error("setup failed");
+      expect(store.approve(issued.userCode, "operator-1", start)).toEqual({ ok: true });
+      const token = store.pollToken(issued.deviceCode, "acs-cli", proof(issued.deviceCode), new Date(start.getTime() + 1_000));
+      if (token.status !== "success") throw new Error("expected success");
+
+      const later = new Date(start.getTime() + CODE_TTL_MS + DEVICE_AUTHORIZATION_RETENTION_MS + 60_000);
+      expect(requestCode(store, { now: later }).ok).toBe(true);
+      expect(store.findByUserCode(issued.userCode, later)).toBeUndefined();
+      // Credentials live on the device row, which the sweep never touches: the device
+      // stays active and its (30-day) refresh token still rotates.
+      expect(store.getDevice(token.deviceId)?.status).toBe("active");
+      const refreshed = store.refreshAccessToken(token.refreshToken, later);
+      expect(refreshed.ok).toBe(true);
+      if (!refreshed.ok) return;
+      expect(store.authenticateAccessToken(refreshed.accessToken, later)?.deviceId).toBe(token.deviceId);
+    });
   });
 });

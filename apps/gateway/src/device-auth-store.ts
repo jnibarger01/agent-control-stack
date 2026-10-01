@@ -12,6 +12,14 @@ import { MCP_SCOPES } from "./auth.js";
 
 export const DEFAULT_DEVICE_AUTH_CLIENT_ID = "acs-cli";
 const DEVICE_CODE_TTL_SECONDS = 15 * 60;
+/**
+ * A device authorization is swept once its device code expired more than this
+ * long ago. Expired, denied, and consumed codes are unreachable then: the code
+ * cannot be approved, and polling it answers the same terminal error
+ * (`invalid_grant`) whether the row is gone or still present. Without a sweep
+ * `oauth_device_authorizations` grows by one row per CLI login forever.
+ */
+export const DEVICE_AUTHORIZATION_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_POLL_INTERVAL_SECONDS = 5;
 const SLOW_DOWN_INCREMENT_SECONDS = 5;
 const ACCESS_TOKEN_TTL_SECONDS = 60 * 60;
@@ -141,6 +149,43 @@ export class DeviceAuthStore {
     this.db.close();
   }
 
+  /**
+   * Sweeps device authorizations whose device code expired more than
+   * `retentionMs` ago and reports what changed.
+   *
+   * Only unreachable rows go. A `pending` row whose code expired is first moved
+   * to `expired` — the same transition `expireIfNeeded` applies on access — and
+   * terminal rows (`denied` / `expired` / `consumed`) are then deleted: the code
+   * can no longer be approved or exchanged, polling it still fails closed with
+   * `invalid_grant`, and a `consumed` code answers `invalid_grant` whether or
+   * not its row survives, so replay detection is unchanged. `approved` rows are
+   * deliberately kept: they are still exchangeable for tokens, so bounding them
+   * would change token issuance.
+   *
+   * `expiredPending` counts rows moved out of `pending`; `deleted` counts rows
+   * removed (the two overlap for pending rows past the cutoff). Runs inside the
+   * caller's transaction when one is open (see `requestDeviceCode`), so a sweep
+   * and the insert that triggered it commit together.
+   */
+  pruneExpiredAuthorizations(
+    now: Date = new Date(),
+    retentionMs: number = DEVICE_AUTHORIZATION_RETENTION_MS
+  ): { expiredPending: number; deleted: number } {
+    if (!Number.isFinite(retentionMs) || retentionMs < 0) {
+      throw new Error("device-auth retention must be a non-negative number of milliseconds");
+    }
+    const cutoff = new Date(now.getTime() - retentionMs).toISOString();
+    const expired = this.db
+      .prepare(`UPDATE oauth_device_authorizations SET status = 'expired' WHERE status = 'pending' AND expires_at < ?`)
+      .run(cutoff);
+    const deleted = this.db
+      .prepare(
+        `DELETE FROM oauth_device_authorizations WHERE status IN ('denied', 'expired', 'consumed') AND expires_at < ?`
+      )
+      .run(cutoff);
+    return { expiredPending: Number(expired.changes ?? 0), deleted: Number(deleted.changes ?? 0) };
+  }
+
   requestDeviceCode(
     input: DeviceCodeRequestInput,
     allowedClientIds: readonly string[] = [DEFAULT_DEVICE_AUTH_CLIENT_ID]
@@ -168,6 +213,9 @@ export class DeviceAuthStore {
     const id = createId("devauth");
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      // Keep the table bounded: a code that expired beyond the retention window
+      // can no longer be approved or exchanged, so its row is dead weight.
+      this.pruneExpiredAuthorizations(now);
       this.db
         .prepare(
           `INSERT INTO oauth_device_authorizations
