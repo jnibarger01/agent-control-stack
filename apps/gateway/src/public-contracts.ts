@@ -146,6 +146,20 @@ export const dcCapabilityIssueSchema = z
   })
   .strict();
 
+/**
+ * Jace Commander (acs.jc.v1) capability issuance request from the dedicated
+ * bridge (POST /jc/capability/issue). `argsSummary` is the exact JSON tool
+ * arguments the bridge will deliver; the requester is the x-jc-actor header.
+ */
+export const jcCapabilityIssueSchema = z
+  .object({
+    client_id: z.string().min(1).max(256),
+    tool: z.string().min(1).max(128),
+    argsSummary: z.string().min(1).max(240_000),
+    correlationId: z.string().min(1).max(256).optional()
+  })
+  .strict();
+
 const dcRuntimeIdSchema = z
   .string()
   .min(1)

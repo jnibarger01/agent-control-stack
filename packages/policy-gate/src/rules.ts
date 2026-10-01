@@ -1,5 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
+import { ACS_ADMIN_APPROVER } from "./execution-mode.js";
 import type { PolicyContext, PolicyDecision } from "./policy.js";
 
 export type PolicyRiskLevel = "read_only" | "safe_mutation" | "requires_approval" | "destructive" | "forbidden";
@@ -38,6 +39,9 @@ export function classifyPolicyRisk(context: PolicyContext): PolicyRiskClassifica
 
   if (!isSupportedAction(context.action.kind)) {
     return risk("forbidden", "unknown action kind is denied", ["deny:unknown-action"]);
+  }
+  if (isJaceCommanderAction(context.action.kind)) {
+    return classifyJaceCommanderAction(context);
   }
   if (isSudo(command)) {
     return risk("forbidden", "sudo is denied by default", ["deny:sudo"]);
@@ -161,8 +165,59 @@ export const SUPPORTED_ACTION_KINDS: readonly string[] = Object.freeze([
   "shell"
 ]);
 
+/**
+ * Jace Commander (acs.jc.v1) action kinds. Only the /jc/capability/issue
+ * route creates these; they are deliberately NOT in SUPPORTED_ACTION_KINDS so
+ * the Mission Control composer never offers them.
+ */
+export const JACE_COMMANDER_POLICY_ACTION_KINDS: readonly string[] = Object.freeze([
+  "jc.read",
+  "jc.write",
+  "jc.privileged_exec"
+]);
+
 function isSupportedAction(kind: string): boolean {
-  return SUPPORTED_ACTION_KINDS.includes(kind);
+  return SUPPORTED_ACTION_KINDS.includes(kind) || isJaceCommanderAction(kind);
+}
+
+function isJaceCommanderAction(kind: string): boolean {
+  return JACE_COMMANDER_POLICY_ACTION_KINDS.includes(kind);
+}
+
+/**
+ * Self-contained Jace Commander rules, evaluated before the generic command
+ * rules. `jc.privileged_exec` (root via the jc-privileged-helper) is ALWAYS
+ * require_approval — never allow — and the requester can never approve it.
+ * The generic `deny:sudo` rule is untouched: `sudo` inside an ordinary
+ * Desktop Commander cmd.run/shell action stays forbidden.
+ */
+function classifyJaceCommanderAction(context: PolicyContext): PolicyRiskClassification {
+  const kind = context.action.kind;
+  if (kind === "jc.privileged_exec") {
+    const requesterSubject = context.action.params.requesterSubject;
+    if (
+      context.operation === "approve" &&
+      (context.actor === context.requester ||
+        (typeof requesterSubject === "string" && context.actor === requesterSubject))
+    ) {
+      return risk("forbidden", "privileged execution self-approval is denied", ["deny:jc-privileged-self-approval"]);
+    }
+    if (context.operation === "approve" && context.actor === ACS_ADMIN_APPROVER) {
+      return risk("forbidden", "privileged execution requires a human approver", ["deny:jc-privileged-auto-approval"]);
+    }
+    return risk("requires_approval", "privileged execution always requires human approval", [
+      "approval:jc-privileged-exec"
+    ]);
+  }
+  if (context.risk === "high" || context.risk === "critical") {
+    return risk("forbidden", "jace commander integration actions must be low or medium risk", ["deny:jc-risk"]);
+  }
+  if (kind === "jc.write") {
+    return risk("safe_mutation", "jace commander mission submission is governed by ACS", [
+      "allow:jc-integration-write"
+    ]);
+  }
+  return risk("read_only", "jace commander integration read is allowed", ["allow:jc-integration-read"]);
 }
 
 function isRmRfRoot(command: string[]): boolean {

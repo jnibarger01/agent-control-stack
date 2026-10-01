@@ -20,7 +20,9 @@ import {
   prepareDesktopCommanderCapability,
   signPreparedDesktopCommanderCapability,
   SqliteDesktopCommanderRuntimeRegistry,
+  SqliteJaceCommanderIssuanceRegistry,
   validateCapabilitySigningConfig,
+  type JaceCommanderSigningConfig,
   type CapabilitySigningConfig,
   type ContainmentConfig,
   type ExecutionAuthorization
@@ -94,6 +96,11 @@ import {
 } from "./mcp.js";
 import { resolveMcpToolAllowlist, type McpToolAllowlistMode } from "./mcp-tool-allowlist.js";
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
+import {
+  JC_CAPABILITY_ROUTE,
+  jaceCommanderSigningConfigFromEnv,
+  registerJcCapabilityIssueRoute
+} from "./jc-capability-issue.js";
 import { SqliteMoaIdempotencyStore } from "./moa/idempotency.js";
 import {
   actorBodySchema,
@@ -246,6 +253,13 @@ export interface GatewayOptions {
   /** Containment roots for the gateway-side Phase 6-8 re-authorization. */
   desktopCommanderContainment?: ContainmentConfig;
   /**
+   * acs.jc.v1 (Jace Commander) signing material for POST /jc/capability/issue.
+   * Defaults to ACS_JACE_COMMANDER_CAPABILITY_{PRIVATE_KEY,KEY_ID} and
+   * ACS_JACE_COMMANDER_RUNTIME_ID; `false` disables issuance. Absent or
+   * invalid config fails closed with 503.
+   */
+  jaceCommanderCapability?: JaceCommanderSigningConfig | false;
+  /**
    * Canonical managed-authority observation. Tests inject this. Production
    * reads the executor lease and break-glass marker. It is not a second
    * authority store.
@@ -305,6 +319,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const capabilitySigningConfig = resolveCapabilitySigningConfig(options.desktopCommanderCapability, dbPath);
   const capabilityIssuanceRegistry = new SqliteDesktopCommanderRuntimeRegistry(dbPath);
   const dcContainment = resolveDcContainment(options.desktopCommanderContainment);
+  const jcSigningConfig =
+    options.jaceCommanderCapability === false
+      ? undefined
+      : (options.jaceCommanderCapability ?? jaceCommanderSigningConfigFromEnv(process.env));
+  const jcIssuanceRegistry = new SqliteJaceCommanderIssuanceRegistry(dbPath);
   /** Lease-authorized canonical execution evidence (Phases 6-8 authority). */
   function recordLeaseAuthorizedExecutionEvent(
     authority: { workItemId: string; attemptId: string; leaseId: string; workerId: string; fencingEpoch?: number },
@@ -1627,6 +1646,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   );
 
+  registerJcCapabilityIssueRoute(app, {
+    signingConfig: jcSigningConfig,
+    registry: jcIssuanceRegistry,
+    workItems,
+    policy,
+    tools,
+    maxPendingWorkItems,
+    requireWorkerIdentity: (request, reply) => requireWorkerIdentity(request, reply, auth),
+    hasPendingWorkItemCapacity: (max) => hasPendingWorkItemCapacity(workItems, max),
+    recordLeaseAuthorizedExecutionEvent,
+    sendError
+  });
+
   // Managed-runtime bootstrap: only the dedicated bridge can issue or
   // complete a challenge. Completion must include the exact identity metadata
   // echoed by the managed Desktop Commander child during MCP initialize.
@@ -1747,6 +1779,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       ) {
         return reply.code(403).send({
           error: "requester cannot approve its own Desktop Commander operation",
+          code: "approval_self_denied"
+        });
+      }
+      if (
+        workItem.requesterSubject === actor &&
+        workItem.requestedActions.some((action) => action.kind === "jc.privileged_exec")
+      ) {
+        return reply.code(403).send({
+          error: "requester cannot approve its own Jace Commander privileged execution",
           code: "approval_self_denied"
         });
       }
@@ -1939,6 +1980,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     executionReads.close();
     deviceAuthStore.close();
     capabilityIssuanceRegistry.close();
+    jcIssuanceRegistry.close();
     workItems.close();
   });
 
@@ -2469,6 +2511,7 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/oauth/token" ||
     path === "/work-items" ||
     path === "/dc/capability/issue" ||
+    path === JC_CAPABILITY_ROUTE ||
     path === "/dc/runtime/bootstrap" ||
     path === "/dc/runtime/bootstrap/complete" ||
     path === "/policy/explain" ||

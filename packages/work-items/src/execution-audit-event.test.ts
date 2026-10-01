@@ -83,7 +83,7 @@ describe("recordExecutionEvent", () => {
   it("fails closed on an event name outside the execution.* / desktop_commander.* namespace", () => {
     expect(() =>
       store.recordExecutionEvent({ name: "work_item.succeeded", workItemId, ...authority, body: {} })
-    ).toThrow(/only accepts execution\.\* \/ desktop_commander\.\* events/);
+    ).toThrow(/only accepts execution\.\* \/ desktop_commander\.\* \/ jace_commander\.\* events/);
     expect(() => store.recordExecutionEvent({ name: "arbitrary.event", workItemId, ...authority })).toThrow(
       /only accepts/
     );

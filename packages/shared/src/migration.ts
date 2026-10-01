@@ -67,7 +67,12 @@ const migrationFiles = [
     name: "desktop_commander_capability_uniqueness",
     filename: "026_desktop_commander_capability_uniqueness.sql"
   },
-  { version: 27, name: "execution_mode", filename: "027_execution_mode.sql" }
+  { version: 27, name: "execution_mode", filename: "027_execution_mode.sql" },
+  {
+    version: 28,
+    name: "jace_commander_capability_issuances",
+    filename: "028_jace_commander_capability_issuances.sql"
+  }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

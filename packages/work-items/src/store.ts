@@ -617,7 +617,9 @@ const executionAuditEventNames = new Set([
   "desktop_commander.capability_denied",
   "desktop_commander.tool_called",
   "desktop_commander.tool_succeeded",
-  "desktop_commander.tool_failed"
+  "desktop_commander.tool_failed",
+  "jace_commander.capability_issued",
+  "jace_commander.capability_denied"
 ]);
 
 export const localAgentEventTypes = [
@@ -4184,7 +4186,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     if (!executionAuditEventNames.has(input.name)) {
       throw new ControlStackError(
         "execution_audit_event_name_invalid",
-        `recordExecutionEvent only accepts execution.* / desktop_commander.* events, got ${input.name}`
+        `recordExecutionEvent only accepts execution.* / desktop_commander.* / jace_commander.* events, got ${input.name}`
       );
     }
     const workItemId = requiredString(input.workItemId, "workItemId");
