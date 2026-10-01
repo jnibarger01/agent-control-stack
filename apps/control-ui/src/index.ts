@@ -1,5 +1,6 @@
 // Public surface of the Mission Control renderer. Implementation lives in the
 // modules below; this file only re-exports so callers keep one import path.
+export { CLIENT_REQUEST_TIMEOUT_MS } from "./client-script.js";
 export { projectAgents } from "./agents.js";
 export {
   isElevatedApprovalRisk,

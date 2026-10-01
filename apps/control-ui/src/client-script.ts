@@ -10,6 +10,15 @@ import { ADMIN_MODE_BANNER_TEXT } from "./types.js";
 import { auditRowsClientSource, metricsClientSource, themeClientSource } from "./visibility.js";
 import { workItemControlsClientSource } from "./work-item-controls.js";
 
+/**
+ * Deadline for every dashboard client request (`fetchJson`). A gateway that
+ * accepts the connection and never answers must not leave a refresh or
+ * control latch set forever. Comfortably above the slowest healthy response
+ * (the readiness probe flags anything over 1s as slow) and inside the 10s
+ * window the client already trusts for server clock samples.
+ */
+export const CLIENT_REQUEST_TIMEOUT_MS = 10_000;
+
 export function clientScript(): string {
   return `
 let sseSource = null;
@@ -205,16 +214,34 @@ function serverNowMs() {
   return Date.now() + serverClockOffsetMs;
 }
 
-function fetchJson(url) {
+// A request that never settles would leave the caller's in-flight latch set
+// forever, so the dashboard (fragments refresh, metrics poll, readiness probe,
+// audit paging, agent roster, work-item detail) would stop updating until a
+// reload. Bound every client request and report the deadline as its own error.
+async function fetchJson(url) {
   const requestStartedMs = Date.now();
-  return fetch(url, { headers: { accept: 'application/json' } }).then(async function (res) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const options = { headers: { accept: 'application/json' } };
+  let timedOut = false;
+  const timer = setTimeout(function () {
+    timedOut = true;
+    if (controller) controller.abort();
+  }, ${CLIENT_REQUEST_TIMEOUT_MS});
+  if (controller) options.signal = controller.signal;
+  try {
+    const res = await fetch(url, options);
     observeServerClock(res, requestStartedMs);
     const body = await res.json().catch(function () { return {}; });
     if (!res.ok) {
       throw new Error(body.error || body.code || ('HTTP ' + res.status));
     }
     return body;
-  });
+  } catch (error) {
+    if (timedOut) throw new Error('request timed out after ${CLIENT_REQUEST_TIMEOUT_MS}ms');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function bindWorkItems() {

@@ -12,6 +12,26 @@ export interface BootLiveOptions {
   beforeParse?: (window: Record<string, unknown>) => void;
 }
 
+/** The subset of `RequestInit` the mock honours (the client passes an abort signal). */
+type MockInit = {
+  method?: string;
+  body?: string;
+  signal?: { aborted: boolean; addEventListener(type: string, listener: () => void): void };
+};
+
+/**
+ * A response that never arrives until the caller's abort signal fires. Used to
+ * exercise the client's request deadline: the timer is on the harness clock, so
+ * the test must advance it the way a real stalled gateway would.
+ */
+function hangUntilAborted(signal?: MockInit["signal"]): Promise<never> {
+  return new Promise<never>((_, reject) => {
+    if (!signal) return;
+    if (signal.aborted) reject(new Error("aborted"));
+    else signal.addEventListener("abort", () => reject(new Error("aborted")));
+  });
+}
+
 export function bootLive(
   initial: MissionControlViewModel,
   extraRoutes: Record<string, (url: string) => unknown> = {},
@@ -26,6 +46,7 @@ export function bootLive(
   let model: MissionControlViewModel | ((finished?: number) => MissionControlViewModel) = initial;
   let postResponse: { status: number; body: unknown } = { status: 200, body: {} };
   let failFragments = 0;
+  let hangFragments = 0;
   let detailGate: (() => Promise<void>) | undefined;
 
   const virtualConsole = new VirtualConsole();
@@ -64,7 +85,7 @@ export function bootLive(
         }
         close() {}
       };
-      w.fetch = async (url: string, init?: { method?: string; body?: string }) => {
+      w.fetch = async (url: string, init?: MockInit) => {
         const method = init?.method ?? "GET";
         calls.push({ url, method, body: init?.body ? JSON.parse(init.body) : undefined });
         const path = url.split("?")[0] ?? url;
@@ -73,6 +94,10 @@ export function bootLive(
             failFragments -= 1;
             throw new Error("network down");
           }
+          if (hangFragments > 0) {
+            hangFragments -= 1;
+            return await hangUntilAborted(init?.signal);
+          }
           const finished = new URL(url, "https://acs.local").searchParams.get("finished");
           const current = typeof model === "function" ? model(finished === null ? undefined : Number(finished)) : model;
           return { ok: true, status: 200, json: async () => ({ fragments: renderDashboardFragments(current) }) };
@@ -80,7 +105,16 @@ export function bootLive(
         const extra = extraRoutes[path];
         if (extra) {
           const result = extra(url) as
-            { status?: number; body?: unknown; headers?: Record<string, string>; responseDelayMs?: number } | undefined;
+            | {
+                status?: number;
+                body?: unknown;
+                headers?: Record<string, string>;
+                responseDelayMs?: number;
+                /** Never answer; only the client's abort signal ends the request. */
+                hang?: boolean;
+              }
+            | undefined;
+          if (result?.hang) return await hangUntilAborted(init?.signal);
           const status = result?.status ?? 200;
           const headers = result?.headers ?? {};
           // Simulate a slow/transit-delayed response on the page clock so
@@ -174,6 +208,9 @@ export function bootLive(
     },
     failNextFragments(count: number) {
       failFragments = count;
+    },
+    hangNextFragments(count: number) {
+      hangFragments = count;
     },
     setDetailGate(gate: (() => Promise<void>) | undefined) {
       detailGate = gate;
