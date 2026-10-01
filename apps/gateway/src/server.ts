@@ -461,6 +461,82 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   >();
 
+  // Re-establish capacity accounting only from a complete, current ACS lease binding.
+  // Invalid records remain persisted for diagnosis and do not mutate scheduler state.
+  for (const perm of workItems.listAdmissionPermits()) {
+    const lease = workItems.getActiveLeaseForAttempt(perm.attemptId);
+    const attempt = workItems.getAttempt(perm.attemptId);
+    const admission = lease && workItems.getExecutionPlanAdmission(lease.admissionId);
+    const workItem = workItems.get(perm.workItemId);
+    const valid =
+      lease?.status === "active" &&
+      Date.parse(lease.expiresAt) > Date.now() &&
+      lease.leaseId === perm.leaseId &&
+      lease.attemptId === perm.attemptId &&
+      lease.workItemId === perm.workItemId &&
+      lease.workerId === perm.workerId &&
+      lease.fencingEpoch === perm.fencingEpoch &&
+      lease.planHash === perm.planHash &&
+      lease.inputHash === perm.inputHash &&
+      attempt?.workItemId === perm.workItemId &&
+      attempt.status === "running" &&
+      attempt.currentFencingEpoch === perm.fencingEpoch &&
+      attempt.claimedByWorkerId === perm.workerId &&
+      attempt.planHash === perm.planHash &&
+      attempt.inputHash === perm.inputHash &&
+      admission?.workItemId === perm.workItemId &&
+      admission.planHash === perm.planHash &&
+      workItem !== undefined &&
+      executionActionHash(workItem) === perm.actionHash;
+    if (!valid) {
+      app.log.warn(
+        {
+          event: "admission_permit_recovery_rejected",
+          attemptId: perm.attemptId,
+          workItemId: perm.workItemId,
+          leaseId: perm.leaseId,
+          fencingEpoch: perm.fencingEpoch,
+          reason: "persisted permit does not match the current active lease binding"
+        },
+        "Persisted execution admission permit rejected during startup recovery"
+      );
+      continue;
+    }
+
+    try {
+      const permit = executionAdmission.restoreActivePermit({
+        permitId: perm.attemptId,
+        lane: perm.lane,
+        executionClass: "execution",
+        executorId: perm.workerId
+      });
+      admissionPermits.set(perm.attemptId, {
+        permit,
+        lane: perm.lane,
+        workItemId: perm.workItemId,
+        leaseId: perm.leaseId,
+        workerId: perm.workerId,
+        fencingEpoch: perm.fencingEpoch,
+        actionHash: perm.actionHash,
+        planHash: perm.planHash,
+        inputHash: perm.inputHash
+      });
+      refreshAdmissionMetrics();
+    } catch (error) {
+      app.log.error(
+        {
+          event: "admission_permit_recovery_failed",
+          attemptId: perm.attemptId,
+          workItemId: perm.workItemId,
+          leaseId: perm.leaseId,
+          fencingEpoch: perm.fencingEpoch,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "Execution admission controller failed to restore a validated permit"
+      );
+    }
+  }
+
   async function acquireExecutionPermit(input: {
     request: FastifyRequest;
     reply: FastifyReply;
@@ -508,6 +584,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       throw new Error(`execution admission permit already bound for attempt ${input.attemptId}`);
     }
     admissionPermits.set(input.attemptId, input);
+    workItems.bindAdmissionPermit({
+      attemptId: input.attemptId,
+      workItemId: input.workItemId,
+      leaseId: input.leaseId,
+      workerId: input.workerId,
+      fencingEpoch: input.fencingEpoch,
+      actionHash: input.actionHash,
+      planHash: input.planHash,
+      inputHash: input.inputHash,
+      lane: input.lane
+    });
     refreshAdmissionMetrics();
   }
 
@@ -516,6 +603,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     if (!binding) return false;
     admissionPermits.delete(attemptId);
     binding.permit.release();
+    workItems.releaseAdmissionPermit(attemptId);
     refreshAdmissionMetrics();
     return true;
   }

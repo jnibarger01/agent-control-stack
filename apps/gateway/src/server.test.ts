@@ -1,7 +1,7 @@
 import { createHmac, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -30,6 +30,29 @@ function resolveInstalledCli(envVar: string, command: string): string | undefine
     if (existsSync(candidate)) return candidate;
   }
   return undefined;
+}
+
+function resolveHermesRuntimeLauncher(executable: string): string {
+  const wrapper = readFileSync(executable, "utf8");
+  const target = wrapper.match(/^exec\s+(\S+)\s+"\$@"/m)?.[1];
+  return target && existsSync(target) ? target : executable;
+}
+
+function hermesE2eEnvironment(home: string, hermesHome: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const [key, value] of Object.entries(process.env)) {
+    if (/^(?:HERMES|XDG_CONFIG|XDG_CACHE|XDG_DATA|PYTHON)/i.test(key)) continue;
+    env[key] = value;
+  }
+  return {
+    ...env,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_DATA_HOME: join(home, ".local", "share"),
+    HERMES_HOME: hermesHome,
+    HERMES_ACCEPT_HOOKS: "1"
+  };
 }
 
 const opencodeExecutable = resolveInstalledCli("ACS_TEST_OPENCODE_EXECUTABLE", "opencode");
@@ -1880,8 +1903,16 @@ describe("gateway MCP transport", () => {
       const dbPath = join(dir, "control.db");
       const configPath = join(dir, "machine-controller.json");
       const hermesHome = join(dir, "hermes-home");
+      const hermesFixtureBin = join(dir, "bin");
+      const hermesFixtureExecutable = join(hermesFixtureBin, "hermes");
       mkdirSync(allowed);
       mkdirSync(hermesHome);
+      mkdirSync(hermesFixtureBin);
+      if (!hermesExecutable) throw new Error("Hermes executable unavailable");
+      const hermesRuntimeLauncher = resolveHermesRuntimeLauncher(hermesExecutable);
+      const installedHermesLauncher = readFileSync(hermesRuntimeLauncher);
+      copyFileSync(hermesRuntimeLauncher, hermesFixtureExecutable);
+      chmodSync(hermesFixtureExecutable, 0o755);
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -2096,7 +2127,7 @@ describe("gateway MCP transport", () => {
           `model:\n  provider: custom\n  default: fixture-model\n  base_url: http://127.0.0.1:${modelAddress.port}/v1\n  api_key: fixture-key\n  context_length: 65536\n  max_tokens: 512\nmcp_servers:\n  acs-gateway:\n    url: http://127.0.0.1:${gatewayAddress.port}/mcp\n    headers:\n      Authorization: Bearer deterministic-hermes-token\ntools:\n  tool_search:\n    enabled: on\n`
         );
         hermesProcess = spawn(
-          "hermes",
+          hermesFixtureExecutable,
           [
             "--ignore-rules",
             "--no-restore-cwd",
@@ -2105,7 +2136,7 @@ describe("gateway MCP transport", () => {
           ],
           {
             cwd: allowed,
-            env: { ...process.env, HOME: dir, HERMES_HOME: hermesHome, HERMES_ACCEPT_HOOKS: "1" },
+            env: hermesE2eEnvironment(dir, hermesHome),
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -2146,6 +2177,7 @@ describe("gateway MCP transport", () => {
         await app.close();
         await new Promise<void>((resolve) => modelServer.close(() => resolve()));
         rmSync(dir, { recursive: true, force: true });
+        expect(readFileSync(hermesRuntimeLauncher)).toEqual(installedHermesLauncher);
       }
       expect(app.server.listening).toBe(false);
       expect(modelServer.listening).toBe(false);

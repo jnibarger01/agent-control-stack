@@ -3,7 +3,14 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
+import {
+  ExecutionAdmissionScheduler,
+  type AdmissionPermit,
+  type AdmissionRequest,
+  type ExecutionAdmissionController,
+  type AdmissionSnapshot,
+  type RestoreAdmissionPermitInput
+} from "@agent-control-stack/execution-admission";
 import { describe, expect, it } from "vitest";
 import { ShutdownController } from "./lifecycle.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
@@ -50,26 +57,13 @@ function attemptResultIdempotencyKey(attemptId: string): string {
   return createHash("sha256").update(`{"attemptId":"${attemptId}","domain":"acs.attempt-result.v1"}`).digest("hex");
 }
 
-function buildFixture(input?: { scheduler?: ExecutionAdmissionScheduler; shutdownController?: ShutdownController }) {
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-admission-gateway-")));
-  const scheduler =
-    input?.scheduler ??
-    new ExecutionAdmissionScheduler({
-      config: {
-        executionMaxInflight: 1,
-        executorMaxInflight: 1,
-        queueMax: 4,
-        queueTimeoutMs: 2_000,
-        waitMaxInflight: 1
-      }
-    });
+function createGateway(root: string, executionAdmission: ExecutionAdmissionController) {
   const dbPath = join(root, "control.db");
   const app = buildGateway({
     dbPath,
     logger: false,
     auth: { token: "", actor: "user", actorId: "user", credentials },
-    shutdownController: input?.shutdownController,
-    executionAdmission: scheduler,
+    executionAdmission,
     desktopCommanderCapability: {
       runtimeId: DC_RUNTIME,
       keyId: "dc-admission-key",
@@ -98,6 +92,23 @@ function buildFixture(input?: { scheduler?: ExecutionAdmissionScheduler; shutdow
     }),
     jaceCommanderContainment: false
   });
+  return { dbPath, app };
+}
+
+function buildFixture(input?: { scheduler?: ExecutionAdmissionScheduler; shutdownController?: ShutdownController }) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-admission-gateway-")));
+  const scheduler =
+    input?.scheduler ??
+    new ExecutionAdmissionScheduler({
+      config: {
+        executionMaxInflight: 1,
+        executorMaxInflight: 1,
+        queueMax: 4,
+        queueTimeoutMs: 2_000,
+        waitMaxInflight: 1
+      }
+    });
+  const { dbPath, app } = createGateway(root, scheduler);
   return { root, dbPath, scheduler, app };
 }
 

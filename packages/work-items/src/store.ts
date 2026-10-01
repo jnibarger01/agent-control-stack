@@ -373,6 +373,19 @@ interface AttemptLeaseRow {
   closed_at: string | null;
 }
 
+interface AdmissionPermitRow {
+  attempt_id: string;
+  work_item_id: string;
+  lease_id: string;
+  worker_id: string;
+  fencing_epoch: number;
+  action_hash: string;
+  plan_hash: string;
+  input_hash: string;
+  lane: "jc" | "dc";
+  created_at: string;
+}
+
 interface WorkspaceAllocationRow {
   allocation_id: string;
   work_item_id: string;
@@ -1137,7 +1150,48 @@ export interface WorkItemStore {
   failExpiredLeases(now?: Date): WorkItem[];
   /** Count attempt leases that are still active and not yet past expires_at. */
   countActiveAttemptLeases(now?: Date): number;
-  /** Append a gateway/system lifecycle event to the canonical audit chain. */
+  /** Persist an admission permit binding for recovery after gateway restart. */
+  bindAdmissionPermit(input: {
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+  }): void;
+  /** Remove a released admission permit binding. */
+  releaseAdmissionPermit(attemptId: string): boolean;
+  /** Get a persisted admission permit binding by attempt ID. */
+  getAdmissionPermit(attemptId: string):
+    | {
+        attemptId: string;
+        workItemId: string;
+        leaseId: string;
+        workerId: string;
+        fencingEpoch: number;
+        actionHash: string;
+        planHash: string;
+        inputHash: string;
+        lane: "jc" | "dc";
+        createdAt: string;
+      }
+    | undefined;
+  /** List all persisted admission permit bindings. */
+  listAdmissionPermits(): Array<{
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+    createdAt: string;
+  }>;
   recordSystemEvent(input: {
     name: string;
     body?: Record<string, unknown>;
@@ -5199,6 +5253,56 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return Number(row?.count ?? 0);
   }
 
+  bindAdmissionPermit(input: {
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+  }): void {
+    this.db
+      .prepare(
+        `INSERT OR REPLACE INTO admission_permits
+         (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch,
+          action_hash, plan_hash, input_hash, lane, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+      )
+      .run(
+        input.attemptId,
+        input.workItemId,
+        input.leaseId,
+        input.workerId,
+        input.fencingEpoch,
+        input.actionHash,
+        input.planHash,
+        input.inputHash,
+        input.lane
+      );
+  }
+
+  releaseAdmissionPermit(attemptId: string): boolean {
+    const result = this.db.prepare(`DELETE FROM admission_permits WHERE attempt_id = ?`).run(attemptId);
+    return result.changes > 0;
+  }
+
+  getAdmissionPermit(attemptId: string) {
+    const row = this.db
+      .prepare(`SELECT * FROM admission_permits WHERE attempt_id = ?`)
+      .get(attemptId) as AdmissionPermitRow | undefined;
+    return row ? mapAdmissionPermitRow(row) : undefined;
+  }
+
+  listAdmissionPermits() {
+    const rows = this.db
+      .prepare(`SELECT * FROM admission_permits ORDER BY created_at`)
+      .all() as unknown as AdmissionPermitRow[];
+    return rows.map(mapAdmissionPermitRow);
+  }
+
   recordSystemEvent(input: {
     name: string;
     body?: Record<string, unknown>;
@@ -6895,6 +6999,21 @@ function rowToAttemptLease(row: AttemptLeaseRow): AttemptLease {
     status: row.status,
     ...(row.closed_at === null ? {} : { closedAt: row.closed_at })
   });
+}
+
+function mapAdmissionPermitRow(row: AdmissionPermitRow) {
+  return {
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    workerId: row.worker_id,
+    fencingEpoch: row.fencing_epoch,
+    actionHash: row.action_hash,
+    planHash: row.plan_hash,
+    inputHash: row.input_hash,
+    lane: row.lane,
+    createdAt: row.created_at
+  };
 }
 
 function rowToWorkspaceAllocation(row: WorkspaceAllocationRow): WorkspaceAllocation {
