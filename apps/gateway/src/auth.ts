@@ -1,12 +1,6 @@
-import { createPublicKey, timingSafeEqual, verify as verifySignature } from "node:crypto";
+import { createPublicKey, timingSafeEqual, verify as verifySignature, type KeyObject } from "node:crypto";
 import type { IncomingHttpHeaders } from "node:http";
-import {
-  createLocalJWKSet,
-  createRemoteJWKSet,
-  jwtVerify,
-  type JSONWebKeySet,
-  type JWTPayload
-} from "jose";
+import { createLocalJWKSet, createRemoteJWKSet, jwtVerify, type JSONWebKeySet, type JWTPayload } from "jose";
 
 export const MCP_SCOPES = ["acs:work:create", "acs:work:read", "acs:work:approve", "acs:device"] as const;
 export type McpScope = (typeof MCP_SCOPES)[number];
@@ -56,7 +50,9 @@ export interface McpTunnelSessionRecord extends McpTunnelSessionLookup {
 export interface McpTunnelOptions {
   trustedProxies: string[];
   connectors?: McpTunnelConnectorOptions[];
-  resolveSession?: (lookup: McpTunnelSessionLookup) => McpTunnelSessionRecord | undefined | Promise<McpTunnelSessionRecord | undefined>;
+  resolveSession?: (
+    lookup: McpTunnelSessionLookup
+  ) => McpTunnelSessionRecord | undefined | Promise<McpTunnelSessionRecord | undefined>;
   maxIssuedAgeMs?: number;
 }
 
@@ -68,7 +64,12 @@ export interface McpAuthOptions {
 
 export type McpAuthorizationResult =
   | { ok: true; auth: McpAuthenticatedRequest }
-  | { ok: false; statusCode: 401 | 403; error: "missing_token" | "invalid_token" | "insufficient_scope"; message: string };
+  | {
+      ok: false;
+      statusCode: 401 | 403;
+      error: "missing_token" | "invalid_token" | "insufficient_scope";
+      message: string;
+    };
 
 export interface ProtectedResourceMetadata {
   resource: string;
@@ -81,6 +82,37 @@ export interface ProtectedResourceMetadata {
 const DEFAULT_TUNNEL_SCOPES: McpScope[] = ["acs:work:create", "acs:work:read"];
 const DEFAULT_TUNNEL_MAX_ISSUED_AGE_MS = 60_000;
 const remoteJwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
+// An inline JWKS is rebuilt per request otherwise: createLocalJWKSet clones the
+// key set and keeps its own key-import cache per instance, so every request
+// re-imported the RSA/EC public key from JWK. Cached by object identity, the
+// same way remoteJwksCache above is keyed by URI: a rotated key set has to be
+// supplied as a new object (same contract as the remote URL changing).
+const localJwksCache = new WeakMap<object, ReturnType<typeof createLocalJWKSet>>();
+// Parsing the tunnel session's SPKI PEM into a KeyObject costs ~4us on every
+// signed request (measured: 51.7us -> 47.3us end-to-end for an Ed25519 tunnel
+// assertion), and the same session asks with the same PEM until it expires.
+// Bounded so a churning registry cannot grow the gateway heap without limit;
+// only successful parses are cached, so a rejected PEM stays rejected.
+const MAX_TUNNEL_SESSION_KEYS = 128;
+const tunnelSessionKeyCache = new Map<string, KeyObject>();
+// Counters behind authKeyCacheStats(): they let a test assert that a repeated
+// request rebuilt no key material at all, rather than merely that the result
+// looked the same.
+let tunnelKeyParseCount = 0;
+let localJwksBuildCount = 0;
+
+/** Diagnostics for tests: how many times per-request key material was rebuilt. */
+export function authKeyCacheStats(): {
+  tunnelKeyParses: number;
+  localJwksBuilds: number;
+  tunnelKeysCached: number;
+} {
+  return {
+    tunnelKeyParses: tunnelKeyParseCount,
+    localJwksBuilds: localJwksBuildCount,
+    tunnelKeysCached: tunnelSessionKeyCache.size
+  };
+}
 
 export function createProtectedResourceMetadata(oauth: McpOAuthOptions): ProtectedResourceMetadata {
   return {
@@ -138,7 +170,8 @@ export function resolveMcpAuthOptions(input: {
   env?: NodeJS.ProcessEnv;
 }): McpAuthOptions | undefined {
   const env = input.env ?? process.env;
-  const localBearerToken = env.NODE_ENV === "production" ? undefined : input.localBearerToken ?? env.ACS_MCP_BEARER_TOKEN;
+  const localBearerToken =
+    env.NODE_ENV === "production" ? undefined : (input.localBearerToken ?? env.ACS_MCP_BEARER_TOKEN);
   const oauth = input.oauth ?? resolveMcpOAuthFromEnv(env);
   const tunnel = input.tunnel ?? resolveMcpTunnelFromEnv(env);
   return localBearerToken || oauth || tunnel ? { localBearerToken, oauth, tunnel } : undefined;
@@ -151,7 +184,13 @@ export async function authorizeMcpRequest(input: {
   remoteAddress?: string;
   now?: Date;
 }): Promise<McpAuthorizationResult> {
-  const tunnel = await authorizeTunnelRequest(input.headers, input.auth?.tunnel, input.remoteAddress, input.requiredScopes, input.now ?? new Date());
+  const tunnel = await authorizeTunnelRequest(
+    input.headers,
+    input.auth?.tunnel,
+    input.remoteAddress,
+    input.requiredScopes,
+    input.now ?? new Date()
+  );
   if (tunnel) {
     return tunnel;
   }
@@ -220,7 +259,7 @@ function resolveMcpTunnelFromEnv(env: NodeJS.ProcessEnv): McpTunnelOptions | und
   const scopes = parseMcpScopes(env.ACS_TUNNEL_SCOPES) ?? DEFAULT_TUNNEL_SCOPES;
   return {
     trustedProxies,
-    connectors: allowUnsignedTunnelId ? connectorEntries?.map((entry) => tunnelConnector(entry, scopes)) ?? [] : []
+    connectors: allowUnsignedTunnelId ? (connectorEntries?.map((entry) => tunnelConnector(entry, scopes)) ?? []) : []
   };
 }
 
@@ -313,12 +352,14 @@ async function authorizeSignedTunnelRequest(input: {
   if (!isFreshIssuedAt(input.issuedAt, input.now, input.tunnel.maxIssuedAgeMs ?? DEFAULT_TUNNEL_MAX_ISSUED_AGE_MS)) {
     return { ok: false, statusCode: 401, error: "invalid_token", message: "stale tunnel assertion" };
   }
-  if (!verifyTunnelSignature(session.publicKeyPem, input.signature, {
-    connectorId: input.connectorId,
-    tunnelId: input.tunnelId,
-    sessionId: input.sessionId,
-    issuedAt: input.issuedAt
-  })) {
+  if (
+    !verifyTunnelSignature(session.publicKeyPem, input.signature, {
+      connectorId: input.connectorId,
+      tunnelId: input.tunnelId,
+      sessionId: input.sessionId,
+      issuedAt: input.issuedAt
+    })
+  ) {
     return { ok: false, statusCode: 401, error: "invalid_token", message: "invalid tunnel signature" };
   }
   const scopes = parseMcpScopeList(session.scopes);
@@ -375,7 +416,7 @@ function constantTimeEqual(left: string, right: string): boolean {
 }
 
 async function verifyJwt(token: string, oauth: McpOAuthOptions, now: Date): Promise<McpAuthenticatedRequest> {
-  const { payload, protectedHeader } = await jwtVerify(token, jwks(oauth), {
+  const { payload, protectedHeader } = await jwtVerify(token, jwksForOAuth(oauth), {
     issuer: oauth.issuer,
     algorithms: ["RS256", "PS256"],
     currentDate: now
@@ -404,9 +445,17 @@ async function verifyJwt(token: string, oauth: McpOAuthOptions, now: Date): Prom
   };
 }
 
-function jwks(oauth: McpOAuthOptions): ReturnType<typeof createLocalJWKSet> | ReturnType<typeof createRemoteJWKSet> {
+/** Memoized local-JWKS lookup: see localJwksCache. Exported for tests. */
+export function jwksForOAuth(
+  oauth: McpOAuthOptions
+): ReturnType<typeof createLocalJWKSet> | ReturnType<typeof createRemoteJWKSet> {
   if (oauth.jwks) {
-    return createLocalJWKSet(oauth.jwks);
+    const cached = localJwksCache.get(oauth.jwks);
+    if (cached) return cached;
+    const created = createLocalJWKSet(oauth.jwks);
+    localJwksBuildCount += 1;
+    localJwksCache.set(oauth.jwks, created);
+    return created;
   }
   if (!oauth.jwksUri) {
     throw new Error("JWKS URI is not configured");
@@ -432,10 +481,7 @@ function hasRequiredScopes(actual: Set<string>, required: McpScope[]): boolean {
 }
 
 function claimScopes(claims: JWTPayload): Set<string> {
-  return new Set([
-    ...scopeList(claims.scope),
-    ...scopeList(claims.scp)
-  ]);
+  return new Set([...scopeList(claims.scope), ...scopeList(claims.scp)]);
 }
 
 function scopeList(input: unknown): string[] {
@@ -486,6 +532,23 @@ function isFreshIssuedAt(issuedAt: string, now: Date, maxIssuedAgeMs: number): b
   return Math.abs(now.getTime() - issuedAtMs) <= maxIssuedAgeMs;
 }
 
+/**
+ * Parsed public key for a tunnel session PEM, memoized per PEM (see
+ * tunnelSessionKeyCache). Exported for tests; a parse failure is never cached.
+ */
+export function tunnelSessionPublicKey(publicKeyPem: string): KeyObject {
+  const cached = tunnelSessionKeyCache.get(publicKeyPem);
+  if (cached) return cached;
+  const key = createPublicKey(publicKeyPem);
+  tunnelKeyParseCount += 1;
+  if (tunnelSessionKeyCache.size >= MAX_TUNNEL_SESSION_KEYS) {
+    const oldest = tunnelSessionKeyCache.keys().next();
+    if (!oldest.done) tunnelSessionKeyCache.delete(oldest.value);
+  }
+  tunnelSessionKeyCache.set(publicKeyPem, key);
+  return key;
+}
+
 function verifyTunnelSignature(
   publicKeyPem: string,
   signature: string,
@@ -496,7 +559,7 @@ function verifyTunnelSignature(
     return verifySignature(
       null,
       Buffer.from(createTunnelSignaturePayload(payload)),
-      createPublicKey(publicKeyPem),
+      tunnelSessionPublicKey(publicKeyPem),
       Buffer.from(normalized, "base64url")
     );
   } catch {
@@ -513,12 +576,18 @@ function tunnelConnector(entry: string, scopes: McpScope[]): McpTunnelConnectorO
 }
 
 function csv(input: string | undefined): string[] | undefined {
-  const values = input?.split(",").map((value) => value.trim()).filter(Boolean);
+  const values = input
+    ?.split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
   return values?.length ? values : undefined;
 }
 
 function quoteAuthParam(value: string): string {
-  return value.replace(/[\r\n]/g, "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
+  return value
+    .replace(/[\r\n]/g, "")
+    .replace(/\\/g, "\\\\")
+    .replace(/"/g, '\\"');
 }
 
 function oauthResource(oauth: McpOAuthOptions): string {
