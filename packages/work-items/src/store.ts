@@ -1618,6 +1618,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
 
       const createdAt = (parsed.now ?? new Date()).toISOString();
+      let invalidationEvent: StoredAuditEvent | undefined;
       const existing = this.db
         .prepare(
           `SELECT * FROM execution_plan_approvals
@@ -1648,6 +1649,28 @@ export class SqliteWorkItemStore implements WorkItemStore {
           throw new ControlStackError(
             "execution_plan_approval_conflict",
             "existing approval changed while replacing it"
+          );
+        }
+        if (replacementStatus === "invalidated") {
+          invalidationEvent = this.appendAuditEvent(
+            createEvent(
+              "execution_plan_approval.invalidated",
+              {
+                ...rowToExecutionPlanApproval(existing),
+                status: "invalidated",
+                invalidatedAt: createdAt,
+                invalidationReason: "superseded_by_new_approver"
+              },
+              {
+                "work_item.id": parsed.workItemId,
+                "plan.id": current.planId,
+                "plan.hash": parsed.planHash,
+                "action.hash": parsed.actionHash,
+                "approval.id": existing.approval_id,
+                "actor.id": parsed.approvedByActorId,
+                "approval.invalidation_reason": "superseded_by_new_approver"
+              }
+            )
           );
         }
       }
@@ -1703,7 +1726,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "actor.id": parsed.approvedByActorId
         })
       );
-      return { value: approval, events: [event] };
+      return { value: approval, events: [...(invalidationEvent ? [invalidationEvent] : []), event] };
     });
   }
 

@@ -266,9 +266,13 @@ function gateWorkerClaimInTransaction(
     .list({ status: "approved" })
     .filter(
       (workItem) =>
-        adminMode ||
-        (!store.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) &&
-          !store.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER))
+        !workItem.requestedActions.some((action) => {
+          const params = action.params as Record<string, unknown> | undefined;
+          return params?.contract === "acs.jc.v1";
+        }) &&
+        (adminMode ||
+          (!store.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) &&
+            !store.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER)))
     )
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
   if (!candidate) {

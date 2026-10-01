@@ -197,6 +197,17 @@ describe("PR30 authority review regressions", () => {
     expect(humanGrant.approvalId).not.toBe(adminGrant.approvalId);
     expect(humanGrant.approvedByActorId).toBe("human-approver");
     expect(f.store.getExecutionPlanApprovalById(adminGrant.approvalId)?.status).toBe("invalidated");
+    const approvalEvents = f.store.readEvents().filter((event) => event.name.startsWith("execution_plan_approval."));
+    expect(approvalEvents.map((event) => event.name)).toEqual([
+      "execution_plan_approval.granted",
+      "execution_plan_approval.invalidated",
+      "execution_plan_approval.granted"
+    ]);
+    expect(approvalEvents[1]?.body).toMatchObject({
+      approvalId: adminGrant.approvalId,
+      status: "invalidated",
+      invalidationReason: "superseded_by_new_approver"
+    });
     f.store.close();
   });
 });
