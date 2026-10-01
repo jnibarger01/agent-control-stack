@@ -1164,6 +1164,7 @@ export interface WorkItemStore {
   recordDerivedWorkResult(input: unknown): WorkItem;
   claimNextObservation(now?: Date): ObservationOutboxEntry | undefined;
   loadCanonicalTrace(workItemId: string, traceId: string, maxEvents?: number): CanonicalTraceEvent[];
+  loadMissionObjective?(workItemId: string): string | undefined;
   completeObservation(observationId: string, completion: ObservationCompletion, now?: Date): void;
   retryObservation(observationId: string, error: string, now?: Date): "pending" | "failed";
   getObservationCapacity(): ObservationCapacity;
@@ -5454,6 +5455,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   claimNextObservation(now: Date = new Date()): ObservationOutboxEntry | undefined {
     return this.write(() => ({ value: claimNextObservationRow(this.db, now), events: [] }));
+  }
+
+  loadMissionObjective(workItemId: string): string | undefined {
+    return this.get(workItemId)?.intent;
   }
 
   loadCanonicalTrace(

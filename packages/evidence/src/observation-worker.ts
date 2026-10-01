@@ -1,7 +1,9 @@
 import {
   JEV_TRACE_QUESTION_SET_VERSION,
+  classifyJevExecutionProgress,
   classifyJevTrace,
   formatJevTelemetry,
+  type ExecutionProgressTelemetry,
   type JevTraceAdvisory
 } from "@agent-control-stack/jev-advisor";
 import type { CanonicalTraceEvent, ObservationOutboxEntry, ObservationStore } from "@agent-control-stack/work-items";
@@ -37,7 +39,8 @@ export interface TraceClassifierResult {
 
 export type TraceClassifier = (
   trace: readonly CanonicalTraceEvent[],
-  timeoutMs: number
+  timeoutMs: number,
+  context?: { executionId: string; missionObjective?: string }
 ) => Promise<TraceClassifierResult>;
 
 export interface ObservationWorkerState {
@@ -89,7 +92,7 @@ export class ObservationWorker {
     this.config = { ...DEFAULT_CONFIG, ...options.config };
     validateConfig(this.config);
     this.telemetrySink = options.telemetrySink ?? ((line) => process.stderr.write(line + "\n"));
-    this.classifier = options.classifier ?? ((trace, timeoutMs) => this.classify(trace, timeoutMs));
+    this.classifier = options.classifier ?? ((trace, timeoutMs, context) => this.classify(trace, timeoutMs, context));
     this.state = {
       running: false,
       concurrent: 0,
@@ -185,7 +188,10 @@ export class ObservationWorker {
         return;
       }
 
-      const result = await this.classifier(trace, this.config.timeoutMs);
+      const result = await this.classifier(trace, this.config.timeoutMs, {
+        executionId: job.workItemId,
+        missionObjective: this.store.loadMissionObjective?.(job.workItemId)
+      });
       if (result.retryable) {
         const retryStatus = this.store.retryObservation(job.observationId, result.outcome);
         if (retryStatus === "pending") this.state.retried += 1;
@@ -232,9 +238,49 @@ export class ObservationWorker {
     return result;
   }
 
-  private async classify(trace: readonly CanonicalTraceEvent[], timeoutMs: number): Promise<TraceClassifierResult> {
+  private async classify(
+    trace: readonly CanonicalTraceEvent[],
+    timeoutMs: number,
+    context?: { executionId: string; missionObjective?: string }
+  ): Promise<TraceClassifierResult> {
     const advisory = await classifyJevTrace(trace, { timeoutMs, enabled: true });
     this.emitTelemetry(advisory);
+    if (context?.missionObjective) {
+      try {
+        const progress = await classifyJevExecutionProgress(
+          {
+            executionId: context.executionId,
+            mission: { objective: context.missionObjective },
+            events: trace,
+            triggeringBoundary: trace.at(-1)?.kind
+          },
+          { timeoutMs, enabled: true }
+        );
+        this.emitProgressTelemetry(progress.telemetry);
+      } catch {
+        this.emitProgressTelemetry({
+          schema_version: "jev-execution-progress-event/1",
+          execution_id: context.executionId,
+          assessment_timestamp: new Date().toISOString(),
+          trajectory_window_size: Math.min(trace.length, 32),
+          triggering_event: trace.at(-1)?.kind ?? "unknown",
+          progress: "unknown",
+          trajectory: "unknown",
+          intervention_recommended: null,
+          risk_escalation: null,
+          completion_confidence: null,
+          evidence: [],
+          deterministic_signals: { repeated_failed_invocation_count: 0 },
+          degraded: true,
+          error: "OBSERVER_ERROR",
+          latency_ms: 0,
+          model: null,
+          question_set_version: "jev-execution-progress@1",
+          trace_id: trace[0]?.trace_id ?? null,
+          work_item_id: context.executionId
+        });
+      }
+    }
     const failure = advisory.result.failureReason;
     return {
       outcome: failure ?? "OK",
@@ -242,6 +288,14 @@ export class ObservationWorker {
       retryable: failure === "TIMEOUT" || failure === "UNAVAILABLE",
       telemetryCorrelationId: null
     };
+  }
+
+  private emitProgressTelemetry(event: ExecutionProgressTelemetry): void {
+    try {
+      this.telemetrySink(JSON.stringify(event));
+    } catch {
+      // Progress telemetry is observational only.
+    }
   }
 
   private emitTelemetry(advisory: JevTraceAdvisory): void {

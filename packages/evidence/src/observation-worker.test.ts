@@ -51,6 +51,7 @@ function job(id = "obs_0123456789abcdef01234567"): ObservationOutboxEntry {
 class FakeStore implements ObservationStore {
   readonly jobs: ObservationOutboxEntry[];
   trace: CanonicalTraceEvent[];
+  missionObjective: string | undefined;
   completions: Array<{ id: string; completion: ObservationCompletion }> = [];
   constructor(jobs: ObservationOutboxEntry[] = [job()], trace: CanonicalTraceEvent[] = [event("run.completed", 1)]) {
     this.jobs = jobs;
@@ -68,6 +69,9 @@ class FakeStore implements ObservationStore {
   }
   loadCanonicalTrace(): CanonicalTraceEvent[] {
     return this.trace.map((item) => ({ ...item }));
+  }
+  loadMissionObjective(): string | undefined {
+    return this.missionObjective;
   }
   completeObservation(id: string, completion: ObservationCompletion): void {
     const found = this.jobs.find((candidate) => candidate.observationId === id);
@@ -196,6 +200,39 @@ describe("JEV observation worker", () => {
     await worker.runOnce();
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(store.jobs[0]?.classifierOutcome).toBe("INCOMPATIBLE_MODEL");
+  });
+
+  it("emits progress telemetry without changing the represented execution state", async () => {
+    const store = new FakeStore();
+    store.missionObjective = "complete the requested change and verify it";
+    const execution = { status: "running", selectedAgent: "agent-a", capabilityActive: true, missionRevision: 3 };
+    const before = structuredClone(execution);
+    const lines: string[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      const request = JSON.parse(String(init.body)) as { questions: Record<string, unknown> };
+      const answers = Object.fromEntries(
+        Object.keys(request.questions).map((name) => [
+          name,
+          { type: "noul", noul: name === "advancing" || name === "on_task" ? 0.99 : 0.01 }
+        ])
+      );
+      return new Response(JSON.stringify({ model: "test", answers }), { status: 200 });
+    });
+    const worker = new ObservationWorker(store, { telemetrySink: (line) => lines.push(line) });
+    await worker.runOnce();
+    expect(lines.map((line) => JSON.parse(line).schema_version)).toContain("jev-execution-progress-event/1");
+    expect(execution).toEqual(before);
+    const advisory = JSON.parse(lines.find((line) => line.includes("jev-execution-progress-event/1"))!);
+    expect(worker.getState().processed).toBe(1);
+    expect(advisory).not.toHaveProperty("cancel");
+    expect(advisory).not.toHaveProperty("pause");
+    expect(advisory).not.toHaveProperty("route");
+    expect(advisory).not.toHaveProperty("agent");
+    expect(advisory).not.toHaveProperty("capability");
+    expect(advisory).not.toHaveProperty("lease");
+    expect(advisory).not.toHaveProperty("mission");
+    expect(advisory).not.toHaveProperty("approval");
+    expect(advisory).not.toHaveProperty("work_item_status");
   });
 
   it("never exceeds configured concurrent observations", async () => {

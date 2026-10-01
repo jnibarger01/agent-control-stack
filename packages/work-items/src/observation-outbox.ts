@@ -42,6 +42,8 @@ export interface ObservationCompletion {
 export interface ObservationStore {
   claimNextObservation(now?: Date): ObservationOutboxEntry | undefined;
   loadCanonicalTrace(workItemId: string, traceId: string, maxEvents?: number): CanonicalTraceEvent[];
+  /** Optional read-only mission context for semantic execution observation. */
+  loadMissionObjective?(workItemId: string): string | undefined;
   completeObservation(observationId: string, completion: ObservationCompletion, now?: Date): void;
   retryObservation(observationId: string, error: string, now?: Date): "pending" | "failed";
   getObservationCapacity(): ObservationCapacity;

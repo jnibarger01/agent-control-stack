@@ -243,3 +243,29 @@ the current runtime to return a classification. A future runtime that
 explicitly advertises complete Noul+Choice+Score support should begin
 performing the typed trace analysis without requiring another architecture
 change.
+
+## JEV-5 execution-progress shadow
+
+The execution-progress observer reuses the canonical trace outbox and bounded
+LoopTrace projection. After a trace reaches the existing terminal observation
+boundary, the worker reads only the stored mission objective and the recent
+32-event window, then emits a separate `jev-execution-progress-event/1`
+telemetry record. Evidence contains event IDs, sequence numbers, event kinds,
+and short deterministic fact labels; raw arguments and result payloads are not
+copied. Intent is redacted and bounded before it reaches System One.
+
+The question set `jev-execution-progress@1` uses Noul only, matching the
+currently supported runtime. It asks about advancing/stalled/regressing,
+on-task/drift/looping/recovery, completion support, and informational
+intervention recommendation and informational risk escalation. Conflicting
+or intermediate judgments remain unknown. Exact repeated failed invocation hashes are counted deterministically
+outside JEV and reported separately. A verbal completion event is not treated
+as verification. Timeout, unavailable model, malformed response, invalid
+trace, or telemetry sink failure cannot affect execution or ACS state.
+
+This stage observes complete traces at the current post-authority terminal
+boundary. Mid-run checkpoint scheduling is deferred; adding it requires
+versioned window identity and bounded outbox semantics so one execution can
+produce multiple assessments without changing the existing one-per-trace
+idempotency contract. No assessment field is read by policy, routing, lifecycle,
+capability, or execution code.

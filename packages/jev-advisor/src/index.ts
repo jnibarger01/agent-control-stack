@@ -38,6 +38,7 @@ export * from "./contracts/questions.js";
 export * from "./question-registry.js";
 export * from "./redaction.js";
 export * from "./trace-projection.js";
+export * from "./execution-progress-shadow.js";
 export {
   LOCAL_BINARY_CAPABILITY,
   capabilityFromMetadata,
