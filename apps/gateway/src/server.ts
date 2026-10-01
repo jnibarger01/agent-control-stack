@@ -849,7 +849,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       try {
-        const actor = requireMutationActor(request, reply, auth);
+        const actor = requireHumanOperatorActor(request, reply, auth);
         if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
         workItems.setExecutionMode({
@@ -3631,6 +3631,41 @@ function requireMutationActor(
   }
   if (!credential.scopes.includes(requiredScope)) {
     reply.code(403).send({ error: `${requiredScope} scope is required`, code: "insufficient_gateway_scope" });
+    return undefined;
+  }
+  return mutationActorForCredential(credential);
+}
+
+/**
+ * Global execution-policy changes can remove human approval from eligible
+ * work, so they require an explicitly approval-scoped, human-classified
+ * operator credential. Worker and service credentials cannot change mode.
+ */
+function requireHumanOperatorActor(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  if (!auth) {
+    reply.code(503).send({ error: "mutation auth is not configured" });
+    return undefined;
+  }
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (!credential) {
+    reply.code(401).send({ error: "unauthorized" });
+    return undefined;
+  }
+  if (
+    credential.actor !== "user" ||
+    !credential.roles.includes("operator") ||
+    credential.roles.includes("service") ||
+    credential.roles.includes("worker")
+  ) {
+    reply.code(403).send({ error: "human operator credential is required", code: "human_operator_required" });
+    return undefined;
+  }
+  if (!credential.scopes.includes("acs:approve")) {
+    reply.code(403).send({ error: "acs:approve scope is required", code: "insufficient_gateway_scope" });
     return undefined;
   }
   return mutationActorForCredential(credential);
