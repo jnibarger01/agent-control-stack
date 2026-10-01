@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, realpathSync, statSync, type Dirent, type Stats } from "node:fs";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import { redactValue } from "@agent-control-stack/shared";
@@ -38,6 +38,11 @@ export interface EvidenceReaderContext {
   workspaceHostPath: string;
   gitPath?: string;
   store: EvidenceStoreReader;
+}
+
+/** Byte-order name comparison, identical to `Array.prototype.sort()`'s default ordering. */
+function compareDirentNames(a: Dirent, b: Dirent): number {
+  return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 }
 
 function containWithin(root: string, requested: string): string {
@@ -106,6 +111,9 @@ export class EvidenceReader implements EvidenceReadSurface {
     const root = containWithin(this.ctx.workspaceHostPath, input.path);
     const depth = Math.min(Math.max(1, input.depth ?? 1), 4);
     const entries: Array<{ path: string; kind: string; sizeBytes: number }> = [];
+    // Resolved once per call instead of once per entry: `containWithin` above already
+    // proved this path resolves, and the workspace root cannot change mid-walk.
+    const workspaceRoot = realpathSync(this.ctx.workspaceHostPath);
     const walk = (dir: string, level: number): void => {
       for (const name of readdirSync(dir).sort()) {
         if (name === ".git") continue;
@@ -117,7 +125,7 @@ export class EvidenceReader implements EvidenceReadSurface {
           continue;
         }
         entries.push({
-          path: full.slice(realpathSync(this.ctx.workspaceHostPath).length + 1),
+          path: full.slice(workspaceRoot.length + 1),
           kind: s.isDirectory() ? "directory" : s.isFile() ? "file" : "other",
           sizeBytes: s.size
         });
@@ -136,20 +144,29 @@ export class EvidenceReader implements EvidenceReadSurface {
     const matches: Array<{ path: string; line: number; text: string }> = [];
     const root = realpathSync(this.ctx.workspaceHostPath);
     const walk = (dir: string): void => {
-      for (const name of readdirSync(dir).sort()) {
+      for (const dirent of readdirSync(dir, { withFileTypes: true }).sort(compareDirentNames)) {
+        const name = dirent.name;
         if (name === ".git" || name === "node_modules" || name === "dist") continue;
         const full = join(dir, name);
-        let s;
-        try {
-          s = statSync(full);
-        } catch {
-          continue;
+        // A dirent already classifies a real directory, so a directory-heavy tree costs one
+        // readdir instead of a stat per entry. Dirents do NOT follow symlinks, so everything
+        // that is not a real directory is still statSync'd -- which keeps symlinked files and
+        // symlinked directories behaving exactly as before.
+        let isDirectory = dirent.isDirectory();
+        let stats: Stats | undefined;
+        if (!isDirectory) {
+          try {
+            stats = statSync(full);
+          } catch {
+            continue;
+          }
+          isDirectory = stats.isDirectory();
         }
-        if (s.isDirectory()) {
+        if (isDirectory) {
           walk(full);
           continue;
         }
-        if (!s.isFile() || s.size > MAX_READ_BYTES) continue;
+        if (!stats?.isFile() || stats.size > MAX_READ_BYTES) continue;
         const buffer = readFileSync(full);
         if (buffer.includes(0)) continue;
         buffer
