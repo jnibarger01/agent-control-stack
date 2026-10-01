@@ -6,6 +6,11 @@ import { ZodError, z } from "zod";
 const protocolVersion = "2024-11-05";
 const standaloneMcpToolNames = machineToolNames.filter((name) => name !== "test.agent.run");
 
+// Framing bounds: a broken or hostile client must not be able to grow the read buffer
+// without limit, and a declared body larger than this is refused instead of buffered.
+const MAX_HEADER_BYTES = 64 * 1024;
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+
 type JsonRpcId = string | number | null;
 
 const requestSchema = z.object({
@@ -32,32 +37,86 @@ export class McpStdioServer {
   start(): void {
     this.input.on("data", (chunk: Buffer) => {
       this.buffer = Buffer.concat([this.buffer, chunk]);
-      void this.drain();
+      // Framing and request errors are handled per frame inside drain(); this last-resort
+      // catch keeps an unexpected failure from becoming an unhandled rejection that would
+      // take the stdio server down with the client still attached.
+      void this.drain().catch((error: unknown) => {
+        process.stderr.write(`acs-mcp: read loop failed: ${error instanceof Error ? error.message : String(error)}\n`);
+      });
     });
   }
 
   private async drain(): Promise<void> {
     while (true) {
       const headerEnd = this.buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) return;
+      if (headerEnd < 0) {
+        // No header terminator yet. Garbage far past any real header means the stream
+        // cannot be resynchronised from content, so drop it rather than buffer forever.
+        if (this.buffer.length > MAX_HEADER_BYTES) {
+          this.buffer = Buffer.alloc(0);
+          this.respond(failure(null, -32700, `MCP frame header exceeds ${MAX_HEADER_BYTES} bytes`));
+        }
+        return;
+      }
       const header = this.buffer.subarray(0, headerEnd).toString("utf8");
-      const length = contentLength(header);
       const bodyStart = headerEnd + 4;
+      const length = contentLength(header);
+      if (length === null || length > MAX_FRAME_BYTES) {
+        // The body length is unknown or unacceptable, so drop just the header and resync:
+        // a following well-formed frame in the same chunk is still served.
+        this.buffer = this.buffer.subarray(bodyStart);
+        this.respond(
+          failure(
+            null,
+            -32700,
+            length === null ? "missing Content-Length header" : `MCP frame exceeds ${MAX_FRAME_BYTES} bytes`
+          )
+        );
+        continue;
+      }
       const bodyEnd = bodyStart + length;
       if (this.buffer.length < bodyEnd) return;
 
       const body = this.buffer.subarray(bodyStart, bodyEnd).toString("utf8");
       this.buffer = this.buffer.subarray(bodyEnd);
-      const response = await handleMcpRequest(this.controller, JSON.parse(body));
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(body);
+      } catch {
+        this.respond(failure(null, -32700, "invalid JSON in MCP frame body"));
+        continue;
+      }
+
+      const response = await this.handleRequest(parsed);
       if (response) {
-        this.output.write(frameMessage(response));
+        this.respond(response);
       }
     }
+  }
+
+  /** A malformed request must answer with an error, never abort the read loop. */
+  private async handleRequest(body: unknown): Promise<unknown | undefined> {
+    try {
+      return await handleMcpRequest(this.controller, body);
+    } catch (error) {
+      return failure(requestId(body), -32603, errorMessage(error));
+    }
+  }
+
+  private respond(message: unknown): void {
+    this.output.write(frameMessage(message));
   }
 }
 
 export async function handleMcpRequest(controller: MachineController, body: unknown): Promise<unknown | undefined> {
-  const request = requestSchema.parse(body);
+  const parsedRequest = requestSchema.safeParse(body);
+  if (!parsedRequest.success) {
+    // An invalid request envelope is answered with -32600 (Invalid Request); the id is
+    // echoed when the raw body carries a usable one so the client can correlate it.
+    return failure(requestId(body), -32600, `invalid MCP request: ${errorMessage(parsedRequest.error)}`);
+  }
+  const request = parsedRequest.data;
   if (request.id === undefined) {
     return undefined;
   }
@@ -93,12 +152,21 @@ export function frameMessage(message: unknown): string {
   return `Content-Length: ${Buffer.byteLength(json, "utf8")}\r\n\r\n${json}`;
 }
 
-function contentLength(header: string): number {
+function contentLength(header: string): number | null {
   const match = /^Content-Length:\s*(\d+)$/im.exec(header);
   if (!match) {
-    throw new Error("missing Content-Length header");
+    return null;
   }
-  return Number(match[1]);
+  const length = Number(match[1]);
+  return Number.isSafeInteger(length) && length >= 0 ? length : null;
+}
+
+/** Recover a JSON-RPC id from an unvalidated body so errors can still be correlated. */
+function requestId(body: unknown): JsonRpcId {
+  if (!body || typeof body !== "object" || Array.isArray(body)) return null;
+  const id = (body as Record<string, unknown>).id;
+  if (typeof id === "string" || typeof id === "number") return id;
+  return null;
 }
 
 function result(id: JsonRpcId, value: unknown) {
