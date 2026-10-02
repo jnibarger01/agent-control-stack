@@ -284,6 +284,8 @@ export interface GatewayOptions {
   /** Governed ports for autonomous coding missions. Absent ports fail closed. */
   codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
+  /** Admin execution mode lasts this long before reverting to strict. Env: ACS_ADMIN_MODE_TTL_MS. */
+  adminModeTtlMs?: number;
   logger?: boolean;
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
@@ -403,6 +405,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
     heartbeatTtlMs,
+    adminModeTtlMs: options.adminModeTtlMs ?? adminModeTtlFromEnv(),
     // The gateway is the one process that refuses to boot on a bad trace config.
     traceConfigValidation: "eager",
     observationEnabled: jevObservationEnabled
@@ -1109,6 +1112,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   const readAuthority = options.readManagedAuthority ?? (() => observeLiveManagedAuthority());
   const executionModeView = () => {
+    workItems.expireAdminModeIfDue();
     const row = workItems.getExecutionMode();
     const mode = readExecutionModeValue(row.raw);
     const observation = readAuthority();
@@ -1119,6 +1123,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       approvalPolicy: mode.approvalPolicy,
       updatedAt: row.updatedAt,
       updatedBy: row.updatedBy,
+      expiresAt: row.expiresAt,
       executor: {
         lease: {
           active: observation.leaseActive,
@@ -1148,9 +1153,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       try {
+        // Authenticate before looking at the body so an unauthorized caller learns nothing
+        // about request validation.
         const actor = requireHumanApprovalActor(request, reply, auth);
         if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
+        // Strict is the fail-safe direction. Admin removes human approval, so it also needs
+        // the dedicated scope and a stated reason.
+        if (body.mode === "admin" && !requireExecutionModeAdminScope(request, reply, auth)) return;
+        if (body.mode === "admin" && (body.reason ?? "").trim().length < MIN_ADMIN_MODE_REASON_LENGTH) {
+          return reply.code(400).send({
+            error: `a reason of at least ${MIN_ADMIN_MODE_REASON_LENGTH} characters is required to enable admin mode`,
+            code: "admin_mode_reason_required"
+          });
+        }
         workItems.setExecutionMode({
           mode: body.mode,
           updatedBy: actor,
@@ -3913,7 +3929,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     });
   });
 
+  const adminExpirySweep = setInterval(() => {
+    try {
+      workItems.expireAdminModeIfDue();
+    } catch {
+      // Reads already treat an expired row as strict; the sweep only records the lapse.
+    }
+  }, 30_000);
+  adminExpirySweep.unref();
   app.addHook("onClose", async () => {
+    clearInterval(adminExpirySweep);
     executionAdmission.shutdown();
     // Active durable reservations survive shutdown and are restored by the next gateway.
     await observationWorker?.stop();
@@ -4840,6 +4865,35 @@ function requireMutationActor(
   return mutationActorForCredential(credential);
 }
 
+const MIN_ADMIN_MODE_REASON_LENGTH = 8;
+export const EXECUTION_MODE_ADMIN_SCOPE = "acs:execution-mode:admin";
+
+/**
+ * Enabling admin mode removes human approval from future work. acs:approve only covers
+ * approving one bounded action, so admin additionally needs its own scope.
+ */
+function requireExecutionModeAdminScope(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): boolean {
+  const credential = auth ? gatewayCredentialForRequest(request, auth) : undefined;
+  if (credential?.scopes.includes(EXECUTION_MODE_ADMIN_SCOPE)) return true;
+  reply.code(403).send({
+    error: `${EXECUTION_MODE_ADMIN_SCOPE} scope is required to enable admin mode`,
+    code: "insufficient_gateway_scope"
+  });
+  return false;
+}
+
+function adminModeTtlFromEnv(env: NodeJS.ProcessEnv = process.env): number | undefined {
+  const raw = env.ACS_ADMIN_MODE_TTL_MS?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isInteger(value)) throw new Error("ACS_ADMIN_MODE_TTL_MS must be an integer number of milliseconds");
+  return value;
+}
+
 export function gatewayCredentialCanMutate(credential: GatewayCredential): boolean {
   return (
     (credential.roles.includes("operator") || credential.roles.includes("service")) &&
@@ -4964,7 +5018,15 @@ function matchGatewayCredential(token: string | undefined, auth: GatewayAuthOpti
       actor: auth.actor,
       actorId: auth.actorId ?? "",
       roles: auth.actor === "agent" ? ["operator", "worker"] : ["operator"],
-      scopes: ["acs:read", "acs:write", "acs:approve", "acs:worker", ...MCP_SCOPES]
+      scopes: [
+        "acs:read",
+        "acs:write",
+        "acs:approve",
+        "acs:worker",
+        // The legacy single token is a human operator only when its actor is "user".
+        ...(auth.actor === "user" ? [EXECUTION_MODE_ADMIN_SCOPE] : []),
+        ...MCP_SCOPES
+      ]
     };
   }
   return undefined;
