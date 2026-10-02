@@ -1642,6 +1642,8 @@ describe("gateway MCP transport", () => {
       const isolatedConfigHome = join(dir, "config");
       const isolatedDataHome = join(dir, "data");
       mkdirSync(allowed);
+      mkdirSync(isolatedConfigHome);
+      mkdirSync(isolatedDataHome);
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -1676,6 +1678,11 @@ describe("gateway MCP transport", () => {
           );
           response.writeHead(200, { "content-type": "text/event-stream" });
           if (hasToolResult) {
+            const toolText = JSON.stringify(messages);
+            const content =
+              toolText.includes("fixture-response:") || toolText.includes("completed through the gateway")
+                ? "OpenCode fixture invocation completed"
+                : "OpenCode fixture tool failed";
             response.end(
               `data: ${JSON.stringify({
                 id: "fixture-completion-2",
@@ -1683,7 +1690,7 @@ describe("gateway MCP transport", () => {
                 choices: [
                   {
                     index: 0,
-                    delta: { role: "assistant", content: "OpenCode fixture invocation completed" },
+                    delta: { role: "assistant", content },
                     finish_reason: null
                   }
                 ]
@@ -1804,7 +1811,7 @@ describe("gateway MCP transport", () => {
         writeFileSync(opencodeConfigPath, JSON.stringify(config));
         opencodeProcess = spawn(
           "opencode",
-          ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
             env: {
@@ -1839,7 +1846,7 @@ describe("gateway MCP transport", () => {
         writeFileSync(opencodeConfigPath, JSON.stringify(invalidConfig));
         const invalidRun = spawn(
           "opencode",
-          ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
             env: {
