@@ -23,6 +23,7 @@
     { "path": "packages/secret-broker" },
     { "path": "./packages/result-validation" },
     { "path": "./packages/recovery" },
+    { "path": "./packages/agent-cli" },
     { "path": "./packages/publication" },
     { "path": "./packages/coding-mission" },
     { "path": "packages/verification" },
