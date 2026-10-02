@@ -1,0 +1,86 @@
+{
+  "state": {
+    "missionId": "mis_123",
+    "goal": "Deploy gateway release and verify health",
+    "operations": [
+      { "id": "op_build", "status": "completed", "kind": "fs.read", "exitCode": 0 },
+      { "id": "op_deploy", "status": "pending", "kind": "git.push", "dependsOn": ["op_build"] }
+    ],
+    "constraints": { "requireHealthCheck": true },
+    "evidence": ["build:sha256:abc"]
+  },
+  "cases": [
+    {
+      "name": "high-confidence valid choice",
+      "answer": { "answers": [{ "id": "next_operation", "choice": "op_deploy", "confidence": 0.96 }] },
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 1, "requiresApproval": false, "approved": false, "permitId": "permit_921" },
+      "expect": { "status": "ready", "selectedOperationId": "op_deploy", "authorized": true, "permitId": "permit_921", "hasAuthorization": true }
+    },
+    {
+      "name": "below-threshold escalation",
+      "answer": { "answers": [{ "id": "next_operation", "choice": "op_deploy", "confidence": 0.5 }] },
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 1, "requiresApproval": false, "approved": false, "permitId": "permit_921" },
+      "expect": { "status": "escalate", "reason": "below_threshold", "selectedOperationId": "op_deploy", "hasAuthorization": false }
+    },
+    {
+      "name": "malformed batch output",
+      "answer": "I think Claude should probably investigate the gateway",
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 1, "requiresApproval": false, "approved": false, "permitId": "permit_921" },
+      "expect": { "status": "rejected", "reason": "invalid_answer", "hasAuthorization": false }
+    },
+    {
+      "name": "partial batch output",
+      "answer": { "answers": [] },
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 1, "requiresApproval": false, "approved": false, "permitId": "permit_921" },
+      "expect": { "status": "rejected", "reason": "invalid_answer", "hasAuthorization": false }
+    },
+    {
+      "name": "unavailable model",
+      "unavailable": true,
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 1, "requiresApproval": false, "approved": false, "permitId": "permit_921" },
+      "expect": { "status": "escalate", "reason": "model_unavailable", "selectedOperationId": null, "hasAuthorization": false }
+    },
+    {
+      "name": "conflicting jev shadow",
+      "answer": { "answers": [{ "id": "next_operation", "choice": "op_deploy", "confidence": 0.96 }] },
+      "shadow": { "jevChoice": "op_build" },
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 1, "requiresApproval": false, "approved": false, "permitId": "permit_921" },
+      "expect": {
+        "status": "ready",
+        "selectedOperationId": "op_deploy",
+        "authorized": true,
+        "hasAuthorization": true,
+        "authoritativeModel": "nimble",
+        "shadowModel": "jev",
+        "shadowDisagreement": true
+      }
+    },
+    {
+      "name": "action-limit denial",
+      "answer": { "answers": [{ "id": "next_operation", "choice": "op_deploy", "confidence": 0.99 }] },
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 100, "requiresApproval": false, "approved": true, "permitId": "permit_921" },
+      "expect": { "status": "denied", "authorizationReason": "execution_limit", "hasAuthorization": true, "authorized": false }
+    },
+    {
+      "name": "capability denial",
+      "answer": { "answers": [{ "id": "next_operation", "choice": "op_deploy", "confidence": 0.99 }] },
+      "policy": { "capabilities": ["fs:read"], "actionsThisMission": 1, "requiresApproval": false, "approved": true, "permitId": "permit_921" },
+      "expect": { "status": "denied", "authorizationReason": "capability_missing", "hasAuthorization": true, "authorized": false }
+    },
+    {
+      "name": "approval denial",
+      "answer": { "answers": [{ "id": "next_operation", "choice": "op_deploy", "confidence": 0.99 }] },
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 1, "requiresApproval": true, "approved": false, "permitId": "permit_921" },
+      "expect": { "status": "denied", "authorizationReason": "approval_required", "hasAuthorization": true, "authorized": false }
+    },
+    {
+      "name": "attempted permit fabrication",
+      "answer": {
+        "answers": [{ "id": "next_operation", "choice": "op_deploy", "confidence": 0.99, "authorized": true, "permitId": "permit_evil" }],
+        "authorized": true
+      },
+      "policy": { "capabilities": ["git:write"], "actionsThisMission": 1, "requiresApproval": false, "approved": true, "permitId": "permit_921" },
+      "expect": { "status": "rejected", "reason": "invalid_answer", "hasAuthorization": false, "rejectsField": "permit_evil" }
+    }
+  ]
+}

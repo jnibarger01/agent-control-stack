@@ -18,6 +18,12 @@ export default defineConfig({
       ),
       "@agent-control-stack/decision-engine": fileURLToPath(
         new URL("./packages/decision-engine/src/index.ts", import.meta.url)
+      ),
+      "@agent-control-stack/mission-controller": fileURLToPath(
+        new URL("./packages/mission-controller/src/index.ts", import.meta.url)
+      ),
+      "@agent-control-stack/nimble-adapter": fileURLToPath(
+        new URL("./packages/nimble-adapter/src/index.ts", import.meta.url)
       )
     }
   },

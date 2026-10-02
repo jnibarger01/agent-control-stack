@@ -24,6 +24,16 @@ export class DecisionAuthorityError extends Error {
   }
 }
 
+/** Transport or model failure. Callers escalate. This is not a selection. */
+export class DecisionModelUnavailable extends Error {
+  readonly code = "model_unavailable" as const;
+
+  constructor(message = "decision model unavailable") {
+    super(message);
+    this.name = "DecisionModelUnavailable";
+  }
+}
+
 const ANSWER_KEYS = new Set(["id", "choice", "value", "score", "semanticRisk", "confidence", "sideEffectClass"]);
 
 export type NimbleDecisionModel = {

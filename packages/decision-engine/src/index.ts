@@ -4,7 +4,14 @@
  */
 export { authorizeOperation, authorizationFactsSchema } from "./authorize.js";
 export type { AuthorizationFacts } from "./authorize.js";
-export { decide, decideParsed, parseDecisionBatch, DecisionAuthorityError, DecisionParseError } from "./decide.js";
+export {
+  decide,
+  decideParsed,
+  parseDecisionBatch,
+  DecisionAuthorityError,
+  DecisionModelUnavailable,
+  DecisionParseError
+} from "./decide.js";
 export type { DecidedAnswer, DecidedBatch, NimbleDecisionModel, ParsedDecision } from "./decide.js";
 export { selectDecisionLevel } from "./hierarchy.js";
 export type { DecisionLevel } from "./hierarchy.js";
@@ -27,7 +34,7 @@ export {
   routeQuestionSchema
 } from "./schemas.js";
 export type { AuthorizationResult, DecisionAnswer, DecisionQuestion, DecisionResult, DecisionType } from "./schemas.js";
-export { compareShadow } from "./shadow.js";
+export { applyShadow, compareShadow } from "./shadow.js";
 export type { ShadowComparison } from "./shadow.js";
 export { CAPABILITY_FOR_CLASS, SIDE_EFFECT_CLASSES, classifySideEffect } from "./side-effect.js";
 export type { SideEffectClass } from "./side-effect.js";

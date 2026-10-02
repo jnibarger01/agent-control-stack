@@ -6,10 +6,11 @@ import {
 } from "@agent-control-stack/mission-state";
 import { ZodError } from "zod";
 import { authorizeOperation, type AuthorizationFacts } from "./authorize.js";
-import { decide, DecisionParseError, type NimbleDecisionModel } from "./decide.js";
+import { decide, DecisionModelUnavailable, DecisionParseError, type NimbleDecisionModel } from "./decide.js";
 import { nextOperationQuestion } from "./questions/next-operation.js";
 import { buildDecisionReceipt, type DecisionReceipt } from "./receipts.js";
 import type { AuthorizationResult, DecisionResult } from "./schemas.js";
+import { applyShadow, compareShadow } from "./shadow.js";
 import { confidenceThreshold, type ConfidenceThresholds } from "./thresholds.js";
 
 export type MissionPolicyFacts = Omit<AuthorizationFacts, "kind">;
@@ -24,6 +25,7 @@ export type MissionStep =
     }
   | {
       readonly status: "escalate";
+      readonly reason: "below_threshold" | "model_unavailable";
       readonly selectedOperationId: string | null;
       readonly receipt: DecisionReceipt;
     }
@@ -57,8 +59,20 @@ export async function nextMissionAction(input: {
   readonly createdAt: string;
   readonly policy: MissionPolicyFacts;
   readonly thresholds?: Partial<ConfidenceThresholds>;
+  readonly shadow?: { readonly jevChoice: string | null };
 }): Promise<MissionStep> {
   const state = buildDecisionState(input.state);
+  const decorate = (receipt: DecisionReceipt, nimbleChoice: string | null, accepted: boolean): DecisionReceipt => {
+    if (input.shadow === undefined) return receipt;
+    return applyShadow(
+      receipt,
+      compareShadow({
+        nimbleChoice: nimbleChoice ?? "",
+        nimbleAccepted: accepted && nimbleChoice !== null,
+        jevChoice: input.shadow.jevChoice
+      })
+    );
+  };
   if (deterministicDone(state)) return { status: "complete" };
   const candidates = dependencyReadyOperations(state);
   if (candidates.length === 0) return { status: "blocked", reason: "no_ready_candidates" };
@@ -74,21 +88,47 @@ export async function nextMissionAction(input: {
       thresholds: input.thresholds
     });
   } catch (error) {
+    if (error instanceof DecisionModelUnavailable) {
+      return {
+        status: "escalate",
+        reason: "model_unavailable",
+        selectedOperationId: null,
+        receipt: decorate(
+          buildDecisionReceipt({
+            missionId: state.missionId,
+            question,
+            selectedId: null,
+            confidence: 0,
+            threshold: confidenceThreshold("next_operation", input.thresholds),
+            state,
+            modelVersion: input.model.version,
+            createdAt: input.createdAt,
+            payload: { unavailable: true }
+          }),
+          null,
+          false
+        )
+      };
+    }
     if (!(error instanceof DecisionParseError) && !(error instanceof ZodError)) throw error;
     return {
       status: "rejected",
       reason: "invalid_answer",
-      receipt: buildDecisionReceipt({
-        missionId: state.missionId,
-        question,
-        selectedId: null,
-        confidence: 0,
-        threshold: confidenceThreshold("next_operation", input.thresholds),
-        state,
-        modelVersion: input.model.version,
-        createdAt: input.createdAt,
-        payload: { invalid: true }
-      })
+      receipt: decorate(
+        buildDecisionReceipt({
+          missionId: state.missionId,
+          question,
+          selectedId: null,
+          confidence: 0,
+          threshold: confidenceThreshold("next_operation", input.thresholds),
+          state,
+          modelVersion: input.model.version,
+          createdAt: input.createdAt,
+          payload: { invalid: true }
+        }),
+        null,
+        false
+      )
     };
   }
   const answer = decided.answers[0];
@@ -97,10 +137,19 @@ export async function nextMissionAction(input: {
     throw new DecisionParseError("missing answer");
   }
   if (resolveNextOperationSelection(parsed.choice, candidateIds) === "selection_not_candidate") {
-    return { status: "rejected", reason: "selection_not_candidate", receipt: answer.receipt };
+    return {
+      status: "rejected",
+      reason: "selection_not_candidate",
+      receipt: decorate(answer.receipt, parsed.choice, false)
+    };
   }
   if (answer.status === "below_threshold") {
-    return { status: "escalate", selectedOperationId: parsed.choice, receipt: answer.receipt };
+    return {
+      status: "escalate",
+      reason: "below_threshold",
+      selectedOperationId: parsed.choice,
+      receipt: decorate(answer.receipt, parsed.choice, false)
+    };
   }
   const operation = candidates.find((candidate) => candidate.id === parsed.choice);
   const authorization = authorizeOperation({
@@ -108,12 +157,17 @@ export async function nextMissionAction(input: {
     kind: operation?.kind ?? "unknown"
   });
   if (!authorization.authorized) {
-    return { status: "denied", selectedOperationId: parsed.choice, authorization, receipt: answer.receipt };
+    return {
+      status: "denied",
+      selectedOperationId: parsed.choice,
+      authorization,
+      receipt: decorate(answer.receipt, parsed.choice, true)
+    };
   }
   return {
     status: "ready",
     decision: { selectedOperationId: parsed.choice, confidence: parsed.confidence ?? answer.receipt.confidence },
     authorization,
-    receipt: answer.receipt
+    receipt: decorate(answer.receipt, parsed.choice, true)
   };
 }

@@ -17,6 +17,12 @@ export type DecisionReceipt = {
   readonly decisionDigest: string;
   readonly fallbackUsed: boolean;
   readonly createdAt: string;
+  /** Nimble made the selection. This field is not an authorization. */
+  readonly authoritativeModel: "nimble";
+  /** Set only when a shadow model was consulted. Null is not agreement. */
+  readonly shadowModel: "jev" | null;
+  readonly shadowDisagreement: boolean;
+  readonly shadowAnswered: boolean;
 };
 
 export function candidateIdsFor(question: DecisionQuestion): string[] {
@@ -67,6 +73,10 @@ export function buildDecisionReceipt(input: {
     stateDigest,
     decisionDigest,
     fallbackUsed: input.confidence < input.threshold,
-    createdAt: input.createdAt
+    createdAt: input.createdAt,
+    authoritativeModel: "nimble",
+    shadowModel: null,
+    shadowDisagreement: false,
+    shadowAnswered: false
   };
 }

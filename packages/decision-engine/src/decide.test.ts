@@ -243,10 +243,14 @@ describe("shadow and hierarchy", () => {
   it("keeps nimble when jev disagrees and does not invent a jev answer", () => {
     expect(compareShadow({ nimbleChoice: "op_deploy", nimbleAccepted: true, jevChoice: "op_build" })).toEqual({
       authority: "nimble",
+      authoritativeModel: "nimble",
+      shadowModel: "jev",
       authoritativeChoice: "op_deploy",
       disagreement: true,
+      shadowDisagreement: true,
       nimbleChoice: "op_deploy",
-      jevChoice: "op_build"
+      jevChoice: "op_build",
+      shadowAnswered: true
     });
     expect(compareShadow({ nimbleChoice: "op_deploy", nimbleAccepted: false, jevChoice: "op_build" }).authoritativeChoice).toBeNull();
     expect(compareShadow({ nimbleChoice: "op_deploy", nimbleAccepted: true, jevChoice: null })).toMatchObject({
