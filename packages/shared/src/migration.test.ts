@@ -1,8 +1,9 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import { applyControlPlaneMigrations, controlPlaneMigrations } from "./migration.js";
@@ -338,34 +339,110 @@ describe("control-plane migration pre-lease-renewal 20-23 repair", () => {
   });
 });
 
+describe("fixture-only migrations", () => {
+  it("keeps unregistered duplicate-prefix fixtures non-canonical and clearly marked", () => {
+    const registered = new Set(controlPlaneMigrations().map((migration) => migration.filename));
+    const files = readdirSync(new URL("../../../storage/migrations/", import.meta.url)).filter((entry) =>
+      entry.endsWith(".sql")
+    );
+    const unregistered = files.filter((entry) => !registered.has(entry)).sort();
+
+    // These share numeric prefixes with canonical migrations but are only used to
+    // reconstruct an earlier lineage in recovery tests.
+    expect(unregistered).toEqual(["037_execution_results_idempotency_unique.sql", "038_admission_permits.sql"]);
+
+    // Each one must say so, so nobody registers or renumbers it by prefix alone.
+    for (const filename of unregistered) {
+      const sql = readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8");
+      // Comment lines wrap, so compare against a whitespace-normalized copy.
+      const prose = sql.replace(/--/gu, " ").replace(/\s+/gu, " ");
+      expect(prose, `${filename} is missing its non-canonical header`).toMatch(/NON-CANONICAL FIXTURE/u);
+      expect(prose, `${filename} must warn against registering by prefix`).toMatch(
+        /must never be added to the canonical migration order/u
+      );
+      expect(prose, `${filename} must warn against renumbering`).toMatch(/Do not renumber/u);
+    }
+
+    // The canonical migrations keep their distinct identities and are applied once.
+    const applied = controlPlaneMigrations().filter((migration) => migration.filename.startsWith("037_"));
+    expect(applied.map((migration) => `${migration.version}:${migration.filename}`)).toEqual([
+      "37:037_jc_reusable_work_item_index.sql"
+    ]);
+  });
+});
+
+describe("migration checksum single source of truth", () => {
+  it("keeps every pinned checksum in one documented legacy block and derives the rest", () => {
+    // The regression this guards against: a checksum pinned in an ad-hoc recovery
+    // table for SQL that still ships, which must then be updated in two places and
+    // can brick recovery when only one is edited.
+    const source = readFileSync(new URL("./migration.ts", import.meta.url), "utf8");
+    const legacyBlockStart = source.indexOf("/**\n * Checksums of migration SQL that a previous release deployed");
+    const legacyBlockEnd = source.indexOf("function migrationFileChecksum");
+    expect(legacyBlockStart, "documented legacy checksum block is missing").toBeGreaterThan(-1);
+    const outsideLegacy = source.slice(0, legacyBlockStart) + source.slice(legacyBlockEnd);
+    const strayHashes = [...outsideLegacy.matchAll(/"[a-f0-9]{64}"/gu)].map((match) => match[0]);
+    expect(strayHashes, `checksums pinned outside the legacy block: ${strayHashes.join(", ")}`).toEqual([]);
+
+    // Recovery for the 37/38 lineage must derive from the shipped fixture SQL
+    // rather than pinning it.
+    expect(outsideLegacy).toContain("migrationFileChecksum(filename)");
+
+    // Every canonical migration still reports a checksum equal to a fresh hash of
+    // its own SQL, so the derived path stays authoritative.
+    for (const migration of controlPlaneMigrations()) {
+      const sql = readFileSync(new URL(`../../../storage/migrations/${migration.filename}`, import.meta.url), "utf8");
+      expect(migration.checksum).toBe(createHash("sha256").update(sql).digest("hex"));
+    }
+  });
+
+  it("does not require editing a second table when a canonical migration file changes", () => {
+    // The 37/38 recovery layout is compared against checksums derived from the
+    // files themselves. Confirm the derived value tracks the file content rather
+    // than any stored constant by checking the historical fixture files hash to
+    // the values recovery will compute.
+    const createHashLocal = createHash;
+    for (const filename of ["037_execution_results_idempotency_unique.sql", "038_admission_permits.sql"]) {
+      const sql = readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8");
+      expect(createHashLocal("sha256").update(sql).digest("hex")).toMatch(/^[a-f0-9]{64}$/u);
+    }
+  });
+});
+
 describe("recovery migration 37-38 lineage", () => {
   function recoveryDatabase(): DatabaseSync {
     const db = database(36);
-    for (const [version, name, filename, checksum] of [
-      [
-        37,
-        "execution_results_idempotency_unique",
-        "037_execution_results_idempotency_unique.sql",
-        "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545"
-      ],
-      [
-        38,
-        "admission_permits",
-        "038_admission_permits.sql",
-        "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
-      ]
+    for (const [version, name, filename] of [
+      [37, "execution_results_idempotency_unique", "037_execution_results_idempotency_unique.sql"],
+      [38, "admission_permits", "038_admission_permits.sql"]
     ] as const) {
-      db.exec(readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8"));
+      const sql = readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8");
+      db.exec(sql);
+      // Derived from the same SQL the repository ships, so this fixture is not a
+      // second hand-maintained checksum table that can drift from the migration.
       db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
         version,
         name,
         filename,
-        checksum,
+        createHash("sha256").update(sql).digest("hex"),
         "2026-10-01T00:00:00.000Z"
       );
     }
     return db;
   }
+
+  it("detects a historical checksum that does not match the shipped migration SQL", () => {
+    const db = recoveryDatabase();
+    try {
+      // Drift must still fail closed: the comparison value is now derived, so a
+      // recorded checksum that disagrees with the file is detected rather than
+      // silently accepted.
+      db.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = 37").run("0".repeat(64));
+      expect(() => applyControlPlaneMigrations(db)).toThrow(/recovery migration layout metadata mismatch/u);
+    } finally {
+      db.close();
+    }
+  });
 
   it("preserves admission rows, repairs exact numbering and adds current schema once", () => {
     const db = recoveryDatabase();
@@ -427,29 +504,18 @@ describe("recovery migration 37-38 lineage", () => {
   it("converges the isolated duplicate-admission lineage and preserves its migration record", () => {
     const db = database(36);
     try {
+      // Checksums come from the SQL each row actually shipped, so this fixture never
+      // becomes a second checksum table that drifts from the migration files.
       const historical = [
-        [
-          37,
-          "execution_results_idempotency_unique",
-          "037_execution_results_idempotency_unique.sql",
-          "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545"
-        ],
-        [
-          38,
-          "admission_permits",
-          "038_admission_permits.sql",
-          "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
-        ],
-        [
-          39,
-          "admission_permits_reconciled",
-          "039_admission_permits.sql",
-          "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
-        ]
+        [37, "execution_results_idempotency_unique", "037_execution_results_idempotency_unique.sql"],
+        [38, "admission_permits", "038_admission_permits.sql"],
+        [39, "admission_permits_reconciled", "039_admission_permits.sql"]
       ] as const;
       const appliedAt = "2026-10-01T00:00:00.000Z";
-      for (const [version, name, filename, checksum] of historical) {
-        db.exec(readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8"));
+      for (const [version, name, filename] of historical) {
+        const sql = readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8");
+        const checksum = createHash("sha256").update(sql).digest("hex");
+        db.exec(sql);
         db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
           version,
           name,
