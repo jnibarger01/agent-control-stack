@@ -1322,11 +1322,15 @@ export interface WorkItemStore {
    * failed closed deterministically and recorded with durable audit evidence rather
    * than blocking new admission until they expire on their own.
    */
-  fenceLeasesWithoutAdmissionReservation(input: {
-    workerIds: readonly string[];
-    reservedAttemptIds: ReadonlySet<string>;
-    now?: Date;
-  }): WorkItem[];
+  fenceLeasesWithoutAdmissionReservation(
+    input: {
+      workerIds: readonly string[];
+      reservedAttemptIds: ReadonlySet<string>;
+      now?: Date;
+    },
+    /** Bound the wait for the write lock for latency-sensitive callers such as probes. */
+    options?: { busyTimeoutMs?: number }
+  ): WorkItem[];
   /** Count attempt leases that are still active and not yet past expires_at. */
   countActiveAttemptLeases(now?: Date, workerIds?: readonly string[]): number;
   /** Persist an admission permit binding for recovery after gateway restart. */

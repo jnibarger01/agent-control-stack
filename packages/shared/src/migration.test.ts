@@ -474,6 +474,59 @@ describe("recovery migration 37-38 lineage", () => {
     }
   });
 
+  it("accepts the released checksum but still rejects any other 37/38 checksum", () => {
+    // The allowance is deliberately narrow: exactly one alternative value per
+    // filename, naming the same immutable SQL. Anything else must still fail closed,
+    // so this asserts the narrow half of the contract even though the derived and
+    // released values currently coincide.
+    const released: Record<string, string> = {
+      "037_execution_results_idempotency_unique.sql":
+        "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545",
+      "038_admission_permits.sql": "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
+    };
+    const rowsFor = (checksumFor: (filename: string) => string) => {
+      const db = database(36);
+      for (const [version, name, filename] of [
+        [37, "execution_results_idempotency_unique", "037_execution_results_idempotency_unique.sql"],
+        [38, "admission_permits", "038_admission_permits.sql"]
+      ] as const) {
+        db.exec(readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8"));
+        db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
+          version,
+          name,
+          filename,
+          checksumFor(filename),
+          "2026-10-01T00:00:00.000Z"
+        );
+      }
+      return db;
+    };
+
+    // Exactly the released checksums are accepted.
+    const accepted = rowsFor((filename) => released[filename]!);
+    try {
+      expect(() => applyControlPlaneMigrations(accepted)).not.toThrow();
+    } finally {
+      accepted.close();
+    }
+
+    // A third, unrelated checksum is still rejected: the allowance is not permissive.
+    const rejected = rowsFor((filename) => createHash("sha256").update(`tampered:${filename}`).digest("hex"));
+    try {
+      expect(() => applyControlPlaneMigrations(rejected)).toThrow(/recovery migration layout metadata mismatch/u);
+    } finally {
+      rejected.close();
+    }
+
+    // The released value and the file's own hash name the same SQL today. When they
+    // diverge, the allowance above is what keeps deployed databases recoverable and
+    // the fixture-pin test below is what reports the edit.
+    for (const [filename, checksum] of Object.entries(released)) {
+      const sql = readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8");
+      expect(createHash("sha256").update(sql).digest("hex")).toBe(checksum);
+    }
+  });
+
   it("pins the 37/38 fixture files to the bytes the lineage deployed", () => {
     // These files are checksummed recovery identity for a deployed lineage. Editing
     // one, even to add a comment, changes the checksum every already-deployed 37/38
