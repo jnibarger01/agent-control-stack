@@ -51,7 +51,9 @@ describe("installed OpenClaw interoperability", () => {
       );
 
       const modelBodies: Array<Record<string, unknown>> = [];
+      const toolResultDiagnostics: string[] = [];
       let finalResponseSent = false;
+      let discoveredToolId: string | undefined;
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -64,37 +66,143 @@ describe("installed OpenClaw interoperability", () => {
           modelBodies.push(body);
           const tools = Array.isArray(body.tools) ? body.tools : [];
           const messages = Array.isArray(body.messages) ? body.messages : [];
-          const tool = tools.find((candidate) => {
-            if (!candidate || typeof candidate !== "object") return false;
+          const toolName = (candidate: unknown): string | undefined => {
+            if (!candidate || typeof candidate !== "object") return undefined;
             const functionValue = (candidate as Record<string, unknown>).function;
             const name =
               functionValue && typeof functionValue === "object"
                 ? (functionValue as Record<string, unknown>).name
                 : (candidate as Record<string, unknown>).name;
-            return typeof name === "string" && (name.includes("test_agent_run") || name.includes("test-agent-run"));
+            return typeof name === "string" ? name : undefined;
+          };
+          const tool = tools.find((candidate) => {
+            const name = toolName(candidate);
+            return name !== undefined && (name.includes("test_agent_run") || name.includes("test-agent-run"));
           }) as Record<string, unknown> | undefined;
-          const functionValue = tool?.function;
-          const functionName =
-            functionValue && typeof functionValue === "object"
-              ? (functionValue as Record<string, unknown>).name
-              : tool?.name;
-          const hasToolResult = messages.some(
-            (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
+          const directToolName = toolName(tool);
+          const availableControlTools = new Set(
+            tools.map(toolName).filter((name): name is string => name !== undefined)
           );
+          const toolResults = messages.filter(
+            (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
+          ) as Array<Record<string, unknown>>;
+          const lastTool = toolResults.at(-1);
+          const priorToolCalls = messages
+            .filter(
+              (message) =>
+                message &&
+                typeof message === "object" &&
+                (message as Record<string, unknown>).role === "assistant" &&
+                Array.isArray((message as Record<string, unknown>).tool_calls)
+            )
+            .flatMap((message) => (message as Record<string, unknown>).tool_calls as unknown[]);
+          const lastToolCall = priorToolCalls.at(-1);
+          const lastToolName = toolName(lastToolCall);
+          const content = lastTool?.content;
+          const resultText =
+            typeof content === "string" ? content : content === undefined ? "" : JSON.stringify(content);
+          if (lastTool) {
+            toolResultDiagnostics.push(JSON.stringify({ name: lastTool.name, content: resultText.slice(0, 1_500) }));
+          }
+          let toolResult: unknown;
+          let jsonStart = -1;
+          const jsonStack: string[] = [];
+          let inJsonString = false;
+          let escaped = false;
+          for (let index = 0; index < resultText.length; index += 1) {
+            const character = resultText[index]!;
+            if (jsonStart < 0) {
+              if (character === "{" || character === "[") {
+                jsonStart = index;
+                jsonStack.push(character);
+              }
+              continue;
+            }
+            if (inJsonString) {
+              if (escaped) escaped = false;
+              else if (character === "\\") escaped = true;
+              else if (character === '"') inJsonString = false;
+              continue;
+            }
+            if (character === '"') inJsonString = true;
+            else if (character === "{" || character === "[") jsonStack.push(character);
+            else if (character === "}" || character === "]") {
+              const opening = jsonStack.pop();
+              if ((opening === "{" && character !== "}") || (opening === "[" && character !== "]")) {
+                jsonStack.length = 0;
+                jsonStart = -1;
+                continue;
+              }
+              if (jsonStack.length === 0) {
+                try {
+                  toolResult = JSON.parse(resultText.slice(jsonStart, index + 1)) as unknown;
+                } catch {
+                  toolResult = undefined;
+                }
+                break;
+              }
+            }
+          }
+          if (lastToolName === "tool_search" && toolResult) {
+            const findTarget = (value: unknown): string | undefined => {
+              if (!value || typeof value !== "object") return undefined;
+              if (Array.isArray(value)) {
+                for (const entry of value) {
+                  const match = findTarget(entry);
+                  if (match) return match;
+                }
+                return undefined;
+              }
+              const record = value as Record<string, unknown>;
+              const name = typeof record.name === "string" ? record.name : "";
+              const id = typeof record.id === "string" ? record.id : undefined;
+              if (id && /test[._-]agent[._-]run/iu.test(name)) return id;
+              for (const entry of Object.values(record)) {
+                const match = findTarget(entry);
+                if (match) return match;
+              }
+              return undefined;
+            };
+            discoveredToolId = findTarget(toolResult);
+          }
 
           const completionId = `openclaw-fixture-${modelBodies.length}`;
-          if (!hasToolResult && typeof functionName === "string") {
-            const argumentsValue = JSON.stringify({
-              agent: "openclaw",
-              prompt: "OpenClaw deterministic interoperability check",
-              cwd: allowed,
-              timeoutSeconds: 5,
-              permissionMode: "read-only"
-            });
+          let call: { name: string; args: Record<string, unknown> } | undefined;
+          if (toolResults.length === 0 && directToolName) {
+            call = {
+              name: directToolName,
+              args: {
+                agent: "openclaw",
+                prompt: "OpenClaw deterministic interoperability check",
+                cwd: allowed,
+                timeoutSeconds: 5,
+                permissionMode: "read-only"
+              }
+            };
+          } else if (toolResults.length === 0 && availableControlTools.has("tool_search")) {
+            call = { name: "tool_search", args: { query: "test agent run", limit: 5 } };
+          } else if (lastToolName === "tool_search" && discoveredToolId && availableControlTools.has("tool_describe")) {
+            call = { name: "tool_describe", args: { id: discoveredToolId } };
+          } else if (lastToolName === "tool_describe" && discoveredToolId && availableControlTools.has("tool_call")) {
+            call = {
+              name: "tool_call",
+              args: {
+                id: discoveredToolId,
+                args: {
+                  agent: "openclaw",
+                  prompt: "OpenClaw deterministic interoperability check",
+                  cwd: allowed,
+                  timeoutSeconds: 5,
+                  permissionMode: "read-only"
+                }
+              }
+            };
+          }
+          if (call) {
             const toolCall = {
-              id: "openclaw-fixture-call",
+              id: `openclaw-fixture-call-${modelBodies.length}`,
               type: "function",
-              function: { name: functionName, arguments: argumentsValue }
+              function: { name: call.name, arguments: JSON.stringify(call.args) }
             };
             if (body.stream === false) {
               response.writeHead(200, { "content-type": "application/json" });
@@ -201,7 +309,7 @@ describe("installed OpenClaw interoperability", () => {
           openclawConfigPath,
           JSON.stringify({
             gateway: { mode: "local", bind: "loopback", port: openclawGatewayPort },
-            tools: { profile: "coding" },
+            tools: { profile: "coding", sandbox: { tools: { alsoAllow: ["bundle-mcp"] } } },
             agents: {
               defaults: {
                 workspace: allowed,
@@ -315,7 +423,19 @@ describe("installed OpenClaw interoperability", () => {
         const diagnosticEvents = new SqliteWorkItemStore(dbPath);
         const diagnosticEventNames = diagnosticEvents.readEvents().map((event) => event.name);
         diagnosticEvents.close();
-        const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}`;
+        const modelToolSets = modelBodies.map((body) => {
+          const tools = Array.isArray(body.tools) ? body.tools : [];
+          return tools.flatMap((candidate) => {
+            if (!candidate || typeof candidate !== "object") return [];
+            const fn = (candidate as Record<string, unknown>).function;
+            const name =
+              fn && typeof fn === "object"
+                ? (fn as Record<string, unknown>).name
+                : (candidate as Record<string, unknown>).name;
+            return typeof name === "string" ? [name] : [];
+          });
+        });
+        const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}\nModel tool sets:${JSON.stringify(modelToolSets)}\nTool results:${toolResultDiagnostics.join(" | ")}`;
         expect(modelBodies.length, diagnostic).toBeGreaterThan(1);
         expect(finalResponseSent, diagnostic).toBe(true);
         expect(

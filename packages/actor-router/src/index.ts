@@ -1,4 +1,9 @@
-import type { ActorRoutingDecision as PersistedActorRoutingDecision, PrivilegedTransitionOptions, RecordActorRoutingDecisionInput, RegistryAgentDetail } from "@agent-control-stack/work-items";
+import type {
+  ActorRoutingDecision as PersistedActorRoutingDecision,
+  PrivilegedTransitionOptions,
+  RecordActorRoutingDecisionInput,
+  RegistryAgentDetail
+} from "@agent-control-stack/work-items";
 
 export interface ActorRoutingInput {
   requiredCapabilities: string[];
@@ -12,6 +17,7 @@ export interface ActorRoutingInput {
   recentFailures?: Set<string>;
   sameTaskFailures?: Set<string>;
   policyEligible?: (agent: RegistryAgentDetail) => boolean;
+  eligibilityReasons?: (agent: RegistryAgentDetail) => string[];
 }
 
 export interface ActorRoutingCandidate {
@@ -29,7 +35,10 @@ export interface ActorRoutingDecision {
 }
 
 export interface ActorRoutingPersistence {
-  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): PersistedActorRoutingDecision;
+  recordActorRoutingDecision(
+    input: RecordActorRoutingDecisionInput,
+    options: PrivilegedTransitionOptions
+  ): PersistedActorRoutingDecision;
 }
 
 const DEFAULT_HEARTBEAT_TTL_MS = 120_000;
@@ -52,6 +61,7 @@ export function routeActor(agents: RegistryAgentDetail[], input: ActorRoutingInp
     if (!heartbeat || now.getTime() - Date.parse(heartbeat) > ttl) reasons.push("stale heartbeat");
     if (input.requiredRole && agent.acpRole !== input.requiredRole) reasons.push("role mismatch");
     if (input.policyEligible && !input.policyEligible(agent)) reasons.push("policy ineligible");
+    reasons.push(...(input.eligibilityReasons?.(agent) ?? []));
     if (input.freeCapacity && (input.freeCapacity[agent.id] ?? 0) <= 0) reasons.push("no free capacity");
     if (reasons.length) {
       excluded[agent.id] = reasons;
@@ -64,7 +74,10 @@ export function routeActor(agents: RegistryAgentDetail[], input: ActorRoutingInp
       score += 40;
       scoreReasons.push("role fit +40");
     }
-    if (input.taskType && (agent.kind === input.taskType || agent.capabilities.some((capability) => capability.name === input.taskType))) {
+    if (
+      input.taskType &&
+      (agent.kind === input.taskType || agent.capabilities.some((capability) => capability.name === input.taskType))
+    ) {
       score += 25;
       scoreReasons.push("task specialization +25");
     }
@@ -110,14 +123,19 @@ export function routeAndPersistActor(
   options: PrivilegedTransitionOptions
 ): { decision: ActorRoutingDecision; persisted: PersistedActorRoutingDecision } {
   const decision = routeActor(agents, input);
-  const persisted = persistence.recordActorRoutingDecision({
-    workItemId: input.workItemId,
-    ...(input.attemptId ? { attemptId: input.attemptId } : {}),
-    ...(decision.selected ? { selectedActorId: decision.selected } : {}),
-    eligible: decision.eligible,
-    excluded: decision.excluded,
-    scores: decision.scores,
-    idempotencyKey: input.idempotencyKey
-  }, options);
+  const persisted = persistence.recordActorRoutingDecision(
+    {
+      workItemId: input.workItemId,
+      ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+      ...(decision.selected ? { selectedActorId: decision.selected } : {}),
+      eligible: decision.eligible,
+      excluded: decision.excluded,
+      scores: decision.scores,
+      idempotencyKey: input.idempotencyKey
+    },
+    options
+  );
   return { decision, persisted };
 }
+
+export * from "./nimble.js";

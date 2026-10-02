@@ -76,6 +76,8 @@ export interface WorkerOptions {
   executionBackend?: ExecutionBackend;
   /** Inject a machine executor (tests only). */
   machineExecutor?: MachineExecutor;
+  /** In Nimble-authoritative mode, claim only work persistently assigned to this worker. */
+  requireNimbleAssignment?: boolean;
 }
 
 export interface WorkerResult {
@@ -207,7 +209,15 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
 
   try {
     workItems.failExpiredLeases();
-    const running = tools.claim_next_approved_work_item({ workerId });
+    const assignedOnly = options.requireNimbleAssignment ?? process.env.ACS_NIMBLE_ROUTING_ENABLED === "1";
+    const running = assignedOnly
+      ? (() => {
+          const candidate = workItems
+            .list({ status: "approved" })
+            .find((item) => workItems.getWorkItemAssignment(item.id)?.selectedWorkerId === workerId);
+          return candidate ? tools.claim_approved_work_item_by_id({ id: candidate.id, workerId }) : undefined;
+        })()
+      : tools.claim_next_approved_work_item({ workerId });
     if (!running) {
       return { executed: false, reason: "no approved work item" };
     }

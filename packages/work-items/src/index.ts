@@ -1,4 +1,5 @@
 export * from "./attempt.js";
+export * from "./assignment.js";
 export * from "./contracts.js";
 export * from "./execution-plan.js";
 export * from "./execution-backend.js";

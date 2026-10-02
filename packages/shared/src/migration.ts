@@ -77,7 +77,31 @@ const migrationFiles = [
   { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" },
   { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" },
   { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" },
-  { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" }
+  { version: 37, name: "jc_reusable_work_item_index", filename: "037_jc_reusable_work_item_index.sql" },
+  {
+    version: 38,
+    name: "execution_results_idempotency_unique",
+    filename: "038_execution_results_idempotency_unique.sql"
+  },
+  { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" },
+  {
+    version: 40,
+    name: "admission_permits",
+    filename: "040_admission_permits.sql"
+  },
+  {
+    version: 41,
+    name: "admission_permit_execution_class",
+    filename: "041_admission_permit_execution_class.sql"
+  },
+  { version: 42, name: "change_sets", filename: "042_change_sets.sql" },
+  { version: 43, name: "work_item_assignments", filename: "043_work_item_assignments.sql" },
+  { version: 44, name: "migration_lineage_reconciliation", filename: "044_migration_lineage_reconciliation.sql" },
+  { version: 45, name: "change_set_approvals", filename: "045_change_set_approvals.sql" },
+  { version: 46, name: "change_set_operation_permits", filename: "046_change_set_operation_permits.sql" },
+  { version: 47, name: "autonomous_authority", filename: "047_autonomous_authority.sql" },
+  { version: 48, name: "operation_permit_grant_authority", filename: "048_operation_permit_grant_authority.sql" },
+  { version: 49, name: "nimble_routing_decision_details", filename: "049_nimble_routing_decision_details.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -108,6 +132,8 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
   }
   repairExactAlternateSeventeenToTwentyOneLayout(db);
   repairExactPreLeaseRenewalTwentyToTwentyThreeLayout(db);
+  repairExactRecoveryThirtySevenThirtyEightLayout(db);
+  repairExactProductionThirtyNineToFortySevenLayout(db);
   for (const migration of controlPlaneMigrations()) {
     // The "already applied?" question is answered fresh inside this
     // migration's own transaction, after BEGIN IMMEDIATE's write lock is
@@ -158,6 +184,316 @@ export function applyControlPlaneMigrations(db: SqliteLike): void {
       }
       throw error;
     }
+  }
+}
+
+/** Reconcile the known recovery and isolated 37-39 layouts without losing schema history. */
+function repairExactRecoveryThirtySevenThirtyEightLayout(db: SqliteLike): void {
+  if (queryMigrationRow(db, 37)?.filename !== "037_execution_results_idempotency_unique.sql") return;
+  const migrations = controlPlaneMigrations();
+  const canonical = new Map(migrations.map((migration) => [migration.version, migration]));
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (queryMigrationRow(db, 37)?.filename !== "037_execution_results_idempotency_unique.sql") {
+      db.exec("COMMIT");
+      return;
+    }
+    const historical = [
+      [
+        37,
+        "execution_results_idempotency_unique",
+        "037_execution_results_idempotency_unique.sql",
+        "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545"
+      ],
+      [
+        38,
+        "admission_permits",
+        "038_admission_permits.sql",
+        "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
+      ]
+    ] as const;
+    for (const [version, name, filename, checksum] of historical) {
+      const row = queryMigrationRow(db, version);
+      if (!row || row.name !== name || row.filename !== filename || row.checksum !== checksum) {
+        throw new Error("recovery migration layout metadata mismatch");
+      }
+    }
+    const isolatedDuplicate = queryMigrationRow(db, 39);
+    if (
+      isolatedDuplicate &&
+      (isolatedDuplicate.name !== "admission_permits_reconciled" ||
+        isolatedDuplicate.filename !== "039_admission_permits.sql" ||
+        isolatedDuplicate.checksum !== historical[1][3])
+    ) {
+      throw new Error("recovery migration layout metadata mismatch");
+    }
+    for (const [version, canonicalVersion] of [
+      [40, 41],
+      [41, 42],
+      [42, 43]
+    ] as const) {
+      const row = queryMigrationRow(db, version);
+      if (row) {
+        const expected = canonical.get(canonicalVersion);
+        if (
+          !expected ||
+          row.name !== expected.name ||
+          row.filename !== `${String(version).padStart(3, "0")}_${expected.filename.slice(4)}` ||
+          row.checksum !== expected.checksum
+        ) {
+          throw new Error("recovery migration layout metadata mismatch");
+        }
+        const schemaPresent =
+          version === 40
+            ? hasColumn(db, "admission_permits", "execution_class")
+            : version === 41
+              ? hasTable(db, "change_set_revisions") && hasTable(db, "change_set_heads")
+              : [
+                  "work_item_id",
+                  "selected_worker_id",
+                  "selected_agent_id",
+                  "routing_decision_id",
+                  "assigned_by_actor_id",
+                  "assigned_at"
+                ].every((column) => hasColumn(db, "work_item_assignments", column));
+        if (!schemaPresent) throw new Error("recovery migration layout schema validation failed");
+      } else if (db.prepare("SELECT version FROM schema_migrations WHERE version > ?").all(version).length > 0) {
+        throw new Error("recovery migration layout has a gap in later metadata");
+      }
+    }
+    if (db.prepare("SELECT version FROM schema_migrations WHERE version > 42").all().length > 0) {
+      throw new Error("recovery migration layout has unexpected later metadata");
+    }
+    const index = db.prepare("PRAGMA index_list(execution_results)").all() as Array<{
+      name: string;
+      unique: number;
+      partial: number;
+    }>;
+    const columns = db.prepare("PRAGMA index_info(idx_execution_results_idempotency_key)").all() as Array<{
+      name: string;
+    }>;
+    if (
+      !index.some(
+        (entry) => entry.name === "idx_execution_results_idempotency_key" && entry.unique === 1 && entry.partial === 0
+      ) ||
+      columns.length !== 1 ||
+      columns[0]?.name !== "idempotency_key" ||
+      ![
+        "attempt_id",
+        "work_item_id",
+        "lease_id",
+        "worker_id",
+        "fencing_epoch",
+        "action_hash",
+        "plan_hash",
+        "input_hash",
+        "lane",
+        "created_at"
+      ].every((column) => hasColumn(db, "admission_permits", column))
+    ) {
+      throw new Error("recovery migration layout schema validation failed");
+    }
+    for (let version = 1; version <= 36; version += 1) {
+      const row = queryMigrationRow(db, version);
+      const migration = canonical.get(version);
+      const knownLegacyWorkspace =
+        version === 7 && row?.checksum === "c7b213f900a6f8b06c4155665f60ee7d3127fd60f75a2583ed6088c86f3f7cf4";
+      if (
+        !row ||
+        !migration ||
+        row.name !== migration.name ||
+        row.filename !== migration.filename ||
+        (row.checksum !== migration.checksum && !knownLegacyWorkspace)
+      ) {
+        throw new Error("recovery migration layout predecessor metadata mismatch");
+      }
+    }
+    db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version BETWEEN 37 AND 42").run();
+    for (const [oldVersion, newVersion] of [
+      [37, 38],
+      [38, 40],
+      [40, 41],
+      [41, 42],
+      [42, 43]
+    ] as const) {
+      const migration = canonical.get(newVersion);
+      if (!migration) throw new Error("recovery migration canonical target missing");
+      db.prepare(
+        "UPDATE schema_migrations SET version = ?, name = ?, filename = ?, checksum = ? WHERE version = ?"
+      ).run(newVersion, migration.name, migration.filename, migration.checksum, oldVersion + 100);
+    }
+    if (isolatedDuplicate) {
+      const reconciliation = canonical.get(44);
+      if (!reconciliation) throw new Error("canonical lineage reconciliation migration missing");
+      db.prepare(
+        "UPDATE schema_migrations SET version = ?, name = ?, filename = ?, checksum = ? WHERE version = ?"
+      ).run(44, reconciliation.name, reconciliation.filename, reconciliation.checksum, 139);
+    }
+    applyMigrationInsideRepair(db, canonical, 37);
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* no active transaction */
+    }
+    throw error;
+  }
+}
+
+/** Reconciles only the exact deployed v37-v47 ledger with main's later v39 JC approval migration. */
+function repairExactProductionThirtyNineToFortySevenLayout(db: SqliteLike): void {
+  if (queryMigrationRow(db, 39)?.filename !== "039_admission_permits.sql") return;
+  const canonical = new Map(controlPlaneMigrations().map((migration) => [migration.version, migration]));
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    if (queryMigrationRow(db, 39)?.filename !== "039_admission_permits.sql") {
+      db.exec("COMMIT");
+      return;
+    }
+    for (const version of [37, 38] as const) {
+      const row = queryMigrationRow(db, version);
+      const expected = canonical.get(version);
+      if (
+        !row ||
+        !expected ||
+        row.name !== expected.name ||
+        row.filename !== expected.filename ||
+        row.checksum !== expected.checksum
+      ) {
+        throw new Error("production migration lineage predecessor mismatch");
+      }
+    }
+    const previous = [
+      [
+        39,
+        "admission_permits",
+        "039_admission_permits.sql",
+        40,
+        "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
+      ],
+      [
+        40,
+        "admission_permit_execution_class",
+        "040_admission_permit_execution_class.sql",
+        41,
+        "17ec50b1dfcc92b34ecfd7875ac8193f89d0b71e607cc18bad34c3998b4f88ed"
+      ],
+      [
+        41,
+        "change_sets",
+        "041_change_sets.sql",
+        42,
+        "8eb803fffe827c9d89c53af28000fa6eebafba272f6645af29ad20a8b6ce1bba"
+      ],
+      [
+        42,
+        "work_item_assignments",
+        "042_work_item_assignments.sql",
+        43,
+        "880096512404a496ae718f734b7eda223bbf638e1976a4ddb0f4d8465f9320fd"
+      ],
+      [
+        43,
+        "migration_lineage_reconciliation",
+        "043_migration_lineage_reconciliation.sql",
+        44,
+        "17d881e7033b4cbd33e1f2b55aefe4e1ae91a0314e8b4b8724a7d46a1fce3c2c"
+      ],
+      [
+        44,
+        "change_set_approvals",
+        "044_change_set_approvals.sql",
+        45,
+        "45ebcd8f20e4b4adbbd60b66dc3e439c75cd86a7de3c33acadeed6fcbd1b8895"
+      ],
+      [
+        45,
+        "change_set_operation_permits",
+        "045_change_set_operation_permits.sql",
+        46,
+        "045abe6497d38f2d868a950efc9e6fffac57d0f8dd0a1b22ff38cb583853f3a9"
+      ],
+      [
+        46,
+        "autonomous_authority",
+        "046_autonomous_authority.sql",
+        47,
+        "babdbc51897b6f79a1a9770b9e3f7a8cfa020e4ab6c5279fd1c88130e19ea344"
+      ],
+      [
+        47,
+        "operation_permit_grant_authority",
+        "047_operation_permit_grant_authority.sql",
+        48,
+        "61b3235e649c6736ad44f16743e8cda669ddf7ee7ba344a63990f174f2c4a9aa"
+      ]
+    ] as const;
+    const rows = db
+      .prepare(
+        "SELECT version, name, filename, checksum FROM schema_migrations WHERE version BETWEEN 39 AND 47 ORDER BY version"
+      )
+      .all() as Array<{ version: number; name: string; filename: string; checksum: string }>;
+    if (
+      rows.length !== previous.length ||
+      !rows.every((row, index) => {
+        const [version, name, filename, canonicalVersion, checksum] = previous[index]!;
+        const target = canonical.get(canonicalVersion);
+        return (
+          target !== undefined &&
+          row.version === version &&
+          row.name === name &&
+          row.filename === filename &&
+          row.checksum === checksum &&
+          target.checksum === checksum
+        );
+      }) ||
+      db.prepare("SELECT version FROM schema_migrations WHERE version > 47").all().length > 0
+    ) {
+      throw new Error("production migration lineage metadata mismatch");
+    }
+    const requiredTables = [
+      "admission_permits",
+      "change_set_revisions",
+      "change_set_heads",
+      "work_item_assignments",
+      "change_set_approvals",
+      "change_set_approval_revocations",
+      "change_set_operation_permits",
+      "autonomous_authority_grants",
+      "autonomous_authority_revocations",
+      "change_set_grant_authorizations"
+    ];
+    if (
+      !hasColumn(db, "admission_permits", "execution_class") ||
+      !requiredTables.every((table) => hasTable(db, table)) ||
+      ![
+        "work_item_id",
+        "selected_worker_id",
+        "selected_agent_id",
+        "routing_decision_id",
+        "assigned_by_actor_id",
+        "assigned_at"
+      ].every((column) => hasColumn(db, "work_item_assignments", column))
+    ) {
+      throw new Error("production migration lineage schema validation failed");
+    }
+    db.prepare("UPDATE schema_migrations SET version = version + 100 WHERE version BETWEEN 39 AND 47").run();
+    for (const [oldVersion, , , canonicalVersion] of previous) {
+      const target = canonical.get(canonicalVersion);
+      if (!target) throw new Error(`canonical production migration ${canonicalVersion} missing`);
+      db.prepare(
+        "UPDATE schema_migrations SET version = ?, name = ?, filename = ?, checksum = ? WHERE version = ?"
+      ).run(canonicalVersion, target.name, target.filename, target.checksum, oldVersion + 100);
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      /* SQLite may have already rolled back. */
+    }
+    throw error;
   }
 }
 
@@ -359,6 +695,25 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
   if (migration.version === 12 && hasColumn(db, "workspace_allocations", "attempt_id")) {
     return "SELECT 1;";
   }
+  if (migration.version === 40 && hasColumn(db, "admission_permits", "execution_class")) {
+    return "SELECT 1;";
+  }
+  if (migration.version === 41 && hasTable(db, "change_set_revisions") && hasTable(db, "change_set_heads")) {
+    return "SELECT 1;";
+  }
+  if (
+    migration.version === 42 &&
+    [
+      "work_item_id",
+      "selected_worker_id",
+      "selected_agent_id",
+      "routing_decision_id",
+      "assigned_by_actor_id",
+      "assigned_at"
+    ].every((column) => hasColumn(db, "work_item_assignments", column))
+  ) {
+    return "SELECT 1;";
+  }
   if (migration.version === 25) {
     let sql = migration.sql;
     for (const column of ["access_token_hash", "access_token_expires_at", "previous_refresh_token_hash"]) {
@@ -474,6 +829,10 @@ function queryRows(db: SqliteLike, sql: string): string[] {
 function hasColumn(db: SqliteLike, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
   return rows.some((row) => row.name === column);
+}
+
+function hasTable(db: SqliteLike, table: string): boolean {
+  return Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table));
 }
 
 function queryMigrationRow(

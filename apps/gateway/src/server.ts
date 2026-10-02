@@ -138,6 +138,11 @@ import { resolveMcpToolAllowlist, type McpToolAllowlistMode } from "./mcp-tool-a
 import { registerMoaGateway, type MoaGatewayOverrides } from "./moa/index.js";
 import { SqliteMoaIdempotencyStore } from "./moa/idempotency.js";
 import {
+  dispatchApprovedWorkItem,
+  nimbleDispatchOptionsFromEnv,
+  type NimbleDispatchOptions
+} from "./semantic-dispatch.js";
+import {
   actorBodySchema,
   agentBodySchema,
   agentPatchSchema,
@@ -317,6 +322,8 @@ export interface GatewayOptions {
   shutdownController?: ShutdownController;
   /** Execution admission controller; tests may inject a deterministic controller. */
   executionAdmission?: ExecutionAdmissionController;
+  /** Authoritative Nimble selection among ACS-eligible worker candidates; disabled unless explicitly enabled. */
+  nimbleRouting?: NimbleDispatchOptions;
   /**
    * Post-authority JEV observation worker. false disables it explicitly.
    * Otherwise production follows ACS_JEV_ENABLED=1; tests may inject a
@@ -371,8 +378,32 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const executionReads = new SqliteExecutionReadStore(dbPath);
   const deviceAuthStore = new DeviceAuthStore(dbPath);
   const policy = createPolicyEngine();
+  const nimbleRouting = options.nimbleRouting ?? nimbleDispatchOptionsFromEnv();
   const shutdownController = options.shutdownController ?? new ShutdownController();
-  const tools = guardWorkItemClaimTools(createWorkItemTools(workItems, policy), shutdownController);
+  const guardedClaimTools = guardWorkItemClaimTools(createWorkItemTools(workItems, policy), shutdownController);
+  const tools =
+    nimbleRouting.enabled === true
+      ? {
+          ...guardedClaimTools,
+          claim_next_approved_work_item(_input: unknown) {
+            throw new ControlStackError(
+              "nimble_routing_required",
+              "approved work must be assigned by Nimble before claim"
+            );
+          },
+          claim_approved_work_item_by_id(input: unknown) {
+            if (!input || typeof input !== "object" || Array.isArray(input)) {
+              throw new ControlStackError("assignment_required", "an authoritative Nimble assignment is required");
+            }
+            const parsed = input as Record<string, unknown>;
+            const assignment = typeof parsed.id === "string" ? workItems.getWorkItemAssignment(parsed.id) : undefined;
+            if (!assignment || assignment.selectedWorkerId !== parsed.workerId) {
+              throw new ControlStackError("assignment_required", "work item is not assigned to this worker");
+            }
+            return guardedClaimTools.claim_approved_work_item_by_id(input);
+          }
+        }
+      : guardedClaimTools;
   const resolvedAuth = resolveAuth(options);
   const auth = resolvedAuth
     ? { ...resolvedAuth, deviceAccessTokenResolver: (token: string) => deviceAuthStore.authenticateAccessToken(token) }
@@ -1293,6 +1324,72 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.get("/work-items", { preHandler: requireRead }, async (request, reply) => {
     try {
       return { workItems: tools.list_work_items(listWorkItemsSchema.parse(request.query)) };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/routing/dispatch", async (request, reply) => {
+    try {
+      const actorId = requireMutationActor(request, reply, auth);
+      if (!actorId) return;
+      const body = z
+        .object({ workItemId: z.string().min(1).max(128) })
+        .strict()
+        .parse(request.body);
+      const workItem = workItems.get(body.workItemId);
+      if (!workItem) return reply.code(404).send({ error: "work item not found", code: "work_item_not_found" });
+      if (workItem.status !== "approved") {
+        return reply
+          .code(409)
+          .send({ error: "only approved work items can be routed", code: "work_item_not_approved" });
+      }
+      const result = await dispatchApprovedWorkItem({
+        store: workItems,
+        policy,
+        workItem,
+        actorId,
+        correlationId: request.id,
+        options: nimbleRouting,
+        isWorkerDispatchable: (workerId, now) => workerIdentityIsDispatchable(workerId, auth, now)
+      });
+      const statusCode = result.state === "ROUTING_DISABLED" ? 503 : 200;
+      return reply.code(statusCode).send(result);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/worker/claim", async (request, reply) => {
+    try {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) return;
+      const body = z
+        .object({ leaseMs: z.number().int().min(1_000).max(3_600_000).optional() })
+        .strict()
+        .parse(request.body ?? {});
+      const candidate = workItems.list({ status: "approved" }).find((item) => {
+        const assignment = workItems.getWorkItemAssignment(item.id);
+        return assignment?.selectedWorkerId === workerId;
+      });
+      if (!candidate) return { claimed: false };
+      const claim = tools.claim_approved_work_item_by_id({ id: candidate.id, workerId, leaseMs: body.leaseMs });
+      if (!claim || typeof claim !== "object" || !("status" in claim) || claim.status !== "running") {
+        workItems.recordSystemEvent({
+          name: "work_item.worker_claim_rejected",
+          body: {
+            workItemId: candidate.id,
+            workerId,
+            reason:
+              claim && typeof claim === "object" && "status" in claim && claim.status === "blocked"
+                ? "policy_blocked"
+                : "claim_unavailable"
+          },
+          attributes: { "work_item.id": candidate.id, "worker.id": workerId, "correlation.id": request.id }
+        });
+        return reply.code(409).send({ claimed: false, code: "claim_unavailable" });
+      }
+      return { claimed: true, workItem: claim };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -3903,6 +4000,21 @@ function requireWorkerIdentity(
     return undefined;
   }
   return matched.actorId;
+}
+
+function workerIdentityIsDispatchable(workerId: string, auth: GatewayAuthOptions | undefined, now: Date): boolean {
+  if (!auth) return false;
+  if (auth.workerIdentities?.getActive(workerId, now)) return true;
+  const credentialCanDispatch = (credential: GatewayCredential): boolean =>
+    credential.actorId === workerId &&
+    credential.status !== "revoked" &&
+    (!credential.expiresAt || Date.parse(credential.expiresAt) > now.getTime()) &&
+    credential.roles.includes("worker") &&
+    credential.scopes.includes("acs:worker");
+  if ((auth.credentials ?? []).some(credentialCanDispatch)) return true;
+  return Boolean(
+    auth.token && auth.actor === "agent" && auth.actorId === workerId && (auth.credentials ?? []).length === 0
+  );
 }
 
 function hasReadAccess(request: FastifyRequest, auth: GatewayAuthOptions | undefined): boolean {

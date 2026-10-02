@@ -121,6 +121,14 @@ import {
   type RecordActorRoutingDecisionInput
 } from "./routing.js";
 import {
+  assignWorkItemInputSchema,
+  nimbleRoutingDecisionDetailsSchema,
+  workItemAssignmentSchema,
+  type AssignWorkItemInput,
+  type NimbleRoutingDecisionDetails,
+  type WorkItemAssignment
+} from "./assignment.js";
+import {
   recordValidationRunInputSchema,
   validationCheckSchema,
   validationRunSchema,
@@ -300,6 +308,32 @@ interface RoutingDecisionRow {
   scores_json: string;
   idempotency_key: string;
   created_at: string;
+}
+
+interface WorkItemAssignmentRow {
+  work_item_id: string;
+  selected_worker_id: string;
+  selected_agent_id: string;
+  routing_decision_id: string;
+  assigned_by_actor_id: string;
+  assigned_at: string;
+}
+
+interface NimbleRoutingDecisionDetailsRow {
+  routing_decision_id: string;
+  work_item_id: string;
+  routing_generation: number;
+  selected_agent_id: string;
+  selected_worker_id: string;
+  candidate_scores_json: string;
+  eligibility_evidence_json: string;
+  model_id: string;
+  model_version: string;
+  selected_score: number;
+  threshold: number;
+  evaluated_at: string;
+  algorithm_version: string;
+  correlation_id: string;
 }
 
 interface ReliabilityRow {
@@ -999,6 +1033,14 @@ export interface WorkItemStore {
   ): ActorRoutingDecision;
   getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined;
   getActorRoutingDecisionForWorkItem(workItemId: string): ActorRoutingDecision | undefined;
+  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment;
+  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined;
+  countActiveAssignmentsForWorker(workerId: string): number;
+  recordNimbleRoutingDecisionDetails(
+    input: NimbleRoutingDecisionDetails,
+    options: PrivilegedTransitionOptions
+  ): NimbleRoutingDecisionDetails;
+  getNimbleRoutingDecisionDetails(decisionId: string): NimbleRoutingDecisionDetails | undefined;
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability;
   getActorReliability(actorId: string): ActorReliability | undefined;
   recordValidationRun(input: RecordValidationRunInput, options: PrivilegedTransitionOptions): ValidationRun;
@@ -2226,7 +2268,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
           parsed.idempotencyKey,
           createdAt
         );
-      const decision = actorRoutingDecisionSchema.parse({ ...parsed, decisionId, createdAt });
+      const { now: _now, ...decisionInput } = parsed;
+      const decision = actorRoutingDecisionSchema.parse({ ...decisionInput, decisionId, createdAt });
       const event = this.appendAuditEvent(
         createEvent("actor.routing_decision.recorded", decision, {
           "work_item.id": decision.workItemId,
@@ -2250,6 +2293,158 @@ export class SqliteWorkItemStore implements WorkItemStore {
       .prepare(`SELECT * FROM actor_routing_decisions WHERE work_item_id = ? ORDER BY created_at DESC LIMIT 1`)
       .get(workItemId) as unknown as RoutingDecisionRow | undefined;
     return row ? rowToActorRoutingDecision(row) : undefined;
+  }
+
+  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment {
+    requirePrivilegedTransition(options, "assign_work_item");
+    const parsed = assignWorkItemInputSchema.parse(input);
+    if (!options.actorId || options.actorId !== parsed.assignedByActorId) {
+      throw new ControlStackError("assignment_actor_mismatch", "assignment actor must match the authorized caller");
+    }
+    return this.write(() => {
+      const workItem = this.get(parsed.workItemId);
+      if (!workItem || workItem.status !== "approved") {
+        throw new ControlStackError("work_item_not_assignable", "only approved work items can be assigned");
+      }
+      if (this.getWorkItemAssignment(parsed.workItemId)) {
+        throw new ControlStackError("work_item_already_assigned", "work item already has an authoritative assignment");
+      }
+      const agent = this.getRegistryAgent(parsed.selectedAgentId);
+      if (!agent || agent.status !== "AVAILABLE") {
+        throw new ControlStackError("assignment_agent_ineligible", "selected agent is no longer available");
+      }
+      const decision = this.getActorRoutingDecision(parsed.routingDecisionId);
+      if (
+        !decision ||
+        decision.workItemId !== parsed.workItemId ||
+        decision.selectedActorId !== parsed.selectedAgentId ||
+        !decision.eligible.includes(parsed.selectedAgentId)
+      ) {
+        throw new ControlStackError("routing_decision_mismatch", "assignment does not match its routing decision");
+      }
+      const assignment = workItemAssignmentSchema.parse({
+        workItemId: parsed.workItemId,
+        selectedWorkerId: parsed.selectedWorkerId,
+        selectedAgentId: parsed.selectedAgentId,
+        routingDecisionId: parsed.routingDecisionId,
+        assignedByActorId: parsed.assignedByActorId,
+        assignedAt: (parsed.now ?? new Date()).toISOString()
+      });
+      this.db
+        .prepare(
+          `INSERT INTO work_item_assignments
+           (work_item_id, selected_worker_id, selected_agent_id, routing_decision_id, assigned_by_actor_id, assigned_at)
+           VALUES (?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          assignment.workItemId,
+          assignment.selectedWorkerId,
+          assignment.selectedAgentId,
+          assignment.routingDecisionId,
+          assignment.assignedByActorId,
+          assignment.assignedAt
+        );
+      const event = this.appendAuditEvent(
+        createEvent("work_item.worker_assigned", assignment, {
+          "work_item.id": assignment.workItemId,
+          "worker.id": assignment.selectedWorkerId,
+          "agent.id": assignment.selectedAgentId,
+          "routing.decision_id": assignment.routingDecisionId
+        })
+      );
+      return { value: assignment, events: [event] };
+    });
+  }
+
+  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM work_item_assignments WHERE work_item_id = ?`)
+      .get(workItemId) as unknown as WorkItemAssignmentRow | undefined;
+    return row ? rowToWorkItemAssignment(row) : undefined;
+  }
+
+  countActiveAssignmentsForWorker(workerId: string): number {
+    const row = this.db
+      .prepare(
+        `SELECT COUNT(*) AS count
+         FROM work_item_assignments AS assignment
+         JOIN work_items AS work_item ON work_item.id = assignment.work_item_id
+         WHERE assignment.selected_worker_id = ?
+           AND work_item.status IN ('approved', 'running', 'cancelling')`
+      )
+      .get(workerId) as { count: number };
+    return row.count;
+  }
+
+  recordNimbleRoutingDecisionDetails(
+    input: NimbleRoutingDecisionDetails,
+    options: PrivilegedTransitionOptions
+  ): NimbleRoutingDecisionDetails {
+    requirePrivilegedTransition(options, "record_nimble_routing_decision_details");
+    const parsed = nimbleRoutingDecisionDetailsSchema.parse(input);
+    return this.write(() => {
+      const decision = this.getActorRoutingDecision(parsed.routingDecisionId);
+      const assignment = this.getWorkItemAssignment(parsed.workItemId);
+      if (
+        !decision ||
+        decision.workItemId !== parsed.workItemId ||
+        decision.selectedActorId !== parsed.selectedAgentId ||
+        !decision.eligible.includes(parsed.selectedAgentId) ||
+        !assignment ||
+        assignment.routingDecisionId !== parsed.routingDecisionId ||
+        assignment.selectedAgentId !== parsed.selectedAgentId ||
+        assignment.selectedWorkerId !== parsed.selectedWorkerId
+      ) {
+        throw new ControlStackError("routing_decision_mismatch", "Nimble evidence must match the durable assignment");
+      }
+      this.db
+        .prepare(
+          `INSERT INTO nimble_routing_decision_details
+           (routing_decision_id, work_item_id, routing_generation, selected_agent_id, selected_worker_id,
+            candidate_scores_json, eligibility_evidence_json, model_id, model_version, selected_score, threshold,
+            evaluated_at, algorithm_version, correlation_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          parsed.routingDecisionId,
+          parsed.workItemId,
+          parsed.routingGeneration,
+          parsed.selectedAgentId,
+          parsed.selectedWorkerId,
+          JSON.stringify(parsed.candidateScores),
+          JSON.stringify({ eligibleAgentIds: parsed.eligibleAgentIds, excluded: parsed.excluded }),
+          parsed.modelId,
+          parsed.modelVersion,
+          parsed.selectedScore,
+          parsed.threshold,
+          parsed.evaluatedAt,
+          parsed.algorithmVersion,
+          parsed.correlationId
+        );
+      const event = this.appendAuditEvent(
+        createEvent("agent.routing.selected", parsed, {
+          "work_item.id": parsed.workItemId,
+          "agent.id": parsed.selectedAgentId,
+          "worker.id": parsed.selectedWorkerId,
+          "routing.decision_id": parsed.routingDecisionId,
+          "routing.model": parsed.modelId,
+          "routing.model_version": parsed.modelVersion,
+          "routing.score": parsed.selectedScore,
+          "routing.threshold": parsed.threshold,
+          "routing.generation": parsed.routingGeneration,
+          "routing.algorithm_version": parsed.algorithmVersion,
+          "correlation.id": parsed.correlationId
+        })
+      );
+      return { value: parsed, events: [event] };
+    });
+  }
+
+  getNimbleRoutingDecisionDetails(decisionId: string): NimbleRoutingDecisionDetails | undefined {
+    const row = this.db
+      .prepare(`SELECT * FROM nimble_routing_decision_details WHERE routing_decision_id = ?`)
+      .get(decisionId) as unknown as NimbleRoutingDecisionDetailsRow | undefined;
+    return row ? rowToNimbleRoutingDecisionDetails(row) : undefined;
   }
 
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability {
@@ -4960,6 +5155,22 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   private assertWorkerMatchesRegisteredAgentTarget(workItem: WorkItem, workerId: string): void {
     const targetedAgents = this.registeredAgentTargets(workItem);
+    const assignment = this.getWorkItemAssignment(workItem.id);
+    if (assignment) {
+      if (assignment.selectedWorkerId !== workerId) {
+        throw new ControlStackError(
+          "work_item_assignment_mismatch",
+          "work item is assigned to a different authenticated worker"
+        );
+      }
+      if (targetedAgents.length > 0 && !targetedAgents.includes(assignment.selectedAgentId)) {
+        throw new ControlStackError(
+          "worker_target_mismatch",
+          "persisted assignment does not satisfy the work item's registered agent target"
+        );
+      }
+      return;
+    }
     if (targetedAgents.length > 0 && !targetedAgents.includes(workerId)) {
       throw new ControlStackError(
         "worker_target_mismatch",
@@ -5005,6 +5216,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
             .prepare(
               `SELECT item.* FROM work_items AS item
                WHERE item.status = 'approved'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM work_item_assignments AS assignment
+                   WHERE assignment.work_item_id = item.id AND assignment.selected_worker_id <> ?
+                 )
                  AND (
                    ? = 'admin'
                    OR (
@@ -5022,11 +5237,19 @@ export class SqliteWorkItemStore implements WorkItemStore {
                  )
                ORDER BY item.created_at ASC LIMIT 1`
             )
-            .get(mode?.mode ?? null, options.adminApprovalActorId, options.adminApprovalActorId) as
+            .get(workerId, mode?.mode ?? null, options.adminApprovalActorId, options.adminApprovalActorId) as
             (WorkItemRow & Record<string, unknown>) | undefined)
         : (this.db
-            .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
-            .get() as unknown as WorkItemRow | undefined);
+            .prepare(
+              `SELECT item.* FROM work_items AS item
+               WHERE item.status = 'approved'
+                 AND NOT EXISTS (
+                   SELECT 1 FROM work_item_assignments AS assignment
+                   WHERE assignment.work_item_id = item.id AND assignment.selected_worker_id <> ?
+                 )
+               ORDER BY item.created_at ASC LIMIT 1`
+            )
+            .get(workerId) as unknown as WorkItemRow | undefined);
       if (!row) {
         return { value: undefined, events: [] };
       }
@@ -7050,6 +7273,41 @@ function rowToActorRoutingDecision(row: RoutingDecisionRow): ActorRoutingDecisio
     scores: JSON.parse(row.scores_json),
     idempotencyKey: row.idempotency_key,
     createdAt: row.created_at
+  });
+}
+
+function rowToWorkItemAssignment(row: WorkItemAssignmentRow): WorkItemAssignment {
+  return workItemAssignmentSchema.parse({
+    workItemId: row.work_item_id,
+    selectedWorkerId: row.selected_worker_id,
+    selectedAgentId: row.selected_agent_id,
+    routingDecisionId: row.routing_decision_id,
+    assignedByActorId: row.assigned_by_actor_id,
+    assignedAt: row.assigned_at
+  });
+}
+
+function rowToNimbleRoutingDecisionDetails(row: NimbleRoutingDecisionDetailsRow): NimbleRoutingDecisionDetails {
+  const eligibility = JSON.parse(row.eligibility_evidence_json) as {
+    eligibleAgentIds: string[];
+    excluded: Record<string, string[]>;
+  };
+  return nimbleRoutingDecisionDetailsSchema.parse({
+    routingDecisionId: row.routing_decision_id,
+    workItemId: row.work_item_id,
+    routingGeneration: row.routing_generation,
+    selectedAgentId: row.selected_agent_id,
+    selectedWorkerId: row.selected_worker_id,
+    candidateScores: JSON.parse(row.candidate_scores_json),
+    eligibleAgentIds: eligibility.eligibleAgentIds,
+    excluded: eligibility.excluded,
+    modelId: row.model_id,
+    modelVersion: row.model_version,
+    selectedScore: row.selected_score,
+    threshold: row.threshold,
+    evaluatedAt: row.evaluated_at,
+    algorithmVersion: row.algorithm_version,
+    correlationId: row.correlation_id
   });
 }
 

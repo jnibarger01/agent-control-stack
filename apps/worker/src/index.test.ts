@@ -72,6 +72,84 @@ describe("worker policy gate", () => {
     }
   });
 
+  it("does not claim an unassigned item in Nimble-authoritative mode", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-nimble-unassigned-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    try {
+      const workItem = tools.create_work_item(readOnlyInput("Unassigned Nimble work"));
+      store.close();
+
+      const result = await runWorkerOnce({ dbPath, workerId: "worker-1", requireNimbleAssignment: true });
+      const check = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(result).toMatchObject({ executed: false, reason: "no approved work item" });
+        expect(check.get(workItem.id)?.status).toBe("approved");
+      } finally {
+        check.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The worker setup already closed this handle.
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("claims an assigned item by ID for the matching Nimble worker", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-nimble-assigned-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    try {
+      const workItem = tools.create_work_item(readOnlyInput("Assigned Nimble work"));
+      store.registerActor({ id: "operator", actorType: "HUMAN", displayName: "Operator" });
+      store.createRegistryAgent({
+        id: "assigned-agent",
+        name: "Assigned Agent",
+        kind: "coding",
+        acpRole: "IMPLEMENTATION_AGENT",
+        status: "AVAILABLE",
+        actorId: "operator"
+      });
+      const decision = store.recordActorRoutingDecision(
+        {
+          workItemId: workItem.id,
+          selectedActorId: "assigned-agent",
+          eligible: ["assigned-agent"],
+          excluded: {},
+          scores: { "assigned-agent": 9600 },
+          idempotencyKey: `nimble-route:${workItem.id}:1`
+        },
+        { via: "domain_service", actorId: "operator" }
+      );
+      store.assignWorkItem(
+        {
+          workItemId: workItem.id,
+          selectedAgentId: "assigned-agent",
+          selectedWorkerId: "worker-1",
+          routingDecisionId: decision.decisionId,
+          assignedByActorId: "operator"
+        },
+        { via: "domain_service", actorId: "operator" }
+      );
+      store.close();
+
+      const result = await runWorkerOnce({ dbPath, workerId: "worker-1", requireNimbleAssignment: true });
+      expect(result).toMatchObject({ executed: true, workItemId: workItem.id });
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The worker setup already closed this handle.
+      }
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("allocates and fences an attempt workspace around execution", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-worker-workspace-"));
     const dbPath = join(dir, "control.db");
