@@ -119,12 +119,16 @@ export function formatExecutionModeStatus(dbPath = defaultDbPath()): { text: str
 }
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 export function setExecutionModeFromCli(mode: "strict", dbPath = defaultDbPath()): { text: string; ok: boolean } {
 =======
 export function setExecutionModeFromCli(
   mode: "strict" | "admin",
   dbPath = defaultDbPath()
 ): { text: string; ok: boolean } {
+>>>>>>> Stashed changes
+=======
+export function setExecutionModeFromCli(mode: "strict", dbPath = defaultDbPath()): { text: string; ok: boolean } {
 >>>>>>> Stashed changes
   const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
   try {

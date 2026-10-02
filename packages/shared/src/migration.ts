@@ -77,7 +77,24 @@ const migrationFiles = [
   { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" },
   { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" },
   { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" },
+<<<<<<< Updated upstream
   { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" }
+=======
+  { version: 37, name: "jc_reusable_work_item_index", filename: "037_jc_reusable_work_item_index.sql" },
+  {
+    version: 38,
+    name: "execution_results_idempotency_unique",
+    filename: "038_execution_results_idempotency_unique.sql"
+  },
+  { version: 39, name: "admission_permits", filename: "039_admission_permits.sql" },
+  {
+    version: 40,
+    name: "admission_permit_execution_class",
+    filename: "040_admission_permit_execution_class.sql"
+  },
+  { version: 41, name: "change_sets", filename: "041_change_sets.sql" },
+  { version: 42, name: "work_item_assignments", filename: "042_work_item_assignments.sql" }
+>>>>>>> Stashed changes
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
