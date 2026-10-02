@@ -141,8 +141,18 @@ function summaryCards(model: MissionControlViewModel): string {
 }
 
 /** Directory/project context is never presented as an agent identity. */
+/**
+ * The agent actually executing this work item.
+ *
+ * Only the agent's own persisted currentWorkItemId counts as an assignment. A
+ * previous version also matched `item.target.services`, which are the services a
+ * work item is *eligible* to use. That made a work item look assigned to an agent
+ * simply because the item named that agent's service, which is a request, not an
+ * assignment, and it disagreed with the durable work_item_assignments record the
+ * control plane uses for routing.
+ */
 function assignedAgent(model: MissionControlViewModel, item: WorkItem): string {
-  const agent = model.agents?.find((a) => a.currentWorkItemId === item.id || item.target.services?.includes(a.id));
+  const agent = model.agents?.find((a) => a.currentWorkItemId === item.id);
   return agent?.displayName ?? "Unassigned";
 }
 function activityTimeline(model: MissionControlViewModel, prefix?: RegExp): string {
