@@ -201,7 +201,9 @@ describe("installed OpenClaw interoperability", () => {
           openclawConfigPath,
           JSON.stringify({
             gateway: { mode: "local", bind: "loopback", port: openclawGatewayPort },
-            tools: { profile: "coding" },
+            // OpenClaw 2026.9 defers MCP schemas behind tool_search for this loopback
+            // fixture provider when toolSearch is unset. Direct schemas keep test.agent.run callable.
+            tools: { profile: "coding", toolSearch: false },
             agents: {
               defaults: {
                 workspace: allowed,

@@ -3,7 +3,7 @@ import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
 import { auditEventHash, stableHash } from "@agent-control-stack/shared";
@@ -34,6 +34,10 @@ function resolveInstalledCli(envVar: string, command: string): string | undefine
 
 const opencodeExecutable = resolveInstalledCli("ACS_TEST_OPENCODE_EXECUTABLE", "opencode");
 const hermesExecutable = resolveInstalledCli("ACS_TEST_HERMES_EXECUTABLE", "hermes");
+const durableHermesRuntime = join(homedir(), ".hermes", "tools");
+const hermesRuntimeDir = existsSync(join(durableHermesRuntime, "facts.json"))
+  ? durableHermesRuntime
+  : process.env.HERMES_RUNTIME_DIR;
 
 function buildTestGateway(options: NonNullable<Parameters<typeof buildGateway>[0]>) {
   if (options.dbPath) {
@@ -1896,7 +1900,9 @@ describe("gateway MCP transport", () => {
         await new Promise<void>((resolve) => modelServer.close(() => resolve()));
         rmSync(dir, { recursive: true, force: true });
       }
-    }
+    },
+    // Two real OpenCode processes. Idle is about 3s; the 5s default trips when vitest saturates the machine.
+    30_000
   );
 
   it.skipIf(!hermesExecutable)(
@@ -2132,7 +2138,16 @@ describe("gateway MCP transport", () => {
           ],
           {
             cwd: allowed,
-            env: { ...process.env, HOME: dir, HERMES_HOME: hermesHome, HERMES_ACCEPT_HOOKS: "1" },
+            env: {
+              ...process.env,
+              HOME: dir,
+              HERMES_HOME: hermesHome,
+              HERMES_ACCEPT_HOOKS: "1",
+              // HERMES_HOME is the config root and also the default Python store.
+              // Keep the store on the durable tools directory so Hermes does not
+              // republish its launcher into this temporary home before the test deletes it.
+              ...(hermesRuntimeDir ? { HERMES_RUNTIME_DIR: hermesRuntimeDir } : {})
+            },
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
