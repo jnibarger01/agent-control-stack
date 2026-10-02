@@ -1,3 +1,4 @@
+import { harnessDcInvocationSchema } from "./harness-dispatch.js";
 import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { explainPolicyInputSchema, workItemToolNames } from "@agent-control-stack/policy-gate";
 import {
@@ -142,7 +143,9 @@ export const dcCapabilityIssueSchema = z
     client_id: z.string().min(1).max(256),
     tool: z.string().min(1).max(128),
     argsSummary: z.string().min(1).max(240_000),
-    correlationId: z.string().min(1).max(256).optional()
+    correlationId: z.string().min(1).max(256).optional(),
+    /** Strands harness hand-off only: bind issuance to exactly this dispatched work item. */
+    workItemId: z.string().min(1).max(128).optional()
   })
   .strict();
 
@@ -474,6 +477,28 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     successStatus: 201
   },
   { method: "get", path: "/work-items/{id}", operationId: "getWorkItem", summary: "Read a governed work item." },
+  {
+    method: "post",
+    path: "/harness/dc-invocations",
+    operationId: "createHarnessInvocation",
+    summary: "Create (idempotently) the governed work item for one Strands harness Desktop Commander call.",
+    requestSchema: harnessDcInvocationSchema,
+    successStatus: 201
+  },
+  {
+    method: "post",
+    path: "/harness/dc-invocations/{id}/dispatch",
+    operationId: "dispatchHarnessInvocation",
+    summary: "Hand an approved harness invocation to the managed Desktop Commander bridge.",
+    requestSchema: harnessDcInvocationSchema,
+    successStatus: 202
+  },
+  {
+    method: "get",
+    path: "/work-items/{id}/execution-result",
+    operationId: "getExecutionResult",
+    summary: "Read integrity-checked, redacted Desktop Commander output for a successful work item."
+  },
   {
     method: "post",
     path: "/work-items/{id}/approve",

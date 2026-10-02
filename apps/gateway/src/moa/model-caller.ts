@@ -7,6 +7,8 @@ export interface ModelCallerEnv {
   openaiApiKey?: string;
   openaiBaseUrl?: string;
   ollamaBaseUrl?: string;
+  explabsApiKey?: string;
+  explabsBaseUrl?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -16,7 +18,9 @@ export function modelCallerEnvFromProcess(env: NodeJS.ProcessEnv = process.env):
     openrouterBaseUrl: env.ACS_OPENROUTER_BASE_URL,
     openaiApiKey: env.ACS_OPENAI_API_KEY ?? env.OPENAI_API_KEY,
     openaiBaseUrl: env.ACS_OPENAI_BASE_URL,
-    ollamaBaseUrl: env.ACS_OLLAMA_BASE_URL ?? env.OLLAMA_BASE_URL
+    ollamaBaseUrl: env.ACS_OLLAMA_BASE_URL ?? env.OLLAMA_BASE_URL,
+    explabsApiKey: env.EXPLABS_API_KEY,
+    explabsBaseUrl: env.EXPLABS_BASE_URL
   };
 }
 
@@ -32,6 +36,9 @@ export function createRoutingModelCaller(env: ModelCallerEnv = modelCallerEnvFro
       }
       if (provider === "openai-codex") {
         return completeOpenAi(fetchImpl, env.openaiBaseUrl ?? "https://api.openai.com/v1", env.openaiApiKey, model, request);
+      }
+      if (provider === "explabs") {
+        return completeOpenAi(fetchImpl, env.explabsBaseUrl ?? "https://api.experientiallabs.ai/v1", env.explabsApiKey, model, request);
       }
       throw new ControlStackError("moa_model_provider_unknown", `unknown MoA model provider: ${request.model}`);
     }

@@ -368,6 +368,9 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
     }
     return sql;
   }
+  if (migration.version === 40 && hasColumn(db, "admission_permits", "execution_class")) {
+    return "SELECT 1;";
+  }
   return migration.sql;
 }
 

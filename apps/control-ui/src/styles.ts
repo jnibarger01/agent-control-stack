@@ -223,6 +223,7 @@ kbd { font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; border: 1px sol
 .card-action { display: block; margin-top: 8px; color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
 .grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(320px, .85fr); gap: 14px; margin-bottom: 14px; }
 .lower { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+#system { grid-column: 1 / -1; }
 .panel { min-width: 0; overflow: hidden; }
 .panel-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--surface); }
 .panel-head p { font-size: 12px; margin-top: 3px; }
@@ -271,13 +272,12 @@ td small { display: block; color: var(--muted); margin-top: 2px; }
 .approval-actions button { border: 1px solid var(--control-line); background: var(--control-bg); color: var(--ink); border-radius: 8px; padding: 8px 10px; cursor: pointer; }
 .approval-actions button:hover { background: var(--hover); border-color: var(--control-hover-line); }
 .approval-actions button:last-child { color: var(--red); border-color: var(--bad-line); }
-.system-panel { padding: 18px; display: grid; grid-template-columns: 130px 1fr; gap: 16px; align-items: start; }
-.system-panel strong { font-size: 44px; color: var(--green); }
-.system-panel span { color: var(--muted); margin-top: 52px; margin-left: -130px; }
+.system-panel { padding: 18px; display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px; align-items: start; }
+.system-panel > div { min-width: 0; }
 .system-panel dl { margin: 0; display: grid; gap: 8px; }
-.system-panel div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
-.system-panel dt { color: var(--muted); }
-.system-panel dd { margin: 0; color: var(--ink); }
+.system-panel dl > div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }
+.system-panel dt { color: var(--muted); min-width: 0; overflow-wrap: anywhere; }
+.system-panel dd { margin: 0; color: var(--ink); text-align: right; overflow-wrap: anywhere; }
 .operator-metrics { padding: 18px; display: grid; gap: 14px; }
 .operator-metrics dl { margin: 0; display: grid; gap: 8px; }
 .operator-metrics div { display: flex; justify-content: space-between; gap: 14px; border-bottom: 1px solid var(--soft-line); padding-bottom: 7px; }

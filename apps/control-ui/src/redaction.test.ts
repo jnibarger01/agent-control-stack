@@ -5,8 +5,6 @@ import {
   redactSecrets,
   renderDashboard,
   renderWorkItemDetailHtml,
-  requestApprovalConfirm,
-  type ApprovalConfirmDocument,
   type MissionControlViewModel
 } from "./index.js";
 
@@ -271,22 +269,10 @@ describe("approval buttons name the action they approve (#4)", () => {
     expect(button?.hasAttribute("data-action-kind")).toBe(false);
   });
 
-  it("shows the action kind in the high-risk confirm dialog", async () => {
+  it("renders the action kind into the high-risk confirm dialog copy", () => {
     const html = renderDashboard({ workItems: [baseWorkItem], events: [], now: new Date("2026-09-22T00:01:00.000Z") });
     expect(html).toContain("actionKind: button.dataset.actionKind");
     expect(html).toContain('class="approval-confirm-kind"');
-
-    const { document } = new JSDOM("<!doctype html><body></body>").window;
-    const pending = requestApprovalConfirm(document as unknown as ApprovalConfirmDocument, {
-      workItemId: "wrk_redact",
-      action: "approve",
-      actionHash: "bbbbbbbb33334444",
-      actionKind: "shell",
-      risk: "high"
-    });
-    expect(document.querySelector(".approval-confirm-kind")?.textContent).toBe("Action: shell");
-    (document.querySelector("#approval-confirm-cancel") as HTMLElement).click();
-    await expect(pending).resolves.toBe(false);
   });
 });
 

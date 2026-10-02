@@ -7,18 +7,50 @@ import { containPath, type ContainmentConfig } from "./containment.js";
 const shellMetaPattern = /[;&|`$<>(){}[\]!*?~\n\r'"\\]/;
 const privilegeEscalation = new Set(["sudo", "su", "doas", "pkexec", "runas"]);
 const shellWrappers = new Set([
-  "sh", "bash", "zsh", "dash", "ksh", "fish", "csh", "tcsh",
-  "env", "nice", "nohup", "timeout", "xargs", "watch", "script"
+  "sh",
+  "bash",
+  "zsh",
+  "dash",
+  "ksh",
+  "fish",
+  "csh",
+  "tcsh",
+  "env",
+  "nice",
+  "nohup",
+  "timeout",
+  "xargs",
+  "watch",
+  "script"
 ]);
 const fixedExecutableDirs = ["/usr/bin", "/bin", "/usr/local/bin"] as const;
 const dangerousExactArgs = new Set([
-  "--no-index", "--privileged", "-v", "--volume", "--mount", "--device",
-  "--cap-add", "--security-opt", "--pid=host", "--ipc=host", "--uts=host",
-  "--userns=host", "--network=host"
+  "--no-index",
+  "--privileged",
+  "-v",
+  "--volume",
+  "--mount",
+  "--device",
+  "--cap-add",
+  "--security-opt",
+  "--pid=host",
+  "--ipc=host",
+  "--uts=host",
+  "--userns=host",
+  "--network=host"
 ]);
 const pathValueFlags = new Set([
-  "--output", "-o", "--file", "-f", "--config", "--cwd", "--prefix", "--cache",
-  "--work-tree", "--git-dir", "-C"
+  "--output",
+  "-o",
+  "--file",
+  "-f",
+  "--config",
+  "--cwd",
+  "--prefix",
+  "--cache",
+  "--work-tree",
+  "--git-dir",
+  "-C"
 ]);
 
 export interface ValidatedCommand {
@@ -57,25 +89,35 @@ export function validateProcessCommand(
     throw new ControlStackError("desktop_commander_command_invalid", "command has no executable");
   }
   if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[0] ?? "")) {
-    throw new ControlStackError("desktop_commander_command_env_assignment", "inline environment assignments are not allowed");
+    throw new ControlStackError(
+      "desktop_commander_command_env_assignment",
+      "inline environment assignments are not allowed"
+    );
   }
 
   const rawExecutable = tokens[0] ?? "";
   if (rawExecutable.includes("/") || rawExecutable.includes("\\")) {
-    throw new ControlStackError("desktop_commander_command_executable_path", "executable paths are forbidden; use an allowlisted command name");
+    throw new ControlStackError(
+      "desktop_commander_command_executable_path",
+      "executable paths are forbidden; use an allowlisted command name"
+    );
   }
   const executableBase = rawExecutable;
   if (privilegeEscalation.has(executableBase) || tokens.some((token) => privilegeEscalation.has(token))) {
-    throw new ControlStackError("desktop_commander_command_privilege_escalation", `privilege escalation is forbidden: ${executableBase}`);
+    throw new ControlStackError(
+      "desktop_commander_command_privilege_escalation",
+      `privilege escalation is forbidden: ${executableBase}`
+    );
   }
   if (shellWrappers.has(executableBase)) {
-    throw new ControlStackError("desktop_commander_command_shell_wrapper", `shell/exec wrapper is forbidden as the executable: ${executableBase}`);
+    throw new ControlStackError(
+      "desktop_commander_command_shell_wrapper",
+      `shell/exec wrapper is forbidden as the executable: ${executableBase}`
+    );
   }
 
   const containment: ContainmentConfig =
-    "allowedRoots" in containmentInput
-      ? containmentInput
-      : { allowedRoots: [...containmentInput], deniedRoots: [] };
+    "allowedRoots" in containmentInput ? containmentInput : { allowedRoots: [...containmentInput], deniedRoots: [] };
   const cwd = baseCwd ?? containment.allowedRoots[0];
   if (!cwd) {
     throw new ControlStackError("desktop_commander_path_no_root", "no Desktop Commander allow root is configured");
@@ -86,7 +128,10 @@ export function validateProcessCommand(
   const preview = previewCommand(config, { cwd, command: executableBase, args: rawArgs });
 
   if (preview.risk === "forbidden") {
-    throw new ControlStackError("desktop_commander_command_forbidden", `command is forbidden by ACS policy: ${preview.reason}`);
+    throw new ControlStackError(
+      "desktop_commander_command_forbidden",
+      `command is forbidden by ACS policy: ${preview.reason}`
+    );
   }
   if (preview.risk === "destructive") {
     throw new ControlStackError(
@@ -98,17 +143,33 @@ export function validateProcessCommand(
   const args = validateArgumentPaths(rawArgs, containment, cwd);
   const resolvedExecutable = resolveExecutableFromFixedPath(executableBase);
   const resolvedCommandLine = [resolvedExecutable, ...args].join(" ");
-  return { executable: executableBase, resolvedExecutable, resolvedCommandLine, args, risk: preview.risk, reason: preview.reason };
+  return {
+    executable: executableBase,
+    resolvedExecutable,
+    resolvedCommandLine,
+    args,
+    risk: preview.risk,
+    reason: preview.reason
+  };
 }
 
 function validateArgumentPaths(args: string[], containment: ContainmentConfig, cwd: string): string[] {
   const next = [...args];
   for (let i = 0; i < next.length; i += 1) {
     const token = next[i] ?? "";
-    if (dangerousExactArgs.has(token) || token.startsWith("--privileged=") || token.startsWith("--volume=") ||
-        token.startsWith("--mount=") || token.startsWith("--device=") || token.startsWith("--cap-add=") ||
-        token.startsWith("--security-opt=")) {
-      throw new ControlStackError("desktop_commander_command_dangerous_argument", `dangerous command argument is forbidden: ${token}`);
+    if (
+      dangerousExactArgs.has(token) ||
+      token.startsWith("--privileged=") ||
+      token.startsWith("--volume=") ||
+      token.startsWith("--mount=") ||
+      token.startsWith("--device=") ||
+      token.startsWith("--cap-add=") ||
+      token.startsWith("--security-opt=")
+    ) {
+      throw new ControlStackError(
+        "desktop_commander_command_dangerous_argument",
+        `dangerous command argument is forbidden: ${token}`
+      );
     }
     const eq = token.indexOf("=");
     if (eq > 0 && pathValueFlags.has(token.slice(0, eq))) {
@@ -123,8 +184,13 @@ function validateArgumentPaths(args: string[], containment: ContainmentConfig, c
       i += 1;
       continue;
     }
-    if (token.startsWith("/") || token.startsWith("./") || token.startsWith("../") ||
-        token.split(/[\\/]/).some((part) => part === "..") || looksSensitive(token)) {
+    if (
+      token.startsWith("/") ||
+      token.startsWith("./") ||
+      token.startsWith("../") ||
+      token.split(/[\\/]/).some((part) => part === "..") ||
+      looksSensitive(token)
+    ) {
       next[i] = containCommandPath(containment, token, cwd);
     }
   }
@@ -134,13 +200,18 @@ function validateArgumentPaths(args: string[], containment: ContainmentConfig, c
 function containCommandPath(containment: ContainmentConfig, value: string, cwd: string): string {
   const canonical = containPath(containment, value, cwd).canonical;
   if (/\s/.test(canonical)) {
-    throw new ControlStackError("desktop_commander_command_path_whitespace", "command paths containing whitespace are not supported");
+    throw new ControlStackError(
+      "desktop_commander_command_path_whitespace",
+      "command paths containing whitespace are not supported"
+    );
   }
   return canonical;
 }
 
 function looksSensitive(value: string): boolean {
-  return /(^|[\\/])(\.env(\.|$)|\.ssh([\\/]|$)|\.gnupg([\\/]|$)|\.aws[\\/](credentials|config)$|\.kube[\\/]config$|\.npmrc$|\.netrc$|id_(rsa|ed25519)$|credentials(\.json)?$|token(\.json)?$)/i.test(value);
+  return /(^|[\\/])(\.env(\.|$)|\.ssh([\\/]|$)|\.gnupg([\\/]|$)|\.aws[\\/](credentials|config)$|\.kube[\\/]config$|\.npmrc$|\.netrc$|id_(rsa|ed25519)$|credentials(\.json)?$|token(\.json)?$)/i.test(
+    value
+  );
 }
 
 function resolveExecutableFromFixedPath(executable: string): string {
@@ -153,17 +224,27 @@ function resolveExecutableFromFixedPath(executable: string): string {
       // not executable in this directory; try the next fixed directory
     }
   }
-  throw new ControlStackError("desktop_commander_command_executable_missing", `allowlisted executable not found on fixed system PATH: ${executable}`);
+  throw new ControlStackError(
+    "desktop_commander_command_executable_missing",
+    `allowlisted executable not found on fixed system PATH: ${executable}`
+  );
 }
 
-function machineControllerShimConfig(containmentRoots: readonly string[], deniedCommands: readonly string[]): MachineControllerConfig {
+function machineControllerShimConfig(
+  containmentRoots: readonly string[],
+  deniedCommands: readonly string[]
+): MachineControllerConfig {
   return {
     server: { name: "acs-desktop-commander-adapter", transport: "stdio", version: "0.1.0" },
     security: {
-      defaultPolicy: "deny", requireApprovalForMutations: true, redactSecrets: true,
-      maxOutputBytes: 256 * 1024, commandTimeoutMs: 120_000, commandTerminationGraceMs: 1_000
+      defaultPolicy: "deny",
+      requireApprovalForMutations: true,
+      redactSecrets: true,
+      maxOutputBytes: 256 * 1024,
+      commandTimeoutMs: 120_000,
+      commandTerminationGraceMs: 1_000
     },
-    paths: { allow: [...containmentRoots], deny: [] },
+    paths: { allow: [...containmentRoots], deny: [], projectsRoot: containmentRoots[0] },
     commands: {
       // Only commands this surface has always classified as read-only. The machine controller's wider
       // rule set (ls, rg, find, ...) is not inherited here: this shim has no deny roots, so enabling

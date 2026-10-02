@@ -116,6 +116,49 @@ describe("normalizeInvocation", () => {
   });
 });
 
+describe("project-scoped start_process ACS rules", () => {
+  // A self-contained containment/projects root so this suite runs identically
+  // on any host instead of depending on a personal checkout location.
+  let projectsRepo: string;
+  let projectContainment: ContainmentConfig;
+  let insideTestFile: string;
+  beforeAll(() => {
+    projectsRepo = realpathSync(mkdtempSync(join(tmpdir(), "dc-projects-")));
+    projectContainment = { allowedRoots: [projectsRepo], deniedRoots: [] };
+    insideTestFile = join(projectsRepo, "packages/machine-controller/src/command.test.ts");
+    mkdirSync(join(projectsRepo, "packages/machine-controller/src"), { recursive: true });
+    writeFileSync(insideTestFile, "");
+  });
+  afterAll(() => rmSync(projectsRepo, { recursive: true, force: true }));
+
+  it.each([
+    () => `git -C ${projectsRepo} worktree list`,
+    () => `git -C ${projectsRepo} worktree add ${join(projectsRepo, "new-worktree")} feature/test`,
+    () => `npm --prefix ${projectsRepo} run check`,
+    () => `npx --prefix ${projectsRepo} tsc -b`,
+    () => `node ${insideTestFile}`
+  ])("normalizes project process command for approval: %s", (commandLine) => {
+    const invocation = normalizeInvocation(
+      "start_process",
+      { command: commandLine(), timeout_ms: 1000, cwd: projectsRepo },
+      projectContainment
+    );
+
+    expect(invocation.policy.requiresApproval).toBe(true);
+    expect(invocation.validatedArguments.command).toMatch(/^\/(usr\/)?bin\/(git|npm|npx|node) /);
+  });
+
+  it("keeps git project paths inside the ACS projects root", () => {
+    expect(() =>
+      normalizeInvocation(
+        "start_process",
+        { command: "git -C /tmp status", timeout_ms: 1000, cwd: projectsRepo },
+        projectContainment
+      )
+    ).toThrow(/forbidden|outside every allow root/);
+  });
+});
+
 describe("reconstructDesktopCommanderInvocation", () => {
   it("derives the invocation from a single requested action", () => {
     const norm = reconstructDesktopCommanderInvocation(

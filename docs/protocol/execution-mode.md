@@ -18,9 +18,19 @@ Jace Commander mutations: ACS records an `acs:admin` approval, then continues
 through the normal lease, capability, and audit path. Jace Commander
 `privileged_exec` remains human-only even in admin mode.
 
+Changing the global mode is a privileged operator action. `POST /execution-mode`
+requires an authenticated credential mapped to actor `user`, with the
+`operator` role and `acs:approve` scope. Agent, worker, service, and write-only
+credentials cannot enable admin mode. This protects the current global-mode
+boundary from agent self-escalation; it does not make admin mode mission-scoped.
+Mission-scoped autonomous authority grants are a separate architecture
+requirement and must replace global admin before ACS can claim bounded,
+pre-authorized autonomous execution.
+
 Consumers:
 
-- `acs mode status|strict|admin` reads and writes the same row (`ACS_DB_PATH`).
+- `acs mode status|strict` reads the row or restores strict mode locally. The CLI
+  intentionally cannot enable admin because it has no authenticated principal.
 - Mission Control shows the mode on the primary header and posts to `POST /execution-mode`.
 - `GET /authority` and `GET /execution-mode` report that row plus the live lease observation.
 

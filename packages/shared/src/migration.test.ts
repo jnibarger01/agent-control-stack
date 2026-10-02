@@ -10,11 +10,28 @@ afterEach(() => {
   for (const directory of directories.splice(0)) rmSync(directory, { recursive: true, force: true });
 });
 
-function database(): DatabaseSync {
+function database(lastVersion?: number): DatabaseSync {
   const directory = mkdtempSync(join(tmpdir(), "acs-migrations-"));
   directories.push(directory);
   const db = new DatabaseSync(join(directory, "control.db"));
-  applyControlPlaneMigrations(db);
+  if (lastVersion === undefined) {
+    applyControlPlaneMigrations(db);
+  } else {
+    db.exec(`CREATE TABLE schema_migrations (
+      version INTEGER PRIMARY KEY, name TEXT NOT NULL, filename TEXT NOT NULL,
+      checksum TEXT NOT NULL, applied_at TEXT NOT NULL
+    )`);
+    for (const migration of controlPlaneMigrations().filter((entry) => entry.version <= lastVersion)) {
+      db.exec(migration.sql);
+      db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
+        migration.version,
+        migration.name,
+        migration.filename,
+        migration.checksum,
+        new Date().toISOString()
+      );
+    }
+  }
   return db;
 }
 
@@ -101,7 +118,7 @@ describe("control-plane migration alternate 17-21 repair", () => {
   });
 
   it("transactionally remaps only the exact alternate deployed layout and is idempotent", () => {
-    const db = database();
+    const db = database(22);
     applyAlternateMetadata(db);
     applyControlPlaneMigrations(db);
     const rows = db
@@ -130,7 +147,7 @@ describe("control-plane migration alternate 17-21 repair", () => {
     expect(partial.prepare("SELECT name FROM schema_migrations WHERE version = 17").get()).toEqual({ name });
     partial.close();
 
-    const mismatched = database();
+    const mismatched = database(22);
     applyAlternateMetadata(mismatched);
     mismatched.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = 18").run("0".repeat(64));
     expect(() => applyControlPlaneMigrations(mismatched)).toThrow("migration metadata mismatch for version 17");
@@ -145,7 +162,7 @@ describe("control-plane migration alternate 17-21 repair", () => {
     ["filename", "UPDATE schema_migrations SET filename = ? WHERE version = ?", ["018_wrong.sql", 19]],
     ["checksum", "UPDATE schema_migrations SET checksum = ? WHERE version = ?", ["0".repeat(64), 20]]
   ])("fails closed and preserves rows for a %s mismatch in an otherwise alternate layout", (_kind, sql, params) => {
-    const db = database();
+    const db = database(22);
     applyAlternateMetadata(db);
     db.prepare(sql).run(...params);
     const before = db
@@ -165,7 +182,7 @@ describe("control-plane migration alternate 17-21 repair", () => {
   });
 
   it("fails schema validation before remapping and leaves the exact alternate metadata intact", () => {
-    const db = database();
+    const db = database(22);
     applyAlternateMetadata(db);
     db.exec("DROP TABLE evidence_manifests");
     const before = db
@@ -185,9 +202,79 @@ describe("control-plane migration alternate 17-21 repair", () => {
   });
 });
 
+describe("deployed migration lineage 37-39", () => {
+  it("preserves the live 037 identity and appends new migrations after it", () => {
+    const db = new DatabaseSync(":memory:");
+    try {
+      db.exec(`
+        CREATE TABLE schema_migrations (
+          version INTEGER PRIMARY KEY,
+          name TEXT NOT NULL,
+          filename TEXT NOT NULL,
+          checksum TEXT NOT NULL,
+          applied_at TEXT NOT NULL
+        )
+      `);
+      const migrations = controlPlaneMigrations();
+      for (const migration of migrations.filter((candidate) => candidate.version <= 36)) {
+        db.exec(migration.sql);
+        db.prepare(
+          "INSERT INTO schema_migrations (version, name, filename, checksum, applied_at) VALUES (?, ?, ?, ?, ?)"
+        ).run(migration.version, migration.name, migration.filename, migration.checksum, new Date().toISOString());
+      }
+
+      const deployed037 = migrations.find((migration) => migration.version === 37);
+      expect(deployed037).toMatchObject({
+        name: "jc_reusable_work_item_index",
+        filename: "037_jc_reusable_work_item_index.sql",
+        checksum: "fc9e4df432de5f482c7cd11991fb5a00933d888e1d5292019cc739eb4ca80702"
+      });
+      if (!deployed037) throw new Error("deployed migration 037 is missing");
+      db.exec(deployed037.sql);
+      db.prepare(
+        "INSERT INTO schema_migrations (version, name, filename, checksum, applied_at) VALUES (?, ?, ?, ?, ?)"
+      ).run(
+        deployed037.version,
+        deployed037.name,
+        deployed037.filename,
+        deployed037.checksum,
+        new Date().toISOString()
+      );
+
+      applyControlPlaneMigrations(db);
+      const tail = db
+        .prepare("SELECT version, name, filename, checksum FROM schema_migrations WHERE version >= 37 ORDER BY version")
+        .all();
+      expect(tail).toEqual(
+        migrations
+          .filter((migration) => migration.version >= 37)
+          .map(({ version, name, filename, checksum }) => ({ version, name, filename, checksum }))
+      );
+      expect(
+        db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?")
+          .get("idx_work_items_requester_status_created")
+      ).toBeDefined();
+      expect(
+        db
+          .prepare("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?")
+          .get("idx_execution_results_idempotency_key")
+      ).toBeDefined();
+      expect(
+        db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get("admission_permits")
+      ).toBeDefined();
+      expect(
+        db.prepare("SELECT 1 FROM pragma_table_info('admission_permits') WHERE name = ?").get("execution_class")
+      ).toBeDefined();
+    } finally {
+      db.close();
+    }
+  });
+});
+
 describe("control-plane migration pre-lease-renewal 20-23 repair", () => {
   it("transactionally inserts lease renewal and shifts the exact deployed layout to 21-24", () => {
-    const db = database();
+    const db = database(24);
     applyPreLeaseRenewalMetadata(db);
     applyControlPlaneMigrations(db);
     const rows = db
@@ -208,7 +295,7 @@ describe("control-plane migration pre-lease-renewal 20-23 repair", () => {
   });
 
   it("rejects a checksum mismatch without shifting or applying lease renewal", () => {
-    const db = database();
+    const db = database(24);
     applyPreLeaseRenewalMetadata(db);
     db.prepare("UPDATE schema_migrations SET checksum = ? WHERE version = 22").run("0".repeat(64));
     const before = db.prepare("SELECT * FROM schema_migrations ORDER BY version").all();

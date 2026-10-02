@@ -16,10 +16,10 @@ Commands:
   skills quarantine <skill>
   skills retrieve --problem <text>
   skills targets
+  code --repo <path> --base-commit <sha> [--model ollama:<model>] <prompt>
   status [--json]
   mode status
   mode strict
-  mode admin
   doctor [--json]
   publication list [--json]
   audit export [--db <path>] [-o <file>]
@@ -39,13 +39,14 @@ export type AcsCommand =
   | { kind: "gateway"; forwarded: string[] }
   | { kind: "status"; json: boolean }
   | { kind: "mode-status" }
-  | { kind: "mode-set"; mode: "strict" | "admin" }
+  | { kind: "mode-set"; mode: "strict" }
   | { kind: "doctor"; json: boolean }
   | { kind: "publication-list"; json: boolean }
   | { kind: "audit-export"; dbPath?: string; outputPath?: string }
   | { kind: "audit-verify"; dbPath?: string; filePath?: string }
   | { kind: "trace-relay"; dbPath?: string; spoolDir?: string }
-  | { kind: "skills"; args: string[] };
+  | { kind: "skills"; args: string[] }
+  | { kind: "code"; args: string[] };
 
 export class AcsUsageError extends Error {
   readonly usage = true;
@@ -205,11 +206,11 @@ function parseAuditArgs(args: string[]): AcsCommand {
 
 function parseModeArgs(args: string[]): AcsCommand {
   const sub = args[0];
-  if (args.length !== 1 || (sub !== "status" && sub !== "strict" && sub !== "admin")) {
-    throw new AcsUsageError("Usage: acs mode status | acs mode strict | acs mode admin");
+  if (args.length !== 1 || (sub !== "status" && sub !== "strict")) {
+    throw new AcsUsageError("Usage: acs mode status | acs mode strict");
   }
   if (sub === "status") return { kind: "mode-status" };
-  return { kind: "mode-set", mode: sub };
+  return { kind: "mode-set", mode: "strict" };
 }
 
 export function parseAcsArgs(args: string[]): AcsCommand {
@@ -246,6 +247,8 @@ export function parseAcsArgs(args: string[]): AcsCommand {
       return parseTraceArgs(rest);
     case "skills":
       return { kind: "skills", args: rest };
+    case "code":
+      return { kind: "code", args: rest };
     default:
       throw new AcsUsageError(`unknown command: ${command}`);
   }

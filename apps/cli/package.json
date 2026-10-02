@@ -15,6 +15,7 @@
     "acs": "./dist/cli.js"
   },
   "dependencies": {
+    "@agent-control-stack/coding-harness": "0.1.0",
     "@agent-control-stack/gateway": "0.1.0",
     "@agent-control-stack/machine-controller": "0.1.0",
     "@agent-control-stack/mcp": "0.1.0",
