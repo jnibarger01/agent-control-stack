@@ -254,7 +254,7 @@ describe("ADR 0015 worker verification enforcement", () => {
     const id = seedRead();
     const executor = new FakeExecutor();
 
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
 
     expect(result).toMatchObject({ executed: true, executionMode: "desktop_commander", workItemId: id });
     expect(result.reason).not.toBe("awaiting_independent_verification");
@@ -278,7 +278,7 @@ describe("ADR 0015 worker verification enforcement", () => {
     const id = seedRead();
     const executor = new FakeExecutor();
 
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
 
     expect(result).toMatchObject({ executed: true, executionMode: "desktop_commander", workItemId: id });
     expect(result.reason).not.toBe("awaiting_independent_verification");
@@ -331,7 +331,7 @@ describe("ADR 0015 worker verification enforcement", () => {
     const id = seedWrite();
     const executor = new FakeExecutor();
 
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
 
     expect(result).toEqual({
       executed: true,
@@ -392,7 +392,7 @@ describe("ADR 0015 worker verification enforcement", () => {
     vi.stubEnv("ACS_VERIFICATION_POLICY", "enforce");
     const id = seedWrite();
     const executor = new FakeExecutor();
-    await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
 
     const store = new SqliteWorkItemStore(dbPath);
     const tools = createWorkItemTools(store, createPolicyEngine());

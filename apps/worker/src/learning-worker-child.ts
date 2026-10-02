@@ -25,7 +25,7 @@ const execute: WorkerExecute = async (workItem) => {
   };
 };
 
-const result = await runWorkerOnce({
+const result = await runWorkerOnce({ routing: "legacy",
   dbPath,
   workerId: "e2e-child-worker",
   execute,

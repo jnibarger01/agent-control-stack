@@ -76,6 +76,8 @@ import {
   loadMachineControllerConfig,
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
+import { claimApprovedWorkViaNimble } from "@agent-control-stack/mission-controller";
+import { createNimbleAdapter } from "@agent-control-stack/nimble-adapter";
 import {
   createPolicyEngine,
   createWorkItemTools,
@@ -103,6 +105,7 @@ import {
   executionActionHash,
   executionPlanApprovalRequestHash,
   listWorkItemsSchema,
+  resolveExecutionBackend,
   submitWorkResultSchema,
   requesterSchema,
   SqliteExecutionReadStore,
@@ -3201,12 +3204,28 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const workerId = requireWorkerIdentity(request, reply, auth);
       if (!workerId) return;
       const body = z.object({ leaseMs: z.number().int().positive().optional() }).strict().parse(request.body ?? {});
-      const claim = tools.claim_next_approved_work_item({ workerId, ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}) });
-      if (!claim) return { claimed: false };
-      if (claim.status === "blocked") {
-        return reply.code(409).send({ claimed: false, workItemId: claim.id, status: claim.status });
+      const routed = await claimApprovedWorkViaNimble({
+        store: workItems,
+        policy,
+        workerId,
+        model: createNimbleAdapter(),
+        createdAt: new Date().toISOString(),
+        executionBackend: resolveExecutionBackend(),
+        claimById: (id, leaseMs) =>
+          tools.claim_approved_work_item_by_id({ id, workerId, ...(leaseMs ? { leaseMs } : {}) }),
+        ...(body.leaseMs ? { leaseMs: body.leaseMs } : {})
+      });
+      if (!routed.beginExecution || !routed.claimed) {
+        return {
+          claimed: false,
+          reason: routed.reason,
+          ...(routed.selectedOperationId ? { workItemId: routed.selectedOperationId } : {})
+        };
       }
-      return { claimed: true, workItem: claim };
+      if (routed.claimed.status === "blocked") {
+        return reply.code(409).send({ claimed: false, workItemId: routed.claimed.id, status: routed.claimed.status });
+      }
+      return { claimed: true, workItem: routed.claimed };
     } catch (error) {
       return sendError(reply, error);
     }

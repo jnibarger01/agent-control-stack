@@ -12,6 +12,9 @@
     }
   },
   "dependencies": {
-    "@agent-control-stack/decision-engine": "0.1.0"
+    "@agent-control-stack/decision-engine": "0.1.0",
+    "@agent-control-stack/policy-gate": "0.1.0",
+    "@agent-control-stack/shared": "0.1.0",
+    "@agent-control-stack/work-items": "0.1.0"
   }
 }

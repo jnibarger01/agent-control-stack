@@ -35,7 +35,7 @@ describe("worker dry-run lock", () => {
         output: "live execution must not be accepted"
       });
 
-      await expect(runWorkerOnce({ dbPath, workerId: "production-worker" })).rejects.toThrow(
+      await expect(runWorkerOnce({ routing: "legacy", dbPath, workerId: "production-worker" })).rejects.toThrow(
         "production worker requires dry_run execution mode"
       );
 
@@ -87,7 +87,7 @@ describe("worker dry-run lock", () => {
       vi.stubEnv("ACS_DESKTOP_COMMANDER_ALLOWED_ROOTS", "");
       vi.stubEnv("ACS_EXECUTION_BACKEND", "");
       await expect(
-        runWorkerOnce({ dbPath, workerId: "dc-worker", executionBackend: "desktop_commander" })
+        runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", executionBackend: "desktop_commander" })
       ).rejects.toThrow(/Desktop Commander adapter is not configured/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -107,7 +107,7 @@ describe("worker dry-run lock", () => {
         output: "must not be persisted"
       });
 
-      await expect(runWorkerOnce({ dbPath, workerId: "production-worker" })).rejects.toThrow();
+      await expect(runWorkerOnce({ routing: "legacy", dbPath, workerId: "production-worker" })).rejects.toThrow();
 
       const check = new SqliteWorkItemStore(dbPath);
       try {

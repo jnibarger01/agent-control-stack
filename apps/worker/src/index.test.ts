@@ -59,7 +59,7 @@ describe("worker policy gate", () => {
       });
       store.close();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "test-worker" });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result.executed).toBe(true);
@@ -101,7 +101,7 @@ describe("worker policy gate", () => {
     try {
       const workItem = tools.create_work_item(readOnlyInput("Attempt workspace"));
       store.close();
-      await runWorkerOnce({
+      await runWorkerOnce({ routing: "legacy",
         dbPath,
         workerId: "test-worker",
         workspaceManager,
@@ -133,7 +133,7 @@ describe("worker policy gate", () => {
     try {
       const workItem = tools.create_work_item(readOnlyInput("Failed dry-run attempt"));
       store.close();
-      const result = await runWorkerOnce({
+      const result = await runWorkerOnce({ routing: "legacy",
         dbPath,
         workerId: "test-worker",
         execute: async () => ({
@@ -180,7 +180,7 @@ describe("worker policy gate", () => {
     try {
       const workItem = tools.create_work_item(readOnlyInput("Engine succeeds, validation fails"));
       store.close();
-      const result = await runWorkerOnce({
+      const result = await runWorkerOnce({ routing: "legacy",
         dbPath,
         workerId: "test-worker",
         execute: async () => ({ ok: true, executionMode: "dry_run", output: "looks fine" }),
@@ -235,7 +235,7 @@ describe("worker policy gate", () => {
       store.approveWorkItem(workItem.id, domainTransition);
       store.close();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "test-worker" });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result.executed).toBe(false);
@@ -266,7 +266,7 @@ describe("worker policy gate", () => {
       store.close();
       vi.clearAllMocks();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "test-worker" });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result).toEqual({ executed: false, workItemId: workItem.id, reason: "blocked by policy" });
@@ -310,7 +310,7 @@ describe("worker policy gate", () => {
       store.close();
       vi.clearAllMocks();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "test-worker" });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         expect(result).toEqual({ executed: false, reason: "no approved work item" });
@@ -353,7 +353,7 @@ describe("worker policy gate", () => {
       expect(approval.workItem.status).toBe("approved");
       store.close();
 
-      const result = await runWorkerOnce({ dbPath, workerId: "test-worker" });
+      const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "test-worker" });
       const check = new SqliteWorkItemStore(dbPath);
       try {
         const events = check.readEvents().map((event) => event.name);

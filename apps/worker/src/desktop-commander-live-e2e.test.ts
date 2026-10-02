@@ -79,7 +79,7 @@ describe.skipIf(!ENABLED)("Desktop Commander live end-to-end", () => {
   it("runs the full ACS lifecycle against the real local Desktop Commander MCP", async () => {
     const id = seedApprovedRead(join(root, "pkg", "readme.txt"));
 
-    const result = await runWorkerOnce({ dbPath, workerId: "e2e-worker" });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "e2e-worker" });
     console.log("[e2e] worker result:", JSON.stringify(result));
 
     expect(result).toMatchObject({ executed: true, executionMode: "desktop_commander", workItemId: id });
@@ -129,7 +129,7 @@ describe.skipIf(!ENABLED)("Desktop Commander live end-to-end", () => {
   it("NEGATIVE: an unauthorized action (path escapes the allow root) never invokes Desktop Commander", async () => {
     const id = seedApprovedRead("/etc/passwd");
 
-    const result = await runWorkerOnce({ dbPath, workerId: "e2e-worker" });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "e2e-worker" });
     console.log("[e2e-neg] worker result:", JSON.stringify(result));
     expect(result.executed).toBe(false);
 

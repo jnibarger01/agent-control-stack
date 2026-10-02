@@ -9,6 +9,9 @@
   "references": [
     { "path": "../../apps/scheduler" },
     { "path": "../../packages/advisory" },
+    { "path": "../../packages/decision-engine" },
+    { "path": "../../packages/mission-controller" },
+    { "path": "../../packages/nimble-adapter" },
     { "path": "../../packages/evidence" },
     { "path": "../../packages/desktop-commander-adapter" },
     { "path": "../../packages/policy-gate" },

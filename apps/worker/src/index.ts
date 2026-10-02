@@ -1,3 +1,10 @@
+import type { NimbleDecisionModel } from "@agent-control-stack/decision-engine";
+import {
+  attachAuthoritativeOutcome,
+  claimApprovedWorkViaNimble,
+  type AuthoritativeStopAfter
+} from "@agent-control-stack/mission-controller";
+import { createNimbleAdapter } from "@agent-control-stack/nimble-adapter";
 import {
   createPolicyEngine,
   createWorkItemTools,
@@ -76,6 +83,17 @@ export interface WorkerOptions {
   executionBackend?: ExecutionBackend;
   /** Inject a machine executor (tests only). */
   machineExecutor?: MachineExecutor;
+  /**
+   * `nimble` is the production claim path. `legacy` keeps oldest-approved
+   * claim for existing worker tests that are not about routing.
+   */
+  routing?: "nimble" | "legacy";
+  /** Injected Nimble model. Production uses ACS_NIMBLE_* via createNimbleAdapter. */
+  decisionModel?: NimbleDecisionModel;
+  /** Test-only crash boundary. Production callers omit this. */
+  nimbleStopAfter?: AuthoritativeStopAfter;
+  /** Fixed clock for decision receipts. */
+  now?: string;
 }
 
 export interface WorkerResult {
@@ -207,7 +225,37 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
 
   try {
     workItems.failExpiredLeases();
-    const running = tools.claim_next_approved_work_item({ workerId });
+    const routing = options.routing ?? "nimble";
+    let nimbleMissionId: string | null = null;
+    let running: ClaimedWorkItem | undefined;
+    if (routing === "legacy") {
+      running = tools.claim_next_approved_work_item({ workerId });
+    } else {
+      const routed = await claimApprovedWorkViaNimble({
+        store: workItems,
+        policy: createPolicyEngine(),
+        workerId,
+        model: options.decisionModel ?? createNimbleAdapter(),
+        createdAt: options.now ?? new Date().toISOString(),
+        executionBackend,
+        claimById: (id, leaseMs) =>
+          tools.claim_approved_work_item_by_id({ id, workerId, ...(leaseMs ? { leaseMs } : {}) }),
+        ...(options.nimbleStopAfter ? { stopAfter: options.nimbleStopAfter } : {})
+      });
+      nimbleMissionId = routed.missionId;
+      if (!routed.beginExecution) {
+        return {
+          executed: false,
+          ...(routed.selectedOperationId ? { workItemId: routed.selectedOperationId } : {}),
+          reason: routed.reason
+        };
+      }
+      running = routed.claimed;
+    }
+    const attachNimbleOutcome = (status: string, exitCode: number | null): void => {
+      if (!nimbleMissionId) return;
+      attachAuthoritativeOutcome(workItems, nimbleMissionId, workerId, { status, exitCode });
+    };
     if (!running) {
       return { executed: false, reason: "no approved work item" };
     }
@@ -238,7 +286,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     const startedAt = new Date().toISOString();
 
     if (executionBackend === "desktop_commander") {
-      return await runDesktopCommanderExecution({
+      const desktopResult = await runDesktopCommanderExecution({
         workItems,
         tools,
         running,
@@ -246,6 +294,11 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         startedAt,
         machineExecutor: machineExecutor!
       });
+      const observed = workItems.get(running.id);
+      if (observed && (observed.status === "succeeded" || observed.status === "failed" || observed.status === "blocked")) {
+        attachNimbleOutcome(observed.status, observed.status === "succeeded" ? 0 : null);
+      }
+      return desktopResult;
     }
 
     if (!isReadOnlyWorkerWorkItem(running)) {
@@ -274,6 +327,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
           reason: "worker_read_only_scope"
         }
       });
+      attachNimbleOutcome("blocked", null);
       return {
         executed: false,
         workItemId: running.id,
@@ -341,6 +395,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
+      attachNimbleOutcome("succeeded", 0);
     } else {
       tools.submit_work_result({
         workItemId: running.id,
@@ -373,6 +428,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
+      attachNimbleOutcome("failed", null);
     }
 
     return {

@@ -40,7 +40,7 @@ describe("PR30 worker cleanup regression", () => {
     } as unknown as import("@agent-control-stack/workspace-manager").WorkspaceManager;
     try {
       await expect(
-        runWorkerOnce({
+        runWorkerOnce({ routing: "legacy",
           dbPath,
           workerId: "worker-throw",
           workspaceManager,

@@ -118,7 +118,7 @@ describe("desktop_commander worker execution - success path", () => {
     const { id } = seed(readAction(join(root, "pkg", "a.txt")));
     const executor = new FakeExecutor();
 
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
 
     expect(result).toMatchObject({ executed: true, executionMode: "desktop_commander", workItemId: id });
     expect(executor.calls).toHaveLength(1);
@@ -209,7 +209,7 @@ describe("desktop_commander worker execution - success path", () => {
     store0.close();
 
     const executor = new FakeExecutor();
-    const notApproved = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const notApproved = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
     expect(notApproved).toEqual({ executed: false, reason: "no approved work item" });
     expect(executor.calls).toHaveLength(0);
 
@@ -224,7 +224,7 @@ describe("desktop_commander worker execution - success path", () => {
     });
     store1.close();
 
-    const approvedRun = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const approvedRun = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
     expect(approvedRun).toMatchObject({ executed: true, executionMode: "desktop_commander" });
     expect(executor.calls).toHaveLength(1);
     expect(executor.calls[0].authorization.toolName).toBe("write_file");
@@ -241,7 +241,7 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
       params: { paths: ["src/index.ts"], tool: "kill_process", arguments: { pid: 1 } }
     });
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
     const store = new SqliteWorkItemStore(dbPath);
@@ -258,7 +258,7 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
   it("denies when a path escapes the containment allow root", async () => {
     seed(readAction("/etc/passwd"));
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
   });
@@ -267,7 +267,7 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
     writeFileSync(join(root, ".env"), "SECRET=x");
     seed(readAction(join(root, ".env")));
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
   });
@@ -284,7 +284,7 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
       }
     });
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const result = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
     expect(executor.calls).toHaveLength(0);
     expect(result.executed).toBe(false);
   });
@@ -298,7 +298,7 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
     vi.stubEnv("ACS_EXECUTION_BACKEND", "desktop_commander");
 
     const executor = new FakeExecutor();
-    const result = await runWorkerOnce({
+    const result = await runWorkerOnce({ routing: "legacy",
       dbPath,
       workerId: "dc-worker",
       executionBackend: "desktop_commander",
@@ -319,10 +319,10 @@ describe("desktop_commander worker execution - denials (Desktop Commander is nev
   it("is idempotent on a replayed attempt (no duplicate Desktop Commander call)", async () => {
     seed(readAction(join(root, "pkg", "a.txt")));
     const executor = new FakeExecutor();
-    const first = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const first = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
     expect(first.executed).toBe(true);
     // A second worker pass finds nothing approved - the item is terminal.
-    const second = await runWorkerOnce({ dbPath, workerId: "dc-worker", machineExecutor: executor });
+    const second = await runWorkerOnce({ routing: "legacy", dbPath, workerId: "dc-worker", machineExecutor: executor });
     expect(second).toEqual({ executed: false, reason: "no approved work item" });
     expect(executor.calls).toHaveLength(1);
   });

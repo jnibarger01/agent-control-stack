@@ -6,5 +6,10 @@
     "tsBuildInfoFile": "dist/.tsbuildinfo"
   },
   "include": ["src/**/*.ts"],
-  "references": [{ "path": "../decision-engine" }]
+  "references": [
+    { "path": "../decision-engine" },
+    { "path": "../policy-gate" },
+    { "path": "../shared" },
+    { "path": "../work-items" }
+  ]
 }

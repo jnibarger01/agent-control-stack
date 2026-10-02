@@ -112,7 +112,7 @@ describe("canonical worker learning loop", () => {
     });
     expect(scheduledA.firings[0]?.created).toBe(true);
 
-    const firstWorker = await runWorkerOnce({
+    const firstWorker = await runWorkerOnce({ routing: "legacy",
       dbPath,
       workerId: "worker-a",
       execute: usingExecute,
