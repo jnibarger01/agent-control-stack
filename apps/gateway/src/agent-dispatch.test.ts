@@ -7,9 +7,9 @@ import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import type { AgentDispatchConfig } from "./agent-runs.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
-const OP = ["operator", "token", "0123456789abcdef0123456789abcdef"].join("-");
-const READER = ["reader", "token", "0123456789abcdef0123456789abcdef"].join("-");
-const AGENT = ["agent", "token", "0123456789abcdef0123456789abcdef"].join("-");
+const OP = "operator-credential".padEnd(40, "_");
+const READER = "reader-credential".padEnd(40, "_");
+const AGENT = "agent-credential".padEnd(40, "_");
 const bearer = (token: string) => ({ authorization: `Bearer ${token}` });
 
 const credentials: GatewayCredential[] = [
