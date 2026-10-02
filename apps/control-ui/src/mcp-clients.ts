@@ -229,6 +229,8 @@ async function clearMcpClient(clientId) {
 document.addEventListener('click', function (event) {
   const target = event.target && event.target.closest ? event.target : null;
   if (!target) return;
+  // A bare #connectors link only changes the hash; go through the dashboard's own navigation so the panel shows.
+  if (target.closest('#mcp-client-alert')) { event.preventDefault(); showView('connectors'); history.pushState(null, '', '#connectors'); return; }
   const label = target.closest('[data-mcp-label],[data-mcp-edit]');
   if (label) { void labelMcpClient(label.dataset.mcpLabel || label.dataset.mcpEdit); return; }
   const clear = target.closest('[data-mcp-clear]');

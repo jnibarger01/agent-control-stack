@@ -29,9 +29,11 @@ Make callers visible and nameable, and add one optional fail-closed control. Not
 3. **Audit.** `connector.requested` now carries `mcpClientId`, `mcpLane` and the claims. Connects are
    `mcp_client.seen`; operator labels are `mcp_client.labelled` and `mcp_client.label_cleared`. No migration.
 4. **A bounded read model.** The gateway rebuilds an in-memory index from those events at startup and updates
-   it from the live event stream. It tracks at most 500 clients (least recently seen unlabelled first to go) and
-   dedupes connect events to one per 30 s per client, subject and method.
-5. **Labels are human-only and attribution-only.** Only a human operator (`actor: user`, `operator` role,
+   it from the live event stream. It tracks at most 500 unlabelled clients (least recently seen first to go) plus at
+   most 500 labelled ones (labels are authoritative for the gate, so they are never evicted and are capped at label
+   time; labels and clears are read completely at startup, never through the activity window), and dedupes connect events to one per 30 s per client, subject and method.
+5. **Labels are human-only and attribution-only.** Operator labels keep Unicode (control and invisible characters are stripped); self-declared claims are
+   printable ASCII. Only a human operator (`actor: user`, `operator` role,
    `acs:approve`) can label or clear. Only a client ACS has actually seen can be labelled, so a label cannot
    pre-authorize an invented id. A label never approves, issues or widens anything.
 6. **Optional enforcement, off by default.** `ACS_MCP_CLIENT_POLICY=require_label` makes both issuance routes

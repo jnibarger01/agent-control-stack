@@ -306,4 +306,13 @@ describe("MCP clients panel", () => {
     expect(loads()).toBeGreaterThan(before);
     expect(ctx.rows()).toHaveLength(1);
   });
+
+  it("takes the operator to the Connectors page when the global alert is clicked from another page", async () => {
+    const ctx = boot(payload([client()]));
+    await ctx.settle();
+    (ctx.document.querySelector('nav a[data-nav="queue"]') as HTMLElement).click();
+    expect(ctx.document.body.dataset.activeView).toBe("queue");
+    (ctx.document.getElementById("mcp-client-alert") as HTMLElement).click();
+    expect(ctx.document.body.dataset.activeView).toBe("connectors");
+  });
 });

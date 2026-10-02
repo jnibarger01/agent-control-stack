@@ -9,8 +9,10 @@ import {
 import { SqliteWorkItemStore, type StoredAuditEvent } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  MAX_LABELLED_CLIENTS,
   MAX_TRACKED_CLIENTS,
   canonicalClientId,
+  sanitizeText,
   McpClientService,
   parseMcpClientPolicy,
   sanitizeClaim,
@@ -414,6 +416,21 @@ describe("MCP client visibility", () => {
     expect((await issue(app, "client-queued")).statusCode).toBe(200);
   });
 
+  it("accepts Unicode labels and notes through the API without mangling them", async () => {
+    setup();
+    const app = gateway();
+    await issue(app, "client-uni");
+    const res = await app.inject({
+      method: "POST",
+      url: "/api/mcp-clients/label",
+      headers: bearer(OP),
+      payload: { clientId: "client-uni", kind: "muse", label: "ミューズ", note: "Müsë – 個人アカウント" }
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.json().client).toMatchObject({ label: "ミューズ", note: "Müsë – 個人アカウント" });
+    expect((await clients(app)).clients[0]).toMatchObject({ label: "ミューズ" });
+  });
+
   it("observe mode never blocks an unlabelled client", async () => {
     setup();
     const app = gateway("observe");
@@ -533,10 +550,100 @@ describe("McpClientService", () => {
       );
     }
     const list = svc.list();
-    expect(list.length).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
+    expect(list.filter((c) => c.status === "unrecognized").length).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
     expect(list.some((c) => c.clientId === "keep-me")).toBe(true);
     expect(list.some((c) => c.clientId === "c0")).toBe(false);
     expect(list.some((c) => c.clientId === `c${MAX_TRACKED_CLIENTS + 49}`)).toBe(true);
+  });
+
+  it("reads labels and clears completely, so a clear outside the activity window still cancels its label", () => {
+    const events: StoredAuditEvent[] = [
+      event(1, "mcp_client.labelled", { clientId: "c2", kind: "other", label: "Two", actorId: "u" }),
+      event(2, "mcp_client.labelled", { clientId: "c3", kind: "other", label: "Three", actorId: "u" }),
+      event(3, "mcp_client.labelled", { clientId: "c4", kind: "other", label: "Four", actorId: "u" }),
+      event(4, "mcp_client.labelled", { clientId: "c1", kind: "muse", label: "Muse", actorId: "u" }),
+      event(5, "mcp_client.label_cleared", { clientId: "c1", actorId: "u" }),
+      event(6, "mcp_client.label_cleared", { clientId: "c2", actorId: "u" }),
+      event(7, "mcp_client.label_cleared", { clientId: "c3", actorId: "u" }),
+      event(8, "mcp_client.label_cleared", { clientId: "c4", actorId: "u" })
+    ];
+    const store = {
+      recordSystemEvent: () => undefined as never,
+      readEvents: (o: { name?: string; limit?: number; beforeSequence?: number }) =>
+        events
+          .filter(
+            (e) => (!o.name || e.name === o.name) && (o.beforeSequence === undefined || e.sequence < o.beforeSequence)
+          )
+          .slice(-(o.limit ?? 100))
+    };
+    const svc = new McpClientService(store as never);
+    // A tiny window (2 events, 1 page) would keep c1's label but drop its clear if labels were windowed.
+    svc.hydrate(2, 1);
+    expect(svc.list().some((c) => c.status === "labelled")).toBe(false);
+    expect(svc.gate("c1").ok).toBe(true); // observe mode; the point is the index says unlabelled
+    expect(svc.isLabelled("c1")).toBe(false);
+  });
+
+  it("keeps human labels and notes as Unicode but strips control and invisible characters", () => {
+    expect(sanitizeText("ミューズ", 64)).toBe("ミューズ");
+    expect(sanitizeText("Müsë (Jacen)", 64)).toBe("Müsë (Jacen)");
+    expect(sanitizeText("  a\u0000b\u202eevil\u200b  ", 64)).toBe("abevil");
+    expect(sanitizeText("🙂".repeat(100), 64)!.length).toBe(128); // 64 code points, 2 UTF-16 units each
+    expect(Array.from(sanitizeText("🙂".repeat(100), 64)!)).toHaveLength(64);
+    expect(sanitizeText("\u0000\u200b", 64)).toBeUndefined();
+    expect(sanitizeText(7, 64)).toBeUndefined();
+  });
+
+  it("bounds labelled clients with a hard limit instead of growing without bound", () => {
+    let seq = 0;
+    // The store feeds its own writes back, like the gateway's event hook does.
+    const svc: McpClientService = new McpClientService({
+      recordSystemEvent: (input: { name: string; body?: Record<string, unknown> }) => {
+        const e = event(1_000 + ++seq, input.name, input.body ?? {});
+        svc.ingest(e);
+        return e;
+      },
+      readEvents: () => []
+    } as never);
+    for (let i = 0; i < MAX_LABELLED_CLIENTS + 5; i += 1) {
+      svc.ingest(
+        event(
+          i + 1,
+          "connector.requested",
+          { source: "jc-capability-issued", mcpClientId: `c${i}`, authSubject: "s" },
+          1_000 + i
+        )
+      );
+    }
+    // 505 unlabelled rows were seen; only the most recent MAX_TRACKED_CLIENTS survive.
+    expect(svc.list().length).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
+    const survivors = svc.list().map((c) => c.clientId);
+    for (const id of survivors.slice(0, MAX_LABELLED_CLIENTS)) {
+      svc.label({ clientId: id, kind: "other", label: id, actorId: "u" });
+    }
+    expect(svc.summary().labelled).toBe(Math.min(survivors.length, MAX_LABELLED_CLIENTS));
+    // Labelled clients are never evicted, no matter how much newer unlabelled traffic arrives.
+    for (let i = 0; i < MAX_TRACKED_CLIENTS + 100; i += 1) {
+      svc.ingest(
+        event(
+          100_000 + i,
+          "connector.requested",
+          { source: "jc-capability-issued", mcpClientId: `n${i}`, authSubject: "s" },
+          9_000_000 + i
+        )
+      );
+    }
+    expect(svc.summary().labelled).toBe(Math.min(survivors.length, MAX_LABELLED_CLIENTS));
+    expect(svc.list().filter((c) => c.status === "unrecognized").length).toBeLessThanOrEqual(MAX_TRACKED_CLIENTS);
+    // Once the label limit is reached a new label is refused, but an existing one can still be edited.
+    const labelled = svc.list().filter((c) => c.status === "labelled");
+    if (labelled.length >= MAX_LABELLED_CLIENTS) {
+      const fresh = svc.list().find((c) => c.status === "unrecognized")!;
+      expect(() => svc.label({ clientId: fresh.clientId, kind: "other", label: "x", actorId: "u" })).toThrow(/at most/);
+      expect(() =>
+        svc.label({ clientId: labelled[0]!.clientId, kind: "other", label: "renamed", actorId: "u" })
+      ).not.toThrow();
+    }
   });
 
   it("canonicalizes only ids the audit redactor would alter", () => {

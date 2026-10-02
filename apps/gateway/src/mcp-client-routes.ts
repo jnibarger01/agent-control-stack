@@ -22,7 +22,7 @@ export function registerMcpClientRoutes(deps: McpClientRouteDeps): void {
   const fail = (reply: FastifyReply, error: unknown) => {
     if (error instanceof McpClientError) {
       return reply
-        .code(error.code === "mcp_client_not_found" ? 404 : 400)
+        .code(error.code === "mcp_client_not_found" ? 404 : error.code === "mcp_client_limit" ? 409 : 400)
         .send({ error: error.message, code: error.code });
     }
     return deps.sendError(reply, error);

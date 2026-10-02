@@ -27,7 +27,10 @@ export const MCP_CLIENT_EVENTS = {
 
 /** A client counts as live if it was seen this recently. */
 export const MCP_CLIENT_LIVE_WINDOW_MS = 5 * 60_000;
+/** Unlabelled clients kept in memory; the least recently seen are dropped first. */
 export const MAX_TRACKED_CLIENTS = 500;
+/** Labels an operator can hold. Labelled clients are never evicted, so this is what bounds them. */
+export const MAX_LABELLED_CLIENTS = 500;
 const SEEN_DEDUPE_MS = 30_000;
 const MAX_CLAIMS = 5;
 const MAX_SUBJECTS = 20;
@@ -103,6 +106,20 @@ export function sanitizeClaim(value: unknown, max = 128): string | undefined {
   return cleaned.length > 0 ? cleaned : undefined;
 }
 
+/**
+ * Human-entered text (labels, notes): keep Unicode, drop control and invisible formatting characters (which
+ * could hide or reorder text), trim, and bound by code points so a surrogate pair is never split.
+ */
+export function sanitizeText(value: unknown, max: number): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const cleaned = value
+    .normalize("NFC")
+    .replace(/[\p{Cc}\p{Cf}]/gu, "")
+    .trim();
+  const bounded = Array.from(cleaned).slice(0, max).join("").trim();
+  return bounded.length > 0 ? bounded : undefined;
+}
+
 const CLIENT_ID_PATTERN = /^[\x21-\x7e]{1,256}$/u;
 export function isValidClientId(value: unknown): value is string {
   return typeof value === "string" && CLIENT_ID_PATTERN.test(value);
@@ -175,6 +192,10 @@ export class McpClientService {
     // Collect every relevant event, then replay them in one global sequence order. Replaying each type as its
     // own batch would apply all labels before all clears and resurrect a cleared (or clear a re-applied) label.
     const all: StoredAuditEvent[] = [];
+    // Labels and clears are the authoritative state the gate depends on, are written only by deliberate operator
+    // actions, and are read completely. Reading them through the same window as the high-volume activity events
+    // could drop a clear while keeping the label it cancels, which would admit a client whose label was removed.
+    const complete = new Set<string>([MCP_CLIENT_EVENTS.labelled, MCP_CLIENT_EVENTS.labelCleared]);
     for (const name of [
       MCP_CLIENT_EVENTS.labelled,
       MCP_CLIENT_EVENTS.labelCleared,
@@ -182,7 +203,7 @@ export class McpClientService {
       "connector.requested"
     ]) {
       let before: number | undefined;
-      for (let page = 0; page < maxPages; page += 1) {
+      for (let page = 0; complete.has(name) || page < maxPages; page += 1) {
         const events = this.store.readEvents({
           name,
           limit: pageSize,
@@ -299,7 +320,7 @@ export class McpClientService {
     } else if (event.name === MCP_CLIENT_EVENTS.labelled) {
       const clientId = body.clientId;
       const kind = MCP_CLIENT_KINDS.find((k) => k === body.kind);
-      const label = sanitizeClaim(body.label, 64);
+      const label = sanitizeText(body.label, 64);
       if (!isValidClientId(clientId) || !kind || !label) return;
       const state = this.state(clientId, ms);
       state.label = {
@@ -307,7 +328,7 @@ export class McpClientService {
         kind,
         at: iso(ms),
         by: sanitizeClaim(body.actorId, 128) ?? "unknown",
-        ...(sanitizeClaim(body.note, 200) ? { note: sanitizeClaim(body.note, 200)! } : {})
+        ...(sanitizeText(body.note, 200) ? { note: sanitizeText(body.note, 200)! } : {})
       };
     } else if (event.name === MCP_CLIENT_EVENTS.labelCleared) {
       const clientId = body.clientId;
@@ -318,14 +339,22 @@ export class McpClientService {
     if (!bulk) this.enforceCap();
   }
 
-  /** Bound memory: drop the least recently seen unlabelled clients first. Labelled clients are kept. */
+  /**
+   * Bound memory: keep at most MAX_TRACKED_CLIENTS unlabelled clients, dropping the least recently seen first.
+   * Labelled clients are authoritative (the gate depends on them) and are bounded instead by MAX_LABELLED_CLIENTS.
+   */
   private enforceCap(): void {
-    if (this.clients.size <= MAX_TRACKED_CLIENTS) return;
-    const evictable = [...this.clients.values()].filter((c) => !c.label).sort((a, b) => a.lastSeenMs - b.lastSeenMs);
-    for (const state of evictable) {
-      if (this.clients.size <= MAX_TRACKED_CLIENTS) break;
+    const unlabelled = [...this.clients.values()].filter((c) => !c.label);
+    if (unlabelled.length <= MAX_TRACKED_CLIENTS) return;
+    unlabelled.sort((a, b) => a.lastSeenMs - b.lastSeenMs);
+    for (const state of unlabelled.slice(0, unlabelled.length - MAX_TRACKED_CLIENTS))
       this.clients.delete(state.clientId);
-    }
+  }
+
+  private labelledCount(): number {
+    let count = 0;
+    for (const state of this.clients.values()) if (state.label) count += 1;
+    return count;
   }
 
   list(): McpClientView[] {
@@ -436,14 +465,20 @@ export class McpClientService {
     actorId: string;
   }): McpClientView {
     if (!isValidClientId(input.clientId)) throw new McpClientError("mcp_client_invalid", "client id is not valid");
-    const label = sanitizeClaim(input.label, 64);
+    const label = sanitizeText(input.label, 64);
     if (!label) throw new McpClientError("mcp_client_invalid", "a label is required");
     if (!MCP_CLIENT_KINDS.includes(input.kind)) throw new McpClientError("mcp_client_invalid", "unknown client kind");
     if (!this.clients.has(input.clientId)) {
       // Only clients ACS has actually seen can be labelled: a label cannot pre-authorize an invented id.
       throw new McpClientError("mcp_client_not_found", "this client has not connected to ACS");
     }
-    const note = sanitizeClaim(input.note, 200);
+    if (!this.isLabelled(input.clientId) && this.labelledCount() >= MAX_LABELLED_CLIENTS) {
+      throw new McpClientError(
+        "mcp_client_limit",
+        `at most ${MAX_LABELLED_CLIENTS} clients can be labelled; clear an unused label first`
+      );
+    }
+    const note = sanitizeText(input.note, 200);
     this.store.recordSystemEvent({
       name: MCP_CLIENT_EVENTS.labelled,
       body: { clientId: input.clientId, kind: input.kind, label, ...(note ? { note } : {}), actorId: input.actorId },
@@ -465,7 +500,7 @@ export class McpClientService {
 
 export class McpClientError extends Error {
   constructor(
-    readonly code: "mcp_client_invalid" | "mcp_client_not_found",
+    readonly code: "mcp_client_invalid" | "mcp_client_not_found" | "mcp_client_limit",
     message: string
   ) {
     super(message);
