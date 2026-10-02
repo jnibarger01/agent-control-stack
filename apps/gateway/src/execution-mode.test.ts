@@ -166,6 +166,7 @@ describe("canonical execution mode", () => {
       });
       const page = await ctx.app.inject({ method: "GET", url: "/", headers: AUTH });
       expect(page.body).toContain("Execution Mode");
+<<<<<<< Updated upstream
       expect(page.body).toContain("Admin / YOLO");
       // Strict: the admin banner is rendered hidden and empty (the live
       // dashboard toggles it in place instead of hard-reloading).
@@ -238,6 +239,10 @@ describe("canonical execution mode", () => {
         payload: { mode: "strict", reason: "rate-limit coverage" }
       });
       expect(mutationSecond.statusCode).toBe(429);
+=======
+      expect(page.body).toContain("Admin — automatic approval");
+      expect(page.body).toMatch(/id="admin-mode-banner"[^>]* hidden/);
+>>>>>>> Stashed changes
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });

@@ -24,7 +24,15 @@ const rawConfigSchema = z.object({
     .optional(),
   paths: z.object({
     allow: z.array(z.string().min(1)).min(1),
-    deny: z.array(z.string().min(1)).default([])
+    deny: z.array(z.string().min(1)).default([]),
+    /**
+     * Root that holds ACS-managed project checkouts. Project-scoped process
+     * forms (git -C <project>, npm --prefix <project>, ...) are only recognized
+     * when a cwd/path falls inside this root. Absent means no project-scoped
+     * classification: those forms stay forbidden rather than being assumed
+     * allowed for any host.
+     */
+    projects_root: z.string().min(1).optional()
   }),
   commands: z
     .object({
@@ -38,7 +46,10 @@ const rawConfigSchema = z.object({
       z
         .object({
           id: z.string().regex(/^[A-Za-z0-9._-]+$/),
-          command: z.string().min(1).refine((value) => !value.includes("/"), "agent command must be a PATH command"),
+          command: z
+            .string()
+            .min(1)
+            .refine((value) => !value.includes("/"), "agent command must be a PATH command"),
           args: z.array(z.string()).default([]),
           permission_mode: z.literal("read-only").default("read-only")
         })
@@ -69,6 +80,7 @@ export interface MachineControllerConfig {
   paths: {
     allow: string[];
     deny: string[];
+    projectsRoot?: string;
   };
   commands: {
     allowReadonly: string[];
@@ -137,7 +149,8 @@ function normalizeConfig(raw: RawConfig, baseDir: string): MachineControllerConf
     },
     paths: {
       allow: raw.paths.allow.map((entry) => realExistingPath(entry, baseDir)),
-      deny: raw.paths.deny.map((entry) => absolutePath(entry, baseDir))
+      deny: raw.paths.deny.map((entry) => absolutePath(entry, baseDir)),
+      ...(raw.paths.projects_root ? { projectsRoot: realExistingPath(raw.paths.projects_root, baseDir) } : {})
     },
     commands: {
       allowReadonly: commands.allow_readonly,

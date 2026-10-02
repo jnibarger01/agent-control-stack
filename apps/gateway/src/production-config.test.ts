@@ -167,6 +167,37 @@ describe("production config fail-fast validator", () => {
     }
   });
 
+  it("accepts only the supported Visualizer loopback origin in strict config", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-prod-config-viz-"));
+    try {
+      expect(() =>
+        validateProductionConfig({
+          NODE_ENV: "production",
+          HOST: "127.0.0.1",
+          ACS_DB_PATH: join(dir, "control.db"),
+          ACS_GATEWAY_CREDENTIALS_JSON: VALID_CREDENTIALS,
+          ACS_VISUALIZER_URL: "http://127.0.0.1:4317"
+        })
+      ).not.toThrow();
+
+      try {
+        validateProductionConfig({
+          NODE_ENV: "production",
+          HOST: "127.0.0.1",
+          ACS_DB_PATH: join(dir, "control.db"),
+          ACS_GATEWAY_CREDENTIALS_JSON: VALID_CREDENTIALS,
+          ACS_VISUALIZER_URL: "http://100.73.187.107:4317"
+        });
+        expect.unreachable("expected ProductionConfigError");
+      } catch (error) {
+        expect(error).toBeInstanceOf(ProductionConfigError);
+        expect((error as ProductionConfigError).issues.some((issue) => issue.key === "ACS_VISUALIZER_URL")).toBe(true);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("rejects an unwritable database directory", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-prod-config-ro-"));
     try {
