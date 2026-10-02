@@ -36,20 +36,14 @@ type AxeViolation = {
 };
 
 async function runAxe(html: string): Promise<AxeViolation[]> {
-  const dom = new JSDOM(html, {
+  // Axe scores static landmarks and controls. Strip the dashboard client before
+  // parse so a large inline script cannot consume the test budget.
+  const markup = html.replace(/<script[\s\S]*?<\/script>/giu, "");
+  const dom = new JSDOM(markup, {
     runScripts: "dangerously",
-    pretendToBeVisual: true,
-    beforeParse(window) {
-      // Dashboard client expects EventSource; stub so inline scripts do not throw in jsdom.
-      (window as unknown as { EventSource: unknown }).EventSource = class {
-        addEventListener() {}
-        close() {}
-      };
-    }
+    pretendToBeVisual: true
   });
   const { window } = dom;
-  // Drop app client script before axe; we only need static markup landmarks/controls.
-  window.document.querySelectorAll("script").forEach((node) => node.remove());
   const script = window.document.createElement("script");
   script.textContent = axeSource;
   window.document.head.appendChild(script);
