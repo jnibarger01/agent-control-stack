@@ -1,9 +1,10 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NIMBLE_ROUTING_ALGORITHM_VERSION } from "@agent-control-stack/actor-router";
 import type { RegistryAgentDetail } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
+import { codingMissionPortsFromEnv } from "./default-runtime.js";
 import {
   CodingMissionController,
   CodingMissionStore,
@@ -574,6 +575,72 @@ describe("coding mission controller", () => {
     const done = await resumed.runUntilStable("mission-merge");
     expect(done.state).toBe("COMPLETED");
     expect(state.calls.merge).toBe(1);
+    mission.close();
+    resumed.close();
+  });
+
+  it("observes a merge GitHub accepted after the response was lost", async () => {
+    root = mkdtempSync(join(tmpdir(), "acs-coding-"));
+    mkdirSync(join(root, "acme", "app"), { recursive: true });
+    let githubAccepted = false;
+    const puts: string[] = [];
+    const fetchImpl = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      if (method === "GET" && url.endsWith("/pulls/123")) {
+        return Response.json(
+          githubAccepted
+            ? { merged: true, merge_commit_sha: MERGE, head: { sha: HEAD } }
+            : { merged: false, head: { sha: HEAD } }
+        );
+      }
+      if (method === "PUT" && url.endsWith("/merge")) {
+        const body = JSON.parse(String(init?.body)) as { sha?: string; merge_method?: string };
+        expect(body).toEqual({ sha: HEAD, merge_method: "merge" });
+        puts.push(url);
+        githubAccepted = true;
+        throw new Error("socket hang up before the merge response");
+      }
+      return Response.json({ message: "unexpected" }, { status: 500 });
+    }) as typeof fetch;
+    const runtime = codingMissionPortsFromEnv(
+      {
+        ACS_GITHUB_TOKEN: "test-token",
+        ACS_CODING_CHECKOUT_ROOT: root,
+        ACS_GITHUB_API: "https://github.test"
+      },
+      { dbPath: join(root, "control.db"), fetchImpl }
+    );
+    expect(runtime?.merger).toBeDefined();
+    const state = script(root, { operations: [{ operationId: "edit-api", dependsOn: [], title: "edit" }] });
+    state.ports.merger = runtime!.merger;
+    const mission = controller(state);
+    mission.create({
+      missionId: "mission-lost",
+      repository: "acme/app",
+      baseRef: "main",
+      baseSha: BASE,
+      summary: "Lost response"
+    });
+    const waiting = await mission.runUntilStable("mission-lost");
+    const unknown = await mission.approve("mission-lost", {
+      approverId: "human",
+      expectedChangeSetHash: waiting.changeSetHash!
+    });
+    expect(unknown.code).toBe("unknown_merge");
+    expect(unknown.state).toBe("EXECUTING");
+    expect(puts).toHaveLength(1);
+    expect(state.calls.deploy).toBe(0);
+    expect(mission.store.require("mission-lost").mergeSha).toBeUndefined();
+    expect(mission.store.effect("mission-lost", "merge")).toEqual({ kind: "merge", outcome: "unknown" });
+
+    const resumed = controller(state);
+    const done = await resumed.runUntilStable("mission-lost");
+    expect(done.state).toBe("COMPLETED");
+    expect(puts).toHaveLength(1);
+    expect(resumed.store.require("mission-lost").mergeSha).toBe(MERGE);
+    expect(resumed.store.effect("mission-lost", "merge")?.outcome).toBe("succeeded");
+    expect(state.calls.deploy).toBe(1);
     mission.close();
     resumed.close();
   });
