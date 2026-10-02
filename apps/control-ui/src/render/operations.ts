@@ -9,63 +9,7 @@ import { executionModeChip } from "../execution-mode.js";
 import { eventTimeline, toCount } from "./panels.js";
 
 const safe = (value: unknown) => escapeHtml(redactSecrets(String(value ?? "—")));
-export const PAGE_META: Record<string, { title: string; description: string; icon: string }> = {
-  overview: {
-    title: "Mission Control",
-    description: "Coordinate work, agents, and outcomes across the control plane.",
-    icon: "⌂"
-  },
-  queue: {
-    title: "Work Queue",
-    description: "Inspect work, admission, policy, and the next action that needs your attention.",
-    icon: "▤"
-  },
-  execution: {
-    title: "Execution",
-    description: "Monitor live attempts, queues, failures, and throughput across the control plane.",
-    icon: "▷"
-  },
-  approvals: {
-    title: "Approvals",
-    description: "Review policy-bound requests and record an explicit operator decision.",
-    icon: "◇"
-  },
-  agents: {
-    title: "Agents",
-    description: "Registry identities, capability coverage, assignments, and observed health.",
-    icon: "♧"
-  },
-  executors: {
-    title: "Executors",
-    description: "Inspect managed bridges, attested runtimes, and execution capabilities.",
-    icon: "⬡"
-  },
-  connectors: {
-    title: "Connectors",
-    description: "Registered integrations, granted scopes, and authenticated tunnel sessions.",
-    icon: "⌘"
-  },
-  metrics: {
-    title: "Metrics",
-    description: "Persisted execution telemetry and observed control-plane counters.",
-    icon: "▥"
-  },
-  audit: {
-    title: "Audit",
-    description: "Investigate immutable events, actors, resources, and correlated decisions.",
-    icon: "▦"
-  },
-  policy: {
-    title: "Policy",
-    description: "Understand evaluations, matched rules, and fail-closed decisions.",
-    icon: "⛨"
-  },
-  system: {
-    title: "System",
-    description: "Readiness checks, execution admission, and connected infrastructure.",
-    icon: "⚙"
-  }
-};
+export { PAGE_META } from "./page-meta.js";
 
 export function metricCard(label: string, value: string | number, note: string, tone = "blue"): string {
   return `<div class="metric-card ${safe(tone)}"><span class="metric-icon" aria-hidden="true">${icon(tone === "green" ? "check" : tone === "red" ? "alert" : tone === "amber" ? "clock" : "trend")}</span><div><strong>${safe(value)}</strong><span>${safe(label)}</span><small>${safe(note)}</small></div></div>`;

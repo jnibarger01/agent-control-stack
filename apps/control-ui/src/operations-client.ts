@@ -1,4 +1,6 @@
-import { PAGE_META } from "./render/operations.js";
+// Page metadata only: importing it from the server renderer would pull the whole
+// renderer, redaction helpers and work-item projections into the client bundle.
+import { PAGE_META } from "./render/page-meta.js";
 
 /** Interaction layer reuses the dashboard's authenticated fetch/actions and refresh scheduler. */
 export function operationsClientSource(): string {

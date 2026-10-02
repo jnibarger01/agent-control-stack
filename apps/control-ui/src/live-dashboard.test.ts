@@ -49,6 +49,19 @@ describe("dashboard fragments", () => {
 });
 
 describe("live dashboard client (#6, #7, #8, #9)", () => {
+  it("does not pull server-only renderer code into the client graph (#21)", () => {
+    const html = renderDashboard({ workItems: [item("wrk_a")], events: [], now: NOW });
+    const match = /const pageMeta = (\{.*?\});/u.exec(html);
+    expect(match).not.toBeNull();
+    const pageMeta = JSON.parse(match![1]!) as Record<string, Record<string, unknown>>;
+
+    // Only the titles and descriptions the browser reads are shipped.
+    for (const meta of Object.values(pageMeta)) {
+      expect(Object.keys(meta).sort()).toEqual(["description", "title"]);
+    }
+    expect(html).not.toContain('"icon"');
+  });
+
   it("contains no hard-reload paths in the client script (#7)", () => {
     const html = renderDashboard({ workItems: [item("wrk_a")], events: [], now: NOW });
     expect(html).not.toContain("location.assign");
@@ -704,7 +717,7 @@ describe("command palette closes deterministically (#23)", () => {
   });
 
   it("closes on Escape and returns focus only when focus was inside the panel", async () => {
-    const { app, results, search, type, click } = boot();
+    const { app, results, search, type } = boot();
     await type("wrk");
     const panelButton = app.document.querySelector("#command-results [data-inspect-work]") as HTMLElement;
     panelButton.focus();
@@ -728,7 +741,7 @@ describe("command palette closes deterministically (#23)", () => {
   });
 
   it("closes when the query is cleared", async () => {
-    const { results, search, type } = boot();
+    const { results, type } = boot();
     await type("wrk");
     expect(results().hidden).toBe(false);
     await type("");
