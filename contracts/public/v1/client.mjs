@@ -220,6 +220,38 @@ const operations = {
     "method": "POST",
     "path": "/api/agents"
   },
+  "listAgentClis": {
+    "method": "GET",
+    "path": "/api/agent-clis"
+  },
+  "syncAgentClis": {
+    "method": "POST",
+    "path": "/api/agent-clis/sync"
+  },
+  "testAgentCli": {
+    "method": "POST",
+    "path": "/api/agent-clis/{id}/test"
+  },
+  "previewAgentRun": {
+    "method": "POST",
+    "path": "/api/agent-runs/preview"
+  },
+  "dispatchAgentRun": {
+    "method": "POST",
+    "path": "/api/agent-runs"
+  },
+  "listAgentRuns": {
+    "method": "GET",
+    "path": "/api/agent-runs"
+  },
+  "getAgentRun": {
+    "method": "GET",
+    "path": "/api/agent-runs/{id}"
+  },
+  "cancelAgentRun": {
+    "method": "POST",
+    "path": "/api/agent-runs/{id}/cancel"
+  },
   "getAgent": {
     "method": "GET",
     "path": "/api/agents/{id}"

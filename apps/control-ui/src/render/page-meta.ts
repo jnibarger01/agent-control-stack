@@ -28,6 +28,10 @@ export const PAGE_META: Record<string, { title: string; description: string }> =
     title: "Agents",
     description: "Registry identities, capability coverage, assignments, and observed health."
   },
+  dispatch: {
+    title: "Dispatch",
+    description: "Run your installed CLI coding agents in a fresh git worktree, with explicit confirmation."
+  },
   executors: {
     title: "Executors",
     description: "Inspect managed bridges, attested runtimes, and execution capabilities."

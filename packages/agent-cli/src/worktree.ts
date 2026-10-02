@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdirSync, realpathSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
@@ -32,6 +32,35 @@ export function allowedRepoRoots(env: NodeJS.ProcessEnv = process.env): string[]
         return resolve(entry);
       }
     });
+}
+
+/**
+ * Git repositories a run could start in: each allowed root that is itself a repository, plus its
+ * immediate children that are. Suggestions only; `resolveRepoRoot` still decides what is allowed.
+ */
+export function discoverRepos(roots: readonly string[], limit = 100): string[] {
+  const found: string[] = [];
+  const isRepo = (path: string) => existsSync(join(path, ".git"));
+  for (const root of roots) {
+    if (isRepo(root)) found.push(root);
+    let entries: string[];
+    try {
+      entries = readdirSync(root);
+    } catch {
+      continue;
+    }
+    for (const name of entries.sort()) {
+      if (name.startsWith(".") || name === "node_modules") continue;
+      const child = join(root, name);
+      try {
+        if (statSync(child).isDirectory() && isRepo(child)) found.push(realpathSync(child));
+      } catch {
+        /* unreadable entry */
+      }
+      if (found.length >= limit) return found;
+    }
+  }
+  return [...new Set(found)].slice(0, limit);
 }
 
 function gitRaw(cwd: string, args: string[]): Promise<string> {

@@ -2,11 +2,11 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from "fastify";
-import { z } from "zod";
 import {
   AGENT_CLI_CATALOG,
   agentCliSpec,
   createDispatchWorktree,
+  discoverRepos,
   planAgentCommand,
   redactLines,
   runAgent,
@@ -15,19 +15,10 @@ import {
 import { ControlStackError } from "@agent-control-stack/shared";
 import type { StoredAuditEvent, WorkItemStore } from "@agent-control-stack/work-items";
 import { AgentRunService } from "./agent-runs.js";
+import { agentRunBodySchema, agentRunConfirmedBodySchema } from "./public-contracts.js";
 
-const dispatchBodySchema = z
-  .object({
-    agentId: z.string().min(1).max(64),
-    prompt: z.string().min(1).max(32_000),
-    repo: z.string().min(1).max(4_096),
-    mode: z.enum(["edit", "read-only"]),
-    timeoutSec: z.number().int().min(10).max(3_600).optional()
-  })
-  .strict();
-const confirmedDispatchBodySchema = dispatchBodySchema
-  .extend({ confirmationHash: z.string().regex(/^[a-f0-9]{64}$/u) })
-  .strict();
+const dispatchBodySchema = agentRunBodySchema;
+const confirmedDispatchBodySchema = agentRunConfirmedBodySchema;
 
 export const AGENT_CLI_REGISTRY_PREFIX = "cli-";
 export const AGENT_CLI_TEST_EVENT = "agent_cli.tested";
@@ -129,6 +120,7 @@ export function registerAgentRoutes(deps: AgentRouteDeps): void {
         dispatch: {
           enabled: service.config.enabled,
           repoRoots: service.config.repoRoots,
+          repos: service.config.enabled ? discoverRepos(service.config.repoRoots) : [],
           maxConcurrent: service.config.maxConcurrent,
           active: service.activeCount()
         },

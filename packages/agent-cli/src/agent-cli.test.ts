@@ -8,6 +8,7 @@ import {
   AGENT_CLI_IDS,
   agentEnv,
   createDispatchWorktree,
+  discoverRepos,
   inspectWorktree,
   parseVersion,
   planAgentCommand,
@@ -249,6 +250,17 @@ describe("worktrees", () => {
     await expect(resolveRepoRoot(join(dir, "nope"), [dir])).rejects.toThrow(/does not exist/);
     mkdirSync(join(dir, "plain"));
     await expect(resolveRepoRoot(join(dir, "plain"), [dir])).rejects.toThrow(/not a git repository/);
+  });
+
+  it("suggests repositories under the allowed roots without following hidden or dependency folders", () => {
+    const root = repo();
+    mkdirSync(join(dir, "projects", "alpha", ".git"), { recursive: true });
+    mkdirSync(join(dir, "projects", ".hidden", ".git"), { recursive: true });
+    mkdirSync(join(dir, "projects", "node_modules", ".git"), { recursive: true });
+    mkdirSync(join(dir, "projects", "plain"), { recursive: true });
+    expect(discoverRepos([join(dir, "projects")]).map((p) => p.split("/").pop())).toEqual(["alpha"]);
+    expect(discoverRepos([dir])).toContain(root);
+    expect(discoverRepos([join(dir, "missing")])).toEqual([]);
   });
 
   it("gives each run its own branch and reports what the agent changed", async () => {
