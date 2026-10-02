@@ -66,8 +66,12 @@ Run the normal repository build first. The standalone verification script uses a
 
 ```bash
 npm run build
-ACS_UI_EVIDENCE_DIR=/absolute/output/directory node scripts/verify-mission-control.mjs
+npm run test:mission-control-e2e:check                       # always run; no browser needed
+ACS_UI_EVIDENCE_DIR=/absolute/output/directory \
+  ACS_UI_E2E=1 npm run test:mission-control-e2e              # execute the harness itself
 ```
+
+`test:mission-control-e2e:check` runs as part of `npm run check`. Because the harness needs Playwright and Chromium, that gate enforces everything that does not require a browser: that the harness is reachable from a named npm script, that its environment contract is still declared, that the gateway is still shut down exactly once, and that the responsive, stale-state, authentication and accessibility checks are still present. Set `ACS_UI_E2E=1` with `ACS_UI_EVIDENCE_DIR` to execute the harness itself; without that flag the gate reports that it was skipped rather than silently passing. This is the same optional-dependency pattern as `ACS_SANDBOX_INTEGRATION` for the sandbox suite.
 
 The script expects Playwright and its Chromium browser. In an environment with an externally supplied Playwright runtime, set `ACS_PLAYWRIGHT_MODULE` to its module path and optionally `ACS_BROWSER_EXECUTABLE` to an existing browser executable. This avoids adding a production dependency. It checks all eleven routes and refreshes, all pages at four widths, WCAG A/AA rules including contrast, real detail retrieval, approve/reject/retry/mode mutation and refresh, authentication rejection, and actual stream loss/stale behavior. It writes screenshots and JSON evidence.
 
