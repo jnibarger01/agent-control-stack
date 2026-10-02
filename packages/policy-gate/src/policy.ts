@@ -19,12 +19,16 @@ export const policyContextSchema = z.object({
   actor: z.string().min(1),
   operation: policyOperationSchema,
   requester: z.string().min(1),
+<<<<<<< Updated upstream
   /**
    * Authenticated principal behind `requester`, when the work item records one.
    * Jace Commander / Desktop Commander items are created with requester
    * "agent" and the real actor here, so self-approval checks must compare the
    * approver against this too. Not part of the action fingerprint.
    */
+=======
+  /** The requesting principal's subject, when the work item carries one. */
+>>>>>>> Stashed changes
   requesterSubject: z.string().min(1).optional(),
   risk: z.enum(["low", "medium", "high", "critical"]),
   action: z.object({
@@ -138,10 +142,7 @@ function booleanValue(value: unknown): boolean | undefined {
 
 const NAMED_RESOURCE_PATH_KEYS = ["sourcePath", "destinationPath", "targetPath", "outputPath", "templatePath"] as const;
 
-function unionResourcePaths(
-  params: Record<string, unknown>,
-  fallback: string[] | undefined
-): string[] | undefined {
+function unionResourcePaths(params: Record<string, unknown>, fallback: string[] | undefined): string[] | undefined {
   const explicit = stringArray(params.paths) ?? [];
   const named = NAMED_RESOURCE_PATH_KEYS.map((key) => stringValue(params[key])).filter(
     (value): value is string => typeof value === "string"

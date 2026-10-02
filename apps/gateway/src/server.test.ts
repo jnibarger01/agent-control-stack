@@ -19,6 +19,10 @@ import { buildGateway, type GatewayAuthOptions, type GatewayCredential } from ".
 import { prepareHermesSourceFixture } from "./hermes-source-fixture.js";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
+// ACS policy denies an actor authorizing its own mutating work, so approval
+// tests authenticate as a principal distinct from the requester.
+const approverToken = "t-approver";
+const approverAuth = { token: approverToken, actor: "user", actorId: "approver" } as const;
 const oauthIssuer = "https://auth.example.test";
 const oauthResource = "https://acs.example.test/mcp";
 
@@ -112,12 +116,29 @@ function buildTestGateway(options: NonNullable<Parameters<typeof buildGateway>[0
   if (options.dbPath) {
     seedActor(options.dbPath, testAuth.actorId, `local_bearer:local-dev`);
   }
-  const app = buildGateway({ ...options, auth: testAuth });
+  const app = buildGateway({
+    ...options,
+    auth: {
+      ...testAuth,
+      credentials: [
+        {
+          id: "approver",
+          token: approverAuth.token,
+          actor: approverAuth.actor,
+          actorId: approverAuth.actorId,
+          roles: ["operator"],
+          scopes: ["acs:read", "acs:write", "acs:approve"]
+        }
+      ]
+    }
+  });
   app.addHook("onRequest", async (request) => {
     request.headers.authorization ??= `Bearer ${testAuth.token}`;
   });
   return app;
 }
+
+const approverHeaders = { authorization: `Bearer ${approverToken}` } as const;
 
 function seedActor(dbPath: string, id: string, externalRef?: string): void {
   const store = new SqliteWorkItemStore(dbPath);
@@ -202,6 +223,7 @@ describe("mission control gateway", () => {
     }
   });
 
+<<<<<<< Updated upstream
   it("rejects unregistered agent.prompt targets before preview or persistence", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-agent-target-validation-"));
     const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
@@ -354,12 +376,59 @@ describe("mission control gateway", () => {
       const olderEvents = older.json().events as Array<{ sequence: number }>;
       expect(olderEvents).toHaveLength(5);
       expect(Math.max(...olderEvents.map((event) => event.sequence))).toBeLessThan(latestEvents[0]!.sequence);
+=======
+  it("protects the same-origin Visualizer projection route and reports unconfigured state", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-unconfigured-"));
+    const app = buildGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      auth: testAuth,
+      visualizerBaseUrl: false
+    });
+
+    try {
+      const anonymous = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/projection"
+      });
+      const authenticated = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/projection",
+        headers: { authorization: "Bearer t" }
+      });
+      const anonymousStatus = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/status"
+      });
+      const authenticatedStatus = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/status",
+        headers: { authorization: "Bearer t" }
+      });
+
+      expect(anonymous.statusCode).toBe(401);
+      expect(anonymousStatus.statusCode).toBe(401);
+      expect(authenticated.statusCode).toBe(200);
+      expect(authenticated.json()).toMatchObject({
+        schemaVersion: 1,
+        configured: false,
+        items: []
+      });
+      expect(authenticatedStatus.statusCode).toBe(200);
+      expect(authenticatedStatus.json()).toMatchObject({
+        schemaVersion: 1,
+        configured: false,
+        reachable: false,
+        state: "not_configured"
+      });
+>>>>>>> Stashed changes
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
     }
   });
 
+<<<<<<< Updated upstream
   it("serves live dashboard fragments from the same view model as the page", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-fragments-"));
     const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
@@ -409,6 +478,136 @@ describe("mission control gateway", () => {
       expect(fragments.executionModeState).toBe("strict");
       const page = await app.inject({ method: "GET", url: "/" });
       expect(page.body).toContain(`<div class="queue" id="queue-list">${fragments.queueList}</div>`);
+=======
+  it("serves Visualizer operational status through the authenticated read-only boundary", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-status-"));
+    const calls: Array<{ url: string; method?: string }> = [];
+    const visualizerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), method: init?.method });
+      return new Response(
+        JSON.stringify({
+          schemaVersion: 1,
+          generatedAt: "2026-09-23T16:20:00.000Z",
+          status: "healthy",
+          eventStreams: { activeClients: 1 },
+          executions: { activeCount: 2, queueDepth: 0 },
+          runtimes: [
+            { runtime: "codex", status: "healthy" },
+            { runtime: "hermes", status: "healthy" },
+            { runtime: "openclaw", status: "healthy" },
+            { runtime: "opencode", status: "healthy" },
+            { runtime: "claude", status: "healthy" },
+            { runtime: "pi", status: "healthy" }
+          ],
+          database: { availability: "available" },
+          approvals: { pendingCount: 0 }
+        }),
+        { status: 200, headers: { "content-type": "application/json" } }
+      );
+    }) as typeof fetch;
+    const app = buildTestGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      visualizerBaseUrl: "http://127.0.0.1:4317",
+      visualizerFetch
+    });
+
+    try {
+      const status = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/status"
+      });
+      expect(status.statusCode).toBe(200);
+      expect(status.headers["cache-control"]).toBe("no-store");
+      expect(status.headers["x-content-type-options"]).toBe("nosniff");
+      expect(status.headers["x-ratelimit-remaining"]).toBeDefined();
+      expect(status.json()).toMatchObject({
+        configured: true,
+        reachable: true,
+        state: "healthy",
+        database: "available",
+        activeExecutions: 2,
+        queueDepth: 0
+      });
+      expect(calls).toEqual([
+        {
+          url: "http://127.0.0.1:4317/api/v1/system-status",
+          method: "GET"
+        }
+      ]);
+
+      const mutation = await app.inject({
+        method: "POST",
+        url: "/api/visualizer/status",
+        payload: { action: "restart" }
+      });
+      expect(mutation.statusCode).toBe(404);
+      expect(calls).toHaveLength(1);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("serves Visualizer projection through bounded read-only loopback GETs", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-visualizer-projection-"));
+    const calls: Array<{ url: string; method?: string }> = [];
+    const visualizerFetch = (async (input: string | URL | Request, init?: RequestInit) => {
+      calls.push({ url: String(input), method: init?.method });
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+    const app = buildTestGateway({
+      dbPath: join(dir, "control.db"),
+      logger: false,
+      visualizerBaseUrl: "http://127.0.0.1:4174",
+      visualizerFetch
+    });
+
+    try {
+      const created = await app.inject({
+        method: "POST",
+        url: "/work-items",
+        payload: {
+          title: "Project me",
+          intent: "verify visualizer gateway projection",
+          target: {},
+          risk: "low"
+        }
+      });
+      expect(created.statusCode).toBe(201);
+
+      const projection = await app.inject({
+        method: "GET",
+        url: "/api/visualizer/projection?limit=1"
+      });
+
+      expect(projection.statusCode).toBe(200);
+      expect(projection.headers["cache-control"]).toBe("no-store");
+      expect(projection.headers["x-content-type-options"]).toBe("nosniff");
+      expect(projection.headers["x-ratelimit-remaining"]).toBeDefined();
+      expect(projection.json()).toMatchObject({
+        schemaVersion: 1,
+        configured: true,
+        items: [
+          {
+            workItemId: created.json().id,
+            title: "Project me",
+            state: "not_projected"
+          }
+        ]
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.url).toMatch(/^http:\/\/127\.0\.0\.1:4174\/api\/v1\/executions\/[0-9a-f-]+\/graph$/);
+      expect(calls[0]?.method).toBe("GET");
+
+      const mutation = await app.inject({
+        method: "POST",
+        url: "/api/visualizer/projection",
+        payload: { action: "approve" }
+      });
+      expect(mutation.statusCode).toBe(404);
+      expect(calls).toHaveLength(1);
+>>>>>>> Stashed changes
     } finally {
       await app.close();
       rmSync(dir, { recursive: true, force: true });
@@ -4899,6 +5098,7 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
+        headers: approverHeaders,
         payload: { reason: "approve exact write", actionHash: approvalActionHash(workItem) }
       });
 
@@ -4915,7 +5115,7 @@ describe("gateway work-item routes", () => {
         expect(approvals).toHaveLength(1);
         expect(approvals[0]?.body).toMatchObject({
           workItemId: workItem.id,
-          approvedBy: "user",
+          approvedBy: "approver",
           reason: "approve exact write"
         });
         expect(JSON.stringify(approvals)).not.toContain("approvalToken");
@@ -4953,6 +5153,7 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${id}/approve`,
+        headers: approverHeaders,
         payload: { reason: "ok", actionHash: approvalActionHash(workItem) }
       });
       expect(approved.statusCode).toBe(200);
@@ -4969,6 +5170,7 @@ describe("gateway work-item routes", () => {
         const replay = await app.inject({
           method: "POST",
           url: `/work-items/${id}/approve`,
+          headers: approverHeaders,
           payload: { reason: "again", actionHash }
         });
 
@@ -5072,6 +5274,7 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${workItem.id}/approve`,
+        headers: approverHeaders,
         payload: { reason: "approve without token", actionHash: approvalActionHash(workItem) }
       });
 
@@ -5124,6 +5327,7 @@ describe("gateway work-item routes", () => {
       const approved = await app.inject({
         method: "POST",
         url: `/work-items/${first.json().id}/approve`,
+        headers: approverHeaders,
         payload: { id: second.json().id, reason: "path id must win", actionHash: approvalActionHash(first.json()) }
       });
 
@@ -5224,6 +5428,7 @@ describe("gateway work-item routes", () => {
       const rejected = await app.inject({
         method: "POST",
         url: `/work-items/${created.json().id}/approve`,
+        headers: approverHeaders,
         payload: { approvedBy: "test", reason: "wrong hash", actionHash: "missing" }
       });
 
@@ -5260,6 +5465,7 @@ describe("gateway work-item routes", () => {
       const rejected = await app.inject({
         method: "POST",
         url: `/work-items/${created.json().id}/approve`,
+        headers: approverHeaders,
         payload: { reason: "stale hash", actionHash: staleHash }
       });
 

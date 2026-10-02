@@ -1830,6 +1830,7 @@
         }
       }
     },
+<<<<<<< Updated upstream
     "/work-items/{id}/change-sets": {
       "post": {
         "operationId": "submitChangeSet",
@@ -1845,6 +1846,12 @@
             }
           }
         ],
+=======
+    "/harness/dc-invocations": {
+      "post": {
+        "operationId": "createHarnessInvocation",
+        "summary": "Create (idempotently) the governed work item for one Strands harness Desktop Commander call.",
+>>>>>>> Stashed changes
         "requestBody": {
           "required": true,
           "content": {
@@ -1853,6 +1860,7 @@
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
+<<<<<<< Updated upstream
                   "definition": {
                     "type": "object",
                     "properties": {
@@ -2676,10 +2684,22 @@
                 "type": "object",
                 "properties": {
                   "missionId": {
+=======
+                  "sessionId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,128}$"
+                  },
+                  "invocationId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,128}$"
+                  },
+                  "tool": {
+>>>>>>> Stashed changes
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 128
                   },
+<<<<<<< Updated upstream
                   "repository": {
                     "type": "string",
                     "minLength": 1,
@@ -2706,6 +2726,21 @@
                   "baseRef",
                   "baseSha",
                   "summary"
+=======
+                  "arguments": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "sessionId",
+                  "invocationId",
+                  "tool",
+                  "arguments"
+>>>>>>> Stashed changes
                 ],
                 "additionalProperties": false
               }
@@ -2724,6 +2759,7 @@
           },
           "403": {
             "description": "The authenticated principal is not authorized."
+<<<<<<< Updated upstream
           },
           "409": {
             "description": "Mission identity, plan, or persisted state conflict."
@@ -2751,10 +2787,13 @@
           },
           "503": {
             "description": "Coding mission ports are not configured."
+=======
+>>>>>>> Stashed changes
           }
         }
       }
     },
+<<<<<<< Updated upstream
     "/coding-missions/{id}": {
       "get": {
         "operationId": "getCodingMission",
@@ -2796,6 +2835,12 @@
       "post": {
         "operationId": "approveCodingChangeSet",
         "summary": "Approve one immutable coding Change Set and continue governed execution without another confirmation.",
+=======
+    "/harness/dc-invocations/{id}/dispatch": {
+      "post": {
+        "operationId": "dispatchHarnessInvocation",
+        "summary": "Hand an approved harness invocation to the managed Desktop Commander bridge.",
+>>>>>>> Stashed changes
         "parameters": [
           {
             "name": "id",
@@ -2815,6 +2860,7 @@
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
+<<<<<<< Updated upstream
                   "expectedChangeSetHash": {
                     "type": "string",
                     "pattern": "^[a-f0-9]{64}$"
@@ -2822,6 +2868,34 @@
                 },
                 "required": [
                   "expectedChangeSetHash"
+=======
+                  "sessionId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,128}$"
+                  },
+                  "invocationId": {
+                    "type": "string",
+                    "pattern": "^[A-Za-z0-9_-]{1,128}$"
+                  },
+                  "tool": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "arguments": {
+                    "type": "object",
+                    "propertyNames": {
+                      "type": "string"
+                    },
+                    "additionalProperties": {}
+                  }
+                },
+                "required": [
+                  "sessionId",
+                  "invocationId",
+                  "tool",
+                  "arguments"
+>>>>>>> Stashed changes
                 ],
                 "additionalProperties": false
               }
@@ -2829,6 +2903,40 @@
           }
         },
         "responses": {
+<<<<<<< Updated upstream
+=======
+          "202": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/execution-result": {
+      "get": {
+        "operationId": "getExecutionResult",
+        "summary": "Read integrity-checked, redacted Desktop Commander output for a successful work item.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+>>>>>>> Stashed changes
           "200": {
             "description": "Successful response."
           },
@@ -2840,12 +2948,15 @@
           },
           "403": {
             "description": "The authenticated principal is not authorized."
+<<<<<<< Updated upstream
           },
           "409": {
             "description": "Approval does not match the immutable Change Set or the mission is not awaiting approval."
           },
           "503": {
             "description": "Coding mission ports are not configured."
+=======
+>>>>>>> Stashed changes
           }
         }
       }

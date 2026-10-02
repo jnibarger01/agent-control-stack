@@ -70,11 +70,37 @@ export function desktopCommanderRequiredScopes(toolName: string): string[] {
   const policy = desktopCommanderToolPolicy(toolName);
   if (!policy)
     throw new ControlStackError("desktop_commander_tool_not_allowlisted", "capability tool is not allowlisted");
+<<<<<<< Updated upstream
   // The scope is a capability vocabulary mapping owned by the canonical tool
   // manifest (ADR 0019), not an inference from argument shape.
   const contract = dcCapabilityToolContract(policy.name);
   if (!contract) throw new ControlStackError("desktop_commander_capability_invalid", "tool has no v1 scope mapping");
   return [contract.scope];
+=======
+  // This is a capability vocabulary mapping, not an inference from argument
+  // shape: `start_process` creates a process and process inspection consumes
+  // process authority even though their arguments have no filesystem path.
+  const scopeByTool: Readonly<Record<string, string>> = {
+    get_config: "fs.read",
+    get_runtime_identity: "fs.read",
+    get_file_info: "fs.read",
+    list_directory: "fs.read",
+    read_file: "fs.read",
+    read_multiple_files: "fs.read",
+    create_directory: "fs.write",
+    write_file: "fs.write",
+    edit_block: "fs.write",
+    move_file: "fs.write",
+    start_process: "process.spawn",
+    list_sessions: "process.exec",
+    list_processes: "process.exec",
+    read_process_output: "process.exec",
+    get_usage_stats: "process.exec"
+  };
+  const scope = scopeByTool[policy.name];
+  if (!scope) throw new ControlStackError("desktop_commander_capability_invalid", "tool has no v1 scope mapping");
+  return [scope];
+>>>>>>> Stashed changes
 }
 
 function requireId(label: string, value: string, pattern = ID_PATTERN): void {

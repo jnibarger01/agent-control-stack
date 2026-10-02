@@ -96,14 +96,15 @@ function seed(action: SeedAction): { id: string; approvedHash?: string } {
     const workItem = tools.create_work_item({
       title: "desktop commander action",
       requester: "user",
+      requesterSubject: "requester",
       intent: "run one desktop commander tool",
       target: { cwd: "/repo" },
       requestedActions: [action],
       risk: "low"
     });
     if (workItem.status === "needs_approval") {
-      const actionHash = approvalActionHash(workItem, "user");
-      tools.approve_work_item({ id: workItem.id, approvedBy: "user", reason: "ok", actionHash });
+      const actionHash = approvalActionHash(workItem, "approver");
+      tools.approve_work_item({ id: workItem.id, approvedBy: "approver", reason: "ok", actionHash });
       return { id: workItem.id, approvedHash: actionHash };
     }
     return { id: workItem.id };
@@ -198,6 +199,7 @@ describe("desktop_commander worker execution - success path", () => {
     const wi = tools0.create_work_item({
       title: "dc write",
       requester: "user",
+      requesterSubject: "requester",
       intent: "write via dc",
       target: { cwd: "/repo" },
       requestedActions: [writeAction(abs)],
@@ -216,9 +218,9 @@ describe("desktop_commander worker execution - success path", () => {
     const tools1 = createWorkItemTools(store1, createPolicyEngine());
     tools1.approve_work_item({
       id: wi.id,
-      approvedBy: "user",
+      approvedBy: "approver",
       reason: "approved",
-      actionHash: approvalActionHash(wi, "user")
+      actionHash: approvalActionHash(wi, "approver")
     });
     store1.close();
 

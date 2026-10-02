@@ -336,6 +336,7 @@ describe("worker policy gate", () => {
       const workItem = tools.create_work_item({
         title: "Approved write work",
         requester: "user",
+        requesterSubject: "requester-1",
         intent: "write source",
         target: { cwd: "/repo" },
         requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
@@ -345,9 +346,9 @@ describe("worker policy gate", () => {
 
       const approval = tools.approve_work_item({
         id: workItem.id,
-        approvedBy: "user",
+        approvedBy: "approver-1",
         reason: "approve exact write action",
-        actionHash: approvalActionHash(workItem, "user")
+        actionHash: approvalActionHash(workItem, "approver-1")
       });
       expect(approval.workItem.status).toBe("approved");
       store.close();

@@ -34,6 +34,12 @@ export interface AuthorityRuntime {
 
 const MANAGED_EXECUTOR_MARK = "desktop-commander/dist/index.js";
 
+export function isManagedExecutorCommand(command: string | undefined): boolean {
+  if (!command?.includes(MANAGED_EXECUTOR_MARK)) return false;
+  const afterEntrypoint = command.slice(command.indexOf(MANAGED_EXECUTOR_MARK) + MANAGED_EXECUTOR_MARK.length);
+  return !/(^|\s)remote\s+--managed(?:\s|$)/u.test(afterEntrypoint);
+}
+
 export function defaultAuthorityStateDir(env: NodeJS.ProcessEnv = process.env): string {
   const override = env.DESKTOP_COMMANDER_EXECUTOR_LOCK_DIR?.trim();
   if (override) return override;
@@ -227,7 +233,7 @@ export function listManagedExecutorPids(): number[] {
     const pid = Number(name);
     if (!Number.isInteger(pid)) continue;
     const command = readPidCommand(pid);
-    if (command?.includes(MANAGED_EXECUTOR_MARK)) pids.push(pid);
+    if (isManagedExecutorCommand(command)) pids.push(pid);
   }
   return pids;
 }

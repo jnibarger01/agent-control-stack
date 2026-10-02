@@ -28,6 +28,7 @@
     { "path": "packages/verification" },
     { "path": "packages/jev-advisor" },
     { "path": "packages/eval-harness" },
+    { "path": "packages/coding-harness" },
     { "path": "packages/moa-orchestrator" },
     { "path": "packages/vercel-bridge-contract" },
     { "path": "apps/control-ui" },

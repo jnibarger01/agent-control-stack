@@ -124,6 +124,7 @@ const operations = {
     "method": "GET",
     "path": "/work-items/{id}"
   },
+<<<<<<< Updated upstream
   "submitChangeSet": {
     "method": "POST",
     "path": "/work-items/{id}/change-sets"
@@ -167,6 +168,19 @@ const operations = {
   "approveCodingChangeSet": {
     "method": "POST",
     "path": "/coding-missions/{id}/approve"
+=======
+  "createHarnessInvocation": {
+    "method": "POST",
+    "path": "/harness/dc-invocations"
+  },
+  "dispatchHarnessInvocation": {
+    "method": "POST",
+    "path": "/harness/dc-invocations/{id}/dispatch"
+  },
+  "getExecutionResult": {
+    "method": "GET",
+    "path": "/work-items/{id}/execution-result"
+>>>>>>> Stashed changes
   },
   "approveWorkItem": {
     "method": "POST",
