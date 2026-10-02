@@ -1457,6 +1457,9 @@ function writeSelectedItemToLocation(id) {
 }
 function selectWorkItem(id, options) {
   if (!id) return;
+  // A location-driven selection must never write the URL back: the URL is the input
+  // being synced from, and rewriting it during popstate/hashchange fights history.
+  const fromLocation = !!(options && options.fromLocation);
   document.querySelectorAll('[data-work-item]').forEach(function (candidate) {
     const match = candidate.dataset.workItem === id;
     candidate.classList.toggle('selected', match);
@@ -1464,7 +1467,7 @@ function selectWorkItem(id, options) {
   });
   openWorkDrawer();
   selectedWorkItemId = id;
-  writeSelectedItemToLocation(id);
+  if (!fromLocation) writeSelectedItemToLocation(id);
   if (options && options.scroll) {
     const row = document.querySelector('[data-work-item="' + cssAttr(id) + '"]');
     if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
@@ -1480,7 +1483,36 @@ function openWorkItemFromLocation() {
   if (!location.hash) showView('queue');
   selectWorkItem(id, { scroll: true });
 }
-window.addEventListener('popstate', openWorkItemFromLocation);
+
+/**
+ * Derive the whole view state from location on every history transition.
+ *
+ * Back/Forward must not leave the URL and the UI disagreeing. Deriving both the
+ * active view and the drawer from location, on both popstate and hashchange, means:
+ *   URL item A -> drawer A
+ *   URL item B -> drawer B
+ *   no item    -> drawer closed
+ *   unknown item -> the drawer opens on that id and shows a deterministic
+ *                   not-found/error state from the normal detail fetch, rather than
+ *                   silently keeping the previously shown item.
+ * The previous implementation only closed the drawer when ?item= disappeared, so
+ * moving from item B back to item A could leave the drawer showing B.
+ */
+function syncViewStateFromLocation() {
+  showView(location.hash.slice(1) || 'overview');
+  const id = workItemIdFromLocation();
+  const drawer = document.getElementById('work-drawer');
+  const drawerOpen = !!drawer && !drawer.hidden;
+  if (!id) {
+    if (drawerOpen) closeWorkDrawer({ fromLocation: true });
+    return;
+  }
+  if (drawerOpen && selectedWorkItemId === id) return;
+  if (!location.hash) showView('queue');
+  selectWorkItem(id, { scroll: true, fromLocation: true });
+}
+window.addEventListener('popstate', syncViewStateFromLocation);
+window.addEventListener('hashchange', syncViewStateFromLocation);
 
 // --- #14 live wait badges between refreshes.
 function formatWaitClient(ms) {
@@ -1822,7 +1854,7 @@ function openWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { if (child !== drawer) child.inert = true; });
   document.body.style.overflow = 'hidden';
 }
-function closeWorkDrawer() {
+function closeWorkDrawer(options) {
   const drawer = document.getElementById('work-drawer');
   if (!drawer || drawer.hidden) return;
   drawer.hidden = true;
@@ -1830,9 +1862,17 @@ function closeWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
   selectedWorkItemId = null;
+  // Clear the row highlight too. Leaving a row marked selected after the drawer is
+  // closed presented stale state that no longer matched the URL or the selection.
+  document.querySelectorAll('[data-work-item].selected').forEach(function (row) {
+    row.classList.remove('selected');
+    row.removeAttribute('aria-current');
+  });
   workDetailGeneration += 1;
   stopLeaseExpiryWarningRefresh();
-  writeSelectedItemToLocation(null);
+  // A location-driven close must not rewrite the URL: location is the source of
+  // truth during history navigation, and writing back would fight the browser.
+  if (!(options && options.fromLocation)) writeSelectedItemToLocation(null);
   if (drawerReturnFocus && drawerReturnFocus.isConnected) drawerReturnFocus.focus({ preventScroll: true });
   else document.getElementById('main-content').focus({ preventScroll: true });
 }
@@ -1943,8 +1983,9 @@ document.addEventListener('keydown', function (event) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('command-search').focus(); }
   if (event.key === 'Escape') document.getElementById('command-results').hidden = true;
 });
-window.addEventListener('hashchange', function () { showView(location.hash.slice(1)); });
-window.addEventListener('popstate', function () { showView(location.hash.slice(1)); if (!workItemIdFromLocation()) closeWorkDrawer(); });
+// View and drawer state on Back/Forward is derived from location in one place.
+// See syncViewStateFromLocation() in operator-workflow.ts; duplicating a partial
+// version here is what allowed the URL and drawer to disagree.
 window.addEventListener('pagehide', function () { if (sseSource) sseSource.close(); });
 applyOperationFilters();
 

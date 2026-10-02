@@ -463,3 +463,109 @@ describe("live dashboard review fixes", () => {
     expect(app.text("#dashboard-updated")).toMatch(/^Updated /);
   });
 });
+
+describe("history navigation derives view and drawer state from location (#6)", () => {
+  const model: MissionControlViewModel = {
+    workItems: [item("wrk_a"), item("wrk_b"), item("wrk_c")],
+    events: [],
+    now: NOW
+  };
+
+  function boot() {
+    const app = bootLive(model, {}, { url: "https://acs.local/#queue" });
+    const drawer = () => app.document.getElementById("work-drawer") as HTMLElement;
+    const activeView = () => app.document.body.dataset.activeView;
+    const selected = () =>
+      Array.from(app.document.querySelectorAll("[data-work-item].selected")).map(
+        (row) => (row as HTMLElement).dataset.workItem
+      );
+    // Simulate a real history transition: the browser has already updated location
+    // before firing popstate.
+    const navigate = async (url: string) => {
+      app.window.history.pushState(null, "", url);
+      app.window.dispatchEvent(new app.window.PopStateEvent("popstate"));
+      await app.flush();
+    };
+    const hashChange = async (url: string) => {
+      app.window.history.pushState(null, "", url);
+      app.window.dispatchEvent(new app.window.HashChangeEvent("hashchange"));
+      await app.flush();
+    };
+    return { app, drawer, activeView, selected, navigate, hashChange };
+  }
+
+  it("shows the drawer for the item named by the URL when moving item B to item A", async () => {
+    const { drawer, selected, navigate } = boot();
+
+    await navigate("?item=wrk_b#queue");
+    expect(drawer().hidden).toBe(false);
+    expect(selected()).toEqual(["wrk_b"]);
+
+    // Back from B to A must re-derive, not leave B on screen behind an A URL.
+    await navigate("?item=wrk_a#queue");
+    expect(drawer().hidden).toBe(false);
+    expect(selected()).toEqual(["wrk_a"]);
+
+    // Forward again to B.
+    await navigate("?item=wrk_b#queue");
+    expect(drawer().hidden).toBe(false);
+    expect(selected()).toEqual(["wrk_b"]);
+  });
+
+  it("closes the drawer when history moves to a URL without an item", async () => {
+    const { app, drawer, selected, navigate } = boot();
+    await navigate("?item=wrk_a#queue");
+    expect(drawer().hidden).toBe(false);
+
+    // Absolute URL: a bare "#queue" would resolve against the current URL and keep
+    // the existing ?item= query.
+    await navigate("https://acs.local/#queue");
+    expect(drawer().hidden).toBe(true);
+    expect(selected()).toEqual([]);
+    // The URL must not be rewritten while syncing from it.
+    expect(app.window.location.search).toBe("");
+  });
+
+  it("switches drawer contents when a different item is deep-linked while one is open", async () => {
+    const { app, drawer, navigate } = boot();
+    await navigate("?item=wrk_a#queue");
+    const detailBefore = app.document.getElementById("work-detail")?.textContent ?? "";
+    await navigate("?item=wrk_c#queue");
+    expect(drawer().hidden).toBe(false);
+    const detailAfter = app.document.getElementById("work-detail")?.textContent ?? "";
+    expect(detailAfter).not.toBe(detailBefore);
+  });
+
+  it("follows the view hash as well as the item on history transitions", async () => {
+    const { drawer, activeView, navigate } = boot();
+    await navigate("?item=wrk_a#approvals");
+    expect(activeView()).toBe("approvals");
+    await navigate("?item=wrk_a#audit");
+    expect(activeView()).toBe("audit");
+    expect(drawer().hidden).toBe(false);
+    await navigate("https://acs.local/#audit");
+    expect(activeView()).toBe("audit");
+    expect(drawer().hidden).toBe(true);
+  });
+
+  it("derives the same state on hashchange as on popstate", async () => {
+    const { drawer, activeView, hashChange } = boot();
+    await hashChange("?item=wrk_b#agents");
+    expect(activeView()).toBe("agents");
+    expect(drawer().hidden).toBe(false);
+    await hashChange("https://acs.local/#agents");
+    expect(drawer().hidden).toBe(true);
+  });
+
+  it("leaves an unknown item in a deterministic drawer state rather than a stale item", async () => {
+    const { drawer, selected, navigate } = boot();
+    await navigate("?item=wrk_a#queue");
+    expect(selected()).toEqual(["wrk_a"]);
+
+    await navigate("?item=wrk_missing#queue");
+    // The drawer follows the URL, and the previously selected item is not left
+    // presented as if it were the requested one.
+    expect(drawer().hidden).toBe(false);
+    expect(selected()).toEqual([]);
+  });
+});

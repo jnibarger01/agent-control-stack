@@ -55,7 +55,7 @@ function openWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { if (child !== drawer) child.inert = true; });
   document.body.style.overflow = 'hidden';
 }
-function closeWorkDrawer() {
+function closeWorkDrawer(options) {
   const drawer = document.getElementById('work-drawer');
   if (!drawer || drawer.hidden) return;
   drawer.hidden = true;
@@ -63,9 +63,17 @@ function closeWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
   selectedWorkItemId = null;
+  // Clear the row highlight too. Leaving a row marked selected after the drawer is
+  // closed presented stale state that no longer matched the URL or the selection.
+  document.querySelectorAll('[data-work-item].selected').forEach(function (row) {
+    row.classList.remove('selected');
+    row.removeAttribute('aria-current');
+  });
   workDetailGeneration += 1;
   stopLeaseExpiryWarningRefresh();
-  writeSelectedItemToLocation(null);
+  // A location-driven close must not rewrite the URL: location is the source of
+  // truth during history navigation, and writing back would fight the browser.
+  if (!(options && options.fromLocation)) writeSelectedItemToLocation(null);
   if (drawerReturnFocus && drawerReturnFocus.isConnected) drawerReturnFocus.focus({ preventScroll: true });
   else document.getElementById('main-content').focus({ preventScroll: true });
 }
@@ -176,8 +184,9 @@ document.addEventListener('keydown', function (event) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('command-search').focus(); }
   if (event.key === 'Escape') document.getElementById('command-results').hidden = true;
 });
-window.addEventListener('hashchange', function () { showView(location.hash.slice(1)); });
-window.addEventListener('popstate', function () { showView(location.hash.slice(1)); if (!workItemIdFromLocation()) closeWorkDrawer(); });
+// View and drawer state on Back/Forward is derived from location in one place.
+// See syncViewStateFromLocation() in operator-workflow.ts; duplicating a partial
+// version here is what allowed the URL and drawer to disagree.
 window.addEventListener('pagehide', function () { if (sseSource) sseSource.close(); });
 applyOperationFilters();
 `;
