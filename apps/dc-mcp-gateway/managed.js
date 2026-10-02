@@ -91,8 +91,14 @@ export function sortedScopes(raw) {
 /**
  * The managed Desktop Commander runtime identity, derived from the child's
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
  * persisted state directory (runtime-identity.json) and verified release digest.
  * Unpackaged development uses the built entrypoint hash. Used for bootstrap AND completion,
+=======
+ * persisted state directory (runtime-identity.json) and a verified release
+ * identity digest. Unpackaged development uses the built entrypoint hash.
+ * Used for the bootstrap request AND its completion,
+>>>>>>> Stashed changes
 =======
  * persisted state directory (runtime-identity.json) and a verified release
  * identity digest. Unpackaged development uses the built entrypoint hash.
@@ -109,6 +115,7 @@ export function dcRuntimeIdentityFromState(env = process.env) {
     // RuntimeIdentityState projection as well.
     const runtimeId = typeof identity.runtimeId === 'string' ? identity.runtimeId : identity.runtime_id;
     if (typeof runtimeId !== 'string' || !runtimeId) return null;
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
     let identityConfigFingerprint;
     if (Object.hasOwn(env, 'ACS_DC_RELEASE_DIR')) {
@@ -129,6 +136,8 @@ export function dcRuntimeIdentityFromState(env = process.env) {
       const entrypoint = env.ACS_DC_ENTRYPOINT;
       if (typeof entrypoint !== 'string' || !entrypoint || !path.isAbsolute(entrypoint)) return null;
 =======
+=======
+>>>>>>> Stashed changes
     const releaseDirectory = env.ACS_DC_RELEASE_DIR;
     const entrypoint = env.ACS_DC_ENTRYPOINT || (releaseDirectory
       ? path.join(releaseDirectory, 'dist/index.js')
@@ -141,6 +150,9 @@ export function dcRuntimeIdentityFromState(env = process.env) {
     } else {
       // Compatibility for unpackaged development only. A configured release
       // must verify; never fall back to entrypoint hashing after verification fails.
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
       identityConfigFingerprint = crypto.createHash('sha256').update(fs.readFileSync(entrypoint)).digest('hex');
     }

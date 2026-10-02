@@ -660,6 +660,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     toolName: string;
   }): Promise<AdmissionPermit> {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     reapAdmissionPermits();
     // Fence any capacity held without a durable reservation, then re-reconcile.
     // This converges the accounting invariant instead of latching on it.
@@ -668,6 +669,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     if (admissionReconciliationMismatch)
       throw new ControlStackError("admission_recovery_required", "admission recovery requires reconciliation");
 =======
+=======
+>>>>>>> Stashed changes
     workItems.failExpiredLeases();
     releaseInactiveAdmissionPermits();
     if (
@@ -679,6 +682,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         "managed executor leases do not match recovered admission capacity"
       );
     }
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
     const abort = new AbortController();
     const onAbort = () => abort.abort();
@@ -705,6 +711,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   function claimWithAdmissionPermit(input: {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     id: string;
     workerId: string;
     leaseMs: number;
@@ -725,6 +732,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       });
       if (!claim?.attemptId || claim.fencingEpoch === undefined || !claim.planHash || !claim.inputHash) return claim;
 =======
+=======
+>>>>>>> Stashed changes
     workItemId: string;
     workerId: string;
     leaseMs: number;
@@ -753,6 +762,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       if (claim.fencingEpoch === undefined || !claim.planHash || !claim.inputHash) {
         throw new ControlStackError("admission_permit_binding_mismatch", "claim lacks canonical attempt authority");
       }
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
       workItems.bindAdmissionPermit({
         attemptId: claim.attemptId,
@@ -765,7 +777,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         inputHash: claim.inputHash,
         lane: input.lane,
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         executionClass
+=======
+        executionClass: input.executionClass
+>>>>>>> Stashed changes
 =======
         executionClass: input.executionClass
 >>>>>>> Stashed changes
@@ -777,7 +793,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         permit: input.permit,
         lane: input.lane,
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         executionClass,
+=======
+        executionClass: input.executionClass,
+>>>>>>> Stashed changes
 =======
         executionClass: input.executionClass,
 >>>>>>> Stashed changes
@@ -860,10 +880,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const binding = admissionPermits.get(attemptId);
     if (!binding) return false;
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     if (!force) {
       const lease = workItems.getActiveLeaseForAttempt(attemptId);
       if (lease?.status === "active" && Date.parse(lease.expiresAt) > Date.now()) return false;
     }
+=======
+    workItems.releaseAdmissionPermit(attemptId);
+>>>>>>> Stashed changes
 =======
     workItems.releaseAdmissionPermit(attemptId);
 >>>>>>> Stashed changes
@@ -890,10 +914,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   let admissionReconciliationMismatch = false;
   function reconcileAdmissionAccounting(): void {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     const activeLeaseCount = workItems.countActiveAttemptLeases(new Date(), [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID]);
     const mismatch =
       admissionPermits.size !== activeLeaseCount ||
       workItems.listAdmissionPermits().length !== admissionPermits.size ||
+=======
+    releaseInactiveAdmissionPermits();
+    const activeLeaseCount = workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID]);
+    const mismatch =
+      admissionPermits.size !== activeLeaseCount ||
+>>>>>>> Stashed changes
 =======
     releaseInactiveAdmissionPermits();
     const activeLeaseCount = workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID]);
@@ -1258,7 +1289,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     async (request, reply) => {
       try {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         const actor = requireHumanApprovalActor(request, reply, auth);
+=======
+        const actor = requireHumanOperatorActor(request, reply, auth);
+>>>>>>> Stashed changes
 =======
         const actor = requireHumanOperatorActor(request, reply, auth);
 >>>>>>> Stashed changes
@@ -3249,6 +3284,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         try {
           const claimed = claimWithAdmissionPermit({
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
             id: workItem.id,
             workerId,
             leaseMs: DC_BRIDGE_LEASE_MS,
@@ -3272,6 +3308,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
           admissionBound =
             !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
+=======
+            workItemId: workItem.id,
+            workerId,
+            leaseMs: DC_BRIDGE_LEASE_MS,
+            permit: admissionPermit,
+            lane: "dc",
+            executionClass: classifyAdmissionTool("dc", body.tool)
+          });
+          admissionBound = Boolean(claimed?.attemptId);
+>>>>>>> Stashed changes
 =======
             workItemId: workItem.id,
             workerId,
@@ -3447,7 +3493,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
           return {
@@ -3674,6 +3723,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         let admissionBound = false;
         try {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
           const adminApprovalWouldBeConsumed =
             workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) ||
             workItems.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
@@ -3723,6 +3773,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
           admissionBound =
             !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
+=======
+          const claimed = claimWithAdmissionPermit({
+            workItemId: workItem.id,
+            workerId,
+            leaseMs: JC_BRIDGE_LEASE_MS,
+            permit: admissionPermit,
+            lane: "jc",
+            executionClass: classifyAdmissionTool("jc", invocation.toolName)
+          });
+          admissionBound = Boolean(claimed?.attemptId);
+>>>>>>> Stashed changes
 =======
           const claimed = claimWithAdmissionPermit({
             workItemId: workItem.id,
@@ -3866,7 +3927,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           const capability = signPreparedJaceCommanderCapability(payload, jcSigningConfig);
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
           return {
@@ -4071,6 +4135,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   });
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   app.get<{ Params: { id: string } }>(
     "/work-items/:id/change-set-review",
     { preHandler: requireRead },
@@ -4138,6 +4203,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
       return claimed ? { claimed: true, workItem: claimed } : { claimed: false };
 =======
+=======
+>>>>>>> Stashed changes
   app.post("/worker/claim", async (request, reply) => {
     reply.header("cache-control", "no-store");
     try {
@@ -4150,6 +4217,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         return reply.code(409).send({ claimed: false, workItemId: claim.id, status: claim.status });
       }
       return { claimed: true, workItem: claim };
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
     } catch (error) {
       return sendError(reply, error);
@@ -4318,12 +4388,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.addHook("onClose", async () => {
     executionAdmission.shutdown();
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     // Active durable reservations survive shutdown and are restored by the next gateway.
 =======
+=======
+>>>>>>> Stashed changes
     // Shutdown stops this scheduler; it does not revoke already issued leases.
     // Keep their durable reservations for the next gateway process to recover.
     for (const binding of admissionPermits.values()) binding.permit.release();
     admissionPermits.clear();
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
     await observationWorker?.stop();
     await acpAdapter?.stop();

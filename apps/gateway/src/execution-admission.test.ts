@@ -66,7 +66,11 @@ function createGateway(
     auth: { token: "", actor: "user", actorId: "user", credentials },
     executionAdmission,
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     shutdownController,
+=======
+    ...(shutdownController ? { shutdownController } : {}),
+>>>>>>> Stashed changes
 =======
     ...(shutdownController ? { shutdownController } : {}),
 >>>>>>> Stashed changes
@@ -280,6 +284,7 @@ async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record
 
 describe("gateway execution admission integration", () => {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   it("fences an orphaned active bridge lease and recovers readiness without operator action", async () => {
     const ctx = buildFixture();
     try {
@@ -322,6 +327,8 @@ describe("gateway execution admission integration", () => {
       expect(after.statusCode).toBe(200);
     } finally {
 =======
+=======
+>>>>>>> Stashed changes
   it("fails closed after restart if a managed active lease has no durable admission binding", async () => {
     const ctx = buildFixture();
     let reopened: ReturnType<typeof buildGateway> | undefined;
@@ -344,12 +351,16 @@ describe("gateway execution admission integration", () => {
       expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
     } finally {
       await reopened?.close();
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
     }
   });
 
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
   it("never fences a permit-backed lease as an orphan", async () => {
     const ctx = buildFixture();
@@ -542,6 +553,8 @@ describe("gateway execution admission integration", () => {
       const rejected = await issueDc(ctx.app, ctx.root);
       expect(rejected.statusCode).toBe(500);
 =======
+=======
+>>>>>>> Stashed changes
   it("rolls back the claim and lease if durable admission binding cannot commit", async () => {
     const ctx = buildFixture();
     try {
@@ -555,6 +568,9 @@ describe("gateway execution admission integration", () => {
       const issued = await issueJc(ctx.app);
       expect(issued.statusCode).toBe(500);
       expect(issued.json().capability).toBeUndefined();
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
       expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 0, activeLeases: 0 });
       expect(ctx.scheduler.snapshot().global.active).toBe(0);
@@ -564,6 +580,7 @@ describe("gateway execution admission integration", () => {
     }
   });
 
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
   it.each(["execution_class", "worker_id", "action_hash"])(
     "fails closed after restart with a corrupted reservation %s",
@@ -581,6 +598,8 @@ describe("gateway execution admission integration", () => {
             column === "execution_class" ? "wait" : "corrupt"
           );
 =======
+=======
+>>>>>>> Stashed changes
   it.each(["execution", "wait"] as const)(
     "recovers %s capacity after shutdown and releases it only on a canonical result",
     async (executionClass) => {
@@ -600,6 +619,9 @@ describe("gateway execution admission integration", () => {
           expect(
             db.prepare("SELECT execution_class FROM admission_permits WHERE attempt_id = ?").get(claim.attemptId)
           ).toEqual({ execution_class: executionClass });
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
         } finally {
           db.close();
@@ -614,6 +636,7 @@ describe("gateway execution admission integration", () => {
           }
         });
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         resumed = createGateway(ctx.root, scheduler).app;
         const rejected = await issueJc(resumed);
         expect(rejected.statusCode).toBe(503);
@@ -623,6 +646,8 @@ describe("gateway execution admission integration", () => {
       } finally {
         await (resumed ?? ctx.app).close();
 =======
+=======
+>>>>>>> Stashed changes
         reopened = createGateway(ctx.root, scheduler).app;
         expect(scheduler.snapshot()).toMatchObject({
           global: { active: executionClass === "execution" ? 1 : 0 },
@@ -637,12 +662,16 @@ describe("gateway execution admission integration", () => {
       } finally {
         await reopened?.close();
         await ctx.app.close();
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
         rmSync(ctx.root, { recursive: true, force: true });
       }
     }
   );
 
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
   it("does not release capacity when a result has the wrong fencing epoch", async () => {
     const ctx = buildFixture();
@@ -663,6 +692,8 @@ describe("gateway execution admission integration", () => {
     }
   });
 
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
   it("does not claim or create a lease before DC admission, then releases on canonical result", async () => {
@@ -774,7 +805,11 @@ describe("gateway execution admission integration", () => {
   });
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   it("retains admission while a lease remains active after DC capability issuance fails", async () => {
+=======
+  it("retains admission for an active lease when post-claim DC capability issuance fails", async () => {
+>>>>>>> Stashed changes
 =======
   it("retains admission for an active lease when post-claim DC capability issuance fails", async () => {
 >>>>>>> Stashed changes
@@ -785,12 +820,15 @@ describe("gateway execution admission integration", () => {
       expect(ctx.scheduler.snapshot().global.active).toBe(1);
       expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
       const db = new DatabaseSync(ctx.dbPath, { readOnly: true });
       try {
         expect(db.prepare("SELECT COUNT(*) AS count FROM admission_permits").get()).toEqual({ count: 1 });
       } finally {
         db.close();
       }
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
     } finally {

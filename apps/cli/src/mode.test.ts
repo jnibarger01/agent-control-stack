@@ -13,7 +13,11 @@ afterEach(() => {
 
 describe("acs mode", () => {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   it("reports strict and refuses unauthenticated local admin activation", async () => {
+=======
+  it("reports strict by default and can only set strict without an authenticated gateway principal", async () => {
+>>>>>>> Stashed changes
 =======
   it("reports strict by default and can only set strict without an authenticated gateway principal", async () => {
 >>>>>>> Stashed changes
@@ -41,9 +45,13 @@ describe("acs mode", () => {
       io.stdout.chunks = "";
       expect(await runAcsCli(["mode", "admin"], io)).toBe(1);
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
       io.stdout.chunks = "";
       expect(await runAcsCli(["mode", "status"], io)).toBe(0);
       expect(io.stdout.chunks).toContain("Execution mode: strict");
+=======
+      expect(io.stderr.chunks).toContain("Usage: acs mode status | acs mode strict");
+>>>>>>> Stashed changes
 =======
       expect(io.stderr.chunks).toContain("Usage: acs mode status | acs mode strict");
 >>>>>>> Stashed changes

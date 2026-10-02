@@ -21,7 +21,10 @@ Commands:
   mode status
   mode strict
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   mode admin (refused; activate through authenticated human operator API)
+=======
+>>>>>>> Stashed changes
 =======
 >>>>>>> Stashed changes
   doctor [--json]

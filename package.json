@@ -18,9 +18,13 @@
     "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site && npm run release:dry-run-gate",
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     "test": "npm run test:vitest && npm run test:release-integrity && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay",
     "test:release-integrity": "npm test -w packages/release-integrity",
     "release:integrity": "node scripts/release-integrity.mjs",
+=======
+    "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay && npm run test:release-integrity",
+>>>>>>> Stashed changes
 =======
     "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay && npm run test:release-integrity",
 >>>>>>> Stashed changes

@@ -46,8 +46,11 @@ function resolveHermesRuntimeLauncher(executable: string): string {
 function hermesE2eEnvironment(home: string, hermesHome: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = {};
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   for (const key of ["PATH", "LANG", "LC_ALL", "TMPDIR", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"]) {
 =======
+=======
+>>>>>>> Stashed changes
   for (const key of [
     "PATH",
     "LANG",
@@ -64,6 +67,9 @@ function hermesE2eEnvironment(home: string, hermesHome: string): NodeJS.ProcessE
     "ALL_PROXY",
     "NO_PROXY"
   ]) {
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
     if (process.env[key] !== undefined) env[key] = process.env[key];
   }
@@ -2171,8 +2177,11 @@ describe("gateway MCP transport", () => {
       const hermesRuntimeLauncher = resolveHermesRuntimeLauncher(hermesExecutable);
       const installedHermesLauncher = readFileSync(hermesRuntimeLauncher);
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
       const hermesFixture = prepareHermesSourceFixture(hermesRuntimeLauncher, dir, hermesHome);
 =======
+=======
+>>>>>>> Stashed changes
       let hermesFixture: ReturnType<typeof prepareHermesSourceFixture>;
       try {
         hermesFixture = prepareHermesSourceFixture(hermesRuntimeLauncher, dir, hermesHome);
@@ -2180,6 +2189,9 @@ describe("gateway MCP transport", () => {
         rmSync(dir, { recursive: true, force: true });
         throw error;
       }
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
       writeFileSync(
         configPath,
@@ -2228,6 +2240,7 @@ describe("gateway MCP transport", () => {
           );
           const lastTool = toolResults.at(-1) as Record<string, unknown> | undefined;
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
           const lastToolName =
             typeof lastTool?.name === "string"
               ? lastTool.name
@@ -2251,6 +2264,8 @@ describe("gateway MCP transport", () => {
                   })
                   .at(-1);
 =======
+=======
+>>>>>>> Stashed changes
           const lastToolCall = messages
             .flatMap((message) => {
               if (!message || typeof message !== "object") return [];
@@ -2259,6 +2274,9 @@ describe("gateway MCP transport", () => {
             })
             .find((call) => call && typeof call === "object" && call.id === lastTool?.tool_call_id);
           const lastToolName = typeof lastTool?.name === "string" ? lastTool.name : lastToolCall?.function?.name;
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
           const resultText =
             lastTool && typeof lastTool.content === "string"
@@ -2440,13 +2458,19 @@ describe("gateway MCP transport", () => {
           {
             cwd: allowed,
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
             env: { ...hermesE2eEnvironment(dir, hermesHome), HERMES_RUNTIME_DIR: hermesFixture.runtimeDirectory },
 =======
+=======
+>>>>>>> Stashed changes
             env: {
               ...hermesE2eEnvironment(dir, hermesHome),
               HERMES_RUNTIME_DIR: hermesFixture.runtimeDirectory,
               HERMES_INSTALL_ROOT: hermesFixture.sourceRoot
             },
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
             stdio: ["ignore", "pipe", "pipe"]
           }

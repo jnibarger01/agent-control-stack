@@ -10,8 +10,13 @@
   },
   "dependencies": {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     "@agent-control-stack/release-integrity": "0.1.0",
     "@modelcontextprotocol/sdk": "^1.30.0"
+=======
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "@agent-control-stack/release-integrity": "0.1.0"
+>>>>>>> Stashed changes
 =======
     "@modelcontextprotocol/sdk": "^1.30.0",
     "@agent-control-stack/release-integrity": "0.1.0"

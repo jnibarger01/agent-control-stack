@@ -972,6 +972,7 @@ describe("work item state machine", () => {
           filename: "038_execution_results_idempotency_unique.sql"
         },
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" },
         { version: 40, name: "admission_permits", filename: "040_admission_permits.sql" },
         { version: 41, name: "admission_permit_execution_class", filename: "041_admission_permit_execution_class.sql" },
@@ -984,10 +985,15 @@ describe("work item state machine", () => {
         { version: 48, name: "operation_permit_grant_authority", filename: "048_operation_permit_grant_authority.sql" },
         { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" }
 =======
+=======
+>>>>>>> Stashed changes
         { version: 39, name: "admission_permits", filename: "039_admission_permits.sql" },
         { version: 40, name: "admission_permit_execution_class", filename: "040_admission_permit_execution_class.sql" },
         { version: 41, name: "change_sets", filename: "041_change_sets.sql" },
         { version: 42, name: "work_item_assignments", filename: "042_work_item_assignments.sql" }
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
       ]);
       expect(store.listActors()).toEqual(

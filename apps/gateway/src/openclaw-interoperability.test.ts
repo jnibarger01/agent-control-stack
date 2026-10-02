@@ -99,8 +99,12 @@ describe("installed OpenClaw interoperability", () => {
       const modelBodies: Array<Record<string, unknown>> = [];
       let finalResponseSent = false;
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
       let discoveredToolId: string | undefined;
       const bridgeCalls: string[] = [];
+=======
+      let discoveredTool: string | undefined;
+>>>>>>> Stashed changes
 =======
       let discoveredTool: string | undefined;
 >>>>>>> Stashed changes
@@ -171,7 +175,11 @@ describe("installed OpenClaw interoperability", () => {
               (entry as { name?: string }).name
           );
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
           const invocation = {
+=======
+          let argumentsValue = JSON.stringify({
+>>>>>>> Stashed changes
 =======
           let argumentsValue = JSON.stringify({
 >>>>>>> Stashed changes
@@ -180,6 +188,7 @@ describe("installed OpenClaw interoperability", () => {
             cwd: allowed,
             timeoutSeconds: 5,
             permissionMode: "read-only"
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
           };
           let selectedName: string | undefined;
@@ -205,6 +214,51 @@ describe("installed OpenClaw interoperability", () => {
           if (selectedName && selectedArgs) {
             bridgeCalls.push(selectedName);
             const argumentsValue = JSON.stringify(selectedArgs);
+=======
+          });
+          let invoke = !hasToolResult && typeof functionName === "string";
+          const toolNames = tools.map((entry) => entry?.function?.name ?? entry?.name);
+          if (!tool && ["tool_search", "tool_describe", "tool_call"].every((name) => toolNames.includes(name))) {
+            const last = messages.filter((message) => message?.role === "tool").at(-1);
+            const call = messages
+              .flatMap((message) => (Array.isArray(message?.tool_calls) ? message.tool_calls : []))
+              .find((candidate) => candidate?.id === last?.tool_call_id);
+            const previousName = last?.name ?? call?.function?.name;
+            const text = typeof last?.content === "string" ? last.content : JSON.stringify(last?.content ?? {});
+            const wrapped = text.match(/\n---\n([\s\S]*?)\n<<<END_EXTERNAL_UNTRUSTED_CONTENT/);
+            const result: unknown = last ? JSON.parse(wrapped?.[1] ?? text) : {};
+            const record =
+              result && typeof result === "object" && !Array.isArray(result) ? (result as Record<string, unknown>) : {};
+            const candidates = Array.isArray(result)
+              ? result
+              : [
+                  ...Object.keys(record.tools && typeof record.tools === "object" ? record.tools : {}),
+                  ...(Array.isArray(record.results)
+                    ? record.results.flatMap((group) => (Array.isArray(group?.matches) ? group.matches : [group]))
+                    : [])
+                ];
+            const discovered = candidates
+              .map((entry) => (typeof entry === "string" ? entry : (entry?.id ?? entry?.name)))
+              .find((name) => typeof name === "string" && /test[_.-]agent[_.-]run/.test(name));
+            if (typeof discovered === "string") discoveredTool = discovered;
+            if (!last) {
+              functionName = "tool_search";
+              argumentsValue = JSON.stringify({ query: "ACS test agent run", limit: 5 });
+              invoke = true;
+            } else if (previousName === "tool_search" && discoveredTool) {
+              functionName = "tool_describe";
+              argumentsValue = JSON.stringify({ id: discoveredTool });
+              invoke = true;
+            } else if (previousName === "tool_describe" && discoveredTool) {
+              functionName = "tool_call";
+              argumentsValue = JSON.stringify({ id: discoveredTool, args: JSON.parse(argumentsValue) });
+              invoke = true;
+            }
+          }
+
+          const completionId = `openclaw-fixture-${modelBodies.length}`;
+          if (invoke && typeof functionName === "string") {
+>>>>>>> Stashed changes
 =======
           });
           let invoke = !hasToolResult && typeof functionName === "string";
@@ -438,7 +492,11 @@ describe("installed OpenClaw interoperability", () => {
         openclawGatewayProcess.stdout?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
         openclawGatewayProcess.stderr?.on("data", (chunk: Buffer) => (gatewayOutput += chunk.toString("utf8")));
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         await waitForPort(openclawGatewayPort, () => gatewayOutput);
+=======
+        await waitForPort(openclawGatewayPort, openclawGatewayProcess, () => gatewayOutput);
+>>>>>>> Stashed changes
 =======
         await waitForPort(openclawGatewayPort, openclawGatewayProcess, () => gatewayOutput);
 >>>>>>> Stashed changes
@@ -486,6 +544,7 @@ describe("installed OpenClaw interoperability", () => {
         const diagnosticEventNames = diagnosticEvents.readEvents().map((event) => event.name);
         diagnosticEvents.close();
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}\nTool names:${JSON.stringify(
           modelBodies.map((body) =>
             (Array.isArray(body.tools) ? body.tools : []).map((tool) => {
@@ -496,6 +555,8 @@ describe("installed OpenClaw interoperability", () => {
           )
         )}`;
 =======
+=======
+>>>>>>> Stashed changes
         const advertisedTools = modelBodies.map((body) =>
           Array.isArray(body.tools) ? body.tools.map((tool) => tool?.function?.name ?? tool?.name) : []
         );
@@ -515,6 +576,9 @@ describe("installed OpenClaw interoperability", () => {
           .slice(0, 3);
         const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}\nModel tools:${JSON.stringify(advertisedTools)}\nBridge responses:${JSON.stringify(redactValue(bridgeResponses)).slice(0, 8_000)}\nBridge schemas:${JSON.stringify(bridgeSchemas)}`;
         expect(exitCode, diagnostic).toBe(0);
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
         expect(modelBodies.length, diagnostic).toBeGreaterThan(1);
         expect(finalResponseSent, diagnostic).toBe(true);
@@ -558,7 +622,12 @@ describe("installed OpenClaw interoperability", () => {
         expect(readFileSync(join(dir, "machine-audit.jsonl"), "utf8")).toContain('"tool":"test.agent.run"');
       } finally {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         await Promise.all([stopFixtureProcess(openclawProcess), stopFixtureProcess(openclawGatewayProcess)]);
+=======
+        await stopFixtureProcess(openclawProcess);
+        await stopFixtureProcess(openclawGatewayProcess);
+>>>>>>> Stashed changes
 =======
         await stopFixtureProcess(openclawProcess);
         await stopFixtureProcess(openclawGatewayProcess);
@@ -586,9 +655,12 @@ async function freePort(): Promise<number> {
 }
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
 async function waitForPort(port: number, diagnostics: () => string): Promise<void> {
   const deadline = Date.now() + 30_000;
 =======
+=======
+>>>>>>> Stashed changes
 async function waitForPort(port: number, child: ReturnType<typeof spawn>, output: () => string): Promise<void> {
   const deadline = Date.now() + 10_000;
 >>>>>>> Stashed changes
@@ -613,7 +685,13 @@ async function waitForPort(port: number, child: ReturnType<typeof spawn>, output
     }
   }
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   throw new Error(`OpenClaw gateway did not listen on 127.0.0.1:${port}. Output: ${diagnostics()}`);
+=======
+  throw new Error(
+    `OpenClaw gateway did not listen on 127.0.0.1:${port}: ${String(redactValue(output().slice(-8_000)))}`
+  );
+>>>>>>> Stashed changes
 =======
   throw new Error(
     `OpenClaw gateway did not listen on 127.0.0.1:${port}: ${String(redactValue(output().slice(-8_000)))}`

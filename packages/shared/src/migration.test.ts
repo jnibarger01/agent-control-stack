@@ -18,6 +18,7 @@ function database(lastVersion?: number): DatabaseSync {
   directories.push(directory);
   const db = new DatabaseSync(join(directory, "control.db"));
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   if (lastVersion === undefined) applyControlPlaneMigrations(db);
   else {
     // Construct the historical fixture atomically. The test below still runs
@@ -43,6 +44,8 @@ function database(lastVersion?: number): DatabaseSync {
       db.close();
       throw error;
 =======
+=======
+>>>>>>> Stashed changes
   if (lastVersion === undefined) {
     applyControlPlaneMigrations(db);
   } else {
@@ -59,6 +62,9 @@ function database(lastVersion?: number): DatabaseSync {
         migration.checksum,
         new Date().toISOString()
       );
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
     }
   }

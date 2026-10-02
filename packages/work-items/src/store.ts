@@ -30,6 +30,7 @@ import { readMissionTrace, type MissionTrace, type MissionTraceQuery } from "./m
 import { transitionWorkItem } from "./state-machine.js";
 import {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   issueAutonomousAuthorityBodySchema,
   autonomousAuthorityCoreSchema,
   autonomousAuthorityHash,
@@ -85,6 +86,8 @@ import {
   type BindChangeSetOperationPermit
 } from "./change-set-operation-permit.js";
 =======
+=======
+>>>>>>> Stashed changes
   changeSetManifestHash,
   changeSetRecordSchema,
   submitChangeSetInputSchema,
@@ -92,6 +95,9 @@ import {
   type SubmitChangeSetInput
 } from "./change-set.js";
 import { insertChangeSetRevision, readChangeSet, readChangeSetSubmission } from "./change-set-store.js";
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
 import {
   assignWorkItemInputSchema,
@@ -1057,6 +1063,7 @@ export interface TraceEnqueueFailure {
 
 export interface WorkItemStore {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   requireActiveChangeSetExecutionAuthority(
     reference: { approvalId?: string; authorizationId?: string },
     manifestHash: string,
@@ -1100,11 +1107,16 @@ export interface WorkItemStore {
     now?: Date
   ): GrantAuthorization;
 =======
+=======
+>>>>>>> Stashed changes
   assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment;
   getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined;
   findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined;
   submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord;
   getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined;
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
   withTransaction<T>(operation: () => T): T;
   create(input: unknown): WorkItem;
@@ -6782,6 +6794,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     options: ClaimOptions
   ): { value: ClaimedWorkItem; events: StoredAuditEvent[] } {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     const operationPermit = this.requireActiveChangeSetOperationPermit(current.id, workerId);
     if (operationPermit) {
       const operation = this.getChangeSet(operationPermit.missionId)!.snapshot.definition.operations.find(
@@ -6792,6 +6805,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .get(current.id) as { n: number };
       if (count.n >= operation.retry.maxAttempts)
         throw new ControlStackError("change_set_retry_limit", "approved operation attempt budget exhausted");
+=======
+    const assignment = this.getWorkItemAssignment(current.id);
+    if (assignment && assignment.selectedWorkerId !== workerId) {
+      throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
+>>>>>>> Stashed changes
 =======
     const assignment = this.getWorkItemAssignment(current.id);
     if (assignment && assignment.selectedWorkerId !== workerId) {
@@ -7067,6 +7085,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
   /**
    * Fence active attempt leases that consume execution capacity without a durable
    * admission reservation. Such a lease cannot be capacity-accounted, so leaving it
@@ -7200,6 +7219,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
   countActiveAttemptLeases(now = new Date(), workerIds?: readonly string[]): number {
     if (workerIds?.length === 0) return 0;
 >>>>>>> Stashed changes
+=======
+  countActiveAttemptLeases(now = new Date(), workerIds?: readonly string[]): number {
+    if (workerIds?.length === 0) return 0;
+>>>>>>> Stashed changes
     const nowIso = now.toISOString();
     const workerFilter = workerIds ? ` AND worker_id IN (${workerIds.map(() => "?").join(", ")})` : "";
     // Prefer authoritative attempt_leases, but also count legacy `leases` rows that
@@ -7210,10 +7233,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
            (
              SELECT COUNT(*) FROM attempt_leases
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
              WHERE status = 'active' AND expires_at > ?${workerFilter}
            ) + (
              SELECT COUNT(*) FROM leases
              WHERE status = 'active' AND expires_at > ?${workerFilter}
+=======
+             WHERE status = 'active' AND expires_at > ? ${workerFilter}
+           ) + (
+             SELECT COUNT(*) FROM leases
+             WHERE status = 'active' AND expires_at > ? ${workerFilter}
+>>>>>>> Stashed changes
 =======
              WHERE status = 'active' AND expires_at > ? ${workerFilter}
            ) + (
@@ -7242,6 +7272,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     executionClass: "execution" | "wait";
   }): void {
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
     if (!["jc", "dc"].includes(input.lane) || !["execution", "wait"].includes(input.executionClass)) {
       throw new ControlStackError("admission_binding_invalid", "invalid admission capacity binding");
     }
@@ -7253,12 +7284,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
         !lease ||
         lease.status !== "active" ||
 =======
+=======
+>>>>>>> Stashed changes
     this.write(() => {
       const lease = this.getActiveLeaseForAttempt(input.attemptId);
       const attempt = this.getAttempt(input.attemptId);
       const workItem = this.get(input.workItemId);
       if (
         !lease ||
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
         Date.parse(lease.expiresAt) <= Date.now() ||
         lease.leaseId !== input.leaseId ||
@@ -7269,6 +7305,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         lease.inputHash !== input.inputHash ||
         attempt?.status !== "running" ||
         attempt.workItemId !== input.workItemId ||
+<<<<<<< Updated upstream
 <<<<<<< Updated upstream
         attempt.planHash !== input.planHash ||
         attempt.inputHash !== input.inputHash ||
@@ -7281,6 +7318,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "admission_binding_invalid",
           "admission reservation does not match current lease authority"
 =======
+=======
+>>>>>>> Stashed changes
         attempt.claimedByWorkerId !== input.workerId ||
         attempt.currentFencingEpoch !== input.fencingEpoch ||
         attempt.planHash !== input.planHash ||
@@ -7291,6 +7330,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
         throw new ControlStackError(
           "admission_permit_binding_mismatch",
           "admission permit requires a current canonical lease binding"
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
         );
       }
@@ -7298,8 +7340,14 @@ export class SqliteWorkItemStore implements WorkItemStore {
         .prepare(
           `INSERT INTO admission_permits
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
         (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch, action_hash, plan_hash, input_hash, lane, execution_class, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+=======
+         (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch,
+         action_hash, plan_hash, input_hash, lane, execution_class, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+>>>>>>> Stashed changes
 =======
          (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch,
          action_hash, plan_hash, input_hash, lane, execution_class, created_at)
@@ -7317,6 +7365,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           input.inputHash,
           input.lane,
 <<<<<<< Updated upstream
+<<<<<<< Updated upstream
           input.executionClass,
           new Date().toISOString()
         );
@@ -7327,6 +7376,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
           { "work_item.id": input.workItemId, "attempt.id": input.attemptId }
         )
 =======
+=======
+>>>>>>> Stashed changes
           input.executionClass
         );
       const event = this.appendAuditEvent(
@@ -7338,6 +7389,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "admission.lane": input.lane,
           "admission.class": input.executionClass
         })
+<<<<<<< Updated upstream
+>>>>>>> Stashed changes
+=======
 >>>>>>> Stashed changes
       );
       return { value: undefined, events: [event] };
