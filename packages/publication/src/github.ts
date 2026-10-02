@@ -53,6 +53,8 @@ export interface GitHubClientOptions {
    * assuming every repository uses "main".
    */
   baseBranch?: string;
+  /** GitHub API origin. Defaults to https://api.github.com. */
+  apiBase?: string;
   fetchImpl?: typeof fetch;
 }
 
@@ -84,23 +86,32 @@ export class GitHubPullRequestClient implements PullRequestClient {
     return this.resolvedBaseBranch;
   }
 
+  private apiRoot(): string {
+    const origin = (this.options.apiBase ?? "https://api.github.com").replace(/\/$/u, "");
+    return `${origin}/repos/${encodeURIComponent(this.options.owner)}/${encodeURIComponent(this.options.repository)}`;
+  }
+
   async createOrUpdate(input: {
     branch: string;
     commitSha: string;
     title: string;
     body: string;
     idempotencyKey: string;
-  }): Promise<{ url: string }> {
+  }): Promise<{ url: string; number?: number; headSha?: string }> {
     const token = this.options.tokenSource();
     if (!token) throw new Error("GitHub publication token is unavailable");
-    const base = `https://api.github.com/repos/${encodeURIComponent(this.options.owner)}/${encodeURIComponent(this.options.repository)}`;
+    const base = this.apiRoot();
     const headers = this.authHeaders(token);
     const existingResponse = await this.fetchImpl(
       `${base}/pulls?head=${encodeURIComponent(`${this.options.owner}:${input.branch}`)}&state=open`,
       { headers }
     );
     if (!existingResponse.ok) throw new Error(`GitHub PR lookup failed: ${existingResponse.status}`);
-    const existing = (await existingResponse.json()) as Array<{ number: number; html_url: string }>;
+    const existing = (await existingResponse.json()) as Array<{
+      number: number;
+      html_url: string;
+      head?: { sha?: string };
+    }>;
     const payload = {
       title: input.title,
       body: `${input.body}\n\nACS commit: ${input.commitSha}\nACS idempotency: ${input.idempotencyKey}`
@@ -112,7 +123,7 @@ export class GitHubPullRequestClient implements PullRequestClient {
         body: JSON.stringify(payload)
       });
       if (!response.ok) throw new Error(`GitHub PR update failed: ${response.status}`);
-      return { url: existing[0].html_url };
+      return pullIdentity(existing[0]);
     }
     const baseBranch = await this.resolveBaseBranch(base, token);
     const response = await this.fetchImpl(`${base}/pulls`, {
@@ -121,7 +132,19 @@ export class GitHubPullRequestClient implements PullRequestClient {
       body: JSON.stringify({ ...payload, head: input.branch, base: baseBranch })
     });
     if (!response.ok) throw new Error(`GitHub PR create failed: ${response.status}`);
-    const created = (await response.json()) as { html_url: string };
-    return { url: created.html_url };
+    const created = (await response.json()) as { html_url: string; number?: number; head?: { sha?: string } };
+    return pullIdentity(created);
   }
+}
+
+function pullIdentity(pull: { html_url: string; number?: number; head?: { sha?: string } }): {
+  url: string;
+  number?: number;
+  headSha?: string;
+} {
+  return {
+    url: pull.html_url,
+    ...(pull.number === undefined ? {} : { number: pull.number }),
+    ...(pull.head?.sha ? { headSha: pull.head.sha } : {})
+  };
 }

@@ -106,6 +106,7 @@ export interface AdvanceResult {
 }
 
 export interface ApprovalView {
+  missionId: string;
   state: CodingMissionState;
   summary: string;
   repository: string;
@@ -115,6 +116,7 @@ export interface ApprovalView {
   checks: Record<string, string>;
   review?: string;
   changeSet?: string;
+  deploymentRequired: boolean;
   deploymentImpact: string;
   approvalAction?: "APPROVE_CHANGE_SET";
   failureCode?: string;
@@ -172,6 +174,7 @@ export class CodingMissionController {
     const operations = this.store.operations(missionId);
     const files = [...new Set(operations.flatMap((operation) => operation.files))].sort();
     return {
+      missionId: mission.missionId,
       state: mission.state,
       summary: mission.summary,
       repository: mission.repository,
@@ -183,6 +186,7 @@ export class CodingMissionController {
       checks: mission.validation?.checks ?? {},
       ...(mission.validation ? { review: mission.validation.checks.review } : {}),
       ...(mission.changeSetHash ? { changeSet: mission.changeSetHash } : {}),
+      deploymentRequired: mission.deploymentRequired,
       deploymentImpact: mission.deploymentImpact,
       ...(mission.state === "WAITING_FOR_APPROVAL" ? { approvalAction: "APPROVE_CHANGE_SET" as const } : {}),
       ...(mission.failureCode ? { failureCode: mission.failureCode } : {}),
@@ -262,6 +266,11 @@ export class CodingMissionController {
       results.push(await this.runUntilStable(mission.missionId));
     }
     return results;
+  }
+
+  listRecent(limit = 50): ApprovalView[] {
+    const capped = Math.min(Math.max(Math.floor(limit), 1), 50);
+    return this.store.listRecent(capped).map((mission) => this.approvalView(mission.missionId));
   }
 
   async approve(
@@ -461,7 +470,9 @@ export class CodingMissionController {
     if (!mission.headSha) return this.degrade(mission, "missing_head");
     const validated = await this.ports.validator.validate({ mission, headSha: mission.headSha });
     if (validated.status === "unknown") return this.degrade(mission, "unknown_validation");
-    if (validated.status !== "succeeded" || !validated.value) return this.fail(mission, "validation_failed");
+    if (validated.status !== "succeeded" || !validated.value) {
+      return this.fail(mission, validated.code ?? "validation_failed");
+    }
     const checks = validated.value.checks;
     for (const name of REQUIRED_CHECKS) {
       if (checks[name] !== "PASS" && checks[name] !== "FAIL") {
@@ -559,7 +570,9 @@ export class CodingMissionController {
     });
     if (merged.status === "unknown") return this.result(this.store.require(fresh.missionId), false, "unknown_merge");
     if (merged.status !== "succeeded" || !merged.value) {
-      return this.fail(this.store.require(fresh.missionId), merged.code ?? "merge_failed");
+      const current = this.store.require(fresh.missionId);
+      if (merged.code === "stale_head") return this.degrade(current, "stale_head");
+      return this.fail(current, merged.code ?? "merge_failed");
     }
     let current = this.store.require(fresh.missionId);
     if (fresh.deploymentRequired) {

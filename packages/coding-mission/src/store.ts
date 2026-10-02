@@ -259,6 +259,13 @@ export class CodingMissionStore {
     return rows.map((row) => this.mapMission(row));
   }
 
+  listRecent(limit: number): CodingMissionRecord[] {
+    const rows = this.db
+      .prepare(`SELECT * FROM coding_missions ORDER BY updated_at DESC, mission_id ASC LIMIT ?`)
+      .all(limit) as unknown as MissionRow[];
+    return rows.map((row) => this.mapMission(row));
+  }
+
   operations(missionId: string): CodingOperation[] {
     const rows = this.db
       .prepare(

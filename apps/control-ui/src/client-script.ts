@@ -1,3 +1,4 @@
+import { codingMissionPanelSource } from "./coding-mission-panel.js";
 import { operationsClientSource } from "./operations-client.js";
 import { CONFIRM_COPY } from "./approval-actions.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
@@ -1336,5 +1337,6 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
-openWorkItemFromLocation();`;
+openWorkItemFromLocation();
+${codingMissionPanelSource()}`;
 }

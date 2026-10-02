@@ -2732,6 +2732,27 @@
             "description": "Coding mission ports are not configured."
           }
         }
+      },
+      "get": {
+        "operationId": "listCodingMissions",
+        "summary": "List recent coding missions, including those waiting for change-set approval.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
       }
     },
     "/coding-missions/{id}": {

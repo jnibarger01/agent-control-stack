@@ -126,13 +126,25 @@ describe("coding mission HTTP", () => {
     const missing = await unconfigured.inject({ method: "POST", url: "/coding-missions", headers, payload });
     expect(missing.statusCode).toBe(503);
     expect(missing.json()).toMatchObject({ code: "coding_mission_unconfigured" });
+    const unlisted = await unconfigured.inject({ method: "GET", url: "/coding-missions", headers });
+    expect(unlisted.statusCode).toBe(503);
+    expect(unlisted.json()).toMatchObject({ code: "coding_mission_unconfigured" });
     await unconfigured.close();
 
     const app = buildGateway({ dbPath, logger: false, auth, codingMissionPorts: ports() });
     const anonymous = await app.inject({ method: "GET", url: "/coding-missions/mission-http" });
     expect(anonymous.statusCode).toBe(401);
+    const anonymousList = await app.inject({ method: "GET", url: "/coding-missions" });
+    expect(anonymousList.statusCode).toBe(401);
     const created = await app.inject({ method: "POST", url: "/coding-missions", headers, payload });
     expect(created.statusCode).toBe(201);
+    const listed = await app.inject({ method: "GET", url: "/coding-missions", headers });
+    expect(listed.statusCode).toBe(200);
+    expect(listed.json()).toMatchObject({
+      missions: [
+        expect.objectContaining({ missionId: "mission-http", state: "WAITING_FOR_APPROVAL", deploymentRequired: true })
+      ]
+    });
     const stale = await app.inject({
       method: "POST",
       url: "/coding-missions/mission-http/approve",

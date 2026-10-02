@@ -156,6 +156,10 @@ const operations = {
     "method": "POST",
     "path": "/coding-missions"
   },
+  "listCodingMissions": {
+    "method": "GET",
+    "path": "/coding-missions"
+  },
   "getCodingMission": {
     "method": "GET",
     "path": "/coding-missions/{id}"

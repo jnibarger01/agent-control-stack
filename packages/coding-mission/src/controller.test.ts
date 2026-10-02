@@ -526,6 +526,30 @@ describe("coding mission controller", () => {
     fourth.close();
   });
 
+  it("degrades when the pull request head no longer matches the approved change set", async () => {
+    root = mkdtempSync(join(tmpdir(), "acs-coding-"));
+    const state = script(root, { operations: [{ operationId: "edit-api", dependsOn: [], title: "edit" }] });
+    state.mergeOutcome = { status: "rejected", code: "stale_head" };
+    const mission = controller(state);
+    mission.create({
+      missionId: "mission-head",
+      repository: "example/repo",
+      baseRef: "main",
+      baseSha: BASE,
+      summary: "Head"
+    });
+    const waiting = await mission.runUntilStable("mission-head");
+    const moved = await mission.approve("mission-head", {
+      approverId: "human",
+      expectedChangeSetHash: waiting.changeSetHash!
+    });
+    expect(moved.state).toBe("DEGRADED");
+    expect(moved.code).toBe("stale_head");
+    expect(state.calls.merge).toBe(1);
+    expect(state.calls.deploy).toBe(0);
+    mission.close();
+  });
+
   it("reconciles an unknown merge without merging twice", async () => {
     root = mkdtempSync(join(tmpdir(), "acs-coding-"));
     const state = script(root, { operations: [{ operationId: "edit-api", dependsOn: [], title: "edit" }] });

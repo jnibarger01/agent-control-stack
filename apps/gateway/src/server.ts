@@ -1,4 +1,8 @@
-import { CodingMissionController, type CodingMissionPorts } from "@agent-control-stack/coding-mission";
+import {
+  CodingMissionController,
+  codingMissionPortsFromEnv,
+  type CodingMissionPorts
+} from "@agent-control-stack/coding-mission";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
@@ -2417,6 +2421,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       codingMissions.create(body);
       await codingMissions.runUntilStable(body.missionId);
       return reply.code(201).send(codingMissions.approvalView(body.missionId));
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get("/coding-missions", async (request, reply) => {
+    try {
+      const credential = gatewayCredentialForRequest(request, auth);
+      if (!credential?.scopes.includes("acs:read")) return reply.code(401).send({ error: "unauthorized" });
+      if (!codingMissions) {
+        return reply
+          .code(503)
+          .send({ error: "coding mission ports are not configured", code: "coding_mission_unconfigured" });
+      }
+      return { missions: codingMissions.listRecent() };
     } catch (error) {
       return sendError(reply, error);
     }
@@ -5125,7 +5144,12 @@ function isLoopbackHost(value: string | string[] | undefined): boolean {
 export async function startGateway(): Promise<FastifyInstance> {
   validateProductionConfig();
   const listen = gatewayListenConfig();
-  const app = buildGateway();
+  const dbPath = process.env.ACS_DB_PATH ?? "storage/local.db";
+  const codingMissionPorts = codingMissionPortsFromEnv(process.env, { dbPath });
+  const app = buildGateway({
+    dbPath,
+    ...(codingMissionPorts ? { codingMissionPorts } : {})
+  });
   await app.listen(listen);
   return app;
 }

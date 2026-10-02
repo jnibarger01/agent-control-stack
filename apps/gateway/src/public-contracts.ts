@@ -707,6 +707,15 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
   },
   {
     method: "get",
+    path: "/coding-missions",
+    operationId: "listCodingMissions",
+    summary: "List recent coding missions, including those waiting for change-set approval.",
+    additionalResponses: {
+      "503": { description: "Coding mission ports are not configured." }
+    }
+  },
+  {
+    method: "get",
     path: "/coding-missions/{id}",
     operationId: "getCodingMission",
     summary: "Read the approval-oriented coding mission view, including Change Set identity and execution progress.",

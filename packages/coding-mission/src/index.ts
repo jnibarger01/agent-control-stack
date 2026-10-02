@@ -1,3 +1,12 @@
+export {
+  codingMissionPortsFromEnv,
+  readCodingRuntimeConfig,
+  resumeConfiguredCodingMissions,
+  runGit,
+  type CodingRuntimeConfig,
+  type CodingRuntimeDependencies,
+  type GitRunner
+} from "./default-runtime.js";
 export { routeCodingOperationWithNimble } from "./routing.js";
 export {
   CodingMissionController,

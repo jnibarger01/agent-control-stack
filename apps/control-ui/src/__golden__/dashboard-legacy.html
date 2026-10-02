@@ -663,6 +663,7 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><button type="button" data-inspect-work="wrk_approve">Review details</button><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><button type="button" data-inspect-work="wrk_blocked">Review details</button><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
+        <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list"><p class="empty">No coding missions are waiting for approval.</p></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body"><div class="operator-metrics"><dl>
@@ -3332,6 +3333,111 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
-openWorkItemFromLocation();</script>
+openWorkItemFromLocation();
+
+const codingMissionDecision = function codingMissionApprovalDecision(status) {
+  if (status === 409) return "refresh";
+  if (status >= 200 && status < 300) return "accepted";
+  return "show_error";
+};
+let codingMissionTimer = null;
+
+function codingMissionEscape(value) {
+  return String(value ?? '').replace(/[&<>"']/g, function (character) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character];
+  });
+}
+
+function codingMissionLabel(mission) {
+  if (mission.state === 'WAITING_FOR_APPROVAL') return 'waiting';
+  if (mission.state === 'EXECUTING') return mission.deploymentRequired ? 'Merging / deploying' : 'Merging';
+  if (mission.state === 'VERIFYING') return 'Verifying';
+  if (mission.state === 'COMPLETED') return 'Complete';
+  return codingMissionEscape(mission.state || 'unknown');
+}
+
+function codingMissionCard(mission) {
+  const hash = typeof mission.changeSet === 'string' ? mission.changeSet : '';
+  const files = Array.isArray(mission.files) ? mission.files : [];
+  const checks = mission.checks && typeof mission.checks === 'object' ? mission.checks : {};
+  const pull = mission.pullRequest || {};
+  const checkText = Object.keys(checks).map(function (name) {
+    return '<li><span>' + codingMissionEscape(name) + '</span> <strong>' + codingMissionEscape(checks[name]) + '</strong></li>';
+  }).join('');
+  const fileText = files.map(function (file) {
+    return '<li><code>' + codingMissionEscape(file) + '</code></li>';
+  }).join('');
+  const pullText = pull.url
+    ? '<a href="' + codingMissionEscape(pull.url) + '" rel="noreferrer">' + codingMissionEscape(pull.number ? '#' + pull.number : pull.url) + '</a>'
+    : (pull.number ? '#' + codingMissionEscape(pull.number) : 'none');
+  const approve = mission.state === 'WAITING_FOR_APPROVAL' && /^[a-f0-9]{64}$/.test(hash)
+    ? '<button type="button" class="primary-button" data-approve-change-set data-mission-id="' + codingMissionEscape(mission.missionId) + '" data-change-set-hash="' + codingMissionEscape(hash) + '">Approve change set</button>'
+    : '';
+  return '<article class="coding-mission"><p><strong>' + codingMissionEscape(mission.summary || mission.missionId) + '</strong> <span>' + codingMissionLabel(mission) + '</span></p>'
+    + '<p>Change set <code>' + codingMissionEscape(hash || 'unavailable') + '</code></p>'
+    + '<p>Pull request ' + pullText + '</p>'
+    + '<p>Deployment ' + codingMissionEscape(mission.deploymentRequired ? 'required' : 'not required') + ': ' + codingMissionEscape(mission.deploymentImpact || '') + '</p>'
+    + '<ul>' + (checkText || '<li>No validation result</li>') + '</ul>'
+    + '<ul>' + (fileText || '<li>No proposed mutations</li>') + '</ul>'
+    + approve + '</article>';
+}
+
+async function refreshCodingMissions() {
+  const root = document.getElementById('coding-mission-list');
+  if (!root) return;
+  let payload = null;
+  try {
+    const response = await fetch('/coding-missions', { credentials: 'same-origin', headers: { accept: 'application/json' } });
+    if (!response.ok) {
+      root.innerHTML = '<p class="empty">Coding missions are unavailable.</p>';
+      return;
+    }
+    payload = await response.json();
+  } catch (error) {
+    root.innerHTML = '<p class="empty">Coding missions are unavailable.</p>';
+    return;
+  }
+  const missions = payload && Array.isArray(payload.missions) ? payload.missions : [];
+  root.innerHTML = missions.length
+    ? '<p id="coding-mission-note" class="muted"></p>' + missions.map(codingMissionCard).join('')
+    : '<p class="empty">No coding missions are waiting for approval.</p>';
+  const pending = missions.some(function (mission) {
+    return mission.state !== 'COMPLETED' && mission.state !== 'FAILED' && mission.state !== 'DEGRADED';
+  });
+  if (pending && !codingMissionTimer) codingMissionTimer = setInterval(refreshCodingMissions, 4000);
+  if (!pending && codingMissionTimer) {
+    clearInterval(codingMissionTimer);
+    codingMissionTimer = null;
+  }
+}
+
+document.addEventListener('click', async function (event) {
+  const button = event.target && event.target.closest ? event.target.closest('[data-approve-change-set]') : null;
+  if (!button || button.disabled) return;
+  const missionId = button.getAttribute('data-mission-id');
+  const hash = button.getAttribute('data-change-set-hash');
+  const displayed = button.parentElement ? button.parentElement.querySelector('code') : null;
+  if (!missionId || !hash || !displayed || displayed.textContent !== hash) return;
+  button.disabled = true;
+  const response = await fetch('/coding-missions/' + encodeURIComponent(missionId) + '/approve', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ expectedChangeSetHash: hash })
+  });
+  const decision = codingMissionDecision(response.status);
+  if (decision === 'refresh') {
+    const note = document.getElementById('coding-mission-note');
+    if (note) note.textContent = 'This change set changed. Refreshing the proposal.';
+    await refreshCodingMissions();
+    const refreshed = document.getElementById('coding-mission-note');
+    if (refreshed) refreshed.textContent = 'This change set changed. Refreshing the proposal.';
+    return;
+  }
+  await refreshCodingMissions();
+});
+
+refreshCodingMissions();
+</script>
   </body>
 </html>
