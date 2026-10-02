@@ -162,6 +162,15 @@ function failures(model: MissionControlViewModel): string {
       .join("") || '<p class="empty">No failures or blocked work in the displayed window.</p>'
   }</div>`;
 }
+/**
+ * The readiness check grid.
+ *
+ * Rendered in exactly one place: the System page (`#system-operations`). It used to
+ * also appear on Overview as a "Systems Overview" card carrying the identical
+ * per-check markup, so the same readiness state was presented twice and could drift
+ * between the two regions. Overview keeps its own at-a-glance "System Readiness"
+ * metric card and links through to System for the diagnostic detail.
+ */
 function systems(model: MissionControlViewModel): string {
   const checks = model.readiness?.checks;
   return `<div class="system-check-grid">${
@@ -236,7 +245,7 @@ export function overviewOperations(model: MissionControlViewModel, agents: Missi
   ).length;
   const ready = model.readiness;
   const pending = model.workItems.filter((i) => i.status === "needs_approval");
-  return `<section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics">${metricCard("Active Work Items", active, "Current control-plane work")}${metricCard("System Readiness", ready ? (ready.ok ? "Passing" : "Degraded") : "Unknown", "Persisted dependency checks", ready?.ok ? "green" : "amber")}${metricCard("Agents Online", agents.filter((a) => a.status === "online").length, `${agents.length} registered / observed`)}${metricCard("Avg Run Time", duration(model.executionTelemetry?.averageRunMs), "Terminal attempts · last 24h")}</div></section><div class="operations-layout"><div class="operations-main">${sectionCard("Missions · Work Items", missionBoard(model), "queue")}<div class="overview-bottom">${sectionCard("Recent Activity", activityTimeline(model), "audit")}${sectionCard("Systems Overview", systems(model), "system")}</div></div><div class="operations-rail">${sectionCard("Agent Health", healthRail(agents), "agents")}${sectionCard("Critical Alerts", failures(model), "execution")}${sectionCard(
+  return `<section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics">${metricCard("Active Work Items", active, "Current control-plane work")}${metricCard("System Readiness", ready ? (ready.ok ? "Passing" : "Degraded") : "Unknown", "Persisted dependency checks", ready?.ok ? "green" : "amber")}${metricCard("Agents Online", agents.filter((a) => a.status === "online").length, `${agents.length} registered / observed`)}${metricCard("Avg Run Time", duration(model.executionTelemetry?.averageRunMs), "Terminal attempts · last 24h")}</div></section><div class="operations-layout"><div class="operations-main">${sectionCard("Missions · Work Items", missionBoard(model), "queue")}<div class="overview-bottom">${sectionCard("Recent Activity", activityTimeline(model), "audit")}</div></div><div class="operations-rail">${sectionCard("Agent Health", healthRail(agents), "agents")}${sectionCard("Critical Alerts", failures(model), "execution")}${sectionCard(
     "Approval Requests",
     `<div class="rail-list">${
       pending

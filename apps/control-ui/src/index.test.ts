@@ -1014,3 +1014,40 @@ describe("assigned agent presentation (#22)", () => {
     }
   });
 });
+
+describe("readiness has one canonical presentation (#20)", () => {
+  const model = {
+    workItems: [],
+    events: [],
+    readiness: {
+      ok: false,
+      checks: {
+        audit_chain: { ok: true },
+        database: { ok: false, code: "db_write_failed" }
+      }
+    },
+    now: new Date("2026-09-22T00:01:00.000Z")
+  };
+
+  it("renders the readiness check grid once, on the System page", () => {
+    const html = renderDashboard(model);
+    // The per-check diagnostic grid is a System-page presentation only.
+    expect(html.match(/class="system-check-grid"/g) ?? []).toHaveLength(1);
+    // Overview keeps its at-a-glance summary card instead of a second copy.
+    expect(html).toContain("System Readiness");
+    expect(html).not.toContain("Systems Overview");
+    // The unique diagnostic detail is preserved.
+    expect(html).toContain("db_write_failed");
+  });
+
+  it("keeps the overview readiness summary in step with the underlying checks", () => {
+    const degraded = renderDashboard(model);
+    expect(degraded).toContain("Degraded");
+
+    const passing = renderDashboard({
+      ...model,
+      readiness: { ok: true, checks: { audit_chain: { ok: true }, database: { ok: true } } }
+    });
+    expect(passing).toContain("Passing");
+  });
+});
