@@ -161,7 +161,7 @@ describe("throughput chart escaping (#25)", () => {
       telemetry([
         {
           at: '</title></g><text x="0" y="0">&lt;img src=x onerror=alert(1)&gt;',
-          started: '</text><script>alert(1)</script>',
+          started: "</text><script>alert(1)</script>",
           completed: 1,
           failed: 0
         }
@@ -180,9 +180,7 @@ describe("throughput chart escaping (#25)", () => {
   });
 
   it("escapes the bucket label in the chart tooltip and the detail table", () => {
-    const chart = throughputChart(
-      telemetry([{ at: "<b>bucket</b>", started: 2, completed: 1, failed: 0 }])
-    );
+    const chart = throughputChart(telemetry([{ at: "<b>bucket</b>", started: 2, completed: 1, failed: 0 }]));
     expect(chart).not.toContain("<b>bucket</b>");
     expect(chart).toContain("&lt;b&gt;bucket&lt;/b&gt;");
   });
