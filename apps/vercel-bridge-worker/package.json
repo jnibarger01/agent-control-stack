@@ -12,6 +12,6 @@
   },
   "dependencies": {
     "@agent-control-stack/vercel-bridge-contract": "0.1.0",
-    "@vercel/queue": "^0.6.0"
+    "@vercel/queue": "^0.7.0"
   }
 }
