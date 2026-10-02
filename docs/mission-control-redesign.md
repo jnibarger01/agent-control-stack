@@ -24,7 +24,20 @@ Creation still uses the existing composer and `POST /work-items`. Retry still us
 
 ## Minimal backend additions
 
-No HTTP routes, schema migrations, dependencies or authority-changing operations were added. The authenticated dashboard projection now includes:
+Scope: this section describes the Mission Control redesign only. It adds no new canonical URLs, no new dependencies, and no authority-changing operation of its own. The dashboard reads through the existing authenticated `GET /dashboard/fragments` projection and the existing store read methods; the browser still never grants authority.
+
+It also does not change persisted schema. No migration was added for this work.
+
+The wider branch this redesign ships alongside does add routes, schema migrations, dependencies, and authority-affecting behavior elsewhere in the system. That is separate work with its own contracts, and it is not covered by the statement above:
+
+- schema migrations for change sets and revisions, change set approvals, change set operation permits, autonomous authority, operation-permit grant authority, and work-item assignments;
+- HTTP routes for change set submission, policy and authority evaluation, approval, and operation permits;
+- durable work-item assignment, enforced through the policy-gate claim tools rather than a dedicated HTTP route;
+- authority-affecting behavior including hash-bound approvals, operation permits, and work-item assignment.
+
+Consult `docs/security-contracts.md`, `docs/architecture.md`, and the change set and approval protocol documents for those. If you are reviewing the effect of this branch as a whole, do not rely on this section as a statement that no routes, migrations, dependencies, or authority operations were added.
+
+The authenticated dashboard projection now includes:
 
 - Current execution plans through the existing integrity-checking store method.
 - Batched current-plan admissions, parsed with the shared admission schema.
