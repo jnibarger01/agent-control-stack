@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { stableHash } from "@agent-control-stack/shared";
-import type { JSONType } from "zod";
 import {
   executionActionHash,
   executionPlanSubjectInputHash,
