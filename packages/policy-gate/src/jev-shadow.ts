@@ -3,6 +3,8 @@
  *
  * ADVISORY ONLY: one typed System One fan-out call emits correlated telemetry.
  * The result is never returned to or consumed by any authoritative ACS path.
+ * JEV routing signals are not an executor-selection authority. Nimble, via
+ * decideAuthoritativeRoute, is the only model consulted for that decision.
  */
 import {
   JEV_INTAKE_QUESTIONS,
