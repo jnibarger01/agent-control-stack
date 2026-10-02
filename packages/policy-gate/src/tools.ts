@@ -17,6 +17,7 @@ import {
 } from "@agent-control-stack/work-items";
 import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
+import { ACS_ADMIN_APPROVER } from "./execution-mode.js";
 import { explainPolicy } from "./explain.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
 
@@ -44,7 +45,8 @@ const claimInputSchema = z.object({
 });
 const claimByIdInputSchema = idInputSchema.extend({
   workerId: z.string().min(1),
-  leaseMs: z.number().int().positive().optional()
+  leaseMs: z.number().int().positive().optional(),
+  executionModeFence: z.literal("admin").optional()
 });
 const approvalInputSchema = idInputSchema.merge(approvalRequestSchema);
 const cancelInputSchema = idInputSchema.merge(cancelRequestSchema);
@@ -259,8 +261,25 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
+  const adminMode = store.getExecutionMode().mode === "admin";
+  const registeredAgentIds = new Set(store.listRegistryAgents().map((agent) => agent.id));
+  const workerMatchesTarget = (workItem: WorkItem) => {
+    const targetedAgents = (workItem.target.services ?? []).filter((serviceId) => registeredAgentIds.has(serviceId));
+    return targetedAgents.length === 0 || targetedAgents.includes(parsed.workerId);
+  };
   const candidate = store
     .list({ status: "approved" })
+    .filter(
+      (workItem) =>
+        workerMatchesTarget(workItem) &&
+        !workItem.requestedActions.some((action) => {
+          const params = action.params as Record<string, unknown> | undefined;
+          return params?.contract === "acs.jc.v1";
+        }) &&
+        (adminMode ||
+          (!store.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) &&
+            !store.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER)))
+    )
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
   if (!candidate) {
     return undefined;
@@ -315,8 +334,9 @@ function gateWorkerClaimInTransaction(
   // `approvalId` column; the rest go through additionalApprovals, consumed
   // transactionally with lease issuance the same way.
   const [firstApproval, ...restApprovals] = planApprovals;
-  const running = store.claimNextApprovedWorkItem(parsed.workerId, {
+  const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
+    adminApprovalActorId: ACS_ADMIN_APPROVER,
     attemptAuthority: {
       planHash: plan.planHash,
       admissionId: admission.admissionId,
@@ -410,6 +430,10 @@ function gateWorkerClaimByIdInTransaction(
   const [firstApproval, ...restApprovals] = planApprovals;
   const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
+    adminApprovalActorId: ACS_ADMIN_APPROVER,
+    ...(parsed.executionModeFence === "admin"
+      ? { executionModeFence: { mode: "admin" as const, approvedByActorId: ACS_ADMIN_APPROVER } }
+      : {}),
     attemptAuthority: {
       planHash: plan.planHash,
       admissionId: admission.admissionId,

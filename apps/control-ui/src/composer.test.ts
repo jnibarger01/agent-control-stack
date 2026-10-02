@@ -20,10 +20,29 @@ function bootComposer(
         const call = app.calls.at(-1);
         previews.push(call?.body);
         return { body: preview(call?.body) };
-      }
+      },
+      "/agents": () => ({
+        body: {
+          agents: [
+            {
+              id: "codex-cli",
+              displayName: "Codex CLI",
+              kind: "cli",
+              status: "online",
+              health: "healthy",
+              capabilities: ["code:implement"],
+              metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+            }
+          ]
+        }
+      })
     }
   );
   const form = app.document.getElementById("task-form") as HTMLFormElement;
+  const agentOption = app.document.createElement("option");
+  agentOption.value = "codex-cli";
+  agentOption.textContent = "Codex CLI";
+  (form.querySelector('[name="service"]') as HTMLSelectElement).append(agentOption);
   const field = <T extends HTMLElement>(name: string) => form.querySelector(`[name="${name}"]`) as unknown as T;
   const type = (name: string, value: string) => {
     const input = field<HTMLInputElement>(name);
@@ -41,9 +60,13 @@ describe("task composer (#17)", () => {
     for (const kind of KINDS) expect(html).toContain(`<option value="${kind}"></option>`);
     expect(html).toContain('list="composer-action-kinds"');
     expect(composerHtml([])).toContain("Defaults to agent.prompt.");
+    const withAgent = composerHtml(KINDS, [{ id: "codex-cli", displayName: "Codex CLI", metadata: { registered: "true" } }]);
+    expect(withAgent).toContain('<option value="codex-cli">Codex CLI</option>');
+    expect(withAgent).toContain('name="repo"');
+    expect(withAgent).toContain('name="newWorktree"');
   });
 
-  it("previews policy after a debounce once title and instructions are filled", async () => {
+  it("previews policy after a debounce once title, instructions, and agent are selected", async () => {
     const c = bootComposer(() => ({
       outcome: "needs_approval",
       reason: "file writes require approval",
@@ -53,9 +76,10 @@ describe("task composer (#17)", () => {
     c.type("title", "Write notes");
     await c.app.advance(COMPOSER_PREVIEW_DEBOUNCE_MS);
     expect(c.previews).toHaveLength(0);
-    expect(c.app.text("#composer-preview")).toBe("Fill in a title and instructions to preview policy.");
+    expect(c.app.text("#composer-preview")).toBe("Add a title, goal, and agent to check policy.");
 
     c.type("intent", "update the notes");
+    c.type("service", "codex-cli");
     c.type("actionKind", "fs.write");
     await c.app.advance(COMPOSER_PREVIEW_DEBOUNCE_MS - 1);
     expect(c.previews).toHaveLength(0);
@@ -64,9 +88,9 @@ describe("task composer (#17)", () => {
     expect(c.previews).toEqual([
       {
         title: "Write notes",
-        intent: "update the notes",
+        intent: "update the notes\n\nWorktree preference: use a new git worktree for this task.",
         risk: "medium",
-        target: {},
+        target: { services: ["codex-cli"] },
         requestedActions: [{ kind: "fs.write", description: "Dispatch prompt to selected agent", params: {} }]
       }
     ]);
@@ -93,6 +117,7 @@ describe("task composer (#17)", () => {
     const c = bootComposer();
     c.type("title", "Read");
     c.type("intent", "read a file");
+    c.type("service", "codex-cli");
     c.type("actionParams", "{not json");
     await c.app.advance(COMPOSER_PREVIEW_DEBOUNCE_MS);
     expect(c.app.text("#composer-params-error")).toMatch(/^Params are not valid JSON/);
@@ -115,6 +140,8 @@ describe("task composer (#17)", () => {
     c.app.setPostResponse({ status: 201, body: { id: "wrk_new", status: "needs_approval" } });
     c.type("title", "Read");
     c.type("intent", "read a file");
+    c.type("service", "codex-cli");
+    c.type("repo", "/home/jacen/projects/agent-control-stack");
     c.type("actionKind", "fs.read");
     c.type("actionParams", '{"paths": ["README.md"]}');
     c.submit();
@@ -126,9 +153,13 @@ describe("task composer (#17)", () => {
         method: "POST",
         body: {
           title: "Read",
-          intent: "read a file",
+          intent: "read a file\n\nWorktree preference: use a new git worktree for this task.",
           risk: "medium",
-          target: {},
+          target: {
+            services: ["codex-cli"],
+            repo: "/home/jacen/projects/agent-control-stack",
+            cwd: "/home/jacen/projects/agent-control-stack"
+          },
           requestedActions: [
             { kind: "fs.read", description: "Dispatch prompt to selected agent", params: { paths: ["README.md"] } }
           ]
@@ -137,7 +168,7 @@ describe("task composer (#17)", () => {
     ]);
     expect(c.app.text("#task-result")).toBe("Created wrk_new (needs_approval)");
     expect(c.field<HTMLInputElement>("title").value).toBe("");
-    expect(c.app.text("#composer-preview")).toBe("Fill in a title and instructions to preview policy.");
+    expect(c.app.text("#composer-preview")).toBe("Add a title, goal, and agent to check policy.");
   });
 
   it("requires a title and instructions before posting", async () => {
@@ -145,7 +176,7 @@ describe("task composer (#17)", () => {
     c.submit();
     await c.app.flush();
     expect(c.posts()).toHaveLength(0);
-    expect(c.app.text("#task-result")).toBe("Title and instructions are required");
+    expect(c.app.text("#task-result")).toBe("Task title, instructions, and agent are required");
     expect(c.app.document.activeElement).toBe(c.field("title"));
   });
 });

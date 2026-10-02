@@ -87,6 +87,33 @@ describe("policy-gated work item tools", () => {
     }
   });
 
+  it("keeps bridge-owned JC work out of the generic worker queue in admin mode", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-tools-jc-queue-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, fakePolicy("allow"));
+
+    try {
+      store.setExecutionMode({ mode: "admin", updatedBy: "operator", reason: "test admin mode" });
+      const jcWorkItem = store.create({
+        title: "JC tool call",
+        requester: "agent",
+        requesterSubject: "user",
+        intent: "execute a JC tool",
+        requestedActions: [
+          { kind: "jc.integration.write", description: "JC mutation", params: { contract: "acs.jc.v1", tool: "x" } }
+        ],
+        risk: "high"
+      });
+      store.approveWorkItem(jcWorkItem.id, domainTransition);
+
+      expect(tools.claim_next_approved_work_item({ workerId: "worker-a" })).toBeUndefined();
+      expect(store.get(jcWorkItem.id)?.status).toBe("approved");
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("consumes one write approval once across competing store connections", () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-tools-claim-race-"));
     const dbPath = join(dir, "control.db");

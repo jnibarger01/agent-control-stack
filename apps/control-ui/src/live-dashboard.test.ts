@@ -149,7 +149,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
   });
 
   it("renders refreshed agents as selectable cards with roster summaries", async () => {
-    const agents = [
+    let agents = [
       {
         id: "hermes-local",
         displayName: "Hermes Agent",
@@ -210,6 +210,8 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     );
     await app.flush();
 
+    const composerAgent = app.document.querySelector('#task-form select[name="service"]') as HTMLSelectElement;
+    expect([...composerAgent.options].map((option) => option.value)).toEqual(["", "hermes-local", "codex-cli"]);
     expect(app.document.querySelectorAll(".agent-card")).toHaveLength(2);
     expect(app.text("#agent-summary")).toContain("Registered2");
     expect(app.text("#agent-summary")).toContain("Online1");
@@ -224,6 +226,27 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.text("#agent-detail h3")).toBe("Hermes Agent");
     expect(app.text("#agent-detail")).toContain("Current work itemwrk_active");
     expect(app.calls.some((call) => call.url === "/api/agents/hermes-local")).toBe(true);
+
+    agents = [
+      ...agents,
+      {
+        id: "muse-code",
+        displayName: "Muse Code",
+        kind: "cli",
+        status: "online",
+        health: "healthy",
+        capabilities: ["code:implement"],
+        metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+      }
+    ];
+    app.emit("agent.created", { "agent.id": "muse-code" });
+    await app.flush();
+    expect([...composerAgent.options].map((option) => option.value)).toEqual([
+      "",
+      "hermes-local",
+      "codex-cli",
+      "muse-code"
+    ]);
   });
 
   it("coalesces a burst of work-item events into a single fragment fetch", async () => {
@@ -338,13 +361,33 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
   });
 
   it("clears the composer and refreshes after creating a work item (#7)", async () => {
-    const app = bootLive({ workItems: [], events: [], now: NOW });
+    const app = bootLive(
+      { workItems: [], events: [], now: NOW },
+      {
+        "/agents": () => ({
+          body: {
+            agents: [
+              {
+                id: "codex-cli",
+                displayName: "Codex CLI",
+                kind: "cli",
+                status: "online",
+                health: "healthy",
+                capabilities: ["code:implement"],
+                metadata: { registered: "true", acpRole: "IMPLEMENTATION_AGENT" }
+              }
+            ]
+          }
+        })
+      }
+    );
     app.open();
     await app.advance(2_000);
     app.setPostResponse({ status: 201, body: { id: "wrk_made" } });
     const form = app.document.querySelector("#task-form") as HTMLFormElement;
     (form.querySelector('[name="title"]') as HTMLInputElement).value = "Composer task";
     (form.querySelector('[name="intent"]') as HTMLTextAreaElement).value = "do the thing";
+    (form.querySelector('[name="service"]') as HTMLSelectElement).value = "codex-cli";
     form.dispatchEvent(new app.window.Event("submit", { bubbles: true, cancelable: true }));
     await app.advance(1_500);
 

@@ -22,6 +22,11 @@ Mission-scoped autonomous authority grants are a separate architecture
 requirement and must replace global admin before ACS can claim bounded,
 pre-authorized autonomous execution.
 
+The same admin policy applies to Desktop Commander and ordinary approval-gated
+Jace Commander mutations: ACS records an `acs:admin` approval, then continues
+through the normal lease, capability, and audit path. Jace Commander
+`privileged_exec` remains human-only even in admin mode.
+
 Consumers:
 
 - `acs mode status|strict` reads the row or restores strict mode locally. The CLI

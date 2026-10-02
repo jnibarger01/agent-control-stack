@@ -129,6 +129,33 @@ describe("mission control gateway", () => {
     }
   });
 
+  it("rejects unregistered agent.prompt targets before preview or persistence", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-agent-target-validation-"));
+    const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });
+
+    try {
+      const payload = {
+        title: "Route to unknown agent",
+        intent: "verify registry-bound routing",
+        target: { services: ["not-a-registered-agent"] },
+        requestedActions: [{ kind: "agent.prompt", description: "dispatch", params: {} }],
+        risk: "medium"
+      };
+
+      const preview = await app.inject({ method: "POST", url: "/dashboard/policy-preview", payload });
+      expect(preview.statusCode).toBe(409);
+      expect(preview.json()).toMatchObject({ code: "agent_target_not_registered" });
+
+      const created = await app.inject({ method: "POST", url: "/work-items", payload });
+      expect(created.statusCode).toBe(409);
+      expect(created.json()).toMatchObject({ code: "agent_target_not_registered" });
+      expect((await app.inject({ method: "GET", url: "/work-items" })).json().workItems).toEqual([]);
+    } finally {
+      await app.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it("previews composer policy without creating or auditing anything", async () => {
     const dir = mkdtempSync(join(tmpdir(), "acs-mission-control-preview-"));
     const app = buildTestGateway({ dbPath: join(dir, "control.db"), logger: false });

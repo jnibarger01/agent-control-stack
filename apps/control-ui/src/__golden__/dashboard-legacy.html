@@ -677,19 +677,26 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
         <article id="system" class="panel" data-view-panel="system"><div class="panel-head"><h2>System Status</h2><span>readiness · infrastructure</span></div><div id="system-operations"><div class="system-check-grid"><p class="empty">Readiness checks unavailable.</p></div></div><div class="system-panel"><div id="system-stats"><dl><div><dt>Agent heartbeats online</dt><dd>0 / 0</dd></div><div><dt>Execution backend</dt><dd>unset</dd></div></dl></div><div id="system-probes" class="system-probes"></div></div></article>
       </section>
       <section class="grid lower">
-        <details id="dispatch" class="panel composer" data-view-panel="overview"><summary class="panel-head">New Task Composer · authenticated session</summary><form id="task-form" novalidate data-known-action-kinds="[]">
-    <label>Title<input name="title" required maxlength="120" placeholder="Investigate failing agent route" /></label>
-    <label>Prompt / instructions<textarea name="intent" required rows="7" placeholder="State the objective, constraints, and expected output."></textarea></label>
-    <div class="form-row"><label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label><label>Target service<input name="service" placeholder="codex-agent, hermes, worker" /></label></div>
-    <label>Requested action kind<input name="actionKind" list="composer-action-kinds" autocomplete="off" spellcheck="false" placeholder="agent.prompt" aria-describedby="composer-kind-hint" /></label>
-    <datalist id="composer-action-kinds"></datalist>
-    <small id="composer-kind-hint" class="field-hint">Defaults to agent.prompt.</small>
-    <label>Requested action description<input name="actionDescription" placeholder="Defaults to prompt dispatch when blank" /></label>
-    <label>Action params (JSON object, optional)<textarea name="actionParams" rows="3" spellcheck="false" placeholder='{"paths": ["README.md"]}' aria-describedby="composer-params-error"></textarea></label>
-    <small id="composer-params-error" class="field-error" role="alert"></small>
-    <section id="composer-preview" class="composer-preview" aria-live="polite" aria-label="Policy preview"><p class="muted">Fill in a title and instructions to preview policy.</p></section>
-    <div class="composer-actions"><button type="button" id="composer-preview-button" class="tool-button">Check policy</button><button type="submit">Create Work Item</button></div><output id="task-result"></output>
-  </form></details>
+        <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>Create task</h2><span>authenticated session</span></div><form id="task-form" novalidate data-known-action-kinds="[]">
+    <label>Task title<input name="title" required maxlength="120" placeholder="Investigate a failing route" /></label>
+    <label>What should the agent do?<textarea name="intent" required rows="4" placeholder="Describe the goal and what a good result looks like."></textarea></label>
+    <div class="form-row">
+      <label>Agent<select name="service" required><option value="">Choose an agent</option></select></label>
+      <label>Project / repo<input name="repo" placeholder="/home/jacen/projects/agent-control-stack" /></label>
+    </div>
+    <label class="composer-worktree" style="display:flex;align-items:center;gap:.55rem"><input type="checkbox" name="newWorktree" value="true" checked style="width:auto;min-width:auto" /> Use a new worktree</label>
+    <details class="composer-advanced"><summary>Advanced options</summary>
+      <label>Risk<select name="risk"><option>low</option><option selected>medium</option><option>high</option><option>critical</option></select></label>
+      <label>Action kind<input name="actionKind" list="composer-action-kinds" autocomplete="off" spellcheck="false" placeholder="agent.prompt" aria-describedby="composer-kind-hint" /></label>
+      <datalist id="composer-action-kinds"></datalist>
+      <small id="composer-kind-hint" class="field-hint">Defaults to agent.prompt.</small>
+      <label>Action description<input name="actionDescription" placeholder="Defaults to prompt dispatch" /></label>
+      <label>Action parameters (JSON, optional)<textarea name="actionParams" rows="3" spellcheck="false" placeholder='{"paths": ["README.md"]}' aria-describedby="composer-params-error"></textarea></label>
+      <small id="composer-params-error" class="field-error" role="alert"></small>
+    </details>
+    <section id="composer-preview" class="composer-preview" aria-live="polite" aria-label="Policy preview"><p class="muted">Add a title, goal, and agent to check policy.</p></section>
+    <div class="composer-actions"><button type="button" id="composer-preview-button" class="tool-button">Check policy</button><button type="submit">Create task</button></div><output id="task-result"></output>
+  </form></article>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><div><h2>Connectors</h2><p>Registered connector identities + tunnel sessions</p></div><span id="connector-count">loading</span></div><div id="connectors-body"><div class="agent-layout connector-layout">
     <div class="table-wrap"><p class="empty">Loading registered connectors...</p></div>
     <section id="connector-detail" class="detail-panel connector-detail" tabindex="-1" aria-live="polite" aria-label="Connector detail">
@@ -2092,10 +2099,24 @@ function bindAgentRows() {
   });
 }
 
+function refreshComposerAgentOptions(agents) {
+  const select = document.querySelector('#task-form select[name="service"]');
+  if (!select) return;
+  const current = select.value;
+  const registered = agents.filter(function (agent) {
+    return agent && agent.metadata && agent.metadata.registered === 'true';
+  });
+  select.innerHTML = '<option value="">Choose an agent</option>' + registered.map(function (agent) {
+    return '<option value="' + escapeClient(agent.id) + '">' + escapeClient(agent.displayName || agent.id) + '</option>';
+  }).join('');
+  if (registered.some(function (agent) { return agent.id === current; })) select.value = current;
+}
+
 async function refreshAgentRoster() {
   try {
     const body = await fetchJson('/agents');
     const agents = Array.isArray(body.agents) ? body.agents : [];
+    refreshComposerAgentOptions(agents);
     const count = document.querySelector('#agent-count');
     if (count) count.textContent = agents.length + ' registered';
     renderAgentTable(agents);
@@ -2993,6 +3014,9 @@ function composerDraft(form) {
   const kind = String(data.get('actionKind') || '').trim() || 'agent.prompt';
   const description = String(data.get('actionDescription') || '').trim() || 'Dispatch prompt to selected agent';
   const service = String(data.get('service') || '').trim();
+  const repo = String(data.get('repo') || '').trim();
+  const newWorktree = data.get('newWorktree') === 'true';
+  const intent = String(data.get('intent') || '');
   const rawParams = String(data.get('actionParams') || '').trim();
   let params = {};
   let paramsError = '';
@@ -3005,14 +3029,14 @@ function composerDraft(form) {
     }
   }
   return {
-    ready: Boolean(String(data.get('title') || '').trim() && String(data.get('intent') || '').trim()),
+    ready: Boolean(String(data.get('title') || '').trim() && intent.trim() && service),
     kind: kind,
     paramsError: paramsError,
     payload: {
       title: String(data.get('title') || ''),
-      intent: String(data.get('intent') || ''),
+      intent: intent + (newWorktree ? '\n\nWorktree preference: use a new git worktree for this task.' : '\n\nWorktree preference: use the selected project checkout.'),
       risk: String(data.get('risk') || 'medium'),
-      target: service ? { services: [service] } : {},
+      target: { services: [service], ...(repo ? { repo } : {}), ...(repo.startsWith("/") ? { cwd: repo } : {}) },
       requestedActions: [{ kind: kind, description: description, params: paramsError ? {} : params }]
     }
   };
@@ -3062,7 +3086,7 @@ async function previewComposerPolicy(form) {
   showComposerParamsError(form, draft.paramsError);
   const root = document.getElementById('composer-preview');
   if (!draft.ready) {
-    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Fill in a title and instructions to preview policy.</p>'; }
+    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Add a title, goal, and agent to check policy.</p>'; }
     return;
   }
   if (draft.paramsError) return;
@@ -3104,8 +3128,8 @@ composerForm?.addEventListener('submit', async function (event) {
   const draft = composerDraft(form);
   showComposerParamsError(form, draft.paramsError);
   if (!draft.ready) {
-    if (result) result.textContent = 'Title and instructions are required';
-    (form.querySelector('[name="title"]').value.trim() ? form.querySelector('[name="intent"]') : form.querySelector('[name="title"]')).focus();
+    if (result) result.textContent = 'Task title, instructions, and agent are required';
+    (form.querySelector('[name="title"]').value.trim() ? (form.querySelector('[name="intent"]').value.trim() ? form.querySelector('[name="service"]') : form.querySelector('[name="intent"]')) : form.querySelector('[name="title"]')).focus();
     return;
   }
   if (draft.paramsError) {
@@ -3121,7 +3145,7 @@ composerForm?.addEventListener('submit', async function (event) {
     form.reset();
     composerPreviewSeq += 1;
     const root = document.getElementById('composer-preview');
-    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Fill in a title and instructions to preview policy.</p>'; }
+    if (root) { root.dataset.outcome = ''; root.innerHTML = '<p class="muted">Add a title, goal, and agent to check policy.</p>'; }
     announce('Created ' + createdId);
     scheduleDashboardRefresh(0);
   }

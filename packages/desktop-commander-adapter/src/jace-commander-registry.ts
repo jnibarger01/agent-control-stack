@@ -35,8 +35,9 @@ const HASH = /^[a-f0-9]{64}$/u;
  * signed. Re-derives lease/fencing/plan binding and, for EVERY tool whose
  * manifest entry has `requiresApproval` (privileged_exec, the fs.write tools,
  * start_process/kill_process and git add/commit/fetch/push), requires a
- * consumed approval bound to this exact plan+action that was granted by a
- * human: never `acs:admin`, never the requesting actor (requesterSubject).
+ * consumed approval bound to this exact plan+action. Canonical admin-mode
+ * approval is valid for ordinary JC mutations; privileged_exec still requires
+ * a human. The requesting actor (requesterSubject) is never a valid approver.
  */
 export class SqliteJaceCommanderIssuanceRegistry {
   private readonly db: DatabaseSync;
@@ -145,11 +146,11 @@ export class SqliteJaceCommanderIssuanceRegistry {
             "approval is missing, expired, or mismatched"
           );
         }
-        // Applies to every approval-gated tool, not only privileged_exec.
-        if (approval.approved_by_actor_id === ACS_ADMIN_APPROVER) {
+        // Root execution remains human-only even in canonical admin mode.
+        if (approval.approved_by_actor_id === ACS_ADMIN_APPROVER && input.toolName === "privileged_exec") {
           throw new ControlStackError(
             "jace_commander_human_approval_required",
-            `${input.toolName} requires a human approval; admin auto-approval is not accepted`
+            "privileged_exec requires a human approval; admin auto-approval is not accepted"
           );
         }
         // Fail closed: without a known requester there is no way to rule out
