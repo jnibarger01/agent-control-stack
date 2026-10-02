@@ -3859,6 +3859,296 @@
         }
       }
     },
+    "/api/agent-clis": {
+      "get": {
+        "operationId": "listAgentClis",
+        "summary": "List the dispatchable CLI agents with install, login and dispatch state.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-clis/sync": {
+      "post": {
+        "operationId": "syncAgentClis",
+        "summary": "Register the CLI agents in the agent registry (idempotent).",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-clis/{id}/test": {
+      "post": {
+        "operationId": "testAgentCli",
+        "summary": "Run a harmless prompt to verify a CLI agent is signed in and working.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-runs/preview": {
+      "post": {
+        "operationId": "previewAgentRun",
+        "summary": "Validate an agent dispatch and return the exact command hash the operator must confirm.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "agentId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32000
+                  },
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "edit",
+                      "read-only"
+                    ]
+                  },
+                  "timeoutSec": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 3600
+                  }
+                },
+                "required": [
+                  "agentId",
+                  "prompt",
+                  "repo",
+                  "mode"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-runs": {
+      "post": {
+        "operationId": "dispatchAgentRun",
+        "summary": "Dispatch a confirmed agent run into a fresh git worktree (human operator only).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "agentId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32000
+                  },
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4096
+                  },
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "edit",
+                      "read-only"
+                    ]
+                  },
+                  "timeoutSec": {
+                    "type": "integer",
+                    "minimum": 10,
+                    "maximum": 3600
+                  },
+                  "confirmationHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "agentId",
+                  "prompt",
+                  "repo",
+                  "mode",
+                  "confirmationHash"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      },
+      "get": {
+        "operationId": "listAgentRuns",
+        "summary": "List recent agent runs.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-runs/{id}": {
+      "get": {
+        "operationId": "getAgentRun",
+        "summary": "Read an agent run with its redacted output.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/api/agent-runs/{id}/cancel": {
+      "post": {
+        "operationId": "cancelAgentRun",
+        "summary": "Cancel an active agent run.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
     "/api/agents/{id}": {
       "get": {
         "operationId": "getAgent",

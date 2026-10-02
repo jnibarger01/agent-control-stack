@@ -130,6 +130,8 @@ import {
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import { AgentRunService, agentDispatchConfigFromEnv, type AgentDispatchConfig } from "./agent-runs.js";
+import { registerAgentRoutes } from "./agent-routes.js";
 import {
   authorizeMcpRequest,
   createProtectedResourceMetadata,
@@ -284,6 +286,8 @@ export interface GatewayOptions {
   /** Governed ports for autonomous coding missions. Absent ports fail closed. */
   codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
+  /** Agent CLI dispatch settings. Defaults to the ACS_AGENT_* environment (off unless enabled). */
+  agentDispatch?: AgentDispatchConfig;
   logger?: boolean;
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
@@ -1680,6 +1684,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return sendError(reply, error);
     }
   });
+
+  const agentRuns = new AgentRunService(workItems, options.agentDispatch ?? agentDispatchConfigFromEnv());
+  agentRuns.reconcile();
+  registerAgentRoutes({
+    app,
+    store: workItems,
+    service: agentRuns,
+    requireRead,
+    requireHumanActor: (request, reply) => requireHumanApprovalActor(request, reply, auth),
+    requireRegistryActor: (request, reply) =>
+      requireMutationActor(request, reply, auth) ? requireBoundActorId(request, reply, auth) : undefined,
+    sendError
+  });
+  app.addHook("onClose", async () => agentRuns.shutdown());
 
   app.get<{ Params: { id: string } }>("/api/agents/:id", { preHandler: requireRead }, async (request, reply) => {
     try {
