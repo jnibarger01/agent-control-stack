@@ -270,9 +270,13 @@ describe("immutable worker result acceptance", () => {
       const second = new SqliteWorkItemStore(dbPath);
       try {
         expect(second.submitWorkResult(input)).toEqual(accepted);
+<<<<<<< Updated upstream
         expect(second.getExecutionResultForIdempotency("worker-a", input.idempotencyKey)?.resultId).toBe(
           accepted.result?.resultId
         );
+=======
+        expect(second.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(accepted.result?.resultId);
+>>>>>>> Stashed changes
       } finally {
         second.close();
       }
@@ -286,3 +290,44 @@ describe("immutable worker result acceptance", () => {
     }
   });
 });
+<<<<<<< Updated upstream
+=======
+
+describe("concurrent same-worker idempotency", () => {
+  it("prevents concurrent identical submissions from the same worker from creating two results", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-wave2-concurrent-"));
+    const dbPath = join(directory, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    const item = seed.create({
+      title: "Concurrent result",
+      requester: "agent",
+      intent: "resolve identical submissions",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "manual", description: "simulate" }],
+      risk: "low"
+    });
+    seed.approveWorkItem(item.id, transition);
+    const claimed = seed.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
+    if (!claimed) throw new Error("expected a claim");
+    seed.close();
+    const first = new SqliteWorkItemStore(dbPath);
+    const second = new SqliteWorkItemStore(dbPath);
+    try {
+      const input = resultInput(claimed);
+      const accepted = await Promise.all([
+        Promise.resolve().then(() => first.submitWorkResult(input)),
+        Promise.resolve().then(() => second.submitWorkResult(input))
+      ]);
+      expect(accepted[0]).toEqual(accepted[1]);
+      expect(first.readEvents().filter((event) => event.name === "execution_result.accepted")).toHaveLength(1);
+      expect(first.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(
+        accepted[0]?.result?.resultId
+      );
+    } finally {
+      first.close();
+      second.close();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 15000);
+});
+>>>>>>> Stashed changes

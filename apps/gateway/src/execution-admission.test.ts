@@ -3,7 +3,14 @@ import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+<<<<<<< Updated upstream
 import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
+=======
+import {
+  ExecutionAdmissionScheduler,
+  type ExecutionAdmissionController
+} from "@agent-control-stack/execution-admission";
+>>>>>>> Stashed changes
 import { describe, expect, it } from "vitest";
 import { ShutdownController } from "./lifecycle.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
@@ -50,6 +57,7 @@ function attemptResultIdempotencyKey(attemptId: string): string {
   return createHash("sha256").update(`{"attemptId":"${attemptId}","domain":"acs.attempt-result.v1"}`).digest("hex");
 }
 
+<<<<<<< Updated upstream
 function buildFixture(input?: { scheduler?: ExecutionAdmissionScheduler; shutdownController?: ShutdownController }) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-admission-gateway-")));
   const scheduler =
@@ -63,13 +71,25 @@ function buildFixture(input?: { scheduler?: ExecutionAdmissionScheduler; shutdow
         waitMaxInflight: 1
       }
     });
+=======
+function createGateway(
+  root: string,
+  executionAdmission: ExecutionAdmissionController,
+  shutdownController?: ShutdownController
+) {
+>>>>>>> Stashed changes
   const dbPath = join(root, "control.db");
   const app = buildGateway({
     dbPath,
     logger: false,
     auth: { token: "", actor: "user", actorId: "user", credentials },
+<<<<<<< Updated upstream
     shutdownController: input?.shutdownController,
     executionAdmission: scheduler,
+=======
+    executionAdmission,
+    ...(shutdownController ? { shutdownController } : {}),
+>>>>>>> Stashed changes
     desktopCommanderCapability: {
       runtimeId: DC_RUNTIME,
       keyId: "dc-admission-key",
@@ -98,6 +118,26 @@ function buildFixture(input?: { scheduler?: ExecutionAdmissionScheduler; shutdow
     }),
     jaceCommanderContainment: false
   });
+<<<<<<< Updated upstream
+=======
+  return { dbPath, app };
+}
+
+function buildFixture(input?: { scheduler?: ExecutionAdmissionScheduler; shutdownController?: ShutdownController }) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "acs-admission-gateway-")));
+  const scheduler =
+    input?.scheduler ??
+    new ExecutionAdmissionScheduler({
+      config: {
+        executionMaxInflight: 1,
+        executorMaxInflight: 1,
+        queueMax: 4,
+        queueTimeoutMs: 2_000,
+        waitMaxInflight: 1
+      }
+    });
+  const { dbPath, app } = createGateway(root, scheduler, input?.shutdownController);
+>>>>>>> Stashed changes
   return { root, dbPath, scheduler, app };
 }
 
@@ -227,7 +267,7 @@ async function submitDcResult(app: ReturnType<typeof buildGateway>, body: Record
   });
 }
 
-async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record<string, any>) {
+async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record<string, any>, summary = "done") {
   const now = new Date().toISOString();
   return app.inject({
     method: "POST",
@@ -246,7 +286,7 @@ async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record
       outcome: "succeeded",
       startedAt: now,
       finishedAt: now,
-      summary: "done",
+      summary,
       structuredOutput: {},
       artifacts: [],
       simulationMetadata: {
@@ -262,6 +302,104 @@ async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record
 }
 
 describe("gateway execution admission integration", () => {
+  it("fails closed after restart if a managed active lease has no durable admission binding", async () => {
+    const ctx = buildFixture();
+    let reopened: ReturnType<typeof buildGateway> | undefined;
+    try {
+      const issued = await issueJc(ctx.app);
+      expect(issued.statusCode, issued.body).toBe(200);
+      await ctx.app.close();
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        db.prepare("DELETE FROM admission_permits WHERE attempt_id = ?").run(issued.json().attemptId);
+      } finally {
+        db.close();
+      }
+      const scheduler = new ExecutionAdmissionScheduler();
+      reopened = createGateway(ctx.root, scheduler).app;
+      const next = await issueJc(reopened, "chatgpt:next", "client-next");
+      expect(next.statusCode, next.body).toBe(503);
+      expect(next.json()).toMatchObject({ code: "admission_recovery_required" });
+      expect(next.json().capability).toBeUndefined();
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+    } finally {
+      await reopened?.close();
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back the claim and lease if durable admission binding cannot commit", async () => {
+    const ctx = buildFixture();
+    try {
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        db.exec(`CREATE TRIGGER reject_admission_binding BEFORE INSERT ON admission_permits
+          BEGIN SELECT RAISE(ABORT, 'test admission persistence failure'); END`);
+      } finally {
+        db.close();
+      }
+      const issued = await issueJc(ctx.app);
+      expect(issued.statusCode).toBe(500);
+      expect(issued.json().capability).toBeUndefined();
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 0, activeLeases: 0 });
+      expect(ctx.scheduler.snapshot().global.active).toBe(0);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["execution", "wait"] as const)(
+    "recovers %s capacity after shutdown and releases it only on a canonical result",
+    async (executionClass) => {
+      const ctx = buildFixture();
+      let reopened: ReturnType<typeof buildGateway> | undefined;
+      try {
+        const issued =
+          executionClass === "wait"
+            ? await issueJcTool(ctx.app, "read_process_output", { sessionId: "session-recovery" })
+            : await issueJc(ctx.app);
+        expect(issued.statusCode, issued.body).toBe(200);
+        const claim = issued.json();
+        await ctx.app.close();
+
+        const db = new DatabaseSync(ctx.dbPath, { readOnly: true });
+        try {
+          expect(
+            db.prepare("SELECT execution_class FROM admission_permits WHERE attempt_id = ?").get(claim.attemptId)
+          ).toEqual({ execution_class: executionClass });
+        } finally {
+          db.close();
+        }
+        const scheduler = new ExecutionAdmissionScheduler({
+          config: {
+            executionMaxInflight: 1,
+            executorMaxInflight: 1,
+            queueMax: 4,
+            queueTimeoutMs: 2_000,
+            waitMaxInflight: 1
+          }
+        });
+        reopened = createGateway(ctx.root, scheduler).app;
+        expect(scheduler.snapshot()).toMatchObject({
+          global: { active: executionClass === "execution" ? 1 : 0 },
+          wait: { active: executionClass === "wait" ? 1 : 0 }
+        });
+        const result = await submitJcResult(reopened, claim);
+        expect(result.statusCode, result.body).toBe(201);
+        expect(scheduler.snapshot()).toMatchObject({ global: { active: 0 }, wait: { active: 0 } });
+        const replay = await submitJcResult(reopened, claim, "conflicting result");
+        expect(replay.statusCode).toBe(409);
+        expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 0 });
+      } finally {
+        await reopened?.close();
+        await ctx.app.close();
+        rmSync(ctx.root, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("does not claim or create a lease before DC admission, then releases on canonical result", async () => {
     const ctx = buildFixture();
     try {
@@ -370,13 +508,13 @@ describe("gateway execution admission integration", () => {
     }
   });
 
-  it("releases admission when post-claim DC capability issuance fails", async () => {
+  it("retains admission for an active lease when post-claim DC capability issuance fails", async () => {
     const ctx = buildFixture();
     try {
       const failed = await issueDc(ctx.app, ctx.root);
       expect(failed.statusCode).toBe(403);
-      expect(ctx.scheduler.snapshot().global.active).toBe(0);
-      expect(authorityCounts(ctx.dbPath).attempts).toBe(1);
+      expect(ctx.scheduler.snapshot().global.active).toBe(1);
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });

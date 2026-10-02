@@ -11,6 +11,7 @@ import {
   inspectControlPlaneDatabase,
   redactValue,
   stableHash,
+  strictCanonicalJsonV1,
   verifyAuditChain,
   type AttributeValue,
   type AuditChainEvent,
@@ -18,6 +19,20 @@ import {
   type AuditEvent
 } from "@agent-control-stack/shared";
 import { transitionWorkItem } from "./state-machine.js";
+import {
+  changeSetManifestHash,
+  changeSetRecordSchema,
+  submitChangeSetInputSchema,
+  type ChangeSetRecord,
+  type SubmitChangeSetInput
+} from "./change-set.js";
+import { insertChangeSetRevision, readChangeSet, readChangeSetSubmission } from "./change-set-store.js";
+import {
+  assignWorkItemInputSchema,
+  workItemAssignmentSchema,
+  type AssignWorkItemInput,
+  type WorkItemAssignment
+} from "./assignment.js";
 import {
   OBSERVATION_OUTBOX_MAX_ATTEMPTS,
   OBSERVATION_OUTBOX_MAX_PROJECTION_EVENTS,
@@ -373,6 +388,23 @@ interface AttemptLeaseRow {
   closed_at: string | null;
 }
 
+<<<<<<< Updated upstream
+=======
+interface AdmissionPermitRow {
+  attempt_id: string;
+  work_item_id: string;
+  lease_id: string;
+  worker_id: string;
+  fencing_epoch: number;
+  action_hash: string;
+  plan_hash: string;
+  input_hash: string;
+  lane: "jc" | "dc";
+  execution_class: "execution" | "wait";
+  created_at: string;
+}
+
+>>>>>>> Stashed changes
 interface WorkspaceAllocationRow {
   allocation_id: string;
   work_item_id: string;
@@ -968,6 +1000,11 @@ export interface TraceEnqueueFailure {
 }
 
 export interface WorkItemStore {
+  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment;
+  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined;
+  findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined;
+  submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord;
+  getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined;
   withTransaction<T>(operation: () => T): T;
   create(input: unknown): WorkItem;
   get(id: string): WorkItem | undefined;
@@ -993,10 +1030,7 @@ export interface WorkItemStore {
   leaseAttempt(input: IssueLeaseInput, options: PrivilegedTransitionOptions): AttemptLease;
   renewAttemptLease(input: RenewAttemptLeaseInput): AttemptLease;
   transitionAttempt(input: TransitionAttemptInput, options: PrivilegedTransitionOptions): ExecutionAttempt;
-  recordActorRoutingDecision(
-    input: RecordActorRoutingDecisionInput,
-    options: PrivilegedTransitionOptions
-  ): ActorRoutingDecision;
+  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): ActorRoutingDecision;
   getActorRoutingDecision(decisionId: string): ActorRoutingDecision | undefined;
   getActorRoutingDecisionForWorkItem(workItemId: string): ActorRoutingDecision | undefined;
   recordActorReliability(input: RecordActorReliabilityInput, options: PrivilegedTransitionOptions): ActorReliability;
@@ -1148,8 +1182,56 @@ export interface WorkItemStore {
   ): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
   /** Count attempt leases that are still active and not yet past expires_at. */
+<<<<<<< Updated upstream
   countActiveAttemptLeases(now?: Date): number;
   /** Append a gateway/system lifecycle event to the canonical audit chain. */
+=======
+  countActiveAttemptLeases(now?: Date, workerIds?: readonly string[]): number;
+  /** Persist an admission permit binding for recovery after gateway restart. */
+  bindAdmissionPermit(input: {
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+    executionClass: "execution" | "wait";
+  }): void;
+  /** Remove a released admission permit binding. */
+  releaseAdmissionPermit(attemptId: string): boolean;
+  /** Get a persisted admission permit binding by attempt ID. */
+  getAdmissionPermit(attemptId: string):
+    | {
+        attemptId: string;
+        workItemId: string;
+        leaseId: string;
+        workerId: string;
+        fencingEpoch: number;
+        actionHash: string;
+        planHash: string;
+        inputHash: string;
+        lane: "jc" | "dc";
+        executionClass: "execution" | "wait";
+        createdAt: string;
+      }
+    | undefined;
+  /** List all persisted admission permit bindings. */
+  listAdmissionPermits(): Array<{
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+    createdAt: string;
+  }>;
+>>>>>>> Stashed changes
   recordSystemEvent(input: {
     name: string;
     body?: Record<string, unknown>;
@@ -1261,12 +1343,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
       1,
       10
     );
-    this.db.exec(`
-      PRAGMA busy_timeout = 5000;
-      PRAGMA journal_mode = WAL;
-      PRAGMA foreign_keys = ON;
-    `);
     try {
+      this.db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+      // Concurrent first-open journal conversion may return SQLITE_BUSY without
+      // honoring busy_timeout. Retry only this idempotent setup operation within
+      // the same five-second contention budget; never retry authority mutations.
+      const deadline = performance.now() + 5_000;
+      const pause = new Int32Array(new SharedArrayBuffer(4));
+      for (;;) {
+        try {
+          this.db.exec("PRAGMA journal_mode = WAL;");
+          break;
+        } catch (error) {
+          const sqliteCode = error && typeof error === "object" && "errcode" in error ? error.errcode : undefined;
+          const remaining = deadline - performance.now();
+          if (sqliteCode !== 5 || remaining <= 0) throw error;
+          Atomics.wait(pause, 0, 0, Math.min(25, remaining));
+        }
+      }
       applyControlPlaneMigrations(this.db);
       const initialHealth = inspectControlPlaneDatabase(this.db);
       this.auditChainValid = initialHealth.checks.auditChain.ok;
@@ -1275,6 +1369,82 @@ export class SqliteWorkItemStore implements WorkItemStore {
       this.db.close();
       throw error;
     }
+  }
+
+  submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord {
+    strictCanonicalJsonV1(input.definition);
+    const parsed = submitChangeSetInputSchema.parse(input);
+    const definition = parsed.definition;
+    const now = parsed.now ?? new Date();
+    return this.write(() => {
+      const mission = this.getRequired(definition.missionId);
+      if (executionPlanSubjectInputHash(mission) !== definition.subjectInputHash) {
+        throw new ControlStackError("change_set_input_mismatch", "change set does not match current mission inputs");
+      }
+      const head = readChangeSet(this.db, mission.id);
+      const replay = readChangeSetSubmission(this.db, mission.id, parsed.submissionId);
+      if (replay) {
+        if (
+          replay.createdByActorId !== parsed.createdByActorId ||
+          replay.snapshot.parentManifestHash !== parsed.expectedHeadHash ||
+          strictCanonicalJsonV1(replay.snapshot.definition) !== strictCanonicalJsonV1(definition)
+        ) {
+          throw new ControlStackError(
+            "change_set_submission_conflict",
+            "submission id was already used for different inputs"
+          );
+        }
+        return { value: replay, events: [] };
+      }
+      if (["succeeded", "failed", "cancelled", "rejected", "quarantined"].includes(mission.status)) {
+        throw new ControlStackError(
+          "change_set_mission_terminal",
+          "terminal mission cannot accept a change set revision"
+        );
+      }
+      if ((head?.manifestHash ?? null) !== parsed.expectedHeadHash) {
+        throw new ControlStackError("change_set_revision_conflict", "change set head changed before submission");
+      }
+      if (Date.parse(definition.expiresAt) <= now.getTime()) {
+        throw new ControlStackError("change_set_expired", "change set expiration must be in the future");
+      }
+      const snapshot = {
+        revision: (head?.snapshot.revision ?? 0) + 1,
+        parentManifestHash: head?.manifestHash ?? null,
+        definition
+      };
+      const manifestHash = changeSetManifestHash(snapshot);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "change_set.submitted",
+          {
+            missionId: mission.id,
+            revision: snapshot.revision,
+            manifestHash,
+            parentManifestHash: snapshot.parentManifestHash,
+            submissionId: parsed.submissionId,
+            executingActorId: definition.executingActorId,
+            createdByActorId: parsed.createdByActorId,
+            createdAt: now.toISOString()
+          },
+          { "work_item.id": mission.id, "change_set.hash": manifestHash }
+        )
+      );
+      const record = changeSetRecordSchema.parse({
+        snapshot,
+        manifestHash,
+        auditEventId: event.id,
+        submissionId: parsed.submissionId,
+        createdByActorId: parsed.createdByActorId,
+        createdAt: now.toISOString()
+      });
+      insertChangeSetRevision(this.db, record);
+      return { value: record, events: [event] };
+    });
+  }
+
+  getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined {
+    return readChangeSet(this.db, missionId, revision);
   }
 
   create(input: unknown): WorkItem {
@@ -2194,6 +2364,103 @@ export class SqliteWorkItemStore implements WorkItemStore {
       );
       return { value: lease, events: [event] };
     });
+  }
+
+  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment {
+    requirePrivilegedTransition(options, "assign_work_item");
+    const parsed = assignWorkItemInputSchema.parse(input);
+    if (!options.actorId || options.actorId !== parsed.assignedByActorId) {
+      throw new ControlStackError("assignment_actor_mismatch", "assignment actor must match the authorized caller");
+    }
+    return this.write(() => {
+      const workItem = this.get(parsed.workItemId);
+      if (!workItem || workItem.status !== "approved") {
+        throw new ControlStackError("work_item_not_routable", "only an approved work item can be assigned");
+      }
+      if (parsed.selectedAgentId && !this.getRegistryAgent(parsed.selectedAgentId)) {
+        throw new ControlStackError("agent_not_found", "assigned registry agent does not exist");
+      }
+      if (parsed.routingDecisionId) {
+        const decision = this.getActorRoutingDecision(parsed.routingDecisionId);
+        if (
+          !decision ||
+          decision.workItemId !== parsed.workItemId ||
+          (parsed.selectedAgentId !== undefined && decision.selectedActorId !== parsed.selectedAgentId)
+        ) {
+          throw new ControlStackError("routing_decision_mismatch", "assignment does not match its routing decision");
+        }
+      }
+      const assignedAt = (parsed.now ?? new Date()).toISOString();
+      const assignment = workItemAssignmentSchema.parse({
+        workItemId: parsed.workItemId,
+        selectedWorkerId: parsed.selectedWorkerId,
+        ...(parsed.selectedAgentId ? { selectedAgentId: parsed.selectedAgentId } : {}),
+        ...(parsed.routingDecisionId ? { routingDecisionId: parsed.routingDecisionId } : {}),
+        assignedByActorId: parsed.assignedByActorId,
+        assignedAt
+      });
+      this.db.prepare(
+        `INSERT INTO work_item_assignments
+         (work_item_id, selected_worker_id, selected_agent_id, routing_decision_id, assigned_by_actor_id, assigned_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(work_item_id) DO UPDATE SET
+           selected_worker_id = excluded.selected_worker_id,
+           selected_agent_id = excluded.selected_agent_id,
+           routing_decision_id = excluded.routing_decision_id,
+           assigned_by_actor_id = excluded.assigned_by_actor_id,
+           assigned_at = excluded.assigned_at`
+      ).run(
+        assignment.workItemId,
+        assignment.selectedWorkerId,
+        assignment.selectedAgentId ?? null,
+        assignment.routingDecisionId ?? null,
+        assignment.assignedByActorId,
+        assignment.assignedAt
+      );
+      const event = this.appendAuditEvent(
+        createEvent("work_item.assigned", assignment, {
+          "work_item.id": assignment.workItemId,
+          "worker.id": assignment.selectedWorkerId,
+          ...(assignment.selectedAgentId ? { "agent.id": assignment.selectedAgentId } : {}),
+          ...(assignment.routingDecisionId ? { "routing.decision_id": assignment.routingDecisionId } : {})
+        })
+      );
+      return { value: assignment, events: [event] };
+    });
+  }
+
+  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined {
+    const row = this.db.prepare(`SELECT * FROM work_item_assignments WHERE work_item_id = ?`).get(workItemId) as
+      | {
+          work_item_id: string;
+          selected_worker_id: string;
+          selected_agent_id: string | null;
+          routing_decision_id: string | null;
+          assigned_by_actor_id: string;
+          assigned_at: string;
+        }
+      | undefined;
+    return row
+      ? workItemAssignmentSchema.parse({
+          workItemId: row.work_item_id,
+          selectedWorkerId: row.selected_worker_id,
+          ...(row.selected_agent_id ? { selectedAgentId: row.selected_agent_id } : {}),
+          ...(row.routing_decision_id ? { routingDecisionId: row.routing_decision_id } : {}),
+          assignedByActorId: row.assigned_by_actor_id,
+          assignedAt: row.assigned_at
+        })
+      : undefined;
+  }
+
+  findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined {
+    const row = this.db.prepare(
+      `SELECT wi.* FROM work_items AS wi
+       LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
+       WHERE wi.status = 'approved'
+         AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)
+       ORDER BY wi.created_at ASC LIMIT 1`
+    ).get(workerId) as unknown as WorkItemRow | undefined;
+    return row ? rowToWorkItem(row) : undefined;
   }
 
   recordActorRoutingDecision(
@@ -4997,6 +5264,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
     return this.write(() => {
+<<<<<<< Updated upstream
       const mode = options.adminApprovalActorId
         ? (this.db.prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`).get() as { mode?: string } | undefined)
         : undefined;
@@ -5027,6 +5295,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
         : (this.db
             .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
             .get() as unknown as WorkItemRow | undefined);
+=======
+      const row = this.db
+        .prepare(
+          `SELECT wi.* FROM work_items AS wi
+           LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
+           WHERE wi.status = 'approved'
+             AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)
+           ORDER BY wi.created_at ASC LIMIT 1`
+        )
+        .get(workerId) as unknown as WorkItemRow | undefined;
+>>>>>>> Stashed changes
       if (!row) {
         return { value: undefined, events: [] };
       }
@@ -5091,6 +5370,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     workerId: string,
     options: ClaimOptions
   ): { value: ClaimedWorkItem; events: StoredAuditEvent[] } {
+    const assignment = this.getWorkItemAssignment(current.id);
+    if (assignment && assignment.selectedWorkerId !== workerId) {
+      throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
+    }
     const authority = options.attemptAuthority;
     if (!authority) {
       throw new ControlStackError("attempt_authority_required", "persisted attempt authority is required");
@@ -5252,8 +5535,13 @@ export class SqliteWorkItemStore implements WorkItemStore {
   ): ClaimedWorkItem | undefined {
     return this.write(() => {
       const row = this.db
-        .prepare(`SELECT * FROM work_items WHERE id = ? AND status = 'approved'`)
-        .get(id) as unknown as WorkItemRow | undefined;
+        .prepare(
+          `SELECT wi.* FROM work_items AS wi
+           LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
+           WHERE wi.id = ? AND wi.status = 'approved'
+             AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)`
+        )
+        .get(id, workerId) as unknown as WorkItemRow | undefined;
       if (!row) {
         return { value: undefined, events: [] };
       }
@@ -5364,8 +5652,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-  countActiveAttemptLeases(now = new Date()): number {
+  countActiveAttemptLeases(now = new Date(), workerIds?: readonly string[]): number {
+    if (workerIds?.length === 0) return 0;
     const nowIso = now.toISOString();
+    const workerFilter = workerIds ? ` AND worker_id IN (${workerIds.map(() => "?").join(", ")})` : "";
     // Prefer authoritative attempt_leases, but also count legacy `leases` rows that
     // have no active attempt_leases twin (test-only legacy claims / dual projection).
     const row = this.db
@@ -5373,19 +5663,112 @@ export class SqliteWorkItemStore implements WorkItemStore {
         `SELECT
            (
              SELECT COUNT(*) FROM attempt_leases
-             WHERE status = 'active' AND expires_at > ?
+             WHERE status = 'active' AND expires_at > ? ${workerFilter}
            ) + (
              SELECT COUNT(*) FROM leases
-             WHERE status = 'active' AND expires_at > ?
+             WHERE status = 'active' AND expires_at > ? ${workerFilter}
                AND lease_id NOT IN (
                  SELECT lease_id FROM attempt_leases WHERE status = 'active'
                )
            ) AS count`
       )
-      .get(nowIso, nowIso) as { count: number };
+      .get(nowIso, ...(workerIds ?? []), nowIso, ...(workerIds ?? [])) as { count: number };
     return Number(row?.count ?? 0);
   }
 
+<<<<<<< Updated upstream
+=======
+  bindAdmissionPermit(input: {
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+    executionClass: "execution" | "wait";
+  }): void {
+    this.write(() => {
+      const lease = this.getActiveLeaseForAttempt(input.attemptId);
+      const attempt = this.getAttempt(input.attemptId);
+      const workItem = this.get(input.workItemId);
+      if (
+        !lease ||
+        Date.parse(lease.expiresAt) <= Date.now() ||
+        lease.leaseId !== input.leaseId ||
+        lease.workItemId !== input.workItemId ||
+        lease.workerId !== input.workerId ||
+        lease.fencingEpoch !== input.fencingEpoch ||
+        lease.planHash !== input.planHash ||
+        lease.inputHash !== input.inputHash ||
+        attempt?.status !== "running" ||
+        attempt.workItemId !== input.workItemId ||
+        attempt.claimedByWorkerId !== input.workerId ||
+        attempt.currentFencingEpoch !== input.fencingEpoch ||
+        attempt.planHash !== input.planHash ||
+        attempt.inputHash !== input.inputHash ||
+        !workItem ||
+        executionActionHash(workItem) !== input.actionHash
+      ) {
+        throw new ControlStackError(
+          "admission_permit_binding_mismatch",
+          "admission permit requires a current canonical lease binding"
+        );
+      }
+      this.db
+        .prepare(
+          `INSERT INTO admission_permits
+         (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch,
+         action_hash, plan_hash, input_hash, lane, execution_class, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`
+        )
+        .run(
+          input.attemptId,
+          input.workItemId,
+          input.leaseId,
+          input.workerId,
+          input.fencingEpoch,
+          input.actionHash,
+          input.planHash,
+          input.inputHash,
+          input.lane,
+          input.executionClass
+        );
+      const event = this.appendAuditEvent(
+        createEvent("execution_admission.bound", input, {
+          "work_item.id": input.workItemId,
+          "attempt.id": input.attemptId,
+          "lease.id": input.leaseId,
+          "worker.id": input.workerId,
+          "admission.lane": input.lane,
+          "admission.class": input.executionClass
+        })
+      );
+      return { value: undefined, events: [event] };
+    });
+  }
+
+  releaseAdmissionPermit(attemptId: string): boolean {
+    const result = this.db.prepare(`DELETE FROM admission_permits WHERE attempt_id = ?`).run(attemptId);
+    return result.changes > 0;
+  }
+
+  getAdmissionPermit(attemptId: string) {
+    const row = this.db.prepare(`SELECT * FROM admission_permits WHERE attempt_id = ?`).get(attemptId) as
+      AdmissionPermitRow | undefined;
+    return row ? mapAdmissionPermitRow(row) : undefined;
+  }
+
+  listAdmissionPermits() {
+    const rows = this.db
+      .prepare(`SELECT * FROM admission_permits ORDER BY created_at`)
+      .all() as unknown as AdmissionPermitRow[];
+    return rows.map(mapAdmissionPermitRow);
+  }
+
+>>>>>>> Stashed changes
   recordSystemEvent(input: {
     name: string;
     body?: Record<string, unknown>;
@@ -5822,6 +6205,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       ...transitionWorkItem(rowToWorkItem(row), resultStatus(input.outcome), now),
       result: compactResult(input, payloadHash, now, resultId)
     };
+<<<<<<< Updated upstream
     this.db
       .prepare(
         `INSERT INTO execution_results
@@ -5852,6 +6236,53 @@ export class SqliteWorkItemStore implements WorkItemStore {
         payloadHash,
         now
       );
+=======
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO execution_results " +
+            "(result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome, " +
+            "started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json, " +
+            "artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .run(
+          resultId,
+          input.workItemId,
+          input.leaseId,
+          input.workerId,
+          input.idempotencyKey,
+          input.actionHash,
+          input.outcome,
+          input.startedAt,
+          input.finishedAt,
+          input.exitCode ?? null,
+          input.summary,
+          input.stdout ?? null,
+          input.stderr ?? null,
+          JSON.stringify(input.structuredOutput),
+          JSON.stringify(input.artifacts),
+          input.error ?? null,
+          input.resourceUsage ? JSON.stringify(input.resourceUsage) : null,
+          JSON.stringify(input.simulationMetadata),
+          payloadHash,
+          now
+        );
+    } catch (insertError) {
+      const err = insertError as NodeJS.ErrnoException;
+      if (err.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed/.test(err.message)) {
+        const existing = this.db
+          .prepare("SELECT * FROM execution_results WHERE idempotency_key = ?")
+          .get(input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
+        if (existing && existing.payload_hash === payloadHash && existing.work_item_id === input.workItemId) {
+          const replayed = this.getRequired(input.workItemId);
+          return { value: replayed, events: [] };
+        }
+        throw new ControlStackError("result_conflict", "result idempotency key conflicts with an accepted result");
+      }
+      throw insertError;
+    }
+>>>>>>> Stashed changes
 
     const updatedWorkItem = this.db
       .prepare(
@@ -7104,6 +7535,25 @@ function rowToAttemptLease(row: AttemptLeaseRow): AttemptLease {
   });
 }
 
+<<<<<<< Updated upstream
+=======
+function mapAdmissionPermitRow(row: AdmissionPermitRow) {
+  return {
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    workerId: row.worker_id,
+    fencingEpoch: row.fencing_epoch,
+    actionHash: row.action_hash,
+    planHash: row.plan_hash,
+    inputHash: row.input_hash,
+    lane: row.lane,
+    executionClass: row.execution_class,
+    createdAt: row.created_at
+  };
+}
+
+>>>>>>> Stashed changes
 function rowToWorkspaceAllocation(row: WorkspaceAllocationRow): WorkspaceAllocation {
   return workspaceAllocationSchema.parse({
     allocationId: row.allocation_id,

@@ -965,7 +965,20 @@ describe("work item state machine", () => {
         { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" },
         { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" },
         { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" },
+<<<<<<< Updated upstream
         { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" }
+=======
+        { version: 37, name: "jc_reusable_work_item_index", filename: "037_jc_reusable_work_item_index.sql" },
+        {
+          version: 38,
+          name: "execution_results_idempotency_unique",
+          filename: "038_execution_results_idempotency_unique.sql"
+        },
+        { version: 39, name: "admission_permits", filename: "039_admission_permits.sql" },
+        { version: 40, name: "admission_permit_execution_class", filename: "040_admission_permit_execution_class.sql" },
+        { version: 41, name: "change_sets", filename: "041_change_sets.sql" },
+        { version: 42, name: "work_item_assignments", filename: "042_work_item_assignments.sql" }
+>>>>>>> Stashed changes
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -1101,7 +1114,16 @@ describe("work item state machine", () => {
         { version: 34 },
         { version: 35 },
         { version: 36 },
+<<<<<<< Updated upstream
         { version: 39 }
+=======
+        { version: 37 },
+        { version: 38 },
+        { version: 39 },
+        { version: 40 },
+        { version: 41 },
+        { version: 42 }
+>>>>>>> Stashed changes
       ]);
     } finally {
       db.close();
@@ -1211,7 +1233,11 @@ describe("work item state machine", () => {
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+<<<<<<< Updated upstream
         31, 32, 33, 34, 35, 36, 39
+=======
+        31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42
+>>>>>>> Stashed changes
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1287,7 +1313,11 @@ describe("work item state machine", () => {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
+<<<<<<< Updated upstream
         31, 32, 33, 34, 35, 36, 39
+=======
+        31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42
+>>>>>>> Stashed changes
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([

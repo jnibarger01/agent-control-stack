@@ -19,7 +19,6 @@ Commands:
   status [--json]
   mode status
   mode strict
-  mode admin
   doctor [--json]
   publication list [--json]
   audit export [--db <path>] [-o <file>]
@@ -39,7 +38,7 @@ export type AcsCommand =
   | { kind: "gateway"; forwarded: string[] }
   | { kind: "status"; json: boolean }
   | { kind: "mode-status" }
-  | { kind: "mode-set"; mode: "strict" | "admin" }
+  | { kind: "mode-set"; mode: "strict" }
   | { kind: "doctor"; json: boolean }
   | { kind: "publication-list"; json: boolean }
   | { kind: "audit-export"; dbPath?: string; outputPath?: string }
@@ -205,11 +204,11 @@ function parseAuditArgs(args: string[]): AcsCommand {
 
 function parseModeArgs(args: string[]): AcsCommand {
   const sub = args[0];
-  if (args.length !== 1 || (sub !== "status" && sub !== "strict" && sub !== "admin")) {
-    throw new AcsUsageError("Usage: acs mode status | acs mode strict | acs mode admin");
+  if (args.length !== 1 || (sub !== "status" && sub !== "strict")) {
+    throw new AcsUsageError("Usage: acs mode status | acs mode strict");
   }
   if (sub === "status") return { kind: "mode-status" };
-  return { kind: "mode-set", mode: sub };
+  return { kind: "mode-set", mode: "strict" };
 }
 
 export function parseAcsArgs(args: string[]): AcsCommand {

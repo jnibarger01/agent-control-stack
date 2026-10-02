@@ -451,6 +451,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     {
       permit: AdmissionPermit;
       lane: "jc" | "dc";
+      executionClass: "execution" | "wait";
       workItemId: string;
       leaseId: string;
       workerId: string;
@@ -461,6 +462,89 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   >();
 
+<<<<<<< Updated upstream
+=======
+  // Re-establish capacity accounting only from a complete, current ACS lease binding.
+  // Invalid records remain persisted for diagnosis and do not mutate scheduler state.
+  for (const perm of workItems.listAdmissionPermits()) {
+    const lease = workItems.getActiveLeaseForAttempt(perm.attemptId);
+    const attempt = workItems.getAttempt(perm.attemptId);
+    const admission = lease && workItems.getExecutionPlanAdmission(lease.admissionId);
+    const workItem = workItems.get(perm.workItemId);
+    const valid =
+      (perm.executionClass === "execution" || perm.executionClass === "wait") &&
+      ((perm.lane === "dc" && perm.workerId === DC_BRIDGE_WORKER_ID) ||
+        (perm.lane === "jc" && perm.workerId === JC_BRIDGE_WORKER_ID)) &&
+      lease?.status === "active" &&
+      Date.parse(lease.expiresAt) > Date.now() &&
+      lease.leaseId === perm.leaseId &&
+      lease.attemptId === perm.attemptId &&
+      lease.workItemId === perm.workItemId &&
+      lease.workerId === perm.workerId &&
+      lease.fencingEpoch === perm.fencingEpoch &&
+      lease.planHash === perm.planHash &&
+      lease.inputHash === perm.inputHash &&
+      attempt?.workItemId === perm.workItemId &&
+      attempt.status === "running" &&
+      attempt.currentFencingEpoch === perm.fencingEpoch &&
+      attempt.claimedByWorkerId === perm.workerId &&
+      attempt.planHash === perm.planHash &&
+      attempt.inputHash === perm.inputHash &&
+      admission?.workItemId === perm.workItemId &&
+      admission.planHash === perm.planHash &&
+      workItem !== undefined &&
+      executionActionHash(workItem) === perm.actionHash;
+    if (!valid) {
+      app.log.warn(
+        {
+          event: "admission_permit_recovery_rejected",
+          attemptId: perm.attemptId,
+          workItemId: perm.workItemId,
+          leaseId: perm.leaseId,
+          fencingEpoch: perm.fencingEpoch,
+          reason: "persisted permit does not match the current active lease binding"
+        },
+        "Persisted execution admission permit rejected during startup recovery"
+      );
+      continue;
+    }
+
+    try {
+      const permit = executionAdmission.restoreActivePermit({
+        permitId: perm.attemptId,
+        lane: perm.lane,
+        executionClass: perm.executionClass,
+        executorId: perm.workerId
+      });
+      admissionPermits.set(perm.attemptId, {
+        permit,
+        lane: perm.lane,
+        executionClass: perm.executionClass,
+        workItemId: perm.workItemId,
+        leaseId: perm.leaseId,
+        workerId: perm.workerId,
+        fencingEpoch: perm.fencingEpoch,
+        actionHash: perm.actionHash,
+        planHash: perm.planHash,
+        inputHash: perm.inputHash
+      });
+      refreshAdmissionMetrics();
+    } catch (error) {
+      app.log.error(
+        {
+          event: "admission_permit_recovery_failed",
+          attemptId: perm.attemptId,
+          workItemId: perm.workItemId,
+          leaseId: perm.leaseId,
+          fencingEpoch: perm.fencingEpoch,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "Execution admission controller failed to restore a validated permit"
+      );
+    }
+  }
+
+>>>>>>> Stashed changes
   async function acquireExecutionPermit(input: {
     request: FastifyRequest;
     reply: FastifyReply;
@@ -469,6 +553,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     actorId: string;
     toolName: string;
   }): Promise<AdmissionPermit> {
+    workItems.failExpiredLeases();
+    releaseInactiveAdmissionPermits();
+    if (
+      admissionPermits.size !==
+      workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID])
+    ) {
+      throw new ControlStackError(
+        "admission_recovery_required",
+        "managed executor leases do not match recovered admission capacity"
+      );
+    }
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     input.request.raw.once("aborted", onAbort);
@@ -492,10 +587,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   }
 
-  function bindAdmissionPermit(input: {
-    attemptId: string;
+  function claimWithAdmissionPermit(input: {
+    workItemId: string;
+    workerId: string;
+    leaseMs: number;
     permit: AdmissionPermit;
     lane: "jc" | "dc";
+<<<<<<< Updated upstream
     workItemId: string;
     leaseId: string;
     workerId: string;
@@ -509,22 +607,93 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
     admissionPermits.set(input.attemptId, input);
     refreshAdmissionMetrics();
+=======
+    executionClass: "execution" | "wait";
+  }) {
+    // The lease and durable capacity reservation commit together. Scheduler
+    // state is published only after commit, and can be rebuilt after a crash.
+    const claimed = workItems.withTransaction(() => {
+      if (
+        admissionPermits.size !==
+        workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID])
+      ) {
+        throw new ControlStackError(
+          "admission_recovery_required",
+          "managed executor leases changed before admission claim"
+        );
+      }
+      const claim = tools.claim_approved_work_item_by_id({
+        id: input.workItemId,
+        workerId: input.workerId,
+        leaseMs: input.leaseMs
+      });
+      if (!claim?.attemptId) return claim;
+      if (claim.fencingEpoch === undefined || !claim.planHash || !claim.inputHash) {
+        throw new ControlStackError("admission_permit_binding_mismatch", "claim lacks canonical attempt authority");
+      }
+      workItems.bindAdmissionPermit({
+        attemptId: claim.attemptId,
+        workItemId: claim.id,
+        leaseId: claim.leaseId,
+        workerId: input.workerId,
+        fencingEpoch: claim.fencingEpoch,
+        actionHash: claim.actionHash,
+        planHash: claim.planHash,
+        inputHash: claim.inputHash,
+        lane: input.lane,
+        executionClass: input.executionClass
+      });
+      return claim;
+    });
+    if (claimed?.attemptId && claimed.fencingEpoch !== undefined && claimed.planHash && claimed.inputHash) {
+      admissionPermits.set(claimed.attemptId, {
+        permit: input.permit,
+        lane: input.lane,
+        executionClass: input.executionClass,
+        workItemId: claimed.id,
+        leaseId: claimed.leaseId,
+        workerId: input.workerId,
+        fencingEpoch: claimed.fencingEpoch,
+        actionHash: claimed.actionHash,
+        planHash: claimed.planHash,
+        inputHash: claimed.inputHash
+      });
+      refreshAdmissionMetrics();
+    }
+    return claimed;
+>>>>>>> Stashed changes
   }
 
   function releaseAdmissionPermit(attemptId: string): boolean {
     const binding = admissionPermits.get(attemptId);
     if (!binding) return false;
+    workItems.releaseAdmissionPermit(attemptId);
     admissionPermits.delete(attemptId);
     binding.permit.release();
     refreshAdmissionMetrics();
     return true;
   }
 
+  function releaseInactiveAdmissionPermits(): void {
+    for (const [attemptId, binding] of admissionPermits) {
+      const lease = workItems.getActiveLeaseForAttempt(attemptId);
+      if (
+        !lease ||
+        Date.parse(lease.expiresAt) <= Date.now() ||
+        lease.leaseId !== binding.leaseId ||
+        lease.fencingEpoch !== binding.fencingEpoch
+      ) {
+        releaseAdmissionPermit(attemptId);
+      }
+    }
+  }
+
   let admissionReconciliationMismatch = false;
   function reconcileAdmissionAccounting(): void {
-    const activeLeaseCount = workItems.countActiveAttemptLeases();
+    releaseInactiveAdmissionPermits();
+    const activeLeaseCount = workItems.countActiveAttemptLeases(new Date(), [DC_BRIDGE_WORKER_ID, JC_BRIDGE_WORKER_ID]);
     const mismatch =
-      admissionPermits.size > activeLeaseCount ||
+      admissionPermits.size !== activeLeaseCount ||
       [...admissionPermits.entries()].some(([attemptId, binding]) => {
         const lease = workItems.getActiveLeaseForAttempt(attemptId);
         return !lease || lease.leaseId !== binding.leaseId || lease.workerId !== binding.workerId;
@@ -849,7 +1018,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       try {
-        const actor = requireMutationActor(request, reply, auth);
+        const actor = requireHumanOperatorActor(request, reply, auth);
         if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
         workItems.setExecutionMode({
@@ -1928,11 +2097,15 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-          const claimed = tools.claim_approved_work_item_by_id({
-            id: workItem.id,
+          const claimed = claimWithAdmissionPermit({
+            workItemId: workItem.id,
             workerId,
-            leaseMs: DC_BRIDGE_LEASE_MS
+            leaseMs: DC_BRIDGE_LEASE_MS,
+            permit: admissionPermit,
+            lane: "dc",
+            executionClass: classifyAdmissionTool("dc", body.tool)
           });
+          admissionBound = Boolean(claimed?.attemptId);
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
             return reply.code(409).send({
@@ -2093,19 +2266,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
           const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
-          bindAdmissionPermit({
-            attemptId: payload.attemptId,
-            permit: admissionPermit,
-            lane: "dc",
-            workItemId: payload.workItemId,
-            leaseId: payload.leaseId,
-            workerId,
-            fencingEpoch: payload.leaseEpoch,
-            actionHash: claimed.actionHash,
-            planHash: payload.planHash,
-            inputHash: claimed.inputHash
-          });
-          admissionBound = true;
           return {
             decision: "allow",
             capability,
@@ -2426,6 +2586,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
+<<<<<<< Updated upstream
           const adminApprovalAtClaim = workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
           if (adminApprovalAtClaim) {
             const modeAfterAdmission = readExecutionModeValue(workItems.getExecutionMode().raw);
@@ -2487,7 +2648,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             workerId,
             leaseMs: JC_BRIDGE_LEASE_MS,
             ...(adminApprovalAtClaim ? { executionModeFence: "admin" as const } : {})
+=======
+          const claimed = claimWithAdmissionPermit({
+            workItemId: workItem.id,
+            workerId,
+            leaseMs: JC_BRIDGE_LEASE_MS,
+            permit: admissionPermit,
+            lane: "jc",
+            executionClass: classifyAdmissionTool("jc", invocation.toolName)
+>>>>>>> Stashed changes
           });
+          admissionBound = Boolean(claimed?.attemptId);
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
             return reply.code(409).send({
@@ -2619,19 +2790,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
           const capability = signPreparedJaceCommanderCapability(payload, jcSigningConfig);
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
-          bindAdmissionPermit({
-            attemptId: payload.attemptId,
-            permit: admissionPermit,
-            lane: "jc",
-            workItemId: payload.workItemId,
-            leaseId: payload.leaseId,
-            workerId,
-            fencingEpoch: payload.leaseEpoch,
-            actionHash: claimed.actionHash,
-            planHash: payload.planHash,
-            inputHash: claimed.inputHash
-          });
-          admissionBound = true;
           return {
             decision: "allow",
             capability,
@@ -2832,6 +2990,23 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  app.post("/worker/claim", async (request, reply) => {
+    reply.header("cache-control", "no-store");
+    try {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) return;
+      const body = z.object({ leaseMs: z.number().int().positive().optional() }).strict().parse(request.body ?? {});
+      const claim = tools.claim_next_approved_work_item({ workerId, ...(body.leaseMs ? { leaseMs: body.leaseMs } : {}) });
+      if (!claim) return { claimed: false };
+      if (claim.status === "blocked") {
+        return reply.code(409).send({ claimed: false, workItemId: claim.id, status: claim.status });
+      }
+      return { claimed: true, workItem: claim };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post<{ Params: { id: string } }>(
     "/work-items/:id/results",
     { bodyLimit: MAX_RESULT_BODY_BYTES },
@@ -2984,7 +3159,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.addHook("onClose", async () => {
     executionAdmission.shutdown();
-    for (const attemptId of [...admissionPermits.keys()]) releaseAdmissionPermit(attemptId);
+    // Shutdown stops this scheduler; it does not revoke already issued leases.
+    // Keep their durable reservations for the next gateway process to recover.
+    for (const binding of admissionPermits.values()) binding.permit.release();
+    admissionPermits.clear();
     await observationWorker?.stop();
     await acpAdapter?.stop();
     executionReads.close();
@@ -3094,6 +3272,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     countActiveLeases: () => workItems.countActiveAttemptLeases(),
     failExpiredLeases: () => {
       workItems.failExpiredLeases();
+      releaseInactiveAdmissionPermits();
     },
     recordDrainStart: (details: DrainStartInfo) => recordShutdownDrain("start", details),
     recordDrainFinish: (details: DrainFinishInfo) =>
@@ -3132,7 +3311,7 @@ function sendError(reply: FastifyReply, error: unknown) {
   }
   if (error instanceof ControlStackError) {
     const status =
-      error.code === GATEWAY_SHUTTING_DOWN_CODE
+      error.code === GATEWAY_SHUTTING_DOWN_CODE || error.code === "admission_recovery_required"
         ? 503
         : error.code === "work_item_not_found" || error.code === "agent_not_found"
           ? 404
@@ -3697,6 +3876,7 @@ function isRateLimitedRoute(url: string): boolean {
   const path = url.split("?", 1)[0];
   return (
     path === "/mcp" ||
+    path === "/worker/claim" ||
     path === "/execution-mode" ||
     path === "/authority" ||
     path === "/session/login" ||
@@ -3832,6 +4012,41 @@ function requireMutationActor(
   }
   if (!credential.scopes.includes(requiredScope)) {
     reply.code(403).send({ error: `${requiredScope} scope is required`, code: "insufficient_gateway_scope" });
+    return undefined;
+  }
+  return mutationActorForCredential(credential);
+}
+
+/**
+ * Global execution-policy changes can remove human approval from eligible
+ * work, so they require an explicitly approval-scoped, human-classified
+ * operator credential. Worker and service credentials cannot change mode.
+ */
+function requireHumanOperatorActor(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  if (!auth) {
+    reply.code(503).send({ error: "mutation auth is not configured" });
+    return undefined;
+  }
+  const credential = gatewayCredentialForRequest(request, auth);
+  if (!credential) {
+    reply.code(401).send({ error: "unauthorized" });
+    return undefined;
+  }
+  if (
+    credential.actor !== "user" ||
+    !credential.roles.includes("operator") ||
+    credential.roles.includes("service") ||
+    credential.roles.includes("worker")
+  ) {
+    reply.code(403).send({ error: "human operator credential is required", code: "human_operator_required" });
+    return undefined;
+  }
+  if (!credential.scopes.includes("acs:approve")) {
+    reply.code(403).send({ error: "acs:approve scope is required", code: "insufficient_gateway_scope" });
     return undefined;
   }
   return mutationActorForCredential(credential);

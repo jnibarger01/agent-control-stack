@@ -261,6 +261,7 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
+<<<<<<< Updated upstream
   const adminMode = store.getExecutionMode().mode === "admin";
   const registeredAgentIds = new Set(store.listRegistryAgents().map((agent) => agent.id));
   const workerMatchesTarget = (workItem: WorkItem) => {
@@ -281,6 +282,9 @@ function gateWorkerClaimInTransaction(
             !store.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER)))
     )
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+=======
+  const candidate = store.findNextApprovedWorkItemForWorker(parsed.workerId);
+>>>>>>> Stashed changes
   if (!candidate) {
     return undefined;
   }
@@ -383,6 +387,10 @@ function gateWorkerClaimByIdInTransaction(
   const candidate = store.get(parsed.id);
   if (!candidate || candidate.status !== "approved") {
     return undefined;
+  }
+  const assignment = store.getWorkItemAssignment(candidate.id);
+  if (assignment && assignment.selectedWorkerId !== parsed.workerId) {
+    throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to a different worker");
   }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");

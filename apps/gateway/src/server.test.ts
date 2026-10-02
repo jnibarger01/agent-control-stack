@@ -16,6 +16,7 @@ import {
 import { describe, expect, it, vi } from "vitest";
 import { createTunnelSignaturePayload, resolveMcpAuthOptions } from "./auth.js";
 import { buildGateway, type GatewayAuthOptions, type GatewayCredential } from "./server.js";
+import { prepareHermesSourceFixture } from "./hermes-source-fixture.js";
 
 const testAuth = { token: "t", actor: "user", actorId: "user" } as const;
 const oauthIssuer = "https://auth.example.test";
@@ -32,6 +33,46 @@ function resolveInstalledCli(envVar: string, command: string): string | undefine
   return undefined;
 }
 
+<<<<<<< Updated upstream
+=======
+function resolveHermesRuntimeLauncher(executable: string): string {
+  const wrapper = readFileSync(executable, "utf8");
+  const target = wrapper.match(/^exec\s+(\S+)\s+"\$@"/m)?.[1];
+  return target && existsSync(target) ? target : executable;
+}
+
+function hermesE2eEnvironment(home: string, hermesHome: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {};
+  for (const key of [
+    "PATH",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TZ",
+    "TERM",
+    "NO_COLOR",
+    "FORCE_COLOR",
+    "SSL_CERT_FILE",
+    "SSL_CERT_DIR",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY"
+  ]) {
+    if (process.env[key] !== undefined) env[key] = process.env[key];
+  }
+  return {
+    ...env,
+    HOME: home,
+    XDG_CONFIG_HOME: join(home, ".config"),
+    XDG_CACHE_HOME: join(home, ".cache"),
+    XDG_DATA_HOME: join(home, ".local", "share"),
+    HERMES_HOME: hermesHome,
+    HERMES_ACCEPT_HOOKS: "1"
+  };
+}
+
+>>>>>>> Stashed changes
 const opencodeExecutable = resolveInstalledCli("ACS_TEST_OPENCODE_EXECUTABLE", "opencode");
 const hermesExecutable = resolveInstalledCli("ACS_TEST_HERMES_EXECUTABLE", "hermes");
 
@@ -1909,6 +1950,19 @@ describe("gateway MCP transport", () => {
       const hermesHome = join(dir, "hermes-home");
       mkdirSync(allowed);
       mkdirSync(hermesHome);
+<<<<<<< Updated upstream
+=======
+      if (!hermesExecutable) throw new Error("Hermes executable unavailable");
+      const hermesRuntimeLauncher = resolveHermesRuntimeLauncher(hermesExecutable);
+      const installedHermesLauncher = readFileSync(hermesRuntimeLauncher);
+      let hermesFixture: ReturnType<typeof prepareHermesSourceFixture>;
+      try {
+        hermesFixture = prepareHermesSourceFixture(hermesRuntimeLauncher, dir, hermesHome);
+      } catch (error) {
+        rmSync(dir, { recursive: true, force: true });
+        throw error;
+      }
+>>>>>>> Stashed changes
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -1916,7 +1970,7 @@ describe("gateway MCP transport", () => {
           security: { max_output_bytes: 256, command_timeout_ms: 5_000 },
           agents: [
             {
-              id: "fixture-agent",
+              id: "codex",
               command: "node",
               args: ["-e", "process.stdout.write('fixture-response:' + process.argv.at(-1))"],
               permission_mode: "read-only"
@@ -1930,6 +1984,7 @@ describe("gateway MCP transport", () => {
         advertisedTools: string[];
         emitted: { name: string; arguments: Record<string, unknown> } | undefined;
       }> = [];
+      const toolResponseTrace: Array<{ name: unknown; content: string }> = [];
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -1954,6 +2009,14 @@ describe("gateway MCP transport", () => {
             (message) => message && typeof message === "object" && (message as Record<string, unknown>).role === "tool"
           );
           const lastTool = toolResults.at(-1) as Record<string, unknown> | undefined;
+          const lastToolCall = messages
+            .flatMap((message) => {
+              if (!message || typeof message !== "object") return [];
+              const calls = (message as Record<string, unknown>).tool_calls;
+              return Array.isArray(calls) ? calls : [];
+            })
+            .find((call) => call && typeof call === "object" && call.id === lastTool?.tool_call_id);
+          const lastToolName = typeof lastTool?.name === "string" ? lastTool.name : lastToolCall?.function?.name;
           const resultText =
             lastTool && typeof lastTool.content === "string"
               ? String(lastTool.content)
@@ -1962,6 +2025,7 @@ describe("gateway MCP transport", () => {
                 : lastTool
                   ? JSON.stringify(lastTool)
                   : "";
+          if (lastTool) toolResponseTrace.push({ name: lastToolName, content: resultText.slice(0, 4_000) });
           const jsonStart = resultText.indexOf("{");
           const jsonEnd = resultText.lastIndexOf("}");
           const result =
@@ -2036,16 +2100,16 @@ describe("gateway MCP transport", () => {
             // first tool-bearing turn. It is not the model-facing smoke path.
           } else if (toolResults.length === 0) {
             call = emit("tool_search", { queries: ["ACS test agent run", "test.agent.run"], limit: 5 });
-          } else if (lastTool?.name === "tool_search" && namedHit && typeof namedHit.name === "string") {
+          } else if (lastToolName === "tool_search" && namedHit && typeof namedHit.name === "string") {
             call = emit("tool_describe", { names: [namedHit.name] });
-          } else if (lastTool?.name === "tool_describe") {
+          } else if (lastToolName === "tool_describe") {
             const describedName =
               (typeof result?.name === "string" && result.name) ||
               (namedHit && typeof namedHit.name === "string" ? namedHit.name : "mcp__acs_gateway__test_agent_run");
             call = emit("tool_call", {
               name: describedName,
               arguments: {
-                agent: "fixture-agent",
+                agent: "codex",
                 prompt: "Hermes deterministic interoperability check",
                 cwd: allowed,
                 timeoutSeconds: 5,
@@ -2123,7 +2187,11 @@ describe("gateway MCP transport", () => {
           `model:\n  provider: custom\n  default: fixture-model\n  base_url: http://127.0.0.1:${modelAddress.port}/v1\n  api_key: fixture-key\n  context_length: 65536\n  max_tokens: 512\nmcp_servers:\n  acs-gateway:\n    url: http://127.0.0.1:${gatewayAddress.port}/mcp\n    headers:\n      Authorization: Bearer deterministic-hermes-token\ntools:\n  tool_search:\n    enabled: on\n`
         );
         hermesProcess = spawn(
+<<<<<<< Updated upstream
           "hermes",
+=======
+          hermesFixture.launcher,
+>>>>>>> Stashed changes
           [
             "--ignore-rules",
             "--no-restore-cwd",
@@ -2132,7 +2200,15 @@ describe("gateway MCP transport", () => {
           ],
           {
             cwd: allowed,
+<<<<<<< Updated upstream
             env: { ...process.env, HOME: dir, HERMES_HOME: hermesHome, HERMES_ACCEPT_HOOKS: "1" },
+=======
+            env: {
+              ...hermesE2eEnvironment(dir, hermesHome),
+              HERMES_RUNTIME_DIR: hermesFixture.runtimeDirectory,
+              HERMES_INSTALL_ROOT: hermesFixture.sourceRoot
+            },
+>>>>>>> Stashed changes
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -2155,7 +2231,10 @@ describe("gateway MCP transport", () => {
         const events = new SqliteWorkItemStore(dbPath);
         try {
           const storedEvents = events.readEvents();
-          expect(storedEvents.map((event) => event.name)).toEqual(
+          expect(
+            storedEvents.map((event) => event.name),
+            JSON.stringify(toolResponseTrace)
+          ).toEqual(
             expect.arrayContaining([
               "local_agent.authorization",
               "local_agent.dispatch.started",
