@@ -236,6 +236,82 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
     expect(app.fragmentFetches()).toBe(baseline + 1);
   });
 
+  it("keeps filter focus, caret and value while typing across a refresh (#5)", async () => {
+    const app = bootLive({
+      workItems: [item("wrk_a"), item("wrk_b", { status: "running" })],
+      events: [],
+      now: NOW
+    });
+    app.open();
+    await app.advance(2_000);
+
+    // The execution filter lives inside #execution-operations, which is replaced
+    // wholesale on refresh. Type part-way into a word, mid-string, then refresh.
+    const search = app.document.querySelector("#execution-search") as HTMLInputElement;
+    expect(search).not.toBeNull();
+    search.value = "deployment wrk_a rollback";
+    search.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+    search.focus();
+    search.setSelectionRange(10, 13); // caret inside "wrk_a"
+    const elementBefore = search;
+    await app.flush();
+
+    // Change the model so the execution fragment genuinely differs and is replaced.
+    app.setModel({
+      workItems: [item("wrk_a"), item("wrk_b", { status: "running" }), item("wrk_d")],
+      events: [],
+      now: NOW
+    });
+    app.emit("work_item.running", { "work_item.id": "wrk_b" });
+    await app.advance(1_500);
+
+    const searchAfter = app.document.querySelector("#execution-search") as HTMLInputElement;
+    // The region really was re-rendered, so this is not trivially passing.
+    expect(searchAfter).not.toBe(elementBefore);
+    expect(app.fragmentFetches()).toBeGreaterThan(0);
+    // Value, focus and caret all survive.
+    expect(searchAfter.value).toBe("deployment wrk_a rollback");
+    expect(app.document.activeElement).toBe(searchAfter);
+    expect(searchAfter.selectionStart).toBe(10);
+    expect(searchAfter.selectionEnd).toBe(13);
+  });
+
+  it("keeps the stage and audit filters across a refresh (#5)", async () => {
+    const app = bootLive({
+      workItems: [item("wrk_a"), item("wrk_b", { status: "running" })],
+      events: [{ name: "policy.decided", timeUnixNano: "1", attributes: {} }],
+      now: NOW
+    });
+    app.open();
+    await app.advance(2_000);
+
+    const stage = app.document.querySelector("#execution-stage") as HTMLSelectElement;
+    const auditSearch = app.document.querySelector("#audit-search") as HTMLInputElement;
+    const auditType = app.document.querySelector("#audit-type") as HTMLInputElement;
+    expect(stage).not.toBeNull();
+    expect(auditSearch).not.toBeNull();
+
+    stage.value = "Running";
+    stage.dispatchEvent(new app.window.Event("change", { bubbles: true }));
+    auditSearch.value = "policy";
+    auditSearch.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+    auditType.value = "policy.decided";
+    auditType.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+    await app.flush();
+
+    app.emit("work_item.running", { "work_item.id": "wrk_b" });
+    await app.advance(1_500);
+
+    const stageAfter = app.document.querySelector("#execution-stage") as HTMLSelectElement;
+    const auditSearchAfter = app.document.querySelector("#audit-search") as HTMLInputElement;
+    const auditTypeAfter = app.document.querySelector("#audit-type") as HTMLInputElement;
+    // Values persist because the client re-applies its own filter state; the caret
+    // and focus guarantees are covered above.
+    expect(stageAfter.value).toBe("Running");
+    expect(auditSearchAfter.value).toBe("policy");
+    expect(auditTypeAfter.value).toBe("policy.decided");
+  });
+
   it("keeps typed reasons, focus, selection, and the queue filter across a patch", async () => {
     const app = bootLive({
       workItems: [item("wrk_a"), item("wrk_b"), item("wrk_c", { status: "running" })],
