@@ -6727,7 +6727,31 @@ export class SqliteWorkItemStore implements WorkItemStore {
    * and audited; afterwards the lease is no longer active and reconciliation
    * recovers without operator action.
    */
-  fenceLeasesWithoutAdmissionReservation(input: {
+  fenceLeasesWithoutAdmissionReservation(
+    input: {
+      workerIds: readonly string[];
+      reservedAttemptIds: ReadonlySet<string>;
+      now?: Date;
+    },
+    options?: { busyTimeoutMs?: number }
+  ): WorkItem[] {
+    if (options?.busyTimeoutMs === undefined) {
+      return this.fenceLeasesWithoutAdmissionReservationInTransaction(input);
+    }
+    // Callers on a latency-sensitive path, notably the readiness probe, must not
+    // block on a contended write lock. Bound the wait so SQLITE_BUSY surfaces and the
+    // caller can report the real database state instead of stalling the probe for the
+    // default five seconds. The write itself stays fail-closed: if it cannot take the
+    // lock it changes nothing and the caller treats reconciliation as unavailable.
+    this.db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(options.busyTimeoutMs))}`);
+    try {
+      return this.fenceLeasesWithoutAdmissionReservationInTransaction(input);
+    } finally {
+      this.db.exec("PRAGMA busy_timeout = 5000");
+    }
+  }
+
+  private fenceLeasesWithoutAdmissionReservationInTransaction(input: {
     workerIds: readonly string[];
     reservedAttemptIds: ReadonlySet<string>;
     now?: Date;

@@ -724,10 +724,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const reserved = new Set(workItems.listAdmissionPermits().map((permit) => permit.attemptId));
     let fenced: ReturnType<typeof workItems.fenceLeasesWithoutAdmissionReservation>;
     try {
-      fenced = workItems.fenceLeasesWithoutAdmissionReservation({
-        workerIds: [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID],
-        reservedAttemptIds: reserved
-      });
+      fenced = workItems.fenceLeasesWithoutAdmissionReservation(
+        {
+          workerIds: [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID],
+          reservedAttemptIds: reserved
+        },
+        // Readiness is probed frequently and must answer promptly. Bound the wait for
+        // the write lock so a contended database surfaces as its real readiness state
+        // instead of stalling the probe for the default busy timeout.
+        { busyTimeoutMs: 50 }
+      );
     } catch (error) {
       // Reconciliation must not mutate authority when fencing cannot be proven safe.
       app.log.error(
