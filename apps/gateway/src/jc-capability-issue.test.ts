@@ -284,19 +284,19 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(other.json().capability).toBeUndefined();
     }));
 
-  it("admin execution mode never auto-approves privileged_exec, and acs:admin cannot approve it", () =>
+  it("admin execution mode auto-authorizes privileged_exec", () =>
     withGateway(async (ctx) => {
       const switched = await ctx.app.inject({
         method: "POST",
         url: "/execution-mode",
         headers: { authorization: `Bearer ${OP_TOKEN}` },
-        payload: { mode: "admin", reason: "jc admin-mode negative test" }
+        payload: { mode: "admin", reason: "jc universal admin test" }
       });
       expect(switched.statusCode).toBe(200);
       const response = await issue(ctx, "privileged_exec", PRIV_ARGS);
-      expect(response.statusCode).toBe(409);
-      expect(response.json().decision).toBe("require_approval");
-      expect(response.json().capability).toBeUndefined();
+      expect(response.statusCode).toBe(200);
+      expect(response.json().decision).toBe("allow");
+      expect(typeof response.json().capability.payload.approvalId).toBe("string");
     }));
 
   it("self-approval by the requesting subject is rejected at /approve and nothing is signed", () =>
@@ -312,8 +312,8 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
 });
 
 // Every approval-gated JC tool refuses requester self-approval and keeps
-// its approver-visible summary. Canonical admin mode may auto-authorize
-// ordinary managed mutations; privileged_exec remains human-only.
+// its approver-visible summary. Canonical admin mode may auto-authorize every
+// managed mutation, including privileged_exec.
 describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval, B3 approval summary)", () => {
   const GATED = jaceCommanderToolNames().filter((name) => jaceCommanderToolPolicy(name)?.requiresApproval === true);
   const head = "0123456789abcdef0123456789abcdef01234567";
@@ -401,7 +401,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
-  it("admin execution mode auto-authorizes ordinary gated tools; privileged_exec stays human-only", () =>
+  it("admin execution mode auto-authorizes every gated tool, including privileged_exec", () =>
     withGateway(
       async (ctx) => {
         const switched = await ctx.app.inject({
@@ -417,18 +417,9 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         for (const tool of GATED) {
           const { args } = fixtures[tool]!;
           const first = await issue(ctx, tool, args);
-          if (tool === "privileged_exec") {
-            expect(first.statusCode, first.body).toBe(409);
-            expect(first.json().capability).toBeUndefined();
-            expect((await approve(ctx, first.json().workItemId, first.json().actionHash)).statusCode).toBe(200);
-            const issued = await issue(ctx, tool, args);
-            expect(issued.statusCode, issued.body).toBe(200);
-            expect(typeof issued.json().capability.payload.approvalId).toBe("string");
-          } else {
-            expect(first.statusCode, `${tool}: ${first.body}`).toBe(200);
-            expect(first.json().decision).toBe("allow");
-            expect(typeof first.json().capability.payload.approvalId).toBe("string");
-          }
+          expect(first.statusCode, `${tool}: ${first.body}`).toBe(200);
+          expect(first.json().decision).toBe("allow");
+          expect(typeof first.json().capability.payload.approvalId).toBe("string");
         }
 
         const db = new DatabaseSync(ctx.dbPath);
@@ -438,7 +429,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
               "SELECT DISTINCT approved_by_actor_id AS actor FROM jace_commander_capability_issuances WHERE approval_id IS NOT NULL ORDER BY actor"
             )
             .all() as Array<{ actor: string }>;
-          expect(approvers.map((row) => row.actor)).toEqual(["acs:admin", "user"]);
+          expect(approvers.map((row) => row.actor)).toEqual(["acs:admin"]);
         } finally {
           db.close();
         }

@@ -24,7 +24,7 @@ export interface JcManifest {
 
 export const JC_MANIFEST: JcManifest = {
   "version": "acs.jc.v1",
-  "manifestHash": "7ab0daef63b8436055d48a644c401f0fb93a10ff6393d9b6b290fb9bdcf67f70",
+  "manifestHash": "49863090b690af103b212bd89b56230eea38f61aa2a491adfef6eb709a2fc11f",
   "scopes": [
     "fs.read",
     "fs.write",
@@ -858,7 +858,7 @@ export const JC_MANIFEST: JcManifest = {
     },
     {
       "name": "privileged_exec",
-      "description": "Run ONE exact command as root via the jc-privileged-helper. Requires an ACS acs.jc.v1 capability carrying a human approvalId bound to this exact argv/cwd/timeoutMs/stdin. The first call returns an ACS approval challenge (workItemId, actionHash, argv); after a human approves it in ACS, retry the identical call. Each approval authorizes one run. No shell: argv[0] must be an absolute path.",
+      "description": "Run ONE exact command as root via the jc-privileged-helper. Requires an ACS acs.jc.v1 capability carrying an approvalId bound to this exact argv/cwd/timeoutMs/stdin. In strict mode a human approval is required; in admin mode ACS may auto-authorize the exact invocation. Each approval authorizes one run. No shell: argv[0] must be an absolute path.",
       "inputSchema": {
         "type": "object",
         "properties": {
