@@ -73,7 +73,7 @@
     "esbuild@0.28.1": true
   },
   "dependencies": {
-    "openai": "^7.21.0"
+    "openai": "^7.23.0"
   },
   "overrides": {
     "browserslist": "4.28.7",
