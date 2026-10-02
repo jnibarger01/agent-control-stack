@@ -284,19 +284,19 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(other.json().capability).toBeUndefined();
     }));
 
-  it("admin execution mode never auto-approves privileged_exec, and acs:admin cannot approve it", () =>
+  it("admin execution mode auto-authorizes privileged_exec", () =>
     withGateway(async (ctx) => {
       const switched = await ctx.app.inject({
         method: "POST",
         url: "/execution-mode",
         headers: { authorization: `Bearer ${OP_TOKEN}` },
-        payload: { mode: "admin", reason: "jc admin-mode negative test" }
+        payload: { mode: "admin", reason: "jc universal admin test" }
       });
       expect(switched.statusCode).toBe(200);
       const response = await issue(ctx, "privileged_exec", PRIV_ARGS);
-      expect(response.statusCode).toBe(409);
-      expect(response.json().decision).toBe("require_approval");
-      expect(response.json().capability).toBeUndefined();
+      expect(response.statusCode).toBe(200);
+      expect(response.json().decision).toBe("allow");
+      expect(typeof response.json().capability.payload.approvalId).toBe("string");
     }));
 
   it("self-approval by the requesting subject is rejected at /approve and nothing is signed", () =>
