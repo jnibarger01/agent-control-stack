@@ -122,6 +122,7 @@ function connectSse() {
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
       if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
       if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
+      loadMcpClients();
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }

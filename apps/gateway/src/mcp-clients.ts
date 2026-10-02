@@ -159,14 +159,15 @@ export class McpClientService {
 
   /** Rebuild the index from the retained audit log. Called once at startup. */
   hydrate(pageSize = 1_000, maxPages = 20): void {
+    // Collect every relevant event, then replay them in one global sequence order. Replaying each type as its
+    // own batch would apply all labels before all clears and resurrect a cleared (or clear a re-applied) label.
+    const all: StoredAuditEvent[] = [];
     for (const name of [
       MCP_CLIENT_EVENTS.labelled,
       MCP_CLIENT_EVENTS.labelCleared,
       MCP_CLIENT_EVENTS.seen,
       "connector.requested"
     ]) {
-      // Newest pages first, then replay oldest-first so counts and labels come out in order.
-      const pages: StoredAuditEvent[][] = [];
       let before: number | undefined;
       for (let page = 0; page < maxPages; page += 1) {
         const events = this.store.readEvents({
@@ -175,12 +176,13 @@ export class McpClientService {
           ...(before !== undefined ? { beforeSequence: before } : {})
         });
         if (events.length === 0) break;
-        pages.unshift(events);
+        all.push(...events);
         before = events[0]!.sequence;
         if (events.length < pageSize) break;
       }
-      for (const events of pages) for (const event of events) this.ingestEvent(event, true);
     }
+    all.sort((x, y) => x.sequence - y.sequence);
+    for (const event of all) this.ingestEvent(event, true);
     this.enforceCap();
   }
 

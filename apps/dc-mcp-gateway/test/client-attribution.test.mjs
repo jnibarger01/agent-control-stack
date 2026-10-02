@@ -18,7 +18,8 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { ClientInfoCache, claimHeaders, createClientObserver, extractClientInfo, sanitizeClaim } from '../client-attribution.js';
+import { identityAttribution } from '../managed.js';
+import { ClientInfoCache, claimHeaders, clientIdForAcs, createClientObserver, extractClientInfo, sanitizeClaim } from '../client-attribution.js';
 import { capabilityTransport } from '../managed.js';
 
 const KEY = 'k'.repeat(32);
@@ -43,6 +44,26 @@ test('claims are bounded printable ASCII and clientInfo is read only from initia
   assert.equal(extractClientInfo(null), undefined);
   assert.deepEqual(claimHeaders({ name: 'Muse', version: '1', userAgent: 'UA/1' }), { 'x-mcp-client-name': 'Muse', 'x-mcp-client-version': '1', 'x-mcp-user-agent': 'UA/1' });
   assert.deepEqual(claimHeaders(undefined), {});
+});
+
+test('a verified client id longer than 256 characters is digested, never truncated', () => {
+  assert.equal(clientIdForAcs('client-short'), 'client-short');
+  const base = 'https://clients.example/' + 'a'.repeat(240);
+  const exactly256 = base.slice(0, 256);
+  assert.equal(clientIdForAcs(exactly256), exactly256);
+  // Two different ids that share their first 256 characters must stay different.
+  const one = exactly256 + '-one';
+  const two = exactly256 + '-two';
+  const a = clientIdForAcs(one);
+  const b = clientIdForAcs(two);
+  assert.notEqual(a, b);
+  assert.match(a, /^sha256:[0-9a-f]{64}$/);
+  assert.ok(a.length <= 256);
+  assert.equal(clientIdForAcs(one), a, 'stable for the same id');
+  assert.equal(clientIdForAcs(''), null);
+  assert.equal(clientIdForAcs(42), null);
+  assert.equal(identityAttribution({ sub: 's', client_id: one }).clientId, a);
+  assert.equal(identityAttribution({ sub: 's', client_id: 'plain' }).clientId, 'plain');
 });
 
 test('the client info cache is bounded and expires', () => {

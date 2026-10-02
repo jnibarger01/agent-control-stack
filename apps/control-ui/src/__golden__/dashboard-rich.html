@@ -879,6 +879,7 @@ function connectSse() {
       if (selectedAgentId) loadAgentDetail(selectedAgentId);
       if (selectedExecutorId) loadExecutorDetail(selectedExecutorId);
       if (selectedConnectorId) loadConnectorDetail(selectedConnectorId);
+      loadMcpClients();
       announce('Live stream reconnected');
       if (selectedWorkItemId) void loadWorkDetail(selectedWorkItemId, { preserve: true });
     }
@@ -3325,12 +3326,17 @@ composerForm?.addEventListener('submit', async function (event) {
 });
 
 
-const mcpState = { summary: null, clients: [], legacy: [], loaded: false };
+const mcpState = { summary: null, clients: [], legacy: [], loaded: false, skewMs: 0, liveWindowMs: 300000 };
+// Liveness comes from lastSeenAt and the server's clock, so it expires between refreshes.
+function mcpIsLive(client) {
+  const age = Date.now() + mcpState.skewMs - new Date(client.lastSeenAt).getTime();
+  return Number.isFinite(age) && age <= mcpState.liveWindowMs;
+}
 let mcpRefreshTimer = null;
 const MCP_KIND_LABELS = { chatgpt: 'ChatGPT', muse: 'Muse', grok: 'Grok', claude: 'Claude', gemini: 'Gemini', other: 'Other' };
 
 function mcpAgo(value) {
-  const ms = Date.now() - new Date(value).getTime();
+  const ms = Date.now() + mcpState.skewMs - new Date(value).getTime();
   if (!Number.isFinite(ms)) return '—';
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return s + 's ago';
@@ -3375,7 +3381,7 @@ function renderMcpClients() {
       const action = client.status === 'labelled'
         ? '<button type="button" class="tool-button" data-mcp-edit="' + escapeClient(client.clientId) + '">Edit</button> <button type="button" class="tool-button" data-mcp-clear="' + escapeClient(client.clientId) + '">Clear</button>'
         : '<button type="button" class="tool-button" data-mcp-label="' + escapeClient(client.clientId) + '">Label…</button>';
-      return '<tr data-mcp-client="' + escapeClient(client.clientId) + '"><td>' + who + '<div class="mcp-actions">' + action + '</div></td><td><code>' + escapeClient(client.clientId) + '</code>' + (client.subjects && client.subjects.length ? '<br><small class="muted">subject ' + escapeClient(client.subjects.join(', ')) + '</small>' : '') + '</td><td>' + claims + '</td><td>' + escapeClient(lanes) + '</td><td>' + activity + '</td><td><span class="' + (client.live ? 'mcp-live' : 'mcp-idle') + '" aria-hidden="true"></span>' + escapeClient(client.live ? 'live' : mcpAgo(client.lastSeenAt)) + '<br><small class="muted">first ' + escapeClient(formatClientTime(client.firstSeenAt)) + '</small></td></tr>';
+      return '<tr data-mcp-client="' + escapeClient(client.clientId) + '"><td>' + who + '<div class="mcp-actions">' + action + '</div></td><td><code>' + escapeClient(client.clientId) + '</code>' + (client.subjects && client.subjects.length ? '<br><small class="muted">subject ' + escapeClient(client.subjects.join(', ')) + '</small>' : '') + '</td><td>' + claims + '</td><td>' + escapeClient(lanes) + '</td><td>' + activity + '</td><td><span class="' + (mcpIsLive(client) ? 'mcp-live' : 'mcp-idle') + '" aria-hidden="true"></span>' + escapeClient(mcpIsLive(client) ? 'live' : mcpAgo(client.lastSeenAt)) + '<br><small class="muted">first ' + escapeClient(formatClientTime(client.firstSeenAt)) + '</small></td></tr>';
     }).join('');
   }
   const legacy = document.getElementById('mcp-legacy');
@@ -3393,7 +3399,7 @@ function renderMcpAlert() {
   const alert = document.getElementById('mcp-client-alert');
   if (!alert) return;
   const summary = mcpState.summary;
-  const live = mcpState.clients.filter(function (c) { return c.status === 'unrecognized' && c.live; });
+  const live = mcpState.clients.filter(function (c) { return c.status === 'unrecognized' && mcpIsLive(c); });
   if (!summary || !live.length) { alert.hidden = true; alert.textContent = ''; return; }
   const names = live.slice(0, 3).map(function (c) { return c.suggestedKind ? (MCP_KIND_LABELS[c.suggestedKind] + '?') : c.clientId.slice(0, 18); }).join(', ');
   alert.textContent = (mcpPolicyBlocks() ? 'Blocked: ' : 'Unrecognized MCP client active: ') + live.length + ' (' + names + '). ' + (mcpPolicyBlocks() ? 'Label it in Connectors to allow it.' : 'Review in Connectors.');
@@ -3408,6 +3414,8 @@ async function loadMcpClients() {
     mcpState.summary = body.summary || null;
     mcpState.clients = body.clients || [];
     mcpState.legacy = body.legacy || [];
+    mcpState.skewMs = body.now ? new Date(body.now).getTime() - Date.now() : 0;
+    mcpState.liveWindowMs = body.liveWindowMs || 300000;
     mcpState.loaded = true;
     renderMcpClients();
   } catch (error) {

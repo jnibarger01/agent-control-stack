@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest, preHandlerAsyncHookHandler } from "fastify";
 import { ControlStackError } from "@agent-control-stack/shared";
-import { McpClientError, type McpClientService, type McpLane } from "./mcp-clients.js";
+import { MCP_CLIENT_LIVE_WINDOW_MS, McpClientError, type McpClientService, type McpLane } from "./mcp-clients.js";
 import { mcpClientClearBodySchema, mcpClientLabelBodySchema, mcpObservationBodySchema } from "./public-contracts.js";
 
 export interface McpClientRouteDeps {
@@ -30,7 +30,14 @@ export function registerMcpClientRoutes(deps: McpClientRouteDeps): void {
 
   app.get("/api/mcp-clients", { preHandler: requireRead, config: limit(120) }, async (_request, reply) => {
     try {
-      return { summary: service.summary(), clients: service.list(), legacy: service.legacyCallers() };
+      // `now` and `liveWindowMs` let the browser keep liveness correct between refreshes using the server's clock.
+      return {
+        now: new Date().toISOString(),
+        liveWindowMs: MCP_CLIENT_LIVE_WINDOW_MS,
+        summary: service.summary(),
+        clients: service.list(),
+        legacy: service.legacyCallers()
+      };
     } catch (error) {
       return fail(reply, error);
     }

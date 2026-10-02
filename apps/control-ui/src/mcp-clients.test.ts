@@ -73,6 +73,7 @@ function boot(initial: Json, handlers: Record<string, (body?: Json) => { status?
       current = next;
     },
     connect: () => listeners.get("open")?.({ data: "", type: "open" }),
+    disconnect: () => listeners.get("error")?.({ data: "", type: "error" }),
     emit: (name: string, data: unknown) => listeners.get(name)?.({ data: JSON.stringify(data), type: name }),
     rows: () => [...document.querySelectorAll("#mcp-clients-body tr[data-mcp-client]")] as HTMLElement[]
   };
@@ -162,7 +163,10 @@ describe("MCP clients panel", () => {
     );
 
     const quiet = boot(
-      payload([client({ live: false }), client({ clientId: "b", status: "labelled", label: "Grok", kind: "grok" })])
+      payload([
+        client({ live: false, lastSeenAt: "2026-10-01T00:00:00.000Z" }),
+        client({ clientId: "b", status: "labelled", label: "Grok", kind: "grok" })
+      ])
     );
     await quiet.settle();
     expect((quiet.document.getElementById("mcp-client-alert") as HTMLElement).hidden).toBe(true);
@@ -260,5 +264,46 @@ describe("MCP clients panel", () => {
     await new Promise((r) => setTimeout(r, 1000));
     expect(ctx.rows()).toHaveLength(1);
     expect((ctx.document.getElementById("mcp-client-alert") as HTMLElement).hidden).toBe(false);
+  });
+
+  it("expires liveness in the browser using the server clock, without another refresh", async () => {
+    // The server marked it live, but its last event is older than the live window by the server's own clock.
+    const stale = {
+      ...payload([client({ live: true, lastSeenAt: new Date(Date.now() - 10 * 60_000).toISOString() })]),
+      now: new Date().toISOString(),
+      liveWindowMs: 300_000
+    };
+    const ctx = boot(stale);
+    await ctx.settle();
+    expect((ctx.document.getElementById("mcp-client-alert") as HTMLElement).hidden).toBe(true);
+    expect(ctx.rows()[0]!.textContent).not.toContain("live");
+    expect(ctx.rows()[0]!.textContent).toContain("10m ago");
+
+    // A browser clock that is wrong still agrees with the server: skew is taken from `now`.
+    const skewed = {
+      ...payload([client({ lastSeenAt: new Date(Date.now() + 3_600_000 - 60_000).toISOString() })]),
+      now: new Date(Date.now() + 3_600_000).toISOString(),
+      liveWindowMs: 300_000
+    };
+    const fresh = boot(skewed);
+    await fresh.settle();
+    expect((fresh.document.getElementById("mcp-client-alert") as HTMLElement).hidden).toBe(false);
+  });
+
+  it("refetches the client list after the live stream reconnects", async () => {
+    const ctx = boot(payload([]));
+    await ctx.settle();
+    ctx.connect();
+    await ctx.settle();
+    const loads = () => ctx.calls.filter((c) => c.method === "GET" && c.url === "/api/mcp-clients").length;
+    const before = loads();
+    ctx.set(payload([client()]));
+    ctx.dom.window.document.dispatchEvent(new ctx.dom.window.Event("visibilitychange"));
+    ctx.disconnect();
+    await ctx.settle();
+    ctx.connect();
+    await ctx.settle();
+    expect(loads()).toBeGreaterThan(before);
+    expect(ctx.rows()).toHaveLength(1);
   });
 });

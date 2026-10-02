@@ -24,7 +24,7 @@
  * Zero runtime dependencies (node:http / node:crypto only), like server.js.
  * Never logs capability contents, signatures, tokens, or tool arguments.
  */
-import { claimHeaders } from './client-attribution.js';
+import { claimHeaders, clientIdForAcs } from './client-attribution.js';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -235,7 +235,7 @@ export function identityAttribution(auth, claims) {
   if (!auth || typeof auth !== 'object') return null;
   return {
     subject: typeof auth.sub === 'string' ? auth.sub.slice(0, 128) : null,
-    clientId: typeof auth.client_id === 'string' ? auth.client_id.slice(0, 256) : null,
+    clientId: clientIdForAcs(auth.client_id),
     // Self-declared by the MCP client (clientInfo, User-Agent). Unverified display text for operators only.
     claims: claims && typeof claims === 'object' ? claims : undefined,
   };

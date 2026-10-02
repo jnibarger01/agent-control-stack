@@ -318,6 +318,14 @@ describe("MCP client visibility", () => {
     }
   });
 
+  it("returns the server clock and live window so the browser can expire liveness itself", async () => {
+    setup();
+    const app = gateway();
+    const body = (await app.inject({ method: "GET", url: "/api/mcp-clients", headers: bearer(READER) })).json();
+    expect(Math.abs(Date.parse(body.now) - Date.now())).toBeLessThan(5_000);
+    expect(body.liveWindowMs).toBe(300_000);
+  });
+
   it("requires authentication to read the client list", async () => {
     setup();
     const app = gateway();
@@ -399,6 +407,34 @@ describe("McpClientService", () => {
     expect(parseMcpClientPolicy({})).toBe("observe");
     expect(parseMcpClientPolicy({ ACS_MCP_CLIENT_POLICY: "require_label" })).toBe("require_label");
     expect(() => parseMcpClientPolicy({ ACS_MCP_CLIENT_POLICY: "block" })).toThrow(/observe or require_label/);
+  });
+
+  it("replays labels and clears in global sequence order, so a re-applied label survives a restart", () => {
+    const events: StoredAuditEvent[] = [
+      event(1, "connector.requested", { source: "jc-capability-issued", mcpClientId: "c1", authSubject: "s" }),
+      event(2, "mcp_client.labelled", { clientId: "c1", kind: "muse", label: "Muse", actorId: "u" }),
+      event(3, "mcp_client.label_cleared", { clientId: "c1", actorId: "u" }),
+      event(4, "mcp_client.labelled", { clientId: "c1", kind: "muse", label: "Muse again", actorId: "u" }),
+      event(5, "connector.requested", { source: "jc-capability-issued", mcpClientId: "c2", authSubject: "s" }),
+      event(6, "mcp_client.labelled", { clientId: "c2", kind: "grok", label: "Grok", actorId: "u" }),
+      event(7, "mcp_client.label_cleared", { clientId: "c2", actorId: "u" })
+    ];
+    const store = {
+      recordSystemEvent: () => undefined as never,
+      // Like the real store: filter by name, honour beforeSequence, oldest first within the page.
+      readEvents: (o: { name?: string; limit?: number; beforeSequence?: number }) =>
+        events
+          .filter(
+            (e) => (!o.name || e.name === o.name) && (o.beforeSequence === undefined || e.sequence < o.beforeSequence)
+          )
+          .slice(-(o.limit ?? 100))
+    };
+    const svc = new McpClientService(store as never);
+    svc.hydrate();
+    const byId = Object.fromEntries(svc.list().map((c) => [c.clientId, c]));
+    expect(byId.c1).toMatchObject({ status: "labelled", label: "Muse again" });
+    expect(byId.c2).toMatchObject({ status: "unrecognized" });
+    expect(svc.gate("c1").ok).toBe(true);
   });
 
   it("marks a client live only inside the window", () => {
