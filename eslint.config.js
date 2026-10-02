@@ -33,6 +33,15 @@ export default tseslint.config(
               group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
               message:
                 "Jev is advisory-only (ADR 0020). Import it only from the allow-listed shadow hook or observation worker, never from authority code."
+            },
+            {
+              group: [
+                "@agent-control-stack/policy-gate/*jev-shadow*",
+                "**/policy-gate/src/jev-shadow.js",
+                "**/policy-gate/src/jev-shadow.ts"
+              ],
+              message:
+                "Jev shadow hooks are advisory-only (ADR 0020). Do not deep-import the shadow module from authority code."
             }
           ]
         }

@@ -41,6 +41,14 @@ describe("Jev authority boundary (ADR 0020)", () => {
     expect(messages.join(" ")).toContain("advisory-only");
   });
 
+  it("refuses cross-package deep imports of the Jev shadow module", async () => {
+    const messages = await boundaryMessages(
+      "packages/work-items/src/store.ts",
+      'import { maybeRunJevShadowAdvisory } from "../../policy-gate/src/jev-shadow.js";\nvoid maybeRunJevShadowAdvisory;\n'
+    );
+    expect(messages.join(" ")).toContain("deep-import");
+  });
+
   it("allows the policy-gate shadow hook only in the gateway MCP observation path", async () => {
     expect(
       await boundaryMessages(
