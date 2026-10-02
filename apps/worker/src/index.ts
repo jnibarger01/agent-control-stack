@@ -21,6 +21,7 @@ import {
 import { buildEvidenceManifest, computeWorkspaceRevision, observation } from "@agent-control-stack/evidence";
 import {
   resolveExecutionBackend,
+  hashAttemptLeaseToken,
   SqliteWorkItemStore,
   type AttemptLease,
   type ClaimedWorkItem,
@@ -29,6 +30,7 @@ import {
   type WorkItemStore
 } from "@agent-control-stack/work-items";
 import { WorkspaceManager } from "@agent-control-stack/workspace-manager";
+import type { AuthenticatedWorkerClaim } from "./claim-client.js";
 import {
   authorizationDeniedEvent,
   authorizationGrantedEvent,
@@ -78,6 +80,8 @@ export interface WorkerOptions {
   machineExecutor?: MachineExecutor;
   /** In Nimble-authoritative mode, claim only work persistently assigned to this worker. */
   requireNimbleAssignment?: boolean;
+  /** Production Nimble claims must be made through the authenticated gateway boundary. */
+  authenticatedClaim?: AuthenticatedWorkerClaim;
 }
 
 export interface WorkerResult {
@@ -170,11 +174,19 @@ export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActi
 export async function runWorkerOnce(options: WorkerOptions = {}): Promise<WorkerResult> {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const executionBackend = options.executionBackend ?? resolveExecutionBackend();
+  const nimbleEnabled = process.env.ACS_NIMBLE_ROUTING_ENABLED === "1";
+  const assignedOnly = options.requireNimbleAssignment ?? nimbleEnabled;
+  if (nimbleEnabled && !options.authenticatedClaim) {
+    throw new ControlStackError(
+      "worker_claim_config_invalid",
+      "Nimble worker mode requires an authenticated ACS worker claim client"
+    );
+  }
   const workItems = new SqliteWorkItemStore(dbPath);
   const learning = options.learning ?? new ProceduralLearning(dbPath);
   const ownsLearning = options.learning === undefined;
   const tools = createWorkItemTools(workItems, createPolicyEngine());
-  const workerId = options.workerId ?? "local-worker";
+  const workerId = options.workerId ?? process.env.ACS_WORKER_ID ?? "local-worker";
   const execute: WorkerExecute = options.execute ?? (async (item) => executeSandboxed(item));
 
   let cleanupWorkspace:
@@ -209,17 +221,50 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
 
   try {
     workItems.failExpiredLeases();
-    const assignedOnly = options.requireNimbleAssignment ?? process.env.ACS_NIMBLE_ROUTING_ENABLED === "1";
-    const running = assignedOnly
-      ? (() => {
-          const candidate = workItems
-            .list({ status: "approved" })
-            .find((item) => workItems.getWorkItemAssignment(item.id)?.selectedWorkerId === workerId);
-          return candidate ? tools.claim_approved_work_item_by_id({ id: candidate.id, workerId }) : undefined;
-        })()
-      : tools.claim_next_approved_work_item({ workerId });
+    const running = options.authenticatedClaim
+      ? await options.authenticatedClaim()
+      : assignedOnly
+        ? (() => {
+            const candidate = workItems
+              .list({ status: "approved" })
+              .find((item) => workItems.getWorkItemAssignment(item.id)?.selectedWorkerId === workerId);
+            return candidate ? tools.claim_approved_work_item_by_id({ id: candidate.id, workerId }) : undefined;
+          })()
+        : tools.claim_next_approved_work_item({ workerId });
     if (!running) {
       return { executed: false, reason: "no approved work item" };
+    }
+    if (options.authenticatedClaim) {
+      const persisted = workItems.get(running.id);
+      const assignment = workItems.getWorkItemAssignment(running.id);
+      const lease = running.attemptId ? workItems.getActiveLeaseForAttempt(running.attemptId) : undefined;
+      if (
+        running.status !== "running" ||
+        running.workerId !== workerId ||
+        !running.attemptId ||
+        !running.planHash ||
+        !running.inputHash ||
+        running.fencingEpoch === undefined ||
+        !persisted ||
+        persisted.status !== "running" ||
+        !assignment ||
+        assignment.selectedWorkerId !== workerId ||
+        lease?.status !== "active" ||
+        lease.attemptId !== running.attemptId ||
+        lease.workItemId !== running.id ||
+        lease.workerId !== workerId ||
+        lease.leaseId !== running.leaseId ||
+        lease.tokenHash !== hashAttemptLeaseToken(running.leaseToken) ||
+        lease.planHash !== running.planHash ||
+        lease.inputHash !== running.inputHash ||
+        lease.fencingEpoch !== running.fencingEpoch ||
+        Date.parse(lease.expiresAt) <= Date.now()
+      ) {
+        throw new ControlStackError(
+          "worker_claim_integrity_mismatch",
+          "authenticated worker claim did not match persisted ACS authority"
+        );
+      }
     }
     if (running.status === "blocked") {
       return { executed: false, workItemId: running.id, reason: "blocked by policy" };
@@ -292,9 +337,13 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
 
     const bridge = new ExecutionLearningBridge(learning);
-    const prepared = bridge.beforeExecution(running, running.attemptId);
+    const executionWorkItem = workItems.get(running.id);
+    if (!executionWorkItem || executionWorkItem.status !== "running") {
+      throw new ControlStackError("worker_claim_integrity_mismatch", "persisted work item changed before execution");
+    }
+    const prepared = bridge.beforeExecution(executionWorkItem, running.attemptId);
     const result = await execute({
-      ...running,
+      ...executionWorkItem,
       retrievedSkills: prepared.retrievedSkills,
       ...(workspace ? { workspace } : {})
     });
@@ -312,7 +361,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     const learningRecord = bridge.afterExecution({
       workItemId: running.id,
       attemptId: running.attemptId,
-      repository: running.target?.repo ?? running.target?.cwd,
+      repository: executionWorkItem.target?.repo ?? executionWorkItem.target?.cwd,
       retrievedSkills: prepared.retrievedSkills,
       usedSkillIds: usedSkills,
       engineSucceeded: result.ok,

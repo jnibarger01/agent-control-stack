@@ -43,10 +43,17 @@ fencing. A caller cannot claim an unassigned item or an item assigned to a
 different worker. When Nimble mode is enabled, the legacy unassigned
 `claim_next_approved_work_item` path is closed.
 
-The in-repository one-shot worker also honors `ACS_NIMBLE_ROUTING_ENABLED=1`:
-it looks up an approved assignment for its configured worker ID and claims that
-work item by ID. It returns without claiming when no matching assignment
-exists.
+When Nimble mode is enabled and authenticated worker configuration is present,
+the worker CLI runs as a long-lived poller over the authenticated claim route.
+It requires a dedicated `ACS_WORKER_ID` and `ACS_WORKER_TOKEN`; the token
+authenticates the claim and the worker ID is never sent in the request body.
+The worker accepts a claim only when its response matches the locally
+persisted assignment, active lease, fencing epoch, and lease-token hash.
+Missing claim configuration, a permanent claim error, or an authority mismatch
+fails closed without falling back to a direct database claim. When no work is
+assigned to that worker, it waits and polls again. Transient gateway
+unavailability uses bounded exponential backoff. Shutdown signals are honored
+after the current execution finishes.
 
 Routing evidence is append-only and includes candidate scores, hard-eligibility
 reasons, model ID/version, threshold, exact selected score, algorithm version,
@@ -67,6 +74,11 @@ descriptive state is persisted in the Nimble evidence record.
 | `ACS_NIMBLE_ROUTING_CONCURRENCY`               | `4`                                   | 1–8 simultaneous evaluations                           |
 | `ACS_NIMBLE_MAX_ACTIVE_ASSIGNMENTS_PER_WORKER` | `1`                                   | 1–32 active assignments                                |
 | `ACS_AGENT_WORKER_BINDINGS`                    | empty                                 | JSON object mapping registered agent IDs to worker IDs |
+| `ACS_WORKER_ID`                                | required in Nimble worker mode        | Must match the worker credential and selected binding  |
+| `ACS_WORKER_TOKEN`                             | required in Nimble worker mode        | Dedicated worker credential; never put in request JSON |
+| `ACS_WORKER_GATEWAY_URL`                       | `http://127.0.0.1:3000`               | Loopback HTTP origin only                              |
+| `ACS_WORKER_CLAIM_TIMEOUT_MS`                  | `5000`                                | 100–60,000 milliseconds                                |
+| `ACS_WORKER_POLL_INTERVAL_MS`                  | `5000`                                | 250–60,000 milliseconds                                |
 
 Jev remains an independent advisory observation path. Its enabled state,
 availability, and output do not affect eligibility, selection, assignment, or

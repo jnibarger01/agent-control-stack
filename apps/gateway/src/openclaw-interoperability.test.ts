@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
@@ -377,6 +377,7 @@ describe("installed OpenClaw interoperability", () => {
               OPENCLAW_GATEWAY_TOKEN: "deterministic-openclaw-gateway-token",
               OPENCLAW_SKIP_CHANNELS: "1"
             },
+            detached: true,
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -410,6 +411,7 @@ describe("installed OpenClaw interoperability", () => {
               OPENCLAW_GATEWAY_TOKEN: "deterministic-openclaw-gateway-token",
               OPENCLAW_SKIP_CHANNELS: "1"
             },
+            detached: true,
             stdio: ["ignore", "pipe", "pipe"]
           }
         );
@@ -474,8 +476,8 @@ describe("installed OpenClaw interoperability", () => {
         }
         expect(readFileSync(join(dir, "machine-audit.jsonl"), "utf8")).toContain('"tool":"test.agent.run"');
       } finally {
-        if (openclawProcess && openclawProcess.exitCode === null) openclawProcess.kill("SIGTERM");
-        if (openclawGatewayProcess && openclawGatewayProcess.exitCode === null) openclawGatewayProcess.kill("SIGTERM");
+        await stopChild(openclawProcess);
+        await stopChild(openclawGatewayProcess);
         await app.close();
         await new Promise<void>((resolve) => modelServer.close(() => resolve()));
         rmSync(dir, { recursive: true, force: true });
@@ -516,6 +518,50 @@ async function waitForPort(port: number): Promise<void> {
     }
   }
   throw new Error(`OpenClaw gateway did not listen on 127.0.0.1:${port}`);
+}
+
+async function stopChild(child: ChildProcess | undefined): Promise<void> {
+  if (!child) return;
+  if (child.exitCode === null && child.signalCode === null) {
+    signalChildGroup(child, "SIGTERM");
+  }
+  if (await waitForChildExit(child, 5_000)) {
+    child.stdout?.destroy();
+    child.stderr?.destroy();
+    return;
+  }
+  if (child.exitCode === null && child.signalCode === null) {
+    signalChildGroup(child, "SIGKILL");
+  }
+  if (!(await waitForChildExit(child, 5_000))) {
+    throw new Error("OpenClaw test process did not exit after termination");
+  }
+  child.stdout?.destroy();
+  child.stderr?.destroy();
+}
+
+function signalChildGroup(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (child.pid === undefined) return;
+  try {
+    process.kill(-child.pid, signal);
+  } catch (error) {
+    if (!(error instanceof Error) || !("code" in error) || error.code !== "ESRCH") throw error;
+  }
+}
+
+function waitForChildExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const onExit = (): void => {
+      clearTimeout(timer);
+      resolve(true);
+    };
+    const timer = setTimeout(() => {
+      child.removeListener("exit", onExit);
+      resolve(child.exitCode !== null || child.signalCode !== null);
+    }, timeoutMs);
+    child.once("exit", onExit);
+  });
 }
 
 function seedActor(dbPath: string, id: string, externalRef: string): void {
