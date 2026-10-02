@@ -71,7 +71,9 @@ import {
   createPolicyEngine,
   createWorkItemTools,
   explainPolicy,
+  probeNimbleRouting,
   previewWorkItemPolicy,
+  resolveNimbleRoutingConfig,
   SUPPORTED_ACTION_KINDS,
   workItemToolNames,
   ACS_ADMIN_APPROVER,
@@ -346,6 +348,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // Refuse to boot on an invalid ACS_TRACE_INSTANCE / ACS_RELEASE_SHA (trace_config_invalid)
   // rather than discovering it inside an approval transaction (PR #212 B4, ADR 0021).
   resolveTraceProducerConfig();
+  const nimbleRouting = resolveNimbleRoutingConfig();
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
@@ -768,7 +771,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     };
     const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
     const health = mergeSandboxReadyzCheck(workItems.readinessHealth(), sandboxCheck);
-    return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
+    const nimbleCheck = nimbleRouting.enabled ? await probeNimbleRouting(nimbleRouting) : undefined;
+    const nimbleOk = nimbleCheck === undefined || nimbleCheck.ok;
+    return reply.code(health.ok && nimbleOk ? 200 : 503).send({
+      ...health,
+      ok: health.ok && nimbleOk,
+      checks: nimbleCheck
+        ? {
+            ...health.checks,
+            nimble: nimbleCheck.ok
+              ? { ok: true, latencyMs: nimbleCheck.latencyMs, model: nimbleCheck.model }
+              : { ok: false, code: nimbleCheck.code, latencyMs: nimbleCheck.latencyMs }
+          }
+        : health.checks,
+      execution: executionView
+    });
   };
 
   const deepHealth = async (_request: FastifyRequest, reply: FastifyReply) => {

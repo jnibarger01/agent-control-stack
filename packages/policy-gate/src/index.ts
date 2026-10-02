@@ -1,4 +1,12 @@
+export * from "./authoritative-dispatch.js";
+export type { AuthoritativeRouteResult } from "@agent-control-stack/actor-router";
 export * from "./contracts.js";
+export {
+  isAuthoritativeRoutingEnabled,
+  probeNimbleRouting,
+  resolveNimbleRoutingConfig,
+  NimbleRoutingConfigError
+} from "@agent-control-stack/actor-router";
 export * from "./explain.js";
 export * from "./fingerprint.js";
 export * from "./mission-classifier.js";

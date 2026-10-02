@@ -1,7 +1,12 @@
+import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
 import {
+  claimNextAuthoritativeWorkItem,
   createPolicyEngine,
   createWorkItemTools,
-  evaluateVerificationRequirement
+  evaluateVerificationRequirement,
+  recordAuthoritativeExecutionOutcome,
+  resolveNimbleRoutingConfig,
+  type AuthoritativeRouteResult
 } from "@agent-control-stack/policy-gate";
 import {
   ExecutionLearningBridge,
@@ -76,6 +81,8 @@ export interface WorkerOptions {
   executionBackend?: ExecutionBackend;
   /** Inject a machine executor (tests only). */
   machineExecutor?: MachineExecutor;
+  /** Inject the Nimble transport (tests only). */
+  routingFetch?: typeof fetch;
 }
 
 export interface WorkerResult {
@@ -171,8 +178,12 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   const workItems = new SqliteWorkItemStore(dbPath);
   const learning = options.learning ?? new ProceduralLearning(dbPath);
   const ownsLearning = options.learning === undefined;
-  const tools = createWorkItemTools(workItems, createPolicyEngine());
+  const policy = createPolicyEngine();
+  const tools = createWorkItemTools(workItems, policy);
   const workerId = options.workerId ?? "local-worker";
+  const routingConfig = resolveNimbleRoutingConfig(process.env);
+  let releaseAdmission: (() => void) | undefined;
+  let routedDecision: AuthoritativeRouteResult | undefined;
   const execute: WorkerExecute = options.execute ?? (async (item) => executeSandboxed(item));
 
   let cleanupWorkspace:
@@ -207,7 +218,41 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
 
   try {
     workItems.failExpiredLeases();
-    const running = tools.claim_next_approved_work_item({ workerId });
+    let running: ReturnType<typeof tools.claim_next_approved_work_item>;
+    if (routingConfig.enabled) {
+      const scheduler = new ExecutionAdmissionScheduler();
+      const claimed = await claimNextAuthoritativeWorkItem({
+        store: workItems,
+        policy,
+        workerId,
+        config: routingConfig,
+        ...(options.routingFetch ? { fetchImpl: options.routingFetch } : {}),
+        admission: {
+          acquire: (input) => {
+            const now = Date.now();
+            return scheduler.acquire({
+              requestId: input.requestId,
+              lane: input.lane,
+              executorId: input.executorId,
+              actorId: input.actorId,
+              toolName: "authoritative_dispatch",
+              executionClass: "execution",
+              enqueuedAt: now,
+              deadlineAt: now + 1_000,
+              signal: AbortSignal.timeout(1_000)
+            });
+          }
+        }
+      });
+      if (!claimed.claimed) {
+        return { executed: false, reason: claimed.reason };
+      }
+      running = claimed.running;
+      releaseAdmission = claimed.releaseAdmission;
+      routedDecision = claimed.decision;
+    } else {
+      running = tools.claim_next_approved_work_item({ workerId });
+    }
     if (!running) {
       return { executed: false, reason: "no approved work item" };
     }
@@ -236,9 +281,28 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       };
     }
     const startedAt = new Date().toISOString();
+    const noteRouting = (outcome: {
+      success: boolean;
+      timedOut?: boolean;
+      verificationResult?: string;
+      testsResult?: string;
+    }) => {
+      if (!routedDecision?.executorId || !running?.attemptId) return;
+      recordAuthoritativeExecutionOutcome(workItems, routedDecision, {
+        executorId: routedDecision.executorId,
+        ...(routedDecision.model ? { model: routedDecision.model } : {}),
+        latencyMs: Math.max(0, Date.now() - Date.parse(startedAt)),
+        success: outcome.success,
+        timedOut: outcome.timedOut ?? false,
+        retryCount: 0,
+        idempotencyKey: `o${stableHash({ decisionId: routedDecision.decisionId, attemptId: running.attemptId })}`,
+        ...(outcome.verificationResult ? { verificationResult: outcome.verificationResult } : {}),
+        ...(outcome.testsResult ? { testsResult: outcome.testsResult } : {})
+      });
+    };
 
     if (executionBackend === "desktop_commander") {
-      return await runDesktopCommanderExecution({
+      const desktopResult = await runDesktopCommanderExecution({
         workItems,
         tools,
         running,
@@ -246,6 +310,12 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         startedAt,
         machineExecutor: machineExecutor!
       });
+      noteRouting({
+        success: desktopResult.executed === true && desktopResult.validationPassed !== false,
+        timedOut: desktopResult.reason?.includes("timeout") ?? false,
+        verificationResult: desktopResult.reason
+      });
+      return desktopResult;
     }
 
     if (!isReadOnlyWorkerWorkItem(running)) {
@@ -274,6 +344,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
           reason: "worker_read_only_scope"
         }
       });
+      noteRouting({ success: false, verificationResult: "worker_read_only_scope" });
       return {
         executed: false,
         workItemId: running.id,
@@ -341,6 +412,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
+      noteRouting({ success: true, ...(validation ? { testsResult: "passed" } : {}) });
     } else {
       tools.submit_work_result({
         workItemId: running.id,
@@ -373,6 +445,11 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
         artifacts: [],
         simulationMetadata: { executionMode: result.executionMode, simulated: true }
       });
+      noteRouting({
+        success: false,
+        verificationResult: validationFailed ? "validation_failed" : "execution_failed",
+        ...(validation ? { testsResult: "failed" } : {})
+      });
     }
 
     return {
@@ -385,6 +462,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
       validationPassed: validation?.passed
     };
   } finally {
+    releaseAdmission?.();
     try {
       if (cleanupWorkspace) {
         await options.workspaceManager?.teardown(cleanupWorkspace.workItemId, {

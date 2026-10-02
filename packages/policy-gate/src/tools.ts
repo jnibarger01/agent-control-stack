@@ -15,6 +15,7 @@ import {
   type WorkItem,
   type WorkItemStore
 } from "@agent-control-stack/work-items";
+import { isAuthoritativeRoutingEnabled } from "@agent-control-stack/actor-router";
 import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
 import { ACS_ADMIN_APPROVER } from "./execution-mode.js";
@@ -272,6 +273,7 @@ function gateWorkerClaimInTransaction(
     .filter(
       (workItem) =>
         workerMatchesTarget(workItem) &&
+        authoritativeRouteAllows(store, workItem.id, parsed.workerId) &&
         !workItem.requestedActions.some((action) => {
           const params = action.params as Record<string, unknown> | undefined;
           return params?.contract === "acs.jc.v1";
@@ -382,6 +384,9 @@ function gateWorkerClaimByIdInTransaction(
 ): ClaimedWorkItem | undefined {
   const candidate = store.get(parsed.id);
   if (!candidate || candidate.status !== "approved") {
+    return undefined;
+  }
+  if (!authoritativeRouteAllows(store, candidate.id, parsed.workerId)) {
     return undefined;
   }
 
@@ -555,6 +560,14 @@ export function createWorkItemTools(store: WorkItemStore, policy: PolicyEngine) 
       return store.submitWorkResult(input);
     }
   };
+}
+
+/** When Nimble routing is enabled, a claim must match the persisted executor. */
+export function authoritativeRouteAllows(store: WorkItemStore, workItemId: string, workerId: string): boolean {
+  if (!isAuthoritativeRoutingEnabled()) return true;
+  const evidence = store.getLatestAuthoritativeRoutingEvidence(workItemId);
+  if (!evidence || (evidence.decision !== "route" && evidence.decision !== "fallback")) return false;
+  return evidence.selectedActorId === workerId;
 }
 
 export function approvalRequired(evaluations: PolicyEvaluation[]): PolicyEvaluation[] {

@@ -1,4 +1,9 @@
-import type { ActorRoutingDecision as PersistedActorRoutingDecision, PrivilegedTransitionOptions, RecordActorRoutingDecisionInput, RegistryAgentDetail } from "@agent-control-stack/work-items";
+import type {
+  ActorRoutingDecision as PersistedActorRoutingDecision,
+  PrivilegedTransitionOptions,
+  RecordActorRoutingDecisionInput,
+  RegistryAgentDetail
+} from "@agent-control-stack/work-items";
 
 export interface ActorRoutingInput {
   requiredCapabilities: string[];
@@ -29,12 +34,18 @@ export interface ActorRoutingDecision {
 }
 
 export interface ActorRoutingPersistence {
-  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): PersistedActorRoutingDecision;
+  recordActorRoutingDecision(
+    input: RecordActorRoutingDecisionInput,
+    options: PrivilegedTransitionOptions
+  ): PersistedActorRoutingDecision;
 }
 
 const DEFAULT_HEARTBEAT_TTL_MS = 120_000;
 
-/** Deterministic, explainable actor selection. It never asks an LLM to route work. */
+/**
+ * Deterministic eligibility filter and fallback ranker.
+ * Production selection goes through decideAuthoritativeRoute. This ranker does not override a valid Nimble choice.
+ */
 export function routeActor(agents: RegistryAgentDetail[], input: ActorRoutingInput): ActorRoutingDecision {
   const now = input.now ?? new Date();
   const ttl = input.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS;
@@ -64,7 +75,10 @@ export function routeActor(agents: RegistryAgentDetail[], input: ActorRoutingInp
       score += 40;
       scoreReasons.push("role fit +40");
     }
-    if (input.taskType && (agent.kind === input.taskType || agent.capabilities.some((capability) => capability.name === input.taskType))) {
+    if (
+      input.taskType &&
+      (agent.kind === input.taskType || agent.capabilities.some((capability) => capability.name === input.taskType))
+    ) {
       score += 25;
       scoreReasons.push("task specialization +25");
     }
@@ -110,14 +124,44 @@ export function routeAndPersistActor(
   options: PrivilegedTransitionOptions
 ): { decision: ActorRoutingDecision; persisted: PersistedActorRoutingDecision } {
   const decision = routeActor(agents, input);
-  const persisted = persistence.recordActorRoutingDecision({
-    workItemId: input.workItemId,
-    ...(input.attemptId ? { attemptId: input.attemptId } : {}),
-    ...(decision.selected ? { selectedActorId: decision.selected } : {}),
-    eligible: decision.eligible,
-    excluded: decision.excluded,
-    scores: decision.scores,
-    idempotencyKey: input.idempotencyKey
-  }, options);
+  const persisted = persistence.recordActorRoutingDecision(
+    {
+      workItemId: input.workItemId,
+      ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+      ...(decision.selected ? { selectedActorId: decision.selected } : {}),
+      eligible: decision.eligible,
+      excluded: decision.excluded,
+      scores: decision.scores,
+      idempotencyKey: input.idempotencyKey
+    },
+    options
+  );
   return { decision, persisted };
 }
+
+export {
+  decideAuthoritativeRoute,
+  recordAuthoritativeOutcome,
+  type AuthoritativeRouteResult,
+  type AuthoritativeRoutingContext,
+  type AuthoritativeRoutingPort,
+  type DecideAuthoritativeRouteOptions
+} from "./authoritative.js";
+export {
+  askNimbleToChooseExecutor,
+  probeNimbleRouting,
+  type NimbleChoiceRequest,
+  type NimbleChoiceResult
+} from "./nimble-client.js";
+export {
+  DEFAULT_NIMBLE_CONFIDENCE_THRESHOLD,
+  DEFAULT_NIMBLE_ROUTING_MODEL,
+  DEFAULT_NIMBLE_ROUTING_URL,
+  DEFAULT_NIMBLE_TIMEOUT_MS,
+  NIMBLE_PROMPT_VERSION,
+  NIMBLE_ROUTER_VERSION,
+  NimbleRoutingConfigError,
+  isAuthoritativeRoutingEnabled,
+  resolveNimbleRoutingConfig,
+  type NimbleRoutingConfig
+} from "./nimble-config.js";
