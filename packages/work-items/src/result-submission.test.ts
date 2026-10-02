@@ -286,8 +286,16 @@ describe("immutable worker result acceptance", () => {
 });
 
 describe("concurrent same-worker idempotency", () => {
-  it("prevents concurrent identical submissions from the same worker from creating two results", async () => {
-    const directory = mkdtempSync(join(tmpdir(), "acs-wave2-concurrent-"));
+  // The contract is that two concurrent identical submissions converge on exactly one
+  // durable result and both callers observe the same work item, regardless of which
+  // SQLite failure the loser observes (UNIQUE constraint versus write contention).
+  // The scenario runs repeatedly so a timing-dependent outcome cannot pass by luck.
+  const rounds = 12;
+
+  function seedConcurrentItem(directory: string): {
+    dbPath: string;
+    claimed: NonNullable<ReturnType<SqliteWorkItemStore["claimNextApprovedWorkItem"]>>;
+  } {
     const dbPath = join(directory, "control.db");
     const seed = new SqliteWorkItemStore(dbPath);
     const item = seed.create({
@@ -300,25 +308,50 @@ describe("concurrent same-worker idempotency", () => {
     });
     seed.approveWorkItem(item.id, transition);
     const claimed = seed.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
-    if (!claimed) throw new Error("expected a claim");
     seed.close();
-    const first = new SqliteWorkItemStore(dbPath);
-    const second = new SqliteWorkItemStore(dbPath);
-    try {
-      const input = resultInput(claimed);
-      const accepted = await Promise.all([
-        Promise.resolve().then(() => first.submitWorkResult(input)),
-        Promise.resolve().then(() => second.submitWorkResult(input))
-      ]);
-      expect(accepted[0]).toEqual(accepted[1]);
-      expect(first.readEvents().filter((event) => event.name === "execution_result.accepted")).toHaveLength(1);
-      expect(first.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(
-        accepted[0]?.result?.resultId
-      );
-    } finally {
-      first.close();
-      second.close();
-      rmSync(directory, { recursive: true, force: true });
+    if (!claimed) throw new Error("expected a claim");
+    return { dbPath, claimed };
+  }
+
+  it("resolves every concurrent round to one durable result", async () => {
+    for (let round = 0; round < rounds; round++) {
+      const directory = mkdtempSync(join(tmpdir(), "acs-wave2-concurrent-"));
+      try {
+        const { dbPath, claimed } = seedConcurrentItem(directory);
+        const first = new SqliteWorkItemStore(dbPath);
+        const second = new SqliteWorkItemStore(dbPath);
+        try {
+          const input = resultInput(claimed);
+          // Both stores are opened before either submits, so neither observes a
+          // freshly created database. A shared start gate makes the two submissions
+          // begin at the same point instead of depending on microtask ordering.
+          let release: () => void = () => undefined;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const submit = async (store: SqliteWorkItemStore) => {
+            await gate;
+            return store.submitWorkResult(input);
+          };
+          const pending = [submit(first), submit(second)];
+          release();
+          const accepted = await Promise.all(pending);
+
+          // Both callers must observe the same converged work item, and the durable
+          // state must contain exactly one accepted result.
+          expect(accepted[0]?.result?.resultId, `round ${round}`).toBe(accepted[1]?.result?.resultId);
+          expect(accepted[0]?.status, `round ${round}`).toBe(accepted[1]?.status);
+          expect(first.readEvents().filter((event) => event.name === "execution_result.accepted")).toHaveLength(1);
+          expect(first.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(
+            accepted[0]?.result?.resultId
+          );
+        } finally {
+          first.close();
+          second.close();
+        }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
     }
-  }, 15000);
+  }, 60_000);
 });

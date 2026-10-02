@@ -7376,7 +7376,16 @@ export class SqliteWorkItemStore implements WorkItemStore {
         );
     } catch (insertError) {
       const err = insertError as NodeJS.ErrnoException;
-      if (err.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed/.test(err.message)) {
+      const isConstraintConflict = err.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed/.test(err.message);
+      // Losing the write-lock race is not a semantic conflict: the same submission
+      // may simply have been committed by a concurrent writer. Resolve it exactly
+      // like a uniqueness violation so the observable outcome does not depend on
+      // whether SQLite happened to report SQLITE_BUSY or a UNIQUE constraint. Without
+      // this, the loser surfaced a raw database error while the winner returned the
+      // idempotent replay, making the contract depend on timing.
+      const isWriteContention =
+        err.code === "ERR_SQLITE_ERROR" && /SQLITE_BUSY|database is locked/i.test(err.message);
+      if (isConstraintConflict || isWriteContention) {
         const existing = this.db
           .prepare("SELECT * FROM execution_results WHERE idempotency_key = ?")
           .get(input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
@@ -7384,6 +7393,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           const replayed = this.getRequired(input.workItemId);
           return { value: replayed, events: [] };
         }
+        if (isWriteContention) throw insertError;
         throw new ControlStackError("result_conflict", "result idempotency key conflicts with an accepted result");
       }
       throw insertError;
