@@ -1,0 +1,20 @@
+{
+  "name": "@agent-control-stack/mission-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@agent-control-stack/actor-router": "0.1.0",
+    "@agent-control-stack/execution-admission": "0.1.0",
+    "@agent-control-stack/shared": "0.1.0",
+    "@agent-control-stack/work-items": "0.1.0"
+  }
+}

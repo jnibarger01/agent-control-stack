@@ -20,6 +20,7 @@
     { "path": "packages/workspace-manager" },
     { "path": "packages/engine-adapter" },
     { "path": "./packages/execution-controller" },
+    { "path": "./packages/mission-runtime" },
     { "path": "packages/secret-broker" },
     { "path": "./packages/result-validation" },
     { "path": "./packages/recovery" },
