@@ -91,7 +91,7 @@ the fence and approval consumption. In `strict` mode, candidate reuse also
 excludes work items carrying an `acs:admin` grant, so an approval left behind
 by an interrupted admin-mode request cannot cross the mode boundary.
 
-Migration 039 introduced durable JC admin approvals. Migration 040 extends the
+Migration 039 introduced durable JC admin approvals. Migration 051 extends the
 durable issuance constraint so `acs:admin` may approve every approval-gated JC
 tool, including `privileged_exec`. Requester self-approval remains forbidden
 for every approval-gated JC tool.
@@ -116,7 +116,7 @@ These are enforced in three independent places.
    - An approval-required tool with no `require_approval` evaluation returns
      409, not a signed capability.
 3. **Durable issuance gate** (`SqliteJaceCommanderIssuanceRegistry` plus the
-   migration 040 `CHECK` constraints):
+   migration 051 `CHECK` constraints):
    - The lease-bound approval must be `consumed` and bound to this plan,
      action and request hash, and must not expire before the capability.
    - The approval must not come from the requesting subject; `acs:admin` is
