@@ -14,7 +14,7 @@ import {
 import { DatabaseSync } from "node:sqlite";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
-import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
+import { createPolicyEngine, createWorkItemTools, maybeRunJevShadowAdvisory } from "@agent-control-stack/policy-gate";
 import { auditEventHash, stableHash } from "@agent-control-stack/shared";
 import {
   DEFAULT_EVENT_LIMIT,
@@ -177,6 +177,39 @@ describe("mission control gateway", () => {
     });
 
     try {
+      const jevTelemetry: string[] = [];
+      await maybeRunJevShadowAdvisory(
+        {
+          schemaVersion: "acs.mission-intake.v1",
+          requestId: "req-nimble-jev-isolation",
+          title: "Inspect source",
+          goal: "JEV recommends a different agent for this work",
+          origin: "cli",
+          target: { files: [] },
+          proposedActions: [
+            { clientActionId: "jev-action-1", kind: "fs.read", description: "Inspect source", params: {} }
+          ],
+          constraints: { network: "none", maxRuntimeMs: 600000, successCriteria: ["inspect source"] }
+        },
+        {
+          enabled: true,
+          fetchImpl: async (_url, init) => {
+            const request = JSON.parse(String(init?.body)) as { questions: Record<string, unknown> };
+            return new Response(
+              JSON.stringify({
+                model: "jev-test",
+                answers: Object.fromEntries(
+                  Object.keys(request.questions).map((name) => [name, { type: "noul", noul: 0.99 }])
+                )
+              }),
+              { status: 200 }
+            );
+          },
+          sink: (line) => jevTelemetry.push(line)
+        }
+      );
+      expect(jevTelemetry).toHaveLength(1);
+
       const [routed, concurrent] = await Promise.all([
         app.inject({
           method: "POST",
