@@ -2911,14 +2911,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         if (!dcRecheck.ok) {
           admissionPermit.release();
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-          return reply
-            .code(403)
-            .send({
-              decision: "deny",
-              reason: "mcp_client_unlabelled",
-              code: "mcp_client_unlabelled",
-              detail: dcRecheck.detail
-            });
+          return reply.code(403).send({
+            decision: "deny",
+            reason: "mcp_client_unlabelled",
+            code: "mcp_client_unlabelled",
+            detail: dcRecheck.detail
+          });
         }
         let admissionBound = false;
         try {
@@ -3342,14 +3340,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         if (!jcRecheck.ok) {
           admissionPermit.release();
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-          return reply
-            .code(403)
-            .send({
-              decision: "deny",
-              reason: "mcp_client_unlabelled",
-              code: "mcp_client_unlabelled",
-              detail: jcRecheck.detail
-            });
+          return reply.code(403).send({
+            decision: "deny",
+            reason: "mcp_client_unlabelled",
+            code: "mcp_client_unlabelled",
+            detail: jcRecheck.detail
+          });
         }
         let admissionBound = false;
         try {
