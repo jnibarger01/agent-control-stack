@@ -1,7 +1,7 @@
 import { createHmac, generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { homedir, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -1649,7 +1649,7 @@ describe("gateway MCP transport", () => {
           security: { max_output_bytes: 256, command_timeout_ms: 5_000 },
           agents: [
             {
-              id: "fixture-agent",
+              id: "opencode",
               command: "node",
               args: ["-e", "process.stdout.write('fixture-response:' + process.argv.at(-1))"],
               permission_mode: "read-only"
@@ -1915,6 +1915,13 @@ describe("gateway MCP transport", () => {
       const hermesHome = join(dir, "hermes-home");
       mkdirSync(allowed);
       mkdirSync(hermesHome);
+      // A fresh home has no committed dependency environment. Hermes then finishes
+      // its self-managed source update, including the desktop build, before any model
+      // call. Reuse the existing install state and refuse that lazy update.
+      const durableHermesInstalls = join(homedir(), ".hermes", "installs");
+      if (hermesRuntimeDir && existsSync(durableHermesInstalls)) {
+        symlinkSync(durableHermesInstalls, join(hermesHome, "installs"));
+      }
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -1922,7 +1929,7 @@ describe("gateway MCP transport", () => {
           security: { max_output_bytes: 256, command_timeout_ms: 5_000 },
           agents: [
             {
-              id: "fixture-agent",
+              id: "codex",
               command: "node",
               args: ["-e", "process.stdout.write('fixture-response:' + process.argv.at(-1))"],
               permission_mode: "read-only"
@@ -1936,6 +1943,8 @@ describe("gateway MCP transport", () => {
         advertisedTools: string[];
         emitted: { name: string; arguments: Record<string, unknown> } | undefined;
       }> = [];
+      // Hermes tool results carry tool_call_id and omit the tool name.
+      const callsById = new Map<string, string>();
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -2037,21 +2046,25 @@ describe("gateway MCP transport", () => {
             }) ?? searchHits.find((item) => typeof item.name === "string");
 
           let call: { name: string; args: Record<string, unknown> } | undefined;
+          const lastToolCallId = typeof lastTool?.tool_call_id === "string" ? lastTool.tool_call_id : "";
+          const resolvedToolName =
+            (typeof lastTool?.name === "string" && lastTool.name) || callsById.get(lastToolCallId) || "";
           if (tools.length === 0) {
             // Hermes performs a provider capability/metadata probe before the
             // first tool-bearing turn. It is not the model-facing smoke path.
           } else if (toolResults.length === 0) {
             call = emit("tool_search", { queries: ["ACS test agent run", "test.agent.run"], limit: 5 });
-          } else if (lastTool?.name === "tool_search" && namedHit && typeof namedHit.name === "string") {
+          } else if (resolvedToolName === "tool_search" && namedHit && typeof namedHit.name === "string") {
             call = emit("tool_describe", { names: [namedHit.name] });
-          } else if (lastTool?.name === "tool_describe") {
+          } else if (resolvedToolName === "tool_describe") {
             const describedName =
               (typeof result?.name === "string" && result.name) ||
               (namedHit && typeof namedHit.name === "string" ? namedHit.name : "mcp__acs_gateway__test_agent_run");
             call = emit("tool_call", {
               name: describedName,
               arguments: {
-                agent: "fixture-agent",
+                // The MCP schema enum is directAgentNames. Hermes rejects other ids before the call.
+                agent: "codex",
                 prompt: "Hermes deterministic interoperability check",
                 cwd: allowed,
                 timeoutSeconds: 5,
@@ -2063,6 +2076,8 @@ describe("gateway MCP transport", () => {
           response.writeHead(200, { "content-type": "text/event-stream" });
           const id = `hermes-fixture-${modelTrace.length}`;
           if (call) {
+            const callId = `hermes-call-${modelTrace.length}`;
+            callsById.set(callId, call.name);
             response.end(
               `data: ${JSON.stringify({
                 id,
@@ -2075,7 +2090,7 @@ describe("gateway MCP transport", () => {
                       tool_calls: [
                         {
                           index: 0,
-                          id: `hermes-call-${modelTrace.length}`,
+                          id: callId,
                           type: "function",
                           function: { name: call.name, arguments: JSON.stringify(call.args) }
                         }
@@ -2143,6 +2158,9 @@ describe("gateway MCP transport", () => {
               HOME: dir,
               HERMES_HOME: hermesHome,
               HERMES_ACCEPT_HOOKS: "1",
+              // The official hermetic switch. Without it, a dirty self-managed checkout
+              // runs source_completion --finish-update --desktop before the model call.
+              HERMES_DISABLE_LAZY_INSTALLS: "1",
               // HERMES_HOME is the config root and also the default Python store.
               // Keep the store on the durable tools directory so Hermes does not
               // republish its launcher into this temporary home before the test deletes it.
