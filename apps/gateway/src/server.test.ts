@@ -1689,7 +1689,11 @@ describe("gateway MCP transport", () => {
       const configPath = join(dir, "machine-controller.json");
       const dbPath = join(dir, "control.db");
       const opencodeConfigPath = join(dir, "opencode.json");
+      const isolatedConfigHome = join(dir, "config");
+      const isolatedDataHome = join(dir, "data");
       mkdirSync(allowed);
+      mkdirSync(isolatedConfigHome);
+      mkdirSync(isolatedDataHome);
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -1724,6 +1728,11 @@ describe("gateway MCP transport", () => {
           );
           response.writeHead(200, { "content-type": "text/event-stream" });
           if (hasToolResult) {
+            const toolText = JSON.stringify(messages);
+            const content =
+              toolText.includes("fixture-response:") || toolText.includes("completed through the gateway")
+                ? "OpenCode fixture invocation completed"
+                : "OpenCode fixture tool failed";
             response.end(
               `data: ${JSON.stringify({
                 id: "fixture-completion-2",
@@ -1731,7 +1740,7 @@ describe("gateway MCP transport", () => {
                 choices: [
                   {
                     index: 0,
-                    delta: { role: "assistant", content: "OpenCode fixture invocation completed" },
+                    delta: { role: "assistant", content },
                     finish_reason: null
                   }
                 ]
@@ -1853,7 +1862,7 @@ describe("gateway MCP transport", () => {
         writeFileSync(opencodeConfigPath, JSON.stringify(config));
         opencodeProcess = spawn(
           opencodeExecutable!,
-          ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
             env: opencodeE2eEnvironment(dir, opencodeConfigPath),
@@ -1881,7 +1890,7 @@ describe("gateway MCP transport", () => {
         writeFileSync(opencodeConfigPath, JSON.stringify(invalidConfig));
         invalidRun = spawn(
           opencodeExecutable!,
-          ["run", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
+          ["run", "--pure", "--auto", "--format", "json", "Use the ACS direct agent tool and report the result."],
           {
             cwd: allowed,
             env: opencodeE2eEnvironment(dir, opencodeConfigPath),
@@ -1936,6 +1945,7 @@ describe("gateway MCP transport", () => {
         rmSync(dir, { recursive: true, force: true });
       }
     },
+    // Two real OpenCode processes. Idle is about 3s; the 5s default trips when vitest saturates the machine.
     30_000
   );
 
@@ -1974,6 +1984,8 @@ describe("gateway MCP transport", () => {
         advertisedTools: string[];
         emitted: { name: string; arguments: Record<string, unknown> } | undefined;
       }> = [];
+      // Hermes tool results carry tool_call_id and omit the tool name.
+      const callsById = new Map<string, string>();
       const modelServer = createServer((request, response) => {
         if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
           response.writeHead(404).end();
@@ -2097,20 +2109,28 @@ describe("gateway MCP transport", () => {
             }) ?? searchHits.find((item) => typeof item.name === "string");
 
           let call: { name: string; args: Record<string, unknown> } | undefined;
+          const lastToolCallId = typeof lastTool?.tool_call_id === "string" ? lastTool.tool_call_id : "";
+          const resolvedToolName =
+            (typeof lastTool?.name === "string" && lastTool.name) || callsById.get(lastToolCallId) || "";
           if (tools.length === 0) {
             // Hermes performs a provider capability/metadata probe before the
             // first tool-bearing turn. It is not the model-facing smoke path.
           } else if (toolResults.length === 0) {
             call = emit("tool_search", { queries: ["ACS test agent run", "test.agent.run"], limit: 5 });
-          } else if (lastToolName === "tool_search" && namedHit && typeof namedHit.name === "string") {
+          } else if (
+            (resolvedToolName || lastToolName) === "tool_search" &&
+            namedHit &&
+            typeof namedHit.name === "string"
+          ) {
             call = emit("tool_describe", { names: [namedHit.name] });
-          } else if (lastToolName === "tool_describe") {
+          } else if ((resolvedToolName || lastToolName) === "tool_describe") {
             const describedName =
               (typeof result?.name === "string" && result.name) ||
               (namedHit && typeof namedHit.name === "string" ? namedHit.name : "mcp__acs_gateway__test_agent_run");
             call = emit("tool_call", {
               name: describedName,
               arguments: {
+                // The MCP schema enum is directAgentNames. Hermes rejects other ids before the call.
                 agent: "codex",
                 prompt: "Hermes deterministic interoperability check",
                 cwd: allowed,
@@ -2123,6 +2143,8 @@ describe("gateway MCP transport", () => {
           response.writeHead(200, { "content-type": "text/event-stream" });
           const id = `hermes-fixture-${modelTrace.length}`;
           if (call) {
+            const callId = `hermes-call-${modelTrace.length}`;
+            callsById.set(callId, call.name);
             response.end(
               `data: ${JSON.stringify({
                 id,
@@ -2135,7 +2157,7 @@ describe("gateway MCP transport", () => {
                       tool_calls: [
                         {
                           index: 0,
-                          id: `hermes-call-${modelTrace.length}`,
+                          id: callId,
                           type: "function",
                           function: { name: call.name, arguments: JSON.stringify(call.args) }
                         }

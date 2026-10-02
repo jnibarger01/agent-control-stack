@@ -74,11 +74,14 @@ import {
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
 import {
+  claimNextAuthoritativeWorkItem,
   createPolicyEngine,
   evaluateChangeSetPolicy,
   createWorkItemTools,
   explainPolicy,
+  probeNimbleRouting,
   previewWorkItemPolicy,
+  resolveNimbleRoutingConfig,
   SUPPORTED_ACTION_KINDS,
   workItemToolNames,
   ACS_ADMIN_APPROVER,
@@ -127,6 +130,8 @@ import {
 } from "@agent-control-stack/work-items";
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
+import { AgentRunService, agentDispatchConfigFromEnv, type AgentDispatchConfig } from "./agent-runs.js";
+import { registerAgentRoutes } from "./agent-routes.js";
 import {
   authorizeMcpRequest,
   createProtectedResourceMetadata,
@@ -375,6 +380,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // Refuse to boot on an invalid ACS_TRACE_INSTANCE / ACS_RELEASE_SHA (trace_config_invalid)
   // rather than discovering it inside an approval transaction (PR #212 B4, ADR 0021).
   resolveTraceProducerConfig();
+  const nimbleRouting = resolveNimbleRoutingConfig();
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
   const heartbeatTtlMs = validateHeartbeatTtl(options.heartbeatTtlMs ?? DEFAULT_HEARTBEAT_TTL_MS);
   const directAgentController = resolveDirectAgentController(options);
@@ -1052,7 +1058,21 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         checks: { ...health.checks, executionAdmission: { ok: false, code: "admission_recovery_required" } }
       });
     }
-    return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
+    const nimbleCheck = nimbleRouting.enabled ? await probeNimbleRouting(nimbleRouting) : undefined;
+    const nimbleOk = nimbleCheck === undefined || nimbleCheck.ok;
+    return reply.code(health.ok && nimbleOk ? 200 : 503).send({
+      ...health,
+      ok: health.ok && nimbleOk,
+      checks: nimbleCheck
+        ? {
+            ...health.checks,
+            nimble: nimbleCheck.ok
+              ? { ok: true, latencyMs: nimbleCheck.latencyMs, model: nimbleCheck.model }
+              : { ok: false, code: nimbleCheck.code, latencyMs: nimbleCheck.latencyMs }
+          }
+        : health.checks,
+      execution: executionView
+    });
   };
 
   const deepHealth = async (_request: FastifyRequest, reply: FastifyReply) => {
@@ -1678,6 +1698,20 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       return sendError(reply, error);
     }
   });
+
+  const agentRuns = new AgentRunService(workItems, options.agentDispatch ?? agentDispatchConfigFromEnv());
+  agentRuns.reconcile();
+  registerAgentRoutes({
+    app,
+    store: workItems,
+    service: agentRuns,
+    requireRead,
+    requireHumanActor: (request, reply) => requireHumanApprovalActor(request, reply, auth),
+    requireRegistryActor: (request, reply) =>
+      requireMutationActor(request, reply, auth) ? requireBoundActorId(request, reply, auth) : undefined,
+    sendError
+  });
+  app.addHook("onClose", async () => agentRuns.shutdown());
 
   app.get<{ Params: { id: string } }>("/api/agents/:id", { preHandler: requireRead }, async (request, reply) => {
     try {
@@ -3728,7 +3762,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         .object({ leaseMs: z.number().int().positive().max(3_600_000).optional() })
         .strict()
         .parse(requestObject(request.body));
-      const claimed = tools.claim_next_approved_work_item({ workerId, ...body });
+      let claimed;
+      if (nimbleRouting.enabled) {
+        const routed = await claimNextAuthoritativeWorkItem({
+          store: workItems,
+          policy,
+          workerId,
+          config: nimbleRouting,
+          ...body
+        });
+        claimed = routed.claimed ? routed.running : undefined;
+      } else {
+        claimed = tools.claim_next_approved_work_item({ workerId, ...body });
+      }
       if (claimed && claimed.status !== "running") {
         return reply
           .code(409)

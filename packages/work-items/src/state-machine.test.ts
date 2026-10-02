@@ -981,7 +981,8 @@ describe("work item state machine", () => {
         { version: 46, name: "change_set_operation_permits", filename: "046_change_set_operation_permits.sql" },
         { version: 47, name: "autonomous_authority", filename: "047_autonomous_authority.sql" },
         { version: 48, name: "operation_permit_grant_authority", filename: "048_operation_permit_grant_authority.sql" },
-        { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" }
+        { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" },
+        { version: 50, name: "authoritative_routing", filename: "050_authoritative_routing.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
