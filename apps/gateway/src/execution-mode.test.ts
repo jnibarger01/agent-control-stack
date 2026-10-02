@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import { ACS_ADMIN_APPROVER, type ManagedAuthorityObservation } from "@agent-control-stack/policy-gate";
 import { describe, expect, it } from "vitest";
-import { buildGateway, type GatewayCredential } from "./server.js";
+import { buildGateway, findIncompatibleHumanApprovalCredentials, type GatewayCredential } from "./server.js";
 
 const testAuth = { token: "op-token", actor: "user", actorId: "user" } as const;
 const WORKER_TOKEN = "bridge-worker-token";
@@ -192,6 +192,46 @@ describe("canonical execution mode", () => {
       });
       expect(approved.statusCode).toBe(200);
       expect(approved.json()).toMatchObject({ executionMode: "admin", updatedBy: "user" });
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("diagnoses mixed-role operator credentials at startup instead of failing silently", async () => {
+    // Every configured credential that claims operator authority but also carries a
+    // service or worker role is named, so operators can migrate before production.
+    expect(findIncompatibleHumanApprovalCredentials(credentials).map((credential) => credential.id)).toEqual([
+      "mixed-worker",
+      "mixed-service"
+    ]);
+    // A pure human operator and non-operator credentials are never flagged.
+    expect(
+      findIncompatibleHumanApprovalCredentials(credentials).map((credential) => credential.id)
+    ).not.toContain("human-operator");
+    expect(findIncompatibleHumanApprovalCredentials([credentials[0]!])).toEqual([]);
+    expect(findIncompatibleHumanApprovalCredentials([])).toEqual([]);
+    // Service and worker actors with the operator role are not human at all, so they
+    // are governed by request-time checks rather than this human-authority diagnostic.
+    expect(
+      findIncompatibleHumanApprovalCredentials([deniedModeCredentials[1]!, deniedModeCredentials[2]!])
+    ).toEqual([]);
+  });
+
+  it("still boots and serves requests when incompatible operator credentials are configured", async () => {
+    const ctx = await gateway();
+    try {
+      const ready = await ctx.app.inject({ method: "GET", url: "/readyz" });
+      expect(ready.statusCode).toBe(200);
+      // And the mixed-role credential remains refused with the documented code.
+      const refused = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: { authorization: "Bearer mixed-worker-mode-token" },
+        payload: { mode: "admin", reason: "spoofed" }
+      });
+      expect(refused.statusCode).toBe(403);
+      expect(refused.json()).toMatchObject({ code: "human_authority_required" });
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });

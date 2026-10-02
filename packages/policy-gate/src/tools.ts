@@ -363,6 +363,12 @@ function gateWorkerClaimByIdInTransaction(
     return undefined;
   }
   const assignment = store.getWorkItemAssignment(candidate.id);
+  // A durable assignment is a routing decision, not a hint. A different worker
+  // must never claim it, and must never be handed a parallel work item to claim
+  // instead, because that would let a bridge bypass routing by retrying. Callers
+  // surface this as work_item_assignment_mismatch and an operator must reassign.
+  // findNextApprovedWorkItemForWorker (claim_next_approved_work_item) applies the
+  // same rule by selection rather than by error.
   if (assignment && assignment.selectedWorkerId !== parsed.workerId) {
     throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to another worker");
   }

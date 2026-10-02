@@ -68,13 +68,19 @@ export function readMissionTrace(
       runtime: permit.runtime
     };
   });
-  // A historical revision remains traceable after amendment; do not follow only the head.
+  // A historical revision remains traceable after amendment; do not follow only the
+  // head. Bounding the history is the resource guard.
   const revisions = db
     .prepare(`SELECT revision FROM change_set_revisions WHERE mission_id = ? LIMIT 2049`)
     .all(missionId) as Array<{ revision: number }>;
   if (revisions.length > 2048)
     throw new ControlStackError("mission_trace_resource_limit", "too many historical revisions");
-  for (const row of revisions) store.getChangeSet(missionId, row.revision);
+  // Verify the whole revision ancestry exactly once. readChangeSet with no revision
+  // reads every revision up to the head in a single forward pass, checking
+  // contiguity, parent bindings, canonical hashes and each submission audit event.
+  // Calling it per revision re-verified the whole ancestry each time, which was
+  // quadratic in the amendment count and rehashed the same audit events repeatedly.
+  store.getChangeSet(missionId);
   const workIds = JSON.stringify([missionId, ...operations.map((link) => link.workItemId)]);
   const traceIds = (
     db

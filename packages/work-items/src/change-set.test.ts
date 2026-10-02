@@ -8,6 +8,8 @@ import {
   SqliteWorkItemStore,
   changeSetDefinitionSchema,
   changeSetManifestHash,
+  changeSetVerificationSchema,
+  IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS,
   executionPlanSubjectInputHash,
   type ChangeSetDefinition,
   type ChangeSetSnapshot
@@ -229,6 +231,29 @@ describe("immutable Change Set snapshot", () => {
     expect(changeSetDefinitionSchema.safeParse(changed).success).toBe(true);
     changed.verification[1]!.independent = false;
     expect(changeSetDefinitionSchema.safeParse(changed).success).toBe(false);
+  });
+
+  it("refuses every verification kind without an implemented adapter at definition time", () => {
+    const { definition } = fixture();
+    const implemented = new Set<string>(IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS);
+    const declared = new Set(changeSetVerificationSchema.shape.kind.options);
+    expect([...implemented].sort()).toEqual(["fs_inspect", "independent_review"]);
+    const missingAdapter = (parsed: { success: boolean; error?: { issues: { message: string }[] } }) =>
+      parsed.error?.issues.some((issue) => issue.message.includes("has no implemented adapter")) ?? false;
+    for (const kind of declared) {
+      const changed = structuredClone(definition);
+      changed.verification[0]!.kind = kind as typeof changed.verification[number]["kind"];
+      const parsed = changeSetDefinitionSchema.safeParse(changed);
+      if (implemented.has(kind)) {
+        // Implemented adapters are never refused for adapter availability. Other
+        // rules may still apply (e.g. independent_review needs independent:true).
+        expect(missingAdapter(parsed), kind).toBe(false);
+      } else {
+        expect(parsed.success, kind).toBe(false);
+        // The refusal must name the missing adapter, not fail opaquely.
+        expect(missingAdapter(parsed), kind).toBe(true);
+      }
+    }
   });
 
   it("rejects unsupported JSON and caller-supplied authority fields", () => {

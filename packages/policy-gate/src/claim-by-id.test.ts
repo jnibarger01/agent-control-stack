@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
+import { SqliteWorkItemStore, executionActionHash } from "@agent-control-stack/work-items";
 import { describe, expect, it } from "vitest";
 import { createPolicyEngine } from "./policy.js";
 import { createWorkItemTools } from "./tools.js";
@@ -238,6 +238,60 @@ describe("gateWorkerClaimById (claim_approved_work_item_by_id)", () => {
 
       const events = store.readEvents();
       expect(events.filter((event) => event.name === "approval.consumed")).toHaveLength(1);
+    } finally {
+      store.close();
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("durable work item assignment is authoritative for both claim paths", () => {
+  it("refuses an exact-ID claim for a different worker instead of bypassing routing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-claim-assignment-byid-"));
+    const store = new SqliteWorkItemStore(join(dir, "control.db"));
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    try {
+      const item = tools.create_work_item({
+        title: "Assigned claim",
+        requester: "user",
+        intent: "only the assigned worker may claim",
+        target: { cwd: "/repo" },
+        requestedActions: [{ kind: "fs.write", description: "write", params: { paths: ["src/index.ts"] } }],
+        risk: "low"
+      });
+      const evaluation = createPolicyEngine().evaluateWorkItem(item, "operator", "approve")[0]!;
+      createWorkItemTools(store, createPolicyEngine()).approve_work_item({
+        id: item.id,
+        approvedBy: "operator",
+        reason: "approve assigned claim",
+        actionHash: evaluation.actionHash
+      });
+      store.assignWorkItem(
+        { workItemId: item.id, selectedWorkerId: "worker-b", assignedByActorId: "operator" },
+        domainTransition
+      );
+
+      // Claiming the exact item as the wrong worker fails closed and mutates nothing.
+      expect(() =>
+        store.claimApprovedWorkItemById(item.id, "irrelevant", "worker-a", {
+          allowLegacyClaimForTests: true
+        })
+      ).toThrow(/assigned to another worker/u);
+      expect(store.get(item.id)?.status).toBe("approved");
+
+      // Selection-based claims respect the assignment too: worker-a sees nothing,
+      // worker-b sees exactly this item.
+      expect(store.findNextApprovedWorkItemForWorker("worker-a")).toBeUndefined();
+      expect(store.findNextApprovedWorkItemForWorker("worker-b")?.id).toBe(item.id);
+
+      // The assigned worker may still claim it.
+      const claimed = store.claimApprovedWorkItemById(
+        item.id,
+        executionActionHash(store.get(item.id)!),
+        "worker-b",
+        { allowLegacyClaimForTests: true }
+      );
+      expect(claimed?.workerId).toBe("worker-b");
     } finally {
       store.close();
       rmSync(dir, { recursive: true, force: true });

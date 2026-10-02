@@ -200,4 +200,66 @@ describe("authenticated worker claims", () => {
       await app.close();
     }
   });
+
+  it("rate limits claim polling per credential while keeping normal polling available", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-worker-claim-rate-"));
+    directories.push(directory);
+    const dbPath = join(directory, "control.db");
+    const identities = new WorkerIdentityRegistry();
+    const issued = identities.issue({
+      workerId: "worker-rate",
+      ttlMs: 60_000,
+      token: "worker-rate-token-0123456789012345678901"
+    });
+    // A deliberately small budget makes the limit observable deterministically.
+    const app = buildGateway({
+      dbPath,
+      logger: false,
+      rateLimit: { windowMs: 60_000, maxRequests: 5 },
+      auth: { token: "unused-static-token", actor: "user", workerIdentities: identities }
+    });
+    try {
+      await app.ready();
+      const claim = () =>
+        app.inject({
+          method: "POST",
+          url: "/worker/claim",
+          headers: { authorization: `Bearer ${issued.token}` },
+          payload: {}
+        });
+
+      // Normal idle polling is unaffected: no work available, still a clean answer.
+      for (let poll = 0; poll < 5; poll++) {
+        const response = await claim();
+        expect(response.statusCode, `poll ${poll}`).toBe(200);
+        expect(response.json()).toEqual({ claimed: false });
+        expect(response.headers["x-ratelimit-remaining"]).toBeDefined();
+      }
+      expect(Number((await claim()).headers["x-ratelimit-remaining"])).toBe(0);
+
+      // Beyond the budget the route is refused with retry semantics, not a crash.
+      const limited = await claim();
+      expect(limited.statusCode).toBe(429);
+      expect(limited.json()).toMatchObject({ code: "rate_limited" });
+      expect(limited.json().retry_after_seconds).toBeGreaterThan(0);
+      expect(limited.headers["retry-after"]).toBeDefined();
+
+      // A different credential keeps its own budget: limits are per principal.
+      const other = identities.issue({
+        workerId: "worker-rate-other",
+        ttlMs: 60_000,
+        token: "worker-rate-other-token-0123456789012345"
+      });
+      const otherClaim = await app.inject({
+        method: "POST",
+        url: "/worker/claim",
+        headers: { authorization: `Bearer ${other.token}` },
+        payload: {}
+      });
+      expect(otherClaim.statusCode).toBe(200);
+      expect(otherClaim.json()).toEqual({ claimed: false });
+    } finally {
+      await app.close();
+    }
+  });
 });

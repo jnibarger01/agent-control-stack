@@ -101,6 +101,7 @@ import {
   SqliteExecutionReadStore,
   SqliteWorkItemStore,
   changeSetPolicyHash,
+  IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS,
   DEFAULT_EVENT_LIMIT,
   MAX_DASHBOARD_FINISHED_LIMIT,
   MAX_EVENT_LIMIT,
@@ -416,6 +417,23 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       "per-principal SSE cap lowered to stay below the global cap"
     );
   }
+  // Human approval, revocation, execution-mode and grant authority is deliberately
+  // restricted to a pure human operator. A credential that mixes in service or
+  // worker roles is refused at request time, so surface it at startup rather than
+  // letting an operator discover it as a mysterious 403 in production.
+  const incompatibleApprovalCredentials = findIncompatibleHumanApprovalCredentials(auth?.credentials ?? []);
+  if (incompatibleApprovalCredentials.length) {
+    app.log.warn(
+      {
+        event: "incompatible_human_approval_credentials",
+        credentialIds: incompatibleApprovalCredentials.map((credential) => credential.id),
+        conflictingRoles: incompatibleApprovalCredentials.map((credential) => credential.roles),
+        remediation:
+          "Split these into a pure human operator credential (roles: [operator], actor: user) and a separate service or worker credential; mixed-role credentials cannot approve, revoke, change execution mode or issue authority grants."
+      },
+      "Configured credentials cannot hold human approval authority; requests using them will be refused with human_authority_required"
+    );
+  }
   const metrics = new GatewayMetrics();
   if (observationWorker) {
     app.addHook("onReady", async () => {
@@ -478,6 +496,26 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       inputHash: string;
     }
   >();
+
+  // Fail closed any lease that survived a restart holding execution capacity
+  // without a durable reservation. Such a lease is uncountable and unreleasable;
+  // fencing it lets startup converge instead of reporting permanently unhealthy.
+  try {
+    const orphaned = workItems.fenceLeasesWithoutAdmissionReservation({
+      workerIds: [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID],
+      reservedAttemptIds: new Set(workItems.listAdmissionPermits().map((permit) => permit.attemptId))
+    });
+    if (orphaned.length)
+      app.log.warn(
+        { event: "admission_orphan_lease_fenced", count: orphaned.length },
+        "Fenced execution leases recovered without an admission reservation"
+      );
+  } catch (error) {
+    app.log.error(
+      { event: "admission_orphan_fencing_failed", error: error instanceof Error ? error.message : String(error) },
+      "Startup could not fence execution leases missing an admission reservation"
+    );
+  }
 
   // Re-establish capacity accounting only from a complete, current ACS lease binding.
   // Invalid records remain persisted for diagnosis and do not mutate scheduler state.
@@ -573,6 +611,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     toolName: string;
   }): Promise<AdmissionPermit> {
     reapAdmissionPermits();
+    // Fence any capacity held without a durable reservation, then re-reconcile.
+    // This converges the accounting invariant instead of latching on it.
+    if (fenceUnreservedBridgeLeases()) reapAdmissionPermits();
     reconcileAdmissionAccounting();
     if (admissionReconciliationMismatch)
       throw new ControlStackError("admission_recovery_required", "admission recovery requires reconciliation");
@@ -651,20 +692,67 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   function reapAdmissionPermits(): void {
     workItems.failExpiredLeases();
-    for (const binding of workItems.listAdmissionPermits()) {
-      const lease = workItems.getActiveLeaseForAttempt(binding.attemptId);
-      if (!lease || lease.status !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
-        releaseAdmissionPermit(binding.attemptId);
-        workItems.releaseAdmissionPermit(binding.attemptId);
+    const durable = new Set(workItems.listAdmissionPermits().map((permit) => permit.attemptId));
+    for (const attemptId of [...admissionPermits.keys()]) {
+      const binding = admissionPermits.get(attemptId);
+      const lease = workItems.getActiveLeaseForAttempt(attemptId);
+      // Release when the durable reservation is gone, or the lease it was bound to
+      // is no longer live. Both directions must converge or accounting latches.
+      if (
+        !binding ||
+        !durable.has(attemptId) ||
+        !lease ||
+        lease.status !== "active" ||
+        lease.leaseId !== binding.leaseId ||
+        Date.parse(lease.expiresAt) <= Date.now()
+      ) {
+        releaseAdmissionPermit(attemptId, true);
       }
+    }
+    for (const attemptId of durable) {
+      if (!admissionPermits.has(attemptId)) workItems.releaseAdmissionPermit(attemptId);
     }
   }
 
-  function releaseAdmissionPermit(attemptId: string): boolean {
+  /**
+   * A bridge lease that holds execution capacity without a durable reservation can
+   * neither be released nor counted. Fence it closed so reconciliation converges
+   * instead of latching readiness at 503 until natural lease expiry. Returns true
+   * when it fenced anything, so the caller re-reconciles.
+   */
+  function fenceUnreservedBridgeLeases(): boolean {
+    const reserved = new Set(workItems.listAdmissionPermits().map((permit) => permit.attemptId));
+    let fenced: ReturnType<typeof workItems.fenceLeasesWithoutAdmissionReservation>;
+    try {
+      fenced = workItems.fenceLeasesWithoutAdmissionReservation({
+        workerIds: [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID],
+        reservedAttemptIds: reserved
+      });
+    } catch (error) {
+      // Reconciliation must not mutate authority when fencing cannot be proven safe.
+      app.log.error(
+        { event: "admission_orphan_fencing_failed", error: error instanceof Error ? error.message : String(error) },
+        "Could not fence execution leases missing an admission reservation"
+      );
+      return false;
+    }
+    if (fenced.length) {
+      metrics.increment("scheduler_orphan_execution_fenced_total");
+      app.log.warn(
+        { event: "admission_orphan_lease_fenced", count: fenced.length },
+        "Fenced execution leases that held capacity without an admission reservation"
+      );
+    }
+    return fenced.length > 0;
+  }
+
+  function releaseAdmissionPermit(attemptId: string, force = false): boolean {
     const binding = admissionPermits.get(attemptId);
     if (!binding) return false;
-    const lease = workItems.getActiveLeaseForAttempt(attemptId);
-    if (lease?.status === "active" && Date.parse(lease.expiresAt) > Date.now()) return false;
+    if (!force) {
+      const lease = workItems.getActiveLeaseForAttempt(attemptId);
+      if (lease?.status === "active" && Date.parse(lease.expiresAt) > Date.now()) return false;
+    }
     admissionPermits.delete(attemptId);
     binding.permit.release();
     workItems.releaseAdmissionPermit(attemptId);
@@ -921,6 +1009,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     };
     const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
     const health = mergeSandboxReadyzCheck(workItems.readinessHealth(), sandboxCheck);
+    // Readiness is a reconciliation boundary: converge capacity accounting first so
+    // an orphaned lease is reported as recovered rather than permanently unhealthy.
+    if (fenceUnreservedBridgeLeases()) reapAdmissionPermits();
     reconcileAdmissionAccounting();
     if (admissionReconciliationMismatch) {
       return reply.code(503).send({
@@ -2003,7 +2094,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             const checks = record.snapshot.definition.verification.filter((rule) =>
               rule.operationIds.includes(operation.operationId)
             );
-            if (checks.some((rule) => !["fs_inspect", "independent_review"].includes(rule.kind)))
+            // Defense in depth: submission already refuses unimplemented kinds, so
+            // this can only trigger on tampered persisted state. Same vocabulary.
+            if (
+              checks.some((rule) => !(IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS as readonly string[]).includes(rule.kind))
+            )
               throw new ControlStackError(
                 "verification_adapter_unavailable",
                 "grant execution needs implemented verification before mutation"
@@ -4398,6 +4493,10 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/oauth/device/code" ||
     path === "/oauth/token" ||
     path === "/work-items" ||
+    // Worker claim polling is deliberately rate limited. It is authenticated, but an
+    // unbounded poll loop from a leaked worker credential is still a workload
+    // amplifier. The limiter keys by method, route and credential, so each worker
+    // identity gets its own budget rather than sharing a global one.
     path === "/worker/claim" ||
     path === "/dc/capability/issue" ||
     path === "/jc/capability/issue" ||
@@ -4505,6 +4604,25 @@ function requiresMcpAuthentication(request: FastifyRequest, auth: McpAuthOptions
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * Credentials that request human approval authority but cannot exercise it.
+ *
+ * Human-only approval, revocation, execution-mode and grant issuance require a
+ * `user` actor holding exactly the operator role. A credential that also carries a
+ * service or worker role is refused at request time; operators must see that at
+ * boot instead of discovering it as a 403 in production.
+ */
+export function findIncompatibleHumanApprovalCredentials(
+  credentials: readonly GatewayCredential[]
+): GatewayCredential[] {
+  return credentials.filter(
+    (credential) =>
+      credential.actor === "user" &&
+      credential.roles.includes("operator") &&
+      (credential.roles.includes("service") || credential.roles.includes("worker"))
+  );
 }
 
 function requireHumanApprovalActor(

@@ -46,10 +46,6 @@ export function resolveChangeSetRuntimePolicy(input: {
     const privileges = desktopCommanderRequiredScopes(operation.toolName).map((scope) =>
       changeSetPrivilegeSchema.parse(scope)
     );
-    const cwd =
-      typeof invocation.validatedArguments.cwd === "string"
-        ? invocation.validatedArguments.cwd
-        : input.dcContainment.allowedRoots[0];
     const commandKey = policy.commandArgs[0];
     const argvKey = policy.argvArgs?.[0];
     const rawCommand = commandKey ? operation.action.params[commandKey] : undefined;
@@ -60,6 +56,26 @@ export function resolveChangeSetRuntimePolicy(input: {
     // It also rejects argv entries containing whitespace before this join.
     const commandLine =
       typeof rawCommand === "string" ? rawCommand : Array.isArray(rawArgv) ? rawArgv.join(" ") : undefined;
+    // cwd is a hash-bound authorization fact. It is taken from the explicit invocation
+    // argument or the mission's own declared working directory, both of which are
+    // covered by the approved snapshot's subjectInputHash. It is never inferred
+    // from the order of configured allow roots.
+    const declaredCwd = operation.action.params.cwd;
+    if (declaredCwd !== undefined && typeof declaredCwd !== "string")
+      throw new ControlStackError("change_set_cwd_invalid", "operation cwd must be an explicit string");
+    const cwd =
+      typeof invocation.validatedArguments.cwd === "string"
+        ? invocation.validatedArguments.cwd
+        : typeof declaredCwd === "string"
+          ? declaredCwd
+          : mission.target.cwd;
+    if (cwd === undefined)
+      throw new ControlStackError(
+        "change_set_cwd_required",
+        "operation requires an explicit or mission-declared cwd so authorization does not depend on allow-root order"
+      );
+    // Only pass a cwd when one was explicitly stated; otherwise the validator must
+    // not silently fall back to the first allow root.
     const command =
       commandLine !== undefined ? validateProcessCommand(commandLine, input.dcContainment, cwd) : undefined;
     const invocationHash = desktopCommanderInvocationFingerprint(invocation);
@@ -103,8 +119,9 @@ export function resolveChangeSetRuntimePolicy(input: {
         id: containPath(input.jcContainment!, requested as string).canonical
       }));
     });
-    // The privileged helper defaults cwd to /. Include that implicit resource
-    // even though its manifest permits execution beyond ordinary filesystem tools.
+    // The privileged helper's cwd default is a documented runtime constant, not an
+    // inference from configuration order, so it is stated explicitly and then
+    // contained and reported as a canonical resource.
     if (privileged) {
       if (!input.jcContainment)
         throw new ControlStackError("jace_commander_containment_unconfigured", "JC containment missing");

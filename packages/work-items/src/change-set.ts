@@ -95,6 +95,21 @@ export const changeSetVerificationSchema = z
   })
   .strict();
 
+/**
+ * The verification kinds this build can actually evaluate.
+ *
+ * The vocabulary above is intentionally wider than the adapters: an unimplemented
+ * kind must never be discovered after its operation mutated the world. Every
+ * authority path (human bundle approval and Autonomous Authority Grant) validates
+ * against this set at Change Set submission, so an unsupported kind is refused
+ * before any execution, permit or capability can exist.
+ */
+export const IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS = [
+  "fs_inspect",
+  "independent_review"
+] as const satisfies readonly ChangeSetVerification["kind"][];
+export type ChangeSetVerification = z.infer<typeof changeSetVerificationSchema>;
+
 export const changeSetDefinitionSchema = z
   .object({
     schemaVersion: z.literal(CHANGE_SET_SCHEMA_VERSION),
@@ -150,10 +165,16 @@ export const changeSetDefinitionSchema = z
       return true;
     };
     if ([...operations.keys()].some((operationId) => !visit(operationId))) issue("operation dependency cycle");
-    if (
-      new Set(value.verification.map((requirement) => requirement.requirementId)).size !== value.verification.length
-    ) {
+    const verificationIds = value.verification.map((requirement) => requirement.requirementId);
+    if (new Set(verificationIds).size !== verificationIds.length) {
       issue("verification identifiers must be unique");
+    }
+    // Canonical pre-authority boundary: refuse any verification kind this build
+    // cannot evaluate, so no authority path can authorize an operation whose
+    // verification would only fail after the mutation has already happened.
+    for (const requirement of value.verification) {
+      if (!(IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS as readonly string[]).includes(requirement.kind))
+        issue(`verification kind "${requirement.kind}" has no implemented adapter`);
     }
     for (const requirement of value.verification) {
       if (requirement.operationIds.some((operationId) => !operations.has(operationId)))

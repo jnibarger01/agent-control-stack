@@ -5,6 +5,7 @@ import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { auditEventHash } from "@agent-control-stack/shared";
 import { SqliteWorkItemStore } from "./store.js";
+import { executionPlanSubjectInputHash, type ChangeSetDefinition } from "./index.js";
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), "acs-mission-trace-"));
@@ -139,4 +140,75 @@ describe("mission audit projection", () => {
       ctx.close();
     }
   });
+
+  it("verifies the revision ancestry once and still fails closed on tampered history", async () => {
+    const ctx = fixture();
+    try {
+      // Amend repeatedly so the revision chain is deep. Each amendment must be
+      // verified, but the cost must stay linear rather than quadratic.
+      const mission = ctx.mission;
+      const build = (revision: number) => {
+        const definition: ChangeSetDefinition = {
+          schemaVersion: "acs.change-set.v1",
+          missionId: mission.id,
+          subjectInputHash: executionPlanSubjectInputHash(mission),
+          executingActorId: "planner",
+          objective: `revision ${revision}`,
+          scope: [{ kind: "path", id: "/repo" }],
+          maximumPrivileges: ["fs.read"],
+          expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+          constraints: { maxRuntimeMs: 1_000, maxParallelOperations: 1, failureBehavior: "stop" },
+          verification: [],
+          operations: [
+            {
+              operationId: "inspect",
+              runtime: "desktop_commander",
+              toolName: "read_file",
+              action: { kind: "fs.read", description: "inspect", params: { path: "/repo/a.ts" } },
+              resources: [{ kind: "path", id: "/repo" }],
+              requestedPrivileges: ["fs.read"],
+              effect: "read_only",
+              expectedSideEffects: [],
+              dependsOn: [],
+              retry: { maxAttempts: 1, idempotencyKey: "inspect" }
+            }
+          ]
+        };
+        return definition;
+      };
+      let head: string | null = null;
+      for (let revision = 1; revision <= 12; revision++)
+        head = ctx.store.submitChangeSet({
+          definition: build(revision),
+          submissionId: `revision-${revision}`,
+          expectedHeadHash: head,
+          createdByActorId: "planner"
+        }).manifestHash;
+
+      const start = Date.now();
+      const trace = ctx.store.getMissionTrace(mission.id);
+      const elapsedMs = Date.now() - start;
+      expect(trace.events.length).toBeGreaterThan(0);
+      expect(trace.events.every((entry) => entry.correlation.missionId === mission.id)).toBe(true);
+      // A deep chain must remain cheap; a quadratic pass cannot stay this small.
+      expect(elapsedMs, `mission trace took ${elapsedMs}ms for 12 revisions`).toBeLessThan(2_000);
+      expect(ctx.store.verifyAuditChain().ok).toBe(true);
+
+      // Integrity is not weakened: tampering with any historical revision still
+      // fails the trace closed.
+      const db = new DatabaseSync(ctx.path);
+      try {
+        db.exec("DROP TRIGGER change_set_revisions_no_update");
+        db.prepare("UPDATE change_set_revisions SET snapshot_json = ? WHERE mission_id = ? AND revision = 1").run(
+          JSON.stringify({ revision: 1, parentManifestHash: null, definition: build(999) }),
+          mission.id
+        );
+      } finally {
+        db.close();
+      }
+      expect(() => ctx.store.getMissionTrace(mission.id)).toThrow(/integrity|failed/u);
+    } finally {
+      ctx.close();
+    }
+  }, 20_000);
 });

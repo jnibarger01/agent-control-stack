@@ -8,6 +8,7 @@ import {
   type ExecutionAdmissionController
 } from "@agent-control-stack/execution-admission";
 import { describe, expect, it, vi } from "vitest";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { ShutdownController } from "./lifecycle.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
@@ -274,6 +275,145 @@ async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record
 }
 
 describe("gateway execution admission integration", () => {
+  it("fences an orphaned active bridge lease and recovers readiness without operator action", async () => {
+    const ctx = buildFixture();
+    try {
+      await attestDc(ctx.app);
+      const issued = await issueDc(ctx.app, ctx.root);
+      expect(issued.statusCode, issued.body).toBe(200);
+      const body = issued.json();
+      // Capacity is consumed by a live lease whose durable reservation vanished.
+      // This is uncountable and unreleasable: reconciliation must converge, not latch.
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        db.prepare("DELETE FROM admission_permits").run();
+      } finally {
+        db.close();
+      }
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+
+      const before = await ctx.app.inject({ method: "GET", url: "/readyz" });
+      expect(before.statusCode).toBe(200);
+      expect(before.json().checks.executionAdmission).toBeUndefined();
+
+      // The lease is fenced closed and no longer holds capacity.
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 0 });
+      expect(ctx.scheduler.snapshot().global.active).toBe(0);
+
+      const reader = new SqliteWorkItemStore(ctx.dbPath);
+      try {
+        expect(reader.readEvents({ name: "attempt_lease.fenced_without_admission" })).toHaveLength(1);
+        expect(reader.get(body.workItemId)?.status).toBe("blocked");
+        expect(reader.get(body.workItemId)?.result?.outcome).toBe("blocked");
+        expect(reader.verifyAuditChain().ok).toBe(true);
+      } finally {
+        reader.close();
+      }
+
+      // New admission is available again rather than permanently recovery-blocked.
+      const again = await issueDc(ctx.app, ctx.root);
+      expect(again.statusCode, again.body).toBe(200);
+      const after = await ctx.app.inject({ method: "GET", url: "/readyz" });
+      expect(after.statusCode).toBe(200);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("never fences a permit-backed lease as an orphan", async () => {
+    const ctx = buildFixture();
+    try {
+      await attestDc(ctx.app);
+      expect((await issueDc(ctx.app, ctx.root)).statusCode).toBe(200);
+      // Repeated reconciliation must leave a correctly reserved lease untouched.
+      for (let probe = 0; probe < 3; probe++)
+        expect((await ctx.app.inject({ method: "GET", url: "/readyz" })).statusCode).toBe(200);
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+      expect(ctx.scheduler.snapshot().global.active).toBe(1);
+      const reader = new SqliteWorkItemStore(ctx.dbPath);
+      try {
+        expect(reader.readEvents({ name: "attempt_lease.fenced_without_admission" })).toHaveLength(0);
+      } finally {
+        reader.close();
+      }
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("fences an orphan lease at startup so an upgrade cannot brick readiness", async () => {
+    const ctx = buildFixture();
+    let resumed: ReturnType<typeof buildGateway> | undefined;
+    try {
+      await attestDc(ctx.app);
+      expect((await issueDc(ctx.app, ctx.root)).statusCode).toBe(200);
+      await ctx.app.close();
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        db.prepare("DELETE FROM admission_permits").run();
+      } finally {
+        db.close();
+      }
+      const scheduler = new ExecutionAdmissionScheduler({
+        config: {
+          executionMaxInflight: 1,
+          executorMaxInflight: 1,
+          queueMax: 4,
+          queueTimeoutMs: 2_000,
+          waitMaxInflight: 1
+        }
+      });
+      resumed = createGateway(ctx.root, scheduler).app;
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 0 });
+      expect(scheduler.snapshot().global.active).toBe(0);
+      const ready = await resumed.inject({ method: "GET", url: "/readyz" });
+      expect(ready.statusCode, ready.body).toBe(200);
+    } finally {
+      await (resumed ?? ctx.app).close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("releases an orphan permit whose lease already disappeared", async () => {
+    const ctx = buildFixture();
+    let resumed: ReturnType<typeof buildGateway> | undefined;
+    try {
+      await attestDc(ctx.app);
+      expect((await issueDc(ctx.app, ctx.root)).statusCode).toBe(200);
+      await ctx.app.close();
+      // Expire the lease through the canonical path; the reservation is then pure
+      // garbage and must be released rather than pinning scheduler capacity.
+      const expirer = new SqliteWorkItemStore(ctx.dbPath);
+      try {
+        expect(expirer.failExpiredLeases(new Date(Date.now() + 3_600_000)).length).toBeGreaterThan(0);
+      } finally {
+        expirer.close();
+      }
+      const scheduler = new ExecutionAdmissionScheduler({
+        config: {
+          executionMaxInflight: 1,
+          executorMaxInflight: 1,
+          queueMax: 4,
+          queueTimeoutMs: 2_000,
+          waitMaxInflight: 1
+        }
+      });
+      resumed = createGateway(ctx.root, scheduler).app;
+      const db2 = new DatabaseSync(ctx.dbPath, { readOnly: true });
+      try {
+        expect(db2.prepare("SELECT COUNT(*) AS count FROM admission_permits").get()).toEqual({ count: 0 });
+      } finally {
+        db2.close();
+      }
+      expect((await resumed.inject({ method: "GET", url: "/readyz" })).statusCode).toBe(200);
+    } finally {
+      await (resumed ?? ctx.app).close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
   it("restores execution and wait capacity across a gateway restart", async () => {
     const ctx = buildFixture();
     let resumed: ReturnType<typeof buildGateway> | undefined;
@@ -313,7 +453,7 @@ describe("gateway execution admission integration", () => {
     }
   });
 
-  it("rejects new admission after restart when a live lease has lost its reservation", async () => {
+  it("never treats a live lease that lost its reservation as accounted capacity", async () => {
     const ctx = buildFixture();
     let resumed: ReturnType<typeof buildGateway> | undefined;
     try {
@@ -336,12 +476,21 @@ describe("gateway execution admission integration", () => {
         }
       });
       resumed = createGateway(ctx.root, scheduler).app;
-      const rejected = await issueJc(resumed);
-      expect(rejected.statusCode).toBe(503);
-      expect(rejected.json()).toMatchObject({ code: "admission_recovery_required" });
-      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+      // The lost reservation is never restored: capacity is not silently reclaimed.
+      expect(scheduler.snapshot().global.active).toBe(0);
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 0 });
+      // Reconciliation fences the unaccountable lease rather than latching unhealthy.
+      const reader = new SqliteWorkItemStore(ctx.dbPath);
+      try {
+        expect(reader.readEvents({ name: "attempt_lease.fenced_without_admission" })).toHaveLength(1);
+      } finally {
+        reader.close();
+      }
       const ready = await resumed.inject({ method: "GET", url: "/readyz" });
-      expect(ready.statusCode).toBe(503);
+      expect(ready.statusCode, ready.body).toBe(200);
+      // And a fresh lease is admitted normally.
+      const accepted = await issueJc(resumed);
+      expect(accepted.statusCode, accepted.body).toBe(200);
     } finally {
       await (resumed ?? ctx.app).close();
       rmSync(ctx.root, { recursive: true, force: true });

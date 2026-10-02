@@ -65,14 +65,21 @@ export function evaluateChangeSetPolicy(input: {
     )
       throw new ControlStackError("change_set_policy_binding_invalid", "canonical policy binding mismatch");
     const declarations = new Set(operation.resources.map(strictCanonicalJsonV1));
+    // A proposal always declares at least one resource. If the canonical runtime
+    // invocation binds none, the declaration is unenforced and must not be treated
+    // as satisfied. Deny rather than authorize an unverifiable boundary.
+    const unenforceableResources = declarations.size > 0 && facts.resources.length === 0;
     const mismatch =
       effects[operation.effect] < effects[facts.effect] ||
       facts.privileges.some((privilege) => !operation.requestedPrivileges.includes(privilege)) ||
-      facts.resources.some((resource) => !declarations.has(strictCanonicalJsonV1(resource)));
+      facts.resources.some((resource) => !declarations.has(strictCanonicalJsonV1(resource))) ||
+      unenforceableResources;
     const decision = mismatch
       ? {
           decision: "deny" as const,
-          reason: "proposal understates canonical operation scope, privileges or effects",
+          reason: unenforceableResources
+            ? "canonical runtime invocation binds no enforceable resource for the declared scope"
+            : "proposal understates canonical operation scope, privileges or effects",
           matchedRules: ["deny:change-set-declaration-mismatch"]
         }
       : evaluatePolicy(context);

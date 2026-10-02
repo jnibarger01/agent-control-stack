@@ -1316,6 +1316,17 @@ export interface WorkItemStore {
     options?: ClaimOptions
   ): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
+  /**
+   * Fence active attempt leases that hold execution capacity without a durable
+   * admission reservation. These leases cannot be capacity-accounted, so they are
+   * failed closed deterministically and recorded with durable audit evidence rather
+   * than blocking new admission until they expire on their own.
+   */
+  fenceLeasesWithoutAdmissionReservation(input: {
+    workerIds: readonly string[];
+    reservedAttemptIds: ReadonlySet<string>;
+    now?: Date;
+  }): WorkItem[];
   /** Count attempt leases that are still active and not yet past expires_at. */
   countActiveAttemptLeases(now?: Date, workerIds?: readonly string[]): number;
   /** Persist an admission permit binding for recovery after gateway restart. */
@@ -2426,6 +2437,15 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const operation = snapshot.snapshot.definition.operations.find((op) => op.operationId === permit.operationId);
       if (!operation || operation.runtime !== permit.runtime || operation.toolName !== permit.toolName)
         throw new ControlStackError("change_set_permit_binding_mismatch", "operation no longer exists");
+      // Verified once per transaction and reused for every dependency. Progress
+      // reconstruction is a deep integrity check, so calling it per dependency made
+      // claim/lease/renew cost grow with the dependency fan-out. Everything here runs
+      // inside this transaction's single database snapshot, so the shared result is
+      // never stale with respect to a later mutation.
+      const dependencyProgress =
+        operation.dependsOn.length > 0
+          ? this.getChangeSetProgress(permit.missionId, permit.manifestHash)
+          : undefined;
       for (const dependency of operation.dependsOn) {
         const previous = this.getChangeSetOperationPermitForOperation(
           permit.missionId,
@@ -2434,9 +2454,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
         );
         if (
           !previous ||
-          this.getChangeSetProgress(permit.missionId, permit.manifestHash).operations.find(
-            (entry) => entry.operationId === dependency
-          )?.status !== "succeeded"
+          dependencyProgress!.operations.find((entry) => entry.operationId === dependency)?.status !== "succeeded"
         )
           throw new ControlStackError("change_set_dependency_pending", "operation dependency has not succeeded");
       }
@@ -6697,6 +6715,106 @@ export class SqliteWorkItemStore implements WorkItemStore {
           )
         ]
       };
+    });
+  }
+
+  /**
+   * Fence active attempt leases that consume execution capacity without a durable
+   * admission reservation. Such a lease cannot be capacity-accounted, so leaving it
+   * alive would either over-admit (capacity consumed but unreserved) or wedge new
+   * admission until natural expiry. Fencing is deterministic, single-transaction
+   * and audited; afterwards the lease is no longer active and reconciliation
+   * recovers without operator action.
+   */
+  fenceLeasesWithoutAdmissionReservation(input: {
+    workerIds: readonly string[];
+    reservedAttemptIds: ReadonlySet<string>;
+    now?: Date;
+  }): WorkItem[] {
+    if (input.workerIds.length === 0) return [];
+    return this.write(() => {
+      const now = input.now ?? new Date();
+      const nowIso = now.toISOString();
+      const placeholders = input.workerIds.map(() => "?").join(",");
+      const rows = this.db
+        .prepare(
+          `SELECT l.* FROM leases l
+           LEFT JOIN attempt_leases a ON a.lease_id = l.lease_id AND a.status = 'active'
+           WHERE l.status = 'active' AND l.worker_id IN (${placeholders})
+             AND COALESCE(a.expires_at, l.expires_at) > ?
+           ORDER BY l.issued_at ASC`
+        )
+        .all(...input.workerIds, nowIso) as unknown as LeaseRow[];
+      const fenced: WorkItem[] = [];
+      for (const lease of rows) {
+        const attemptLease = this.db
+          .prepare(`SELECT * FROM attempt_leases WHERE lease_id = ? AND status = 'active'`)
+          .get(lease.lease_id) as unknown as AttemptLeaseRow | undefined;
+        const attemptId = attemptLease?.attempt_id;
+        // A reserved lease is capacity-accounted; never disturb it here.
+        if (attemptId && input.reservedAttemptIds.has(attemptId)) continue;
+        const currentRow = this.getRowRequired(lease.work_item_id);
+        // Only in-flight execution can be fenced. Anything else is reported by the
+        // caller's own reconciliation rather than mutated here.
+        if (currentRow.status !== "running" || currentRow.worker_id !== lease.worker_id) continue;
+        const reason =
+          "execution lease held capacity without a durable admission reservation; fenced by reconciliation";
+        const result = this.derivedResultInput(lease, "blocked", nowIso, reason);
+        if (attemptLease) {
+          const fencedAttempt = this.db
+            .prepare(
+              `UPDATE execution_attempts
+               SET status = 'unknown', terminal_at = ?, outcome_code = 'admission_reservation_missing',
+                   recovery_reason = ?, updated_at = ?
+               WHERE attempt_id = ? AND status = 'running'
+                 AND current_fencing_epoch = ? AND claimed_by_worker_id = ?`
+            )
+            .run(nowIso, reason, nowIso, attemptLease.attempt_id, attemptLease.fencing_epoch, attemptLease.worker_id);
+          if (fencedAttempt.changes !== 1)
+            throw new ControlStackError(
+              "attempt_fence_mismatch",
+              `unreserved attempt lease is stale or inconsistent: ${lease.lease_id}`
+            );
+        }
+        this.appendAuditEvent(
+          createEvent(
+            "attempt_lease.fenced_without_admission",
+            {
+              leaseId: lease.lease_id,
+              attemptId: attemptId ?? null,
+              workItemId: lease.work_item_id,
+              workerId: lease.worker_id,
+              fencingEpoch: attemptLease?.fencing_epoch ?? null,
+              expiresAt: attemptLease?.expires_at ?? lease.expires_at,
+              fencedAt: nowIso,
+              reason
+            },
+            {
+              "work_item.id": lease.work_item_id,
+              "attempt.id": attemptId ?? "",
+              "lease.id": lease.lease_id,
+              "worker.id": lease.worker_id
+            }
+          )
+        );
+        // Accept the derived terminal result while the legacy lease projection is
+        // still active: execution_results_binding_guard requires that binding. The
+        // lease is closed immediately afterwards, which releases the capacity.
+        fenced.push(
+          this.acceptResultInTransaction(result, {
+            now: nowIso,
+            allowDerivedOutcome: true,
+            allowAttemptProjection: Boolean(attemptLease)
+          }).value
+        );
+        this.db
+          .prepare(`UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+          .run(nowIso, lease.lease_id);
+        this.db
+          .prepare(`UPDATE leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+          .run(nowIso, lease.lease_id);
+      }
+      return { value: fenced, events: [] };
     });
   }
 

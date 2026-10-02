@@ -1,10 +1,11 @@
 import { generateKeyPairSync } from "node:crypto";
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 import { stableHash } from "@agent-control-stack/shared";
+import type { JSONType } from "zod";
 import {
   executionActionHash,
   executionPlanSubjectInputHash,
@@ -153,6 +154,16 @@ function fixture() {
   return { root, dbPath, mission, app, url, headers, payload };
 }
 
+/** Persist the fixture definition so evaluateChangeSetPolicy has a real snapshot. */
+function store_submitChangeSet(ctx: ReturnType<typeof fixture>) {
+  const store = new SqliteWorkItemStore(ctx.dbPath);
+  try {
+    return store.submitChangeSet({ ...ctx.payload, createdByActorId: "planner" });
+  } finally {
+    store.close();
+  }
+}
+
 describe("authenticated Change Set intake", () => {
   it("excludes aggregate parents from worker selection and direct claims", async () => {
     const ctx = fixture();
@@ -241,6 +252,127 @@ describe("authenticated Change Set intake", () => {
       }
     }
   );
+
+  it("derives cwd from the approved mission or the invocation, never from allow-root order", async () => {
+    const ctx = fixture();
+    try {
+      const resolve = (
+        containment: { allowedRoots: string[]; deniedRoots: string[] },
+        mission: typeof ctx.mission,
+        params: ChangeSetDefinition["operations"][number]["action"]["params"],
+        toolName = "start_process"
+      ) =>
+        resolveChangeSetRuntimePolicy({
+          operation: {
+            ...structuredClone(ctx.payload.definition.operations[0]!),
+            toolName,
+            action: { kind: "fs.read", description: "inspect", params }
+          },
+          mission,
+          actorId: "planner",
+          dcContainment: containment
+        });
+
+      // An explicit invocation cwd is used verbatim.
+      const explicit = resolve({ allowedRoots: [ctx.root], deniedRoots: [] }, ctx.mission, {
+        command: "git status",
+        cwd: ctx.root,
+        timeout_ms: 1000
+      });
+      expect(explicit.context.cwd).toBe(ctx.root);
+
+      // With no cwd argument the mission's own declared working directory is used,
+      // and that mission input is covered by the approved subjectInputHash.
+      const inherited = resolve(
+        { allowedRoots: [ctx.root], deniedRoots: [] },
+        ctx.mission,
+        { path: join(ctx.root, "a") },
+        "read_file"
+      );
+      expect(inherited.context.cwd).toBe(ctx.root);
+
+      // Reordering or extending the configured allow roots cannot change any
+      // hash-bound authorization fact.
+      const other = realpathSync(mkdtempSync(join(tmpdir(), "acs-change-set-other-")));
+      try {
+        const reordered = resolve(
+          { allowedRoots: [other, ctx.root], deniedRoots: [] },
+          ctx.mission,
+          { path: join(ctx.root, "a") },
+          "read_file"
+        );
+        const reversed = resolve(
+          { allowedRoots: [ctx.root, other], deniedRoots: [] },
+          ctx.mission,
+          { path: join(ctx.root, "a") },
+          "read_file"
+        );
+        expect(reordered.context).toEqual(reversed.context);
+        expect(reordered.invocationHash).toBe(inherited.invocationHash);
+        expect(reordered.privileges).toEqual(inherited.privileges);
+      } finally {
+        rmSync(other, { recursive: true, force: true });
+      }
+
+      // A mission with no declared cwd fails closed rather than borrowing one.
+      const noMissionCwd = { ...ctx.mission, target: {} };
+      expect(() =>
+        resolve({ allowedRoots: [ctx.root], deniedRoots: [] }, noMissionCwd, {
+          path: join(ctx.root, "a")
+        }, "read_file")
+      ).toThrow("explicit or mission-declared cwd");
+      // A command without any cwd binding is refused outright rather than
+      // borrowing the first allow root.
+      expect(() =>
+        resolve({ allowedRoots: [ctx.root], deniedRoots: [] }, noMissionCwd, {
+          command: "git status",
+          timeout_ms: 1000
+        })
+      ).toThrow();
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses declared resources the canonical invocation cannot enforce", async () => {
+    const ctx = fixture();
+    try {
+      // A canonical invocation that binds no enforceable resource must not satisfy a
+      // proposal that declares one. This is the canonical policy rule, so it applies
+      // to human approval and Autonomous Authority Grant alike.
+      const record = store_submitChangeSet(ctx);
+      const base = resolveChangeSetRuntimePolicy({
+        operation: ctx.payload.definition.operations[0]!,
+        mission: ctx.mission,
+        actorId: "planner",
+        dcContainment: { allowedRoots: [ctx.root], deniedRoots: [] }
+      });
+      expect(base.resources.length).toBeGreaterThan(0);
+
+      const evaluate = (resources: typeof base.resources) =>
+        evaluateChangeSetPolicy({
+          record,
+          mission: ctx.mission,
+          actorId: "planner",
+          expectedManifestHash: record.manifestHash,
+          resolveOperation: () => ({ ...base, resources })
+        });
+
+      // Declared resources with matching canonical paths: normal evaluation.
+      expect(evaluate(base.resources).decision.decision).toBe("allow");
+      // Declared resources with mismatched canonical paths: denied.
+      expect(evaluate([{ kind: "path", id: "/somewhere/else" }]).decision.decision).toBe("deny");
+      // Declared resources with zero enforceable canonical resources: denied.
+      const empty = evaluate([]);
+      expect(empty.decision.decision).toBe("deny");
+      expect(empty.decision.matchedRules).toContain("deny:change-set-declaration-mismatch");
+      expect(empty.operations[0]!.decision.reason).toMatch(/no enforceable resource/u);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
 
   it("treats privileged JC execution as a distinct privilege and contains its default cwd", async () => {
     const ctx = fixture();
@@ -1188,37 +1320,55 @@ describe("human-issued Autonomous Authority Grants", () => {
     }
   });
 
-  it("refuses unsupported verification before creating a grant execution", async () => {
+  it("refuses unsupported verification at submission, before any authority exists", async () => {
     const ctx = fixture();
     try {
       const grant = await issueGrant(ctx);
-      const proposal = await proposeForApproval(ctx, true, (definition) => {
-        definition.verification[0]!.kind = "http_probe";
-      });
-      const authorized = await ctx.app.inject({
-        method: "POST",
-        url: `${ctx.url}/authorize`,
-        headers: ctx.headers,
-        payload: { grantId: grant.grantId, expectedManifestHash: proposal.expectedManifestHash }
-      });
-      expect(authorized.statusCode, authorized.body).toBe(201);
-      const permit = await ctx.app.inject({
-        method: "POST",
-        url: `${ctx.url}/operations/a/permit`,
-        headers: ctx.headers,
-        payload: {
-          authorizationId: authorized.json().authorizationId,
-          expectedManifestHash: proposal.expectedManifestHash
+      const definition = structuredClone(ctx.payload.definition);
+      for (const operation of definition.operations) {
+        operation.toolName = "write_file";
+        operation.action = {
+          kind: "fs.write",
+          description: "write",
+          params: { path: join(ctx.root, operation.operationId), content: "expected" }
+        };
+        operation.requestedPrivileges = ["fs.write"];
+        operation.effect = "mutation";
+        operation.expectedSideEffects = ["write approved file"];
+      }
+      definition.maximumPrivileges.push("fs.write");
+      definition.verification = [
+        {
+          requirementId: "probe",
+          kind: "http_probe",
+          operationIds: ["a"],
+          expectation: { url: "https://example.invalid" },
+          independent: false
         }
+      ];
+
+      // The canonical pre-authority boundary refuses the proposal. No snapshot,
+      // policy evaluation, authorization, permit, or execution can exist.
+      const submitted = await ctx.app.inject({
+        method: "POST",
+        url: ctx.url,
+        headers: ctx.headers,
+        payload: { ...ctx.payload, definition }
       });
-      expect(permit.statusCode, permit.body).toBe(409);
-      expect(permit.json().code).toBe("verification_adapter_unavailable");
+      expect(submitted.statusCode).toBe(400);
+      expect((await ctx.app.inject({ method: "GET", url: ctx.url, headers: ctx.headers })).statusCode).toBe(404);
       const store = new SqliteWorkItemStore(ctx.dbPath);
       try {
+        expect(store.getChangeSet(ctx.mission.id)).toBeUndefined();
         expect(store.list()).toHaveLength(1);
+        expect(store.readEvents({ name: "change_set.submitted" })).toHaveLength(0);
+        expect(store.readEvents({ name: "change_set.policy_evaluated" })).toHaveLength(0);
+        expect(store.readEvents({ name: "change_set.grant_authorized" })).toHaveLength(0);
+        expect(store.readEvents({ name: "execution_admission.bound" })).toHaveLength(0);
       } finally {
         store.close();
       }
+      expect(grant.grantId).toBeTruthy();
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
@@ -1703,7 +1853,6 @@ describe("Change Set result verification", () => {
     "simulated execution",
     "wrong invocation",
     "missing requirement",
-    "unsupported adapter",
     "independent review",
     "missing evidence",
     "executor self-approval",
@@ -1731,7 +1880,6 @@ describe("Change Set result verification", () => {
           definition.operations = [definition.operations[0]!];
           definition.verification[0]!.operationIds = ["a"];
         }
-        if (scenario === "unsupported adapter") definition.verification[0]!.kind = "http_probe";
         if (scenario === "two reviewers")
           for (let reviewer = 0; reviewer < 2; reviewer++)
             definition.verification.push({
@@ -2230,7 +2378,6 @@ describe("Change Set result verification", () => {
         "simulated execution": "verification_execution_binding_mismatch",
         "wrong invocation": "verification_execution_binding_mismatch",
         "missing requirement": "verification_not_satisfied",
-        "unsupported adapter": "verification_adapter_unavailable",
         "independent review": "independent_review_required"
       };
       expect(response.json().code).toBe(codes[scenario]);
@@ -2541,15 +2688,109 @@ describe("Change Set operation permits", () => {
     }
   });
 
+  it("verifies change set progress once for a multi-dependency permit check", async () => {
+    const ctx = fixture();
+    try {
+      // A fan-in operation: op-c depends on two predecessors. Progress
+      // reconstruction is a deep integrity check, so running it once per
+      // dependency would double the cost of this single permit check.
+      const definition = structuredClone(ctx.payload.definition);
+      definition.operations = [
+        { ...definition.operations[0]!, operationId: "op-a", dependsOn: [], retry: { maxAttempts: 1, idempotencyKey: "a" } },
+        { ...definition.operations[1]!, operationId: "op-b", dependsOn: [], retry: { maxAttempts: 1, idempotencyKey: "b" } },
+        {
+          ...definition.operations[0]!,
+          operationId: "op-c",
+          dependsOn: ["op-a", "op-b"],
+          retry: { maxAttempts: 1, idempotencyKey: "c" }
+        }
+      ];
+      const submitted = await ctx.app.inject({
+        method: "POST",
+        url: ctx.url,
+        headers: ctx.headers,
+        payload: { ...ctx.payload, definition }
+      });
+      expect(submitted.statusCode, submitted.body).toBe(201);
+      const approved = await ctx.app.inject({
+        method: "POST",
+        url: `${ctx.url}/approve`,
+        headers: reviewerHeaders,
+        payload: {
+          expectedManifestHash: submitted.json().manifestHash,
+          requestId: "fan-in-review",
+          reason: "Approve exact fan-in plan"
+        }
+      });
+      expect(approved.statusCode, approved.body).toBe(201);
+      // Permit both predecessors so op-c's dependency loop is fully satisfied and
+      // therefore iterates over every dependency.
+      for (const operationId of ["op-a", "op-b", "op-c"]) {
+        const permitted = await ctx.app.inject({
+          method: "POST",
+          url: `${ctx.url}/operations/${operationId}/permit`,
+          headers: ctx.headers,
+          payload: { expectedManifestHash: submitted.json().manifestHash, approvalId: approved.json().approvalId }
+        });
+        expect(permitted.statusCode, permitted.body).toBe(201);
+        if (operationId === "op-c")
+          Object.assign(ctx, { fanInPermit: permitted.json() as { executionWorkItemId: string } });
+      }
+
+      const store = new SqliteWorkItemStore(ctx.dbPath);
+      try {
+        const original = store.getChangeSetProgress.bind(store);
+        let reconstructions = 0;
+        (store as unknown as { getChangeSetProgress: typeof store.getChangeSetProgress }).getChangeSetProgress = (
+          ...args: Parameters<typeof store.getChangeSetProgress>
+        ) => {
+          reconstructions += 1;
+          // Report the predecessors as complete so the loop visits both dependencies.
+          const actual = original(...args);
+          return {
+            ...actual,
+            operations: actual.operations.map((entry) =>
+              entry.operationId === "op-c" ? entry : { ...entry, status: "succeeded" as const }
+            )
+          };
+        };
+        const permit = store.requireActiveChangeSetOperationPermit(
+          (ctx as unknown as { fanInPermit: { executionWorkItemId: string } }).fanInPermit.executionWorkItemId,
+          "acs-dc-bridge"
+        );
+        expect(permit?.operationId).toBe("op-c");
+        // Two dependencies, one verification.
+        expect(reconstructions).toBe(1);
+      } finally {
+        store.close();
+      }
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
   it("enforces dependencies and parent revocation before any canonical claim", async () => {
     const ctx = fixture();
     try {
       const { permit, permitBody } = await approveAndPermit(ctx, "b");
       const store = new SqliteWorkItemStore(ctx.dbPath);
       try {
+        // Progress reconstruction is a deep integrity check. Count it so the cost of
+        // this permit check is pinned independently of dependency fan-out: one
+        // verification serves every dependency, not one per dependency.
+        const original = store.getChangeSetProgress.bind(store);
+        let reconstructions = 0;
+        (store as unknown as { getChangeSetProgress: typeof store.getChangeSetProgress }).getChangeSetProgress = (
+          ...args: Parameters<typeof store.getChangeSetProgress>
+        ) => {
+          reconstructions += 1;
+          return original(...args);
+        };
         expect(() => store.requireActiveChangeSetOperationPermit(permit.executionWorkItemId, "acs-dc-bridge")).toThrow(
           /dependency/u
         );
+        expect(reconstructions).toBe(1);
       } finally {
         store.close();
       }
