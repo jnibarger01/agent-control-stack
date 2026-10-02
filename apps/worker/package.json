@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@agent-control-stack/advisory": "0.1.0",
+    "@agent-control-stack/coding-mission": "0.1.0",
     "@agent-control-stack/desktop-commander-adapter": "0.1.0",
     "@agent-control-stack/execution-admission": "0.1.0",
     "@agent-control-stack/evidence": "0.1.0",

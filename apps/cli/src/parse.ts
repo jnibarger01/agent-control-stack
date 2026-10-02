@@ -19,7 +19,7 @@ Commands:
   status [--json]
   mode status
   mode strict
-  mode admin
+  mode admin (refused; activate through authenticated human operator API)
   doctor [--json]
   publication list [--json]
   audit export [--db <path>] [-o <file>]

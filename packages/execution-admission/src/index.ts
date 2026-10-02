@@ -24,8 +24,17 @@ export interface AdmissionPermit {
   release(): void;
 }
 
+export interface RestoreAdmissionPermitInput {
+  permitId: string;
+  lane: AdmissionLane;
+  executionClass: AdmissionExecutionClass;
+  executorId: string;
+}
+
 export interface ExecutionAdmissionController {
   acquire(request: AdmissionRequest): Promise<AdmissionPermit>;
+  /** Restore an already-authorized in-flight permit after process restart. */
+  restoreActivePermit(input: RestoreAdmissionPermitInput): AdmissionPermit;
   shutdown(): void;
   snapshot(): AdmissionSnapshot;
 }
@@ -320,6 +329,41 @@ export class ExecutionAdmissionScheduler implements ExecutionAdmissionController
       queue.order.length = 0;
       queue.queued = 0;
     }
+  }
+
+  /**
+   * Inject an already-active permit into the scheduler after restart.
+   * Used to restore in-flight permits from persistent storage without
+   * going through the normal admission queue. Returns a permit handle
+   * whose release() delegates back into the scheduler.
+   */
+  restoreActivePermit(input: RestoreAdmissionPermitInput): AdmissionPermit {
+    if (this.activePermits.has(input.permitId)) {
+      const existing = this.activePermits.get(input.permitId)!;
+      return {
+        permitId: existing.permitId,
+        admittedAt: existing.admittedAt,
+        release: () => {
+          this.releasePermit(existing.permitId);
+        }
+      };
+    }
+    const { permitId, lane, executionClass, executorId } = input;
+    this.activePermits.set(permitId, { permitId, lane, executionClass, executorId, admittedAt: this.clock.now() });
+    if (executionClass === "wait") {
+      this.activeWait += 1;
+      this.activeWaitByExecutor.set(executorId, (this.activeWaitByExecutor.get(executorId) ?? 0) + 1);
+    } else {
+      this.activeExecution += 1;
+      this.activeExecutionByExecutor.set(executorId, (this.activeExecutionByExecutor.get(executorId) ?? 0) + 1);
+    }
+    return {
+      permitId,
+      admittedAt: this.clock.now(),
+      release: () => {
+        this.releasePermit(permitId);
+      }
+    };
   }
 
   snapshot(): AdmissionSnapshot {

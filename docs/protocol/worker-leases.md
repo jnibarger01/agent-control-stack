@@ -59,7 +59,30 @@ The server stores:
 
 Raw lease tokens are never stored.
 
-## Result submission
+## Managed execution admission recovery
+
+The JC/DC gateway reserves scheduler capacity before claiming work. The claim,
+attempt lease, durable `admission_permits` binding and binding audit event commit
+in one database transaction before capability issuance. An insertion failure
+rolls back the claim and releases the scheduler reservation. A later capability
+issuance failure retains the reservation while its lease is active.
+
+Gateway shutdown preserves durable reservations. Startup restores capacity only
+when the reservation matches the current attempt, lease, worker, fencing epoch,
+plan/input/action hashes, runtime lane and canonical tool capacity class. WAIT
+operations restore WAIT capacity, rather than ordinary execution capacity.
+Invalid active bindings remain available for investigation. Missing or rejected
+bindings cause new admission to return `503 admission_recovery_required`; readiness
+also reports unhealthy. This is a reconciliation boundary, not an automatic retry
+or permission bypass.
+
+Accepted terminal results release capacity after the lease closes. Rejected
+results do not release an active lease's reservation. Expired leases are reaped
+before admitting new execution; startup does not sweep unrelated worker leases.
+This capacity accounting does not prove that a remote side effect stopped at
+lease expiration. Runtime capability expiry and fencing remain separate controls.
+
+## Result submission contract
 
 The canonical result contract and HTTP response matrix are documented in [`worker-results.md`](worker-results.md). The worker sends the opaque `lease_id`, not the persisted token hash, to `POST /work-items/:id/results` along with its authenticated worker identity and `action_hash`. The gateway never accepts an unauthenticated result route.
 

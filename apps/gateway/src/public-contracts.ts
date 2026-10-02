@@ -1,6 +1,8 @@
 import { directAgentNames } from "@agent-control-stack/machine-controller";
 import { explainPolicyInputSchema, workItemToolNames } from "@agent-control-stack/policy-gate";
 import {
+  missionTraceQuerySchema,
+  changeSetReviewBodySchema,
   acpRoles,
   actionRequestSchema,
   actorTypes,
@@ -8,6 +10,8 @@ import {
   listWorkItemsSchema,
   registryStatuses,
   submitWorkResultSchema,
+  submitChangeSetInputSchema,
+  issueAutonomousAuthorityBodySchema,
   targetSchema,
   workItemRiskSchema
 } from "@agent-control-stack/work-items";
@@ -20,6 +24,13 @@ import {
 } from "./portfolio-client.js";
 
 export { createWorkItemSchema, listWorkItemsSchema, submitWorkResultSchema };
+export { issueAutonomousAuthorityBodySchema, changeSetReviewBodySchema, missionTraceQuerySchema };
+export const grantAuthorizationBodySchema = z
+  .object({
+    grantId: z.string().min(1).max(256),
+    expectedManifestHash: z.string().regex(/^[a-f0-9]{64}$/u)
+  })
+  .strict();
 
 export const PUBLIC_CONTRACT_VERSION = "1.0.0";
 export const MCP_PROTOCOL_VERSION = "2024-11-05";
@@ -28,6 +39,41 @@ export const approvalBodySchema = z.object({
   reason: z.string().min(1),
   actionHash: z.string().min(1)
 });
+export const changeSetSubmissionBodySchema = submitChangeSetInputSchema.omit({ createdByActorId: true, now: true });
+export const changeSetPolicyBodySchema = z
+  .object({ expectedManifestHash: z.string().regex(/^[a-f0-9]{64}$/u) })
+  .strict();
+export const changeSetOperationPermitBodySchema = z.union([
+  changeSetPolicyBodySchema.extend({ approvalId: z.string().min(1).max(256) }).strict(),
+  changeSetPolicyBodySchema.extend({ authorizationId: z.string().min(1).max(256) }).strict()
+]);
+export const changeSetApprovalBodySchema = changeSetPolicyBodySchema
+  .extend({
+    requestId: z.string().min(1).max(128),
+    reason: z.string().min(1).max(4_000),
+    expiresAt: z.string().datetime({ offset: true }).optional()
+  })
+  .strict();
+export const changeSetRevocationBodySchema = z.object({ reason: z.string().min(1).max(4_000) }).strict();
+export const codingMissionCreateBodySchema = z
+  .object({
+    missionId: z.string().min(1).max(128),
+    repository: z.string().min(1).max(256),
+    baseRef: z.string().min(1).max(256),
+    baseSha: z.string().regex(/^[a-f0-9]{40}$/u),
+    summary: z.string().min(1).max(4000)
+  })
+  .strict();
+export const codingMissionApprovalBodySchema = z
+  .object({
+    expectedChangeSetHash: z.string().regex(/^[a-f0-9]{64}$/u)
+  })
+  .strict();
+export const changeSetQuerySchema = z
+  .object({
+    revision: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional()
+  })
+  .strict();
 export const cancelBodySchema = z.object({ reason: z.string().min(1).optional() });
 export const unblockBodySchema = z.object({}).passthrough();
 export const mcpScopeSchema = z.enum(MCP_SCOPES);
@@ -142,6 +188,7 @@ export const dcCapabilityIssueSchema = z
     client_id: z.string().min(1).max(256),
     tool: z.string().min(1).max(128),
     argsSummary: z.string().min(1).max(240_000),
+    changeSetPermitId: z.string().min(1).max(256).optional(),
     correlationId: z.string().min(1).max(256).optional()
   })
   .strict();
@@ -348,6 +395,7 @@ export type PublicHttpOperation = {
   operationId: string;
   summary: string;
   requestSchema?: z.ZodType;
+  querySchema?: z.ZodType;
   /**
    * The status code the gateway actually sends on success. Defaults to 200
    * when omitted - only set this when the runtime handler in server.ts
@@ -365,6 +413,107 @@ export type PublicHttpOperation = {
 };
 
 export const publicHttpOperations: readonly PublicHttpOperation[] = [
+  {
+    method: "post",
+    path: "/work-items/{id}/authority-grants",
+    operationId: "issueAutonomousAuthority",
+    summary: "Human operator issues immutable mission-scoped autonomous authority.",
+    requestSchema: issueAutonomousAuthorityBodySchema,
+    successStatus: 201,
+    additionalResponses: { "409": { description: "Mission, input binding or grant conflict." } }
+  },
+  {
+    method: "get",
+    path: "/work-items/{id}/authority-grants/{grantId}",
+    operationId: "getAutonomousAuthority",
+    summary: "Read verified grant provenance and current validity.",
+    additionalResponses: {
+      "404": { description: "Grant not found." },
+      "409": { description: "Grant integrity failure." }
+    }
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/authority-grants/{grantId}/revoke",
+    operationId: "revokeAutonomousAuthority",
+    summary: "Human operator revokes mission authority without erasing history.",
+    requestSchema: changeSetRevocationBodySchema,
+    additionalResponses: {
+      "404": { description: "Grant not found." },
+      "409": { description: "Grant integrity failure." }
+    }
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/change-sets/authorize",
+    operationId: "authorizeChangeSetWithGrant",
+    summary: "Bind a current immutable snapshot and deterministic policy to a human-issued grant.",
+    requestSchema: grantAuthorizationBodySchema,
+    successStatus: 201,
+    additionalResponses: { "409": { description: "Grant, policy or snapshot does not authorize this Change Set." } }
+  },
+  {
+    method: "get",
+    path: "/work-items/{id}/change-set-authorizations/{authorizationId}",
+    operationId: "getGrantAuthorization",
+    summary: "Read exact-snapshot grant authorization and current validity.",
+    additionalResponses: {
+      "404": { description: "Authorization not found." },
+      "409": { description: "Authorization integrity failure." }
+    }
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/change-sets/operations/{operationId}/permit",
+    operationId: "permitChangeSetOperation",
+    summary: "Bind an approved operation to canonical governed execution.",
+    requestSchema: changeSetOperationPermitBodySchema,
+    successStatus: 201
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/change-sets/approve",
+    operationId: "approveChangeSet",
+    summary: "Record human approval of the exact current Change Set after deterministic policy reevaluation.",
+    requestSchema: changeSetApprovalBodySchema,
+    successStatus: 201,
+    additionalResponses: {
+      "404": { description: "Mission not found." },
+      "409": { description: "Policy, authority or snapshot conflict." }
+    }
+  },
+  {
+    method: "get",
+    path: "/work-items/{id}/change-set-approvals/{approvalId}",
+    operationId: "getChangeSetApproval",
+    summary: "Read immutable approval evidence and current validity.",
+    additionalResponses: {
+      "404": { description: "Approval not found." },
+      "409": { description: "Approval integrity mismatch." }
+    }
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/change-set-approvals/{approvalId}/revoke",
+    operationId: "revokeChangeSetApproval",
+    summary: "Revoke an immutable bundle approval with human authority.",
+    requestSchema: changeSetRevocationBodySchema,
+    additionalResponses: {
+      "404": { description: "Approval not found." },
+      "409": { description: "Approval integrity mismatch." }
+    }
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/change-sets/policy",
+    operationId: "evaluateChangeSetPolicy",
+    summary: "Evaluate the current immutable snapshot using canonical runtime facts without issuing authority.",
+    requestSchema: changeSetPolicyBodySchema,
+    additionalResponses: {
+      "404": { description: "Mission not found." },
+      "409": { description: "Snapshot or runtime binding conflict." }
+    }
+  },
   { method: "get", path: "/livez", operationId: "getLiveness", summary: "Read process liveness." },
   { method: "get", path: "/readyz", operationId: "getReadiness", summary: "Read control-plane readiness." },
   { method: "get", path: "/health", operationId: "getHealth", summary: "Read control-plane health." },
@@ -474,6 +623,120 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     successStatus: 201
   },
   { method: "get", path: "/work-items/{id}", operationId: "getWorkItem", summary: "Read a governed work item." },
+  {
+    method: "post",
+    path: "/work-items/{id}/change-sets",
+    operationId: "submitChangeSet",
+    summary: "Submit an immutable mission execution proposal without granting authority.",
+    requestSchema: changeSetSubmissionBodySchema,
+    successStatus: 201,
+    additionalResponses: {
+      "404": { description: "Mission not found." },
+      "409": { description: "Mission, revision, submission or integrity conflict." }
+    }
+  },
+  {
+    method: "get",
+    path: "/work-items/{id}/change-sets",
+    operationId: "getChangeSet",
+    summary: "Read the current or a historical immutable mission execution snapshot.",
+    additionalResponses: {
+      "404": { description: "Mission or revision not found." },
+      "409": { description: "Snapshot integrity mismatch." }
+    }
+  },
+  {
+    method: "get",
+    path: "/work-items/{id}/change-sets/progress",
+    operationId: "getChangeSetProgress",
+    summary: "Reconstruct operation progress and verified completion from canonical persisted evidence.",
+    additionalResponses: {
+      "404": { description: "Mission or Change Set not found." },
+      "409": { description: "Revision or persisted execution integrity mismatch." }
+    }
+  },
+  {
+    method: "get",
+    path: "/work-items/{id}/mission-trace",
+    operationId: "getMissionTrace",
+    querySchema: missionTraceQuerySchema,
+    summary:
+      "Read a paginated hash-verified mission audit projection spanning parent, children and execution evidence.",
+    additionalResponses: { "409": { description: "Persisted mission or audit integrity mismatch." } }
+  },
+  {
+    method: "get",
+    path: "/work-items/{id}/change-set-review",
+    operationId: "getChangeSetReviewContext",
+    summary: "Read canonical result, evidence, requirements and reviews for independent assessment.",
+    additionalResponses: { "409": { description: "No observed result or invalid persisted execution evidence." } }
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/change-set-review",
+    operationId: "reviewChangeSetOperation",
+    summary: "Record an independently authenticated review bound to persisted execution evidence.",
+    requestSchema: changeSetReviewBodySchema,
+    additionalResponses: {
+      "403": { description: "Independent reviewer authority required." },
+      "409": { description: "Result, evidence, reviewer or replay binding conflict." }
+    }
+  },
+  {
+    method: "post",
+    path: "/work-items/{id}/change-sets/complete",
+    operationId: "completeChangeSetMission",
+    summary:
+      "Close the bound mission only after all operation results and required evidence are independently validated.",
+    requestSchema: changeSetOperationPermitBodySchema,
+    additionalResponses: {
+      "409": { description: "Authority, revision, result, verification or mission state prevents completion." }
+    }
+  },
+  {
+    method: "post",
+    path: "/coding-missions",
+    operationId: "createCodingMission",
+    summary: "Create a coding mission and run autonomous preparation until the approval boundary.",
+    requestSchema: codingMissionCreateBodySchema,
+    successStatus: 201,
+    additionalResponses: {
+      "503": { description: "Coding mission ports are not configured." },
+      "409": { description: "Mission identity, plan, or persisted state conflict." }
+    }
+  },
+  {
+    method: "get",
+    path: "/coding-missions",
+    operationId: "listCodingMissions",
+    summary: "List recent coding missions, including those waiting for change-set approval.",
+    additionalResponses: {
+      "503": { description: "Coding mission ports are not configured." }
+    }
+  },
+  {
+    method: "get",
+    path: "/coding-missions/{id}",
+    operationId: "getCodingMission",
+    summary: "Read the approval-oriented coding mission view, including Change Set identity and execution progress.",
+    additionalResponses: {
+      "503": { description: "Coding mission ports are not configured." },
+      "409": { description: "Mission is missing or its persisted state conflicts." }
+    }
+  },
+  {
+    method: "post",
+    path: "/coding-missions/{id}/approve",
+    operationId: "approveCodingChangeSet",
+    summary: "Approve one immutable coding Change Set and continue governed execution without another confirmation.",
+    requestSchema: codingMissionApprovalBodySchema,
+    additionalResponses: {
+      "503": { description: "Coding mission ports are not configured." },
+      "409": {
+        description: "Approval does not match the immutable Change Set or the mission is not awaiting approval."
+      }
+    }
+  },
   {
     method: "post",
     path: "/work-items/{id}/approve",

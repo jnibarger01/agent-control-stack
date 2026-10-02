@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { planRecovery, type RecoveryPlan } from "./index.js";
 
 export interface ReconciliationWorkspace {
@@ -19,7 +20,18 @@ export interface ReconciliationWorkspaceAllocation {
   status: "active" | "closed" | string;
 }
 export interface ReconciliationStore {
-  recordRecoveryDecision(input: { attemptId: string; workItemId: string; decision: RecoveryPlan["decision"]; retryAllowed: boolean; reason: string; retryAfterMs?: number; idempotencyKey: string }, options: { via: "domain_service" }): unknown;
+  recordRecoveryDecision(
+    input: {
+      attemptId: string;
+      workItemId: string;
+      decision: RecoveryPlan["decision"];
+      retryAllowed: boolean;
+      reason: string;
+      retryAfterMs?: number;
+      idempotencyKey: string;
+    },
+    options: { via: "domain_service" }
+  ): unknown;
   /** Most recent lease for the attempt, whatever its status - never assumed. */
   getActiveLeaseForAttempt(attemptId: string): ReconciliationLease | undefined;
   /** Independent validation evidence for the attempt, if any was ever recorded. */
@@ -70,10 +82,10 @@ export async function reconcileStartup(input: StartupReconciliationInput): Promi
       attemptNumber: input.attemptNumberById[attemptId] ?? 1,
       maxAttempts: input.maxAttempts,
       attemptStatus: "unknown",
-      // A fresh process on startup genuinely cannot have a live child from a
-      // prior run - this is the one input it is legitimate to assume rather
-      // than look up.
+      // This process owns no surviving child handle. Another process or remote
+      // runtime may still be executing; never infer non-execution from startup.
       processAlive: false,
+      executionDisposition: "unknown",
       leaseActive,
       leaseExpired,
       workspacePresent: true,
@@ -82,15 +94,18 @@ export async function reconcileStartup(input: StartupReconciliationInput): Promi
       cleanupComplete,
       failureClass: "process_gone"
     });
-    input.store.recordRecoveryDecision({
-      attemptId,
-      workItemId: workspace.workItemId,
-      decision: plan.decision,
-      retryAllowed: plan.retryAllowed,
-      reason: plan.reason,
-      ...(plan.retryAfterMs === undefined ? {} : { retryAfterMs: plan.retryAfterMs }),
-      idempotencyKey: `startup-recovery:${attemptId}`
-    }, { via: "domain_service" });
+    input.store.recordRecoveryDecision(
+      {
+        attemptId,
+        workItemId: workspace.workItemId,
+        decision: plan.decision,
+        retryAllowed: plan.retryAllowed,
+        reason: plan.reason,
+        ...(plan.retryAfterMs === undefined ? {} : { retryAfterMs: plan.retryAfterMs }),
+        idempotencyKey: `startup-recovery:${attemptId}:${createHash("sha256").update(JSON.stringify(plan)).digest("hex").slice(0, 32)}`
+      },
+      { via: "domain_service" }
+    );
     plans.push(plan);
   }
   return plans;

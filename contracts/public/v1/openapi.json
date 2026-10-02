@@ -6,6 +6,785 @@
     "description": "Generated from the Zod schemas used by the ACS gateway runtime."
   },
   "paths": {
+    "/work-items/{id}/authority-grants": {
+      "post": {
+        "operationId": "issueAutonomousAuthority",
+        "summary": "Human operator issues immutable mission-scoped autonomous authority.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "requestId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "expectedSubjectInputHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "definition": {
+                    "type": "object",
+                    "properties": {
+                      "executingActorId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "scope": {
+                        "minItems": 1,
+                        "maxItems": 512,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "repository",
+                                "path",
+                                "service",
+                                "environment",
+                                "network",
+                                "secret"
+                              ]
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2000
+                            },
+                            "coverage": {
+                              "type": "string",
+                              "enum": [
+                                "exact",
+                                "descendants"
+                              ]
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "id",
+                            "coverage"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "toolClasses": {
+                        "minItems": 1,
+                        "maxItems": 512,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "runtime": {
+                              "type": "string",
+                              "enum": [
+                                "desktop_commander",
+                                "jace_commander",
+                                "sandbox"
+                              ]
+                            },
+                            "toolName": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 256
+                            }
+                          },
+                          "required": [
+                            "runtime",
+                            "toolName"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "maximumPrivileges": {
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "fs.read",
+                            "fs.write",
+                            "process.exec",
+                            "service.control",
+                            "deploy",
+                            "remote",
+                            "git.write",
+                            "secret.read",
+                            "network",
+                            "process.spawn",
+                            "process.read",
+                            "process.privileged",
+                            "git.read",
+                            "git.network",
+                            "integration.read",
+                            "integration.write"
+                          ]
+                        }
+                      },
+                      "expiresAt": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                      },
+                      "manifestHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "limits": {
+                        "type": "object",
+                        "properties": {
+                          "maxOperations": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 4096
+                          },
+                          "maxRuntimeMs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 86400000
+                          },
+                          "maxParallelOperations": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 32
+                          },
+                          "maxAttemptsPerOperation": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 10
+                          }
+                        },
+                        "required": [
+                          "maxOperations",
+                          "maxRuntimeMs",
+                          "maxParallelOperations",
+                          "maxAttemptsPerOperation"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "required": [
+                      "executingActorId",
+                      "scope",
+                      "toolClasses",
+                      "maximumPrivileges",
+                      "expiresAt",
+                      "limits"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "requestId",
+                  "expectedSubjectInputHash",
+                  "definition",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Mission, input binding or grant conflict."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/authority-grants/{grantId}": {
+      "get": {
+        "operationId": "getAutonomousAuthority",
+        "summary": "Read verified grant provenance and current validity.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "grantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Grant not found."
+          },
+          "409": {
+            "description": "Grant integrity failure."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/authority-grants/{grantId}/revoke": {
+      "post": {
+        "operationId": "revokeAutonomousAuthority",
+        "summary": "Human operator revokes mission authority without erasing history.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "grantId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Grant not found."
+          },
+          "409": {
+            "description": "Grant integrity failure."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-sets/authorize": {
+      "post": {
+        "operationId": "authorizeChangeSetWithGrant",
+        "summary": "Bind a current immutable snapshot and deterministic policy to a human-issued grant.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "grantId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "expectedManifestHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "grantId",
+                  "expectedManifestHash"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Grant, policy or snapshot does not authorize this Change Set."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-set-authorizations/{authorizationId}": {
+      "get": {
+        "operationId": "getGrantAuthorization",
+        "summary": "Read exact-snapshot grant authorization and current validity.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "authorizationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Authorization not found."
+          },
+          "409": {
+            "description": "Authorization integrity failure."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-sets/operations/{operationId}/permit": {
+      "post": {
+        "operationId": "permitChangeSetOperation",
+        "summary": "Bind an approved operation to canonical governed execution.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "operationId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedManifestHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "expectedManifestHash",
+                      "approvalId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedManifestHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "authorizationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "expectedManifestHash",
+                      "authorizationId"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-sets/approve": {
+      "post": {
+        "operationId": "approveChangeSet",
+        "summary": "Record human approval of the exact current Change Set after deterministic policy reevaluation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "expectedManifestHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "requestId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  },
+                  "expiresAt": {
+                    "type": "string",
+                    "format": "date-time",
+                    "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                  }
+                },
+                "required": [
+                  "expectedManifestHash",
+                  "requestId",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Mission not found."
+          },
+          "409": {
+            "description": "Policy, authority or snapshot conflict."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-set-approvals/{approvalId}": {
+      "get": {
+        "operationId": "getChangeSetApproval",
+        "summary": "Read immutable approval evidence and current validity.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "approvalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Approval not found."
+          },
+          "409": {
+            "description": "Approval integrity mismatch."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-set-approvals/{approvalId}/revoke": {
+      "post": {
+        "operationId": "revokeChangeSetApproval",
+        "summary": "Revoke an immutable bundle approval with human authority.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "approvalId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Approval not found."
+          },
+          "409": {
+            "description": "Approval integrity mismatch."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-sets/policy": {
+      "post": {
+        "operationId": "evaluateChangeSetPolicy",
+        "summary": "Evaluate the current immutable snapshot using canonical runtime facts without issuing authority.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "expectedManifestHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "expectedManifestHash"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Mission not found."
+          },
+          "409": {
+            "description": "Snapshot or runtime binding conflict."
+          }
+        }
+      }
+    },
     "/livez": {
       "get": {
         "operationId": "getLiveness",
@@ -1047,6 +1826,1026 @@
           },
           "403": {
             "description": "The authenticated principal is not authorized."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-sets": {
+      "post": {
+        "operationId": "submitChangeSet",
+        "summary": "Submit an immutable mission execution proposal without granting authority.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "definition": {
+                    "type": "object",
+                    "properties": {
+                      "schemaVersion": {
+                        "type": "string",
+                        "const": "acs.change-set.v1"
+                      },
+                      "missionId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 128,
+                        "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                      },
+                      "subjectInputHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "executingActorId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 2000
+                      },
+                      "objective": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 8000
+                      },
+                      "scope": {
+                        "minItems": 1,
+                        "maxItems": 512,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "repository",
+                                "path",
+                                "service",
+                                "environment",
+                                "network",
+                                "secret"
+                              ]
+                            },
+                            "id": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 2000
+                            }
+                          },
+                          "required": [
+                            "kind",
+                            "id"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "maximumPrivileges": {
+                        "minItems": 1,
+                        "maxItems": 16,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "fs.read",
+                            "fs.write",
+                            "process.exec",
+                            "service.control",
+                            "deploy",
+                            "remote",
+                            "git.write",
+                            "secret.read",
+                            "network",
+                            "process.spawn",
+                            "process.read",
+                            "process.privileged",
+                            "git.read",
+                            "git.network",
+                            "integration.read",
+                            "integration.write"
+                          ]
+                        }
+                      },
+                      "expiresAt": {
+                        "type": "string",
+                        "maxLength": 64,
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d(?::[0-5]\\d(?:\\.\\d+)?)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                      },
+                      "constraints": {
+                        "type": "object",
+                        "properties": {
+                          "maxRuntimeMs": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 86400000
+                          },
+                          "maxParallelOperations": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 32
+                          },
+                          "failureBehavior": {
+                            "type": "string",
+                            "enum": [
+                              "stop",
+                              "continue_independent"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "maxRuntimeMs",
+                          "maxParallelOperations",
+                          "failureBehavior"
+                        ],
+                        "additionalProperties": false
+                      },
+                      "operations": {
+                        "minItems": 1,
+                        "maxItems": 512,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "operationId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                            },
+                            "runtime": {
+                              "type": "string",
+                              "enum": [
+                                "jace_commander",
+                                "desktop_commander",
+                                "sandbox"
+                              ]
+                            },
+                            "toolName": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                            },
+                            "action": {
+                              "type": "object",
+                              "properties": {
+                                "kind": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128
+                                },
+                                "description": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 4000
+                                },
+                                "params": {
+                                  "type": "object",
+                                  "propertyNames": {
+                                    "type": "string"
+                                  },
+                                  "additionalProperties": {
+                                    "$ref": "#/$defs/__schema0"
+                                  }
+                                }
+                              },
+                              "required": [
+                                "kind",
+                                "description",
+                                "params"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "resources": {
+                              "minItems": 1,
+                              "maxItems": 64,
+                              "type": "array",
+                              "items": {
+                                "type": "object",
+                                "properties": {
+                                  "kind": {
+                                    "type": "string",
+                                    "enum": [
+                                      "repository",
+                                      "path",
+                                      "service",
+                                      "environment",
+                                      "network",
+                                      "secret"
+                                    ]
+                                  },
+                                  "id": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": 2000
+                                  }
+                                },
+                                "required": [
+                                  "kind",
+                                  "id"
+                                ],
+                                "additionalProperties": false
+                              }
+                            },
+                            "requestedPrivileges": {
+                              "minItems": 1,
+                              "maxItems": 16,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "enum": [
+                                  "fs.read",
+                                  "fs.write",
+                                  "process.exec",
+                                  "service.control",
+                                  "deploy",
+                                  "remote",
+                                  "git.write",
+                                  "secret.read",
+                                  "network",
+                                  "process.spawn",
+                                  "process.read",
+                                  "process.privileged",
+                                  "git.read",
+                                  "git.network",
+                                  "integration.read",
+                                  "integration.write"
+                                ]
+                              }
+                            },
+                            "effect": {
+                              "type": "string",
+                              "enum": [
+                                "read_only",
+                                "mutation",
+                                "privileged"
+                              ]
+                            },
+                            "expectedSideEffects": {
+                              "maxItems": 64,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 2000
+                              }
+                            },
+                            "dependsOn": {
+                              "maxItems": 128,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                              }
+                            },
+                            "retry": {
+                              "type": "object",
+                              "properties": {
+                                "maxAttempts": {
+                                  "type": "integer",
+                                  "minimum": 1,
+                                  "maximum": 10
+                                },
+                                "idempotencyKey": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 128,
+                                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                                }
+                              },
+                              "required": [
+                                "maxAttempts",
+                                "idempotencyKey"
+                              ],
+                              "additionalProperties": false
+                            }
+                          },
+                          "required": [
+                            "operationId",
+                            "runtime",
+                            "toolName",
+                            "action",
+                            "resources",
+                            "requestedPrivileges",
+                            "effect",
+                            "expectedSideEffects",
+                            "dependsOn",
+                            "retry"
+                          ],
+                          "additionalProperties": false
+                        }
+                      },
+                      "verification": {
+                        "maxItems": 512,
+                        "type": "array",
+                        "items": {
+                          "type": "object",
+                          "properties": {
+                            "requirementId": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 128,
+                              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                            },
+                            "operationIds": {
+                              "minItems": 1,
+                              "maxItems": 512,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 128,
+                                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                              }
+                            },
+                            "kind": {
+                              "type": "string",
+                              "enum": [
+                                "command_exit",
+                                "tests",
+                                "typecheck",
+                                "lint",
+                                "db_readback",
+                                "http_probe",
+                                "service_state",
+                                "fs_inspect",
+                                "git_sha",
+                                "artifact_hash",
+                                "ci_status",
+                                "independent_review"
+                              ]
+                            },
+                            "expectation": {
+                              "type": "object",
+                              "propertyNames": {
+                                "type": "string"
+                              },
+                              "additionalProperties": {
+                                "$ref": "#/$defs/__schema1"
+                              }
+                            },
+                            "independent": {
+                              "type": "boolean"
+                            }
+                          },
+                          "required": [
+                            "requirementId",
+                            "operationIds",
+                            "kind",
+                            "expectation",
+                            "independent"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    },
+                    "required": [
+                      "schemaVersion",
+                      "missionId",
+                      "subjectInputHash",
+                      "executingActorId",
+                      "objective",
+                      "scope",
+                      "maximumPrivileges",
+                      "expiresAt",
+                      "constraints",
+                      "operations",
+                      "verification"
+                    ],
+                    "additionalProperties": false
+                  },
+                  "expectedHeadHash": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "submissionId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128,
+                    "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+                  }
+                },
+                "required": [
+                  "definition",
+                  "expectedHeadHash",
+                  "submissionId"
+                ],
+                "additionalProperties": false,
+                "$defs": {
+                  "__schema0": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/$defs/__schema0"
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {
+                          "$ref": "#/$defs/__schema0"
+                        }
+                      }
+                    ]
+                  },
+                  "__schema1": {
+                    "anyOf": [
+                      {
+                        "type": "string"
+                      },
+                      {
+                        "type": "number"
+                      },
+                      {
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/$defs/__schema1"
+                        }
+                      },
+                      {
+                        "type": "object",
+                        "propertyNames": {
+                          "type": "string"
+                        },
+                        "additionalProperties": {
+                          "$ref": "#/$defs/__schema1"
+                        }
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Mission not found."
+          },
+          "409": {
+            "description": "Mission, revision, submission or integrity conflict."
+          }
+        }
+      },
+      "get": {
+        "operationId": "getChangeSet",
+        "summary": "Read the current or a historical immutable mission execution snapshot.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Mission or revision not found."
+          },
+          "409": {
+            "description": "Snapshot integrity mismatch."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-sets/progress": {
+      "get": {
+        "operationId": "getChangeSetProgress",
+        "summary": "Reconstruct operation progress and verified completion from canonical persisted evidence.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "404": {
+            "description": "Mission or Change Set not found."
+          },
+          "409": {
+            "description": "Revision or persisted execution integrity mismatch."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/mission-trace": {
+      "get": {
+        "operationId": "getMissionTrace",
+        "summary": "Read a paginated hash-verified mission audit projection spanning parent, children and execution evidence.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          {
+            "name": "afterSequence",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Persisted mission or audit integrity mismatch."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-set-review": {
+      "get": {
+        "operationId": "getChangeSetReviewContext",
+        "summary": "Read canonical result, evidence, requirements and reviews for independent assessment.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "No observed result or invalid persisted execution evidence."
+          }
+        }
+      },
+      "post": {
+        "operationId": "reviewChangeSetOperation",
+        "summary": "Record an independently authenticated review bound to persisted execution evidence.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "attemptId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "evidenceManifestHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  },
+                  "verdict": {
+                    "type": "string",
+                    "enum": [
+                      "PASS",
+                      "NEEDS_CHANGES",
+                      "BLOCK",
+                      "UNKNOWN"
+                    ]
+                  },
+                  "reason": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "attemptId",
+                  "evidenceManifestHash",
+                  "verdict",
+                  "reason"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "Independent reviewer authority required."
+          },
+          "409": {
+            "description": "Result, evidence, reviewer or replay binding conflict."
+          }
+        }
+      }
+    },
+    "/work-items/{id}/change-sets/complete": {
+      "post": {
+        "operationId": "completeChangeSetMission",
+        "summary": "Close the bound mission only after all operation results and required evidence are independently validated.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "anyOf": [
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedManifestHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "approvalId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "expectedManifestHash",
+                      "approvalId"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "expectedManifestHash": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      },
+                      "authorizationId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      }
+                    },
+                    "required": [
+                      "expectedManifestHash",
+                      "authorizationId"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Authority, revision, result, verification or mission state prevents completion."
+          }
+        }
+      }
+    },
+    "/coding-missions": {
+      "post": {
+        "operationId": "createCodingMission",
+        "summary": "Create a coding mission and run autonomous preparation until the approval boundary.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "missionId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "repository": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "baseRef": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "baseSha": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "missionId",
+                  "repository",
+                  "baseRef",
+                  "baseSha",
+                  "summary"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Mission identity, plan, or persisted state conflict."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      },
+      "get": {
+        "operationId": "listCodingMissions",
+        "summary": "List recent coding missions, including those waiting for change-set approval.",
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      }
+    },
+    "/coding-missions/{id}": {
+      "get": {
+        "operationId": "getCodingMission",
+        "summary": "Read the approval-oriented coding mission view, including Change Set identity and execution progress.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Mission is missing or its persisted state conflicts."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      }
+    },
+    "/coding-missions/{id}/approve": {
+      "post": {
+        "operationId": "approveCodingChangeSet",
+        "summary": "Approve one immutable coding Change Set and continue governed execution without another confirmation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "expectedChangeSetHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "expectedChangeSetHash"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Approval does not match the immutable Change Set or the mission is not awaiting approval."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
           }
         }
       }

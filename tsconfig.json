@@ -24,6 +24,7 @@
     { "path": "./packages/result-validation" },
     { "path": "./packages/recovery" },
     { "path": "./packages/publication" },
+    { "path": "./packages/coding-mission" },
     { "path": "packages/verification" },
     { "path": "packages/jev-advisor" },
     { "path": "packages/eval-harness" },

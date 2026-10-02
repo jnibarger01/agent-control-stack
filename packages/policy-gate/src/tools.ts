@@ -18,8 +18,8 @@ import {
 import { isAuthoritativeRoutingEnabled } from "@agent-control-stack/actor-router";
 import { z } from "zod";
 import { evaluateContractAdmission } from "./contracts.js";
-import { ACS_ADMIN_APPROVER } from "./execution-mode.js";
 import { explainPolicy } from "./explain.js";
+import { ACS_ADMIN_APPROVER } from "./execution-mode.js";
 import type { PolicyContext, PolicyDecision, PolicyEngine, PolicyEvaluation, PolicyOperation } from "./policy.js";
 
 export const workItemToolNames = [
@@ -262,27 +262,11 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
-  const adminMode = store.getExecutionMode().mode === "admin";
-  const registeredAgentIds = new Set(store.listRegistryAgents().map((agent) => agent.id));
-  const workerMatchesTarget = (workItem: WorkItem) => {
-    const targetedAgents = (workItem.target.services ?? []).filter((serviceId) => registeredAgentIds.has(serviceId));
-    return targetedAgents.length === 0 || targetedAgents.includes(parsed.workerId);
-  };
   const candidate = store
     .list({ status: "approved" })
-    .filter(
-      (workItem) =>
-        workerMatchesTarget(workItem) &&
-        authoritativeRouteAllows(store, workItem.id, parsed.workerId) &&
-        !workItem.requestedActions.some((action) => {
-          const params = action.params as Record<string, unknown> | undefined;
-          return params?.contract === "acs.jc.v1";
-        }) &&
-        (adminMode ||
-          (!store.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) &&
-            !store.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER)))
-    )
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+    .filter((workItem) => store.isWorkItemEligibleForWorker(workItem, parsed.workerId, ACS_ADMIN_APPROVER))
+    .sort((left, right) => left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id))
+    .find((workItem) => authoritativeRouteAllows(store, workItem.id, parsed.workerId));
   if (!candidate) {
     return undefined;
   }
@@ -386,6 +370,20 @@ function gateWorkerClaimByIdInTransaction(
   if (!candidate || candidate.status !== "approved") {
     return undefined;
   }
+  const assignment = store.getWorkItemAssignment(candidate.id);
+  // A durable assignment is a routing decision, not a hint. A different worker
+  // must never claim it, and must never be handed a parallel work item to claim
+  // instead, because that would let a bridge bypass routing by retrying. Callers
+  // surface this as work_item_assignment_mismatch and an operator must reassign.
+  // findNextApprovedWorkItemForWorker (claim_next_approved_work_item) applies the
+  // same rule by selection rather than by error.
+  if (assignment && assignment.selectedWorkerId !== parsed.workerId) {
+    throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to another worker");
+  }
+  const targetedAgents = (candidate.target.services ?? []).filter((agentId) => store.getRegistryAgent(agentId));
+  if (targetedAgents.length > 0 && !targetedAgents.includes(parsed.workerId)) {
+    throw new ControlStackError("worker_target_mismatch", "work item targets a different registered agent");
+  }
   if (!authoritativeRouteAllows(store, candidate.id, parsed.workerId)) {
     return undefined;
   }
@@ -436,8 +434,10 @@ function gateWorkerClaimByIdInTransaction(
   const running = store.claimApprovedWorkItemById(candidate.id, executionActionHash(candidate), parsed.workerId, {
     leaseMs: parsed.leaseMs,
     adminApprovalActorId: ACS_ADMIN_APPROVER,
-    ...(parsed.executionModeFence === "admin"
-      ? { executionModeFence: { mode: "admin" as const, approvedByActorId: ACS_ADMIN_APPROVER } }
+    ...(parsed.executionModeFence
+      ? {
+          executionModeFence: { mode: "admin" as const, approvedByActorId: ACS_ADMIN_APPROVER }
+        }
       : {}),
     attemptAuthority: {
       planHash: plan.planHash,

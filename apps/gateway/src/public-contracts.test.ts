@@ -30,7 +30,12 @@ type GeneratedClientModule = {
     transport: (request: GeneratedTransportRequest) => Promise<unknown>
   ): Record<
     string,
-    (input?: { path?: Record<string, string>; body?: unknown; headers?: Record<string, string> }) => Promise<unknown>
+    (input?: {
+      path?: Record<string, string>;
+      query?: Record<string, string | number | boolean | undefined>;
+      body?: unknown;
+      headers?: Record<string, string>;
+    }) => Promise<unknown>
   >;
   createGatewayMcpClient(transport: (request: GeneratedTransportRequest) => Promise<unknown>): {
     callTool(
@@ -119,6 +124,13 @@ describe("generated public contract clients", () => {
     })) as { statusCode: number; body: { id: string } };
     expect(created.statusCode).toBe(201);
     expect(created.body.id).toMatch(/^wrk_/);
+    const trace = (await http.getMissionTrace({
+      path: { id: created.body.id },
+      query: { afterSequence: 0, limit: 1 },
+      headers: { authorization: "Bearer test-token" }
+    })) as { statusCode: number; body: { events: unknown[] } };
+    expect(trace.statusCode).toBe(200);
+    expect(trace.body.events).toHaveLength(1);
 
     const listed = (await mcp.callTool(
       "list_work_items",

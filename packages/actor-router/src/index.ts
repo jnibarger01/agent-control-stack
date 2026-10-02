@@ -165,3 +165,18 @@ export {
   resolveNimbleRoutingConfig,
   type NimbleRoutingConfig
 } from "./nimble-config.js";
+export {
+  DEFAULT_NIMBLE_ROUTING_THRESHOLD,
+  NIMBLE_ROUTING_ALGORITHM_VERSION,
+  evaluateNimbleCandidate,
+  routeNimbleActor,
+  validateNimbleRoutingOptions
+} from "./nimble.js";
+export type {
+  ActorNimbleRoutingInput,
+  ActorNimbleRoutingResult,
+  NimbleCandidateResult,
+  NimbleClientOptions,
+  NimbleRoutingState,
+  NimbleRoutingStateInput
+} from "./nimble.js";

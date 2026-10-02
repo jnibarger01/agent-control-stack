@@ -942,3 +942,112 @@ describe("high-risk approval confirm", () => {
     await openConfirm;
   });
 });
+
+describe("assigned agent presentation (#22)", () => {
+  const base = {
+    workItems: [
+      {
+        id: "wrk_a",
+        title: "Mentions an agent service",
+        requester: "user" as const,
+        status: "approved" as const,
+        intent: "do the thing",
+        // The item requests this agent's service. That is eligibility, not assignment.
+        target: { services: ["codex-cli"] },
+        requestedActions: [{ kind: "shell" as const, description: "run", params: {} }],
+        risk: "low" as const,
+        createdAt: "2026-09-22T00:00:00.000Z",
+        updatedAt: "2026-09-22T00:00:00.000Z"
+      },
+      {
+        id: "wrk_b",
+        title: "Actually assigned",
+        requester: "user" as const,
+        status: "approved" as const,
+        intent: "do the other thing",
+        target: {},
+        requestedActions: [{ kind: "shell" as const, description: "run", params: {} }],
+        risk: "low" as const,
+        createdAt: "2026-09-22T00:00:00.000Z",
+        updatedAt: "2026-09-22T00:00:00.000Z"
+      }
+    ],
+    events: [],
+    agents: [
+      {
+        id: "codex-cli",
+        displayName: "Codex CLI",
+        kind: "coding-agent",
+        status: "online" as const,
+        health: "healthy" as const,
+        currentWorkItemId: "wrk_b",
+        capabilities: [],
+        metadata: {}
+      }
+    ],
+    now: new Date("2026-09-22T00:01:00.000Z")
+  };
+
+  it("does not present a merely requested service as an assigned agent", () => {
+    const { window } = new JSDOM(renderDashboard(base)).window;
+    const document = window.document;
+    const cardFor = (id: string) =>
+      document.querySelector(`[data-inspect-work="${id}"]`)?.closest(".mission-card")?.textContent ?? "";
+
+    // wrk_a names the agent's service but no assignment exists for it.
+    expect(cardFor("wrk_a")).toContain("Unassigned");
+    expect(cardFor("wrk_a")).not.toContain("Codex CLI");
+
+    // wrk_b is genuinely assigned via the agent's persisted currentWorkItemId.
+    expect(cardFor("wrk_b")).toContain("Codex CLI");
+  });
+
+  it("does not label any work item assigned when the agent has no current work item", () => {
+    const model = {
+      ...base,
+      agents: [{ ...base.agents![0]!, currentWorkItemId: undefined }]
+    };
+    const { window } = new JSDOM(renderDashboard(model)).window;
+    const document = window.document;
+    for (const card of Array.from(document.querySelectorAll(".mission-card"))) {
+      expect(card.textContent).toContain("Unassigned");
+    }
+  });
+});
+
+describe("readiness has one canonical presentation (#20)", () => {
+  const model = {
+    workItems: [],
+    events: [],
+    readiness: {
+      ok: false,
+      checks: {
+        audit_chain: { ok: true },
+        database: { ok: false, code: "db_write_failed" }
+      }
+    },
+    now: new Date("2026-09-22T00:01:00.000Z")
+  };
+
+  it("renders the readiness check grid once, on the System page", () => {
+    const html = renderDashboard(model);
+    // The per-check diagnostic grid is a System-page presentation only.
+    expect(html.match(/class="system-check-grid"/g) ?? []).toHaveLength(1);
+    // Overview keeps its at-a-glance summary card instead of a second copy.
+    expect(html).toContain("System Readiness");
+    expect(html).not.toContain("Systems Overview");
+    // The unique diagnostic detail is preserved.
+    expect(html).toContain("db_write_failed");
+  });
+
+  it("keeps the overview readiness summary in step with the underlying checks", () => {
+    const degraded = renderDashboard(model);
+    expect(degraded).toContain("Degraded");
+
+    const passing = renderDashboard({
+      ...model,
+      readiness: { ok: true, checks: { audit_chain: { ok: true }, database: { ok: true } } }
+    });
+    expect(passing).toContain("Passing");
+  });
+});
