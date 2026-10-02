@@ -351,17 +351,24 @@ describe("fixture-only migrations", () => {
     // reconstruct an earlier lineage in recovery tests.
     expect(unregistered).toEqual(["037_execution_results_idempotency_unique.sql", "038_admission_permits.sql"]);
 
-    // Each one must say so, so nobody registers or renumbers it by prefix alone.
+    // They must be documented as non-canonical somewhere a reader will look before
+    // registering or renumbering them. The documentation deliberately lives in
+    // migration.ts rather than inside the SQL files: these files are checksummed
+    // recovery identity, so editing their bytes would change the checksum every
+    // already-deployed 37/38 database is validated against.
+    const source = readFileSync(new URL("./migration.ts", import.meta.url), "utf8");
+    // Doc comments wrap, so compare against a whitespace-normalized copy.
+    const prose = source
+      .replace(/\/\*\*?/gu, " ")
+      .replace(/\*\//gu, " ")
+      .replace(/^\s*\*\s?/gmu, " ")
+      .replace(/\s+/gu, " ");
     for (const filename of unregistered) {
-      const sql = readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8");
-      // Comment lines wrap, so compare against a whitespace-normalized copy.
-      const prose = sql.replace(/--/gu, " ").replace(/\s+/gu, " ");
-      expect(prose, `${filename} is missing its non-canonical header`).toMatch(/NON-CANONICAL FIXTURE/u);
-      expect(prose, `${filename} must warn against registering by prefix`).toMatch(
-        /must never be added to the canonical migration order/u
-      );
-      expect(prose, `${filename} must warn against renumbering`).toMatch(/Do not renumber/u);
+      expect(source, `${filename} must be documented as non-canonical`).toContain(filename);
     }
+    expect(prose).toMatch(/non-canonical/iu);
+    expect(prose).toMatch(/must not be added to the canonical migration order/iu);
+    expect(prose).toMatch(/Do not renumber or edit them/iu);
 
     // The canonical migrations keep their distinct identities and are applied once.
     const applied = controlPlaneMigrations().filter((migration) => migration.filename.startsWith("037_"));
@@ -430,6 +437,58 @@ describe("recovery migration 37-38 lineage", () => {
     }
     return db;
   }
+
+  it("recovers a database recorded with the released 37/38 checksums", () => {
+    // Regression guard. The historical lineage shipped from these fixture files, and
+    // a deployed database records that checksum. Editing either file changes the
+    // checksum derived from it, so recovery must also accept the released value.
+    // Without that allowance, every already-deployed 37/38 database fails startup.
+    const released: Record<string, string> = {
+      "037_execution_results_idempotency_unique.sql":
+        "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545",
+      "038_admission_permits.sql": "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
+    };
+    const db = database(36);
+    try {
+      for (const [version, name, filename] of [
+        [37, "execution_results_idempotency_unique", "037_execution_results_idempotency_unique.sql"],
+        [38, "admission_permits", "038_admission_permits.sql"]
+      ] as const) {
+        db.exec(readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8"));
+        db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
+          version,
+          name,
+          filename,
+          released[filename]!,
+          "2026-10-01T00:00:00.000Z"
+        );
+      }
+      // Must not throw: recovery recognises the released checksums.
+      expect(() => applyControlPlaneMigrations(db)).not.toThrow();
+      // And the schema really was brought up to the current version.
+      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toMatchObject({
+        count: controlPlaneMigrations().length
+      });
+    } finally {
+      db.close();
+    }
+  });
+
+  it("pins the 37/38 fixture files to the bytes the lineage deployed", () => {
+    // These files are checksummed recovery identity for a deployed lineage. Editing
+    // one, even to add a comment, changes the checksum every already-deployed 37/38
+    // database is validated against. This test fails loudly if that happens, which is
+    // what makes the released-checksum allowance in migration.ts necessary.
+    const released: Record<string, string> = {
+      "037_execution_results_idempotency_unique.sql":
+        "956ee37aed0a4466fb5a128123398e3ecb8cad3a202224205cbaa83ef7ed8545",
+      "038_admission_permits.sql": "11dbde427fe5d3b3fad1fc1fb1d735bc29b18eb59a3b04cb9c1ee82b6e3e2de5"
+    };
+    for (const [filename, checksum] of Object.entries(released)) {
+      const sql = readFileSync(new URL(`../../../storage/migrations/${filename}`, import.meta.url), "utf8");
+      expect(createHash("sha256").update(sql).digest("hex"), `${filename} was edited`).toBe(checksum);
+    }
+  });
 
   it("detects a historical checksum that does not match the shipped migration SQL", () => {
     const db = recoveryDatabase();

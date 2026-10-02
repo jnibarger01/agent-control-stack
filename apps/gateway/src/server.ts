@@ -2097,7 +2097,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             // Defense in depth: submission already refuses unimplemented kinds, so
             // this can only trigger on tampered persisted state. Same vocabulary.
             if (
-              checks.some((rule) => !(IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS as readonly string[]).includes(rule.kind))
+              checks.some(
+                (rule) => !(IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS as readonly string[]).includes(rule.kind)
+              )
             )
               throw new ControlStackError(
                 "verification_adapter_unavailable",

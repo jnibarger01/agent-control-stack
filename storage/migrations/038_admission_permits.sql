@@ -1,14 +1,3 @@
--- NON-CANONICAL FIXTURE. This file is deliberately NOT registered in
--- `migrationFiles` in packages/shared/src/migration.ts and must never be added to
--- the canonical migration order just because of its numeric prefix.
---
--- It exists only to reconstruct an earlier lineage in migration recovery tests, in
--- which this migration's content shipped under version 38 instead of 39. The
--- canonical migration carrying this content is 039_admission_permits.sql.
--- Do not renumber: recovery and its tests depend on these exact filenames.
---
--- Editing this file changes the checksum that migration recovery derives for the
--- historical 38 layout, which is intentional and is detected as checksum drift.
 -- Persist admission permit bindings across gateway restarts.
 -- Rebuilds the in-memory permit map from active leases on startup.
 CREATE TABLE IF NOT EXISTS admission_permits (

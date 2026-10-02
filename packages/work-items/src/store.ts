@@ -2446,9 +2446,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       // inside this transaction's single database snapshot, so the shared result is
       // never stale with respect to a later mutation.
       const dependencyProgress =
-        operation.dependsOn.length > 0
-          ? this.getChangeSetProgress(permit.missionId, permit.manifestHash)
-          : undefined;
+        operation.dependsOn.length > 0 ? this.getChangeSetProgress(permit.missionId, permit.manifestHash) : undefined;
       for (const dependency of operation.dependsOn) {
         const previous = this.getChangeSetOperationPermitForOperation(
           permit.missionId,
@@ -6811,7 +6809,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
           }).value
         );
         this.db
-          .prepare(`UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+          .prepare(
+            `UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`
+          )
           .run(nowIso, lease.lease_id);
         this.db
           .prepare(`UPDATE leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
@@ -7383,8 +7383,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
       // whether SQLite happened to report SQLITE_BUSY or a UNIQUE constraint. Without
       // this, the loser surfaced a raw database error while the winner returned the
       // idempotent replay, making the contract depend on timing.
-      const isWriteContention =
-        err.code === "ERR_SQLITE_ERROR" && /SQLITE_BUSY|database is locked/i.test(err.message);
+      const isWriteContention = err.code === "ERR_SQLITE_ERROR" && /SQLITE_BUSY|database is locked/i.test(err.message);
       if (isConstraintConflict || isWriteContention) {
         const existing = this.db
           .prepare("SELECT * FROM execution_results WHERE idempotency_key = ?")
