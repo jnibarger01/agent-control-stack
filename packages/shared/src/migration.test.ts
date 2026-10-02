@@ -576,7 +576,9 @@ describe("recovery migration 37-38 lineage", () => {
         name: "admission_permits"
       });
       applyControlPlaneMigrations(db);
-      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: controlPlaneMigrations().length });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
+        count: controlPlaneMigrations().length
+      });
     } finally {
       db.close();
     }
@@ -632,15 +634,25 @@ describe("recovery migration 37-38 lineage", () => {
       ] as const;
       const appliedAt = "2026-10-01T00:00:00.000Z";
       for (const [version, name, filename] of historical) {
-        const sqlFilename = version === 40 ? "041_admission_permit_execution_class.sql"
-          : version === 41 ? "042_change_sets.sql"
-          : version === 42 ? "043_work_item_assignments.sql"
-          : filename === "039_admission_permits.sql" ? "038_admission_permits.sql" : filename;
+        const sqlFilename =
+          version === 40
+            ? "041_admission_permit_execution_class.sql"
+            : version === 41
+              ? "042_change_sets.sql"
+              : version === 42
+                ? "043_work_item_assignments.sql"
+                : filename === "039_admission_permits.sql"
+                  ? "038_admission_permits.sql"
+                  : filename;
         const sql = readFileSync(new URL(`../../../storage/migrations/${sqlFilename}`, import.meta.url), "utf8");
         const checksum = createHash("sha256").update(sql).digest("hex");
         db.exec(sql);
         db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
-          version, name, filename, checksum, appliedAt
+          version,
+          name,
+          filename,
+          checksum,
+          appliedAt
         );
       }
       db.exec(
@@ -682,7 +694,7 @@ describe("recovery migration 37-38 lineage", () => {
       ).toContain("work_items");
 
       applyControlPlaneMigrations(db);
-      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 48 });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 49 });
       expect(
         db
           .prepare(
@@ -707,24 +719,44 @@ describe("recovery migration 37-38 lineage", () => {
       ] as const;
       const appliedAt = "2026-10-01T00:00:00.000Z";
       for (const [version, name, filename] of historical) {
-        const sqlFilename = version === 40 ? "041_admission_permit_execution_class.sql"
-          : version === 41 ? "042_change_sets.sql"
-          : version === 42 ? "043_work_item_assignments.sql"
-          : filename;
+        const sqlFilename =
+          version === 40
+            ? "041_admission_permit_execution_class.sql"
+            : version === 41
+              ? "042_change_sets.sql"
+              : version === 42
+                ? "043_work_item_assignments.sql"
+                : filename;
         const sql = readFileSync(new URL(`../../../storage/migrations/${sqlFilename}`, import.meta.url), "utf8");
         const checksum = createHash("sha256").update(sql).digest("hex");
         db.exec(sql);
-        const historicalFilename = version === 40 ? "040_admission_permit_execution_class.sql"
-          : version === 41 ? "041_change_sets.sql"
-          : version === 42 ? "042_work_item_assignments.sql"
-          : filename;
+        const historicalFilename =
+          version === 40
+            ? "040_admission_permit_execution_class.sql"
+            : version === 41
+              ? "041_change_sets.sql"
+              : version === 42
+                ? "042_work_item_assignments.sql"
+                : filename;
         db.prepare("INSERT INTO schema_migrations VALUES (?, ?, ?, ?, ?)").run(
-          version, name, historicalFilename, checksum, appliedAt
+          version,
+          name,
+          historicalFilename,
+          checksum,
+          appliedAt
         );
       }
       applyControlPlaneMigrations(db);
-      const rows = db.prepare("SELECT version, name, filename FROM schema_migrations WHERE version IN (37, 38, 39, 40, 41, 42, 43, 44) ORDER BY version").all();
-      expect(rows).toEqual(controlPlaneMigrations().filter((migration) => migration.version >= 37 && migration.version <= 44).map(({ version, name, filename }) => ({ version, name, filename })));
+      const rows = db
+        .prepare(
+          "SELECT version, name, filename FROM schema_migrations WHERE version IN (37, 38, 39, 40, 41, 42, 43, 44) ORDER BY version"
+        )
+        .all();
+      expect(rows).toEqual(
+        controlPlaneMigrations()
+          .filter((migration) => migration.version >= 37 && migration.version <= 44)
+          .map(({ version, name, filename }) => ({ version, name, filename }))
+      );
     } finally {
       db.close();
     }

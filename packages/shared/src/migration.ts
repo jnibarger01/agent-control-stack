@@ -127,7 +127,8 @@ const migrationFiles = [
   { version: 45, name: "change_set_approvals", filename: "045_change_set_approvals.sql" },
   { version: 46, name: "change_set_operation_permits", filename: "046_change_set_operation_permits.sql" },
   { version: 47, name: "autonomous_authority", filename: "047_autonomous_authority.sql" },
-  { version: 48, name: "operation_permit_grant_authority", filename: "048_operation_permit_grant_authority.sql" }
+  { version: 48, name: "operation_permit_grant_authority", filename: "048_operation_permit_grant_authority.sql" },
+  { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" }
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {

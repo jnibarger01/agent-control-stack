@@ -152,6 +152,18 @@ const operations = {
     "method": "POST",
     "path": "/work-items/{id}/change-sets/complete"
   },
+  "createCodingMission": {
+    "method": "POST",
+    "path": "/coding-missions"
+  },
+  "getCodingMission": {
+    "method": "GET",
+    "path": "/coding-missions/{id}"
+  },
+  "approveCodingChangeSet": {
+    "method": "POST",
+    "path": "/coding-missions/{id}/approve"
+  },
   "approveWorkItem": {
     "method": "POST",
     "path": "/work-items/{id}/approve"

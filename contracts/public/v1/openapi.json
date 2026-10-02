@@ -2663,6 +2663,172 @@
         }
       }
     },
+    "/coding-missions": {
+      "post": {
+        "operationId": "createCodingMission",
+        "summary": "Create a coding mission and run autonomous preparation until the approval boundary.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "missionId": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 128
+                  },
+                  "repository": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "baseRef": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 256
+                  },
+                  "baseSha": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{40}$"
+                  },
+                  "summary": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  }
+                },
+                "required": [
+                  "missionId",
+                  "repository",
+                  "baseRef",
+                  "baseSha",
+                  "summary"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Mission identity, plan, or persisted state conflict."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      }
+    },
+    "/coding-missions/{id}": {
+      "get": {
+        "operationId": "getCodingMission",
+        "summary": "Read the approval-oriented coding mission view, including Change Set identity and execution progress.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Mission is missing or its persisted state conflicts."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      }
+    },
+    "/coding-missions/{id}/approve": {
+      "post": {
+        "operationId": "approveCodingChangeSet",
+        "summary": "Approve one immutable coding Change Set and continue governed execution without another confirmation.",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                  "expectedChangeSetHash": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "expectedChangeSetHash"
+                ],
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response."
+          },
+          "400": {
+            "description": "Boundary validation failed."
+          },
+          "401": {
+            "description": "Authentication is required."
+          },
+          "403": {
+            "description": "The authenticated principal is not authorized."
+          },
+          "409": {
+            "description": "Approval does not match the immutable Change Set or the mission is not awaiting approval."
+          },
+          "503": {
+            "description": "Coding mission ports are not configured."
+          }
+        }
+      }
+    },
     "/work-items/{id}/approve": {
       "post": {
         "operationId": "approveWorkItem",

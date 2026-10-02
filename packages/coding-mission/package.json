@@ -1,5 +1,5 @@
 {
-  "name": "@agent-control-stack/actor-router",
+  "name": "@agent-control-stack/coding-mission",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -12,6 +12,7 @@
     }
   },
   "dependencies": {
+    "@agent-control-stack/actor-router": "0.1.0",
     "@agent-control-stack/shared": "0.1.0",
     "@agent-control-stack/work-items": "0.1.0"
   }

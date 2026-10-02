@@ -1,3 +1,4 @@
+import { CodingMissionController, type CodingMissionPorts } from "@agent-control-stack/coding-mission";
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import type { ServerResponse } from "node:http";
 import {
@@ -155,6 +156,8 @@ import {
   grantAuthorizationBodySchema,
   changeSetOperationPermitBodySchema,
   changeSetRevocationBodySchema,
+  codingMissionCreateBodySchema,
+  codingMissionApprovalBodySchema,
   changeSetQuerySchema,
   cancelBodySchema,
   capabilitiesBodySchema,
@@ -271,6 +274,8 @@ export interface GatewayJevObservationOptions {
 
 export interface GatewayOptions {
   dbPath?: string;
+  /** Governed ports for autonomous coding missions. Absent ports fail closed. */
+  codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
   logger?: boolean;
   auth?: GatewayAuthOptions;
@@ -376,6 +381,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   const jevObservationOptions = options.jevObservation === false ? undefined : options.jevObservation;
   const jevObservationEnabled =
     options.jevObservation === false ? false : (jevObservationOptions?.enabled ?? process.env.ACS_JEV_ENABLED === "1");
+  const codingMissions = options.codingMissionPorts
+    ? new CodingMissionController(dbPath, options.codingMissionPorts)
+    : undefined;
+  if (codingMissions) {
+    app.addHook("onReady", async () => {
+      await codingMissions.resumeAll();
+    });
+    app.addHook("onClose", async () => {
+      codingMissions.close();
+    });
+  }
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
     heartbeatTtlMs,
@@ -2383,6 +2399,59 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         },
         { via: "policy_gate", actorId }
       );
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/coding-missions", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) return;
+      if (!codingMissions) {
+        return reply
+          .code(503)
+          .send({ error: "coding mission ports are not configured", code: "coding_mission_unconfigured" });
+      }
+      const body = codingMissionCreateBodySchema.parse(request.body);
+      codingMissions.create(body);
+      await codingMissions.runUntilStable(body.missionId);
+      return reply.code(201).send(codingMissions.approvalView(body.missionId));
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>("/coding-missions/:id", async (request, reply) => {
+    try {
+      const credential = gatewayCredentialForRequest(request, auth);
+      if (!credential?.scopes.includes("acs:read")) return reply.code(401).send({ error: "unauthorized" });
+      if (!codingMissions) {
+        return reply
+          .code(503)
+          .send({ error: "coding mission ports are not configured", code: "coding_mission_unconfigured" });
+      }
+      return codingMissions.approvalView(request.params.id);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/coding-missions/:id/approve", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth, "acs:approve");
+      if (!actor) return;
+      if (!codingMissions) {
+        return reply
+          .code(503)
+          .send({ error: "coding mission ports are not configured", code: "coding_mission_unconfigured" });
+      }
+      const body = codingMissionApprovalBodySchema.parse(request.body);
+      await codingMissions.approve(request.params.id, {
+        approverId: actor,
+        expectedChangeSetHash: body.expectedChangeSetHash
+      });
+      return codingMissions.approvalView(request.params.id);
     } catch (error) {
       return sendError(reply, error);
     }

@@ -9,6 +9,7 @@
   "references": [
     { "path": "../../apps/control-ui" },
     { "path": "../../packages/acp-adapter" },
+    { "path": "../../packages/coding-mission" },
     { "path": "../../packages/evidence" },
     { "path": "../../packages/machine-controller" },
     { "path": "../../packages/moa-orchestrator" },

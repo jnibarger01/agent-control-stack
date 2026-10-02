@@ -55,6 +55,20 @@ export const changeSetApprovalBodySchema = changeSetPolicyBodySchema
   })
   .strict();
 export const changeSetRevocationBodySchema = z.object({ reason: z.string().min(1).max(4_000) }).strict();
+export const codingMissionCreateBodySchema = z
+  .object({
+    missionId: z.string().min(1).max(128),
+    repository: z.string().min(1).max(256),
+    baseRef: z.string().min(1).max(256),
+    baseSha: z.string().regex(/^[a-f0-9]{40}$/u),
+    summary: z.string().min(1).max(4000)
+  })
+  .strict();
+export const codingMissionApprovalBodySchema = z
+  .object({
+    expectedChangeSetHash: z.string().regex(/^[a-f0-9]{64}$/u)
+  })
+  .strict();
 export const changeSetQuerySchema = z
   .object({
     revision: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional()
@@ -677,6 +691,41 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     requestSchema: changeSetOperationPermitBodySchema,
     additionalResponses: {
       "409": { description: "Authority, revision, result, verification or mission state prevents completion." }
+    }
+  },
+  {
+    method: "post",
+    path: "/coding-missions",
+    operationId: "createCodingMission",
+    summary: "Create a coding mission and run autonomous preparation until the approval boundary.",
+    requestSchema: codingMissionCreateBodySchema,
+    successStatus: 201,
+    additionalResponses: {
+      "503": { description: "Coding mission ports are not configured." },
+      "409": { description: "Mission identity, plan, or persisted state conflict." }
+    }
+  },
+  {
+    method: "get",
+    path: "/coding-missions/{id}",
+    operationId: "getCodingMission",
+    summary: "Read the approval-oriented coding mission view, including Change Set identity and execution progress.",
+    additionalResponses: {
+      "503": { description: "Coding mission ports are not configured." },
+      "409": { description: "Mission is missing or its persisted state conflicts." }
+    }
+  },
+  {
+    method: "post",
+    path: "/coding-missions/{id}/approve",
+    operationId: "approveCodingChangeSet",
+    summary: "Approve one immutable coding Change Set and continue governed execution without another confirmation.",
+    requestSchema: codingMissionApprovalBodySchema,
+    additionalResponses: {
+      "503": { description: "Coding mission ports are not configured." },
+      "409": {
+        description: "Approval does not match the immutable Change Set or the mission is not awaiting approval."
+      }
     }
   },
   {

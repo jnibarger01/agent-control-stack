@@ -76,6 +76,8 @@ export interface WorkerOptions {
   executionBackend?: ExecutionBackend;
   /** Inject a machine executor (tests only). */
   machineExecutor?: MachineExecutor;
+  /** Resume durable coding missions when the host supplies governed ports. */
+  resumeCodingMissions?: (dbPath: string) => Promise<void>;
 }
 
 export interface WorkerResult {
@@ -167,6 +169,7 @@ export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActi
 
 export async function runWorkerOnce(options: WorkerOptions = {}): Promise<WorkerResult> {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  if (options.resumeCodingMissions) await options.resumeCodingMissions(dbPath);
   const executionBackend = options.executionBackend ?? resolveExecutionBackend();
   const workItems = new SqliteWorkItemStore(dbPath);
   const learning = options.learning ?? new ProceduralLearning(dbPath);
