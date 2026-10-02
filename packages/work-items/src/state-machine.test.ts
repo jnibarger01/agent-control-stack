@@ -965,7 +965,8 @@ describe("work item state machine", () => {
         { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" },
         { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" },
         { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" },
-        { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" }
+        { version: 39, name: "jace_commander_admin_approvals", filename: "039_jace_commander_admin_approvals.sql" },
+        { version: 40, name: "jace_commander_universal_admin", filename: "040_jace_commander_universal_admin.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -1101,7 +1102,8 @@ describe("work item state machine", () => {
         { version: 34 },
         { version: 35 },
         { version: 36 },
-        { version: 39 }
+        { version: 39 },
+        { version: 40 }
       ]);
     } finally {
       db.close();
@@ -1211,7 +1213,7 @@ describe("work item state machine", () => {
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32, 33, 34, 35, 36, 39
+        31, 32, 33, 34, 35, 36, 39, 40
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1287,7 +1289,7 @@ describe("work item state machine", () => {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32, 33, 34, 35, 36, 39
+        31, 32, 33, 34, 35, 36, 39, 40
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([

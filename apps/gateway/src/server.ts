@@ -2133,9 +2133,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   //
   // Mirrors /dc/capability/issue with a separate worker identity, signing key,
   // tool table and issuance table. Canonical admin mode auto-authorizes
-  // ordinary approval-gated JC mutations through the normal approval record,
-  // lease, capability and audit path. privileged_exec (root execution of one
-  // exact argv) remains human-only, and requester self-approval is always denied.
+  // every approval-gated JC mutation through the normal approval record,
+  // lease, capability and audit path, including privileged_exec. Requester
+  // self-approval remains denied.
   app.post(
     "/jc/capability/issue",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
@@ -2307,7 +2307,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
-        if (mode.mode === "admin" && invocation.toolName !== "privileged_exec") {
+        if (mode.mode === "admin") {
           const gate = adminExecutionGate(readAuthority(), true);
           if (!gate.ok) {
             recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
