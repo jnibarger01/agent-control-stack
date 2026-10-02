@@ -1547,19 +1547,28 @@ export class SqliteWorkItemStore implements WorkItemStore {
       1,
       10
     );
-    this.db.exec(`
-      PRAGMA busy_timeout = 5000;
-      PRAGMA journal_mode = WAL;
-      PRAGMA foreign_keys = ON;
-    `);
-    try {
-      applyControlPlaneMigrations(this.db);
-      const initialHealth = inspectControlPlaneDatabase(this.db);
-      this.auditChainValid = initialHealth.checks.auditChain.ok;
-      this.readinessDatabaseChecks = { ...initialHealth.checks };
-    } catch (error) {
-      this.db.close();
-      throw error;
+    // Concurrent first opens (overlapping schedulers) can hold the migration
+    // write lock longer than one busy interval. Retry the same 5s wait instead
+    // of raising the timeout. Give up after three locked attempts.
+    const maxLockedAttempts = 3;
+    for (let attempt = 1; attempt <= maxLockedAttempts; attempt += 1) {
+      try {
+        this.db.exec(`
+          PRAGMA busy_timeout = 5000;
+          PRAGMA journal_mode = WAL;
+          PRAGMA foreign_keys = ON;
+        `);
+        applyControlPlaneMigrations(this.db);
+        const initialHealth = inspectControlPlaneDatabase(this.db);
+        this.auditChainValid = initialHealth.checks.auditChain.ok;
+        this.readinessDatabaseChecks = { ...initialHealth.checks };
+        break;
+      } catch (error) {
+        if (!isSqliteBusy(error) || attempt === maxLockedAttempts) {
+          this.db.close();
+          throw error;
+        }
+      }
     }
   }
 
@@ -9493,6 +9502,15 @@ function assertTestOnlyStoreApiAllowed(apiName: string, nodeEnv = process.env.NO
   if (nodeEnv === "production") {
     throw new ControlStackError("test_only_api_disabled_in_production", `${apiName} is disabled in production`);
   }
+}
+
+function isSqliteBusy(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const sqliteError = error as NodeJS.ErrnoException & { errstr?: string };
+  return (
+    sqliteError.code === "ERR_SQLITE_ERROR" &&
+    /SQLITE_BUSY|database is locked/i.test(`${sqliteError.message} ${sqliteError.errstr ?? ""}`)
+  );
 }
 
 function requirePrivilegedTransition(options: PrivilegedTransitionOptions | undefined, transition: string): void {
