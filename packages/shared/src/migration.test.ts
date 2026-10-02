@@ -694,7 +694,9 @@ describe("recovery migration 37-38 lineage", () => {
       ).toContain("work_items");
 
       applyControlPlaneMigrations(db);
-      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({ count: 49 });
+      expect(db.prepare("SELECT COUNT(*) AS count FROM schema_migrations").get()).toEqual({
+        count: controlPlaneMigrations().length
+      });
       expect(
         db
           .prepare(
