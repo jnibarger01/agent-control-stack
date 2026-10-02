@@ -12,7 +12,9 @@
     }
   },
   "dependencies": {
+    "@agent-control-stack/actor-router": "0.1.0",
     "@agent-control-stack/advisory": "0.1.0",
+    "@agent-control-stack/execution-admission": "0.1.0",
     "@agent-control-stack/jev-advisor": "0.1.0",
     "@agent-control-stack/shared": "0.1.0",
     "@agent-control-stack/work-items": "0.1.0",

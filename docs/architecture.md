@@ -15,6 +15,17 @@ lifecycle, result authority, or canonical audit sink. Migration notes from the
 retired OpenClaw Agent Orchestrator are captured in
 [`openclaw-agent-orchestrator-migration.md`](openclaw-agent-orchestrator-migration.md).
 
+## Routing
+
+Eligible approved operations are routed by `decideAuthoritativeRoute` in
+`packages/actor-router`. ACS removes executors that fail capability, health,
+authorization, execution-mode, operator, or capacity checks, then asks the
+configured Nimble model to choose among what remains. A valid choice is the
+dispatch. Timeout, transport failure, a malformed response, an unknown
+executor, or low confidence uses the deterministic score fallback and records
+why. JEV stays advisory telemetry and is not a second router. The historical
+Mission Router inventory is not an execution authority.
+
 ## Layers
 
 - `packages/shared`: IDs, redaction, errors, hash helpers, migrations, and OpenTelemetry-shaped event schemas.
