@@ -102,6 +102,7 @@ const migrationFiles = [
     name: "execution_results_idempotency_unique",
     filename: "038_execution_results_idempotency_unique.sql"
   },
+<<<<<<< Updated upstream
   {
     version: 39,
     name: "jace_commander_admin_approvals",
@@ -129,6 +130,16 @@ const migrationFiles = [
   { version: 47, name: "autonomous_authority", filename: "047_autonomous_authority.sql" },
   { version: 48, name: "operation_permit_grant_authority", filename: "048_operation_permit_grant_authority.sql" },
   { version: 49, name: "coding_missions", filename: "049_coding_missions.sql" }
+=======
+  { version: 39, name: "admission_permits", filename: "039_admission_permits.sql" },
+  {
+    version: 40,
+    name: "admission_permit_execution_class",
+    filename: "040_admission_permit_execution_class.sql"
+  },
+  { version: 41, name: "change_sets", filename: "041_change_sets.sql" },
+  { version: 42, name: "work_item_assignments", filename: "042_work_item_assignments.sql" }
+>>>>>>> Stashed changes
 ] as const;
 
 export function controlPlaneMigrations(): ControlPlaneMigration[] {
@@ -688,6 +699,9 @@ function migrationSqlForCurrentSchema(db: SqliteLike, migration: ControlPlaneMig
       }
     }
     return sql;
+  }
+  if (migration.version === 40 && hasColumn(db, "admission_permits", "execution_class")) {
+    return "SELECT 1;";
   }
   return migration.sql;
 }

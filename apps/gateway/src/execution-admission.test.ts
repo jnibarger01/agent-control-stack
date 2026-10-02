@@ -65,7 +65,11 @@ function createGateway(
     logger: false,
     auth: { token: "", actor: "user", actorId: "user", credentials },
     executionAdmission,
+<<<<<<< Updated upstream
     shutdownController,
+=======
+    ...(shutdownController ? { shutdownController } : {}),
+>>>>>>> Stashed changes
     desktopCommanderCapability: {
       runtimeId: DC_RUNTIME,
       keyId: "dc-admission-key",
@@ -240,7 +244,7 @@ async function submitDcResult(app: ReturnType<typeof buildGateway>, body: Record
   });
 }
 
-async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record<string, any>) {
+async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record<string, any>, summary = "done") {
   const now = new Date().toISOString();
   return app.inject({
     method: "POST",
@@ -259,7 +263,7 @@ async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record
       outcome: "succeeded",
       startedAt: now,
       finishedAt: now,
-      summary: "done",
+      summary,
       structuredOutput: {},
       artifacts: [],
       simulationMetadata: {
@@ -275,6 +279,7 @@ async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record
 }
 
 describe("gateway execution admission integration", () => {
+<<<<<<< Updated upstream
   it("fences an orphaned active bridge lease and recovers readiness without operator action", async () => {
     const ctx = buildFixture();
     try {
@@ -316,11 +321,36 @@ describe("gateway execution admission integration", () => {
       const after = await ctx.app.inject({ method: "GET", url: "/readyz" });
       expect(after.statusCode).toBe(200);
     } finally {
+=======
+  it("fails closed after restart if a managed active lease has no durable admission binding", async () => {
+    const ctx = buildFixture();
+    let reopened: ReturnType<typeof buildGateway> | undefined;
+    try {
+      const issued = await issueJc(ctx.app);
+      expect(issued.statusCode, issued.body).toBe(200);
+      await ctx.app.close();
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        db.prepare("DELETE FROM admission_permits WHERE attempt_id = ?").run(issued.json().attemptId);
+      } finally {
+        db.close();
+      }
+      const scheduler = new ExecutionAdmissionScheduler();
+      reopened = createGateway(ctx.root, scheduler).app;
+      const next = await issueJc(reopened, "chatgpt:next", "client-next");
+      expect(next.statusCode, next.body).toBe(503);
+      expect(next.json()).toMatchObject({ code: "admission_recovery_required" });
+      expect(next.json().capability).toBeUndefined();
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+    } finally {
+      await reopened?.close();
+>>>>>>> Stashed changes
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
     }
   });
 
+<<<<<<< Updated upstream
   it("never fences a permit-backed lease as an orphan", async () => {
     const ctx = buildFixture();
     try {
@@ -511,6 +541,21 @@ describe("gateway execution admission integration", () => {
       }
       const rejected = await issueDc(ctx.app, ctx.root);
       expect(rejected.statusCode).toBe(500);
+=======
+  it("rolls back the claim and lease if durable admission binding cannot commit", async () => {
+    const ctx = buildFixture();
+    try {
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        db.exec(`CREATE TRIGGER reject_admission_binding BEFORE INSERT ON admission_permits
+          BEGIN SELECT RAISE(ABORT, 'test admission persistence failure'); END`);
+      } finally {
+        db.close();
+      }
+      const issued = await issueJc(ctx.app);
+      expect(issued.statusCode).toBe(500);
+      expect(issued.json().capability).toBeUndefined();
+>>>>>>> Stashed changes
       expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 0, activeLeases: 0 });
       expect(ctx.scheduler.snapshot().global.active).toBe(0);
     } finally {
@@ -519,6 +564,7 @@ describe("gateway execution admission integration", () => {
     }
   });
 
+<<<<<<< Updated upstream
   it.each(["execution_class", "worker_id", "action_hash"])(
     "fails closed after restart with a corrupted reservation %s",
     async (column) => {
@@ -534,6 +580,27 @@ describe("gateway execution admission integration", () => {
           db.prepare(`UPDATE admission_permits SET ${column} = ?`).run(
             column === "execution_class" ? "wait" : "corrupt"
           );
+=======
+  it.each(["execution", "wait"] as const)(
+    "recovers %s capacity after shutdown and releases it only on a canonical result",
+    async (executionClass) => {
+      const ctx = buildFixture();
+      let reopened: ReturnType<typeof buildGateway> | undefined;
+      try {
+        const issued =
+          executionClass === "wait"
+            ? await issueJcTool(ctx.app, "read_process_output", { sessionId: "session-recovery" })
+            : await issueJc(ctx.app);
+        expect(issued.statusCode, issued.body).toBe(200);
+        const claim = issued.json();
+        await ctx.app.close();
+
+        const db = new DatabaseSync(ctx.dbPath, { readOnly: true });
+        try {
+          expect(
+            db.prepare("SELECT execution_class FROM admission_permits WHERE attempt_id = ?").get(claim.attemptId)
+          ).toEqual({ execution_class: executionClass });
+>>>>>>> Stashed changes
         } finally {
           db.close();
         }
@@ -546,6 +613,7 @@ describe("gateway execution admission integration", () => {
             waitMaxInflight: 1
           }
         });
+<<<<<<< Updated upstream
         resumed = createGateway(ctx.root, scheduler).app;
         const rejected = await issueJc(resumed);
         expect(rejected.statusCode).toBe(503);
@@ -554,11 +622,28 @@ describe("gateway execution admission integration", () => {
         expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
       } finally {
         await (resumed ?? ctx.app).close();
+=======
+        reopened = createGateway(ctx.root, scheduler).app;
+        expect(scheduler.snapshot()).toMatchObject({
+          global: { active: executionClass === "execution" ? 1 : 0 },
+          wait: { active: executionClass === "wait" ? 1 : 0 }
+        });
+        const result = await submitJcResult(reopened, claim);
+        expect(result.statusCode, result.body).toBe(201);
+        expect(scheduler.snapshot()).toMatchObject({ global: { active: 0 }, wait: { active: 0 } });
+        const replay = await submitJcResult(reopened, claim, "conflicting result");
+        expect(replay.statusCode).toBe(409);
+        expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 0 });
+      } finally {
+        await reopened?.close();
+        await ctx.app.close();
+>>>>>>> Stashed changes
         rmSync(ctx.root, { recursive: true, force: true });
       }
     }
   );
 
+<<<<<<< Updated upstream
   it("does not release capacity when a result has the wrong fencing epoch", async () => {
     const ctx = buildFixture();
     try {
@@ -578,6 +663,8 @@ describe("gateway execution admission integration", () => {
     }
   });
 
+=======
+>>>>>>> Stashed changes
   it("does not claim or create a lease before DC admission, then releases on canonical result", async () => {
     const ctx = buildFixture();
     try {
@@ -686,19 +773,26 @@ describe("gateway execution admission integration", () => {
     }
   });
 
+<<<<<<< Updated upstream
   it("retains admission while a lease remains active after DC capability issuance fails", async () => {
+=======
+  it("retains admission for an active lease when post-claim DC capability issuance fails", async () => {
+>>>>>>> Stashed changes
     const ctx = buildFixture();
     try {
       const failed = await issueDc(ctx.app, ctx.root);
       expect(failed.statusCode).toBe(403);
       expect(ctx.scheduler.snapshot().global.active).toBe(1);
       expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+<<<<<<< Updated upstream
       const db = new DatabaseSync(ctx.dbPath, { readOnly: true });
       try {
         expect(db.prepare("SELECT COUNT(*) AS count FROM admission_permits").get()).toEqual({ count: 1 });
       } finally {
         db.close();
       }
+=======
+>>>>>>> Stashed changes
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });

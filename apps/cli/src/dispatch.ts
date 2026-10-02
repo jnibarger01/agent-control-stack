@@ -117,6 +117,7 @@ export function formatExecutionModeStatus(dbPath = defaultDbPath()): { text: str
   }
 }
 
+<<<<<<< Updated upstream
 export function setExecutionModeFromCli(
   mode: "strict" | "admin",
   dbPath = defaultDbPath()
@@ -127,6 +128,9 @@ export function setExecutionModeFromCli(
       ok: false
     };
   }
+=======
+export function setExecutionModeFromCli(mode: "strict", dbPath = defaultDbPath()): { text: string; ok: boolean } {
+>>>>>>> Stashed changes
   const store = new SqliteWorkItemStore(dbPath, { heartbeatTtlMs: DEFAULT_HEARTBEAT_TTL_MS });
   try {
     store.setExecutionMode({ mode, updatedBy: "acs-cli", reason: `acs mode ${mode}` });

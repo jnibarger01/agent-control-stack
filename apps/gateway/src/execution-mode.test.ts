@@ -31,6 +31,30 @@ const credentials: GatewayCredential[] = [
     actorId: "acs-dc-bridge",
     roles: ["service", "worker"],
     scopes: ["acs:read", "acs:write", "acs:worker"]
+  },
+  {
+    id: "write-only-operator",
+    token: "write-only-operator-token",
+    actor: "user",
+    actorId: "write-only-operator",
+    roles: ["operator"],
+    scopes: ["acs:read", "acs:write"]
+  },
+  {
+    id: "agent-approver",
+    token: "agent-approver-token",
+    actor: "agent",
+    actorId: "agent-approver",
+    roles: ["operator", "worker"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  },
+  {
+    id: "service-approver",
+    token: "service-approver-token",
+    actor: "system",
+    actorId: "service-approver",
+    roles: ["service"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
   }
 ];
 
@@ -277,6 +301,40 @@ describe("canonical execution mode", () => {
       // Strict: the admin banner is rendered hidden and empty (the live
       // dashboard toggles it in place instead of hard-reloading).
       expect(page.body).toMatch(/<div id="admin-mode-banner" class="admin-mode-banner" role="alert" hidden><\/div>/u);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects global admin changes from write-only, agent, and service credentials", async () => {
+    const ctx = await gateway();
+    try {
+      for (const [token, expectedCode] of [
+        ["write-only-operator-token", "insufficient_gateway_scope"],
+        ["agent-approver-token", "human_operator_required"],
+        ["service-approver-token", "human_operator_required"]
+      ] as const) {
+        const response = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${token}` },
+          payload: { mode: "admin", reason: "must not self-grant global authority" }
+        });
+        expect(response.statusCode).toBe(403);
+        expect(response.json().code).toBe(expectedCode);
+      }
+
+      const mode = await ctx.app.inject({ method: "GET", url: "/execution-mode", headers: AUTH });
+      expect(mode.json()).toMatchObject({ executionMode: "strict", approvalPolicy: "policy" });
+      const switched = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "admin", reason: "authorized operator action" }
+      });
+      expect(switched.statusCode).toBe(200);
+      expect(switched.json()).toMatchObject({ executionMode: "admin", approvalPolicy: "auto" });
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
