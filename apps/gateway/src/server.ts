@@ -849,7 +849,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       try {
-        const actor = requireHumanOperatorActor(request, reply, auth);
+        const actor = requireHumanOperatorActor(request, reply, auth, (credential, code) => {
+          workItems.recordSystemEvent({
+            name: "execution_mode.change_denied",
+            body: { decision: "deny", code, credentialId: credential.id },
+            attributes: {
+              "actor.id": mutationActorForCredential(credential),
+              "actor.type": credential.actor,
+              "request.id": request.id
+            }
+          });
+        });
         if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
         workItems.setExecutionMode({
@@ -3845,7 +3855,8 @@ function requireMutationActor(
 function requireHumanOperatorActor(
   request: FastifyRequest,
   reply: FastifyReply,
-  auth: GatewayAuthOptions | undefined
+  auth: GatewayAuthOptions | undefined,
+  recordDenial: (credential: GatewayCredential, code: string) => void
 ): string | undefined {
   if (!auth) {
     reply.code(503).send({ error: "mutation auth is not configured" });
@@ -3857,15 +3868,17 @@ function requireHumanOperatorActor(
     return undefined;
   }
   if (
-    credential.actor !== "user" ||
+    (credential.actor !== "user" && credential.actor !== "operator") ||
     !credential.roles.includes("operator") ||
     credential.roles.includes("service") ||
     credential.roles.includes("worker")
   ) {
+    recordDenial(credential, "human_operator_required");
     reply.code(403).send({ error: "human operator credential is required", code: "human_operator_required" });
     return undefined;
   }
   if (!credential.scopes.includes("acs:approve")) {
+    recordDenial(credential, "insufficient_gateway_scope");
     reply.code(403).send({ error: "acs:approve scope is required", code: "insufficient_gateway_scope" });
     return undefined;
   }

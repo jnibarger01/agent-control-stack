@@ -2,6 +2,7 @@ import { createPrivateKey, createPublicKey, generateKeyPairSync, verify } from "
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 import { strictCanonicalJsonV1 } from "@agent-control-stack/shared";
 import { ACS_ADMIN_APPROVER, type ManagedAuthorityObservation } from "@agent-control-stack/policy-gate";
 import { describe, expect, it } from "vitest";
@@ -23,6 +24,14 @@ const credentials: GatewayCredential[] = [
     actorId: "user",
     roles: ["operator"],
     scopes: ["acs:read", "acs:write", "acs:approve"]
+  },
+  {
+    id: "production-operator",
+    token: "production-operator-token",
+    actor: "operator",
+    actorId: "production-operator",
+    roles: ["operator"],
+    scopes: ["acs:read", "acs:approve"]
   },
   {
     id: "dc-bridge",
@@ -176,6 +185,31 @@ describe("canonical execution mode", () => {
     }
   });
 
+  it("accepts the documented production operator identity and attributes mode changes", async () => {
+    const ctx = await gateway();
+    try {
+      for (const mode of ["admin", "strict"] as const) {
+        const response = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: "Bearer production-operator-token" },
+          payload: { mode }
+        });
+        expect(response.statusCode, response.body).toBe(200);
+        expect(response.json().executionMode).toBe(mode);
+      }
+      const store = new SqliteWorkItemStore(join(ctx.root, "control.db"));
+      try {
+        expect(store.getExecutionMode().updatedBy).toBe("production-operator");
+      } finally {
+        store.close();
+      }
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
   it("rejects global admin changes from write-only, agent, and service credentials", async () => {
     const ctx = await gateway();
     try {
@@ -188,10 +222,35 @@ describe("canonical execution mode", () => {
           method: "POST",
           url: "/execution-mode",
           headers: { authorization: `Bearer ${token}` },
-          payload: { mode: "admin", reason: "must not self-grant global authority" }
+          payload: { mode: "admin", reason: "secret-request-body-must-not-be-audited" }
         });
         expect(response.statusCode).toBe(403);
         expect(response.json().code).toBe(expectedCode);
+      }
+
+      const store = new SqliteWorkItemStore(join(ctx.root, "control.db"));
+      try {
+        const denied = store.readEvents({ name: "execution_mode.change_denied" });
+        expect(denied).toHaveLength(3);
+        expect(denied.map((event) => event.attributes["actor.id"])).toEqual([
+          "write-only-operator",
+          "agent-approver",
+          "service-approver"
+        ]);
+        expect(denied.map((event) => event.body.code)).toEqual([
+          "insufficient_gateway_scope",
+          "human_operator_required",
+          "human_operator_required"
+        ]);
+        for (const event of denied) {
+          expect(event.body.decision).toBe("deny");
+          expect(event.body.credentialId).toBeTypeOf("string");
+          expect(event.attributes["request.id"]).toBeTypeOf("string");
+        }
+        expect(JSON.stringify(denied)).not.toContain("secret-request-body");
+        for (const credential of credentials) expect(JSON.stringify(denied)).not.toContain(credential.token);
+      } finally {
+        store.close();
       }
 
       const mode = await ctx.app.inject({ method: "GET", url: "/execution-mode", headers: AUTH });
