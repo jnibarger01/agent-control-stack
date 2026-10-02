@@ -8,6 +8,7 @@
   "include": ["src/**/*.ts"],
   "references": [
     { "path": "../actor-router" },
+    { "path": "../execution-admission" },
     { "path": "../shared" },
     { "path": "../work-items" },
     { "path": "../advisory" },
