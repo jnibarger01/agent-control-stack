@@ -60,21 +60,24 @@ const DC_CMD = process.env.DC_CMD || '/home/linuxbrew/.linuxbrew/bin/node';
 // on a stale checkout advertised a stale (or empty) Jace Commander tool list.
 const MONOREPO_DC_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../vendor/desktop-commander');
 const JC_DIR = path.resolve(process.env.JC_DC_DIR || MONOREPO_DC_DIR);
-const DEFAULT_DC_ARGS = MANAGED
-  ? '/home/jacen/projects/desktop-commander/dist/index.js'
-  : '/home/jacen/projects/desktop-commander/dist/index.js --standalone';
-// The JC default is built as an argv array so a JC_DC_DIR containing spaces
-// stays one argument (DC_ARGS is whitespace-split).
+// Managed mode must launch the runtime that ACS actually attested. There is no
+// default Desktop Commander entrypoint: the previous fallback pointed at a
+// hardcoded developer checkout under /home/jacen, so a packaged deployment that
+// forgot DC_ARGS would launch that tree instead of failing closed. Configure
+// DC_ARGS explicitly, or ACS_DC_RELEASE_DIR for the verified release path.
 const DC_ARGS = process.env.DC_ARGS
   ? process.env.DC_ARGS.split(' ')
   : JC
     ? [path.join(JC_DIR, 'dist/jace-commander/cli.js'), 'serve']
-    : DEFAULT_DC_ARGS.split(' ');
+    : (() => {
+        console.error('bridge: DC_ARGS is required when JC_DC_DIR is not in use; refusing to guess a Desktop Commander entrypoint');
+        process.exit(1);
+      })();
 if (MANAGED && DC_ARGS.includes('--standalone')) {
   console.error('bridge: managed mode refuses a --standalone executor; fix DC_ARGS');
   process.exit(1);
 }
-const DC_CWD = JC ? JC_DIR : process.env.DC_CWD || '/home/jacen/projects/desktop-commander';
+const DC_CWD = JC ? JC_DIR : process.env.DC_CWD || path.dirname(DC_ARGS[0]);
 const EXECUTION_TOKEN = process.env.DC_GATEWAY_EXECUTION_TOKEN || '';
 const GATEWAY_ATTESTATION_KEY = process.env.DC_GATEWAY_ATTESTATION_KEY || '';
 const PIPELINE_ACS_PUBLIC_KEY = process.env.DC_ACS_CAPABILITY_PUBLIC_KEY || '';

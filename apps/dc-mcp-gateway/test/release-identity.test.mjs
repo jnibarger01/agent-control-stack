@@ -112,3 +112,34 @@ test('missing executable hash cannot authorize a pinned Node version probe', () 
     assert.equal(fs.existsSync(marker), false);
   } finally { fs.rmSync(f.root, { recursive: true, force: true }); }
 });
+
+test('unpackaged development requires an explicit entrypoint and never guesses a checkout', () => {
+  const f = fixture();
+  const devEnv = {
+    DESKTOP_COMMANDER_STATE_DIR: f.state,
+    ACS_DC_RUNTIME_SCOPES: 'fs.read,process.exec'
+  };
+
+  // No entrypoint configured: fail closed rather than falling back to a
+  // developer checkout under /home/jacen.
+  assert.equal(dcRuntimeIdentityFromState(devEnv), null);
+
+  // An explicit development override is honoured and hashed.
+  const override = path.join(f.root, 'dev', 'dist', 'index.js');
+  fs.mkdirSync(path.dirname(override), { recursive: true });
+  fs.writeFileSync(override, 'development entrypoint');
+  const explicit = { ...devEnv, ACS_DC_ENTRYPOINT: override };
+  const identity = dcRuntimeIdentityFromState(explicit);
+  assert.equal(identity.runtimeId, 'fixture-runtime');
+  assert.equal(
+    identity.identityConfigFingerprint,
+    crypto.createHash('sha256').update(fs.readFileSync(override)).digest('hex')
+  );
+
+  // A relative override is refused: managed runtime identity must not depend on cwd.
+  assert.equal(dcRuntimeIdentityFromState({ ...devEnv, ACS_DC_ENTRYPOINT: 'dist/index.js' }), null);
+
+  // The packaged release path is unaffected and still prefers the verified digest.
+  const released = dcRuntimeIdentityFromState(f.env);
+  assert.equal(released.identityConfigFingerprint, f.metadata.runtimeIdentityDigest);
+});

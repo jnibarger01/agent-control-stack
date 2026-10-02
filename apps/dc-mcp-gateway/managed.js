@@ -113,7 +113,14 @@ export function dcRuntimeIdentityFromState(env = process.env) {
       if (Object.hasOwn(env, 'ACS_DC_ENTRYPOINT') && env.ACS_DC_ENTRYPOINT !== expectedEntrypoint) return null;
       identityConfigFingerprint = release.runtimeIdentityDigest;
     } else {
-      const entrypoint = env.ACS_DC_ENTRYPOINT || '/home/jacen/projects/desktop-commander/dist/index.js';
+      // Unpackaged development. The entrypoint must be configured explicitly: this
+      // code previously fell back to a hardcoded developer checkout under
+      // /home/jacen, so a packaged deployment that lacked ACS_DC_RELEASE_DIR would
+      // silently bind to a developer's working tree instead of failing closed.
+      // Packaged deployments configure ACS_DC_RELEASE_DIR and take the verified
+      // release path above.
+      const entrypoint = env.ACS_DC_ENTRYPOINT;
+      if (typeof entrypoint !== 'string' || !entrypoint || !path.isAbsolute(entrypoint)) return null;
       identityConfigFingerprint = crypto.createHash('sha256').update(fs.readFileSync(entrypoint)).digest('hex');
     }
     return {
