@@ -128,6 +128,14 @@ import {
 import { z, ZodError } from "zod";
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from "fastify";
 import {
+  McpClientService,
+  parseMcpClientPolicy,
+  sanitizeClaim,
+  type McpClientPolicy,
+  type McpLane
+} from "./mcp-clients.js";
+import { registerMcpClientRoutes } from "./mcp-client-routes.js";
+import {
   authorizeMcpRequest,
   createProtectedResourceMetadata,
   MCP_SCOPES,
@@ -281,6 +289,8 @@ export interface GatewayOptions {
   /** Governed ports for autonomous coding missions. Absent ports fail closed. */
   codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
+  /** `observe` (default) or `require_label`. Defaults to ACS_MCP_CLIENT_POLICY. */
+  mcpClientPolicy?: McpClientPolicy;
   logger?: boolean;
   auth?: GatewayAuthOptions;
   mcpAuth?: McpAuthOptions;
@@ -396,6 +406,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       codingMissions.close();
     });
   }
+  // Declared before the store: the store's event hook can fire while it is still being constructed.
+  let mcpClients: McpClientService | undefined;
   const workItems = new SqliteWorkItemStore(dbPath, {
     onEvent: broadcast,
     heartbeatTtlMs,
@@ -403,6 +415,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     traceConfigValidation: "eager",
     observationEnabled: jevObservationEnabled
   });
+  const mcpClientService = new McpClientService(workItems, options.mcpClientPolicy ?? parseMcpClientPolicy());
+  // eslint-disable-next-line prefer-const -- the store hook above may fire before this assignment
+  mcpClients = mcpClientService;
+  mcpClientService.hydrate();
   const observationWorker: JevObservationWorkerLifecycle | undefined = jevObservationEnabled
     ? (jevObservationOptions?.createWorker?.(workItems) ?? new ObservationWorker(workItems))
     : undefined;
@@ -936,6 +952,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       });
     }
   });
+  app.addHook("onResponse", async (request) => {
+    mcpCallContexts.delete(request.id);
+  });
   app.addHook("onResponse", async (request, reply) => {
     metrics.observeRequest(
       request.method,
@@ -989,6 +1008,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   function broadcast(event: StoredAuditEvent): void {
     metrics.increment("acs_audit_events_total", { event_name: event.name });
+    try {
+      mcpClients?.ingest(event);
+    } catch {
+      // The client index is a read model; a bad event must never stop the live stream.
+    }
     const frame = `event: ${event.name}\ndata: ${JSON.stringify(event)}\n\n`;
     for (const client of sseClients) {
       try {
@@ -1661,6 +1685,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     } catch (error) {
       return sendError(reply, error);
     }
+  });
+
+  registerMcpClientRoutes({
+    app,
+    service: mcpClientService,
+    requireRead,
+    requireHumanActor: (request, reply) => requireHumanApprovalActor(request, reply, auth),
+    requireBridge: (request, reply) => requireWorkerIdentity(request, reply, auth),
+    laneForBridge: (workerId) =>
+      workerId === JC_BRIDGE_WORKER_ID ? "jc" : workerId === DC_BRIDGE_WORKER_ID ? "dc" : undefined,
+    sendError
   });
 
   app.get<{ Params: { id: string } }>("/api/agents/:id", { preHandler: requireRead }, async (request, reply) => {
@@ -2603,6 +2638,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           return reply.code(400).send({ error: "x-dc-actor header is required", code: "dc_actor_invalid" });
         }
         const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
+        const dcAdmission = admitMcpCaller("dc", request, body.client_id);
+        if (!dcAdmission.ok) {
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied");
+          return reply.code(403).send({
+            decision: "deny",
+            reason: "mcp_client_unlabelled",
+            code: "mcp_client_unlabelled",
+            detail: dcAdmission.detail
+          });
+        }
         if (!capabilitySigningConfig || !dcContainment) {
           return reply
             .code(503)
@@ -3111,6 +3156,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           return reply.code(400).send({ error: "x-jc-actor header is required", code: "jc_actor_invalid" });
         }
         const body = dcCapabilityIssueSchema.parse(requestObject(request.body));
+        const jcAdmission = admitMcpCaller("jc", request, body.client_id);
+        if (!jcAdmission.ok) {
+          recordJcCapabilityAudit(workerId, request.id, body.tool, jcActor, "denied");
+          return reply.code(403).send({
+            decision: "deny",
+            reason: "mcp_client_unlabelled",
+            code: "mcp_client_unlabelled",
+            detail: jcAdmission.detail
+          });
+        }
         if (!jcSigningConfig) {
           return reply.code(503).send({
             error: "jace-commander capability issuance not configured",
@@ -3965,6 +4020,48 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   }
 
+  /**
+   * Who the edge says is calling, kept per request so every audit helper can attach it without changing
+   * its call sites. `clientId` is the verified OAuth client; the claim fields are self-declared.
+   */
+  const mcpCallContexts = new Map<
+    string,
+    { clientId: string; lane: McpLane; name?: string; version?: string; userAgent?: string }
+  >();
+  function mcpCallAttribution(requestId: string) {
+    const context = mcpCallContexts.get(requestId);
+    if (!context) return {};
+    return {
+      mcpClientId: context.clientId,
+      mcpLane: context.lane,
+      ...(context.name ? { mcpClientName: context.name } : {}),
+      ...(context.version ? { mcpClientVersion: context.version } : {}),
+      ...(context.userAgent ? { mcpUserAgent: context.userAgent } : {})
+    };
+  }
+  /** Record the caller for this request and apply the optional require_label policy. Only ever denies. */
+  function admitMcpCaller(
+    lane: McpLane,
+    request: FastifyRequest,
+    clientId: string
+  ): { ok: true } | { ok: false; detail: string } {
+    mcpCallContexts.set(request.id, {
+      clientId,
+      lane,
+      ...(sanitizeClaim(firstHeader(request.headers["x-mcp-client-name"]))
+        ? { name: sanitizeClaim(firstHeader(request.headers["x-mcp-client-name"]))! }
+        : {}),
+      ...(sanitizeClaim(firstHeader(request.headers["x-mcp-client-version"]), 64)
+        ? { version: sanitizeClaim(firstHeader(request.headers["x-mcp-client-version"]), 64)! }
+        : {}),
+      ...(sanitizeClaim(firstHeader(request.headers["x-mcp-user-agent"]), 200)
+        ? { userAgent: sanitizeClaim(firstHeader(request.headers["x-mcp-user-agent"]), 200)! }
+        : {})
+    });
+    const gate = mcpClientService.gate(clientId);
+    return gate.ok ? { ok: true } : { ok: false, detail: gate.detail };
+  }
+
   function recordJcCapabilityAudit(
     actor: string,
     requestId: string,
@@ -3981,7 +4078,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       workItemId,
       requestId,
       authMethod: "gateway_bearer",
-      authSubject: jcActor
+      authSubject: jcActor,
+      ...mcpCallAttribution(requestId)
     });
   }
 
@@ -4001,7 +4099,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       workItemId,
       requestId,
       authMethod: "gateway_bearer",
-      authSubject: dcActor
+      authSubject: dcActor,
+      ...mcpCallAttribution(requestId)
     });
   }
 

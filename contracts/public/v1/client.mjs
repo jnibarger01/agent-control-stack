@@ -220,6 +220,22 @@ const operations = {
     "method": "POST",
     "path": "/api/agents"
   },
+  "listMcpClients": {
+    "method": "GET",
+    "path": "/api/mcp-clients"
+  },
+  "labelMcpClient": {
+    "method": "POST",
+    "path": "/api/mcp-clients/label"
+  },
+  "clearMcpClientLabel": {
+    "method": "POST",
+    "path": "/api/mcp-clients/label/clear"
+  },
+  "observeMcpClient": {
+    "method": "POST",
+    "path": "/mcp-clients/observe"
+  },
   "getAgent": {
     "method": "GET",
     "path": "/api/agents/{id}"

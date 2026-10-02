@@ -1,4 +1,5 @@
 import { icon } from "../icons.js";
+import { mcpClientAlertHtml, mcpClientsPanelHtml } from "../mcp-clients.js";
 import { PAGE_META, auditSearch } from "./operations.js";
 import { type WorkItem } from "@agent-control-stack/work-items";
 import { clientScript } from "../client-script.js";
@@ -54,6 +55,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <div id="admin-mode-banner" class="admin-mode-banner" role="alert"${model.executionMode === "admin" ? "" : " hidden"}>${model.executionMode === "admin" ? ADMIN_MODE_BANNER_TEXT : ""}</div>
       <div id="execution-mode-problem" class="admin-mode-banner" role="alert"${model.executionModeProblem ? "" : " hidden"}>${model.executionModeProblem ? `ACS execution mode ${escapeHtml(model.executionModeProblem)} -- fail closed` : ""}</div>
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
+      ${mcpClientAlertHtml()}
       <div id="command-results" class="command-results" hidden role="region" aria-label="Search results"></div>
       <div class="page-actions"><button type="button" data-create-task class="primary-button">＋ Create Task</button><button type="button" data-refresh-dashboard>↻ Refresh</button><span class="muted">Governed by ACS</span></div>
       <section id="overview-operations" data-view-panel="overview">${fragments.overviewOperations}</section>
@@ -79,6 +81,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       <section class="grid lower">
         <article id="dispatch" class="panel composer" data-view-panel="overview"><div class="panel-head"><h2>Create task</h2><span>authenticated session</span></div>${composerHtml(model.composerActionKinds ?? [], agents)}</article>
         <article id="connectors" class="panel" data-view-panel="connectors"><div class="panel-head"><div><h2>Connectors</h2><p>Registered connector identities + tunnel sessions</p></div><span id="connector-count">loading</span></div><div id="connectors-body">${fragments.connectors}</div></article>
+        ${mcpClientsPanelHtml()}
         <article id="policy" class="panel" data-view-panel="policy"><div class="panel-head"><h2>Policy</h2><span>recent decisions</span></div><div id="policy-body" class="policy-body">${fragments.policy}</div></article>
         <details class="panel" data-view-panel="overview"><summary class="panel-head">Operational controls · authority</summary><p class="empty">Approve, reject, and unblock use authenticated backend routes and append audit events; each approval names the action hash it approves. Cancel, retry, and clone live in work-item detail: cancel and retry require a reason, cancel always asks for confirmation, and retry/clone create a new item that goes back through policy. Bulk approval and bulk cancel are not exposed. Displayed audit attributes and errors are redacted for secret-looking values.</p></details>
       </section>

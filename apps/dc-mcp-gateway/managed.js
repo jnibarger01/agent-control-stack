@@ -24,6 +24,7 @@
  * Zero runtime dependencies (node:http / node:crypto only), like server.js.
  * Never logs capability contents, signatures, tokens, or tool arguments.
  */
+import { claimHeaders } from './client-attribution.js';
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -230,11 +231,13 @@ export function acsPost(managed, pathname, body, extraHeaders = {}) {
  * verified OAuth access-token payload. These fields confer no authority; ACS
  * re-checks capability/approval/lease authority independently.
  */
-export function identityAttribution(auth) {
+export function identityAttribution(auth, claims) {
   if (!auth || typeof auth !== 'object') return null;
   return {
     subject: typeof auth.sub === 'string' ? auth.sub.slice(0, 128) : null,
     clientId: typeof auth.client_id === 'string' ? auth.client_id.slice(0, 256) : null,
+    // Self-declared by the MCP client (clientInfo, User-Agent). Unverified display text for operators only.
+    claims: claims && typeof claims === 'object' ? claims : undefined,
   };
 }
 
@@ -290,7 +293,7 @@ export function capabilityTransport(managed, { identity, requestId }) {
         argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
         correlationId: requestId,
         ...(changeSetPermitId === undefined ? {} : { changeSetPermitId }),
-      }, { [actorHeader]: actor });
+      }, { [actorHeader]: actor, ...claimHeaders(identity?.claims) });
     } catch {
       throw Object.assign(new Error('ACS capability issuance unavailable'), {
         acsCode: 'acs_http_unreachable',

@@ -1,3 +1,4 @@
+import { MCP_CLIENT_EVENT_NAMES, mcpClientsClientSource } from "./mcp-clients.js";
 import { codingMissionPanelSource } from "./coding-mission-panel.js";
 import { operationsClientSource } from "./operations-client.js";
 import { CONFIRM_COPY } from "./approval-actions.js";
@@ -29,6 +30,8 @@ let leaseWarningRoot = null;
 // clock backwards by the delay.
 const SERVER_CLOCK_MAX_RTT_MS = 10000;
 const sseEventNames = [
+${MCP_CLIENT_EVENT_NAMES.map((name) => `  '${name}',`).join("\n")}
+  'connector.requested',
   'work_item.created',
   'work_item.pending_policy',
   'work_item.needs_approval',
@@ -156,6 +159,7 @@ function appendAuditEvent(event) {
   if (data.name === 'work_item.needs_approval') notifyApprovalNeeded(data);
   const eventName = String(data.name || event.type || '');
   onLiveAuditEvent(eventName, data);
+  onMcpClientAuditEvent(eventName);
   if (eventName.startsWith('agent.') || eventName.startsWith('acp.')) {
     refreshAgentRoster();
     if (selectedAgentId) loadAgentDetail(selectedAgentId);
@@ -1264,6 +1268,7 @@ document.addEventListener('click', async (event) => {
 
 
 ${composerClientSource()}
+${mcpClientsClientSource()}
 
 const viewAliases = {
   overview: 'overview',
