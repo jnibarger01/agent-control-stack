@@ -621,7 +621,7 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
       <div id="sse-stale-banner" class="stale-banner" hidden role="status" aria-live="assertive">Connection lost. Displayed work items may be stale. Approve, deny, and work-item controls are disabled until the live stream reconnects.</div>
       <div id="command-results" class="command-results" hidden role="region" aria-label="Search results"></div>
       <div class="page-actions"><button type="button" data-create-task class="primary-button">＋ Create Task</button><button type="button" data-refresh-dashboard>↻ Refresh</button><span class="muted">Governed by ACS</span></div>
-      <section id="overview-operations" data-view-panel="overview"><section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>4</strong><span>Active Work Items</span><small>Current control-plane work</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>Unknown</strong><span>System Readiness</span><small>Persisted dependency checks</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>1</strong><span>Agents Online</span><small>2 registered / observed</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div></div></section><div class="operations-layout"><div class="operations-main"><section class="section-card"><div class="panel-head"><h2>Missions · Work Items</h2><a href="#queue" data-dashboard-view="queue">View all →</a></div><div class="mission-board"><section class="board-column green"><h3><i aria-hidden="true"></i>Ready<span>0</span></h3><p class="empty">No work in this stage.</p></section><section class="board-column blue"><h3><i aria-hidden="true"></i>Running<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_running"><strong>Running task</strong><small>wrk_running</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> </span><footer><span>Unassigned</span><span>running</span></footer></button></section><section class="board-column amber"><h3><i aria-hidden="true"></i>Waiting Approval<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>wrk_approve</small><p>/repo · 1 actions</p><span><span class="pill high">high</span> </span><footer><span>Unassigned</span><span>needs_approval</span></footer></button></section><section class="board-column red"><h3><i aria-hidden="true"></i>Blocked<span>2</span></h3><button class="mission-card" data-inspect-work="wrk_blocked"><strong>Blocked task</strong><small>wrk_blocked</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></span><footer><span>Unassigned</span><span>blocked</span></footer></button><button class="mission-card" data-inspect-work="wrk_quarantined"><strong>Quarantined task</strong><small>wrk_quarantined</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> </span><footer><span>Unassigned</span><span>quarantined</span></footer></button></section></div></section><div class="overview-bottom"><section class="section-card"><div class="panel-head"><h2>Recent Activity</h2><a href="#audit" data-dashboard-view="audit">View all →</a></div><ol class="activity-timeline"><li><span class="activity-marker" aria-hidden="true"></span><div><strong>work item · needs approval</strong><small>Approve me</small><time>2026-07-05T00:39:50.000Z</time></div><button data-inspect-work="wrk_approve">Inspect</button></li><li><span class="activity-marker" aria-hidden="true"></span><div><strong>policy · decided</strong><small>Approve me</small><time>2026-07-05T00:39:40.000Z</time></div><button data-inspect-work="wrk_approve">Inspect</button></li><li><span class="activity-marker" aria-hidden="true"></span><div><strong>tunnel session · heartbeat</strong><small>chatgpt-prod</small><time>2026-07-05T00:39:30.000Z</time></div></li></ol></section><section class="section-card"><div class="panel-head"><h2>Systems Overview</h2><a href="#system" data-dashboard-view="system">View all →</a></div><div class="system-check-grid"><p class="empty">Readiness checks unavailable.</p></div></section></div></div><div class="operations-rail"><section class="section-card"><div class="panel-head"><h2>Agent Health</h2><a href="#agents" data-dashboard-view="agents">View all →</a></div><div class="rail-list"><a class="health-row" href="#agents" data-inspect-agent="hermes-local"><span class="agent-avatar" aria-hidden="true">H</span><span><strong>Hermes Agent</strong><small>Heartbeat 2026-07-05T00:39:30.000Z</small></span><span class="pill healthy">healthy</span></a><a class="health-row" href="#agents" data-inspect-agent="codex-cli"><span class="agent-avatar" aria-hidden="true">C</span><span><strong>Codex CLI</strong><small>No heartbeat observed</small></span><span class="pill unknown">unknown</span></a></div></section><section class="section-card"><div class="panel-head"><h2>Critical Alerts</h2><a href="#execution" data-dashboard-view="execution">View all →</a></div><div class="rail-list"><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Blocked task</strong><small>worker lease expired token=[redacted]</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></div><button data-inspect-work="wrk_blocked">Inspect</button></div><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Quarantined task</strong><small>quarantined</small></div><button data-inspect-work="wrk_quarantined">Inspect</button></div></div></section><section class="section-card"><div class="panel-head"><h2>Approval Requests</h2><a href="#approvals" data-dashboard-view="approvals">View all →</a></div><div class="rail-list"><button class="approval-preview" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>user · high risk · 40m</small><span>Review request →</span></button></div></section></div></div></section>
+      <section id="overview-operations" data-view-panel="overview"><section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>4</strong><span>Active Work Items</span><small>Current control-plane work</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>Unknown</strong><span>System Readiness</span><small>Persisted dependency checks</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>1</strong><span>Agents Online</span><small>2 registered / observed</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div></div></section><div class="operations-layout"><div class="operations-main"><section class="section-card"><div class="panel-head"><h2>Missions · Work Items</h2><a href="#queue" data-dashboard-view="queue">View all →</a></div><div class="mission-board"><section class="board-column green"><h3><i aria-hidden="true"></i>Ready<span>0</span></h3><p class="empty">No work in this stage.</p></section><section class="board-column blue"><h3><i aria-hidden="true"></i>Running<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_running"><strong>Running task</strong><small>wrk_running</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> </span><footer><span>Unassigned</span><span>running</span></footer></button></section><section class="board-column amber"><h3><i aria-hidden="true"></i>Waiting Approval<span>1</span></h3><button class="mission-card" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>wrk_approve</small><p>/repo · 1 actions</p><span><span class="pill high">high</span> </span><footer><span>Unassigned</span><span>needs_approval</span></footer></button></section><section class="board-column red"><h3><i aria-hidden="true"></i>Blocked<span>2</span></h3><button class="mission-card" data-inspect-work="wrk_blocked"><strong>Blocked task</strong><small>wrk_blocked</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></span><footer><span>Unassigned</span><span>blocked</span></footer></button><button class="mission-card" data-inspect-work="wrk_quarantined"><strong>Quarantined task</strong><small>wrk_quarantined</small><p>/repo · 1 actions</p><span><span class="pill low">low</span> </span><footer><span>Unassigned</span><span>quarantined</span></footer></button></section></div></section><div class="overview-bottom"><section class="section-card"><div class="panel-head"><h2>Recent Activity</h2><a href="#audit" data-dashboard-view="audit">View all →</a></div><ol class="activity-timeline"><li><span class="activity-marker" aria-hidden="true"></span><div><strong>work item · needs approval</strong><small>Approve me</small><time>2026-07-05T00:39:50.000Z</time></div><button data-inspect-work="wrk_approve">Inspect</button></li><li><span class="activity-marker" aria-hidden="true"></span><div><strong>policy · decided</strong><small>Approve me</small><time>2026-07-05T00:39:40.000Z</time></div><button data-inspect-work="wrk_approve">Inspect</button></li><li><span class="activity-marker" aria-hidden="true"></span><div><strong>tunnel session · heartbeat</strong><small>chatgpt-prod</small><time>2026-07-05T00:39:30.000Z</time></div></li></ol></section></div></div><div class="operations-rail"><section class="section-card"><div class="panel-head"><h2>Agent Health</h2><a href="#agents" data-dashboard-view="agents">View all →</a></div><div class="rail-list"><a class="health-row" href="#agents" data-inspect-agent="hermes-local"><span class="agent-avatar" aria-hidden="true">H</span><span><strong>Hermes Agent</strong><small>Heartbeat 2026-07-05T00:39:30.000Z</small></span><span class="pill healthy">healthy</span></a><a class="health-row" href="#agents" data-inspect-agent="codex-cli"><span class="agent-avatar" aria-hidden="true">C</span><span><strong>Codex CLI</strong><small>No heartbeat observed</small></span><span class="pill unknown">unknown</span></a></div></section><section class="section-card"><div class="panel-head"><h2>Critical Alerts</h2><a href="#execution" data-dashboard-view="execution">View all →</a></div><div class="rail-list"><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Blocked task</strong><small>worker lease expired token=[redacted]</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></div><button data-inspect-work="wrk_blocked">Inspect</button></div><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Quarantined task</strong><small>quarantined</small></div><button data-inspect-work="wrk_quarantined">Inspect</button></div></div></section><section class="section-card"><div class="panel-head"><h2>Approval Requests</h2><a href="#approvals" data-dashboard-view="approvals">View all →</a></div><div class="rail-list"><button class="approval-preview" data-inspect-work="wrk_approve"><strong>Approve me</strong><small>user · high risk · 40m</small><span>Review request →</span></button></div></section></div></div></section>
       <section id="execution-operations" data-view-panel="execution"><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>1</strong><span>Active Runs</span><small>Current running work items</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>0</strong><span>Queued Runs</span><small>Admission scheduler queue</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Success Rate</span><small>Succeeded / succeeded + failed · 24h</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>—</strong><span>Failed · 24h</span><small>Persisted failed attempts</small></div></div></div><div class="operations-layout"><div class="operations-main"><section class="section-card"><div class="panel-head"><h2>Execution Pipeline</h2></div><div class="execution-pipeline"><a class="pipeline-stage blue" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="draft"><span class="stage-icon" aria-hidden="true">◇</span><strong>Pending</strong><b>0</b></a><a class="pipeline-stage violet" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="pending_policy"><span class="stage-icon" aria-hidden="true">◇</span><strong>Policy Check</strong><b>0</b></a><a class="pipeline-stage amber" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="needs_approval"><span class="stage-icon" aria-hidden="true">◇</span><strong>Waiting Approval</strong><b>1</b></a><a class="pipeline-stage green" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="approved"><span class="stage-icon" aria-hidden="true">✓</span><strong>Approved</strong><b>0</b></a><a class="pipeline-stage blue" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="running,cancelling"><span class="stage-icon" aria-hidden="true">◇</span><strong>Running</strong><b>1</b></a><a class="pipeline-stage green" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="succeeded"><span class="stage-icon" aria-hidden="true">✓</span><strong>Completed</strong><b>7</b></a><a class="pipeline-stage red" href="#queue" data-dashboard-view="queue" data-dashboard-statuses="failed,blocked,unknown,quarantined"><span class="stage-icon" aria-hidden="true">!</span><strong>Failed / Blocked</strong><b>2</b></a></div><p class="panel-note">Current work-item states · completed and failed counts include retained store history. Tool wait is not a persisted ACS stage.</p></section><section class="section-card"><div class="panel-head"><h2>Live Runs</h2></div><div class="execution-filter"><label>Search runs <input type="search" id="execution-search" placeholder="Title, ID, agent, or executor"></label><label>Stage <select id="execution-stage"><option value="">All stages</option><option>Waiting Approval</option><option>Blocked</option><option>Running</option><option>Quarantined</option><option>Completed</option></select></label><span id="execution-filter-count" role="status"></span></div><div class="table-wrap"><table class="runs-table"><thead><tr><th>Run / Work Item</th><th>Agent</th><th>Executor / Worker</th><th>Stage</th><th>Elapsed</th><th>Queue Age</th><th>Risk</th><th>Detail</th></tr></thead><tbody><tr data-run-stage="Waiting Approval"><td><strong>wrk_approve</strong><small>Approve me</small></td><td>Unassigned</td><td>Unclaimed</td><td><span class="pill needs_approval">needs_approval</span><small>Waiting Approval</small></td><td>—</td><td>40m</td><td><span class="pill high">high</span></td><td><button data-inspect-work="wrk_approve" aria-label="Inspect Approve me">Inspect</button></td></tr><tr data-run-stage="Blocked"><td><strong>wrk_blocked</strong><small>Blocked task</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></td><td>Unassigned</td><td>Unclaimed</td><td><span class="pill blocked">blocked</span><small>Blocked</small></td><td>—</td><td>—</td><td><span class="pill low">low</span></td><td><button data-inspect-work="wrk_blocked" aria-label="Inspect Blocked task">Inspect</button></td></tr><tr data-run-stage="Running"><td><strong>attempt_1</strong><small>Running task</small></td><td>Unassigned</td><td>worker-1</td><td><span class="pill running">running</span><small>Running</small></td><td>—</td><td>9m</td><td><span class="pill low">low</span></td><td><button data-inspect-work="wrk_running" aria-label="Inspect Running task">Inspect</button></td></tr><tr data-run-stage="Quarantined"><td><strong>wrk_quarantined</strong><small>Quarantined task</small></td><td>Unassigned</td><td>Unclaimed</td><td><span class="pill quarantined">quarantined</span><small>Quarantined</small></td><td>—</td><td>—</td><td><span class="pill low">low</span></td><td><button data-inspect-work="wrk_quarantined" aria-label="Inspect Quarantined task">Inspect</button></td></tr><tr data-run-stage="Completed"><td><strong>wrk_done</strong><small>Finished task</small></td><td>Unassigned</td><td>Unclaimed</td><td><span class="pill succeeded">succeeded</span><small>Completed</small></td><td>—</td><td>—</td><td><span class="pill medium">medium</span></td><td><button data-inspect-work="wrk_done" aria-label="Inspect Finished task">Inspect</button></td></tr></tbody></table></div></section><section class="section-card"><div class="panel-head"><h2>Execution Throughput · Last 24 hours</h2></div><p class="empty">Persisted execution telemetry unavailable.</p></section></div><div class="operations-rail"><section class="section-card"><div class="panel-head"><h2>Failures &amp; Retries</h2></div><div class="rail-list"><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Blocked task</strong><small>worker lease expired token=[redacted]</small><span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span></div><button data-inspect-work="wrk_blocked">Inspect</button></div><div class="failure-row"><span class="failure-icon" aria-hidden="true">!</span><div><strong>Quarantined task</strong><small>quarantined</small></div><button data-inspect-work="wrk_quarantined">Inspect</button></div></div></section><section class="section-card"><div class="panel-head"><h2>Execution Admission</h2></div><div class="admission-meter"><div><strong>1 / 2</strong><span>Global execution slots</span></div><progress max="2" value="1" aria-label="Execution admission utilization"></progress><p>0 queued · Capacity available</p><a href="#executors" data-dashboard-view="executors">Inspect executor runtimes →</a><small>Per-executor capacity is not published by ACS.</small></div></section><section class="section-card"><div class="panel-head"><h2>Recent Execution Events</h2><a href="#audit" data-dashboard-view="audit">View all →</a></div><ol class="activity-timeline"><li><span class="activity-marker" aria-hidden="true"></span><div><strong>work item · needs approval</strong><small>Approve me</small><time>2026-07-05T00:39:50.000Z</time></div><button data-inspect-work="wrk_approve">Inspect</button></li></ol></section></div></div></section>
       <section id="approval-summary" data-view-panel="approvals"><div class="metric-grid approval-metrics"><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>1</strong><span>Pending</span><small>Admin auto-approval still requires valid authority</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>1</strong><span>Over SLA</span><small>SLA 30m</small></div></div><div class="metric-card violet"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>1</strong><span>High Risk</span><small>Pending high / critical requests</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>40m</strong><span>Oldest Wait</span><small>Current approval inbox</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Approval Grants · 24h</span><small>Recorded action grants</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Grant Latency</span><small>Matched requirement → grant · 24h</small></div></div></div></section>
       <section id="metrics-operations" data-view-panel="metrics"><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>1</strong><span>Active Runs</span><small>Current running work items</small></div></div><div class="metric-card amber"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 6v6l4 3"/></svg></span><div><strong>0</strong><span>Queued Runs</span><small>Admission scheduler queue</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Run Time</span><small>Terminal attempts · last 24h</small></div></div><div class="metric-card green"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></svg></span><div><strong>—</strong><span>Success Rate</span><small>Succeeded / succeeded + failed · 24h</small></div></div><div class="metric-card red"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 10 18H2z"/><path d="M12 9v5M12 17h.01"/></svg></span><div><strong>—</strong><span>Failed · 24h</span><small>Persisted failed attempts</small></div></div></div><section class="section-card"><div class="panel-head"><h2>Execution Throughput · Last 24 hours</h2></div><p class="empty">Persisted execution telemetry unavailable.</p></section><div class="metric-grid"><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>—</strong><span>Avg Queue Latency</span><small>Started attempts updated in last 24h</small></div></div><div class="metric-card blue"><span class="metric-icon" aria-hidden="true"><svg class="ui-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m3 17 6-6 4 4 8-10M15 5h6v6"/></svg></span><div><strong>1 / 2</strong><span>Execution Admission</span><small>Global execution slots</small></div></div></div></section>
@@ -686,6 +686,7 @@ button { background-color: var(--control-bg); color: var(--ink); border: 1px sol
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><button type="button" data-inspect-work="wrk_approve">Review details</button><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-action-hash="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd" data-action-kind="fs.read" data-risk="high" aria-label="Approve fs.read: inspect source (hash dddddddd…) for Approve me" aria-describedby="reason-wrk_approve" title="dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd">Approve fs.read <code class="hash-prefix">dddddddd…</code></button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><button type="button" data-inspect-work="wrk_blocked">Review details</button><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
+        <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list"><p class="empty">No coding missions are waiting for approval.</p></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body"><div class="operator-metrics"><dl>
@@ -1102,6 +1103,21 @@ setInterval(function () {
   if (sseConnected && document.visibilityState !== 'hidden') scheduleDashboardRefresh(0);
 }, 30000);
 
+// Filter controls live inside fragment targets that are replaced wholesale, so a
+// coalesced refresh destroys and recreates the element the operator is typing into.
+// Without an explicit capture, focus and caret are lost mid-word on every refresh.
+const FILTER_CONTROL_IDS = ['execution-search', 'execution-stage', 'audit-search', 'audit-type'];
+
+function captureTextControlState(control) {
+  const state = { value: control.value };
+  if (typeof control.selectionStart === 'number') {
+    state.selectionStart = control.selectionStart;
+    state.selectionEnd = control.selectionEnd;
+    state.scrollTop = control.scrollTop;
+  }
+  return state;
+}
+
 function captureOperatorState() {
   const active = document.activeElement;
   const reasons = {};
@@ -1112,11 +1128,24 @@ function captureOperatorState() {
   document.querySelectorAll('.approval-result[id]').forEach(function (output) {
     if (output.textContent) outputs[output.id] = output.textContent;
   });
+  // Preserve every filter control's value, plus the caret and scroll position of
+  // whichever one currently has focus, so typing survives a refresh.
+  const filters = {};
+  FILTER_CONTROL_IDS.forEach(function (id) {
+    const control = document.getElementById(id);
+    if (control) filters[id] = captureTextControlState(control);
+  });
+  const activeFilterId =
+    active && FILTER_CONTROL_IDS.indexOf(active.id) !== -1 ? active.id : null;
+  const activeFilter = activeFilterId ? captureTextControlState(active) : null;
   return {
     activeId: active && active.id ? active.id : null,
     activeSelector: active && active.dataset && active.dataset.workItem ? '[data-work-item="' + cssAttr(active.dataset.workItem) + '"]' : null,
     reasons: reasons,
-    outputs: outputs
+    outputs: outputs,
+    filters: filters,
+    activeFilterId: activeFilterId,
+    activeFilter: activeFilter
   };
 }
 
@@ -1136,10 +1165,29 @@ function restoreOperatorState(state) {
       selected.setAttribute('aria-current', 'true');
     }
   }
+  // Restore filter values first, then focus and caret. Order matters: assigning
+  // .value resets the caret to the end, so the selection must be reapplied after.
+  Object.keys(state.filters || {}).forEach(function (id) {
+    const control = document.getElementById(id);
+    const saved = state.filters[id];
+    if (control && saved && control.value !== saved.value) control.value = saved.value;
+  });
   const target = (state.activeId && document.getElementById(state.activeId)) ||
     (state.activeSelector && document.querySelector(state.activeSelector));
   if (target && document.activeElement !== target && typeof target.focus === 'function') {
     target.focus({ preventScroll: true });
+  }
+  if (state.activeFilterId && state.activeFilter) {
+    const control = document.getElementById(state.activeFilterId);
+    if (control && typeof control.setSelectionRange === 'function') {
+      const { selectionStart, selectionEnd, scrollTop } = state.activeFilter;
+      try {
+        control.setSelectionRange(selectionStart, selectionEnd);
+      } catch {
+        // Some input types (for example number) reject selection ranges.
+      }
+      if (typeof scrollTop === 'number') control.scrollTop = scrollTop;
+    }
   }
 }
 
@@ -1464,6 +1512,9 @@ function writeSelectedItemToLocation(id) {
 }
 function selectWorkItem(id, options) {
   if (!id) return;
+  // A location-driven selection must never write the URL back: the URL is the input
+  // being synced from, and rewriting it during popstate/hashchange fights history.
+  const fromLocation = !!(options && options.fromLocation);
   document.querySelectorAll('[data-work-item]').forEach(function (candidate) {
     const match = candidate.dataset.workItem === id;
     candidate.classList.toggle('selected', match);
@@ -1471,7 +1522,7 @@ function selectWorkItem(id, options) {
   });
   openWorkDrawer();
   selectedWorkItemId = id;
-  writeSelectedItemToLocation(id);
+  if (!fromLocation) writeSelectedItemToLocation(id);
   if (options && options.scroll) {
     const row = document.querySelector('[data-work-item="' + cssAttr(id) + '"]');
     if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
@@ -1487,7 +1538,36 @@ function openWorkItemFromLocation() {
   if (!location.hash) showView('queue');
   selectWorkItem(id, { scroll: true });
 }
-window.addEventListener('popstate', openWorkItemFromLocation);
+
+/**
+ * Derive the whole view state from location on every history transition.
+ *
+ * Back/Forward must not leave the URL and the UI disagreeing. Deriving both the
+ * active view and the drawer from location, on both popstate and hashchange, means:
+ *   URL item A -> drawer A
+ *   URL item B -> drawer B
+ *   no item    -> drawer closed
+ *   unknown item -> the drawer opens on that id and shows a deterministic
+ *                   not-found/error state from the normal detail fetch, rather than
+ *                   silently keeping the previously shown item.
+ * The previous implementation only closed the drawer when ?item= disappeared, so
+ * moving from item B back to item A could leave the drawer showing B.
+ */
+function syncViewStateFromLocation() {
+  showView(location.hash.slice(1) || 'overview');
+  const id = workItemIdFromLocation();
+  const drawer = document.getElementById('work-drawer');
+  const drawerOpen = !!drawer && !drawer.hidden;
+  if (!id) {
+    if (drawerOpen) closeWorkDrawer({ fromLocation: true });
+    return;
+  }
+  if (drawerOpen && selectedWorkItemId === id) return;
+  if (!location.hash) showView('queue');
+  selectWorkItem(id, { scroll: true, fromLocation: true });
+}
+window.addEventListener('popstate', syncViewStateFromLocation);
+window.addEventListener('hashchange', syncViewStateFromLocation);
 
 // --- #14 live wait badges between refreshes.
 function formatWaitClient(ms) {
@@ -1777,7 +1857,7 @@ document.getElementById('theme-toggle')?.addEventListener('click', function () {
 renderThemeToggle();
 
 
-const pageMeta = {"overview":{"title":"Mission Control","description":"Coordinate work, agents, and outcomes across the control plane.","icon":"⌂"},"queue":{"title":"Work Queue","description":"Inspect work, admission, policy, and the next action that needs your attention.","icon":"▤"},"execution":{"title":"Execution","description":"Monitor live attempts, queues, failures, and throughput across the control plane.","icon":"▷"},"approvals":{"title":"Approvals","description":"Review policy-bound requests and record an explicit operator decision.","icon":"◇"},"agents":{"title":"Agents","description":"Registry identities, capability coverage, assignments, and observed health.","icon":"♧"},"executors":{"title":"Executors","description":"Inspect managed bridges, attested runtimes, and execution capabilities.","icon":"⬡"},"connectors":{"title":"Connectors","description":"Registered integrations, granted scopes, and authenticated tunnel sessions.","icon":"⌘"},"metrics":{"title":"Metrics","description":"Persisted execution telemetry and observed control-plane counters.","icon":"▥"},"audit":{"title":"Audit","description":"Investigate immutable events, actors, resources, and correlated decisions.","icon":"▦"},"policy":{"title":"Policy","description":"Understand evaluations, matched rules, and fail-closed decisions.","icon":"⛨"},"system":{"title":"System","description":"Readiness checks, execution admission, and connected infrastructure.","icon":"⚙"}};
+const pageMeta = {"overview":{"title":"Mission Control","description":"Coordinate work, agents, and outcomes across the control plane."},"queue":{"title":"Work Queue","description":"Inspect work, admission, policy, and the next action that needs your attention."},"execution":{"title":"Execution","description":"Monitor live attempts, queues, failures, and throughput across the control plane."},"approvals":{"title":"Approvals","description":"Review policy-bound requests and record an explicit operator decision."},"agents":{"title":"Agents","description":"Registry identities, capability coverage, assignments, and observed health."},"executors":{"title":"Executors","description":"Inspect managed bridges, attested runtimes, and execution capabilities."},"connectors":{"title":"Connectors","description":"Registered integrations, granted scopes, and authenticated tunnel sessions."},"metrics":{"title":"Metrics","description":"Persisted execution telemetry and observed control-plane counters."},"audit":{"title":"Audit","description":"Investigate immutable events, actors, resources, and correlated decisions."},"policy":{"title":"Policy","description":"Understand evaluations, matched rules, and fail-closed decisions."},"system":{"title":"System","description":"Readiness checks, execution admission, and connected infrastructure."}};
 let drawerReturnFocus = null;
 let executionSearch = '';
 let executionStageFilter = '';
@@ -1791,10 +1871,7 @@ function closeAuditDrawer() {
   document.querySelector('aside').inert = false;
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
-  const replacement = auditReturnFocus?.dataset.inspectAudit
-    ? document.querySelector('[data-inspect-audit="' + cssAttr(auditReturnFocus.dataset.inspectAudit) + '"]') : null;
-  const target = auditReturnFocus?.isConnected ? auditReturnFocus : replacement || document.getElementById('audit-search') || document.getElementById('main-content');
-  target?.focus({ preventScroll: true });
+  if (auditReturnFocus?.isConnected) auditReturnFocus.focus({ preventScroll: true });
 }
 document.getElementById('audit-drawer-close')?.addEventListener('click', closeAuditDrawer);
 document.addEventListener('click', function (event) {
@@ -1814,7 +1891,7 @@ document.addEventListener('click', function (event) {
 });
 document.addEventListener('keydown', function (event) {
   const drawer = document.getElementById('audit-drawer');
-  if (event.defaultPrevented || drawer.hidden || (document.getElementById('shortcut-help') && !document.getElementById('shortcut-help').hidden) || document.getElementById('approval-confirm-dialog')) return;
+  if (drawer.hidden) return;
   if (event.key === 'Escape') { event.preventDefault(); closeAuditDrawer(); }
   if (event.key === 'Tab') {
     const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
@@ -1832,7 +1909,7 @@ function openWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { if (child !== drawer) child.inert = true; });
   document.body.style.overflow = 'hidden';
 }
-function closeWorkDrawer() {
+function closeWorkDrawer(options) {
   const drawer = document.getElementById('work-drawer');
   if (!drawer || drawer.hidden) return;
   drawer.hidden = true;
@@ -1840,19 +1917,24 @@ function closeWorkDrawer() {
   Array.from(document.getElementById('main-content').children).forEach(function (child) { child.inert = false; });
   document.body.style.overflow = '';
   selectedWorkItemId = null;
-  document.querySelectorAll('[data-work-item]').forEach(function (row) {
-    row.classList.remove('selected'); row.removeAttribute('aria-current');
+  // Clear the row highlight too. Leaving a row marked selected after the drawer is
+  // closed presented stale state that no longer matched the URL or the selection.
+  document.querySelectorAll('[data-work-item].selected').forEach(function (row) {
+    row.classList.remove('selected');
+    row.removeAttribute('aria-current');
   });
   workDetailGeneration += 1;
   stopLeaseExpiryWarningRefresh();
-  writeSelectedItemToLocation(null);
+  // A location-driven close must not rewrite the URL: location is the source of
+  // truth during history navigation, and writing back would fight the browser.
+  if (!(options && options.fromLocation)) writeSelectedItemToLocation(null);
   if (drawerReturnFocus && drawerReturnFocus.isConnected) drawerReturnFocus.focus({ preventScroll: true });
   else document.getElementById('main-content').focus({ preventScroll: true });
 }
 document.getElementById('work-drawer-close')?.addEventListener('click', closeWorkDrawer);
 document.addEventListener('keydown', function (event) {
   const drawer = document.getElementById('work-drawer');
-  if (event.defaultPrevented || !drawer || drawer.hidden || (document.getElementById('shortcut-help') && !document.getElementById('shortcut-help').hidden) || document.getElementById('approval-confirm-dialog')) return;
+  if (!drawer || drawer.hidden || document.getElementById('approval-confirm-dialog')) return;
   if (event.key === 'Escape') { event.preventDefault(); closeWorkDrawer(); }
   if (event.key === 'Tab') {
     const fields = Array.from(drawer.querySelectorAll('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href], summary, [tabindex="0"]')).filter(function (e) { return !e.hidden; });
@@ -1868,6 +1950,26 @@ function syncPageHeading(view) {
   document.querySelectorAll('nav a[data-nav]').forEach(function (link) {
     if (link.dataset.nav === view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
+}
+/**
+ * Command palette results visibility.
+ *
+ * Closing used to be a side effect of the delegated click handler, so results stayed
+ * open for any click that did not match one of its targets. Visibility is now owned
+ * by one helper, and every path that should close the palette goes through it.
+ */
+function closeCommandResults(options) {
+  const results = document.getElementById('command-results');
+  if (!results || results.hidden) return false;
+  results.hidden = true;
+  // Only pull focus back when it was inside the panel we just closed.
+  if (options && options.restoreFocus && results.contains(document.activeElement)) {
+    document.getElementById('command-search')?.focus({ preventScroll: true });
+  }
+  return true;
+}
+function isCommandSurface(node) {
+  return !!(node && node.closest && node.closest('#command-results, #command-search'));
 }
 function applyOperationFilters() {
   const text = executionSearch.toLowerCase();
@@ -1928,7 +2030,13 @@ document.addEventListener('click', function (event) {
   } else if (node.dataset.searchView) {
     showView(node.dataset.searchView); history.pushState(null, '', '#' + node.dataset.searchView);
   }
-  document.getElementById('command-results').hidden = true;
+  closeCommandResults();
+});
+// Any click outside the palette input and its results closes the palette,
+// including navigation and card clicks that match none of the delegated targets.
+document.addEventListener('click', function (event) {
+  if (isCommandSurface(event.target)) return;
+  closeCommandResults();
 });
 function searchCommands() {
   const query = document.getElementById('command-search').value.trim().toLowerCase();
@@ -1954,10 +2062,11 @@ function searchCommands() {
 document.getElementById('command-search')?.addEventListener('input', searchCommands);
 document.addEventListener('keydown', function (event) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('command-search').focus(); }
-  if (event.key === 'Escape') document.getElementById('command-results').hidden = true;
+  if (event.key === 'Escape') closeCommandResults({ restoreFocus: true });
 });
-window.addEventListener('hashchange', function () { showView(location.hash.slice(1)); });
-window.addEventListener('popstate', function () { showView(location.hash.slice(1)); if (!workItemIdFromLocation()) closeWorkDrawer(); });
+// View and drawer state on Back/Forward is derived from location in one place.
+// See syncViewStateFromLocation() in operator-workflow.ts; duplicating a partial
+// version here is what allowed the URL and drawer to disagree.
 window.addEventListener('pagehide', function () { if (sseSource) sseSource.close(); });
 applyOperationFilters();
 
@@ -2021,7 +2130,7 @@ function bindWorkItems() {
   document.addEventListener('click', function (event) {
     const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
     if (!button) return;
-    selectWorkItem(button.dataset.workItem);
+    selectWorkItem(button.dataset.workItem, { keepFocus: true });
   });
 }
 
@@ -3256,6 +3365,111 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
-openWorkItemFromLocation();</script>
+openWorkItemFromLocation();
+
+const codingMissionDecision = function codingMissionApprovalDecision(status) {
+  if (status === 409) return "refresh";
+  if (status >= 200 && status < 300) return "accepted";
+  return "show_error";
+};
+let codingMissionTimer = null;
+
+function codingMissionEscape(value) {
+  return String(value ?? '').replace(/[&<>"']/g, function (character) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character];
+  });
+}
+
+function codingMissionLabel(mission) {
+  if (mission.state === 'WAITING_FOR_APPROVAL') return 'waiting';
+  if (mission.state === 'EXECUTING') return mission.deploymentRequired ? 'Merging / deploying' : 'Merging';
+  if (mission.state === 'VERIFYING') return 'Verifying';
+  if (mission.state === 'COMPLETED') return 'Complete';
+  return codingMissionEscape(mission.state || 'unknown');
+}
+
+function codingMissionCard(mission) {
+  const hash = typeof mission.changeSet === 'string' ? mission.changeSet : '';
+  const files = Array.isArray(mission.files) ? mission.files : [];
+  const checks = mission.checks && typeof mission.checks === 'object' ? mission.checks : {};
+  const pull = mission.pullRequest || {};
+  const checkText = Object.keys(checks).map(function (name) {
+    return '<li><span>' + codingMissionEscape(name) + '</span> <strong>' + codingMissionEscape(checks[name]) + '</strong></li>';
+  }).join('');
+  const fileText = files.map(function (file) {
+    return '<li><code>' + codingMissionEscape(file) + '</code></li>';
+  }).join('');
+  const pullText = pull.url
+    ? '<a href="' + codingMissionEscape(pull.url) + '" rel="noreferrer">' + codingMissionEscape(pull.number ? '#' + pull.number : pull.url) + '</a>'
+    : (pull.number ? '#' + codingMissionEscape(pull.number) : 'none');
+  const approve = mission.state === 'WAITING_FOR_APPROVAL' && /^[a-f0-9]{64}$/.test(hash)
+    ? '<button type="button" class="primary-button" data-approve-change-set data-mission-id="' + codingMissionEscape(mission.missionId) + '" data-change-set-hash="' + codingMissionEscape(hash) + '">Approve change set</button>'
+    : '';
+  return '<article class="coding-mission"><p><strong>' + codingMissionEscape(mission.summary || mission.missionId) + '</strong> <span>' + codingMissionLabel(mission) + '</span></p>'
+    + '<p>Change set <code>' + codingMissionEscape(hash || 'unavailable') + '</code></p>'
+    + '<p>Pull request ' + pullText + '</p>'
+    + '<p>Deployment ' + codingMissionEscape(mission.deploymentRequired ? 'required' : 'not required') + ': ' + codingMissionEscape(mission.deploymentImpact || '') + '</p>'
+    + '<ul>' + (checkText || '<li>No validation result</li>') + '</ul>'
+    + '<ul>' + (fileText || '<li>No proposed mutations</li>') + '</ul>'
+    + approve + '</article>';
+}
+
+async function refreshCodingMissions() {
+  const root = document.getElementById('coding-mission-list');
+  if (!root) return;
+  let payload = null;
+  try {
+    const response = await fetch('/coding-missions', { credentials: 'same-origin', headers: { accept: 'application/json' } });
+    if (!response.ok) {
+      root.innerHTML = '<p class="empty">Coding missions are unavailable.</p>';
+      return;
+    }
+    payload = await response.json();
+  } catch (error) {
+    root.innerHTML = '<p class="empty">Coding missions are unavailable.</p>';
+    return;
+  }
+  const missions = payload && Array.isArray(payload.missions) ? payload.missions : [];
+  root.innerHTML = missions.length
+    ? '<p id="coding-mission-note" class="muted"></p>' + missions.map(codingMissionCard).join('')
+    : '<p class="empty">No coding missions are waiting for approval.</p>';
+  const pending = missions.some(function (mission) {
+    return mission.state !== 'COMPLETED' && mission.state !== 'FAILED' && mission.state !== 'DEGRADED';
+  });
+  if (pending && !codingMissionTimer) codingMissionTimer = setInterval(refreshCodingMissions, 4000);
+  if (!pending && codingMissionTimer) {
+    clearInterval(codingMissionTimer);
+    codingMissionTimer = null;
+  }
+}
+
+document.addEventListener('click', async function (event) {
+  const button = event.target && event.target.closest ? event.target.closest('[data-approve-change-set]') : null;
+  if (!button || button.disabled) return;
+  const missionId = button.getAttribute('data-mission-id');
+  const hash = button.getAttribute('data-change-set-hash');
+  const displayed = button.parentElement ? button.parentElement.querySelector('code') : null;
+  if (!missionId || !hash || !displayed || displayed.textContent !== hash) return;
+  button.disabled = true;
+  const response = await fetch('/coding-missions/' + encodeURIComponent(missionId) + '/approve', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'content-type': 'application/json', accept: 'application/json' },
+    body: JSON.stringify({ expectedChangeSetHash: hash })
+  });
+  const decision = codingMissionDecision(response.status);
+  if (decision === 'refresh') {
+    const note = document.getElementById('coding-mission-note');
+    if (note) note.textContent = 'This change set changed. Refreshing the proposal.';
+    await refreshCodingMissions();
+    const refreshed = document.getElementById('coding-mission-note');
+    if (refreshed) refreshed.textContent = 'This change set changed. Refreshing the proposal.';
+    return;
+  }
+  await refreshCodingMissions();
+});
+
+refreshCodingMissions();
+</script>
   </body>
 </html>

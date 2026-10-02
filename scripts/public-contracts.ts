@@ -46,15 +46,8 @@ const openapi = {
       [operation.method]: {
         operationId: operation.operationId,
         summary: operation.summary,
-        ...(pathParameters(operation.path).length > 0
-          ? {
-              parameters: pathParameters(operation.path).map((name) => ({
-                name,
-                in: "path",
-                required: true,
-                schema: { type: "string", minLength: 1 }
-              }))
-            }
+        ...(httpParameters(operation.path, operation.querySchema).length > 0
+          ? { parameters: httpParameters(operation.path, operation.querySchema) }
           : {}),
         ...(operation.requestSchema
           ? {
@@ -129,12 +122,14 @@ const operations = ${JSON.stringify(
 export function createPublicApiClient(transport) {
   return Object.fromEntries(Object.entries(operations).map(([operationId, operation]) => [
     operationId,
-    ({ path = {}, body, headers = {} } = {}) => transport({
+    ({ path = {}, query = {}, body, headers = {} } = {}) => transport({
       method: operation.method,
       path: Object.entries(path).reduce(
         (value, [name, replacement]) => value.replace(\`{\${name}}\`, encodeURIComponent(String(replacement))),
         operation.path
-      ),
+      ) + (Object.values(query).some((value) => value !== undefined)
+        ? "?" + new URLSearchParams(Object.entries(query).filter(([, value]) => value !== undefined)
+          .map(([key, value]) => [key, String(value)])).toString() : ""),
       headers,
       ...(body === undefined ? {} : { body })
     })
@@ -307,6 +302,25 @@ function schemaShape(schema: JsonObject | undefined): CompatibilitySurface["oper
 
 function sortedStrings(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").sort() : [];
+}
+
+function httpParameters(path: string, querySchema?: z.ZodType): JsonObject[] {
+  const query = querySchema ? jsonSchema(querySchema) : undefined;
+  const required = sortedStrings(query?.required);
+  return [
+    ...pathParameters(path).map((name) => ({
+      name,
+      in: "path",
+      required: true,
+      schema: { type: "string", minLength: 1 }
+    })),
+    ...Object.entries((query?.properties ?? {}) as JsonObject).map(([name, schema]) => ({
+      name,
+      in: "query",
+      required: required.includes(name),
+      schema
+    }))
+  ];
 }
 
 function pathParameters(path: string): string[] {

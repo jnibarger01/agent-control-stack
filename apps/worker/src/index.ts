@@ -10,6 +10,7 @@ import {
 } from "@agent-control-stack/procedural-learning";
 import { executeSandboxed, type SandboxResult } from "@agent-control-stack/sandbox";
 import { resolve, sep } from "node:path";
+import { resumeConfiguredCodingMissions } from "@agent-control-stack/coding-mission";
 import { ControlStackError, domainHash, stableHash } from "@agent-control-stack/shared";
 import {
   admittedPlanHash,
@@ -76,6 +77,8 @@ export interface WorkerOptions {
   executionBackend?: ExecutionBackend;
   /** Inject a machine executor (tests only). */
   machineExecutor?: MachineExecutor;
+  /** Replaces the default coding-mission resume. Tests use this to avoid the process environment. */
+  resumeCodingMissions?: (dbPath: string) => Promise<void>;
 }
 
 export interface WorkerResult {
@@ -167,6 +170,8 @@ export function isReadOnlyWorkerWorkItem(workItem: Pick<WorkItem, "requestedActi
 
 export async function runWorkerOnce(options: WorkerOptions = {}): Promise<WorkerResult> {
   const dbPath = options.dbPath ?? process.env.ACS_DB_PATH ?? "storage/local.db";
+  if (options.resumeCodingMissions) await options.resumeCodingMissions(dbPath);
+  else await resumeConfiguredCodingMissions(dbPath);
   const executionBackend = options.executionBackend ?? resolveExecutionBackend();
   const workItems = new SqliteWorkItemStore(dbPath);
   const learning = options.learning ?? new ProceduralLearning(dbPath);
@@ -991,3 +996,6 @@ function machineExecutorContainmentFromEnv(): { allowedRoots: string[]; deniedRo
 export function workerResultIdempotencyKey(attemptId: string): string {
   return stableHash({ domain: "acs.attempt-result.v1", attemptId });
 }
+
+export * from "./mission-runner.js";
+export * from "./mission-client.js";

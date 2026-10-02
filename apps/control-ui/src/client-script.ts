@@ -1,3 +1,4 @@
+import { codingMissionPanelSource } from "./coding-mission-panel.js";
 import { operationsClientSource } from "./operations-client.js";
 import { CONFIRM_COPY } from "./approval-actions.js";
 import { auditTimelineClientSource } from "./audit-timeline.js";
@@ -249,7 +250,7 @@ function bindWorkItems() {
   document.addEventListener('click', function (event) {
     const button = event.target && event.target.closest ? event.target.closest('[data-work-item]') : null;
     if (!button) return;
-    selectWorkItem(button.dataset.workItem);
+    selectWorkItem(button.dataset.workItem, { keepFocus: true });
   });
 }
 
@@ -1336,5 +1337,6 @@ document.querySelector('aside nav')?.addEventListener('click', (event) => {
   history.pushState(null, '', href);
 });
 showView((location.hash || '#overview').replace('#', ''));
-openWorkItemFromLocation();`;
+openWorkItemFromLocation();
+${codingMissionPanelSource()}`;
 }

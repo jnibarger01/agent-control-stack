@@ -9,63 +9,7 @@ import { executionModeChip } from "../execution-mode.js";
 import { eventTimeline, toCount } from "./panels.js";
 
 const safe = (value: unknown) => escapeHtml(redactSecrets(String(value ?? "—")));
-export const PAGE_META: Record<string, { title: string; description: string; icon: string }> = {
-  overview: {
-    title: "Mission Control",
-    description: "Coordinate work, agents, and outcomes across the control plane.",
-    icon: "⌂"
-  },
-  queue: {
-    title: "Work Queue",
-    description: "Inspect work, admission, policy, and the next action that needs your attention.",
-    icon: "▤"
-  },
-  execution: {
-    title: "Execution",
-    description: "Monitor live attempts, queues, failures, and throughput across the control plane.",
-    icon: "▷"
-  },
-  approvals: {
-    title: "Approvals",
-    description: "Review policy-bound requests and record an explicit operator decision.",
-    icon: "◇"
-  },
-  agents: {
-    title: "Agents",
-    description: "Registry identities, capability coverage, assignments, and observed health.",
-    icon: "♧"
-  },
-  executors: {
-    title: "Executors",
-    description: "Inspect managed bridges, attested runtimes, and execution capabilities.",
-    icon: "⬡"
-  },
-  connectors: {
-    title: "Connectors",
-    description: "Registered integrations, granted scopes, and authenticated tunnel sessions.",
-    icon: "⌘"
-  },
-  metrics: {
-    title: "Metrics",
-    description: "Persisted execution telemetry and observed control-plane counters.",
-    icon: "▥"
-  },
-  audit: {
-    title: "Audit",
-    description: "Investigate immutable events, actors, resources, and correlated decisions.",
-    icon: "▦"
-  },
-  policy: {
-    title: "Policy",
-    description: "Understand evaluations, matched rules, and fail-closed decisions.",
-    icon: "⛨"
-  },
-  system: {
-    title: "System",
-    description: "Readiness checks, execution admission, and connected infrastructure.",
-    icon: "⚙"
-  }
-};
+export { PAGE_META } from "./page-meta.js";
 
 export function metricCard(label: string, value: string | number, note: string, tone = "blue"): string {
   return `<div class="metric-card ${safe(tone)}"><span class="metric-icon" aria-hidden="true">${icon(tone === "green" ? "check" : tone === "red" ? "alert" : tone === "amber" ? "clock" : "trend")}</span><div><strong>${safe(value)}</strong><span>${safe(label)}</span><small>${safe(note)}</small></div></div>`;
@@ -141,8 +85,18 @@ function summaryCards(model: MissionControlViewModel): string {
 }
 
 /** Directory/project context is never presented as an agent identity. */
+/**
+ * The agent actually executing this work item.
+ *
+ * Only the agent's own persisted currentWorkItemId counts as an assignment. A
+ * previous version also matched `item.target.services`, which are the services a
+ * work item is *eligible* to use. That made a work item look assigned to an agent
+ * simply because the item named that agent's service, which is a request, not an
+ * assignment, and it disagreed with the durable work_item_assignments record the
+ * control plane uses for routing.
+ */
 function assignedAgent(model: MissionControlViewModel, item: WorkItem): string {
-  const agent = model.agents?.find((a) => a.currentWorkItemId === item.id || item.target.services?.includes(a.id));
+  const agent = model.agents?.find((a) => a.currentWorkItemId === item.id);
   return agent?.displayName ?? "Unassigned";
 }
 function activityTimeline(model: MissionControlViewModel, prefix?: RegExp): string {
@@ -208,6 +162,15 @@ function failures(model: MissionControlViewModel): string {
       .join("") || '<p class="empty">No failures or blocked work in the displayed window.</p>'
   }</div>`;
 }
+/**
+ * The readiness check grid.
+ *
+ * Rendered in exactly one place: the System page (`#system-operations`). It used to
+ * also appear on Overview as a "Systems Overview" card carrying the identical
+ * per-check markup, so the same readiness state was presented twice and could drift
+ * between the two regions. Overview keeps its own at-a-glance "System Readiness"
+ * metric card and links through to System for the diagnostic detail.
+ */
 function systems(model: MissionControlViewModel): string {
   const checks = model.readiness?.checks;
   return `<div class="system-check-grid">${
@@ -230,10 +193,10 @@ export function throughputChart(telemetry: ExecutionTelemetry | undefined): stri
   const bars = rows
     .map((row, index) => {
       const x = 30 + index * 30;
-      return `<g><title>${safe(row.at)}: ${row.started} started, ${row.completed} completed, ${row.failed} failed</title>${[row.started, row.completed, row.failed].map((n, j) => `<rect x="${x + j * 7}" y="${130 - (n / max) * 100}" width="5" height="${(n / max) * 100}" class="chart-${j}"/>`).join("")}</g>`;
+      return `<g><title>${safe(row.at)}: ${safe(String(row.started))} started, ${safe(String(row.completed))} completed, ${safe(String(row.failed))} failed</title>${[row.started, row.completed, row.failed].map((n, j) => `<rect x="${x + j * 7}" y="${130 - (n / max) * 100}" width="5" height="${(n / max) * 100}" class="chart-${j}"/>`).join("")}</g>`;
     })
     .join("");
-  return `<div class="chart-wrap"><p class="chart-legend"><span>● Started</span><span>● Completed</span><span>● Failed</span></p><svg viewBox="0 0 770 162" role="img" aria-label="Persisted execution attempts over the last 24 hours"><title>Hourly attempt throughput. Maximum ${max} attempts per series.</title><path d="M25 30H760M25 80H760M25 130H760" class="chart-grid"/><text x="2" y="32">${max}</text><text x="6" y="134">0</text>${bars}<text x="30" y="155">24h ago</text><text x="380" y="155">12h ago</text><text x="730" y="155">Now</text></svg><details><summary>Inspect hourly values</summary><div class="table-wrap"><table><thead><tr><th>Hour starting</th><th>Started</th><th>Completed</th><th>Failed</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${safe(time(r.at))}</td><td>${r.started}</td><td>${r.completed}</td><td>${r.failed}</td></tr>`).join("")}</tbody></table></div></details></div>`;
+  return `<div class="chart-wrap"><p class="chart-legend"><span>● Started</span><span>● Completed</span><span>● Failed</span></p><svg viewBox="0 0 770 162" role="img" aria-label="Persisted execution attempts over the last 24 hours"><title>Hourly attempt throughput. Maximum ${max} attempts per series.</title><path d="M25 30H760M25 80H760M25 130H760" class="chart-grid"/><text x="2" y="32">${safe(String(max))}</text><text x="6" y="134">${safe("0")}</text>${bars}<text x="30" y="155">24h ago</text><text x="380" y="155">12h ago</text><text x="730" y="155">Now</text></svg><details><summary>Inspect hourly values</summary><div class="table-wrap"><table><thead><tr><th>Hour starting</th><th>Started</th><th>Completed</th><th>Failed</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${safe(time(r.at))}</td><td>${safe(String(r.started))}</td><td>${safe(String(r.completed))}</td><td>${safe(String(r.failed))}</td></tr>`).join("")}</tbody></table></div></details></div>`;
 }
 function executionTable(model: MissionControlViewModel): string {
   return `<div class="execution-filter"><label>Search runs <input type="search" id="execution-search" placeholder="Title, ID, agent, or executor"></label><label>Stage <select id="execution-stage"><option value="">All stages</option>${[...new Set(model.workItems.map((i) => executionStage(i, model.executionAttemptsByWorkItem?.[i.id]?.at(-1))))].map((stage) => `<option>${safe(stage)}</option>`).join("")}</select></label><span id="execution-filter-count" role="status"></span></div><div class="table-wrap"><table class="runs-table"><thead><tr><th>Run / Work Item</th><th>Agent</th><th>Executor / Worker</th><th>Stage</th><th>Elapsed</th><th>Queue Age</th><th>Risk</th><th>Detail</th></tr></thead><tbody>${
@@ -282,7 +245,7 @@ export function overviewOperations(model: MissionControlViewModel, agents: Missi
   ).length;
   const ready = model.readiness;
   const pending = model.workItems.filter((i) => i.status === "needs_approval");
-  return `<section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics">${metricCard("Active Work Items", active, "Current control-plane work")}${metricCard("System Readiness", ready ? (ready.ok ? "Passing" : "Degraded") : "Unknown", "Persisted dependency checks", ready?.ok ? "green" : "amber")}${metricCard("Agents Online", agents.filter((a) => a.status === "online").length, `${agents.length} registered / observed`)}${metricCard("Avg Run Time", duration(model.executionTelemetry?.averageRunMs), "Terminal attempts · last 24h")}</div></section><div class="operations-layout"><div class="operations-main">${sectionCard("Missions · Work Items", missionBoard(model), "queue")}<div class="overview-bottom">${sectionCard("Recent Activity", activityTimeline(model), "audit")}${sectionCard("Systems Overview", systems(model), "system")}</div></div><div class="operations-rail">${sectionCard("Agent Health", healthRail(agents), "agents")}${sectionCard("Critical Alerts", failures(model), "execution")}${sectionCard(
+  return `<section class="command-summary"><div class="panel-head"><div><h2>Command Summary</h2><p>Live view of your agent operations</p></div><span class="eyebrow">ACS · governed execution</span></div><div class="metric-grid command-metrics">${metricCard("Active Work Items", active, "Current control-plane work")}${metricCard("System Readiness", ready ? (ready.ok ? "Passing" : "Degraded") : "Unknown", "Persisted dependency checks", ready?.ok ? "green" : "amber")}${metricCard("Agents Online", agents.filter((a) => a.status === "online").length, `${agents.length} registered / observed`)}${metricCard("Avg Run Time", duration(model.executionTelemetry?.averageRunMs), "Terminal attempts · last 24h")}</div></section><div class="operations-layout"><div class="operations-main">${sectionCard("Missions · Work Items", missionBoard(model), "queue")}<div class="overview-bottom">${sectionCard("Recent Activity", activityTimeline(model), "audit")}</div></div><div class="operations-rail">${sectionCard("Agent Health", healthRail(agents), "agents")}${sectionCard("Critical Alerts", failures(model), "execution")}${sectionCard(
     "Approval Requests",
     `<div class="rail-list">${
       pending

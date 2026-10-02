@@ -9,6 +9,7 @@
   "references": [
     { "path": "../../apps/scheduler" },
     { "path": "../../packages/advisory" },
+    { "path": "../../packages/coding-mission" },
     { "path": "../../packages/evidence" },
     { "path": "../../packages/desktop-commander-adapter" },
     { "path": "../../packages/policy-gate" },

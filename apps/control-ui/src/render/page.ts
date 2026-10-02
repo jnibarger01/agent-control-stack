@@ -69,6 +69,7 @@ export function renderDashboard(input: WorkItem[] | MissionControlViewModel): st
       </section>
       <section class="grid approvals-grid">
         <article id="approvals" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">${fragments.approvalsCount}</span></div><div id="approvals-list">${fragments.approvalsList}</div></article>
+        <article id="coding-missions" class="panel wide" data-view-panel="approvals"><div class="panel-head"><h2>Coding missions</h2><span>change-set approval</span></div><div id="coding-mission-list"><p class="empty">No coding missions are waiting for approval.</p></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body">${fragments.metrics}</div><div id="live-metrics" class="live-metrics" aria-live="off"><p class="muted">Live counters load while this view is open.</p></div><p class="metrics-scrape">Full Prometheus text: authenticated <a href="/metrics"><code>GET /metrics</code></a> (<code>acs_rate_limit_rejected_total</code>, <code>acs_http_requests_total{status="429"}</code>, …). Names: <code>docs/runbooks/operator-metrics.md</code>.</p></article>

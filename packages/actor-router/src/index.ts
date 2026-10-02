@@ -1,4 +1,9 @@
-import type { ActorRoutingDecision as PersistedActorRoutingDecision, PrivilegedTransitionOptions, RecordActorRoutingDecisionInput, RegistryAgentDetail } from "@agent-control-stack/work-items";
+import type {
+  ActorRoutingDecision as PersistedActorRoutingDecision,
+  PrivilegedTransitionOptions,
+  RecordActorRoutingDecisionInput,
+  RegistryAgentDetail
+} from "@agent-control-stack/work-items";
 
 export interface ActorRoutingInput {
   requiredCapabilities: string[];
@@ -29,7 +34,10 @@ export interface ActorRoutingDecision {
 }
 
 export interface ActorRoutingPersistence {
-  recordActorRoutingDecision(input: RecordActorRoutingDecisionInput, options: PrivilegedTransitionOptions): PersistedActorRoutingDecision;
+  recordActorRoutingDecision(
+    input: RecordActorRoutingDecisionInput,
+    options: PrivilegedTransitionOptions
+  ): PersistedActorRoutingDecision;
 }
 
 const DEFAULT_HEARTBEAT_TTL_MS = 120_000;
@@ -64,7 +72,10 @@ export function routeActor(agents: RegistryAgentDetail[], input: ActorRoutingInp
       score += 40;
       scoreReasons.push("role fit +40");
     }
-    if (input.taskType && (agent.kind === input.taskType || agent.capabilities.some((capability) => capability.name === input.taskType))) {
+    if (
+      input.taskType &&
+      (agent.kind === input.taskType || agent.capabilities.some((capability) => capability.name === input.taskType))
+    ) {
       score += 25;
       scoreReasons.push("task specialization +25");
     }
@@ -110,14 +121,35 @@ export function routeAndPersistActor(
   options: PrivilegedTransitionOptions
 ): { decision: ActorRoutingDecision; persisted: PersistedActorRoutingDecision } {
   const decision = routeActor(agents, input);
-  const persisted = persistence.recordActorRoutingDecision({
-    workItemId: input.workItemId,
-    ...(input.attemptId ? { attemptId: input.attemptId } : {}),
-    ...(decision.selected ? { selectedActorId: decision.selected } : {}),
-    eligible: decision.eligible,
-    excluded: decision.excluded,
-    scores: decision.scores,
-    idempotencyKey: input.idempotencyKey
-  }, options);
+  const persisted = persistence.recordActorRoutingDecision(
+    {
+      workItemId: input.workItemId,
+      ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+      ...(decision.selected ? { selectedActorId: decision.selected } : {}),
+      eligible: decision.eligible,
+      excluded: decision.excluded,
+      scores: decision.scores,
+      idempotencyKey: input.idempotencyKey
+    },
+    options
+  );
   return { decision, persisted };
 }
+
+export {
+  DEFAULT_NIMBLE_ROUTING_MODEL,
+  DEFAULT_NIMBLE_ROUTING_THRESHOLD,
+  DEFAULT_NIMBLE_ROUTING_URL,
+  NIMBLE_ROUTING_ALGORITHM_VERSION,
+  evaluateNimbleCandidate,
+  routeNimbleActor,
+  validateNimbleRoutingOptions
+} from "./nimble.js";
+export type {
+  ActorNimbleRoutingInput,
+  ActorNimbleRoutingResult,
+  NimbleCandidateResult,
+  NimbleClientOptions,
+  NimbleRoutingState,
+  NimbleRoutingStateInput
+} from "./nimble.js";
