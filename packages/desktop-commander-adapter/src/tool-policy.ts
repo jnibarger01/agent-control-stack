@@ -55,6 +55,7 @@ export interface DesktopCommanderToolPolicy {
 /** ACS enforcement mechanics; the contract fields come from the manifest. */
 type DesktopCommanderToolMechanics = Omit<DesktopCommanderToolPolicy, "riskClass" | "requiresApproval" | "argsSchema">;
 
+<<<<<<< Updated upstream
 function readOnlyPolicy(
   name: string,
   extra: Partial<DesktopCommanderToolMechanics> = {}
@@ -98,6 +99,126 @@ function approvalPolicy(
 const mechanics: readonly DesktopCommanderToolMechanics[] = [
   {
     name: "get_config",
+=======
+const pathString = z
+  .string()
+  .min(1)
+  .max(MAX_PATH_LEN)
+  .refine((value) => !value.includes("\0"), "path must not contain NUL");
+
+const commandString = z
+  .string()
+  .min(1)
+  .max(MAX_SMALL_TEXT_LEN)
+  .refine((value) => !value.includes("\0"), "command must not contain NUL")
+  .refine((value) => !/[\r\n]/.test(value), "command must be a single line");
+
+// --- per-tool argument schemas (strict) -------------------------------------
+
+// `origin` is optional telemetry attribution defined by the Desktop Commander
+// MCP tool contract (`src/tools/schemas.ts`): 'ui' marks widget-fired calls.
+// It is NOT authorization-relevant — no ACS policy, scope, or approval decision
+// reads it — but it is a legitimate schema field, so strict parsing must accept
+// it. It flows into normalizedArguments and the invocation hash identically on
+// issuance and executor verification, so the capability still binds the exact
+// invocation the caller sends.
+const originArg = z.enum(["ui", "llm"]).optional();
+
+const getConfigArgs = z.object({
+  origin: originArg
+}).strict();
+
+const readFileArgs = z
+  .object({
+    path: pathString,
+    // Network reads are forbidden by ACS policy - `isUrl` may only be false.
+    isUrl: z.literal(false).optional(),
+    offset: z.number().int().min(0).max(1_000_000_000).optional(),
+    length: z.number().int().min(1).max(1_000_000).optional(),
+    origin: originArg
+  })
+  .strict();
+
+const readMultipleFilesArgs = z
+  .object({
+    paths: z.array(pathString).min(1).max(64)
+  })
+  .strict();
+
+const listDirectoryArgs = z
+  .object({
+    path: pathString,
+    depth: z.number().int().min(1).max(8).optional(),
+    origin: originArg
+  })
+  .strict();
+
+const getFileInfoArgs = z.object({ path: pathString, origin: originArg }).strict();
+
+const createDirectoryArgs = z.object({ path: pathString }).strict();
+
+const writeFileArgs = z
+  .object({
+    path: pathString,
+    content: z.string().max(MAX_TEXT_LEN),
+    mode: z.enum(["rewrite", "append"]).optional(),
+    origin: originArg
+  })
+  .strict();
+
+const moveFileArgs = z
+  .object({
+    source: pathString,
+    destination: pathString
+  })
+  .strict();
+
+const editBlockArgs = z
+  .object({
+    file_path: pathString,
+    old_string: z.string().max(MAX_TEXT_LEN),
+    new_string: z.string().max(MAX_TEXT_LEN),
+    expected_replacements: z.number().int().min(1).max(1_000).optional()
+  })
+  .strict();
+
+const startProcessArgs = z
+  .object({
+    command: commandString,
+    // ACS always runs a process in an explicit, contained working directory.
+    cwd: pathString,
+    timeout_ms: z
+      .number()
+      .int()
+      .min(1)
+      .max(15 * 60 * 1_000),
+    origin: originArg
+  })
+  .strict();
+
+const readProcessOutputArgs = z
+  .object({
+    pid: z.number().int().min(1).max(2_147_483_647),
+    timeout_ms: z
+      .number()
+      .int()
+      .min(1)
+      .max(5 * 60 * 1_000)
+      .optional(),
+    offset: z.number().int().min(0).optional(),
+    length: z.number().int().min(1).max(1_000_000).optional()
+  })
+  .strict();
+
+const emptyArgs = z.object({}).strict();
+
+// --- the registry ----------------------------------------------------------
+
+const policies: readonly DesktopCommanderToolPolicy[] = [
+  {
+    name: "get_config",
+    riskClass: "read_only",
+>>>>>>> Stashed changes
     mutating: false,
     network: false,
     destructive: false,
