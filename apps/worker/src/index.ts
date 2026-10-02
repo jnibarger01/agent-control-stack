@@ -76,6 +76,12 @@ export interface WorkerOptions {
   executionBackend?: ExecutionBackend;
   /** Inject a machine executor (tests only). */
   machineExecutor?: MachineExecutor;
+  /**
+   * Resume durable missions before the work-item claim loop. Production
+   * passes the mission runtime's resumeOpenMissions so a restarted worker
+   * continues from persisted mission state.
+   */
+  resumeMissions?: (input: { dbPath: string; workerId: string }) => Promise<void>;
 }
 
 export interface WorkerResult {
@@ -206,6 +212,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   }
 
   try {
+    if (options.resumeMissions) await options.resumeMissions({ dbPath, workerId });
     workItems.failExpiredLeases();
     const running = tools.claim_next_approved_work_item({ workerId });
     if (!running) {

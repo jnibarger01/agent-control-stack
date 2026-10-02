@@ -35,6 +35,24 @@ function approvalActionHash(workItem: WorkItem, actor: string): string {
 }
 
 describe("worker policy gate", () => {
+  it("resumes durable missions before it claims work", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "acs-worker-mission-resume-"));
+    const seen: string[] = [];
+    try {
+      const result = await runWorkerOnce({
+        dbPath: join(directory, "control.db"),
+        workerId: "worker-resume",
+        resumeMissions: async ({ workerId }) => {
+          seen.push(workerId);
+        }
+      });
+      expect(seen).toEqual(["worker-resume"]);
+      expect(result).toMatchObject({ executed: false, reason: "no approved work item" });
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a non-dry-run execution mode in production", () => {
     expect(() => assertDryRunExecutionMode("live", "production")).toThrow(
       "production worker requires dry_run execution mode"
