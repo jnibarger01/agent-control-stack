@@ -261,7 +261,6 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
-<<<<<<< Updated upstream
   const adminMode = store.getExecutionMode().mode === "admin";
   const registeredAgentIds = new Set(store.listRegistryAgents().map((agent) => agent.id));
   const workerMatchesTarget = (workItem: WorkItem) => {
@@ -285,9 +284,6 @@ function gateWorkerClaimInTransaction(
       );
     })
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
-=======
-  const candidate = store.findNextApprovedWorkItemForWorker(parsed.workerId);
->>>>>>> Stashed changes
   if (!candidate) {
     return undefined;
   }

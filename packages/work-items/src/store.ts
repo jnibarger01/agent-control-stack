@@ -5256,7 +5256,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
     return this.write(() => {
-<<<<<<< Updated upstream
       const mode = options.adminApprovalActorId
         ? (this.db.prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`).get() as { mode?: string } | undefined)
         : undefined;
@@ -5296,17 +5295,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
                ORDER BY item.created_at ASC LIMIT 1`
             )
             .get(workerId) as unknown as WorkItemRow | undefined);
-=======
-      const row = this.db
-        .prepare(
-          `SELECT wi.* FROM work_items AS wi
-           LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
-           WHERE wi.status = 'approved'
-             AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)
-           ORDER BY wi.created_at ASC LIMIT 1`
-        )
-        .get(workerId) as unknown as WorkItemRow | undefined;
->>>>>>> Stashed changes
       if (!row) {
         return { value: undefined, events: [] };
       }

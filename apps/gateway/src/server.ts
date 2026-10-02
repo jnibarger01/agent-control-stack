@@ -614,10 +614,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     permit: AdmissionPermit;
     lane: "jc" | "dc";
     executionClass: "execution" | "wait";
-<<<<<<< Updated upstream
     executionModeFence?: "admin";
-=======
->>>>>>> Stashed changes
   }) {
     // The lease and durable capacity reservation commit together. Scheduler
     // state is published only after commit, and can be rebuilt after a crash.
@@ -634,12 +631,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const claim = tools.claim_approved_work_item_by_id({
         id: input.workItemId,
         workerId: input.workerId,
-<<<<<<< Updated upstream
         leaseMs: input.leaseMs,
         ...(input.executionModeFence ? { executionModeFence: input.executionModeFence } : {})
-=======
-        leaseMs: input.leaseMs
->>>>>>> Stashed changes
       });
       if (!claim?.attemptId) return claim;
       if (claim.fencingEpoch === undefined || !claim.planHash || !claim.inputHash) {
@@ -2805,7 +2798,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-<<<<<<< Updated upstream
           const adminApprovalAtClaim = workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
           if (adminApprovalAtClaim) {
             const modeAfterAdmission = readExecutionModeValue(workItems.getExecutionMode().raw);
@@ -2862,20 +2854,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             }
           }
 
-=======
->>>>>>> Stashed changes
           const claimed = claimWithAdmissionPermit({
             workItemId: workItem.id,
             workerId,
             leaseMs: JC_BRIDGE_LEASE_MS,
             permit: admissionPermit,
             lane: "jc",
-<<<<<<< Updated upstream
             executionClass: classifyAdmissionTool("jc", invocation.toolName),
             ...(adminApprovalAtClaim ? { executionModeFence: "admin" as const } : {})
-=======
-            executionClass: classifyAdmissionTool("jc", invocation.toolName)
->>>>>>> Stashed changes
           });
           admissionBound = Boolean(claimed?.attemptId);
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
