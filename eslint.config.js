@@ -20,11 +20,28 @@ export default tseslint.config(
       "no-restricted-imports": [
         "error",
         {
+          paths: [
+            {
+              name: "@agent-control-stack/policy-gate",
+              importNames: ["maybeRunJevShadowAdvisory", "runJevShadowAdvisory"],
+              message:
+                "Jev shadow hooks are advisory-only (ADR 0020). Only the gateway MCP observation path may import them from the policy-gate barrel."
+            }
+          ],
           patterns: [
             {
               group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
               message:
                 "Jev is advisory-only (ADR 0020). Import it only from the allow-listed shadow hook or observation worker, never from authority code."
+            },
+            {
+              group: [
+                "@agent-control-stack/policy-gate/*jev-shadow*",
+                "**/policy-gate/src/jev-shadow.js",
+                "**/policy-gate/src/jev-shadow.ts"
+              ],
+              message:
+                "Jev shadow hooks are advisory-only (ADR 0020). Do not deep-import the shadow module from authority code."
             }
           ]
         }
@@ -39,6 +56,24 @@ export default tseslint.config(
       "**/*.test.ts"
     ],
     rules: { "no-restricted-imports": "off" }
+  },
+  {
+    // The gateway MCP transport is the single production caller of the advisory shadow hook.
+    // Keep the raw adapter forbidden here while allowing the policy-gate wrapper.
+    files: ["apps/gateway/src/mcp.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@agent-control-stack/jev-advisor", "@agent-control-stack/jev-advisor/*", "**/jev-advisor/**"],
+              message: "Jev is advisory-only (ADR 0020). Use the policy-gate shadow hook from this observation path."
+            }
+          ]
+        }
+      ]
+    }
   },
   {
     // The deterministic decision modules must not depend on the Jev shadow hook either, so Jev
