@@ -114,6 +114,8 @@ export interface RunAgentOptions {
   env?: NodeJS.ProcessEnv;
   maxOutputBytes?: number;
   onStart?: (pid: number | undefined) => void;
+  /** Called about every two seconds while running with the redacted output so far. */
+  onSnapshot?: (redactedOutput: string) => void;
 }
 
 /** Spawn the CLI (no shell) in its own process group, bounded by timeout and output size. */
@@ -149,6 +151,9 @@ export function runAgent(options: RunAgentOptions): Promise<AgentRunOutcome> {
       setTimeout(() => killGroup("SIGKILL"), 2_000).unref();
     };
     const timer = setTimeout(() => stop("timeout"), options.command.timeoutSec * 1_000);
+    const snapshotTimer = options.onSnapshot
+      ? setInterval(() => options.onSnapshot?.(redactLines(output)), 2_000)
+      : undefined;
     const onAbort = () => stop("cancel");
     if (options.signal?.aborted) onAbort();
     else options.signal?.addEventListener("abort", onAbort, { once: true });
@@ -169,6 +174,7 @@ export function runAgent(options: RunAgentOptions): Promise<AgentRunOutcome> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (snapshotTimer) clearInterval(snapshotTimer);
       options.signal?.removeEventListener("abort", onAbort);
       killGroup("SIGKILL");
       const text = redactLines(output + extra);

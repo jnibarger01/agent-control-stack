@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@agent-control-stack/acp-adapter": "0.1.0",
+    "@agent-control-stack/agent-cli": "0.1.0",
     "@agent-control-stack/coding-mission": "0.1.0",
     "@agent-control-stack/control-ui": "0.1.0",
     "@agent-control-stack/desktop-commander-adapter": "0.1.0",
