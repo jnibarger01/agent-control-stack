@@ -17,7 +17,9 @@
   "scripts": {
     "build": "npm run build:chatgpt-widget && tsc -b && npm run build -w apps/public-site && npm run release:dry-run-gate",
     "build:chatgpt-widget": "npm run build -w apps/chatgpt-widget",
-    "test": "npm run test:vitest && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay",
+    "test": "npm run test:vitest && npm run test:release-integrity && npm run test:agentos && npm run test:public-site-safety && npm run test:dc-mcp-gateway && npm run test:dc-relay",
+    "test:release-integrity": "npm test -w packages/release-integrity",
+    "release:integrity": "node scripts/release-integrity.mjs",
     "test:vitest": "vitest run",
     "test:protocol-conformance": "npm run build && vitest run apps/gateway/src/security-contract-conformance.test.ts",
     "test:agentos": "npm test -w packages/agentos-contracts",
@@ -25,6 +27,8 @@
     "test:dc-mcp-gateway": "npm test -w apps/dc-mcp-gateway",
     "test:dc-relay": "npm test -w apps/dc-relay",
     "test:sandbox-integration": "ACS_SANDBOX_INTEGRATION=1 vitest run --coverage \"--coverage.include=packages/sandbox/src/*.ts\" --coverage.reportsDirectory=coverage/sandbox --coverage.thresholds.perFile --coverage.thresholds.lines=85 --coverage.thresholds.statements=85 --coverage.thresholds.branches=65 --coverage.thresholds.functions=85 packages/sandbox/src",
+    "test:mission-control-e2e": "node scripts/verify-mission-control.mjs",
+    "test:mission-control-e2e:check": "node scripts/check-mission-control-e2e-gate.mjs",
     "test:coverage": "vitest run --coverage",
     "test:authority-coverage": "npm run test:coverage && node scripts/check-authority-coverage.mjs",
     "contracts:generate": "tsx scripts/public-contracts.ts",
@@ -43,7 +47,7 @@
     "security:audit": "npm audit --audit-level=high",
     "security:secrets": "docker run --rm -v \"$PWD:/repo:ro\" zricethezav/gitleaks@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f detect --source=/repo --no-git --redact --config=/repo/.gitleaks.toml --exit-code=1",
     "release:dry-run-gate": "node scripts/check-dry-run-boundary.mjs",
-    "check": "npm run format:check && npm run lint && npm run build && npm run contracts:check && npm run dc-contracts:check && npm run jc-contracts:check && npm run release:dry-run-gate && npm test && npm run test:authority-coverage && npm run security:audit",
+    "check": "npm run format:check && npm run lint && npm run build && npm run contracts:check && npm run dc-contracts:check && npm run jc-contracts:check && npm run release:dry-run-gate && npm run test:mission-control-e2e:check && npm test && npm run test:authority-coverage && npm run security:audit",
     "dev:gateway": "tsx apps/gateway/src/index.ts",
     "eval": "tsx packages/eval-harness/src/cli.ts",
     "start:mcp": "node apps/mcp/dist/cli.js",
@@ -76,6 +80,8 @@
     "openai": "^7.23.0"
   },
   "overrides": {
+    "brace-expansion@^2.0.0": "2.1.7",
+    "brace-expansion@^5.0.0": "5.0.12",
     "browserslist": "4.28.7",
     "fast-uri": "3.1.7",
     "fastify": "5.12.5"

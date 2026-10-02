@@ -68,6 +68,18 @@ function fullAnswerBody() {
         score: 3.7,
         probabilities: { "0": 0.01, "1": 0.02, "2": 0.07, "3": 0.1, "4": 0.8 },
         confidence: 0.8
+      },
+      capability_issuance_latency: {
+        type: "score",
+        score: 1,
+        probabilities: { "0": 0.01, "1": 0.02, "2": 0.97 },
+        confidence: 0.8
+      },
+      execution_latency: {
+        type: "score",
+        score: 1,
+        probabilities: { "0": 0.01, "1": 0.02, "2": 0.97 },
+        confidence: 0.8
       }
     }
   };
@@ -270,7 +282,7 @@ describe("canonical trace projection for Jev", () => {
 
 describe("Jev canonical trace classifier", () => {
   it("declares the requested taxonomy and primitive types", () => {
-    expect(JEV_TRACE_QUESTION_SET_VERSION).toBe("jev-trace@1");
+    expect(JEV_TRACE_QUESTION_SET_VERSION).toBe("jev-trace@2");
     expect(JEV_TRACE_FAILURE_MODES).toEqual([
       "healthy",
       "tool_loop",
@@ -322,7 +334,7 @@ describe("Jev canonical trace classifier", () => {
       }
     );
     expect(calls).toHaveLength(1);
-    expect(Object.keys((calls[0] as { questions: object }).questions)).toHaveLength(5);
+    expect(Object.keys((calls[0] as { questions: object }).questions)).toHaveLength(7);
     expect(result.result.degraded).toBe(false);
     expect(result.result.answers.failure_mode).toMatchObject({
       type: "choice",
@@ -330,7 +342,7 @@ describe("Jev canonical trace classifier", () => {
       confidence: 0.82
     });
     expect(result.result.answers.recovery_urgency).toMatchObject({ type: "score", score: 3.7 });
-    expect(result.telemetry.question_set_version).toBe("jev-trace@1");
+    expect(result.telemetry.question_set_version).toBe("jev-trace@2");
     expect(result.telemetry.observations.failure_mode.primitive).toBe("choice");
   });
 

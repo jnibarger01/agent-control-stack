@@ -15,6 +15,7 @@ import {
   type JevPrimitive
 } from "./contracts/capability.js";
 import type { CanonicalTraceEvent } from "@agent-control-stack/work-items";
+import { projectLatencyMetrics } from "./latency-projection.js";
 import {
   choice,
   noul,
@@ -31,7 +32,17 @@ import {
   JEV_CLASSIFIER_VERSION,
   type JevTelemetryEvent
 } from "./telemetry.js";
+// projectCanonicalTraceForJev and JevTraceProjection are re-exported by the
+// `export * from "./trace-projection.js"` below, so this module only needs the
+// import for internal use.
 import { projectCanonicalTraceForJev, type JevTraceProjection } from "./trace-projection.js";
+export {
+  projectLatencyMetrics,
+  redactLatencyPayload,
+  type CapabilityIssuanceLatency,
+  type ExecutionLatency,
+  type JevLatencyMetrics
+} from "./latency-projection.js";
 
 export * from "./telemetry.js";
 export * from "./contracts/questions.js";
@@ -391,7 +402,16 @@ function readNumberEnv(name: string): number | undefined {
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-export const JEV_TRACE_QUESTION_SET_VERSION = "jev-trace@1" as const;
+/**
+ * Version of the trace question set and telemetry payload.
+ *
+ * Bumped to @2 because the trace question set, failure modes and telemetry shape
+ * changed materially. The value is part of `observationalIdentity`, so observations
+ * produced under @1 are never conflated with @2 results: previously persisted rows
+ * keep the version they were written with and remain readable, while new rows are
+ * attributed to @2.
+ */
+export const JEV_TRACE_QUESTION_SET_VERSION = "jev-trace@2" as const;
 export const JEV_TRACE_FAILURE_MODES = [
   "healthy",
   "tool_loop",
@@ -427,7 +447,13 @@ export const JEV_TRACE_QUESTIONS = {
     "moderate",
     "high",
     "immediate"
-  ])
+  ]),
+  capability_issuance_latency: score("How fast was capability issuance in this trace?", [
+    "fast",
+    "moderate",
+    "slow"
+  ]),
+  execution_latency: score("How fast was execution in this trace?", ["fast", "moderate", "slow"])
 } as const satisfies JevQuestions;
 
 export type JevTraceAdvisory = {
@@ -445,6 +471,7 @@ export async function classifyJevTrace(
   options: ClassifyJevOptions = {}
 ): Promise<JevTraceAdvisory> {
   const projection = projectCanonicalTraceForJev(events);
+  const latencyMetrics = projectLatencyMetrics(events);
   const result = await classifyJev(projection, JEV_TRACE_QUESTIONS, options);
   const telemetry = buildJevTelemetryEvent({
     result,
@@ -454,7 +481,8 @@ export async function classifyJevTrace(
       traceId: projection.trace_id,
       workItemId: projection.work_item_id
     },
-    actualOutcome: traceActualOutcome(events)
+    actualOutcome: traceActualOutcome(events),
+    latencyMetrics
   });
   return { projection, result, telemetry };
 }

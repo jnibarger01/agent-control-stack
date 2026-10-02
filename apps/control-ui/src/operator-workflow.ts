@@ -110,6 +110,9 @@ function writeSelectedItemToLocation(id) {
 }
 function selectWorkItem(id, options) {
   if (!id) return;
+  // A location-driven selection must never write the URL back: the URL is the input
+  // being synced from, and rewriting it during popstate/hashchange fights history.
+  const fromLocation = !!(options && options.fromLocation);
   document.querySelectorAll('[data-work-item]').forEach(function (candidate) {
     const match = candidate.dataset.workItem === id;
     candidate.classList.toggle('selected', match);
@@ -117,7 +120,7 @@ function selectWorkItem(id, options) {
   });
   openWorkDrawer();
   selectedWorkItemId = id;
-  writeSelectedItemToLocation(id);
+  if (!fromLocation) writeSelectedItemToLocation(id);
   if (options && options.scroll) {
     const row = document.querySelector('[data-work-item="' + cssAttr(id) + '"]');
     if (row && row.scrollIntoView) row.scrollIntoView({ block: 'nearest' });
@@ -133,7 +136,36 @@ function openWorkItemFromLocation() {
   if (!location.hash) showView('queue');
   selectWorkItem(id, { scroll: true });
 }
-window.addEventListener('popstate', openWorkItemFromLocation);
+
+/**
+ * Derive the whole view state from location on every history transition.
+ *
+ * Back/Forward must not leave the URL and the UI disagreeing. Deriving both the
+ * active view and the drawer from location, on both popstate and hashchange, means:
+ *   URL item A -> drawer A
+ *   URL item B -> drawer B
+ *   no item    -> drawer closed
+ *   unknown item -> the drawer opens on that id and shows a deterministic
+ *                   not-found/error state from the normal detail fetch, rather than
+ *                   silently keeping the previously shown item.
+ * The previous implementation only closed the drawer when ?item= disappeared, so
+ * moving from item B back to item A could leave the drawer showing B.
+ */
+function syncViewStateFromLocation() {
+  showView(location.hash.slice(1) || 'overview');
+  const id = workItemIdFromLocation();
+  const drawer = document.getElementById('work-drawer');
+  const drawerOpen = !!drawer && !drawer.hidden;
+  if (!id) {
+    if (drawerOpen) closeWorkDrawer({ fromLocation: true });
+    return;
+  }
+  if (drawerOpen && selectedWorkItemId === id) return;
+  if (!location.hash) showView('queue');
+  selectWorkItem(id, { scroll: true, fromLocation: true });
+}
+window.addEventListener('popstate', syncViewStateFromLocation);
+window.addEventListener('hashchange', syncViewStateFromLocation);
 
 // --- #14 live wait badges between refreshes.
 function formatWaitClient(ms) {

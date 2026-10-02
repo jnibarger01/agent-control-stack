@@ -209,9 +209,12 @@ describe("deep links (#15)", () => {
     expect(app.text("#work-detail h3")).toBe("Task wrk_b");
     expect(app.document.querySelector("#work-detail .permalink")?.getAttribute("href")).toBe("?item=wrk_b#queue");
 
-    (app.document.querySelector('[data-work-item="wrk_a"]') as HTMLElement).click();
+    const row = app.document.querySelector('[data-work-item="wrk_a"]') as HTMLElement;
+    row.focus();
+    row.click();
     await app.flush();
     expect(app.window.location.search).toBe("?item=wrk_a");
+    expect(app.document.activeElement).toBe(row);
   });
 
   it("puts the same permalink in the server-rendered detail and advertises shortcut help", () => {

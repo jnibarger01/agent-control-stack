@@ -43,6 +43,7 @@ import {
   validateCapabilitySigningConfig,
   type CapabilitySigningConfig,
   type ContainmentConfig,
+  containPath,
   type ExecutionAuthorization
 } from "@agent-control-stack/desktop-commander-adapter";
 import {
@@ -69,6 +70,7 @@ import {
 } from "@agent-control-stack/machine-controller";
 import {
   createPolicyEngine,
+  evaluateChangeSetPolicy,
   createWorkItemTools,
   explainPolicy,
   previewWorkItemPolicy,
@@ -98,6 +100,8 @@ import {
   requesterSchema,
   SqliteExecutionReadStore,
   SqliteWorkItemStore,
+  changeSetPolicyHash,
+  IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS,
   DEFAULT_EVENT_LIMIT,
   MAX_DASHBOARD_FINISHED_LIMIT,
   MAX_EVENT_LIMIT,
@@ -142,6 +146,16 @@ import {
   agentBodySchema,
   agentPatchSchema,
   approvalBodySchema,
+  changeSetSubmissionBodySchema,
+  changeSetPolicyBodySchema,
+  missionTraceQuerySchema,
+  changeSetReviewBodySchema,
+  changeSetApprovalBodySchema,
+  issueAutonomousAuthorityBodySchema,
+  grantAuthorizationBodySchema,
+  changeSetOperationPermitBodySchema,
+  changeSetRevocationBodySchema,
+  changeSetQuerySchema,
   cancelBodySchema,
   capabilitiesBodySchema,
   connectorBodySchema,
@@ -180,6 +194,10 @@ import { gatewayListenConfig } from "./runtime-config.js";
 import { DeviceAuthStore } from "./device-auth-store.js";
 import { registerDeviceAuthRoutes } from "./device-auth.js";
 import { createPortfolioClientFromEnv, type PortfolioClient } from "./portfolio-client.js";
+import { verifyChangeSetResult } from "./change-set-verification.js";
+import { fileReadbackExpectationSchema } from "@agent-control-stack/verification";
+import { changeSetExecutionInput } from "./change-set-execution.js";
+import { dcWorkItemActionKind, resolveChangeSetRuntimePolicy } from "./change-set-runtime-policy.js";
 
 const sessionCookieName = "acs_session";
 const sessionCookieMaxAgeSeconds = 8 * 60 * 60;
@@ -399,6 +417,23 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       "per-principal SSE cap lowered to stay below the global cap"
     );
   }
+  // Human approval, revocation, execution-mode and grant authority is deliberately
+  // restricted to a pure human operator. A credential that mixes in service or
+  // worker roles is refused at request time, so surface it at startup rather than
+  // letting an operator discover it as a mysterious 403 in production.
+  const incompatibleApprovalCredentials = findIncompatibleHumanApprovalCredentials(auth?.credentials ?? []);
+  if (incompatibleApprovalCredentials.length) {
+    app.log.warn(
+      {
+        event: "incompatible_human_approval_credentials",
+        credentialIds: incompatibleApprovalCredentials.map((credential) => credential.id),
+        conflictingRoles: incompatibleApprovalCredentials.map((credential) => credential.roles),
+        remediation:
+          "Split these into a pure human operator credential (roles: [operator], actor: user) and a separate service or worker credential; mixed-role credentials cannot approve, revoke, change execution mode or issue authority grants."
+      },
+      "Configured credentials cannot hold human approval authority; requests using them will be refused with human_authority_required"
+    );
+  }
   const metrics = new GatewayMetrics();
   if (observationWorker) {
     app.addHook("onReady", async () => {
@@ -451,6 +486,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     {
       permit: AdmissionPermit;
       lane: "jc" | "dc";
+      executionClass: "execution" | "wait";
       workItemId: string;
       leaseId: string;
       workerId: string;
@@ -461,6 +497,111 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   >();
 
+  // Fail closed any lease that survived a restart holding execution capacity
+  // without a durable reservation. Such a lease is uncountable and unreleasable;
+  // fencing it lets startup converge instead of reporting permanently unhealthy.
+  try {
+    const orphaned = workItems.fenceLeasesWithoutAdmissionReservation({
+      workerIds: [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID],
+      reservedAttemptIds: new Set(workItems.listAdmissionPermits().map((permit) => permit.attemptId))
+    });
+    if (orphaned.length)
+      app.log.warn(
+        { event: "admission_orphan_lease_fenced", count: orphaned.length },
+        "Fenced execution leases recovered without an admission reservation"
+      );
+  } catch (error) {
+    app.log.error(
+      { event: "admission_orphan_fencing_failed", error: error instanceof Error ? error.message : String(error) },
+      "Startup could not fence execution leases missing an admission reservation"
+    );
+  }
+
+  // Re-establish capacity accounting only from a complete, current ACS lease binding.
+  // Invalid records remain persisted for diagnosis and do not mutate scheduler state.
+  for (const perm of workItems.listAdmissionPermits()) {
+    const lease = workItems.getActiveLeaseForAttempt(perm.attemptId);
+    if (!lease || lease.status !== "active" || Date.parse(lease.expiresAt) <= Date.now()) {
+      workItems.releaseAdmissionPermit(perm.attemptId);
+      continue;
+    }
+    const attempt = workItems.getAttempt(perm.attemptId);
+    const admission = lease && workItems.getExecutionPlanAdmission(lease.admissionId);
+    const workItem = workItems.get(perm.workItemId);
+    const valid =
+      lease?.status === "active" &&
+      Date.parse(lease.expiresAt) > Date.now() &&
+      lease.leaseId === perm.leaseId &&
+      lease.attemptId === perm.attemptId &&
+      lease.workItemId === perm.workItemId &&
+      lease.workerId === perm.workerId &&
+      lease.fencingEpoch === perm.fencingEpoch &&
+      lease.planHash === perm.planHash &&
+      lease.inputHash === perm.inputHash &&
+      attempt?.workItemId === perm.workItemId &&
+      attempt.status === "running" &&
+      attempt.currentFencingEpoch === perm.fencingEpoch &&
+      attempt.claimedByWorkerId === perm.workerId &&
+      attempt.planHash === perm.planHash &&
+      attempt.inputHash === perm.inputHash &&
+      admission?.workItemId === perm.workItemId &&
+      admission.planHash === perm.planHash &&
+      workItem !== undefined &&
+      workItem.status === "running" &&
+      perm.workerId === (perm.lane === "jc" ? JC_BRIDGE_WORKER_ID : DC_BRIDGE_WORKER_ID) &&
+      typeof workItem.requestedActions[0]?.params?.tool === "string" &&
+      perm.executionClass === classifyAdmissionTool(perm.lane, String(workItem.requestedActions[0]?.params?.tool)) &&
+      executionActionHash(workItem) === perm.actionHash;
+    if (!valid) {
+      app.log.warn(
+        {
+          event: "admission_permit_recovery_rejected",
+          attemptId: perm.attemptId,
+          workItemId: perm.workItemId,
+          leaseId: perm.leaseId,
+          fencingEpoch: perm.fencingEpoch,
+          reason: "persisted permit does not match the current active lease binding"
+        },
+        "Persisted execution admission permit rejected during startup recovery"
+      );
+      continue;
+    }
+
+    try {
+      const permit = executionAdmission.restoreActivePermit({
+        permitId: perm.attemptId,
+        lane: perm.lane,
+        executionClass: perm.executionClass,
+        executorId: perm.workerId
+      });
+      admissionPermits.set(perm.attemptId, {
+        permit,
+        lane: perm.lane,
+        executionClass: perm.executionClass,
+        workItemId: perm.workItemId,
+        leaseId: perm.leaseId,
+        workerId: perm.workerId,
+        fencingEpoch: perm.fencingEpoch,
+        actionHash: perm.actionHash,
+        planHash: perm.planHash,
+        inputHash: perm.inputHash
+      });
+      refreshAdmissionMetrics();
+    } catch (error) {
+      app.log.error(
+        {
+          event: "admission_permit_recovery_failed",
+          attemptId: perm.attemptId,
+          workItemId: perm.workItemId,
+          leaseId: perm.leaseId,
+          fencingEpoch: perm.fencingEpoch,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        "Execution admission controller failed to restore a validated permit"
+      );
+    }
+  }
+
   async function acquireExecutionPermit(input: {
     request: FastifyRequest;
     reply: FastifyReply;
@@ -469,6 +610,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     actorId: string;
     toolName: string;
   }): Promise<AdmissionPermit> {
+    reapAdmissionPermits();
+    // Fence any capacity held without a durable reservation, then re-reconcile.
+    // This converges the accounting invariant instead of latching on it.
+    if (fenceUnreservedBridgeLeases()) reapAdmissionPermits();
+    reconcileAdmissionAccounting();
+    if (admissionReconciliationMismatch)
+      throw new ControlStackError("admission_recovery_required", "admission recovery requires reconciliation");
     const abort = new AbortController();
     const onAbort = () => abort.abort();
     input.request.raw.once("aborted", onAbort);
@@ -492,39 +640,140 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   }
 
-  function bindAdmissionPermit(input: {
-    attemptId: string;
-    permit: AdmissionPermit;
-    lane: "jc" | "dc";
-    workItemId: string;
-    leaseId: string;
+  function claimWithAdmissionPermit(input: {
+    id: string;
     workerId: string;
-    fencingEpoch: number;
-    actionHash: string;
-    planHash: string;
-    inputHash: string;
-  }): void {
-    if (admissionPermits.has(input.attemptId)) {
-      throw new Error(`execution admission permit already bound for attempt ${input.attemptId}`);
+    leaseMs: number;
+    lane: "jc" | "dc";
+    toolName: string;
+    permit: AdmissionPermit;
+    validateAuthority?: () => void;
+    executionModeFence?: "admin";
+  }) {
+    const executionClass = classifyAdmissionTool(input.lane, input.toolName);
+    const claimed = workItems.withTransaction(() => {
+      input.validateAuthority?.();
+      const claim = tools.claim_approved_work_item_by_id({
+        id: input.id,
+        workerId: input.workerId,
+        leaseMs: input.leaseMs,
+        ...(input.executionModeFence ? { executionModeFence: input.executionModeFence } : {})
+      });
+      if (!claim?.attemptId || claim.fencingEpoch === undefined || !claim.planHash || !claim.inputHash) return claim;
+      workItems.bindAdmissionPermit({
+        attemptId: claim.attemptId,
+        workItemId: claim.id,
+        leaseId: claim.leaseId,
+        workerId: input.workerId,
+        fencingEpoch: claim.fencingEpoch,
+        actionHash: claim.actionHash,
+        planHash: claim.planHash,
+        inputHash: claim.inputHash,
+        lane: input.lane,
+        executionClass
+      });
+      return claim;
+    });
+    if (claimed?.attemptId && claimed.fencingEpoch !== undefined && claimed.planHash && claimed.inputHash) {
+      admissionPermits.set(claimed.attemptId, {
+        permit: input.permit,
+        lane: input.lane,
+        executionClass,
+        workItemId: claimed.id,
+        leaseId: claimed.leaseId,
+        workerId: input.workerId,
+        fencingEpoch: claimed.fencingEpoch,
+        actionHash: claimed.actionHash,
+        planHash: claimed.planHash,
+        inputHash: claimed.inputHash
+      });
+      refreshAdmissionMetrics();
     }
-    admissionPermits.set(input.attemptId, input);
-    refreshAdmissionMetrics();
+    return claimed;
   }
 
-  function releaseAdmissionPermit(attemptId: string): boolean {
+  function reapAdmissionPermits(): void {
+    workItems.failExpiredLeases();
+    const durable = new Set(workItems.listAdmissionPermits().map((permit) => permit.attemptId));
+    for (const attemptId of [...admissionPermits.keys()]) {
+      const binding = admissionPermits.get(attemptId);
+      const lease = workItems.getActiveLeaseForAttempt(attemptId);
+      // Release when the durable reservation is gone, or the lease it was bound to
+      // is no longer live. Both directions must converge or accounting latches.
+      if (
+        !binding ||
+        !durable.has(attemptId) ||
+        !lease ||
+        lease.status !== "active" ||
+        lease.leaseId !== binding.leaseId ||
+        Date.parse(lease.expiresAt) <= Date.now()
+      ) {
+        releaseAdmissionPermit(attemptId, true);
+      }
+    }
+    for (const attemptId of durable) {
+      if (!admissionPermits.has(attemptId)) workItems.releaseAdmissionPermit(attemptId);
+    }
+  }
+
+  /**
+   * A bridge lease that holds execution capacity without a durable reservation can
+   * neither be released nor counted. Fence it closed so reconciliation converges
+   * instead of latching readiness at 503 until natural lease expiry. Returns true
+   * when it fenced anything, so the caller re-reconciles.
+   */
+  function fenceUnreservedBridgeLeases(): boolean {
+    const reserved = new Set(workItems.listAdmissionPermits().map((permit) => permit.attemptId));
+    let fenced: ReturnType<typeof workItems.fenceLeasesWithoutAdmissionReservation>;
+    try {
+      fenced = workItems.fenceLeasesWithoutAdmissionReservation(
+        {
+          workerIds: [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID],
+          reservedAttemptIds: reserved
+        },
+        // Readiness is probed frequently and must answer promptly. Bound the wait for
+        // the write lock so a contended database surfaces as its real readiness state
+        // instead of stalling the probe for the default busy timeout.
+        { busyTimeoutMs: 50 }
+      );
+    } catch (error) {
+      // Reconciliation must not mutate authority when fencing cannot be proven safe.
+      app.log.error(
+        { event: "admission_orphan_fencing_failed", error: error instanceof Error ? error.message : String(error) },
+        "Could not fence execution leases missing an admission reservation"
+      );
+      return false;
+    }
+    if (fenced.length) {
+      metrics.increment("scheduler_orphan_execution_fenced_total");
+      app.log.warn(
+        { event: "admission_orphan_lease_fenced", count: fenced.length },
+        "Fenced execution leases that held capacity without an admission reservation"
+      );
+    }
+    return fenced.length > 0;
+  }
+
+  function releaseAdmissionPermit(attemptId: string, force = false): boolean {
     const binding = admissionPermits.get(attemptId);
     if (!binding) return false;
+    if (!force) {
+      const lease = workItems.getActiveLeaseForAttempt(attemptId);
+      if (lease?.status === "active" && Date.parse(lease.expiresAt) > Date.now()) return false;
+    }
     admissionPermits.delete(attemptId);
     binding.permit.release();
+    workItems.releaseAdmissionPermit(attemptId);
     refreshAdmissionMetrics();
     return true;
   }
 
   let admissionReconciliationMismatch = false;
   function reconcileAdmissionAccounting(): void {
-    const activeLeaseCount = workItems.countActiveAttemptLeases();
+    const activeLeaseCount = workItems.countActiveAttemptLeases(new Date(), [JC_BRIDGE_WORKER_ID, DC_BRIDGE_WORKER_ID]);
     const mismatch =
-      admissionPermits.size > activeLeaseCount ||
+      admissionPermits.size !== activeLeaseCount ||
+      workItems.listAdmissionPermits().length !== admissionPermits.size ||
       [...admissionPermits.entries()].some(([attemptId, binding]) => {
         const lease = workItems.getActiveLeaseForAttempt(attemptId);
         return !lease || lease.leaseId !== binding.leaseId || lease.workerId !== binding.workerId;
@@ -768,6 +1017,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     };
     const sandboxCheck = evaluateSandboxReadyzCheck(options.sandboxReadiness);
     const health = mergeSandboxReadyzCheck(workItems.readinessHealth(), sandboxCheck);
+    // Readiness is a reconciliation boundary: converge capacity accounting first so
+    // an orphaned lease is reported as recovered rather than permanently unhealthy.
+    if (fenceUnreservedBridgeLeases()) reapAdmissionPermits();
+    reconcileAdmissionAccounting();
+    if (admissionReconciliationMismatch) {
+      return reply.code(503).send({
+        ...health,
+        ok: false,
+        execution: executionView,
+        checks: { ...health.checks, executionAdmission: { ok: false, code: "admission_recovery_required" } }
+      });
+    }
     return reply.code(health.ok ? 200 : 503).send({ ...health, execution: executionView });
   };
 
@@ -849,7 +1110,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
       try {
-        const actor = requireMutationActor(request, reply, auth);
+        const actor = requireHumanApprovalActor(request, reply, auth);
         if (!actor) return;
         const body = executionModeBodySchema.parse(requestObject(request.body));
         workItems.setExecutionMode({
@@ -970,7 +1231,12 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     const admission = executionAdmission.snapshot();
     return {
       workItems: workItemList,
-      executionPlansByWorkItem: Object.fromEntries(workItems.listCurrentExecutionPlansForWorkItems(ids)),
+      executionPlansByWorkItem: Object.fromEntries(
+        ids.flatMap((id) => {
+          const plan = workItems.getCurrentExecutionPlan(id);
+          return plan ? [[id, plan]] : [];
+        })
+      ),
       executionPlanAdmissionsByWorkItem: Object.fromEntries(executionReads.listCurrentPlanAdmissionsForWorkItems(ids)),
       statusCounts: dashboard.statusCounts,
       finishedWorkItems: {
@@ -1054,13 +1320,13 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   app.post("/dashboard/policy-preview", { preHandler: requireRead }, async (request, reply) => {
     try {
       const credential = gatewayCredentialForRequest(request, auth);
+      const payload = requestObject(request.body);
+      validateRegisteredAgentPromptTarget(workItems, payload);
       reply.header("cache-control", "no-store");
-      const previewInput = createWorkItemSchema.parse({
-        ...requestObject(request.body),
+      return previewWorkItemPolicy(policy, {
+        ...payload,
         requester: credential ? requesterForCredential(credential) : "user"
       });
-      assertRegisteredAgentPromptTargets(workItems, previewInput);
-      return previewWorkItemPolicy(policy, previewInput);
     } catch (error) {
       return sendError(reply, error);
     }
@@ -1488,6 +1754,18 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  app.get<{ Params: { id: string } }>(
+    "/work-items/:id/mission-trace",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        return workItems.getMissionTrace(request.params.id, missionTraceQuerySchema.parse(request.query));
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
   app.get<{ Params: { id: string } }>("/work-items/:id", { preHandler: requireRead }, async (request, reply) => {
     try {
       const workItem = tools.get_work_item({ id: request.params.id });
@@ -1518,14 +1796,593 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       }
       const credential = gatewayCredentialForRequest(request, auth);
       if (!credential) return reply.code(401).send({ error: "unauthorized" });
-      const createInput = createWorkItemSchema.parse({
-        ...requestObject(request.body),
-        requester: requesterForCredential(credential),
-        requesterSubject: actor
-      });
-      assertRegisteredAgentPromptTargets(workItems, createInput);
-      const workItem = tools.create_work_item(createInput);
+      const payload = requestObject(request.body);
+      validateRegisteredAgentPromptTarget(workItems, payload);
+      const workItem = tools.create_work_item(
+        createWorkItemSchema.parse({
+          ...payload,
+          requester: requesterForCredential(credential),
+          requesterSubject: actor
+        })
+      );
       return reply.code(201).send(workItem);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/change-sets", async (request, reply) => {
+    try {
+      const actor = requireMutationActor(request, reply, auth);
+      if (!actor) return;
+      const input = changeSetSubmissionBodySchema.parse(request.body);
+      if (input.definition.missionId !== request.params.id) {
+        throw new ControlStackError("change_set_input_mismatch", "change set targets a different mission");
+      }
+      const record = workItems.submitChangeSet({ ...input, createdByActorId: actor });
+      return reply.code(201).send(record);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/authority-grants", async (request, reply) => {
+    try {
+      const issuedByActorId = requireHumanApprovalActor(request, reply, auth);
+      if (!issuedByActorId) return;
+      if (issuedByActorId === ACS_ADMIN_APPROVER) return reply.code(403).send({ code: "human_authority_required" });
+      const body = issueAutonomousAuthorityBodySchema.parse(request.body);
+      for (const resource of body.definition.scope.filter((r) => r.kind === "path" || r.kind === "repository")) {
+        for (const runtime of new Set(body.definition.toolClasses.map((tool) => tool.runtime))) {
+          const containment =
+            runtime === "desktop_commander" ? dcContainment : runtime === "jace_commander" ? jcContainment : undefined;
+          if (!containment)
+            throw new ControlStackError(
+              "autonomous_authority_runtime_unsupported",
+              "grant runtime containment is unavailable"
+            );
+          if (containPath(containment, resource.id).canonical !== resource.id)
+            throw new ControlStackError("autonomous_authority_scope_mismatch", "grant path must be canonical");
+        }
+      }
+      const grant = workItems.issueAutonomousAuthority(
+        { ...body, missionId: request.params.id, issuedByActorId },
+        { via: "policy_gate", actorId: issuedByActorId }
+      );
+      return reply.code(201).send(grant);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { id: string; grantId: string } }>(
+    "/work-items/:id/authority-grants/:grantId",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        return workItems.withTransaction(() => {
+          const grant = workItems.getAutonomousAuthority(request.params.grantId);
+          if (!grant || grant.missionId !== request.params.id)
+            return reply.code(404).send({ code: "autonomous_authority_not_found" });
+          try {
+            workItems.requireActiveAutonomousAuthority(
+              grant.grantId,
+              grant.missionId,
+              grant.definition.executingActorId
+            );
+            return { grant, active: true };
+          } catch (error) {
+            if (
+              !(error instanceof ControlStackError) ||
+              ![
+                "autonomous_authority_revoked",
+                "autonomous_authority_expired",
+                "change_set_input_mismatch",
+                "change_set_mission_terminal"
+              ].includes(error.code)
+            )
+              throw error;
+            return { grant, active: false, code: error.code };
+          }
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string; grantId: string } }>(
+    "/work-items/:id/authority-grants/:grantId/revoke",
+    async (request, reply) => {
+      try {
+        const actorId = requireHumanApprovalActor(request, reply, auth);
+        if (!actorId) return;
+        const body = changeSetRevocationBodySchema.parse(request.body);
+        workItems.withTransaction(() => {
+          const grant = workItems.getAutonomousAuthority(request.params.grantId);
+          if (!grant || grant.missionId !== request.params.id)
+            throw new ControlStackError("autonomous_authority_binding_mismatch", "grant not found in mission");
+          workItems.revokeAutonomousAuthority(grant.grantId, actorId, body.reason, { via: "policy_gate", actorId });
+        });
+        return { revoked: true };
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/change-sets/authorize", async (request, reply) => {
+    try {
+      const actorId = requireMutationActor(request, reply, auth);
+      if (!actorId) return;
+      const body = grantAuthorizationBodySchema.parse(request.body);
+      const authorization = workItems.withTransaction(() => {
+        workItems.requireActiveAutonomousAuthority(body.grantId, request.params.id, actorId);
+        const mission = workItems.get(request.params.id)!;
+        const record = workItems.getChangeSet(mission.id);
+        if (!record) throw new ControlStackError("change_set_not_found", "Change Set not found");
+        const evaluation = evaluateChangeSetPolicy({
+          record,
+          mission,
+          actorId,
+          expectedManifestHash: body.expectedManifestHash,
+          resolveOperation: (operation) =>
+            resolveChangeSetRuntimePolicy({ operation, mission, actorId, dcContainment, jcContainment })
+        });
+        if (evaluation.decision.decision === "deny")
+          throw new ControlStackError(
+            "grant_authorization_policy_mismatch",
+            "deterministic policy denies authorization"
+          );
+        const prior = workItems.getGrantAuthorizationForGrant(body.grantId, body.expectedManifestHash);
+        const policyAuditEventId =
+          prior?.policyAuditEventId ??
+          workItems.recordSystemEvent({
+            name: "change_set.policy_evaluated",
+            body: { ...evaluation },
+            attributes: {
+              "work_item.id": mission.id,
+              "change_set.hash": record.manifestHash,
+              "authority.grant_id": body.grantId
+            }
+          }).id;
+        return workItems.authorizeChangeSetWithGrant(
+          {
+            grantId: body.grantId,
+            missionId: mission.id,
+            expectedManifestHash: body.expectedManifestHash,
+            executingActorId: actorId,
+            policyHash: changeSetPolicyHash(evaluation),
+            policyAuditEventId
+          },
+          { via: "policy_gate", actorId }
+        );
+      });
+      return reply.code(201).send(authorization);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { id: string; authorizationId: string } }>(
+    "/work-items/:id/change-set-authorizations/:authorizationId",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        return workItems.withTransaction(() => {
+          const authorization = workItems.getGrantAuthorization(request.params.authorizationId);
+          if (!authorization || authorization.missionId !== request.params.id)
+            return reply.code(404).send({ code: "grant_authorization_not_found" });
+          try {
+            workItems.requireActiveGrantAuthorization(
+              authorization.authorizationId,
+              authorization.manifestHash,
+              authorization.executingActorId
+            );
+            return { authorization, active: true };
+          } catch (error) {
+            if (
+              !(error instanceof ControlStackError) ||
+              ![
+                "autonomous_authority_revoked",
+                "autonomous_authority_expired",
+                "change_set_input_mismatch",
+                "change_set_mission_terminal",
+                "grant_authorization_superseded",
+                "grant_authorization_expired"
+              ].includes(error.code)
+            )
+              throw error;
+            return { authorization, active: false, code: error.code };
+          }
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/change-sets/policy", async (request, reply) => {
+    try {
+      const actorId = requireMutationActor(request, reply, auth);
+      if (!actorId) return;
+      const body = changeSetPolicyBodySchema.parse(request.body);
+      const result = workItems.withTransaction(() => {
+        const mission = workItems.get(request.params.id);
+        if (!mission) throw new ControlStackError("work_item_not_found", "mission not found");
+        const record = workItems.getChangeSet(mission.id);
+        if (!record) throw new ControlStackError("change_set_not_found", "change set not found");
+        const evaluation = evaluateChangeSetPolicy({
+          record,
+          mission,
+          actorId,
+          expectedManifestHash: body.expectedManifestHash,
+          resolveOperation: (operation) =>
+            resolveChangeSetRuntimePolicy({ operation, mission, actorId, dcContainment, jcContainment })
+        });
+        const event = workItems.recordSystemEvent({
+          name: "change_set.policy_evaluated",
+          body: { ...evaluation },
+          attributes: { "work_item.id": mission.id, "change_set.hash": record.manifestHash }
+        });
+        return { ...evaluation, auditEventId: event.id };
+      });
+      return result;
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post<{ Params: { id: string; operationId: string } }>(
+    "/work-items/:id/change-sets/operations/:operationId/permit",
+    async (request, reply) => {
+      try {
+        const actorId = requireMutationActor(request, reply, auth);
+        if (!actorId) return;
+        const body = changeSetOperationPermitBodySchema.parse(request.body);
+        const permit = workItems.withTransaction(() => {
+          const reference =
+            "approvalId" in body ? { approvalId: body.approvalId } : { authorizationId: body.authorizationId };
+          const approval = workItems.requireActiveChangeSetExecutionAuthority(
+            reference,
+            body.expectedManifestHash,
+            actorId
+          );
+          if (approval.missionId !== request.params.id)
+            throw new ControlStackError("change_set_permit_binding_mismatch", "mission binding mismatch");
+          const record = workItems.getChangeSet(approval.missionId)!;
+          const mission = workItems.get(approval.missionId)!;
+          const resolveOperation = (operation: (typeof record.snapshot.definition.operations)[number]) =>
+            resolveChangeSetRuntimePolicy({
+              operation,
+              mission,
+              actorId: approval.policyActorId,
+              dcContainment,
+              jcContainment
+            });
+          const evaluation = evaluateChangeSetPolicy({
+            record,
+            mission,
+            actorId: approval.policyActorId,
+            expectedManifestHash: body.expectedManifestHash,
+            resolveOperation
+          });
+          if (changeSetPolicyHash(evaluation) !== approval.policyHash)
+            throw new ControlStackError(
+              "change_set_approval_policy_mismatch",
+              "approved policy no longer matches current policy"
+            );
+          const operation = record.snapshot.definition.operations.find(
+            (op) => op.operationId === request.params.operationId
+          );
+          if (!operation)
+            throw new ControlStackError("change_set_operation_not_found", "operation not in approved snapshot");
+          const existing = workItems.getChangeSetOperationPermitForOperation(
+            mission.id,
+            record.manifestHash,
+            operation.operationId
+          );
+          if (existing) {
+            if ((existing.approvalId ?? existing.authorizationId) !== approval.authorityId)
+              throw new ControlStackError("change_set_permit_conflict", "operation belongs to another approval");
+            return existing;
+          }
+          const jc = operation.runtime === "jace_commander";
+          const config = jc ? jcSigningConfig : capabilitySigningConfig;
+          if (!config || operation.runtime === "sandbox")
+            throw new ControlStackError("change_set_runtime_unsupported", "governed runtime is not configured");
+          const facts = resolveOperation(operation);
+          if (approval.grant) {
+            // Arbitrary commands currently bind cwd, not every filesystem side
+            // effect. A broad grant must not turn that into claimed confinement.
+            if (
+              facts.privileges.some((privilege) => !["fs.read", "fs.write"].includes(privilege)) ||
+              facts.resources.length === 0
+            )
+              throw new ControlStackError(
+                "autonomous_authority_runtime_unconfined",
+                "runtime cannot enforce this grant's resource boundary"
+              );
+            const checks = record.snapshot.definition.verification.filter((rule) =>
+              rule.operationIds.includes(operation.operationId)
+            );
+            // Defense in depth: submission already refuses unimplemented kinds, so
+            // this can only trigger on tampered persisted state. Same vocabulary.
+            if (
+              checks.some(
+                (rule) => !(IMPLEMENTED_CHANGE_SET_VERIFICATION_KINDS as readonly string[]).includes(rule.kind)
+              )
+            )
+              throw new ControlStackError(
+                "verification_adapter_unavailable",
+                "grant execution needs implemented verification before mutation"
+              );
+            for (const check of checks.filter((rule) => rule.kind === "fs_inspect"))
+              fileReadbackExpectationSchema.parse(check.expectation);
+          }
+          const child = tools.create_work_item(
+            changeSetExecutionInput({
+              record,
+              operationId: operation.operationId,
+              ...reference,
+              facts,
+              runtimeId: config.runtimeId,
+              ...(!jc && capabilitySigningConfig
+                ? { identityConfigFingerprint: capabilitySigningConfig.identityConfigFingerprint }
+                : {})
+            })
+          );
+          const evaluations = policy.evaluateWorkItem(child, approval.humanIssuerActorId, "approve");
+          if (policy.summarize(evaluations).decision === "deny")
+            throw new ControlStackError("change_set_approval_denied", "execution policy denies operation");
+          for (const evaluation of evaluations.filter((e) => e.decision.decision === "require_approval")) {
+            tools.approve_work_item({
+              id: child.id,
+              actionHash: evaluation.actionHash,
+              approvedBy: approval.humanIssuerActorId,
+              reason: `Bound Change Set ${approval.authorityKind} ${approval.authorityId}`
+            });
+          }
+          const workerId = jc ? JC_BRIDGE_WORKER_ID : DC_BRIDGE_WORKER_ID;
+          workItems.assignWorkItem(
+            {
+              workItemId: child.id,
+              selectedWorkerId: workerId,
+              selectedAgentId: actorId,
+              routingDecisionId: record.manifestHash,
+              assignedByActorId: actorId
+            },
+            { via: "policy_gate", actorId }
+          );
+          return workItems.bindChangeSetOperationPermit(
+            {
+              missionId: mission.id,
+              manifestHash: record.manifestHash,
+              operationId: operation.operationId,
+              ...reference,
+              policyHash: approval.policyHash,
+              executionWorkItemId: child.id,
+              workerId,
+              runtime: jc ? "jace_commander" : "desktop_commander",
+              toolName: operation.toolName,
+              invocationHash: facts.invocationHash
+            },
+            { via: "policy_gate", actorId }
+          );
+        });
+        return reply.code(201).send(permit);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  function changeSetPermitWorkItem(
+    permitId: string,
+    runtime: "desktop_commander" | "jace_commander",
+    actorId: string,
+    tool: string,
+    invocationHash: string,
+    bindingHash: string
+  ) {
+    return workItems.withTransaction(() => {
+      const permit = workItems.getChangeSetOperationPermit(permitId);
+      if (
+        !permit ||
+        permit.runtime !== runtime ||
+        permit.executingActorId !== actorId ||
+        permit.toolName !== tool ||
+        permit.invocationHash !== invocationHash
+      )
+        throw new ControlStackError(
+          "change_set_permit_binding_mismatch",
+          "runtime request does not match operation permit"
+        );
+      workItems.requireActiveChangeSetOperationPermit(permit.executionWorkItemId, permit.workerId);
+      const approval = workItems.requireActiveChangeSetExecutionAuthority(
+        permit,
+        permit.manifestHash,
+        permit.executingActorId
+      );
+      const record = workItems.getChangeSet(permit.missionId)!;
+      const mission = workItems.get(permit.missionId)!;
+      const evaluation = evaluateChangeSetPolicy({
+        record,
+        mission,
+        actorId: approval.policyActorId,
+        expectedManifestHash: permit.manifestHash,
+        resolveOperation: (operation) =>
+          resolveChangeSetRuntimePolicy({
+            operation,
+            mission,
+            actorId: approval.policyActorId,
+            dcContainment,
+            jcContainment
+          })
+      });
+      if (changeSetPolicyHash(evaluation) !== permit.policyHash)
+        throw new ControlStackError(
+          "change_set_approval_policy_mismatch",
+          "approved policy no longer matches runtime policy"
+        );
+      const child = workItems.get(permit.executionWorkItemId)!;
+      if (child.requestedActions[0]?.params.bindingHash !== bindingHash || child.status !== "approved")
+        throw new ControlStackError(
+          "change_set_permit_binding_mismatch",
+          "operation already claimed or runtime binding changed"
+        );
+      return child;
+    });
+  }
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/change-sets/approve", async (request, reply) => {
+    try {
+      const actorId = requireHumanApprovalActor(request, reply, auth);
+      if (!actorId) return;
+      if (actorId === ACS_ADMIN_APPROVER) return reply.code(403).send({ code: "human_authority_required" });
+      const body = changeSetApprovalBodySchema.parse(request.body);
+      const result = workItems.withTransaction(() => {
+        const mission = workItems.get(request.params.id);
+        if (!mission) throw new ControlStackError("work_item_not_found", "mission not found");
+        const record = workItems.getChangeSet(mission.id);
+        if (!record) throw new ControlStackError("change_set_not_found", "change set not found");
+        const evaluation = evaluateChangeSetPolicy({
+          record,
+          mission,
+          actorId,
+          expectedManifestHash: body.expectedManifestHash,
+          resolveOperation: (operation) =>
+            resolveChangeSetRuntimePolicy({ operation, mission, actorId, dcContainment, jcContainment })
+        });
+        if (evaluation.decision.decision === "deny")
+          throw new ControlStackError("change_set_approval_denied", "bundle policy denies approval");
+        const replay = workItems.getChangeSetApprovalByRequest(mission.id, body.requestId);
+        const policyAuditEventId =
+          replay?.policyAuditEventId ??
+          workItems.recordSystemEvent({
+            name: "change_set.policy_evaluated",
+            body: { ...evaluation },
+            attributes: { "work_item.id": mission.id, "change_set.hash": record.manifestHash }
+          }).id;
+        return workItems.grantChangeSetApproval(
+          {
+            missionId: mission.id,
+            expectedManifestHash: body.expectedManifestHash,
+            requestId: body.requestId,
+            approvedByActorId: actorId,
+            reason: body.reason,
+            expiresAt: body.expiresAt ?? record.snapshot.definition.expiresAt,
+            policyHash: changeSetPolicyHash(evaluation),
+            policyAuditEventId
+          },
+          { via: "policy_gate", actorId }
+        );
+      });
+      return reply.code(201).send(result);
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.get<{ Params: { id: string; approvalId: string } }>(
+    "/work-items/:id/change-set-approvals/:approvalId",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        return workItems.withTransaction(() => {
+          const approval = workItems.getChangeSetApproval(request.params.approvalId);
+          if (!approval || approval.missionId !== request.params.id)
+            return reply.code(404).send({ code: "change_set_approval_not_found" });
+          try {
+            workItems.requireActiveChangeSetApproval(
+              approval.approvalId,
+              approval.manifestHash,
+              approval.executingActorId
+            );
+            return { approval, active: true };
+          } catch (error) {
+            if (
+              !(error instanceof ControlStackError) ||
+              ![
+                "change_set_approval_revoked",
+                "change_set_approval_expired",
+                "change_set_approval_superseded",
+                "change_set_mission_terminal",
+                "change_set_input_mismatch"
+              ].includes(error.code)
+            )
+              throw error;
+            return { approval, active: false, code: error.code };
+          }
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string; approvalId: string } }>(
+    "/work-items/:id/change-set-approvals/:approvalId/revoke",
+    async (request, reply) => {
+      try {
+        const actorId = requireHumanApprovalActor(request, reply, auth);
+        if (!actorId) return;
+        const body = changeSetRevocationBodySchema.parse(request.body);
+        return workItems.withTransaction(() => {
+          const approval = workItems.getChangeSetApproval(request.params.approvalId);
+          if (!approval || approval.missionId !== request.params.id)
+            return reply.code(404).send({ code: "change_set_approval_not_found" });
+          workItems.revokeChangeSetApproval(approval.approvalId, actorId, body.reason, { via: "policy_gate", actorId });
+          return { revoked: true };
+        });
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/work-items/:id/change-sets",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        const query = changeSetQuerySchema.parse(request.query);
+        if (!workItems.get(request.params.id)) return reply.code(404).send({ code: "work_item_not_found" });
+        const record = workItems.getChangeSet(request.params.id, query.revision);
+        if (!record) return reply.code(404).send({ code: "change_set_not_found" });
+        return record;
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.get<{ Params: { id: string } }>(
+    "/work-items/:id/change-sets/progress",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        const query = changeSetPolicyBodySchema.parse(request.query);
+        return workItems.getChangeSetProgress(request.params.id, query.expectedManifestHash);
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/change-sets/complete", async (request, reply) => {
+    try {
+      const actorId = requireMutationActor(request, reply, auth);
+      if (!actorId) return;
+      const body = changeSetOperationPermitBodySchema.parse(request.body);
+      return workItems.completeChangeSetMission(
+        {
+          missionId: request.params.id,
+          executingActorId: actorId,
+          ...body
+        },
+        { via: "policy_gate", actorId }
+      );
     } catch (error) {
       return sendError(reply, error);
     }
@@ -1640,6 +2497,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     "/dc/capability/issue",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
+      let authenticatedBridge = false;
       try {
         const workerId = requireWorkerIdentity(request, reply, auth);
         if (!workerId) {
@@ -1651,6 +2509,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             code: "dc_bridge_identity_required"
           });
         }
+        authenticatedBridge = true;
         const dcActor = firstHeader(request.headers["x-dc-actor"]);
         if (!dcActor || !/^[A-Za-z0-9._:@-]{1,128}$/u.test(dcActor)) {
           return reply.code(400).send({ error: "x-dc-actor header is required", code: "dc_actor_invalid" });
@@ -1726,21 +2585,31 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
 
         const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
-        const existing = workItems
-          .list()
-          .filter((candidate) => {
-            const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
-            return (
-              candidate.requesterSubject === dcActor &&
-              params?.tool === body.tool &&
-              params?.bindingHash === bindingHash &&
-              ["needs_approval", "approved"].includes(candidate.status) &&
-              (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
-                ? true
-                : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
-            );
-          })
-          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+        const existing = body.changeSetPermitId
+          ? changeSetPermitWorkItem(
+              body.changeSetPermitId,
+              "desktop_commander",
+              dcActor,
+              body.tool,
+              invocationHash,
+              bindingHash
+            )
+          : workItems
+              .list()
+              .filter((candidate) => {
+                const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
+                return (
+                  !params?.changeSetBinding &&
+                  candidate.requesterSubject === dcActor &&
+                  params?.tool === body.tool &&
+                  params?.bindingHash === bindingHash &&
+                  ["needs_approval", "approved"].includes(candidate.status) &&
+                  (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
+                    ? true
+                    : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
+                );
+              })
+              .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
 
         if (!existing && !hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
           return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
@@ -1810,7 +2679,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           });
         }
 
-        if (mode.mode === "admin") {
+        if (mode.mode === "admin" && !body.changeSetPermitId) {
           const gate = adminExecutionGate(readAuthority(), true);
           if (!gate.ok) {
             recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
@@ -1831,16 +2700,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
               workItemId: workItem.id
             });
           }
-          const currentPlan = workItems.getCurrentExecutionPlan(workItem.id);
-          const hasCurrentApproval =
-            required.length > 0 &&
-            currentPlan !== undefined &&
-            required.every(
-              (evaluation) =>
-                workItems.hasApproval(workItem.id, evaluation.actionHash) &&
-                workItems.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, evaluation.actionHash)
-            );
-          if (workItem.status !== "approved" || !hasCurrentApproval) {
+          if (workItem.status !== "approved") {
             try {
               const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
               const adminRequired = adminEvaluations.filter(
@@ -1872,21 +2732,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                 });
               }
               workItem = approved.workItem;
-            } catch (error) {
-              recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
-              return reply.code(403).send({
-                decision: "deny",
-                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
-                reason: "acs admin auto-authorization failed closed",
-                workItemId: workItem.id
-              });
-            }
-          }
-          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
-            try {
-              workItems.recordSystemEventOnceForWorkItem({
+              workItems.recordSystemEvent({
                 name: "execution_mode.auto_authorized",
-                workItemId: workItem.id,
                 body: {
                   workItemId: workItem.id,
                   tool: body.tool,
@@ -1894,7 +2741,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
                   approvalPolicy: "auto",
                   approvedBy: ACS_ADMIN_APPROVER
                 },
-                attributes: { "execution_mode.mode": "admin" }
+                attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
               });
             } catch (error) {
               recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
@@ -1928,11 +2775,30 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-          const claimed = tools.claim_approved_work_item_by_id({
+          const claimed = claimWithAdmissionPermit({
             id: workItem.id,
             workerId,
-            leaseMs: DC_BRIDGE_LEASE_MS
+            leaseMs: DC_BRIDGE_LEASE_MS,
+            lane: "dc",
+            toolName: body.tool,
+            permit: admissionPermit,
+            ...(body.changeSetPermitId
+              ? {
+                  validateAuthority: () => {
+                    changeSetPermitWorkItem(
+                      body.changeSetPermitId!,
+                      "desktop_commander",
+                      dcActor,
+                      body.tool,
+                      invocationHash,
+                      bindingHash
+                    );
+                  }
+                }
+              : {})
           });
+          admissionBound =
+            !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
             return reply.code(409).send({
@@ -2093,19 +2959,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
           const capability = signPreparedDesktopCommanderCapability(payload, capabilitySigningConfig);
           recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "issued", workItem.id);
-          bindAdmissionPermit({
-            attemptId: payload.attemptId,
-            permit: admissionPermit,
-            lane: "dc",
-            workItemId: payload.workItemId,
-            leaseId: payload.leaseId,
-            workerId,
-            fencingEpoch: payload.leaseEpoch,
-            actionHash: claimed.actionHash,
-            planHash: payload.planHash,
-            inputHash: claimed.inputHash
-          });
-          admissionBound = true;
+
           return {
             decision: "allow",
             capability,
@@ -2124,6 +2978,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           if (!admissionBound) admissionPermit.release();
         }
       } catch (error) {
+        if (authenticatedBridge) recordFailedChangeSetDispatch(request, error, "desktop_commander");
         return sendError(reply, error);
       }
     }
@@ -2132,14 +2987,16 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // ACS-issued Jace Commander capability issuance (acs.jc.v1, lease-bound, per call).
   //
   // Mirrors /dc/capability/issue with a separate worker identity, signing key,
-  // tool table and issuance table. Canonical admin mode auto-authorizes
-  // ordinary approval-gated JC mutations through the normal approval record,
-  // lease, capability and audit path. privileged_exec (root execution of one
-  // exact argv) remains human-only, and requester self-approval is always denied.
+  // tool table and issuance table. privileged_exec (root execution of one exact
+  // argv) is ALWAYS approval-gated by a human: policy-gate returns
+  // require_approval for `privileged.exec`, admin execution mode never
+  // auto-approves it, and the durable issuance gate rejects `acs:admin` and
+  // self-approvals before anything is signed.
   app.post(
     "/jc/capability/issue",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
     async (request, reply) => {
+      let authenticatedBridge = false;
       try {
         const workerId = requireWorkerIdentity(request, reply, auth);
         if (!workerId) {
@@ -2151,6 +3008,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             code: "jc_bridge_identity_required"
           });
         }
+        authenticatedBridge = true;
         // The edge's /jc/mcp lane attests the requester as `x-jc-actor`
         // (apps/dc-mcp-gateway/managed.js); `x-dc-actor` is still accepted for
         // older callers. Both are honored only from the authenticated
@@ -2226,22 +3084,28 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           requesterSubject: jcActor
         });
 
-        const modeBeforeLookup = readExecutionModeValue(workItems.getExecutionMode().raw);
-        const existing = workItems
-          .list()
-          .filter((candidate) => {
-            const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
-            return (
-              candidate.requesterSubject === jcActor &&
-              params?.tool === invocation.toolName &&
-              params?.bindingHash === bindingHash &&
-              ["needs_approval", "approved"].includes(candidate.status) &&
-              (modeBeforeLookup.state === "ok" && modeBeforeLookup.mode === "admin"
-                ? true
-                : !workItems.hasGrantedApprovalBy(candidate.id, ACS_ADMIN_APPROVER))
-            );
-          })
-          .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
+        const existing = body.changeSetPermitId
+          ? changeSetPermitWorkItem(
+              body.changeSetPermitId,
+              "jace_commander",
+              jcActor,
+              invocation.toolName,
+              invocation.invocationHash,
+              bindingHash
+            )
+          : workItems
+              .list()
+              .filter((candidate) => {
+                const params = candidate.requestedActions[0]?.params as Record<string, unknown> | undefined;
+                return (
+                  !params?.changeSetBinding &&
+                  candidate.requesterSubject === jcActor &&
+                  params?.tool === invocation.toolName &&
+                  params?.bindingHash === bindingHash &&
+                  ["needs_approval", "approved"].includes(candidate.status)
+                );
+              })
+              .sort((left, right) => right.createdAt.localeCompare(left.createdAt))[0];
 
         if (!existing && !hasPendingWorkItemCapacity(workItems, maxPendingWorkItems)) {
           return reply.code(429).send({ error: "pending work-item limit reached", code: "work_queue_full" });
@@ -2295,116 +3159,9 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             detail: policy.summarize(evaluations).reason
           });
         }
-
-        const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
-        if (mode.state !== "ok") {
-          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-          return reply.code(403).send({
-            decision: "deny",
-            code: mode.state === "missing" ? "execution_mode_missing" : "execution_mode_corrupt",
-            reason: "canonical execution mode is not usable",
-            workItemId: workItem.id
-          });
-        }
-
-        if (mode.mode === "admin" && invocation.toolName !== "privileged_exec") {
-          const gate = adminExecutionGate(readAuthority(), true);
-          if (!gate.ok) {
-            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-            workItems.recordSystemEvent({
-              name: "execution_mode.auto_authorization_denied",
-              body: {
-                code: gate.code,
-                tool: invocation.toolName,
-                workItemId: workItem.id,
-                correlationId: body.correlationId ?? null
-              },
-              attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin", "execution_mode.lane": "jc" }
-            });
-            return reply.code(403).send({
-              decision: "deny",
-              code: gate.code,
-              reason: gate.detail,
-              workItemId: workItem.id
-            });
-          }
-          const currentPlan = workItems.getCurrentExecutionPlan(workItem.id);
-          const hasCurrentApproval =
-            required.length > 0 &&
-            currentPlan !== undefined &&
-            required.every(
-              (evaluation) =>
-                workItems.hasApproval(workItem.id, evaluation.actionHash) &&
-                workItems.hasExecutionPlanApproval(workItem.id, currentPlan.planHash, evaluation.actionHash)
-            );
-          if (workItem.status !== "approved" || !hasCurrentApproval) {
-            try {
-              const adminEvaluations = policy.evaluateWorkItem(workItem, ACS_ADMIN_APPROVER, "approve");
-              const adminRequired = adminEvaluations.filter(
-                (evaluation) => evaluation.decision.decision === "require_approval"
-              );
-              const adminActionHash = adminRequired[0]?.actionHash;
-              if (!adminActionHash || policy.summarize(adminEvaluations).decision === "deny") {
-                recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-                return reply.code(403).send({
-                  decision: "deny",
-                  code: "admin_authorization_failed",
-                  reason: policy.summarize(adminEvaluations).reason,
-                  workItemId: workItem.id
-                });
-              }
-              const approved = tools.approve_work_item({
-                id: workItem.id,
-                actionHash: adminActionHash,
-                approvedBy: ACS_ADMIN_APPROVER,
-                reason: ACS_ADMIN_APPROVAL_REASON
-              });
-              if (approved.decision.decision === "deny" || approved.workItem.status !== "approved") {
-                recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-                return reply.code(403).send({
-                  decision: "deny",
-                  code: "admin_authorization_failed",
-                  reason: approved.decision.reason,
-                  workItemId: workItem.id
-                });
-              }
-              workItem = approved.workItem;
-            } catch (error) {
-              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-              return reply.code(403).send({
-                decision: "deny",
-                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
-                reason: "acs admin auto-authorization failed closed",
-                workItemId: workItem.id
-              });
-            }
-          }
-          if (workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER)) {
-            try {
-              workItems.recordSystemEventOnceForWorkItem({
-                name: "execution_mode.auto_authorized",
-                workItemId: workItem.id,
-                body: {
-                  workItemId: workItem.id,
-                  tool: invocation.toolName,
-                  correlationId: body.correlationId ?? null,
-                  approvalPolicy: "auto",
-                  approvedBy: ACS_ADMIN_APPROVER,
-                  lane: "jc"
-                },
-                attributes: { "execution_mode.mode": "admin", "execution_mode.lane": "jc" }
-              });
-            } catch (error) {
-              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-              return reply.code(403).send({
-                decision: "deny",
-                code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
-                reason: "acs admin auto-authorization failed closed",
-                workItemId: workItem.id
-              });
-            }
-          }
-        }
+        // Deliberately NO admin-mode auto-approval here (unlike /dc/capability/issue):
+        // Jace Commander capabilities only ride approvals granted through the
+        // normal human approval path.
         if (workItem.status !== "approved" || (toolPolicy.requiresApproval && required.length === 0)) {
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
           return reply.code(409).send({
@@ -2426,68 +3183,55 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-          const adminApprovalAtClaim = workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
-          if (adminApprovalAtClaim) {
-            const modeAfterAdmission = readExecutionModeValue(workItems.getExecutionMode().raw);
-            if (modeAfterAdmission.state !== "ok" || modeAfterAdmission.mode !== "admin") {
-              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
-              workItems.recordSystemEvent({
-                name: "execution_mode.auto_authorization_denied",
-                body: {
-                  code: "admin_authorization_failed",
-                  tool: invocation.toolName,
-                  workItemId: workItem.id,
-                  correlationId: body.correlationId ?? null,
-                  phase: "post_admission"
-                },
-                attributes: {
-                  "work_item.id": workItem.id,
-                  "execution_mode.mode":
-                    modeAfterAdmission.state === "ok" ? modeAfterAdmission.mode : modeAfterAdmission.state,
-                  "execution_mode.lane": "jc"
-                }
-              });
-              return reply.code(403).send({
-                decision: "deny",
-                code: "admin_authorization_failed",
-                reason: "canonical execution mode is no longer admin",
-                workItemId: workItem.id
-              });
+          const adminApprovalWouldBeConsumed =
+            workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) ||
+            workItems.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
+          const validateAuthority = () => {
+            if (body.changeSetPermitId) {
+              changeSetPermitWorkItem(
+                body.changeSetPermitId,
+                "jace_commander",
+                jcActor,
+                invocation.toolName,
+                invocation.invocationHash,
+                bindingHash
+              );
             }
-
-            const gateAfterAdmission = adminExecutionGate(readAuthority(), true);
-            if (!gateAfterAdmission.ok) {
-              recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+            if (!adminApprovalWouldBeConsumed) return;
+            const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
+            if (mode.state !== "ok" || mode.mode !== "admin") {
               workItems.recordSystemEvent({
-                name: "execution_mode.auto_authorization_denied",
-                body: {
-                  code: gateAfterAdmission.code,
-                  tool: invocation.toolName,
-                  workItemId: workItem.id,
-                  correlationId: body.correlationId ?? null,
-                  phase: "post_admission"
-                },
-                attributes: {
-                  "work_item.id": workItem.id,
-                  "execution_mode.mode": "admin",
-                  "execution_mode.lane": "jc"
-                }
+                name: "execution_mode.admin_approval_claim_denied",
+                body: { workItemId: workItem.id, code: "execution_mode_fence_mismatch" },
+                attributes: { "work_item.id": workItem.id }
               });
-              return reply.code(403).send({
-                decision: "deny",
-                code: gateAfterAdmission.code,
-                reason: gateAfterAdmission.detail,
-                workItemId: workItem.id
-              });
+              throw new ControlStackError(
+                "execution_mode_fence_mismatch",
+                "ACS admin approval requires canonical admin mode"
+              );
             }
-          }
-
-          const claimed = tools.claim_approved_work_item_by_id({
+            const gate = adminExecutionGate(readAuthority(), true);
+            if (!gate.ok) {
+              workItems.recordSystemEvent({
+                name: "execution_mode.admin_approval_claim_denied",
+                body: { workItemId: workItem.id, code: gate.code },
+                attributes: { "work_item.id": workItem.id, "execution_mode.mode": "admin" }
+              });
+              throw new ControlStackError(gate.code, gate.detail);
+            }
+          };
+          const claimed = claimWithAdmissionPermit({
             id: workItem.id,
             workerId,
             leaseMs: JC_BRIDGE_LEASE_MS,
-            ...(adminApprovalAtClaim ? { executionModeFence: "admin" as const } : {})
+            lane: "jc",
+            toolName: invocation.toolName,
+            permit: admissionPermit,
+            ...(body.changeSetPermitId || adminApprovalWouldBeConsumed ? { validateAuthority } : {}),
+            ...(adminApprovalWouldBeConsumed ? { executionModeFence: "admin" as const } : {})
           });
+          admissionBound =
+            !!claimed?.attemptId && claimed.fencingEpoch !== undefined && !!claimed.planHash && !!claimed.inputHash;
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
             recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
             return reply.code(409).send({
@@ -2619,19 +3363,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
           const capability = signPreparedJaceCommanderCapability(payload, jcSigningConfig);
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "issued", workItem.id);
-          bindAdmissionPermit({
-            attemptId: payload.attemptId,
-            permit: admissionPermit,
-            lane: "jc",
-            workItemId: payload.workItemId,
-            leaseId: payload.leaseId,
-            workerId,
-            fencingEpoch: payload.leaseEpoch,
-            actionHash: claimed.actionHash,
-            planHash: payload.planHash,
-            inputHash: claimed.inputHash
-          });
-          admissionBound = true;
+
           return {
             decision: "allow",
             capability,
@@ -2650,6 +3382,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           if (!admissionBound) admissionPermit.release();
         }
       } catch (error) {
+        if (authenticatedBridge) recordFailedChangeSetDispatch(request, error, "jace_commander");
         return sendError(reply, error);
       }
     }
@@ -2832,6 +3565,77 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   });
 
+  app.get<{ Params: { id: string } }>(
+    "/work-items/:id/change-set-review",
+    { preHandler: requireRead },
+    async (request, reply) => {
+      try {
+        const child = workItems.get(request.params.id);
+        const binding = z
+          .object({ missionId: z.string(), manifestHash: z.string(), operationId: z.string() })
+          .passthrough()
+          .parse(child?.requestedActions[0]?.params.changeSetBinding);
+        const progress = workItems.getChangeSetProgress(binding.missionId, binding.manifestHash);
+        const operation = progress.operations.find((entry) => entry.executionWorkItemId === request.params.id);
+        if (!operation || !operation.attemptId || !operation.resultId)
+          throw new ControlStackError("change_set_review_result_missing", "no durably observed result to review");
+        return {
+          operation,
+          evidence: operation.evidenceManifestHash
+            ? workItems.getEvidenceManifest(operation.evidenceManifestHash)
+            : undefined,
+          requirement: workItems.getVerificationRequirement(operation.attemptId),
+          result: workItems.getExecutionResult(operation.resultId),
+          reviews: workItems.listReviewFindings(operation.attemptId),
+          decision: workItems.getVerificationDecision(operation.attemptId)
+        };
+      } catch (error) {
+        return sendError(reply, error);
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string } }>("/work-items/:id/change-set-review", async (request, reply) => {
+    try {
+      const credential = auth ? gatewayCredentialForRequest(request, auth) : undefined;
+      if (!credential) return reply.code(401).send({ code: "unauthorized", error: "authenticated reviewer required" });
+      if (
+        !credential.scopes.includes("acs:review") ||
+        credential.roles.includes("worker") ||
+        (!credential.roles.includes("service") && !credential.roles.includes("operator"))
+      )
+        return reply
+          .code(403)
+          .send({ code: "independent_reviewer_required", error: "dedicated reviewer authority required" });
+      return workItems.reviewChangeSetOperation(request.params.id, changeSetReviewBodySchema.parse(request.body), {
+        via: "policy_gate",
+        actorId: credential.actorId
+      });
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
+  app.post("/worker/claim", async (request, reply) => {
+    try {
+      const workerId = requireWorkerIdentity(request, reply, auth);
+      if (!workerId) return;
+      const body = z
+        .object({ leaseMs: z.number().int().positive().max(3_600_000).optional() })
+        .strict()
+        .parse(requestObject(request.body));
+      const claimed = tools.claim_next_approved_work_item({ workerId, ...body });
+      if (claimed && claimed.status !== "running") {
+        return reply
+          .code(409)
+          .send({ error: "claim was rejected by policy or approval binding", code: "worker_claim_blocked" });
+      }
+      return claimed ? { claimed: true, workItem: claimed } : { claimed: false };
+    } catch (error) {
+      return sendError(reply, error);
+    }
+  });
+
   app.post<{ Params: { id: string } }>(
     "/work-items/:id/results",
     { bodyLimit: MAX_RESULT_BODY_BYTES },
@@ -2866,8 +3670,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           admissionBinding.inputHash === body.inputHash
         );
         try {
-          const replay = workItems.getExecutionResultForIdempotency(body.workerId, body.idempotencyKey);
-          const workItem = workItems.submitWorkResult(body);
+          const replay = workItems.getExecutionResultForIdempotency(body.idempotencyKey);
+          const workItem = workItems.withTransaction(() => {
+            const accepted = workItems.submitWorkResult(body);
+            if (!replay)
+              verifyChangeSetResult(
+                workItems,
+                body,
+                body.simulationMetadata.executionMode === "jace_commander" ? jcContainment : dcContainment
+              );
+            return accepted;
+          });
           const resultId = typeof workItem.result?.resultId === "string" ? workItem.result.resultId : undefined;
           const result = resultId ? workItems.getExecutionResult(resultId) : undefined;
           if (!result) {
@@ -2984,7 +3797,7 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
 
   app.addHook("onClose", async () => {
     executionAdmission.shutdown();
-    for (const attemptId of [...admissionPermits.keys()]) releaseAdmissionPermit(attemptId);
+    // Active durable reservations survive shutdown and are restored by the next gateway.
     await observationWorker?.stop();
     await acpAdapter?.stop();
     executionReads.close();
@@ -3028,6 +3841,42 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   }
 
   /** Hash-chained audit evidence for /dc/capability/issue (issued vs denied). */
+  function recordFailedChangeSetDispatch(
+    request: FastifyRequest,
+    error: unknown,
+    runtime: "desktop_commander" | "jace_commander"
+  ) {
+    try {
+      const parsed = dcCapabilityIssueSchema.safeParse(request.body);
+      if (!parsed.success || !parsed.data.changeSetPermitId) return;
+      const permit = workItems.getChangeSetOperationPermit(parsed.data.changeSetPermitId);
+      if (!permit) return; // An untrusted identifier does not establish a mission relationship.
+      workItems.recordSystemEvent({
+        name: "change_set.dispatch_denied",
+        body: {
+          missionId: permit.missionId,
+          manifestHash: permit.manifestHash,
+          operationId: permit.operationId,
+          permitId: permit.permitId,
+          executionWorkItemId: permit.executionWorkItemId,
+          runtime,
+          requestId: request.id,
+          code: error instanceof ControlStackError ? error.code : "dispatch_rejected"
+        },
+        attributes: {
+          "work_item.id": permit.missionId,
+          "execution.work_item_id": permit.executionWorkItemId,
+          "worker.id": runtime === "desktop_commander" ? DC_BRIDGE_WORKER_ID : JC_BRIDGE_WORKER_ID
+        }
+      });
+    } catch {
+      request.log.warn(
+        { requestId: request.id, code: "dispatch_denial_audit_unavailable" },
+        "mission dispatch denial audit unavailable"
+      );
+    }
+  }
+
   function recordJcCapabilityAudit(
     actor: string,
     requestId: string,
@@ -3103,18 +3952,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   return app;
 }
 
-function assertRegisteredAgentPromptTargets(
-  store: Pick<SqliteWorkItemStore, "getRegistryAgent">,
-  input: Pick<WorkItem, "target" | "requestedActions">
-): void {
-  if (!input.requestedActions.some((action) => action.kind === "agent.prompt")) return;
-  for (const agentId of input.target.services ?? []) {
-    if (!store.getRegistryAgent(agentId)) {
-      throw new ControlStackError("agent_target_not_registered", `agent target is not registered: ${agentId}`);
-    }
-  }
-}
-
 function sendError(reply: FastifyReply, error: unknown) {
   if (error instanceof ZodError) {
     return reply.code(400).send({ error: "invalid request" });
@@ -3131,6 +3968,8 @@ function sendError(reply: FastifyReply, error: unknown) {
     });
   }
   if (error instanceof ControlStackError) {
+    if (error.code === "admission_recovery_required")
+      return reply.code(503).send({ error: "admission recovery requires reconciliation", code: error.code });
     const status =
       error.code === GATEWAY_SHUTTING_DOWN_CODE
         ? 503
@@ -3169,6 +4008,18 @@ function sendError(reply: FastifyReply, error: unknown) {
 
 function requestObject(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" ? (input as Record<string, unknown>) : {};
+}
+
+function validateRegisteredAgentPromptTarget(store: SqliteWorkItemStore, input: Record<string, unknown>): void {
+  const actions = Array.isArray(input.requestedActions) ? input.requestedActions : [];
+  if (!actions.some((value) => requestObject(value).kind === "agent.prompt")) return;
+  const services = requestObject(input.target).services;
+  if (!Array.isArray(services)) return;
+  for (const service of services) {
+    if (typeof service !== "string" || !store.getRegistryAgent(service)) {
+      throw new ControlStackError("agent_target_not_registered", "agent.prompt targets must name registered agents");
+    }
+  }
 }
 
 /** Parse a bridge argument summary without persisting it. Invalid JSON fails closed. */
@@ -3224,18 +4075,6 @@ function containmentRootForPaths(containment: ContainmentConfig, paths: readonly
     return containment.allowedRoots[0];
   }
   return containment.allowedRoots.find((root) => paths.every((path) => path === root || path.startsWith(`${root}/`)));
-}
-
-function dcWorkItemActionKind(
-  policy: NonNullable<ReturnType<typeof desktopCommanderToolPolicy>>
-): "fs.read" | "fs.list" | "fs.stat" | "fs.write" | "fs.patch" | "fs.move" | "cmd.run" {
-  if (policy.commandArgs.length > 0) return "cmd.run";
-  if (policy.name === "list_directory") return "fs.list";
-  if (policy.name === "get_file_info") return "fs.stat";
-  if (policy.name === "edit_block") return "fs.patch";
-  if (policy.name === "move_file") return "fs.move";
-  if (policy.mutating) return "fs.write";
-  return "fs.read";
 }
 
 /** Signing material plus the durable-issuance runtime identity binding. */
@@ -3703,6 +4542,11 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/oauth/device/code" ||
     path === "/oauth/token" ||
     path === "/work-items" ||
+    // Worker claim polling is deliberately rate limited. It is authenticated, but an
+    // unbounded poll loop from a leaked worker credential is still a workload
+    // amplifier. The limiter keys by method, route and credential, so each worker
+    // identity gets its own budget rather than sharing a global one.
+    path === "/worker/claim" ||
     path === "/dc/capability/issue" ||
     path === "/jc/capability/issue" ||
     path === "/dc/runtime/bootstrap" ||
@@ -3809,6 +4653,47 @@ function requiresMcpAuthentication(request: FastifyRequest, auth: McpAuthOptions
 
 function firstHeader(value: string | string[] | undefined): string | undefined {
   return Array.isArray(value) ? value[0] : value;
+}
+
+/**
+ * Credentials that request human approval authority but cannot exercise it.
+ *
+ * Human-only approval, revocation, execution-mode and grant issuance require a
+ * `user` actor holding exactly the operator role. A credential that also carries a
+ * service or worker role is refused at request time; operators must see that at
+ * boot instead of discovering it as a 403 in production.
+ */
+export function findIncompatibleHumanApprovalCredentials(
+  credentials: readonly GatewayCredential[]
+): GatewayCredential[] {
+  return credentials.filter(
+    (credential) =>
+      credential.actor === "user" &&
+      credential.roles.includes("operator") &&
+      (credential.roles.includes("service") || credential.roles.includes("worker"))
+  );
+}
+
+function requireHumanApprovalActor(
+  request: FastifyRequest,
+  reply: FastifyReply,
+  auth: GatewayAuthOptions | undefined
+): string | undefined {
+  const actor = requireMutationActor(request, reply, auth, "acs:approve");
+  if (!actor || !auth) return undefined;
+  const credential = gatewayCredentialForRequest(request, auth);
+  // Authority comes from configured identity, never caller-supplied actor fields.
+  if (
+    !credential ||
+    credential.actor !== "user" ||
+    !credential.roles.includes("operator") ||
+    credential.roles.includes("service") ||
+    credential.roles.includes("worker")
+  ) {
+    reply.code(403).send({ error: "human operator authority is required", code: "human_authority_required" });
+    return undefined;
+  }
+  return actor;
 }
 
 function requireMutationActor(

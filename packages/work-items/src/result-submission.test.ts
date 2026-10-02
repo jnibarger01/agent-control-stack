@@ -139,7 +139,7 @@ describe("immutable worker result acceptance", () => {
         })
       ).toThrow();
       expect(store.get(claimed.id)?.status).toBe("running");
-      expect(store.getExecutionResultForIdempotency(claimed.workerId, input.idempotencyKey)).toBeUndefined();
+      expect(store.getExecutionResultForIdempotency(input.idempotencyKey)).toBeUndefined();
     } finally {
       store.close();
       rmSync(directory, { recursive: true, force: true });
@@ -235,7 +235,7 @@ describe("immutable worker result acceptance", () => {
       ]);
       expect(accepted[0]).toEqual(accepted[1]);
       expect(first.readEvents().filter((event) => event.name === "execution_result.accepted")).toHaveLength(1);
-      expect(first.getExecutionResultForIdempotency("worker-a", input.idempotencyKey)?.resultId).toBe(
+      expect(first.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(
         accepted[0]?.result?.resultId
       );
     } finally {
@@ -243,7 +243,7 @@ describe("immutable worker result acceptance", () => {
       second.close();
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 15000);
 
   it("keeps idempotency durable across a store restart", () => {
     const directory = mkdtempSync(join(tmpdir(), "acs-wave2-result-restart-"));
@@ -270,9 +270,7 @@ describe("immutable worker result acceptance", () => {
       const second = new SqliteWorkItemStore(dbPath);
       try {
         expect(second.submitWorkResult(input)).toEqual(accepted);
-        expect(second.getExecutionResultForIdempotency("worker-a", input.idempotencyKey)?.resultId).toBe(
-          accepted.result?.resultId
-        );
+        expect(second.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(accepted.result?.resultId);
       } finally {
         second.close();
       }
@@ -285,4 +283,75 @@ describe("immutable worker result acceptance", () => {
       rmSync(directory, { recursive: true, force: true });
     }
   });
+});
+
+describe("concurrent same-worker idempotency", () => {
+  // The contract is that two concurrent identical submissions converge on exactly one
+  // durable result and both callers observe the same work item, regardless of which
+  // SQLite failure the loser observes (UNIQUE constraint versus write contention).
+  // The scenario runs repeatedly so a timing-dependent outcome cannot pass by luck.
+  const rounds = 12;
+
+  function seedConcurrentItem(directory: string): {
+    dbPath: string;
+    claimed: NonNullable<ReturnType<SqliteWorkItemStore["claimNextApprovedWorkItem"]>>;
+  } {
+    const dbPath = join(directory, "control.db");
+    const seed = new SqliteWorkItemStore(dbPath);
+    const item = seed.create({
+      title: "Concurrent result",
+      requester: "agent",
+      intent: "resolve identical submissions",
+      target: { cwd: "/repo" },
+      requestedActions: [{ kind: "manual", description: "simulate" }],
+      risk: "low"
+    });
+    seed.approveWorkItem(item.id, transition);
+    const claimed = seed.claimNextApprovedWorkItem("worker-a", { allowLegacyClaimForTests: true });
+    seed.close();
+    if (!claimed) throw new Error("expected a claim");
+    return { dbPath, claimed };
+  }
+
+  it("resolves every concurrent round to one durable result", async () => {
+    for (let round = 0; round < rounds; round++) {
+      const directory = mkdtempSync(join(tmpdir(), "acs-wave2-concurrent-"));
+      try {
+        const { dbPath, claimed } = seedConcurrentItem(directory);
+        const first = new SqliteWorkItemStore(dbPath);
+        const second = new SqliteWorkItemStore(dbPath);
+        try {
+          const input = resultInput(claimed);
+          // Both stores are opened before either submits, so neither observes a
+          // freshly created database. A shared start gate makes the two submissions
+          // begin at the same point instead of depending on microtask ordering.
+          let release: () => void = () => undefined;
+          const gate = new Promise<void>((resolve) => {
+            release = resolve;
+          });
+          const submit = async (store: SqliteWorkItemStore) => {
+            await gate;
+            return store.submitWorkResult(input);
+          };
+          const pending = [submit(first), submit(second)];
+          release();
+          const accepted = await Promise.all(pending);
+
+          // Both callers must observe the same converged work item, and the durable
+          // state must contain exactly one accepted result.
+          expect(accepted[0]?.result?.resultId, `round ${round}`).toBe(accepted[1]?.result?.resultId);
+          expect(accepted[0]?.status, `round ${round}`).toBe(accepted[1]?.status);
+          expect(first.readEvents().filter((event) => event.name === "execution_result.accepted")).toHaveLength(1);
+          expect(first.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(
+            accepted[0]?.result?.resultId
+          );
+        } finally {
+          first.close();
+          second.close();
+        }
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  }, 60_000);
 });

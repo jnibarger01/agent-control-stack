@@ -164,6 +164,21 @@ setInterval(function () {
   if (sseConnected && document.visibilityState !== 'hidden') scheduleDashboardRefresh(0);
 }, ${PERIODIC_REFRESH_MS});
 
+// Filter controls live inside fragment targets that are replaced wholesale, so a
+// coalesced refresh destroys and recreates the element the operator is typing into.
+// Without an explicit capture, focus and caret are lost mid-word on every refresh.
+const FILTER_CONTROL_IDS = ['execution-search', 'execution-stage', 'audit-search', 'audit-type'];
+
+function captureTextControlState(control) {
+  const state = { value: control.value };
+  if (typeof control.selectionStart === 'number') {
+    state.selectionStart = control.selectionStart;
+    state.selectionEnd = control.selectionEnd;
+    state.scrollTop = control.scrollTop;
+  }
+  return state;
+}
+
 function captureOperatorState() {
   const active = document.activeElement;
   const reasons = {};
@@ -174,11 +189,24 @@ function captureOperatorState() {
   document.querySelectorAll('.approval-result[id]').forEach(function (output) {
     if (output.textContent) outputs[output.id] = output.textContent;
   });
+  // Preserve every filter control's value, plus the caret and scroll position of
+  // whichever one currently has focus, so typing survives a refresh.
+  const filters = {};
+  FILTER_CONTROL_IDS.forEach(function (id) {
+    const control = document.getElementById(id);
+    if (control) filters[id] = captureTextControlState(control);
+  });
+  const activeFilterId =
+    active && FILTER_CONTROL_IDS.indexOf(active.id) !== -1 ? active.id : null;
+  const activeFilter = activeFilterId ? captureTextControlState(active) : null;
   return {
     activeId: active && active.id ? active.id : null,
     activeSelector: active && active.dataset && active.dataset.workItem ? '[data-work-item="' + cssAttr(active.dataset.workItem) + '"]' : null,
     reasons: reasons,
-    outputs: outputs
+    outputs: outputs,
+    filters: filters,
+    activeFilterId: activeFilterId,
+    activeFilter: activeFilter
   };
 }
 
@@ -198,10 +226,29 @@ function restoreOperatorState(state) {
       selected.setAttribute('aria-current', 'true');
     }
   }
+  // Restore filter values first, then focus and caret. Order matters: assigning
+  // .value resets the caret to the end, so the selection must be reapplied after.
+  Object.keys(state.filters || {}).forEach(function (id) {
+    const control = document.getElementById(id);
+    const saved = state.filters[id];
+    if (control && saved && control.value !== saved.value) control.value = saved.value;
+  });
   const target = (state.activeId && document.getElementById(state.activeId)) ||
     (state.activeSelector && document.querySelector(state.activeSelector));
   if (target && document.activeElement !== target && typeof target.focus === 'function') {
     target.focus({ preventScroll: true });
+  }
+  if (state.activeFilterId && state.activeFilter) {
+    const control = document.getElementById(state.activeFilterId);
+    if (control && typeof control.setSelectionRange === 'function') {
+      const { selectionStart, selectionEnd, scrollTop } = state.activeFilter;
+      try {
+        control.setSelectionRange(selectionStart, selectionEnd);
+      } catch {
+        // Some input types (for example number) reject selection ranges.
+      }
+      if (typeof scrollTop === 'number') control.scrollTop = scrollTop;
+    }
   }
 }
 

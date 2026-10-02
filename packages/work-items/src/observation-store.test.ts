@@ -102,7 +102,7 @@ describe("JEV-4 store-backed observation outbox", () => {
       expect(job).toMatchObject({
         workItemId: f.workItem.id,
         traceId,
-        questionSetVersion: "jev-trace@1",
+        questionSetVersion: "jev-trace@2",
         classifierVersion: "jev-advisory-v2",
         status: "running",
         attempts: 1,
