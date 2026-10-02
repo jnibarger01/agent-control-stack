@@ -142,3 +142,59 @@ describe("Mission Control operational slices", () => {
     expect(app.text("#execution-mode-result")).toContain("Rejected: forbidden");
   });
 });
+
+describe("throughput chart escaping (#25)", () => {
+  const at = "2026-09-22T00:00:00.000Z";
+  const telemetry = (throughput: unknown[]) =>
+    ({
+      windowStart: at,
+      windowEnd: at,
+      succeeded: 1,
+      failed: 0,
+      averageRunMs: 1000,
+      averageQueueMs: 100,
+      throughput
+    }) as Parameters<typeof throughputChart>[0];
+
+  it("escapes every interpolated value rather than assuming telemetry is well formed", () => {
+    const chart = throughputChart(
+      telemetry([
+        {
+          at: '</title></g><text x="0" y="0">&lt;img src=x onerror=alert(1)&gt;',
+          started: '</text><script>alert(1)</script>',
+          completed: 1,
+          failed: 0
+        }
+      ])
+    );
+    // No markup from the payload may survive: escaping means the angle brackets are
+    // entities, so no new element or attribute can be introduced.
+    expect(chart).not.toContain("<script>");
+    expect(chart).not.toContain("<img");
+    expect(chart).not.toContain("</text></g>");
+    expect(chart).not.toContain('<text x="0" y="0">');
+    // The payload is still shown, fully escaped. The bucket label already contained
+    // entities, so escaping it again is expected and still safe.
+    expect(chart).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(chart).toContain("&amp;lt;img src=x onerror=alert(1)&amp;gt;");
+  });
+
+  it("escapes the bucket label in the chart tooltip and the detail table", () => {
+    const chart = throughputChart(
+      telemetry([{ at: "<b>bucket</b>", started: 2, completed: 1, failed: 0 }])
+    );
+    expect(chart).not.toContain("<b>bucket</b>");
+    expect(chart).toContain("&lt;b&gt;bucket&lt;/b&gt;");
+  });
+
+  it("still renders when counts are non-finite, without emitting raw markup", () => {
+    const chart = throughputChart(
+      telemetry([{ at, started: Number.NaN, completed: Number.POSITIVE_INFINITY, failed: 0 }])
+    );
+    // Non-finite counts are a data-quality problem rather than an escaping one; the
+    // chart must still render as markup rather than throw or leak markup.
+    expect(chart).toContain("<svg");
+    expect(chart).not.toContain("<script>");
+    expect(chart).toContain("</svg>");
+  });
+});
