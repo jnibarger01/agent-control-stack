@@ -37,35 +37,31 @@ type AxeViolation = {
 
 async function runAxe(html: string): Promise<AxeViolation[]> {
   const dom = new JSDOM(html, {
-    runScripts: "dangerously",
-    pretendToBeVisual: true,
-    beforeParse(window) {
-      // Dashboard client expects EventSource; stub so inline scripts do not throw in jsdom.
-      (window as unknown as { EventSource: unknown }).EventSource = class {
-        addEventListener() {}
-        close() {}
-      };
-    }
+    runScripts: "outside-only",
+    pretendToBeVisual: true
   });
   const { window } = dom;
   // Drop app client script before axe; we only need static markup landmarks/controls.
   window.document.querySelectorAll("script").forEach((node) => node.remove());
-  const script = window.document.createElement("script");
-  script.textContent = axeSource;
-  window.document.head.appendChild(script);
+  // Evaluate only axe; the dashboard client must never execute in this static audit.
+  window.eval(axeSource);
   const axe = (
     window as unknown as { axe: { run: (ctx: unknown, opts: unknown) => Promise<{ violations: AxeViolation[] }> } }
   ).axe;
-  const result = await axe.run(window.document, {
-    runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "best-practice"] },
-    rules: {
-      // jsdom lacks layout/paint; contrast checks are unreliable here.
-      "color-contrast": { enabled: false },
-      // Landmark heuristics vary for single-page operator dashboards.
-      region: { enabled: false }
-    }
-  });
-  return result.violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious");
+  try {
+    const result = await axe.run(window.document, {
+      runOnly: { type: "tag", values: ["wcag2a", "wcag2aa", "best-practice"] },
+      rules: {
+        // jsdom lacks layout/paint; contrast checks are unreliable here.
+        "color-contrast": { enabled: false },
+        // Landmark heuristics vary for single-page operator dashboards.
+        region: { enabled: false }
+      }
+    });
+    return result.violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious");
+  } finally {
+    window.close();
+  }
 }
 
 describe("mission-control a11y + mobile smoke", () => {
@@ -105,6 +101,13 @@ describe("mission-control a11y + mobile smoke", () => {
 
     const violations = await runAxe(html);
     expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
+  });
+
+  it("still detects serious accessibility defects in static markup", async () => {
+    const violations = await runAxe(
+      '<!doctype html><html lang="en"><head><title>Fixture</title></head><body><main><button></button></main></body></html>'
+    );
+    expect(violations.map((violation) => violation.id)).toContain("button-name");
   });
 
   it("keeps approval controls in reason-then-action focus order", () => {
