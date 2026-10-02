@@ -51,6 +51,61 @@ test("ACS release rejects dependency and pinned Node drift", (t) => {
   assert.throws(() => verifyRelease(stage, { allowStaging: true }), /pinned Node identity mismatch/);
 });
 
+test("ACS release rejects symlinked release roots, node_modules and pinned Node", (t) => {
+  // Documented contract: these three positions must be real objects that resolve to
+  // themselves. A symlink is refused rather than canonicalized so a packaged
+  // deployment cannot bind to a developer checkout.
+  const { root, stage, nodePath } = fixture(t);
+  createReleaseMetadata(stage, { commit, nodePath, component: "acs" });
+
+  // A symlinked release root is refused, and the error distinguishes a direct link.
+  const linkedRoot = join(root, "_staging", "linked-stage");
+  symlinkSync(stage, linkedRoot);
+  assert.throws(() => verifyRelease(linkedRoot, { allowStaging: true }), /must not be a symlink/);
+
+  // A release whose own node_modules is a symlink is refused. Individual package
+  // entries inside node_modules may still be workspace links.
+  const linkedModules = join(root, "_staging", "linked-modules");
+  mkdirSync(linkedModules, { recursive: true });
+  const modulesSource = join(root, "modules-source");
+  renameSync(join(stage, "node_modules"), modulesSource);
+  for (const entry of ["apps", "packages", "package.json", "package-lock.json"]) {
+    renameSync(join(stage, entry), join(linkedModules, entry));
+  }
+  symlinkSync(modulesSource, join(linkedModules, "node_modules"));
+  assert.throws(
+    () => createReleaseMetadata(linkedModules, { commit, nodePath, component: "acs" }),
+    /release node_modules missing or linked/
+  );
+
+  // A symlinked pinned Node binary is refused even when it resolves to correct bytes.
+  const pinned = fixture(t);
+  // Put the symlink exactly where the pinned Node is expected, so the link is what
+  // is rejected rather than a path-membership mismatch.
+  const realNode = join(pinned.root, "_node", "v24.18.0", "bin", "node.real");
+  renameSync(pinned.nodePath, realNode);
+  symlinkSync(realNode, pinned.nodePath);
+  assert.throws(
+    () => createReleaseMetadata(pinned.stage, { commit, nodePath: pinned.nodePath, component: "acs" }),
+    /pinned Node must not be a symlink/
+  );
+
+  // The same release seals and verifies normally once the binary is a real file.
+  renameSync(realNode, join(pinned.root, "_node", "v24.18.0", "bin", "node.real.tmp"));
+  rmSync(pinned.nodePath);
+  renameSync(join(pinned.root, "_node", "v24.18.0", "bin", "node.real.tmp"), pinned.nodePath);
+  assert.equal(
+    typeof createReleaseMetadata(pinned.stage, { commit, nodePath: pinned.nodePath, component: "acs" })
+      .runtimeIdentityDigest,
+    "string"
+  );
+
+  // Fingerprint validation is not weakened: an intact release still verifies.
+  assert.equal(typeof verifyRelease(pinned.stage, { allowStaging: true }).runtimeIdentityDigest, "string");
+  // And a release whose files were moved out is still rejected on content.
+  assert.throws(() => verifyRelease(stage, { allowStaging: true }), /release metadata|ENOENT|manifest mismatch/);
+});
+
 test("ACS release refuses escaping workspace links", (t) => {
   const { stage, nodePath } = fixture(t);
   symlinkSync("/etc/passwd", join(stage, "node_modules/escape"));

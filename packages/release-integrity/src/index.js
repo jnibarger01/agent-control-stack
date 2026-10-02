@@ -1,3 +1,25 @@
+/**
+ * Release integrity: symlink policy
+ *
+ * Release roots, a release's own `node_modules` directory, and the pinned Node
+ * binary must all be real filesystem objects that resolve to themselves. A symlink
+ * at any of those positions is rejected rather than canonicalized, because the
+ * release fingerprint is computed over paths relative to the release root: if the
+ * root itself could be redirected, every path in the manifest could be made to
+ * point outside the published directory while still appearing correct.
+ *
+ * This is intentionally stricter than resolving symlinks and comparing canonical
+ * paths. Normalizing would let a packaged deployment bind to an arbitrary
+ * developer checkout, so the contract is instead documented and enforced:
+ *
+ *   - the release root must not be a symlink, and no ancestor of it may be one;
+ *   - `node_modules` must be a real directory, though individual package entries
+ *     inside it may be workspace links;
+ *   - the pinned Node executable must be a real file, not a link.
+ *
+ * Operators using symlinked deployment roots must copy or bind-mount the release
+ * into place instead of linking to it.
+ */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,8 +38,19 @@ function assertDirectory(directory, { allowStaging = false } = {}) {
     throw new Error('release directory is not under a published component directory');
   }
   const stat = fs.lstatSync(directory);
-  if (!stat.isDirectory() || stat.isSymbolicLink() || fs.realpathSync(directory) !== directory) {
-    throw new Error('ACS_DC_RELEASE_DIR must be a real directory');
+  if (stat.isSymbolicLink()) throw new Error('ACS_DC_RELEASE_DIR must not be a symlink');
+  if (!stat.isDirectory()) throw new Error('ACS_DC_RELEASE_DIR must be a real directory');
+  assertResolvesToItself(directory, 'ACS_DC_RELEASE_DIR');
+}
+
+/**
+ * Reject paths that resolve to a different location, which happens when the path
+ * or one of its ancestors is a symlink. Callers check `isSymbolicLink()` first so
+ * the error distinguishes a direct link from a linked ancestor.
+ */
+function assertResolvesToItself(target, label) {
+  if (fs.realpathSync(target) !== target) {
+    throw new Error(`${label} must not resolve through a symlink; copy or bind-mount the release instead`);
   }
 }
 
@@ -65,7 +98,8 @@ function releaseFiles(directory, component) {
 
 function dependencyFiles(directory, component) {
   const root = path.join(directory, 'node_modules');
-  if (!fs.lstatSync(root).isDirectory() || fs.realpathSync(root) !== root) throw new Error('release node_modules missing or linked');
+  if (!fs.lstatSync(root).isDirectory()) throw new Error('release node_modules missing or linked');
+  assertResolvesToItself(root, 'release node_modules');
   return entriesUnder(root, '', () => false, component === 'acs' ? directory : root)
     .sort(component === 'acs' ? (a, b) => a.path.localeCompare(b.path, 'en') : byPath);
 }
@@ -118,7 +152,9 @@ function nodeIdentity(directory, nodePath, recordedVersion, expectedHash) {
   const expected = path.join(path.dirname(path.dirname(directory)), '_node', recordedVersion, 'bin/node');
   if (nodePath !== expected) throw new Error('pinned Node path does not belong to release root');
   const stat = fs.lstatSync(nodePath);
-  if (!stat.isFile() || stat.isSymbolicLink() || fs.realpathSync(nodePath) !== nodePath) throw new Error('pinned Node must be a real file');
+  if (stat.isSymbolicLink()) throw new Error('pinned Node must not be a symlink');
+  if (!stat.isFile()) throw new Error('pinned Node must be a real file');
+  assertResolvesToItself(nodePath, 'pinned Node');
   const digest = sha256(fs.readFileSync(nodePath));
   // Verify recorded executable bytes before launching even --version. A changed
   // binary must not gain execution merely by being named in release metadata.
