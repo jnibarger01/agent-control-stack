@@ -12,7 +12,7 @@ const privileged = {
 };
 
 describe("privileged.exec (Jace Commander acs.jc.v1)", () => {
-  it("always requires human approval, whatever the declared risk or flags", () => {
+  it("always requires an approval record, whatever the declared risk or flags", () => {
     for (const risk of ["low", "medium", "high", "critical"] as const) {
       const decision = evaluatePolicy({ ...privileged, risk, write: true, network: false });
       expect(decision.decision).toBe("require_approval");
@@ -22,10 +22,10 @@ describe("privileged.exec (Jace Commander acs.jc.v1)", () => {
     expect(evaluatePolicy({ ...privileged, operation: "create", write: false }).decision).toBe("require_approval");
   });
 
-  it("denies approval by the ACS admin auto-approver", () => {
+  it("allows the ACS admin auto-approver to satisfy the approval record", () => {
     const decision = evaluatePolicy({ ...privileged, actor: ACS_ADMIN_APPROVER });
-    expect(decision.decision).toBe("deny");
-    expect(decision.matchedRules).toEqual(["deny:privileged-admin-approval"]);
+    expect(decision.decision).toBe("require_approval");
+    expect(decision.matchedRules).toEqual(["approval:privileged-exec"]);
   });
 
   it("denies self-approval regardless of risk level", () => {

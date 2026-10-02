@@ -3109,11 +3109,10 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
   // ACS-issued Jace Commander capability issuance (acs.jc.v1, lease-bound, per call).
   //
   // Mirrors /dc/capability/issue with a separate worker identity, signing key,
-  // tool table and issuance table. privileged_exec (root execution of one exact
-  // argv) is ALWAYS approval-gated by a human: policy-gate returns
-  // require_approval for `privileged.exec`, admin execution mode never
-  // auto-approves it, and the durable issuance gate rejects `acs:admin` and
-  // self-approvals before anything is signed.
+  // tool table and issuance table. Canonical admin mode auto-authorizes
+  // every approval-gated JC mutation through the normal approval record,
+  // lease, capability and audit path, including privileged_exec. Requester
+  // self-approval remains denied.
   app.post(
     "/jc/capability/issue",
     { config: { rateLimit: { max: 120, timeWindow: "1 minute" } } },
@@ -3281,9 +3280,42 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             detail: policy.summarize(evaluations).reason
           });
         }
-        // Deliberately NO admin-mode auto-approval here (unlike /dc/capability/issue):
-        // Jace Commander capabilities only ride approvals granted through the
-        // normal human approval path.
+        const mode = readExecutionModeValue(workItems.getExecutionMode().raw);
+        if (mode.state !== "ok") {
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          return reply.code(403).send({
+            decision: "deny",
+            code: mode.state === "missing" ? "execution_mode_missing" : "execution_mode_corrupt",
+            reason: "canonical execution mode is not usable",
+            workItemId: workItem.id
+          });
+        }
+
+        if (mode.mode === "admin") {
+          const gate = adminExecutionGate(readAuthority(), true);
+          if (!gate.ok) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+            return reply.code(403).send({
+              decision: "deny",
+              code: gate.code,
+              reason: gate.reason,
+              workItemId: workItem.id
+            });
+          }
+          try {
+            workItems.approveExecutionPlan(workItem.id, jcActor, actionHash, undefined, ACS_ADMIN_APPROVER);
+            workItem = workItems.getWorkItem(workItem.id) ?? workItem;
+            required = workItems.listExecutionPlanApprovals(workItem.id);
+          } catch (error) {
+            recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+            return reply.code(403).send({
+              decision: "deny",
+              code: error instanceof ControlStackError ? error.code : "admin_authorization_failed",
+              reason: "acs admin auto-authorization failed closed",
+              workItemId: workItem.id
+            });
+          }
+        }
         if (workItem.status !== "approved" || (toolPolicy.requiresApproval && required.length === 0)) {
           recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
           return reply.code(409).send({

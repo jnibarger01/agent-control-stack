@@ -41,12 +41,11 @@ rejected by the other verifier.
 | `mission_router_list`, `looptrace_verify`                             | `fs.read`            | no                                              | `jc.fs.read`           | low            |
 | `list_directory`, `get_file_info`, `read_file`, `read_multiple_files` | `fs.read`            | no                                              | `jc.fs.read`           | low            |
 | Ordinary gated mutations (see manifest)                               | tool-specific        | required in strict; ACS may grant in admin mode | tool-specific          | medium/high    |
-| `privileged_exec`                                                     | `process.privileged` | **human, always**                               | `privileged.exec`      | critical       |
+| `privileged_exec`                                                     | `process.privileged` | required in strict; ACS may grant in admin mode | `privileged.exec`      | critical       |
 
-In the canonical manifest, `requiresApproval` means policy requires approval
-in strict mode. It does not mean every approval must come from a human: eligible
-managed mutations may receive an ACS `acs:admin` approval in admin mode.
-`privileged_exec` is the sole human-only approval tool.
+In the canonical manifest, `requiresApproval` means policy requires an approval
+record in strict mode. In admin mode, every managed approval-gated mutation may
+receive an ACS `acs:admin` approval, including `privileged_exec`.
 
 The argument schemas are strict (unknown keys are rejected) and **are never
 rewritten**. `normalizedArguments` equals the delivered arguments. For
@@ -92,10 +91,10 @@ the fence and approval consumption. In `strict` mode, candidate reuse also
 excludes work items carrying an `acs:admin` grant, so an approval left behind
 by an interrupted admin-mode request cannot cross the mode boundary.
 
-Migration 039 updates the durable JC issuance constraint to permit
-`acs:admin` for those ordinary approval-gated tools while retaining the
-human-only constraint for `privileged_exec`. Requester self-approval remains
-forbidden for every approval-gated JC tool.
+Migration 039 introduced durable JC admin approvals. Migration 040 extends the
+durable issuance constraint so `acs:admin` may approve every approval-gated JC
+tool, including `privileged_exec`. Requester self-approval remains forbidden
+for every approval-gated JC tool.
 
 ## `privileged_exec` approval rules
 
@@ -104,24 +103,24 @@ These are enforced in three independent places.
 1. **Policy** (`packages/policy-gate/src/rules.ts`):
    - `privileged.exec` always evaluates to `require_approval`
      (`approval:privileged-exec`), regardless of risk or flags.
-   - An approval by `acs:admin` evaluates to `deny`
-     (`deny:privileged-admin-approval`).
+   - In admin mode, `acs:admin` may satisfy that approval record.
    - An approval by the requester evaluates to `deny` (`deny:self-approval`).
    - The argv is not mapped to `command`, so the ordinary `deny:sudo`,
      shell-metacharacter and destructive rules still apply to every other
      action kind unchanged.
 2. **Route** (`/jc/capability/issue`):
-   - The ordinary-JC admin branch explicitly excludes `privileged_exec`.
+   - The admin branch applies to every approval-gated JC tool, including
+     `privileged_exec`.
    - In strict mode, candidate reuse excludes work items carrying an
      `acs:admin` grant.
    - An approval-required tool with no `require_approval` evaluation returns
      409, not a signed capability.
 3. **Durable issuance gate** (`SqliteJaceCommanderIssuanceRegistry` plus the
-   migration 039 `CHECK` constraints):
+   migration 040 `CHECK` constraints):
    - The lease-bound approval must be `consumed` and bound to this plan,
      action and request hash, and must not expire before the capability.
-   - For `privileged_exec`, `approved_by_actor_id` must not be
-     `acs:admin` or the requesting subject.
+   - The approval must not come from the requesting subject; `acs:admin` is
+     accepted when canonical admin mode created the grant.
    - At most one capability is issued per approval, and at most one per
      lease/invocation.
    - The nonce hash is unique.
@@ -134,14 +133,13 @@ These are enforced in three independent places.
    authenticated as `acs-jc-bridge`.
 2. For `privileged_exec`, ACS creates a `needs_approval` work item (risk
    critical; title `ROOT: <argv>`, plus an `approvalSummary` with argv, cwd,
-   timeout and stdin size). It returns `409 {decision: "require_approval",
-workItemId, actionHash, approvalSummary}`.
-3. A human approves the exact `actionHash` through `POST /work-items/:id/approve`.
-4. The identical call is retried. ACS claims the item under a fresh lease,
-   consumes the approval, records the issuance, appends
-   `jace_commander.capability_issued` to the canonical audit chain, and
-   returns the signed envelope.
-5. The approval is consumed. The same argv needs a new approval next time.
+   timeout and stdin size). In strict mode it returns the normal 409 approval
+   challenge. In admin mode ACS records the exact `acs:admin` approval itself.
+3. ACS claims the approved item under a fresh lease, consumes the approval,
+   records the issuance, appends `jace_commander.capability_issued` to the
+   canonical audit chain, and returns the signed envelope.
+4. The approval is consumed. The same argv needs a new approval record next time;
+   admin mode creates that record automatically.
 
 ## Configuration
 

@@ -311,7 +311,9 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
     }));
 });
 
-// Every approval-gated JC tool requires a human grant, including in admin mode.
+// Every approval-gated JC tool refuses requester self-approval and keeps
+// its approver-visible summary. Canonical admin mode may auto-authorize every
+// managed mutation, including privileged_exec.
 describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval, B3 approval summary)", () => {
   const GATED = jaceCommanderToolNames().filter((name) => jaceCommanderToolPolicy(name)?.requiresApproval === true);
   const head = "0123456789abcdef0123456789abcdef01234567";
@@ -399,7 +401,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
-  it("admin execution mode still requires human approval for every gated JC tool", () =>
+  it("admin execution mode auto-authorizes every gated tool, including privileged_exec", () =>
     withGateway(
       async (ctx) => {
         const switched = await ctx.app.inject({
@@ -415,13 +417,9 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         for (const tool of GATED) {
           const { args } = fixtures[tool]!;
           const first = await issue(ctx, tool, args);
-          expect(first.statusCode, `${tool}: ${first.body}`).toBe(409);
-          expect(first.json().decision).toBe("require_approval");
-          expect(first.json().capability).toBeUndefined();
-          expect((await approve(ctx, first.json().workItemId, first.json().actionHash)).statusCode).toBe(200);
-          const issued = await issue(ctx, tool, args);
-          expect(issued.statusCode, `${tool}: ${issued.body}`).toBe(200);
-          expect(typeof issued.json().capability.payload.approvalId).toBe("string");
+          expect(first.statusCode, `${tool}: ${first.body}`).toBe(200);
+          expect(first.json().decision).toBe("allow");
+          expect(typeof first.json().capability.payload.approvalId).toBe("string");
         }
 
         const db = new DatabaseSync(ctx.dbPath);
@@ -431,7 +429,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
               "SELECT DISTINCT approved_by_actor_id AS actor FROM jace_commander_capability_issuances WHERE approval_id IS NOT NULL ORDER BY actor"
             )
             .all() as Array<{ actor: string }>;
-          expect(approvers.map((row) => row.actor)).toEqual(["user"]);
+          expect(approvers.map((row) => row.actor)).toEqual(["acs:admin"]);
         } finally {
           db.close();
         }
