@@ -74,6 +74,7 @@ import {
   type DirectAgentRunner
 } from "@agent-control-stack/machine-controller";
 import {
+  claimNextAuthoritativeWorkItem,
   createPolicyEngine,
   evaluateChangeSetPolicy,
   createWorkItemTools,
@@ -3729,7 +3730,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         .object({ leaseMs: z.number().int().positive().max(3_600_000).optional() })
         .strict()
         .parse(requestObject(request.body));
-      const claimed = tools.claim_next_approved_work_item({ workerId, ...body });
+      let claimed;
+      if (nimbleRouting.enabled) {
+        const routed = await claimNextAuthoritativeWorkItem({
+          store: workItems,
+          policy,
+          workerId,
+          config: nimbleRouting,
+          ...body
+        });
+        claimed = routed.claimed ? routed.running : undefined;
+      } else {
+        claimed = tools.claim_next_approved_work_item({ workerId, ...body });
+      }
       if (claimed && claimed.status !== "running") {
         return reply
           .code(409)

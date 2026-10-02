@@ -44,6 +44,7 @@ export async function claimNextAuthoritativeWorkItem(options: {
   admission?: AuthoritativeAdmission;
   fetchImpl?: typeof fetch;
   now?: Date;
+  leaseMs?: number;
 }): Promise<AuthoritativeClaim> {
   const items = options.store
     .list({ status: "approved" })
@@ -89,7 +90,11 @@ export async function claimNextAuthoritativeWorkItem(options: {
       }
     }
     const tools = createWorkItemTools(options.store, options.policy);
-    const running = tools.claim_approved_work_item_by_id({ id: item.id, workerId: options.workerId });
+    const running = tools.claim_approved_work_item_by_id({
+      id: item.id,
+      workerId: options.workerId,
+      ...(options.leaseMs ? { leaseMs: options.leaseMs } : {})
+    });
     if (!running || running.status !== "running" || running.workerId !== decision.executorId) {
       release();
       return { claimed: false, reason: "authorization_blocked", decision };
