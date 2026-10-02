@@ -4,6 +4,24 @@
 **Date**: 2026-07-25
 **Status**: COMPLETE
 
+> **Status update, 2026-10-02.** The review below is a 2026-07-25 snapshot of commit `5227780` and is kept as the
+> historical record. Re-checked against `origin/main` (`cdb1f2a`) on 2026-10-02:
+>
+> | Original finding                                          | Status now                                                                                                                                                               |
+> | --------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+> | No rate limiting, request size limits, or SSE client caps | Addressed in code: per-route `rateLimit` config, a JSON `bodyLimit`, and `maxSseClients` / `maxSseClientsPerPrincipal` in `apps/gateway/src/server.ts`. Not load-tested. |
+> | Six high-severity npm advisories                          | `npm audit --audit-level=high` now reports no high or critical findings (7 moderate remain).                                                                             |
+> | `npm run lint` fails                                      | `npm run lint` is clean.                                                                                                                                                 |
+> | Single static dashboard token                             | Still true: the legacy `ACS_GATEWAY_TOKEN` path remains the human operator credential.                                                                                   |
+> | Tunnel replay window without nonce                        | Not re-verified.                                                                                                                                                         |
+> | Sandbox integration tests skipped                         | Not re-verified; still require real Bubblewrap/systemd.                                                                                                                  |
+>
+> Counts in the body (62 test files, 572 tests, 12 packages) are out of date: the workspace is now 14 apps and 31
+> packages. Admin execution mode, mission-scoped Autonomous Authority Grants, and the Jev advisory boundary
+> (ADR 0020) did not exist or were not reviewed here. Treat the verdict as superseded until it is re-run.
+
+
+
 ---
 
 ## 1. Verdict
