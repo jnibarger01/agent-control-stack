@@ -13,12 +13,11 @@ requires a healthy managed authority: authentication, one unambiguous executor
 lease, no break-glass marker, and the managed runtime. Policy denials stay
 denials. A missing or corrupt mode row fails closed.
 
-<<<<<<< Updated upstream
 The same admin policy applies to Desktop Commander and ordinary approval-gated
 Jace Commander mutations: ACS records an `acs:admin` approval, then continues
 through the normal lease, capability, and audit path. Jace Commander
 `privileged_exec` remains human-only even in admin mode.
-=======
+
 Changing the global mode is a privileged operator action. `POST /execution-mode`
 requires an authenticated credential mapped to actor `user`, with the
 `operator` role and `acs:approve` scope. Agent, worker, service, and write-only
@@ -27,7 +26,6 @@ boundary from agent self-escalation; it does not make admin mode mission-scoped.
 Mission-scoped autonomous authority grants are a separate architecture
 requirement and must replace global admin before ACS can claim bounded,
 pre-authorized autonomous execution.
->>>>>>> Stashed changes
 
 Consumers:
 

@@ -33,8 +33,6 @@ function resolveInstalledCli(envVar: string, command: string): string | undefine
   return undefined;
 }
 
-<<<<<<< Updated upstream
-=======
 function resolveHermesRuntimeLauncher(executable: string): string {
   const wrapper = readFileSync(executable, "utf8");
   const target = wrapper.match(/^exec\s+(\S+)\s+"\$@"/m)?.[1];
@@ -72,7 +70,6 @@ function hermesE2eEnvironment(home: string, hermesHome: string): NodeJS.ProcessE
   };
 }
 
->>>>>>> Stashed changes
 const opencodeExecutable = resolveInstalledCli("ACS_TEST_OPENCODE_EXECUTABLE", "opencode");
 const hermesExecutable = resolveInstalledCli("ACS_TEST_HERMES_EXECUTABLE", "hermes");
 
@@ -1950,8 +1947,6 @@ describe("gateway MCP transport", () => {
       const hermesHome = join(dir, "hermes-home");
       mkdirSync(allowed);
       mkdirSync(hermesHome);
-<<<<<<< Updated upstream
-=======
       if (!hermesExecutable) throw new Error("Hermes executable unavailable");
       const hermesRuntimeLauncher = resolveHermesRuntimeLauncher(hermesExecutable);
       const installedHermesLauncher = readFileSync(hermesRuntimeLauncher);
@@ -1962,7 +1957,6 @@ describe("gateway MCP transport", () => {
         rmSync(dir, { recursive: true, force: true });
         throw error;
       }
->>>>>>> Stashed changes
       writeFileSync(
         configPath,
         JSON.stringify({
@@ -2187,11 +2181,7 @@ describe("gateway MCP transport", () => {
           `model:\n  provider: custom\n  default: fixture-model\n  base_url: http://127.0.0.1:${modelAddress.port}/v1\n  api_key: fixture-key\n  context_length: 65536\n  max_tokens: 512\nmcp_servers:\n  acs-gateway:\n    url: http://127.0.0.1:${gatewayAddress.port}/mcp\n    headers:\n      Authorization: Bearer deterministic-hermes-token\ntools:\n  tool_search:\n    enabled: on\n`
         );
         hermesProcess = spawn(
-<<<<<<< Updated upstream
-          "hermes",
-=======
           hermesFixture.launcher,
->>>>>>> Stashed changes
           [
             "--ignore-rules",
             "--no-restore-cwd",
@@ -2200,15 +2190,11 @@ describe("gateway MCP transport", () => {
           ],
           {
             cwd: allowed,
-<<<<<<< Updated upstream
-            env: { ...process.env, HOME: dir, HERMES_HOME: hermesHome, HERMES_ACCEPT_HOOKS: "1" },
-=======
             env: {
               ...hermesE2eEnvironment(dir, hermesHome),
               HERMES_RUNTIME_DIR: hermesFixture.runtimeDirectory,
               HERMES_INSTALL_ROOT: hermesFixture.sourceRoot
             },
->>>>>>> Stashed changes
             stdio: ["ignore", "pipe", "pipe"]
           }
         );

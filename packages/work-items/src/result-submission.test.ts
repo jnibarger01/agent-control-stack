@@ -270,13 +270,9 @@ describe("immutable worker result acceptance", () => {
       const second = new SqliteWorkItemStore(dbPath);
       try {
         expect(second.submitWorkResult(input)).toEqual(accepted);
-<<<<<<< Updated upstream
         expect(second.getExecutionResultForIdempotency("worker-a", input.idempotencyKey)?.resultId).toBe(
           accepted.result?.resultId
         );
-=======
-        expect(second.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(accepted.result?.resultId);
->>>>>>> Stashed changes
       } finally {
         second.close();
       }
@@ -290,8 +286,6 @@ describe("immutable worker result acceptance", () => {
     }
   });
 });
-<<<<<<< Updated upstream
-=======
 
 describe("concurrent same-worker idempotency", () => {
   it("prevents concurrent identical submissions from the same worker from creating two results", async () => {
@@ -320,7 +314,7 @@ describe("concurrent same-worker idempotency", () => {
       ]);
       expect(accepted[0]).toEqual(accepted[1]);
       expect(first.readEvents().filter((event) => event.name === "execution_result.accepted")).toHaveLength(1);
-      expect(first.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(
+      expect(first.getExecutionResultForIdempotency("worker-a", input.idempotencyKey)?.resultId).toBe(
         accepted[0]?.result?.resultId
       );
     } finally {
@@ -330,4 +324,3 @@ describe("concurrent same-worker idempotency", () => {
     }
   }, 15000);
 });
->>>>>>> Stashed changes

@@ -261,7 +261,6 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
-<<<<<<< Updated upstream
   const adminMode = store.getExecutionMode().mode === "admin";
   const registeredAgentIds = new Set(store.listRegistryAgents().map((agent) => agent.id));
   const workerMatchesTarget = (workItem: WorkItem) => {
@@ -270,8 +269,10 @@ function gateWorkerClaimInTransaction(
   };
   const candidate = store
     .list({ status: "approved" })
-    .filter(
-      (workItem) =>
+    .filter((workItem) => {
+      const assignment = store.getWorkItemAssignment(workItem.id);
+      return (
+        (!assignment || assignment.selectedWorkerId === parsed.workerId) &&
         workerMatchesTarget(workItem) &&
         !workItem.requestedActions.some((action) => {
           const params = action.params as Record<string, unknown> | undefined;
@@ -280,11 +281,9 @@ function gateWorkerClaimInTransaction(
         (adminMode ||
           (!store.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER) &&
             !store.hasGrantedExecutionPlanApprovalBy(workItem.id, ACS_ADMIN_APPROVER)))
-    )
+      );
+    })
     .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
-=======
-  const candidate = store.findNextApprovedWorkItemForWorker(parsed.workerId);
->>>>>>> Stashed changes
   if (!candidate) {
     return undefined;
   }

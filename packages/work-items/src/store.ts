@@ -388,8 +388,6 @@ interface AttemptLeaseRow {
   closed_at: string | null;
 }
 
-<<<<<<< Updated upstream
-=======
 interface AdmissionPermitRow {
   attempt_id: string;
   work_item_id: string;
@@ -404,7 +402,6 @@ interface AdmissionPermitRow {
   created_at: string;
 }
 
->>>>>>> Stashed changes
 interface WorkspaceAllocationRow {
   allocation_id: string;
   work_item_id: string;
@@ -1182,10 +1179,6 @@ export interface WorkItemStore {
   ): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
   /** Count attempt leases that are still active and not yet past expires_at. */
-<<<<<<< Updated upstream
-  countActiveAttemptLeases(now?: Date): number;
-  /** Append a gateway/system lifecycle event to the canonical audit chain. */
-=======
   countActiveAttemptLeases(now?: Date, workerIds?: readonly string[]): number;
   /** Persist an admission permit binding for recovery after gateway restart. */
   bindAdmissionPermit(input: {
@@ -1231,7 +1224,6 @@ export interface WorkItemStore {
     lane: "jc" | "dc";
     createdAt: string;
   }>;
->>>>>>> Stashed changes
   recordSystemEvent(input: {
     name: string;
     body?: Record<string, unknown>;
@@ -5264,7 +5256,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
     return this.write(() => {
-<<<<<<< Updated upstream
       const mode = options.adminApprovalActorId
         ? (this.db.prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`).get() as { mode?: string } | undefined)
         : undefined;
@@ -5272,6 +5263,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
         ? (this.db
             .prepare(
               `SELECT item.* FROM work_items AS item
+               LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = item.id
+                 AND (assignment.selected_worker_id = ?)
                WHERE item.status = 'approved'
                  AND (
                    ? = 'admin'
@@ -5290,22 +5283,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
                  )
                ORDER BY item.created_at ASC LIMIT 1`
             )
-            .get(mode?.mode ?? null, options.adminApprovalActorId, options.adminApprovalActorId) as
-            (WorkItemRow & Record<string, unknown>) | undefined)
+            .get(workerId, mode?.mode ?? null, options.adminApprovalActorId, options.adminApprovalActorId) as
+            | (WorkItemRow & Record<string, unknown>)
+            | undefined)
         : (this.db
-            .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
-            .get() as unknown as WorkItemRow | undefined);
-=======
-      const row = this.db
-        .prepare(
-          `SELECT wi.* FROM work_items AS wi
-           LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = wi.id
-           WHERE wi.status = 'approved'
-             AND (assignment.work_item_id IS NULL OR assignment.selected_worker_id = ?)
-           ORDER BY wi.created_at ASC LIMIT 1`
-        )
-        .get(workerId) as unknown as WorkItemRow | undefined;
->>>>>>> Stashed changes
+            .prepare(
+              `SELECT item.* FROM work_items AS item
+               LEFT JOIN work_item_assignments AS assignment ON assignment.work_item_id = item.id
+                 AND (assignment.selected_worker_id = ?)
+               WHERE item.status = 'approved'
+               ORDER BY item.created_at ASC LIMIT 1`
+            )
+            .get(workerId) as unknown as WorkItemRow | undefined);
       if (!row) {
         return { value: undefined, events: [] };
       }
@@ -5676,8 +5665,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return Number(row?.count ?? 0);
   }
 
-<<<<<<< Updated upstream
-=======
   bindAdmissionPermit(input: {
     attemptId: string;
     workItemId: string;
@@ -5768,7 +5755,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return rows.map(mapAdmissionPermitRow);
   }
 
->>>>>>> Stashed changes
   recordSystemEvent(input: {
     name: string;
     body?: Record<string, unknown>;
@@ -6205,38 +6191,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       ...transitionWorkItem(rowToWorkItem(row), resultStatus(input.outcome), now),
       result: compactResult(input, payloadHash, now, resultId)
     };
-<<<<<<< Updated upstream
-    this.db
-      .prepare(
-        `INSERT INTO execution_results
-         (result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome,
-          started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json,
-          artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        resultId,
-        input.workItemId,
-        input.leaseId,
-        input.workerId,
-        input.idempotencyKey,
-        input.actionHash,
-        input.outcome,
-        input.startedAt,
-        input.finishedAt,
-        input.exitCode ?? null,
-        input.summary,
-        input.stdout ?? null,
-        input.stderr ?? null,
-        JSON.stringify(input.structuredOutput),
-        JSON.stringify(input.artifacts),
-        input.error ?? null,
-        input.resourceUsage ? JSON.stringify(input.resourceUsage) : null,
-        JSON.stringify(input.simulationMetadata),
-        payloadHash,
-        now
-      );
-=======
     try {
       this.db
         .prepare(
@@ -6282,7 +6236,6 @@ export class SqliteWorkItemStore implements WorkItemStore {
       }
       throw insertError;
     }
->>>>>>> Stashed changes
 
     const updatedWorkItem = this.db
       .prepare(
@@ -7535,8 +7488,6 @@ function rowToAttemptLease(row: AttemptLeaseRow): AttemptLease {
   });
 }
 
-<<<<<<< Updated upstream
-=======
 function mapAdmissionPermitRow(row: AdmissionPermitRow) {
   return {
     attemptId: row.attempt_id,
@@ -7553,7 +7504,6 @@ function mapAdmissionPermitRow(row: AdmissionPermitRow) {
   };
 }
 
->>>>>>> Stashed changes
 function rowToWorkspaceAllocation(row: WorkspaceAllocationRow): WorkspaceAllocation {
   return workspaceAllocationSchema.parse({
     allocationId: row.allocation_id,

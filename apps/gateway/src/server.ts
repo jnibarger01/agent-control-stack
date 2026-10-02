@@ -462,8 +462,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   >();
 
-<<<<<<< Updated upstream
-=======
   // Re-establish capacity accounting only from a complete, current ACS lease binding.
   // Invalid records remain persisted for diagnosis and do not mutate scheduler state.
   for (const perm of workItems.listAdmissionPermits()) {
@@ -544,7 +542,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     }
   }
 
->>>>>>> Stashed changes
   async function acquireExecutionPermit(input: {
     request: FastifyRequest;
     reply: FastifyReply;
@@ -593,22 +590,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     leaseMs: number;
     permit: AdmissionPermit;
     lane: "jc" | "dc";
-<<<<<<< Updated upstream
-    workItemId: string;
-    leaseId: string;
-    workerId: string;
-    fencingEpoch: number;
-    actionHash: string;
-    planHash: string;
-    inputHash: string;
-  }): void {
-    if (admissionPermits.has(input.attemptId)) {
-      throw new Error(`execution admission permit already bound for attempt ${input.attemptId}`);
-    }
-    admissionPermits.set(input.attemptId, input);
-    refreshAdmissionMetrics();
-=======
     executionClass: "execution" | "wait";
+    executionModeFence?: "admin";
   }) {
     // The lease and durable capacity reservation commit together. Scheduler
     // state is published only after commit, and can be rebuilt after a crash.
@@ -625,7 +608,8 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       const claim = tools.claim_approved_work_item_by_id({
         id: input.workItemId,
         workerId: input.workerId,
-        leaseMs: input.leaseMs
+        leaseMs: input.leaseMs,
+        ...(input.executionModeFence ? { executionModeFence: input.executionModeFence } : {})
       });
       if (!claim?.attemptId) return claim;
       if (claim.fencingEpoch === undefined || !claim.planHash || !claim.inputHash) {
@@ -661,7 +645,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
       refreshAdmissionMetrics();
     }
     return claimed;
->>>>>>> Stashed changes
   }
 
   function releaseAdmissionPermit(attemptId: string): boolean {
@@ -2586,7 +2569,6 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         });
         let admissionBound = false;
         try {
-<<<<<<< Updated upstream
           const adminApprovalAtClaim = workItems.hasGrantedApprovalBy(workItem.id, ACS_ADMIN_APPROVER);
           if (adminApprovalAtClaim) {
             const modeAfterAdmission = readExecutionModeValue(workItems.getExecutionMode().raw);
@@ -2643,20 +2625,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
             }
           }
 
-          const claimed = tools.claim_approved_work_item_by_id({
-            id: workItem.id,
-            workerId,
-            leaseMs: JC_BRIDGE_LEASE_MS,
-            ...(adminApprovalAtClaim ? { executionModeFence: "admin" as const } : {})
-=======
           const claimed = claimWithAdmissionPermit({
             workItemId: workItem.id,
             workerId,
             leaseMs: JC_BRIDGE_LEASE_MS,
             permit: admissionPermit,
             lane: "jc",
-            executionClass: classifyAdmissionTool("jc", invocation.toolName)
->>>>>>> Stashed changes
+            executionClass: classifyAdmissionTool("jc", invocation.toolName),
+            ...(adminApprovalAtClaim ? { executionModeFence: "admin" as const } : {})
           });
           admissionBound = Boolean(claimed?.attemptId);
           if (!claimed?.attemptId || claimed.fencingEpoch === undefined || !claimed.planHash || !claimed.inputHash) {
