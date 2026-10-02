@@ -400,7 +400,16 @@ function readNumberEnv(name: string): number | undefined {
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
-export const JEV_TRACE_QUESTION_SET_VERSION = "jev-trace@1" as const;
+/**
+ * Version of the trace question set and telemetry payload.
+ *
+ * Bumped to @2 because the trace question set, failure modes and telemetry shape
+ * changed materially. The value is part of `observationalIdentity`, so observations
+ * produced under @1 are never conflated with @2 results: previously persisted rows
+ * keep the version they were written with and remain readable, while new rows are
+ * attributed to @2.
+ */
+export const JEV_TRACE_QUESTION_SET_VERSION = "jev-trace@2" as const;
 export const JEV_TRACE_FAILURE_MODES = [
   "healthy",
   "tool_loop",

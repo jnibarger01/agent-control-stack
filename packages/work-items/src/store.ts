@@ -1462,7 +1462,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.onEvent = options.onEvent ?? (() => undefined);
     this.onTraceFailure = options.onTraceFailure ?? defaultTraceFailureReporter;
     this.observationEnabled = options.observationEnabled ?? false;
-    this.observationQuestionSetVersion = options.observationQuestionSetVersion ?? "jev-trace@1";
+    // Mirrors JEV_TRACE_QUESTION_SET_VERSION in @agent-control-stack/jev-advisor.
+    // work-items must not depend on that package, so the default is asserted to stay
+    // in sync by a test in @agent-control-stack/evidence, which depends on both.
+    this.observationQuestionSetVersion = options.observationQuestionSetVersion ?? "jev-trace@2";
     this.observationClassifierVersion = options.observationClassifierVersion ?? "jev-advisory-v2";
     this.observationMaxQueued = boundedObservationInteger(
       options.observationMaxQueued,

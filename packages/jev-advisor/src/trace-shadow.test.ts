@@ -282,7 +282,7 @@ describe("canonical trace projection for Jev", () => {
 
 describe("Jev canonical trace classifier", () => {
   it("declares the requested taxonomy and primitive types", () => {
-    expect(JEV_TRACE_QUESTION_SET_VERSION).toBe("jev-trace@1");
+    expect(JEV_TRACE_QUESTION_SET_VERSION).toBe("jev-trace@2");
     expect(JEV_TRACE_FAILURE_MODES).toEqual([
       "healthy",
       "tool_loop",
@@ -342,7 +342,7 @@ describe("Jev canonical trace classifier", () => {
       confidence: 0.82
     });
     expect(result.result.answers.recovery_urgency).toMatchObject({ type: "score", score: 3.7 });
-    expect(result.telemetry.question_set_version).toBe("jev-trace@1");
+    expect(result.telemetry.question_set_version).toBe("jev-trace@2");
     expect(result.telemetry.observations.failure_mode.primitive).toBe("choice");
   });
 
