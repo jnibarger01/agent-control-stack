@@ -279,7 +279,7 @@ describe("live dashboard client (#6, #7, #8, #9)", () => {
   it("keeps the stage and audit filters across a refresh (#5)", async () => {
     const app = bootLive({
       workItems: [item("wrk_a"), item("wrk_b", { status: "running" })],
-      events: [{ name: "policy.decided", timeUnixNano: "1", attributes: {} }],
+      events: [],
       now: NOW
     });
     app.open();
@@ -643,5 +643,103 @@ describe("history navigation derives view and drawer state from location (#6)", 
     // presented as if it were the requested one.
     expect(drawer().hidden).toBe(false);
     expect(selected()).toEqual([]);
+  });
+});
+
+describe("command palette closes deterministically (#23)", () => {
+  const model: MissionControlViewModel = {
+    workItems: [item("wrk_a"), item("wrk_b")],
+    events: [],
+    now: NOW
+  };
+
+  function boot() {
+    const app = bootLive(model, {}, { url: "https://acs.local/#queue" });
+    const results = () => app.document.getElementById("command-results") as HTMLElement;
+    const search = () => app.document.querySelector("#command-search") as HTMLInputElement;
+    const type = async (text: string) => {
+      const input = search();
+      input.focus();
+      input.value = text;
+      input.dispatchEvent(new app.window.Event("input", { bubbles: true }));
+      await app.flush();
+    };
+    const click = async (selector: string) => {
+      const target = app.document.querySelector(selector) as HTMLElement;
+      target.click();
+      await app.flush();
+    };
+    return { app, results, search, type, click };
+  }
+
+  it("opens on input and closes on a click outside the palette", async () => {
+    const { results, type, click } = boot();
+    await type("wrk");
+    expect(results().hidden).toBe(false);
+
+    // A click that matches none of the delegated targets must still close it.
+    await click("#page-description");
+    expect(results().hidden).toBe(true);
+  });
+
+  it("stays open while clicking inside the palette input or results", async () => {
+    const { results, search, type, click } = boot();
+    await type("wrk");
+    expect(results().hidden).toBe(false);
+
+    (search() as HTMLElement).click();
+    await type("wrk_");
+    expect(results().hidden).toBe(false);
+
+    await click("#command-results .muted, #command-results p");
+    expect(results().hidden).toBe(false);
+  });
+
+  it("closes when a result is selected", async () => {
+    const { results, type, click } = boot();
+    await type("Task wrk_a");
+    expect(results().hidden).toBe(false);
+    await click("#command-results [data-inspect-work]");
+    expect(results().hidden).toBe(true);
+  });
+
+  it("closes on Escape and returns focus only when focus was inside the panel", async () => {
+    const { app, results, search, type, click } = boot();
+    await type("wrk");
+    const panelButton = app.document.querySelector("#command-results [data-inspect-work]") as HTMLElement;
+    panelButton.focus();
+    expect(app.document.activeElement).toBe(panelButton);
+
+    app.key("Escape");
+    await app.flush();
+    expect(results().hidden).toBe(true);
+    // Focus was inside the panel we closed, so it returns to the search input.
+    expect(app.document.activeElement).toBe(search());
+
+    // Reopen and press Escape while focus is elsewhere: focus is left alone.
+    await type("wrk");
+    const navLink = app.document.querySelector('nav a[data-nav="audit"]') as HTMLElement;
+    navLink.focus();
+    expect(app.document.activeElement).toBe(navLink);
+    app.key("Escape");
+    await app.flush();
+    expect(results().hidden).toBe(true);
+    expect(app.document.activeElement).toBe(navLink);
+  });
+
+  it("closes when the query is cleared", async () => {
+    const { results, search, type } = boot();
+    await type("wrk");
+    expect(results().hidden).toBe(false);
+    await type("");
+    expect(results().hidden).toBe(true);
+  });
+
+  it("closes on navigation outside the palette", async () => {
+    const { results, type, click } = boot();
+    await type("wrk");
+    expect(results().hidden).toBe(false);
+    await click('nav a[data-nav="audit"]');
+    expect(results().hidden).toBe(true);
   });
 });

@@ -1943,6 +1943,26 @@ function syncPageHeading(view) {
     if (link.dataset.nav === view) link.setAttribute('aria-current', 'page'); else link.removeAttribute('aria-current');
   });
 }
+/**
+ * Command palette results visibility.
+ *
+ * Closing used to be a side effect of the delegated click handler, so results stayed
+ * open for any click that did not match one of its targets. Visibility is now owned
+ * by one helper, and every path that should close the palette goes through it.
+ */
+function closeCommandResults(options) {
+  const results = document.getElementById('command-results');
+  if (!results || results.hidden) return false;
+  results.hidden = true;
+  // Only pull focus back when it was inside the panel we just closed.
+  if (options && options.restoreFocus && results.contains(document.activeElement)) {
+    document.getElementById('command-search')?.focus({ preventScroll: true });
+  }
+  return true;
+}
+function isCommandSurface(node) {
+  return !!(node && node.closest && node.closest('#command-results, #command-search'));
+}
 function applyOperationFilters() {
   const text = executionSearch.toLowerCase();
   let runs = 0, runTotal = 0;
@@ -2002,7 +2022,13 @@ document.addEventListener('click', function (event) {
   } else if (node.dataset.searchView) {
     showView(node.dataset.searchView); history.pushState(null, '', '#' + node.dataset.searchView);
   }
-  document.getElementById('command-results').hidden = true;
+  closeCommandResults();
+});
+// Any click outside the palette input and its results closes the palette,
+// including navigation and card clicks that match none of the delegated targets.
+document.addEventListener('click', function (event) {
+  if (isCommandSurface(event.target)) return;
+  closeCommandResults();
 });
 function searchCommands() {
   const query = document.getElementById('command-search').value.trim().toLowerCase();
@@ -2028,7 +2054,7 @@ function searchCommands() {
 document.getElementById('command-search')?.addEventListener('input', searchCommands);
 document.addEventListener('keydown', function (event) {
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') { event.preventDefault(); document.getElementById('command-search').focus(); }
-  if (event.key === 'Escape') document.getElementById('command-results').hidden = true;
+  if (event.key === 'Escape') closeCommandResults({ restoreFocus: true });
 });
 // View and drawer state on Back/Forward is derived from location in one place.
 // See syncViewStateFromLocation() in operator-workflow.ts; duplicating a partial
