@@ -132,11 +132,18 @@ export function directCapabilityAdmission(): ExecutionAdmissionController {
 export async function startAcs(
   box: Sandbox,
   runtimeId: string,
-  options: { ttlMs?: number; executionAdmission?: ExecutionAdmissionController } = {}
+  options: {
+    ttlMs?: number;
+    executionAdmission?: ExecutionAdmissionController;
+    additionalCredentials?: GatewayCredential[];
+    /** Test-only lifecycle hook for deterministic result-delivery barriers. */
+    beforeListen?: (app: FastifyInstance) => void;
+  } = {}
 ): Promise<AcsHandle> {
   const keys = signingKeys();
   const fingerprint = createHash("sha256").update(readFileSync(DC_ENTRY)).digest("hex");
   const credentials: GatewayCredential[] = [
+    ...(options.additionalCredentials ?? []),
     {
       id: "operator",
       token: OPERATOR_TOKEN,
@@ -169,6 +176,7 @@ export async function startAcs(
     desktopCommanderContainment: { allowedRoots: [box.workspace], deniedRoots: [] },
     ...(options.executionAdmission ? { executionAdmission: options.executionAdmission } : {})
   });
+  options.beforeListen?.(app);
   await app.listen({ host: "127.0.0.1", port: 0 });
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   const post = async (path: string, token: string, payload: unknown, headers: Record<string, string> = {}) => {

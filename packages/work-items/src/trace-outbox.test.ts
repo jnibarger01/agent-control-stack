@@ -534,6 +534,17 @@ describe("trace outbox", () => {
         seq: number;
       }>;
       expect(chains).toEqual([{ producer_key: TRACE_CHAIN_PRODUCER_KEY, seq: 5 }]);
+      const reader = new SqliteWorkItemStore(dbPath, { traceInstance: "observer", releaseSha: "unreleased" });
+      try {
+        const producers = reader
+          .getMissionTrace(item.id)
+          .events.filter((entry) => entry.event.name === "approval.granted")
+          .map((entry) => entry.producer);
+        expect(new Set(producers.map((entry) => entry["acs.process.id"])).size).toBe(2);
+        expect(new Set(producers.map((entry) => entry["acs.instance"]))).toEqual(new Set(["acs-a", "acs-b"]));
+      } finally {
+        reader.close();
+      }
     } finally {
       check.close();
     }

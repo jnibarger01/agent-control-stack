@@ -66,6 +66,14 @@ export type JevTelemetryEvent = {
     sensitivity_categories: string[];
   } | null;
   actual_outcome: string | null;
+  latency_metrics: {
+    capabilityIssuance: unknown;
+    execution: unknown;
+    totalTraceMs: unknown;
+    capabilityIssuanceBucket: "fast" | "moderate" | "slow" | "unknown";
+    executionBucket: "fast" | "moderate" | "slow" | "unknown";
+    traceBucket: "fast" | "moderate" | "slow" | "unknown";
+  } | null;
   degraded: boolean;
   failure_reason: string | null;
 };
@@ -77,6 +85,7 @@ export type JevTelemetryInput = {
   correlation?: JevCorrelation;
   deterministicBaseline?: JevDeterministicBaseline | null;
   actualOutcome?: string | null;
+  latencyMetrics?: import("./latency-projection.js").JevLatencyMetrics | null;
 };
 
 function safeText(value: unknown, max = 128): string | null {
@@ -188,6 +197,7 @@ export function buildJevTelemetryEvent(input: JevTelemetryInput): JevTelemetryEv
     signals,
     deterministic_baseline: safeBaseline(input.deterministicBaseline),
     actual_outcome: safeText(input.actualOutcome),
+    latency_metrics: input.latencyMetrics ?? null,
     degraded: result.degraded,
     failure_reason: result.failureReason ?? null
   };

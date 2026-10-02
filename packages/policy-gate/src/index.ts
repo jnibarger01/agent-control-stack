@@ -12,3 +12,4 @@ export * from "./verification-policy.js";
 export * from "./pending-approval-digest.js";
 export * from "./execution-mode.js";
 export * from "./managed-authority.js";
+export * from "./change-set-policy.js";
