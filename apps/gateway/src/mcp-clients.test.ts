@@ -2,11 +2,15 @@ import { generateKeyPairSync } from "node:crypto";
 import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ExecutionAdmissionScheduler } from "@agent-control-stack/execution-admission";
+import {
+  ExecutionAdmissionScheduler,
+  type ExecutionAdmissionController
+} from "@agent-control-stack/execution-admission";
 import { SqliteWorkItemStore, type StoredAuditEvent } from "@agent-control-stack/work-items";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   MAX_TRACKED_CLIENTS,
+  canonicalClientId,
   McpClientService,
   parseMcpClientPolicy,
   sanitizeClaim,
@@ -62,22 +66,52 @@ const credentials: GatewayCredential[] = [
 let root: string;
 const open: Array<{ close: () => Promise<unknown> }> = [];
 
-function gateway(policy: McpClientPolicy = "observe", dbPath = join(root, "control.db")) {
+const bigAdmission = () =>
+  new ExecutionAdmissionScheduler({
+    config: {
+      executionMaxInflight: 1_000,
+      executorMaxInflight: 1_000,
+      queueMax: 1_000,
+      queueTimeoutMs: 30_000,
+      waitMaxInflight: 1_000
+    }
+  });
+
+/** Admission that can be held shut, to model a call waiting in the queue. */
+class GatedAdmission implements ExecutionAdmissionController {
+  private readonly inner = bigAdmission();
+  gate: Promise<void> | undefined;
+  async acquire(request: Parameters<ExecutionAdmissionController["acquire"]>[0]) {
+    if (this.gate) await this.gate;
+    return this.inner.acquire(request);
+  }
+  restoreActivePermit(input: Parameters<ExecutionAdmissionController["restoreActivePermit"]>[0]) {
+    return this.inner.restoreActivePermit(input);
+  }
+  shutdown() {
+    this.inner.shutdown();
+  }
+  snapshot() {
+    return this.inner.snapshot();
+  }
+}
+
+function gateway(
+  policy: McpClientPolicy = "observe",
+  dbPath = join(root, "control.db"),
+  extra: {
+    executionAdmission?: ExecutionAdmissionController;
+    rateLimit?: { windowMs: number; maxRequests: number };
+  } = {}
+) {
   const pair = generateKeyPairSync("ed25519");
   const app = buildGateway({
     dbPath,
     logger: false,
     mcpClientPolicy: policy,
     // A successful issuance holds its admission permit until the result callback; tests issue repeatedly.
-    executionAdmission: new ExecutionAdmissionScheduler({
-      config: {
-        executionMaxInflight: 1_000,
-        executorMaxInflight: 1_000,
-        queueMax: 1_000,
-        queueTimeoutMs: 30_000,
-        waitMaxInflight: 1_000
-      }
-    }),
+    executionAdmission: extra.executionAdmission ?? bigAdmission(),
+    ...(extra.rateLimit ? { rateLimit: extra.rateLimit } : {}),
     auth: { token: "", actor: "user", actorId: "user", credentials },
     jaceCommanderCapability: {
       runtimeId: "jc-test-runtime",
@@ -274,6 +308,112 @@ describe("MCP client visibility", () => {
     expect((await issue(app, "client-new")).statusCode).toBe(403);
   });
 
+  it("gives a secret-shaped client id one stable identity instead of collapsing it to [redacted]", async () => {
+    setup();
+    const secretish = (n: string) => `https://client.example/${"sk-" + n.repeat(24)}/metadata.json`;
+    const raw = secretish("a");
+    const app = gateway("require_label");
+    expect((await issue(app, raw)).statusCode).toBe(403);
+    expect(
+      (await observe(app, { lane: "jc", clientId: raw, subject: "chatgpt:jacen", method: "initialize" })).statusCode
+    ).toBe(202);
+    expect((await issue(app, secretish("b"))).statusCode).toBe(403);
+    const view = await clients(app);
+    expect(view.clients).toHaveLength(2);
+    for (const c of view.clients) {
+      expect(c.clientId).toMatch(/^sha256:[0-9a-f]{64}$/);
+      expect(c.clientId).not.toContain("redacted");
+    }
+    const first = view.clients.find((c) => c.connects === 1)!;
+    expect(first.clientId).toBe(canonicalClientId(raw));
+    expect(first.denied).toBe(1);
+
+    // Labelling the row the operator sees is enough for the original id to pass the gate, and only that id.
+    const label = await app.inject({
+      method: "POST",
+      url: "/api/mcp-clients/label",
+      headers: bearer(OP),
+      payload: { clientId: first.clientId, kind: "other", label: "URL client" }
+    });
+    expect(label.statusCode).toBe(200);
+    expect((await issue(app, raw)).statusCode).toBe(200);
+    expect((await issue(app, secretish("b"))).statusCode).toBe(403);
+  });
+
+  it("rate limits the observe, label and list routes with the gateway limiter", async () => {
+    setup();
+    const app = gateway("observe", join(root, "control.db"), { rateLimit: { windowMs: 60_000, maxRequests: 3 } });
+    const body = (i: number) => ({
+      lane: "jc",
+      clientId: `client-${i}`,
+      subject: "chatgpt:jacen",
+      method: "initialize"
+    });
+    const codes: number[] = [];
+    for (let i = 0; i < 5; i += 1) codes.push((await observe(app, body(i))).statusCode);
+    expect(codes).toEqual([202, 202, 202, 429, 429]);
+    // Only the observe budget for this bridge is spent; the operator has their own.
+    const list = async () =>
+      (await app.inject({ method: "GET", url: "/api/mcp-clients", headers: bearer(READER) })).statusCode;
+    expect([await list(), await list(), await list(), await list()]).toEqual([200, 200, 200, 429]);
+    const label = () =>
+      app.inject({
+        method: "POST",
+        url: "/api/mcp-clients/label",
+        headers: bearer(OP),
+        payload: { clientId: "client-0", kind: "other", label: "x" }
+      });
+    const labelCodes = [
+      (await label()).statusCode,
+      (await label()).statusCode,
+      (await label()).statusCode,
+      (await label()).statusCode
+    ];
+    expect(labelCodes[3]).toBe(429);
+  });
+
+  it("denies a queued call whose client was unlabelled while it waited for admission", async () => {
+    setup();
+    const admission = new GatedAdmission();
+    const app = gateway("require_label", join(root, "control.db"), { executionAdmission: admission });
+    expect((await issue(app, "client-queued")).statusCode).toBe(403);
+    await app.inject({
+      method: "POST",
+      url: "/api/mcp-clients/label",
+      headers: bearer(OP),
+      payload: { clientId: "client-queued", kind: "other", label: "Queued" }
+    });
+
+    let release!: () => void;
+    admission.gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const pending = issue(app, "client-queued");
+    await new Promise((r) => setTimeout(r, 100));
+    // The operator clears the label while the call sits in the queue.
+    await app.inject({
+      method: "POST",
+      url: "/api/mcp-clients/label/clear",
+      headers: bearer(OP),
+      payload: { clientId: "client-queued" }
+    });
+    release();
+    const res = await pending;
+    expect(res.statusCode).toBe(403);
+    expect(res.json()).toMatchObject({ decision: "deny", code: "mcp_client_unlabelled" });
+    expect(res.json().capability).toBeUndefined();
+
+    // The permit was released: another labelled client is admitted straight away.
+    admission.gate = undefined;
+    await app.inject({
+      method: "POST",
+      url: "/api/mcp-clients/label",
+      headers: bearer(OP),
+      payload: { clientId: "client-queued", kind: "other", label: "Queued" }
+    });
+    expect((await issue(app, "client-queued")).statusCode).toBe(200);
+  });
+
   it("observe mode never blocks an unlabelled client", async () => {
     setup();
     const app = gateway("observe");
@@ -397,6 +537,18 @@ describe("McpClientService", () => {
     expect(list.some((c) => c.clientId === "keep-me")).toBe(true);
     expect(list.some((c) => c.clientId === "c0")).toBe(false);
     expect(list.some((c) => c.clientId === `c${MAX_TRACKED_CLIENTS + 49}`)).toBe(true);
+  });
+
+  it("canonicalizes only ids the audit redactor would alter", () => {
+    expect(canonicalClientId("client-plain")).toBe("client-plain");
+    expect(canonicalClientId("https://c.example/meta.json")).toBe("https://c.example/meta.json");
+    const secretish = `https://c.example/${"sk-" + "x".repeat(24)}/m.json`;
+    const id = canonicalClientId(secretish)!;
+    expect(id).toMatch(/^sha256:[0-9a-f]{64}$/);
+    expect(canonicalClientId(secretish)).toBe(id);
+    expect(canonicalClientId("has space")).toBeUndefined();
+    expect(canonicalClientId("")).toBeUndefined();
+    expect(canonicalClientId("x".repeat(257))).toBeUndefined();
   });
 
   it("suggests a kind from claims only, and parses the policy fail-closed", () => {

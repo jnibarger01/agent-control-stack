@@ -9,6 +9,8 @@
  * It grants no authority: a label never approves, widens or issues anything. In `require_label` mode it can
  * only deny. Capability issuance, policy, approval and lease checks are unchanged.
  */
+import { createHash } from "node:crypto";
+import { redactValue } from "@agent-control-stack/shared";
 import type { StoredAuditEvent, WorkItemStore } from "@agent-control-stack/work-items";
 
 export type McpLane = "jc" | "dc";
@@ -104,6 +106,17 @@ export function sanitizeClaim(value: unknown, max = 128): string | undefined {
 const CLIENT_ID_PATTERN = /^[\x21-\x7e]{1,256}$/u;
 export function isValidClientId(value: unknown): value is string {
   return typeof value === "string" && CLIENT_ID_PATTERN.test(value);
+}
+
+/**
+ * The one identity used for a client everywhere (index, labels, audit, gate). The audit log redacts
+ * secret-shaped values, so a client id such as `https://c.example/sk-.../metadata.json` would be stored as
+ * `[redacted]` while the gate still saw the original. Those ids are replaced by a stable digest instead.
+ */
+export function canonicalClientId(raw: unknown): string | undefined {
+  if (!isValidClientId(raw)) return undefined;
+  if (redactValue(raw) === raw) return raw;
+  return `sha256:${createHash("sha256").update(raw).digest("hex")}`;
 }
 
 export function normalizeClaims(input: McpClientClaims | undefined): McpClientClaims {
@@ -386,10 +399,11 @@ export class McpClientService {
 
   /** Record that a client connected (initialize/tools/list). Throttled so a chatty client cannot flood the log. */
   observe(input: McpClientObservation): { recorded: boolean } {
-    if (!isValidClientId(input.clientId)) return { recorded: false };
+    const clientId = canonicalClientId(input.clientId);
+    if (!clientId) return { recorded: false };
     const subject = sanitizeClaim(input.subject, 128);
     const method = sanitizeClaim(input.method, 64) ?? "unknown";
-    const key = `${input.lane}|${input.clientId}|${subject ?? ""}|${method}`;
+    const key = `${input.lane}|${clientId}|${subject ?? ""}|${method}`;
     const now = this.now();
     const last = this.lastSeenWrite.get(key);
     if (last !== undefined && now - last < SEEN_DEDUPE_MS) return { recorded: false };
@@ -402,14 +416,14 @@ export class McpClientService {
       name: MCP_CLIENT_EVENTS.seen,
       body: {
         lane: input.lane,
-        clientId: input.clientId,
+        clientId,
         ...(subject ? { subject } : {}),
         method,
         ...(claims.name ? { clientName: claims.name } : {}),
         ...(claims.version ? { clientVersion: claims.version } : {}),
         ...(claims.userAgent ? { userAgent: claims.userAgent } : {})
       },
-      attributes: { "mcp.client_id": input.clientId, "mcp.lane": input.lane }
+      attributes: { "mcp.client_id": clientId, "mcp.lane": input.lane }
     });
     return { recorded: true };
   }

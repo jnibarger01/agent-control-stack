@@ -38,7 +38,13 @@ Make callers visible and nameable, and add one optional fail-closed control. Not
    deny a client with no label (`403 mcp_client_unlabelled`). It can only deny; every existing policy, approval,
    lease and admission check still runs for labelled clients. It is an environment setting, not a UI toggle, so
    it cannot be flipped from the browser. Unknown values refuse to start.
-7. **Existing identities do not change.** The edge keeps the `chatgpt:<sub>` actor string: approvals, requester
+7. **One identity per client, checked at the last moment.** A verified client id the audit redactor would alter
+   (for example a URL containing an `sk-...` segment) is replaced by `sha256:<digest>` before it is indexed,
+   labelled, audited or gated, and the edge digests ids over 256 characters instead of truncating them, so
+   distinct ids never collapse and a label always matches what the gate sees. `require_label` is evaluated
+   again after a call finishes waiting for execution admission, so clearing a label stops an already queued call.
+   The observe, label and list routes are covered by the gateway rate limiter.
+8. **Existing identities do not change.** The edge keeps the `chatgpt:<sub>` actor string: approvals, requester
    subjects and admission keys already depend on it. Distinguishing clients is done with `client_id`, not by
    renaming actors. (The prefix is historical and misleading; renaming it is a separate, breaking change.)
 

@@ -43,6 +43,12 @@ The edge must be the version that forwards `x-mcp-client-*` headers and reports 
 the visibility is lost. Until the edge is upgraded, calls are still attributed on the ACS side through the
 issuance request, but without client names.
 
+## Client IDs that look like `sha256:...`
+
+Ids that are very long (over 256 characters) or that contain secret-shaped text (for example a client-metadata
+URL with an `sk-...` segment) are shown as `sha256:<digest>` so they keep one stable identity. Label that row as
+usual; the original id passes the gate.
+
 ## Troubleshooting
 
 - **A client is missing.** Connect events are throttled to one per minute per client; calls appear immediately.

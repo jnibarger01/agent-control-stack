@@ -130,6 +130,7 @@ import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest }
 import {
   McpClientService,
   parseMcpClientPolicy,
+  canonicalClientId,
   sanitizeClaim,
   type McpClientPolicy,
   type McpLane
@@ -2906,6 +2907,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           actorId: `${dcActor}:${body.client_id}`,
           toolName: body.tool
         });
+        const dcRecheck = recheckMcpCaller(request);
+        if (!dcRecheck.ok) {
+          admissionPermit.release();
+          recordDcCapabilityAudit(workerId, request.id, body.tool, dcActor, "denied", workItem.id);
+          return reply
+            .code(403)
+            .send({
+              decision: "deny",
+              reason: "mcp_client_unlabelled",
+              code: "mcp_client_unlabelled",
+              detail: dcRecheck.detail
+            });
+        }
         let admissionBound = false;
         try {
           const claimed = claimWithAdmissionPermit({
@@ -3324,6 +3338,19 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
           actorId: `${jcActor}:${body.client_id}`,
           toolName: invocation.toolName
         });
+        const jcRecheck = recheckMcpCaller(request);
+        if (!jcRecheck.ok) {
+          admissionPermit.release();
+          recordJcCapabilityAudit(workerId, request.id, invocation.toolName, jcActor, "denied", workItem.id);
+          return reply
+            .code(403)
+            .send({
+              decision: "deny",
+              reason: "mcp_client_unlabelled",
+              code: "mcp_client_unlabelled",
+              detail: jcRecheck.detail
+            });
+        }
         let admissionBound = false;
         try {
           const adminApprovalWouldBeConsumed =
@@ -4045,8 +4072,11 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     request: FastifyRequest,
     clientId: string
   ): { ok: true } | { ok: false; detail: string } {
+    // The id the index, labels and audit use. A client id the audit redactor would alter is replaced by a stable
+    // digest so it keeps one identity everywhere instead of collapsing into "[redacted]".
+    const canonicalId = canonicalClientId(clientId) ?? clientId;
     mcpCallContexts.set(request.id, {
-      clientId,
+      clientId: canonicalId,
       lane,
       ...(sanitizeClaim(firstHeader(request.headers["x-mcp-client-name"]))
         ? { name: sanitizeClaim(firstHeader(request.headers["x-mcp-client-name"]))! }
@@ -4058,7 +4088,17 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
         ? { userAgent: sanitizeClaim(firstHeader(request.headers["x-mcp-user-agent"]), 200)! }
         : {})
     });
-    const gate = mcpClientService.gate(clientId);
+    const gate = mcpClientService.gate(canonicalId);
+    return gate.ok ? { ok: true } : { ok: false, detail: gate.detail };
+  }
+  /**
+   * Check the label again after a request has waited for execution admission. An operator may have cleared it
+   * while the call was queued; a cleared label must not still sign a capability. Only ever denies.
+   */
+  function recheckMcpCaller(request: FastifyRequest): { ok: true } | { ok: false; detail: string } {
+    const context = mcpCallContexts.get(request.id);
+    if (!context) return { ok: true };
+    const gate = mcpClientService.gate(context.clientId);
     return gate.ok ? { ok: true } : { ok: false, detail: gate.detail };
   }
 
@@ -4740,6 +4780,11 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/dc/runtime/bootstrap/complete" ||
     path === "/policy/explain" ||
     path === "/dashboard/policy-preview" ||
+    // MCP client visibility: bridge reports and operator labelling write audit events, so they are limited too.
+    path === "/mcp-clients/observe" ||
+    path === "/api/mcp-clients" ||
+    path === "/api/mcp-clients/label" ||
+    path === "/api/mcp-clients/label/clear" ||
     path.startsWith("/work-items/") ||
     path.startsWith("/webhooks/")
   );
@@ -4748,7 +4793,7 @@ function isRateLimitedRoute(url: string): boolean {
 function isRateLimitedGetRoute(url: string): boolean {
   // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
   const path = url.split("?", 1)[0];
-  return path === "/execution-mode" || path === "/authority";
+  return path === "/execution-mode" || path === "/authority" || path === "/api/mcp-clients";
 }
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {
