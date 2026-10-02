@@ -21,5 +21,8 @@ paths = [
 ]
 regexes = [
   '''(?i)authorization:\s*bearer\s+(?:change-me-local-dev|local-dev-token)''',
-  '''(?i)authorization:\s*bearer['`;]?$'''
+  '''(?i)authorization:\s*bearer['`;]?$''',
+  # SHA-256 of a removed migration. The filename contains "auth", which makes
+  # the generic-api-key rule treat the checksum as a credential.
+  '''a6527d63c1a6c3549c6c2a69b6b255be0dea751b70c3a4227f67e1deab1883e3'''
 ]
