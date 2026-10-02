@@ -259,9 +259,7 @@ function gateWorkerClaimInTransaction(
   policy: PolicyEngine,
   parsed: z.infer<typeof claimInputSchema>
 ): ClaimedWorkItem | undefined {
-  const candidate = store
-    .list({ status: "approved" })
-    .sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+  const candidate = store.findNextApprovedWorkItemForWorker(parsed.workerId);
   if (!candidate) {
     return undefined;
   }
@@ -363,6 +361,10 @@ function gateWorkerClaimByIdInTransaction(
   const candidate = store.get(parsed.id);
   if (!candidate || candidate.status !== "approved") {
     return undefined;
+  }
+  const assignment = store.getWorkItemAssignment(candidate.id);
+  if (assignment && assignment.selectedWorkerId !== parsed.workerId) {
+    throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to another worker");
   }
 
   const { decision, evaluations } = evaluateAndRecordPolicy(store, policy, candidate, parsed.workerId, "claim");

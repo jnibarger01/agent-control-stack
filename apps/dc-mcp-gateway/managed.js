@@ -29,6 +29,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { verifyRelease } from './release-integrity.js';
 
 export const ACS_CAPABILITY_META_KEY = 'capability';
 /** Desktop Commander's managed guard transports the same envelope at this key. */
@@ -89,8 +90,8 @@ export function sortedScopes(raw) {
 
 /**
  * The managed Desktop Commander runtime identity, derived from the child's
- * persisted state directory (runtime-identity.json) and a SHA-256 fingerprint
- * of the built entrypoint. Used for the bootstrap request AND its completion,
+ * persisted state directory (runtime-identity.json) and verified release digest.
+ * Unpackaged development uses the built entrypoint hash. Used for bootstrap AND completion,
  * so both sides validate the same identity binding. Returns null when the
  * child state is unavailable — managed mode then fails closed.
  */
@@ -102,8 +103,19 @@ export function dcRuntimeIdentityFromState(env = process.env) {
     // RuntimeIdentityState projection as well.
     const runtimeId = typeof identity.runtimeId === 'string' ? identity.runtimeId : identity.runtime_id;
     if (typeof runtimeId !== 'string' || !runtimeId) return null;
-    const entrypoint = env.ACS_DC_ENTRYPOINT || '/home/jacen/projects/desktop-commander/dist/index.js';
-    const identityConfigFingerprint = crypto.createHash('sha256').update(fs.readFileSync(entrypoint)).digest('hex');
+    let identityConfigFingerprint;
+    if (Object.hasOwn(env, 'ACS_DC_RELEASE_DIR')) {
+      const directory = env.ACS_DC_RELEASE_DIR;
+      if (typeof directory !== 'string' || !path.isAbsolute(directory)) return null;
+      const release = verifyRelease(directory);
+      if (release.component && release.component !== 'dc') return null;
+      const expectedEntrypoint = path.join(directory, 'dist', 'index.js');
+      if (Object.hasOwn(env, 'ACS_DC_ENTRYPOINT') && env.ACS_DC_ENTRYPOINT !== expectedEntrypoint) return null;
+      identityConfigFingerprint = release.runtimeIdentityDigest;
+    } else {
+      const entrypoint = env.ACS_DC_ENTRYPOINT || '/home/jacen/projects/desktop-commander/dist/index.js';
+      identityConfigFingerprint = crypto.createHash('sha256').update(fs.readFileSync(entrypoint)).digest('hex');
+    }
     return {
       runtimeId,
       identityConfigFingerprint,
@@ -243,6 +255,11 @@ export function capabilityTransport(managed, { identity, requestId }) {
     }
     // Anti-spoof: drop every client-supplied ACS authority field.
     const clientMeta = typeof params._meta === 'object' && params._meta !== null ? params._meta : {};
+    // Locator only: ACS checks its actor, exact invocation and live authority.
+    const changeSetPermitId = clientMeta.acsOperationPermitId;
+    if (changeSetPermitId !== undefined && (typeof changeSetPermitId !== 'string' || !/^[A-Za-z0-9._:-]{1,256}$/.test(changeSetPermitId))) {
+      throw Object.assign(new Error('invalid operation permit locator'), { acsCode: 'change_set_permit_invalid' });
+    }
     const cleanParams = { ...params };
     const strippedMeta = Object.fromEntries(
       Object.entries(clientMeta).filter(([k]) => k !== 'capability' && !k.startsWith('acs')),
@@ -265,6 +282,7 @@ export function capabilityTransport(managed, { identity, requestId }) {
         tool: toolName,
         argsSummary: JSON.stringify(cleanParams.arguments ?? {}),
         correlationId: requestId,
+        ...(changeSetPermitId === undefined ? {} : { changeSetPermitId }),
       }, { [actorHeader]: actor });
     } catch {
       throw Object.assign(new Error('ACS capability issuance unavailable'), {

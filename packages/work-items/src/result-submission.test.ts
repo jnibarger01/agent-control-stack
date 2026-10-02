@@ -270,9 +270,7 @@ describe("immutable worker result acceptance", () => {
       const second = new SqliteWorkItemStore(dbPath);
       try {
         expect(second.submitWorkResult(input)).toEqual(accepted);
-        expect(second.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(
-          accepted.result?.resultId
-        );
+        expect(second.getExecutionResultForIdempotency(input.idempotencyKey)?.resultId).toBe(accepted.result?.resultId);
       } finally {
         second.close();
       }

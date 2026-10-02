@@ -37,7 +37,14 @@ export const changeSetPrivilegeSchema = z.enum([
   "remote",
   "git.write",
   "secret.read",
-  "network"
+  "network",
+  "process.spawn",
+  "process.read",
+  "process.privileged",
+  "git.read",
+  "git.network",
+  "integration.read",
+  "integration.write"
 ]);
 
 export const changeSetOperationSchema = z

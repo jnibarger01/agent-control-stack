@@ -991,3 +991,6 @@ function machineExecutorContainmentFromEnv(): { allowedRoots: string[]; deniedRo
 export function workerResultIdempotencyKey(attemptId: string): string {
   return stableHash({ domain: "acs.attempt-result.v1", attemptId });
 }
+
+export * from "./mission-runner.js";
+export * from "./mission-client.js";

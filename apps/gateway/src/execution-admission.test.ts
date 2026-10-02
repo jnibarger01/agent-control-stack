@@ -5,13 +5,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ExecutionAdmissionScheduler,
-  type AdmissionPermit,
-  type AdmissionRequest,
-  type ExecutionAdmissionController,
-  type AdmissionSnapshot,
-  type RestoreAdmissionPermitInput
+  type ExecutionAdmissionController
 } from "@agent-control-stack/execution-admission";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ShutdownController } from "./lifecycle.js";
 import { buildGateway, type GatewayCredential } from "./server.js";
 
@@ -57,13 +53,18 @@ function attemptResultIdempotencyKey(attemptId: string): string {
   return createHash("sha256").update(`{"attemptId":"${attemptId}","domain":"acs.attempt-result.v1"}`).digest("hex");
 }
 
-function createGateway(root: string, executionAdmission: ExecutionAdmissionController) {
+function createGateway(
+  root: string,
+  executionAdmission: ExecutionAdmissionController,
+  shutdownController?: ShutdownController
+) {
   const dbPath = join(root, "control.db");
   const app = buildGateway({
     dbPath,
     logger: false,
     auth: { token: "", actor: "user", actorId: "user", credentials },
     executionAdmission,
+    shutdownController,
     desktopCommanderCapability: {
       runtimeId: DC_RUNTIME,
       keyId: "dc-admission-key",
@@ -108,7 +109,7 @@ function buildFixture(input?: { scheduler?: ExecutionAdmissionScheduler; shutdow
         waitMaxInflight: 1
       }
     });
-  const { dbPath, app } = createGateway(root, scheduler);
+  const { dbPath, app } = createGateway(root, scheduler, input?.shutdownController);
   return { root, dbPath, scheduler, app };
 }
 
@@ -273,6 +274,161 @@ async function submitJcResult(app: ReturnType<typeof buildGateway>, body: Record
 }
 
 describe("gateway execution admission integration", () => {
+  it("restores execution and wait capacity across a gateway restart", async () => {
+    const ctx = buildFixture();
+    let resumed: ReturnType<typeof buildGateway> | undefined;
+    try {
+      await attestDc(ctx.app);
+      const execution = await issueDc(ctx.app, ctx.root);
+      expect(execution.statusCode).toBe(200);
+      const wait = await issueJcTool(
+        ctx.app,
+        "read_process_output",
+        { sessionId: "session-1" },
+        "chatgpt:wait",
+        "client-wait"
+      );
+      expect(wait.statusCode).toBe(200);
+      await ctx.app.close();
+      const scheduler = new ExecutionAdmissionScheduler({
+        config: {
+          executionMaxInflight: 1,
+          executorMaxInflight: 1,
+          queueMax: 4,
+          queueTimeoutMs: 2_000,
+          waitMaxInflight: 1
+        }
+      });
+      resumed = createGateway(ctx.root, scheduler).app;
+      expect(scheduler.snapshot().global.active).toBe(1);
+      expect(scheduler.snapshot().wait.active).toBe(1);
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 2, activeLeases: 2 });
+      expect((await submitDcResult(resumed, execution.json())).statusCode).toBe(201);
+      expect((await submitJcResult(resumed, wait.json())).statusCode).toBe(201);
+      expect(scheduler.snapshot().global.active).toBe(0);
+      expect(scheduler.snapshot().wait.active).toBe(0);
+    } finally {
+      await (resumed ?? ctx.app).close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects new admission after restart when a live lease has lost its reservation", async () => {
+    const ctx = buildFixture();
+    let resumed: ReturnType<typeof buildGateway> | undefined;
+    try {
+      await attestDc(ctx.app);
+      expect((await issueDc(ctx.app, ctx.root)).statusCode).toBe(200);
+      await ctx.app.close();
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        db.exec("DELETE FROM admission_permits");
+      } finally {
+        db.close();
+      }
+      const scheduler = new ExecutionAdmissionScheduler({
+        config: {
+          executionMaxInflight: 1,
+          executorMaxInflight: 1,
+          queueMax: 4,
+          queueTimeoutMs: 2_000,
+          waitMaxInflight: 1
+        }
+      });
+      resumed = createGateway(ctx.root, scheduler).app;
+      const rejected = await issueJc(resumed);
+      expect(rejected.statusCode).toBe(503);
+      expect(rejected.json()).toMatchObject({ code: "admission_recovery_required" });
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+      const ready = await resumed.inject({ method: "GET", url: "/readyz" });
+      expect(ready.statusCode).toBe(503);
+    } finally {
+      await (resumed ?? ctx.app).close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it("rolls back the attempt and lease when durable reservation insertion fails", async () => {
+    const ctx = buildFixture();
+    try {
+      await attestDc(ctx.app);
+      const db = new DatabaseSync(ctx.dbPath);
+      try {
+        db.exec(
+          "CREATE TRIGGER reject_admission BEFORE INSERT ON admission_permits BEGIN SELECT RAISE(ABORT, 'fixture reservation failure'); END"
+        );
+      } finally {
+        db.close();
+      }
+      const rejected = await issueDc(ctx.app, ctx.root);
+      expect(rejected.statusCode).toBe(500);
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 0, activeLeases: 0 });
+      expect(ctx.scheduler.snapshot().global.active).toBe(0);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["execution_class", "worker_id", "action_hash"])(
+    "fails closed after restart with a corrupted reservation %s",
+    async (column) => {
+      const ctx = buildFixture();
+      let resumed: ReturnType<typeof buildGateway> | undefined;
+      try {
+        await attestDc(ctx.app);
+        expect((await issueDc(ctx.app, ctx.root)).statusCode).toBe(200);
+        await ctx.app.close();
+        const db = new DatabaseSync(ctx.dbPath);
+        try {
+          // Column names come only from this fixed test case list.
+          db.prepare(`UPDATE admission_permits SET ${column} = ?`).run(
+            column === "execution_class" ? "wait" : "corrupt"
+          );
+        } finally {
+          db.close();
+        }
+        const scheduler = new ExecutionAdmissionScheduler({
+          config: {
+            executionMaxInflight: 1,
+            executorMaxInflight: 1,
+            queueMax: 4,
+            queueTimeoutMs: 2_000,
+            waitMaxInflight: 1
+          }
+        });
+        resumed = createGateway(ctx.root, scheduler).app;
+        const rejected = await issueJc(resumed);
+        expect(rejected.statusCode).toBe(503);
+        expect(rejected.json()).toMatchObject({ code: "admission_recovery_required" });
+        expect(scheduler.snapshot().global.active).toBe(0);
+        expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+      } finally {
+        await (resumed ?? ctx.app).close();
+        rmSync(ctx.root, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("does not release capacity when a result has the wrong fencing epoch", async () => {
+    const ctx = buildFixture();
+    try {
+      await attestDc(ctx.app);
+      const issued = await issueDc(ctx.app, ctx.root);
+      expect(issued.statusCode).toBe(200);
+      const body = issued.json();
+      const rejected = await submitDcResult(ctx.app, { ...body, leaseEpoch: body.leaseEpoch + 1 });
+      expect(rejected.statusCode).toBeGreaterThanOrEqual(400);
+      expect(ctx.scheduler.snapshot().global.active).toBe(1);
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+      expect((await submitDcResult(ctx.app, body)).statusCode).toBe(201);
+      expect(ctx.scheduler.snapshot().global.active).toBe(0);
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
   it("does not claim or create a lease before DC admission, then releases on canonical result", async () => {
     const ctx = buildFixture();
     try {
@@ -381,13 +537,19 @@ describe("gateway execution admission integration", () => {
     }
   });
 
-  it("releases admission when post-claim DC capability issuance fails", async () => {
+  it("retains admission while a lease remains active after DC capability issuance fails", async () => {
     const ctx = buildFixture();
     try {
       const failed = await issueDc(ctx.app, ctx.root);
       expect(failed.statusCode).toBe(403);
-      expect(ctx.scheduler.snapshot().global.active).toBe(0);
-      expect(authorityCounts(ctx.dbPath).attempts).toBe(1);
+      expect(ctx.scheduler.snapshot().global.active).toBe(1);
+      expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 1, activeLeases: 1 });
+      const db = new DatabaseSync(ctx.dbPath, { readOnly: true });
+      try {
+        expect(db.prepare("SELECT COUNT(*) AS count FROM admission_permits").get()).toEqual({ count: 1 });
+      } finally {
+        db.close();
+      }
     } finally {
       await ctx.app.close();
       rmSync(ctx.root, { recursive: true, force: true });
@@ -409,10 +571,18 @@ describe("gateway execution admission integration", () => {
     try {
       await attestDc(ctx.app);
       const hold = await holdPermit(scheduler, "acs-dc-bridge");
-      const pending = issueDc(ctx.app, ctx.root);
-      await new Promise((resolve) => setTimeout(resolve, 20));
-      controller.beginShutdown();
-      const rejected = await pending;
+      const acquire = scheduler.acquire.bind(scheduler);
+      const queued = vi.spyOn(scheduler, "acquire").mockImplementation((request) => {
+        const pending = acquire(request);
+        // Trigger shutdown at the actual queue boundary, rather than race a
+        // wall-clock sleep against the independent queue-expiration timer.
+        expect(scheduler.snapshot().global.queued).toBe(1);
+        controller.beginShutdown();
+        return pending;
+      });
+      const rejected = await issueDc(ctx.app, ctx.root);
+      expect(queued).toHaveBeenCalledTimes(1);
+      queued.mockRestore();
       expect(rejected.statusCode).toBe(503);
       expect(rejected.json().code).toBe("gateway_shutting_down");
       expect(authorityCounts(ctx.dbPath)).toEqual({ attempts: 0, activeLeases: 0 });

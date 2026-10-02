@@ -34,6 +34,50 @@ const credentials: GatewayCredential[] = [
   }
 ];
 
+const deniedModeCredentials: GatewayCredential[] = [
+  {
+    id: "write-only",
+    token: "write-only-mode-token",
+    actor: "user",
+    actorId: "write-only",
+    roles: ["operator"],
+    scopes: ["acs:read", "acs:write"]
+  },
+  {
+    id: "service-approve",
+    token: "service-approve-mode-token",
+    actor: "system",
+    actorId: "service",
+    roles: ["service"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  },
+  {
+    id: "agent-operator",
+    token: "agent-operator-mode-token",
+    actor: "agent",
+    actorId: "agent",
+    roles: ["operator"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  },
+  {
+    id: "mixed-worker",
+    token: "mixed-worker-mode-token",
+    actor: "user",
+    actorId: "mixed-worker",
+    roles: ["operator", "worker"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  },
+  {
+    id: "mixed-service",
+    token: "mixed-service-mode-token",
+    actor: "user",
+    actorId: "mixed-service",
+    roles: ["operator", "service"],
+    scopes: ["acs:read", "acs:write", "acs:approve"]
+  }
+];
+credentials.push(...deniedModeCredentials);
+
 const healthyAuthority: ManagedAuthorityObservation = {
   authorityOwner: "managed:pid:42",
   authoritative: true,
@@ -128,6 +172,53 @@ function issue(
 }
 
 describe("canonical execution mode", () => {
+  it("requires authentication and attributes mode changes to configured human identity", async () => {
+    const ctx = await gateway();
+    try {
+      const denied = await ctx.app.inject({ method: "POST", url: "/execution-mode", payload: { mode: "admin" } });
+      expect(denied.statusCode).toBe(401);
+      const spoofed = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "admin", actorId: "forged-actor", reason: "human activation" }
+      });
+      expect(spoofed.statusCode).toBe(400);
+      const approved = await ctx.app.inject({
+        method: "POST",
+        url: "/execution-mode",
+        headers: AUTH,
+        payload: { mode: "admin", reason: "human activation" }
+      });
+      expect(approved.statusCode).toBe(200);
+      expect(approved.json()).toMatchObject({ executionMode: "admin", updatedBy: "user" });
+    } finally {
+      await ctx.app.close();
+      rmSync(ctx.root, { recursive: true, force: true });
+    }
+  });
+
+  it.each([...deniedModeCredentials, credentials[1]!])(
+    "rejects authority escalation by $id without changing mode",
+    async (credential) => {
+      const ctx = await gateway();
+      try {
+        const response = await ctx.app.inject({
+          method: "POST",
+          url: "/execution-mode",
+          headers: { authorization: `Bearer ${credential.token}` },
+          payload: { mode: "admin", actor: "user", actorId: "user", reason: "spoofed human authority" }
+        });
+        expect(response.statusCode).toBe(403);
+        const state = await ctx.app.inject({ method: "GET", url: "/execution-mode", headers: AUTH });
+        expect(state.json().executionMode).toBe("strict");
+      } finally {
+        await ctx.app.close();
+        rmSync(ctx.root, { recursive: true, force: true });
+      }
+    }
+  );
+
   it("defaults to strict and reports the same mode on the authority endpoint", async () => {
     const ctx = await gateway();
     try {
@@ -215,7 +306,7 @@ describe("canonical execution mode", () => {
 
       const correlationId = "corr-admin-start";
       const response = await issue(ctx.app, "create_directory", { path: join(ctx.root, "admin-made") }, correlationId);
-      expect(response.statusCode).toBe(200);
+      expect(response.statusCode, response.body).toBe(200);
       expect(response.json().decision).toBe("allow");
       expect(response.json().decision).not.toBe("require_approval");
       expect(response.json().capability.payload.toolName).toBe("create_directory");
@@ -279,7 +370,7 @@ describe("canonical execution mode", () => {
         source: join(ctx.root, "a.txt"),
         destination: join(ctx.root, "b.txt")
       });
-      expect(moved.statusCode).toBe(200);
+      expect(moved.statusCode, moved.body).toBe(200);
       expect(moved.json().decision).toBe("allow");
       expect(moved.json().capability).toBeDefined();
 

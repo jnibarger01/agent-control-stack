@@ -964,7 +964,26 @@ describe("work item state machine", () => {
         { version: 33, name: "jace_commander_execution_results", filename: "033_jace_commander_execution_results.sql" },
         { version: 34, name: "jev_observation_outbox", filename: "034_jev_observation_outbox.sql" },
         { version: 35, name: "work_item_queue_index", filename: "035_work_item_queue_index.sql" },
-        { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" }
+        { version: 36, name: "muse_agent", filename: "036_muse_agent.sql" },
+        { version: 37, name: "jc_reusable_work_item_index", filename: "037_jc_reusable_work_item_index.sql" },
+        {
+          version: 38,
+          name: "execution_results_idempotency_unique",
+          filename: "038_execution_results_idempotency_unique.sql"
+        },
+        { version: 39, name: "admission_permits", filename: "039_admission_permits.sql" },
+        {
+          version: 40,
+          name: "admission_permit_execution_class",
+          filename: "040_admission_permit_execution_class.sql"
+        },
+        { version: 41, name: "change_sets", filename: "041_change_sets.sql" },
+        { version: 42, name: "work_item_assignments", filename: "042_work_item_assignments.sql" },
+        { version: 43, name: "migration_lineage_reconciliation", filename: "043_migration_lineage_reconciliation.sql" },
+        { version: 44, name: "change_set_approvals", filename: "044_change_set_approvals.sql" },
+        { version: 45, name: "change_set_operation_permits", filename: "045_change_set_operation_permits.sql" },
+        { version: 46, name: "autonomous_authority", filename: "046_autonomous_authority.sql" },
+        { version: 47, name: "operation_permit_grant_authority", filename: "047_operation_permit_grant_authority.sql" }
       ]);
       expect(store.listActors()).toEqual(
         expect.arrayContaining([expect.objectContaining({ id: "actor_system_bootstrap", actorType: "SYSTEM" })])
@@ -1099,7 +1118,18 @@ describe("work item state machine", () => {
         { version: 33 },
         { version: 34 },
         { version: 35 },
-        { version: 36 }
+        { version: 36 },
+        { version: 37 },
+        { version: 38 },
+        { version: 39 },
+        { version: 40 },
+        { version: 41 },
+        { version: 42 },
+        { version: 43 },
+        { version: 44 },
+        { version: 45 },
+        { version: 46 },
+        { version: 47 }
       ]);
     } finally {
       db.close();
@@ -1209,7 +1239,7 @@ describe("work item state machine", () => {
     try {
       expect(migrationRows(copiedPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32, 33, 34, 35, 36
+        31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47
       ]);
       expect(store.verifyAuditChain()).toMatchObject({ ok: true });
     } finally {
@@ -1285,7 +1315,7 @@ describe("work item state machine", () => {
       expect(tableNames(dbPath)).toEqual(expect.arrayContaining(["schema_migrations", "actors", "agents"]));
       expect(migrationRows(dbPath).map((row) => row.version)).toEqual([
         1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30,
-        31, 32, 33, 34, 35, 36
+        31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47
       ]);
       expect(store.listRegistryAgents()).toEqual(
         expect.arrayContaining([
