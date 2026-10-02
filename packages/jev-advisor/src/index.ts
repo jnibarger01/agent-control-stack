@@ -32,8 +32,10 @@ import {
   JEV_CLASSIFIER_VERSION,
   type JevTelemetryEvent
 } from "./telemetry.js";
+// projectCanonicalTraceForJev and JevTraceProjection are re-exported by the
+// `export * from "./trace-projection.js"` below, so this module only needs the
+// import for internal use.
 import { projectCanonicalTraceForJev, type JevTraceProjection } from "./trace-projection.js";
-export { projectCanonicalTraceForJev, type JevTraceProjection } from "./trace-projection.js";
 export {
   projectLatencyMetrics,
   redactLatencyPayload,
