@@ -15,7 +15,8 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
+import { ClientInfoCache, createClientObserver, extractClientInfo } from './client-attribution.js';
+import { managedModeFromEnv, jcModeFromEnv, identityAttribution, capabilityTransport, acsPost, isToolsCall, dcRuntimeIdentityFromState, issueRuntimeBootstrap, completeRuntimeBootstrap, injectRuntimeBootstrap } from './managed.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -136,6 +137,46 @@ const verifyJwt = (token) => {
   } catch { return null; }
 };
 const randId = () => crypto.randomBytes(24).toString('base64url');
+
+// ---- Client attribution (visibility only; never authority) ----
+// clientInfo from a client's `initialize` is cached so its later tools/call can carry it to ACS, and each
+// verified client connection is reported to ACS so Mission Control can show who is on the lane.
+const clientInfoCache = new ClientInfoCache();
+const observers = new Map();
+function observerFor(lane, managed) {
+  if (!managed || !managed.enabled) return null;
+  let observer = observers.get(lane);
+  if (!observer) {
+    const reporting = { ...managed, timeoutMs: Math.min(managed.timeoutMs || 1500, 1500) };
+    observer = createClientObserver({
+      post: (route, payload) => acsPost(reporting, route, payload),
+      onError: (error) => console.warn(`gateway: client observation (${lane}) failed: ${error && error.message ? error.message : 'error'}`),
+    });
+    observers.set(lane, observer);
+  }
+  return observer;
+}
+/**
+ * Record what this request tells us about the caller and return the claims to forward on a tools/call.
+ * Fire-and-forget: it can never delay, alter or fail the request.
+ */
+function noteClient(lane, managed, auth, req, parsed) {
+  try {
+    const identity = identityAttribution(auth);
+    if (!identity || !identity.clientId || !identity.subject) return undefined;
+    const key = `${lane}|${identity.clientId}|${identity.subject}`;
+    const method = parsed && !Array.isArray(parsed) && typeof parsed.method === 'string' ? parsed.method : '';
+    if (method === 'initialize') clientInfoCache.set(key, extractClientInfo(parsed));
+    const info = clientInfoCache.get(key);
+    const ua = typeof req.headers['user-agent'] === 'string' ? req.headers['user-agent'] : undefined;
+    const claims = { ...(info || {}), ...(ua ? { userAgent: ua } : {}) };
+    const observer = observerFor(lane, managed);
+    if (observer && req.method === 'POST') void observer.observe({ lane, identity, method, claims });
+    return claims;
+  } catch {
+    return undefined;
+  }
+}
 const now = () => Math.floor(Date.now() / 1000);
 
 // Per-request identity attestation for the executor (bridge): base64url(JSON
@@ -715,6 +756,7 @@ const server = http.createServer(async (req, res) => {
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
       if (MANAGED.enabled && req.method === 'POST') {
         const { isCall, parsed, hasBatchedCall } = isToolsCall(body);
+        const dcClaims = noteClient('dc', MANAGED, auth, req, parsed);
         if (hasBatchedCall) {
           // Fail closed: a batch containing tools/call would otherwise bypass
           // per-call ACS issuance and anti-spoof metadata stripping.
@@ -732,7 +774,7 @@ const server = http.createServer(async (req, res) => {
               }
             }
             const rewrite = capabilityTransport(MANAGED, {
-              identity: identityAttribution(auth),
+              identity: identityAttribution(auth, dcClaims),
               requestId: randId(),
             });
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
@@ -789,6 +831,7 @@ const server = http.createServer(async (req, res) => {
       let body = req.method === 'POST' || req.method === 'PUT' ? await readBody(req) : null;
       if (req.method === 'POST') {
         const { isCall, parsed, hasBatchedCall } = isToolsCall(body);
+        const jcClaims = noteClient('jc', JC, auth, req, parsed);
         if (hasBatchedCall) {
           // Fail closed: a batch would bypass per-call ACS issuance and
           // anti-spoof metadata stripping. Clients must send single requests.
@@ -803,7 +846,7 @@ const server = http.createServer(async (req, res) => {
             if (!jcBridge.ok || jcBridge.data?.variant !== 'jc') {
               throw Object.assign(new Error('jc upstream is not the Jace Commander bridge'), { acsCode: 'jc_bridge_mismatch' });
             }
-            const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth), requestId: randId() });
+            const rewrite = capabilityTransport(JC, { identity: identityAttribution(auth, jcClaims), requestId: randId() });
             body = Buffer.from(JSON.stringify(await rewrite(parsed)), 'utf8');
           } catch (e) {
             const code = e && e.acsCode ? e.acsCode : 'managed_fail_closed';
