@@ -1,5 +1,10 @@
 import { directAgentNames } from "@agent-control-stack/machine-controller";
-import { explainPolicyInputSchema, workItemToolNames } from "@agent-control-stack/policy-gate";
+import {
+  missionDispatchInputSchema,
+  missionDispatchConfirmedSchema,
+  explainPolicyInputSchema,
+  workItemToolNames
+} from "@agent-control-stack/policy-gate";
 import {
   missionTraceQuerySchema,
   changeSetReviewBodySchema,
@@ -889,6 +894,27 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     operationId: "observeMcpClient",
     summary: "Edge bridge reports a verified client connection (bridge identity only).",
     requestSchema: mcpObservationBodySchema,
+    successStatus: 202
+  },
+  {
+    method: "get",
+    path: "/api/mission-dispatch",
+    operationId: "listMissionDispatches",
+    summary: "List governed mission dispatch receipts and authoritative progress."
+  },
+  {
+    method: "post",
+    path: "/api/mission-dispatch/preview",
+    operationId: "previewMissionDispatch",
+    summary: "Review an approved immutable mission snapshot.",
+    requestSchema: missionDispatchInputSchema
+  },
+  {
+    method: "post",
+    path: "/api/mission-dispatch",
+    operationId: "requestMissionDispatch",
+    summary: "Schedule a confirmed approved mission for the existing worker.",
+    requestSchema: missionDispatchConfirmedSchema,
     successStatus: 202
   },
   {

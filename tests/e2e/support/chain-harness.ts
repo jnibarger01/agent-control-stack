@@ -134,6 +134,7 @@ export async function startAcs(
   runtimeId: string,
   options: {
     ttlMs?: number;
+    missionDispatchEnabled?: boolean;
     executionAdmission?: ExecutionAdmissionController;
     additionalCredentials?: GatewayCredential[];
     /** Test-only lifecycle hook for deterministic result-delivery barriers. */
@@ -164,6 +165,7 @@ export async function startAcs(
   const app = buildGateway({
     dbPath: join(box.root, "acs.db"),
     logger: false,
+    missionDispatchEnabled: options.missionDispatchEnabled,
     auth: { token: "", actor: "user", actorId: "e2e-operator", credentials },
     desktopCommanderCapability: {
       runtimeId,

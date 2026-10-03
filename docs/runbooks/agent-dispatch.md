@@ -1,5 +1,9 @@
 # Agent dispatch from Mission Control
 
+For approved Change Sets executed through ACS policy, scheduler, capabilities and
+leases, use [governed mission dispatch](governed-mission-dispatch.md). The CLI path
+below uses each CLI’s own permissions and does not govern its internal tools.
+
 Run your installed CLI coding agents from Mission Control's **Dispatch** page. Design and limits:
 [ADR 0022](../adr/0022-human-authorized-agent-runs.md).
 

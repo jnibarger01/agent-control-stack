@@ -30,7 +30,7 @@ export const PAGE_META: Record<string, { title: string; description: string }> =
   },
   dispatch: {
     title: "Dispatch",
-    description: "Run your installed CLI coding agents in a fresh git worktree, with explicit confirmation."
+    description: "Execute approved missions through ACS, or review a separate host-side CLI run."
   },
   executors: {
     title: "Executors",
