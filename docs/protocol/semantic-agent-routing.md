@@ -55,6 +55,35 @@ no authorization headers or environment values, and does not persist the raw
 model request or response. Candidate audit events retain bounded score,
 threshold, status, latency, model, and fixed failure codes.
 
+## Local Ollama residency
+
+The ACS development host keeps `nimble:latest` warm through the lingering
+user-level `acs-nimble-residency.service`. Install or refresh it from the
+repository root with
+`./scripts/install-acs-nimble-residency.sh`. The user systemd manager must be
+enabled at boot (user lingering). The service waits for the local Ollama API,
+verifies that `nimble:latest` is already installed, then sends a model-specific
+one-token warm-up request with `keep_alive: -1` and confirms the model is
+resident. It repeats this check every minute, including after an Ollama restart,
+when the server has discarded its in-memory model state. It never pulls models
+and does not change Ollama's global keep-alive setting. If another model is
+already resident, it preserves that model, logs the contention, and retries on
+the next check rather than forcing an eviction.
+
+Check the service with `systemctl --user status acs-nimble-residency.service`
+and residency with `ollama ps`; `nimble:latest` should show `Forever`. The
+service only manages this model. If the model is removed, it reports an error
+instead of downloading it.
+
+On the ACS routing host, a live residency snapshot measured about **9.67 GiB of
+VRAM** for Nimble on a GPU reporting **15.92 GiB total** (about 61%). This is a
+host- and runtime-specific observation, not a model guarantee. Pinning Nimble
+reserves substantial accelerator capacity while Ollama is running; other local
+models may fail to load, share the device, or spill layers to system memory.
+Keep this tradeoff intentional and remeasure after changing the model, context
+size, Ollama version, or GPU. ACS's 750 ms routing timeout depends on Nimble
+being warm; cold model loading is outside that request budget.
+
 ## Observable routing states
 
 Audit events include `agent.routing.started`,
