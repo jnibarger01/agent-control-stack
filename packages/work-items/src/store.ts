@@ -7431,6 +7431,28 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
+  recordSystemEventOnceForWorkItem(input: {
+    name: string;
+    workItemId: string;
+    body?: Record<string, unknown>;
+    attributes?: Record<string, string | number | boolean>;
+  }): StoredAuditEvent {
+    return this.write(() => {
+      const name = requiredString(input.name, "name");
+      const workItemId = requiredString(input.workItemId, "workItemId");
+      const existing = this.db
+        .prepare(
+          `SELECT * FROM audit_events WHERE name = ? AND json_extract(attributes, '$."work_item.id"') = ? LIMIT 1`
+        )
+        .get(name, workItemId) as unknown as EventRow | undefined;
+      if (existing) return { value: rowToEvent(existing), events: [] };
+
+      const attributes = { ...(input.attributes ?? {}), "work_item.id": workItemId };
+      const event = this.appendAuditEvent(createEvent(name, input.body ?? {}, attributes));
+      return { value: event, events: [event] };
+    });
+  }
+
   getExecutionMode(now: Date = new Date()): {
     mode: "strict" | "admin" | null;
     raw: string | null;
