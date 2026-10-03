@@ -7,7 +7,8 @@ import type { SqliteWorkItemStore } from "./store.js";
 const execFileAsync = promisify(execFile);
 
 export const SYSTEM_BOOTSTRAP_ACTOR_ID = "actor_system_bootstrap";
-export const DISCOVERY_PROBE_TIMEOUT_MS = 3_000;
+// Cold starts are slow (hermes --version took 6.5s cold, 0.2s warm); a short timeout makes the roster flap.
+export const DISCOVERY_PROBE_TIMEOUT_MS = 10_000;
 export const DISCOVERY_ERROR_MAX_LENGTH = 200;
 
 const EXECUTABLE_NAME = /^[A-Za-z0-9][A-Za-z0-9._+-]*$/;
