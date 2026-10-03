@@ -194,6 +194,10 @@ export const agentRunConfirmedBodySchema = agentRunBodySchema
   .extend({ confirmationHash: z.string().regex(/^[a-f0-9]{64}$/u) })
   .strict();
 
+export const agentRunReviewBodySchema = z
+  .object({ decision: z.enum(["accept", "reject"]), note: z.string().max(500).optional() })
+  .strict();
+
 export const executionModeBodySchema = z
   .object({
     mode: z.enum(["strict", "admin"]),
@@ -926,6 +930,13 @@ export const publicHttpOperations: readonly PublicHttpOperation[] = [
     path: "/api/agent-runs/{id}",
     operationId: "getAgentRun",
     summary: "Read an agent run with its redacted output."
+  },
+  {
+    method: "post",
+    path: "/api/agent-runs/{id}/review",
+    operationId: "reviewAgentRun",
+    summary: "Accept or reject a succeeded agent run (human operator only). Nothing is promoted.",
+    requestSchema: agentRunReviewBodySchema
   },
   {
     method: "post",

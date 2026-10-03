@@ -25,7 +25,11 @@ Click **Add to roster** once to list the CLIs under Agents.
 2. Pick an agent, repository and mode, describe the task, and choose **Review & dispatch**.
 3. Read the confirmation (mode, repository, branch, containment, prompt, command hash) and confirm.
 4. Watch the run. Output refreshes live and is redacted. **Cancel run** stops the process group.
-5. Review the result on the run's branch: `git -C <worktree path> diff`. ACS never merges or pushes it.
+5. A finished run shows what ACS verified (`resultCheck`) and, if it succeeded, is **pending review**. Accept or
+   reject it with `POST /api/agent-runs/<id>/review` (`{"decision":"accept"|"reject","note":"..."}`, human operator
+   only). A confirmation expires after 10 minutes and works once: submitting it again returns the same run.
+   An exit code of 0 is not enough to succeed: see [ADR 0024](../adr/0024-governed-agent-run-lifecycle.md).
+6. Review the result on the run's branch: `git -C <worktree path> diff`. ACS never merges or pushes it.
    Remove a finished worktree with `git worktree remove <path>` and delete its `acs/agent/*` branch.
 
 ## Status of the nine CLIs

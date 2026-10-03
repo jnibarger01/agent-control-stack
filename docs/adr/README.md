@@ -36,6 +36,7 @@ ADR status values:
 | [0021](0021-looptrace-evidence-spine.md)                                 | LoopTrace is an observational evidence/replay spine, not an authority                     | Accepted                          |
 | [0022](0022-human-authorized-agent-runs.md)                              | Human-authorized agent runs                                                               | Accepted                          |
 | [0023](0023-desktop-commander-concurrency-scheduler.md)                  | Centralize Desktop Commander concurrency scheduling in ACS                                | Accepted                          |
+| [0024](0024-governed-agent-run-lifecycle.md)                             | Harden agent runs: expiring confirmations, fencing, verified results, review              | Accepted                          |
 
 ## Decision rules
 
