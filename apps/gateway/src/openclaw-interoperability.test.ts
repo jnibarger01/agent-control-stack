@@ -315,7 +315,27 @@ describe("installed OpenClaw interoperability", () => {
         const diagnosticEvents = new SqliteWorkItemStore(dbPath);
         const diagnosticEventNames = diagnosticEvents.readEvents().map((event) => event.name);
         diagnosticEvents.close();
-        const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel bodies:${modelBodies.length}`;
+        const modelRequestSummary = modelBodies.map((body) => {
+          const tools = Array.isArray(body.tools) ? body.tools : [];
+          const toolNames = tools.flatMap((candidate) => {
+            if (!candidate || typeof candidate !== "object") return [];
+            const record = candidate as Record<string, unknown>;
+            const fn = record.function;
+            const name = fn && typeof fn === "object" ? (fn as Record<string, unknown>).name : record.name;
+            return typeof name === "string" ? [name] : [];
+          });
+          const messages = Array.isArray(body.messages) ? body.messages : [];
+          return {
+            stream: body.stream,
+            tools: toolNames,
+            messageRoles: messages.flatMap((message) =>
+              message && typeof message === "object" && typeof (message as Record<string, unknown>).role === "string"
+                ? [(message as Record<string, unknown>).role]
+                : []
+            )
+          };
+        });
+        const diagnostic = `${output}\nOpenClaw gateway:\n${gatewayOutput}\nEvents:${diagnosticEventNames.join(",")}\nModel requests:${JSON.stringify(modelRequestSummary)}`;
         expect(modelBodies.length, diagnostic).toBeGreaterThan(1);
         expect(finalResponseSent, diagnostic).toBe(true);
         expect(
