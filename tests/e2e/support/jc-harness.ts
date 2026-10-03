@@ -27,10 +27,11 @@ import {
 
 export const JC_CLI = join(DC_ROOT, "dist/jace-commander/cli.js");
 export const JC_RUNTIME_ID = "jc-e2e-runtime";
-const JC_KEY_ID = "e2e-jc-key";
+export const JC_KEY_ID = "e2e-jc-key";
 const OPERATOR_TOKEN = "e2e-jc-operator-token";
 const JC_BRIDGE_TOKEN = "e2e-jc-bridge-token";
 const DC_BRIDGE_TOKEN = "e2e-jc-unused-dc-bridge-token";
+export const JC_BRIDGE_AUTH_TOKEN = JC_BRIDGE_TOKEN;
 
 export function requireJaceCommanderBuild(): void {
   if (!existsSync(JC_CLI)) {
@@ -43,6 +44,7 @@ export interface JcAcsHandle {
   app: FastifyInstance;
   publicKey: string;
   approve(workItemId: string, actionHash: string): Promise<number>;
+  workItem(workItemId: string): Promise<{ workItem: { status: string }; events: Array<{ name: string }> }>;
   /** Execution-admission snapshot: a control-plane read that needs no permit. */
   admission(): Promise<{
     global: { active: number; queued: number };
@@ -52,11 +54,19 @@ export interface JcAcsHandle {
 }
 
 /** The real ACS gateway with acs.jc.v1 signing and filesystem containment to `allowedRoots`. */
-export async function startJcAcs(box: Sandbox, allowedRoots: string[]): Promise<JcAcsHandle> {
+export async function startJcAcs(
+  box: Sandbox,
+  allowedRoots: string[],
+  options: {
+    additionalCredentials?: GatewayCredential[];
+    executionAdmission?: import("@agent-control-stack/execution-admission").ExecutionAdmissionController;
+  } = {}
+): Promise<JcAcsHandle> {
   const pair = generateKeyPairSync("ed25519");
   const privateKey = pair.privateKey.export({ format: "der", type: "pkcs8" }).toString("base64url");
   const publicKey = pair.publicKey.export({ format: "der", type: "spki" }).toString("base64url");
   const credentials: GatewayCredential[] = [
+    ...(options.additionalCredentials ?? []),
     {
       id: "operator",
       token: OPERATOR_TOKEN,
@@ -87,7 +97,8 @@ export async function startJcAcs(box: Sandbox, allowedRoots: string[]): Promise<
     logger: false,
     auth: { token: "", actor: "user", actorId: "e2e-operator", credentials },
     jaceCommanderCapability: { runtimeId: JC_RUNTIME_ID, keyId: JC_KEY_ID, privateKey, ttlMs: 29_000 },
-    jaceCommanderContainment: { allowedRoots, deniedRoots: [] }
+    jaceCommanderContainment: { allowedRoots, deniedRoots: [] },
+    ...(options.executionAdmission ? { executionAdmission: options.executionAdmission } : {})
   });
   await app.listen({ host: "127.0.0.1", port: 0 });
   const url = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
@@ -107,7 +118,16 @@ export async function startJcAcs(box: Sandbox, allowedRoots: string[]): Promise<
       const response = await fetch(`${url}/internal/execution-admission`, {
         headers: { authorization: `Bearer ${OPERATOR_TOKEN}` }
       });
-      return (await response.json()) as { global: { active: number; queued: number }; wait: { active: number; queued: number } };
+      return (await response.json()) as {
+        global: { active: number; queued: number };
+        wait: { active: number; queued: number };
+      };
+    },
+    workItem: async (workItemId) => {
+      const response = await fetch(`${url}/work-items/${workItemId}`, {
+        headers: { authorization: `Bearer ${OPERATOR_TOKEN}` }
+      });
+      return (await response.json()) as { workItem: { status: string }; events: Array<{ name: string }> };
     },
     close: () => app.close()
   };
