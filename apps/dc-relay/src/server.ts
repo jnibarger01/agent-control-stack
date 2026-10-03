@@ -29,16 +29,16 @@ const bodyLimit = 72 * 1024;
 const registrationSchema = z.object({
   device_id: z.string().uuid().optional(),
   device_name: z.string().min(1).max(128),
-  capabilities: z.record(z.unknown()),
+  capabilities: z.record(z.string(), z.unknown()),
 }).strict();
 const updateSchema = z.object({
   device_name: z.string().min(1).max(128).optional(),
-  capabilities: z.record(z.unknown()).optional(),
+  capabilities: z.record(z.string(), z.unknown()).optional(),
 }).strict().refine((value) => Object.keys(value).length > 0);
 const dispatchSchema = z.object({
   tool_name: z.string().min(1).max(128),
-  arguments: z.record(z.unknown()),
-  metadata: z.record(z.unknown()).optional(),
+  arguments: z.record(z.string(), z.unknown()),
+  metadata: z.record(z.string(), z.unknown()).optional(),
   idempotency_key: z.string().min(1).max(128),
 }).strict();
 const deviceStartSchema = z.object({
