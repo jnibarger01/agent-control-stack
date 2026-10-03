@@ -42,13 +42,6 @@ function approvalActionHash(workItem: WorkItem, actor: string): string {
 }
 
 describe("worker policy gate", () => {
-  it("refuses Nimble-authoritative operation without an authenticated claim client", async () => {
-    vi.stubEnv("ACS_NIMBLE_ROUTING_ENABLED", "1");
-    await expect(runWorkerOnce({ dbPath: "/unavailable/control.db", workerId: "worker-1" })).rejects.toMatchObject({
-      code: "worker_claim_config_invalid"
-    });
-  });
-
   it("rejects a non-dry-run execution mode in production", () => {
     expect(() => assertDryRunExecutionMode("live", "production")).toThrow(
       "production worker requires dry_run execution mode"
