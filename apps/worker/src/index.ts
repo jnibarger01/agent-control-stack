@@ -28,6 +28,7 @@ import {
 import { buildEvidenceManifest, computeWorkspaceRevision, observation } from "@agent-control-stack/evidence";
 import {
   resolveExecutionBackend,
+  hashAttemptLeaseToken,
   SqliteWorkItemStore,
   type AttemptLease,
   type ClaimedWorkItem,
@@ -36,6 +37,7 @@ import {
   type WorkItemStore
 } from "@agent-control-stack/work-items";
 import { WorkspaceManager } from "@agent-control-stack/workspace-manager";
+import type { AuthenticatedWorkerClaim } from "./claim-client.js";
 import {
   authorizationDeniedEvent,
   authorizationGrantedEvent,
@@ -85,6 +87,8 @@ export interface WorkerOptions {
   machineExecutor?: MachineExecutor;
   /** Inject the Nimble transport (tests only). */
   routingFetch?: typeof fetch;
+  /** Claim through the authenticated gateway boundary instead of local DB routing. */
+  authenticatedClaim?: AuthenticatedWorkerClaim;
   /** Replaces the default coding-mission resume. Tests use this to avoid the process environment. */
   resumeCodingMissions?: (dbPath: string) => Promise<void>;
 }
@@ -187,7 +191,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   const ownsLearning = options.learning === undefined;
   const policy = createPolicyEngine();
   const tools = createWorkItemTools(workItems, policy);
-  const workerId = options.workerId ?? "local-worker";
+  const workerId = options.workerId ?? process.env.ACS_WORKER_ID ?? "local-worker";
   const routingConfig = resolveNimbleRoutingConfig(process.env);
   let releaseAdmission: (() => void) | undefined;
   let routedDecision: AuthoritativeRouteResult | undefined;
@@ -226,7 +230,9 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
   try {
     workItems.failExpiredLeases();
     let running: ReturnType<typeof tools.claim_next_approved_work_item>;
-    if (routingConfig.enabled) {
+    if (options.authenticatedClaim) {
+      running = await options.authenticatedClaim();
+    } else if (routingConfig.enabled) {
       const scheduler = new ExecutionAdmissionScheduler();
       const claimed = await claimNextAuthoritativeWorkItem({
         store: workItems,
@@ -262,6 +268,38 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
     if (!running) {
       return { executed: false, reason: "no approved work item" };
+    }
+    if (options.authenticatedClaim) {
+      const persisted = workItems.get(running.id);
+      const assignment = workItems.getWorkItemAssignment(running.id);
+      const lease = running.attemptId ? workItems.getActiveLeaseForAttempt(running.attemptId) : undefined;
+      if (
+        running.status !== "running" ||
+        running.workerId !== workerId ||
+        !running.attemptId ||
+        !running.planHash ||
+        !running.inputHash ||
+        running.fencingEpoch === undefined ||
+        !persisted ||
+        persisted.status !== "running" ||
+        !assignment ||
+        assignment.selectedWorkerId !== workerId ||
+        lease?.status !== "active" ||
+        lease.attemptId !== running.attemptId ||
+        lease.workItemId !== running.id ||
+        lease.workerId !== workerId ||
+        lease.leaseId !== running.leaseId ||
+        lease.tokenHash !== hashAttemptLeaseToken(running.leaseToken) ||
+        lease.planHash !== running.planHash ||
+        lease.inputHash !== running.inputHash ||
+        lease.fencingEpoch !== running.fencingEpoch ||
+        Date.parse(lease.expiresAt) <= Date.now()
+      ) {
+        throw new ControlStackError(
+          "worker_claim_integrity_mismatch",
+          "authenticated worker claim did not match persisted ACS authority"
+        );
+      }
     }
     if (running.status === "blocked") {
       return { executed: false, workItemId: running.id, reason: "blocked by policy" };
@@ -360,9 +398,13 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
 
     const bridge = new ExecutionLearningBridge(learning);
-    const prepared = bridge.beforeExecution(running, running.attemptId);
+    const executionWorkItem = workItems.get(running.id);
+    if (!executionWorkItem || executionWorkItem.status !== "running") {
+      throw new ControlStackError("worker_claim_integrity_mismatch", "persisted work item changed before execution");
+    }
+    const prepared = bridge.beforeExecution(executionWorkItem, running.attemptId);
     const result = await execute({
-      ...running,
+      ...executionWorkItem,
       retrievedSkills: prepared.retrievedSkills,
       ...(workspace ? { workspace } : {})
     });
@@ -380,7 +422,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     const learningRecord = bridge.afterExecution({
       workItemId: running.id,
       attemptId: running.attemptId,
-      repository: running.target?.repo ?? running.target?.cwd,
+      repository: executionWorkItem.target?.repo ?? executionWorkItem.target?.cwd,
       retrievedSkills: prepared.retrievedSkills,
       usedSkillIds: usedSkills,
       engineSucceeded: result.ok,

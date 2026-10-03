@@ -4,8 +4,13 @@ import { join } from "node:path";
 import { exec, fork, spawn } from "node:child_process";
 import { DatabaseSync } from "node:sqlite";
 import { createPolicyEngine, createWorkItemTools } from "@agent-control-stack/policy-gate";
-import { SqliteWorkItemStore, type ClaimedWorkItem, type WorkItem } from "@agent-control-stack/work-items";
-import { describe, expect, it, vi } from "vitest";
+import {
+  SqliteWorkItemStore,
+  hashAttemptLeaseToken,
+  type ClaimedWorkItem,
+  type WorkItem
+} from "@agent-control-stack/work-items";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertDryRunExecutionMode,
   configuredNetworkProfile,
@@ -25,6 +30,8 @@ vi.mock("node:child_process", async (importOriginal) => {
 });
 
 const domainTransition = { via: "domain_service" } as const;
+
+afterEach(() => vi.unstubAllEnvs());
 
 function approvalActionHash(workItem: WorkItem, actor: string): string {
   const decision = createPolicyEngine().evaluateWorkItem(workItem, actor, "approve")[0];
@@ -68,6 +75,115 @@ describe("worker policy gate", () => {
         check.close();
       }
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("executes a Nimble assignment only after an authenticated claim callback matches persisted lease authority", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "acs-worker-authenticated-nimble-"));
+    const dbPath = join(dir, "control.db");
+    const store = new SqliteWorkItemStore(dbPath);
+    const tools = createWorkItemTools(store, createPolicyEngine());
+    try {
+      const workItem = tools.create_work_item(readOnlyInput("Authenticated assigned Nimble work"));
+      store.registerActor({ id: "operator", actorType: "HUMAN", displayName: "Operator" });
+      store.createRegistryAgent({
+        id: "assigned-agent",
+        name: "Assigned Agent",
+        kind: "coding",
+        acpRole: "IMPLEMENTATION_AGENT",
+        status: "AVAILABLE",
+        actorId: "operator"
+      });
+      const decision = store.recordActorRoutingDecision(
+        {
+          workItemId: workItem.id,
+          selectedActorId: "assigned-agent",
+          eligible: ["assigned-agent"],
+          excluded: {},
+          scores: { "assigned-agent": 9600 },
+          idempotencyKey: `nimble-route:${workItem.id}:1`
+        },
+        { via: "domain_service", actorId: "operator" }
+      );
+      store.assignWorkItem(
+        {
+          workItemId: workItem.id,
+          selectedAgentId: "assigned-agent",
+          selectedWorkerId: "worker-1",
+          routingDecisionId: decision.decisionId,
+          assignedByActorId: "operator"
+        },
+        { via: "domain_service", actorId: "operator" }
+      );
+      store.close();
+
+      const authenticatedClaim = vi.fn(async () => {
+        const claimStore = new SqliteWorkItemStore(dbPath);
+        try {
+          const claimTools = createWorkItemTools(claimStore, createPolicyEngine());
+          const claim = claimTools.claim_approved_work_item_by_id({
+            id: workItem.id,
+            workerId: "worker-1"
+          }) as ClaimedWorkItem;
+          const lease = claimStore.getActiveLeaseForAttempt(claim.attemptId!);
+          expect(lease?.tokenHash).toBe(hashAttemptLeaseToken(claim.leaseToken));
+          expect({
+            itemStatus: claimStore.get(claim.id)?.status,
+            assignmentWorker: claimStore.getWorkItemAssignment(claim.id)?.selectedWorkerId,
+            leaseStatus: lease?.status,
+            attemptId: lease?.attemptId === claim.attemptId,
+            itemId: lease?.workItemId === claim.id,
+            workerId: lease?.workerId === claim.workerId,
+            leaseId: lease?.leaseId === claim.leaseId,
+            tokenPresent: typeof claim.leaseToken === "string" && claim.leaseToken.length >= 16,
+            tokenHash: lease?.tokenHash === hashAttemptLeaseToken(claim.leaseToken),
+            planHash: lease?.planHash === claim.planHash,
+            inputHash: lease?.inputHash === claim.inputHash,
+            epoch: lease?.fencingEpoch === claim.fencingEpoch,
+            expiry: Date.parse(lease?.expiresAt ?? "") > Date.now()
+          }).toEqual({
+            itemStatus: "running",
+            assignmentWorker: "worker-1",
+            leaseStatus: "active",
+            attemptId: true,
+            itemId: true,
+            workerId: true,
+            leaseId: true,
+            tokenPresent: true,
+            tokenHash: true,
+            planHash: true,
+            inputHash: true,
+            epoch: true,
+            expiry: true
+          });
+          return claim;
+        } finally {
+          claimStore.close();
+        }
+      });
+      const execute = vi.fn(async (input: WorkItem) => {
+        expect(Object.hasOwn(input, "leaseToken")).toBe(false);
+        expect(Object.hasOwn(input, "workerId")).toBe(false);
+        return { ok: true, executionMode: "dry_run" as const, output: "read-only result" };
+      });
+      const result = await runWorkerOnce({ dbPath, workerId: "worker-1", authenticatedClaim, execute });
+
+      expect(authenticatedClaim).toHaveBeenCalledTimes(1);
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(result).toMatchObject({ executed: true, workItemId: workItem.id });
+      const finalStore = new SqliteWorkItemStore(dbPath);
+      try {
+        expect(finalStore.get(workItem.id)?.status).toBe("succeeded");
+      } finally {
+        finalStore.close();
+      }
+    } finally {
+      try {
+        store.close();
+      } catch {
+        // The worker setup already closed this handle.
+      }
       rmSync(dir, { recursive: true, force: true });
     }
   });
