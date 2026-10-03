@@ -1,5 +1,6 @@
 import { icon } from "../icons.js";
-import { PAGE_META, auditSearch } from "./operations.js";
+import { auditSearch } from "./operations.js";
+import { PAGE_META } from "./page-meta.js";
 import { type WorkItem } from "@agent-control-stack/work-items";
 import { clientScript } from "../client-script.js";
 import { composerHtml } from "../composer.js";

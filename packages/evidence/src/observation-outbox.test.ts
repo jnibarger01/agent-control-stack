@@ -9,6 +9,8 @@ import {
   OBSERVATION_OUTBOX_TIMEOUT_MS,
   type ObservationOutboxEntry
 } from "./observation-outbox.js";
+import { JEV_TRACE_QUESTION_SET_VERSION } from "@agent-control-stack/jev-advisor";
+import { SqliteWorkItemStore } from "@agent-control-stack/work-items";
 
 function entry(): ObservationOutboxEntry {
   const now = new Date().toISOString();
@@ -75,5 +77,34 @@ describe("JEV observation outbox contract", () => {
     expect(OBSERVATION_OUTBOX_MAX_ATTEMPTS).toBe(3);
     expect(OBSERVATION_OUTBOX_TIMEOUT_MS).toBe(30_000);
     expect(OBSERVATION_OUTBOX_MAX_PROJECTION_EVENTS).toBe(1000);
+  });
+});
+
+
+describe("JEV trace attribution version", () => {
+  it("keeps the work-items default observation version aligned with the JEV constant", () => {
+    // work-items must not depend on jev-advisor, so the default it persists is a
+    // literal. This guard is the single place that keeps the two in step.
+    const store = new SqliteWorkItemStore(":memory:");
+    try {
+      const persisted = (
+        store as unknown as { observationQuestionSetVersion: string }
+      ).observationQuestionSetVersion;
+      expect(persisted).toBe(JEV_TRACE_QUESTION_SET_VERSION);
+    } finally {
+      store.close();
+    }
+  });
+
+  it("distinguishes observations attributed to the previous question set", () => {
+    // Backward compatibility is explicit: identity includes the version, so rows
+    // written under @1 are never conflated with @2 rows, and both remain readable
+    // because each row stores the version it was written with.
+    const current = { ...entry(), questionSetVersion: JEV_TRACE_QUESTION_SET_VERSION };
+    const previous = { ...current, questionSetVersion: "jev-trace@1" };
+    expect(observationalIdentity(current)).not.toBe(observationalIdentity(previous));
+    expect(observationalIdentity(current)).toBe(
+      observationalIdentity({ ...current, questionSetVersion: JEV_TRACE_QUESTION_SET_VERSION })
+    );
   });
 });

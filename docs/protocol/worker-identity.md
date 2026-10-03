@@ -8,7 +8,19 @@ Bearer tokens that prove the identity also need an independent lifecycle —
 TTL, rotation, and revoke — before real execution.
 
 This document covers the worker credential registry used by the gateway when
-authenticating `POST /work-items/:id/results`.
+authenticating `POST /worker/claim` and `POST /work-items/:id/results`.
+
+## Claim admission
+
+`POST /worker/claim` accepts an empty object or `leaseMs` (positive integer,
+at most one hour). The gateway derives the worker ID from the authenticated
+credential; body identity fields are rejected. It uses the existing Policy Gate
+and shutdown guard to create a persisted attempt and lease. A durable assignment
+restricts selection to its chosen worker, including exact-ID claims; assignment
+does not grant approval. Unassigned approved work remains eligible for ordinary
+workers. Concurrent claims are serialized by the store transaction. No eligible
+work returns `{ "claimed": false }`; a policy/approval rejection returns `409`
+with `worker_claim_blocked`. Assignment cannot change once execution is running.
 
 ## Credential lifecycle
 

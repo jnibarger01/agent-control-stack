@@ -11,13 +11,84 @@ import {
   inspectControlPlaneDatabase,
   redactValue,
   stableHash,
+  strictCanonicalJsonV1,
   verifyAuditChain,
   type AttributeValue,
   type AuditChainEvent,
   type AuditChainVerification,
   type AuditEvent
 } from "@agent-control-stack/shared";
+import {
+  changeSetReviewBodySchema,
+  changeSetReviewHash,
+  assertChangeSetEvidenceAudit,
+  verifyChangeSetReviews,
+  sameReview,
+  type ChangeSetReviewInput
+} from "./change-set-review.js";
+import { readMissionTrace, type MissionTrace, type MissionTraceQuery } from "./mission-trace.js";
 import { transitionWorkItem } from "./state-machine.js";
+import {
+  issueAutonomousAuthorityBodySchema,
+  autonomousAuthorityCoreSchema,
+  autonomousAuthorityHash,
+  assertChangeSetWithinGrant,
+  grantAuthorizationCoreSchema,
+  grantAuthorizationHash,
+  type IssueAutonomousAuthorityInput,
+  type AutonomousAuthorityGrant,
+  type GrantAuthorization,
+  type ChangeSetExecutionAuthority
+} from "./autonomous-authority.js";
+import {
+  readAutonomousAuthority,
+  readAutonomousAuthorityRevocation,
+  readGrantAuthorization,
+  assertGrantPolicy
+} from "./autonomous-authority-store.js";
+import {
+  changeSetManifestHash,
+  submitChangeSetInputSchema,
+  type SubmitChangeSetInput,
+  type ChangeSetRecord
+} from "./change-set.js";
+import { readChangeSet, readChangeSetSubmission, insertChangeSetRevision } from "./change-set-store.js";
+import {
+  readChangeSetProgress,
+  changeSetCompletionCoreSchema,
+  changeSetCompletionHash,
+  type ChangeSetProgress,
+  type ChangeSetCompletion
+} from "./change-set-progress.js";
+import {
+  changeSetApprovalHash,
+  changeSetApprovalCoreSchema,
+  grantChangeSetApprovalSchema,
+  changeSetPolicyHash,
+  type ChangeSetApproval,
+  type GrantChangeSetApproval
+} from "./change-set-approval.js";
+import {
+  readChangeSetApproval,
+  readChangeSetApprovalByRequest,
+  readChangeSetApprovalRevocation,
+  readVerifiedChangeSetAuthorityEvent
+} from "./change-set-approval-store.js";
+import {
+  changeSetOperationVerification,
+  CHANGE_SET_VERIFICATION_POLICY,
+  changeSetOperationPermitCoreSchema,
+  changeSetOperationPermitHash,
+  readChangeSetOperationPermit,
+  type ChangeSetOperationPermit,
+  type BindChangeSetOperationPermit
+} from "./change-set-operation-permit.js";
+import {
+  assignWorkItemInputSchema,
+  workItemAssignmentSchema,
+  type AssignWorkItemInput,
+  type WorkItemAssignment
+} from "./assignment.js";
 import {
   OBSERVATION_OUTBOX_MAX_ATTEMPTS,
   OBSERVATION_OUTBOX_MAX_PROJECTION_EVENTS,
@@ -373,6 +444,20 @@ interface AttemptLeaseRow {
   closed_at: string | null;
 }
 
+interface AdmissionPermitRow {
+  attempt_id: string;
+  work_item_id: string;
+  lease_id: string;
+  worker_id: string;
+  fencing_epoch: number;
+  action_hash: string;
+  plan_hash: string;
+  input_hash: string;
+  lane: "jc" | "dc";
+  execution_class: "execution" | "wait";
+  created_at: string;
+}
+
 interface WorkspaceAllocationRow {
   allocation_id: string;
   work_item_id: string;
@@ -421,6 +506,8 @@ interface ExecutionPlanApprovalRow {
 
 type PersistedResultInput = Omit<SubmitWorkResultInput, "outcome"> & { outcome: ResultOutcome };
 
+const auditProcessId = createId("acs_process");
+const auditProcessStartedAt = new Date(Date.now() - process.uptime() * 1000).toISOString();
 export type StoredAuditEvent = AuditChainEvent;
 export const DEFAULT_EVENT_LIMIT = 100;
 export const MAX_EVENT_LIMIT = 500;
@@ -968,8 +1055,96 @@ export interface TraceEnqueueFailure {
 }
 
 export interface WorkItemStore {
+  requireActiveChangeSetExecutionAuthority(
+    reference: { approvalId?: string; authorizationId?: string },
+    manifestHash: string,
+    executingActorId?: string,
+    now?: Date
+  ): ChangeSetExecutionAuthority;
+  issueAutonomousAuthority(
+    input: IssueAutonomousAuthorityInput,
+    options: PrivilegedTransitionOptions
+  ): AutonomousAuthorityGrant;
+  getAutonomousAuthority(grantId: string): AutonomousAuthorityGrant | undefined;
+  requireActiveAutonomousAuthority(
+    grantId: string,
+    missionId: string,
+    executingActorId: string,
+    now?: Date
+  ): AutonomousAuthorityGrant;
+  revokeAutonomousAuthority(
+    grantId: string,
+    actorId: string,
+    reason: string,
+    options: PrivilegedTransitionOptions
+  ): void;
+  authorizeChangeSetWithGrant(
+    input: {
+      grantId: string;
+      missionId: string;
+      expectedManifestHash: string;
+      executingActorId: string;
+      policyHash: string;
+      policyAuditEventId: string;
+    },
+    options: PrivilegedTransitionOptions
+  ): GrantAuthorization;
+  getGrantAuthorization(authorizationId: string): GrantAuthorization | undefined;
+  getGrantAuthorizationForGrant(grantId: string, manifestHash: string): GrantAuthorization | undefined;
+  requireActiveGrantAuthorization(
+    authorizationId: string,
+    manifestHash: string,
+    executingActorId: string,
+    now?: Date
+  ): GrantAuthorization;
   withTransaction<T>(operation: () => T): T;
   create(input: unknown): WorkItem;
+  submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord;
+  getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined;
+  getChangeSetProgress(missionId: string, expectedManifestHash?: string): ChangeSetProgress;
+  completeChangeSetMission(
+    input: {
+      missionId: string;
+      expectedManifestHash: string;
+      executingActorId: string;
+      approvalId?: string;
+      authorizationId?: string;
+    },
+    options: PrivilegedTransitionOptions
+  ): ChangeSetCompletion;
+  grantChangeSetApproval(input: GrantChangeSetApproval, options: PrivilegedTransitionOptions): ChangeSetApproval;
+  getChangeSetApproval(approvalId: string): ChangeSetApproval | undefined;
+  getChangeSetApprovalByRequest(missionId: string, requestId: string): ChangeSetApproval | undefined;
+  requireActiveChangeSetApproval(
+    approvalId: string,
+    manifestHash: string,
+    executingActorId: string,
+    now?: Date
+  ): ChangeSetApproval;
+  bindChangeSetOperationPermit(
+    input: BindChangeSetOperationPermit,
+    options: PrivilegedTransitionOptions
+  ): ChangeSetOperationPermit;
+  getChangeSetOperationPermit(permitId: string): ChangeSetOperationPermit | undefined;
+  getChangeSetOperationPermitForOperation(
+    missionId: string,
+    manifestHash: string,
+    operationId: string
+  ): ChangeSetOperationPermit | undefined;
+  requireActiveChangeSetOperationPermit(
+    workItemId: string,
+    workerId?: string,
+    now?: Date
+  ): ChangeSetOperationPermit | undefined;
+  revokeChangeSetApproval(
+    approvalId: string,
+    actorId: string,
+    reason: string,
+    options: PrivilegedTransitionOptions
+  ): void;
+  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment;
+  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined;
+  findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined;
   get(id: string): WorkItem | undefined;
   list(input?: unknown): WorkItem[];
   listDashboardWorkItems(options?: DashboardWorkItemsOptions): DashboardWorkItems;
@@ -1036,6 +1211,11 @@ export interface WorkItemStore {
     options: PrivilegedTransitionOptions
   ): VerificationRequirementProjection;
   getVerificationRequirement(attemptId: string): VerificationRequirementProjection | undefined;
+  reviewChangeSetOperation(
+    workItemId: string,
+    input: ChangeSetReviewInput,
+    options: PrivilegedTransitionOptions
+  ): ReviewFindingProjection;
   recordVerificationDecision(
     input: RecordVerificationDecisionInput,
     options: PrivilegedTransitionOptions
@@ -1090,6 +1270,7 @@ export interface WorkItemStore {
     fencingToken: number;
     workspaceAllocationId: string;
   }): CommandAuthority | undefined;
+  getMissionTrace(missionId: string, query?: MissionTraceQuery): MissionTrace;
   readEvents(options?: ReadEventsOptions): StoredAuditEvent[];
   /** Cheap readiness view: no full integrity scan or full audit-chain replay. */
   readinessHealth(): StoreHealth;
@@ -1147,9 +1328,68 @@ export interface WorkItemStore {
     options?: ClaimOptions
   ): ClaimedWorkItem | undefined;
   failExpiredLeases(now?: Date): WorkItem[];
+  /**
+   * Fence active attempt leases that hold execution capacity without a durable
+   * admission reservation. These leases cannot be capacity-accounted, so they are
+   * failed closed deterministically and recorded with durable audit evidence rather
+   * than blocking new admission until they expire on their own.
+   */
+  fenceLeasesWithoutAdmissionReservation(
+    input: {
+      workerIds: readonly string[];
+      reservedAttemptIds: ReadonlySet<string>;
+      now?: Date;
+    },
+    /** Bound the wait for the write lock for latency-sensitive callers such as probes. */
+    options?: { busyTimeoutMs?: number }
+  ): WorkItem[];
   /** Count attempt leases that are still active and not yet past expires_at. */
-  countActiveAttemptLeases(now?: Date): number;
-  /** Append a gateway/system lifecycle event to the canonical audit chain. */
+  countActiveAttemptLeases(now?: Date, workerIds?: readonly string[]): number;
+  /** Persist an admission permit binding for recovery after gateway restart. */
+  bindAdmissionPermit(input: {
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+    executionClass: "execution" | "wait";
+  }): void;
+  /** Remove a released admission permit binding. */
+  releaseAdmissionPermit(attemptId: string): boolean;
+  /** Get a persisted admission permit binding by attempt ID. */
+  getAdmissionPermit(attemptId: string):
+    | {
+        attemptId: string;
+        workItemId: string;
+        leaseId: string;
+        workerId: string;
+        fencingEpoch: number;
+        actionHash: string;
+        planHash: string;
+        inputHash: string;
+        lane: "jc" | "dc";
+        executionClass: "execution" | "wait";
+        createdAt: string;
+      }
+    | undefined;
+  /** List all persisted admission permit bindings. */
+  listAdmissionPermits(): Array<{
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+    executionClass: "execution" | "wait";
+    createdAt: string;
+  }>;
   recordSystemEvent(input: {
     name: string;
     body?: Record<string, unknown>;
@@ -1189,7 +1429,7 @@ export interface WorkItemStore {
   retryObservation(observationId: string, error: string, now?: Date): "pending" | "failed";
   getObservationCapacity(): ObservationCapacity;
   getExecutionResult(resultId: string): StoredExecutionResult | undefined;
-  getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined;
+  getExecutionResultForIdempotency(idempotencyKey: string): StoredExecutionResult | undefined;
   retryWorkItem(id: string, input: RetryWorkItemInput): WorkItem;
   cloneWorkItem(id: string, input: CloneWorkItemInput): WorkItem;
 }
@@ -1247,7 +1487,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     this.onEvent = options.onEvent ?? (() => undefined);
     this.onTraceFailure = options.onTraceFailure ?? defaultTraceFailureReporter;
     this.observationEnabled = options.observationEnabled ?? false;
-    this.observationQuestionSetVersion = options.observationQuestionSetVersion ?? "jev-trace@1";
+    // Mirrors JEV_TRACE_QUESTION_SET_VERSION in @agent-control-stack/jev-advisor.
+    // work-items must not depend on that package, so the default is asserted to stay
+    // in sync by a test in @agent-control-stack/evidence, which depends on both.
+    this.observationQuestionSetVersion = options.observationQuestionSetVersion ?? "jev-trace@2";
     this.observationClassifierVersion = options.observationClassifierVersion ?? "jev-advisory-v2";
     this.observationMaxQueued = boundedObservationInteger(
       options.observationMaxQueued,
@@ -1312,6 +1555,1080 @@ export class SqliteWorkItemStore implements WorkItemStore {
       });
       return { value: workItem, events: [event] };
     });
+  }
+
+  submitChangeSet(input: SubmitChangeSetInput): ChangeSetRecord {
+    strictCanonicalJsonV1(input.definition);
+    const parsed = submitChangeSetInputSchema.parse(input);
+    return this.write(() => {
+      const mission = this.getRequired(parsed.definition.missionId);
+      if (executionPlanSubjectInputHash(mission) !== parsed.definition.subjectInputHash) {
+        throw new ControlStackError("change_set_input_mismatch", "change set mission inputs do not match");
+      }
+      const head = readChangeSet(this.db, mission.id);
+      const replay = readChangeSetSubmission(this.db, mission.id, parsed.submissionId);
+      if (replay) {
+        if (
+          replay.snapshot.parentManifestHash !== parsed.expectedHeadHash ||
+          replay.createdByActorId !== parsed.createdByActorId ||
+          strictCanonicalJsonV1(replay.snapshot.definition) !== strictCanonicalJsonV1(parsed.definition)
+        ) {
+          throw new ControlStackError("change_set_submission_conflict", "submission identifier already used");
+        }
+        return { value: replay, events: [] };
+      }
+      if (["succeeded", "failed", "cancelled", "rejected", "quarantined"].includes(mission.status)) {
+        throw new ControlStackError("change_set_mission_terminal", "cannot amend a terminal mission");
+      }
+      if ((head?.manifestHash ?? null) !== parsed.expectedHeadHash) {
+        throw new ControlStackError("change_set_revision_conflict", "change set head changed");
+      }
+      this.assertAggregateMissionUnclaimed(mission.id);
+      const now = parsed.now ?? new Date();
+      if (Date.parse(parsed.definition.expiresAt) <= now.getTime()) {
+        throw new ControlStackError("change_set_expired", "change set expiration must be in the future");
+      }
+      const snapshot = {
+        revision: (head?.snapshot.revision ?? 0) + 1,
+        parentManifestHash: head?.manifestHash ?? null,
+        definition: parsed.definition
+      };
+      const manifestHash = changeSetManifestHash(snapshot);
+      const createdAt = now.toISOString();
+      const event = this.appendAuditEvent(
+        createEvent(
+          "change_set.submitted",
+          {
+            missionId: mission.id,
+            revision: snapshot.revision,
+            manifestHash,
+            parentManifestHash: snapshot.parentManifestHash,
+            submissionId: parsed.submissionId,
+            createdByActorId: parsed.createdByActorId,
+            executingActorId: parsed.definition.executingActorId,
+            createdAt
+          },
+          { "work_item.id": mission.id, "change_set.hash": manifestHash }
+        )
+      );
+      const record: ChangeSetRecord = {
+        snapshot,
+        manifestHash,
+        auditEventId: event.id,
+        submissionId: parsed.submissionId,
+        createdByActorId: parsed.createdByActorId,
+        createdAt
+      };
+      insertChangeSetRevision(this.db, record);
+      return { value: record, events: [event] };
+    });
+  }
+
+  getChangeSet(missionId: string, revision?: number): ChangeSetRecord | undefined {
+    return readChangeSet(this.db, missionId, revision);
+  }
+
+  /** A Change Set parent is a control-plane aggregate, never an executable child. */
+  private assertAggregateMissionUnclaimed(missionId: string): void {
+    const mission = this.getRequired(missionId);
+    if (
+      !["draft", "pending_policy", "needs_approval", "approved"].includes(mission.status) ||
+      mission.result !== undefined ||
+      this.db.prepare("SELECT 1 FROM execution_attempts WHERE work_item_id = ? LIMIT 1").get(missionId) ||
+      this.db.prepare("SELECT 1 FROM leases WHERE work_item_id = ? LIMIT 1").get(missionId)
+    )
+      throw new ControlStackError(
+        "change_set_mission_execution_conflict",
+        "aggregate mission already has direct execution state"
+      );
+  }
+
+  getChangeSetProgress(missionId: string, expectedManifestHash?: string): ChangeSetProgress {
+    return this.withTransaction(() => {
+      const mission = this.getRequired(missionId);
+      const record = this.getChangeSet(missionId);
+      if (!record) throw new ControlStackError("change_set_not_found", "mission has no change set");
+      if (expectedManifestHash !== undefined && record.manifestHash !== expectedManifestHash)
+        throw new ControlStackError("change_set_revision_conflict", "mission snapshot changed");
+      try {
+        return readChangeSetProgress(this.db, this, record, mission, resultPayloadHash);
+      } catch (error) {
+        if (error instanceof ControlStackError) throw error;
+        throw new ControlStackError("change_set_progress_integrity_mismatch", "mission execution evidence is invalid");
+      }
+    });
+  }
+
+  completeChangeSetMission(
+    input: {
+      missionId: string;
+      expectedManifestHash: string;
+      executingActorId: string;
+      approvalId?: string;
+      authorizationId?: string;
+    },
+    options: PrivilegedTransitionOptions
+  ): ChangeSetCompletion {
+    requirePrivilegedTransition(options, "complete_change_set");
+    if (options.via !== "policy_gate" || options.actorId !== input.executingActorId)
+      throw new ControlStackError(
+        "change_set_completion_actor_mismatch",
+        "completion requires the bound executing actor"
+      );
+    if (Number(input.approvalId !== undefined) + Number(input.authorizationId !== undefined) !== 1)
+      throw new ControlStackError(
+        "change_set_completion_binding_mismatch",
+        "completion requires exactly one authority"
+      );
+    return this.write(() => {
+      const progress = this.getChangeSetProgress(input.missionId, input.expectedManifestHash);
+      const authorityId = input.approvalId ?? input.authorizationId!;
+      if (progress.completion) {
+        if (
+          progress.completion.executingActorId !== input.executingActorId ||
+          progress.completion.authorityId !== authorityId ||
+          progress.completion.authorityKind !== (input.approvalId ? "human_approval" : "autonomous_grant")
+        )
+          throw new ControlStackError(
+            "change_set_completion_binding_mismatch",
+            "completed mission has different authority"
+          );
+        return { value: progress.completion, events: [] };
+      }
+      this.assertAggregateMissionUnclaimed(input.missionId);
+      const authority = this.requireActiveChangeSetExecutionAuthority(
+        input,
+        input.expectedManifestHash,
+        input.executingActorId
+      );
+      if (authority.missionId !== input.missionId)
+        throw new ControlStackError(
+          "change_set_completion_binding_mismatch",
+          "completion authority belongs to another mission"
+        );
+      if (progress.operations.some((operation) => operation.status !== "succeeded"))
+        throw new ControlStackError(
+          "change_set_completion_pending",
+          "every operation needs an accepted result and verification"
+        );
+      for (const operation of progress.operations) {
+        const permit = this.getChangeSetOperationPermit(operation.permitId!)!;
+        if ((permit.approvalId ?? permit.authorizationId) !== authorityId || permit.policyHash !== authority.policyHash)
+          throw new ControlStackError(
+            "change_set_completion_binding_mismatch",
+            "operation belongs to another authority"
+          );
+      }
+      const completedAt = new Date().toISOString();
+      const core = changeSetCompletionCoreSchema.parse({
+        schemaVersion: "acs.change-set.completion.v1",
+        missionId: input.missionId,
+        manifestHash: input.expectedManifestHash,
+        executingActorId: input.executingActorId,
+        authorityKind: authority.authorityKind,
+        authorityId,
+        policyHash: authority.policyHash,
+        operations: progress.operations,
+        completedAt
+      });
+      const completionHash = changeSetCompletionHash(core);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "change_set.completed",
+          {
+            missionId: core.missionId,
+            manifestHash: core.manifestHash,
+            authorityId,
+            authorityKind: core.authorityKind,
+            policyHash: core.policyHash,
+            completedAt,
+            completionHash
+          },
+          { "work_item.id": core.missionId, "change_set.hash": core.manifestHash, "actor.id": core.executingActorId }
+        )
+      );
+      const completion = { ...core, completionHash, auditEventId: event.id };
+      const changed = this.db
+        .prepare(
+          `UPDATE work_items SET status = 'succeeded', updated_at = ?, result_json = ?
+        WHERE id = ? AND status IN ('draft', 'pending_policy', 'needs_approval', 'approved') AND result_json IS NULL`
+        )
+        .run(completedAt, strictCanonicalJsonV1(completion), core.missionId);
+      if (changed.changes !== 1) throw new ControlStackError("work_item_conflict", "mission changed before completion");
+      return { value: completion, events: [event] };
+    });
+  }
+
+  issueAutonomousAuthority(
+    input: IssueAutonomousAuthorityInput,
+    options: PrivilegedTransitionOptions
+  ): AutonomousAuthorityGrant {
+    requirePrivilegedTransition(options, "issue_autonomous_authority");
+    if (options.via !== "policy_gate" || options.actorId !== input.issuedByActorId)
+      throw new ControlStackError("autonomous_authority_issuer_mismatch", "human issuer provenance required");
+    const body = issueAutonomousAuthorityBodySchema.parse({
+      requestId: input.requestId,
+      expectedSubjectInputHash: input.expectedSubjectInputHash,
+      definition: input.definition,
+      reason: input.reason
+    });
+    if (body.definition.executingActorId === input.issuedByActorId)
+      throw new ControlStackError("autonomous_authority_self_grant", "issuer cannot be the executing actor");
+    return this.write(() => {
+      const mission = this.getRequired(input.missionId);
+      const now = new Date();
+      if (["succeeded", "failed", "cancelled", "rejected", "quarantined"].includes(mission.status))
+        throw new ControlStackError("change_set_mission_terminal", "mission is terminal");
+      if (executionPlanSubjectInputHash(mission) !== body.expectedSubjectInputHash)
+        throw new ControlStackError("change_set_input_mismatch", "grant targets changed mission inputs");
+      if (Date.parse(body.definition.expiresAt) <= now.getTime())
+        throw new ControlStackError("autonomous_authority_expired", "grant expiration must be in the future");
+      const reason = String(redactValue(body.reason));
+      const replay = this.db
+        .prepare("SELECT grant_id FROM autonomous_authority_grants WHERE mission_id = ? AND request_id = ?")
+        .get(mission.id, body.requestId) as { grant_id: string } | undefined;
+      if (replay) {
+        const prior = this.getAutonomousAuthority(replay.grant_id)!;
+        if (
+          prior.issuedByActorId !== input.issuedByActorId ||
+          prior.subjectInputHash !== body.expectedSubjectInputHash ||
+          prior.reason !== reason ||
+          strictCanonicalJsonV1(prior.definition) !== strictCanonicalJsonV1(body.definition)
+        )
+          throw new ControlStackError("autonomous_authority_conflict", "grant request identifier reused");
+        this.requireActiveAutonomousAuthority(prior.grantId, mission.id, body.definition.executingActorId);
+        return { value: prior, events: [] };
+      }
+      const core = autonomousAuthorityCoreSchema.parse({
+        schemaVersion: "acs.autonomous-authority.v1",
+        grantId: createId("authority_grant"),
+        missionId: mission.id,
+        subjectInputHash: body.expectedSubjectInputHash,
+        issuedByActorId: input.issuedByActorId,
+        requestId: body.requestId,
+        definition: body.definition,
+        reason,
+        createdAt: now.toISOString()
+      });
+      const grantHash = autonomousAuthorityHash(core);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "autonomous_authority.issued",
+          {
+            grantId: core.grantId,
+            missionId: mission.id,
+            grantHash,
+            issuedByActorId: core.issuedByActorId,
+            executingActorId: core.definition.executingActorId
+          },
+          { "work_item.id": mission.id, "authority.grant_id": core.grantId, "authority.grant_hash": grantHash }
+        )
+      );
+      const record = { ...core, grantHash, auditEventId: event.id };
+      this.db
+        .prepare("INSERT INTO autonomous_authority_grants VALUES (?, ?, ?, ?, ?, ?)")
+        .run(core.grantId, mission.id, core.requestId, strictCanonicalJsonV1(record), grantHash, event.id);
+      return { value: record, events: [event] };
+    });
+  }
+
+  getAutonomousAuthority(grantId: string): AutonomousAuthorityGrant | undefined {
+    return readAutonomousAuthority(this.db, grantId);
+  }
+
+  requireActiveAutonomousAuthority(
+    grantId: string,
+    missionId: string,
+    executingActorId: string,
+    now = new Date()
+  ): AutonomousAuthorityGrant {
+    return this.withTransaction(() => {
+      const grant = this.getAutonomousAuthority(grantId);
+      if (!grant || grant.missionId !== missionId || grant.definition.executingActorId !== executingActorId)
+        throw new ControlStackError("autonomous_authority_binding_mismatch", "grant identity or mission mismatch");
+      const mission = this.getRequired(missionId);
+      if (executionPlanSubjectInputHash(mission) !== grant.subjectInputHash)
+        throw new ControlStackError("change_set_input_mismatch", "grant targets changed mission inputs");
+      if (["succeeded", "failed", "cancelled", "rejected", "quarantined"].includes(mission.status))
+        throw new ControlStackError("change_set_mission_terminal", "mission is terminal");
+      if (Date.parse(grant.definition.expiresAt) <= now.getTime())
+        throw new ControlStackError("autonomous_authority_expired", "grant expired");
+      if (readAutonomousAuthorityRevocation(this.db, grantId))
+        throw new ControlStackError("autonomous_authority_revoked", "grant revoked");
+      return grant;
+    });
+  }
+
+  revokeAutonomousAuthority(
+    grantId: string,
+    actorId: string,
+    reason: string,
+    options: PrivilegedTransitionOptions
+  ): void {
+    requirePrivilegedTransition(options, "revoke_autonomous_authority");
+    if (options.via !== "policy_gate" || options.actorId !== actorId)
+      throw new ControlStackError("autonomous_authority_issuer_mismatch", "human revocation provenance required");
+    this.write(() => {
+      const grant = this.getAutonomousAuthority(grantId);
+      if (!grant) throw new ControlStackError("autonomous_authority_binding_mismatch", "grant not found");
+      if (readAutonomousAuthorityRevocation(this.db, grantId)) return { value: undefined, events: [] };
+      const safeReason = String(redactValue(requiredString(reason, "reason"))).slice(0, 4000);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "autonomous_authority.revoked",
+          { grantId, actorId, reason: safeReason },
+          { "work_item.id": grant.missionId, "authority.grant_id": grantId }
+        )
+      );
+      this.db
+        .prepare("INSERT INTO autonomous_authority_revocations VALUES (?, ?, ?, ?)")
+        .run(grantId, actorId, safeReason, event.id);
+      return { value: undefined, events: [event] };
+    });
+  }
+
+  authorizeChangeSetWithGrant(
+    input: {
+      grantId: string;
+      missionId: string;
+      expectedManifestHash: string;
+      executingActorId: string;
+      policyHash: string;
+      policyAuditEventId: string;
+    },
+    options: PrivilegedTransitionOptions
+  ): GrantAuthorization {
+    requirePrivilegedTransition(options, "authorize_change_set_with_grant");
+    if (options.via !== "policy_gate" || options.actorId !== input.executingActorId)
+      throw new ControlStackError("autonomous_authority_binding_mismatch", "authorization actor mismatch");
+    return this.write(() => {
+      const grant = this.requireActiveAutonomousAuthority(input.grantId, input.missionId, input.executingActorId);
+      const snapshot = this.getChangeSet(input.missionId);
+      if (!snapshot || snapshot.manifestHash !== input.expectedManifestHash)
+        throw new ControlStackError("change_set_revision_conflict", "Change Set head changed");
+      assertChangeSetWithinGrant(grant, snapshot);
+      if (Date.parse(snapshot.snapshot.definition.expiresAt) <= Date.now())
+        throw new ControlStackError("change_set_expired", "Change Set expired");
+      assertGrantPolicy(this.db, input.policyAuditEventId, input.policyHash, snapshot, input.executingActorId);
+      const replay = this.db
+        .prepare(
+          "SELECT authorization_id FROM change_set_grant_authorizations WHERE grant_id = ? AND manifest_hash = ?"
+        )
+        .get(input.grantId, input.expectedManifestHash) as { authorization_id: string } | undefined;
+      if (replay) {
+        const prior = this.requireActiveGrantAuthorization(
+          replay.authorization_id,
+          input.expectedManifestHash,
+          input.executingActorId
+        );
+        if (prior.policyHash !== input.policyHash)
+          throw new ControlStackError("grant_authorization_policy_mismatch", "authorization policy changed");
+        return { value: prior, events: [] };
+      }
+      const core = grantAuthorizationCoreSchema.parse({
+        schemaVersion: "acs.change-set.grant-authorization.v1",
+        authorizationId: createId("cs_authorization"),
+        grantId: grant.grantId,
+        grantHash: grant.grantHash,
+        missionId: grant.missionId,
+        revision: snapshot.snapshot.revision,
+        manifestHash: snapshot.manifestHash,
+        subjectInputHash: grant.subjectInputHash,
+        executingActorId: input.executingActorId,
+        policyHash: input.policyHash,
+        policyAuditEventId: input.policyAuditEventId,
+        createdAt: new Date().toISOString(),
+        expiresAt: snapshot.snapshot.definition.expiresAt
+      });
+      const authorizationHash = grantAuthorizationHash(core);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "change_set.grant_authorized",
+          {
+            bindingId: core.authorizationId,
+            bindingHash: authorizationHash,
+            manifestHash: core.manifestHash,
+            grantId: grant.grantId,
+            grantHash: grant.grantHash,
+            policyHash: core.policyHash
+          },
+          { "work_item.id": grant.missionId, "change_set.hash": core.manifestHash, "authority.grant_id": grant.grantId }
+        )
+      );
+      const record = { ...core, authorizationHash, auditEventId: event.id };
+      this.db
+        .prepare("INSERT INTO change_set_grant_authorizations VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(
+          core.authorizationId,
+          core.grantId,
+          core.missionId,
+          core.revision,
+          core.manifestHash,
+          strictCanonicalJsonV1(record),
+          authorizationHash,
+          event.id
+        );
+      return { value: record, events: [event] };
+    });
+  }
+
+  getGrantAuthorization(authorizationId: string): GrantAuthorization | undefined {
+    return readGrantAuthorization(this.db, authorizationId);
+  }
+
+  getGrantAuthorizationForGrant(grantId: string, manifestHash: string): GrantAuthorization | undefined {
+    const row = this.db
+      .prepare("SELECT authorization_id FROM change_set_grant_authorizations WHERE grant_id = ? AND manifest_hash = ?")
+      .get(grantId, manifestHash) as { authorization_id: string } | undefined;
+    return row ? this.getGrantAuthorization(row.authorization_id) : undefined;
+  }
+
+  requireActiveGrantAuthorization(
+    authorizationId: string,
+    manifestHash: string,
+    executingActorId: string,
+    now = new Date()
+  ): GrantAuthorization {
+    return this.withTransaction(() => {
+      const authorization = this.getGrantAuthorization(authorizationId);
+      if (
+        !authorization ||
+        authorization.manifestHash !== manifestHash ||
+        authorization.executingActorId !== executingActorId
+      )
+        throw new ControlStackError(
+          "grant_authorization_binding_mismatch",
+          "authorization identity or snapshot mismatch"
+        );
+      const grant = this.requireActiveAutonomousAuthority(
+        authorization.grantId,
+        authorization.missionId,
+        executingActorId,
+        now
+      );
+      const snapshot = this.getChangeSet(authorization.missionId);
+      if (!snapshot || snapshot.manifestHash !== manifestHash)
+        throw new ControlStackError("grant_authorization_superseded", "authorization snapshot superseded");
+      assertChangeSetWithinGrant(grant, snapshot);
+      if (Date.parse(authorization.expiresAt) <= now.getTime())
+        throw new ControlStackError("grant_authorization_expired", "authorization expired");
+      return authorization;
+    });
+  }
+
+  requireActiveChangeSetExecutionAuthority(
+    reference: { approvalId?: string; authorizationId?: string },
+    manifestHash: string,
+    executingActorId?: string,
+    now = new Date()
+  ): ChangeSetExecutionAuthority {
+    return this.withTransaction(() => {
+      if ((reference.approvalId === undefined) === (reference.authorizationId === undefined))
+        throw new ControlStackError("change_set_permit_authority_mismatch", "exactly one authority reference required");
+      if (reference.approvalId !== undefined) {
+        const record = this.getChangeSetApproval(reference.approvalId);
+        if (!record) throw new ControlStackError("change_set_permit_authority_mismatch", "approval not found");
+        this.requireActiveChangeSetApproval(
+          record.approvalId,
+          manifestHash,
+          executingActorId ?? record.executingActorId,
+          now
+        );
+        return {
+          authorityId: record.approvalId,
+          authorityKind: "human_approval",
+          missionId: record.missionId,
+          revision: record.revision,
+          manifestHash: record.manifestHash,
+          executingActorId: record.executingActorId,
+          humanIssuerActorId: record.approvedByActorId,
+          policyActorId: record.approvedByActorId,
+          policyHash: record.policyHash,
+          policyAuditEventId: record.policyAuditEventId,
+          expiresAt: record.expiresAt
+        };
+      }
+      const record = this.getGrantAuthorization(reference.authorizationId!);
+      if (!record) throw new ControlStackError("grant_authorization_binding_mismatch", "authorization not found");
+      this.requireActiveGrantAuthorization(
+        record.authorizationId,
+        manifestHash,
+        executingActorId ?? record.executingActorId,
+        now
+      );
+      const grant = this.requireActiveAutonomousAuthority(
+        record.grantId,
+        record.missionId,
+        record.executingActorId,
+        now
+      );
+      return {
+        authorityId: record.authorizationId,
+        authorityKind: "autonomous_grant",
+        missionId: record.missionId,
+        revision: record.revision,
+        manifestHash: record.manifestHash,
+        executingActorId: record.executingActorId,
+        humanIssuerActorId: grant.issuedByActorId,
+        policyActorId: record.executingActorId,
+        policyHash: record.policyHash,
+        policyAuditEventId: record.policyAuditEventId,
+        expiresAt: record.expiresAt,
+        grant
+      };
+    });
+  }
+
+  getChangeSetApproval(approvalId: string): ChangeSetApproval | undefined {
+    return readChangeSetApproval(this.db, approvalId);
+  }
+  getChangeSetApprovalByRequest(missionId: string, requestId: string): ChangeSetApproval | undefined {
+    return readChangeSetApprovalByRequest(this.db, missionId, requestId);
+  }
+
+  grantChangeSetApproval(input: GrantChangeSetApproval, options: PrivilegedTransitionOptions): ChangeSetApproval {
+    requirePrivilegedTransition(options, "grant_change_set_approval");
+    const parsed = grantChangeSetApprovalSchema.parse(input);
+    if (options.via !== "policy_gate" || options.actorId !== parsed.approvedByActorId)
+      throw new ControlStackError(
+        "change_set_approval_authority_mismatch",
+        "approval requires bound Policy Gate authority"
+      );
+    return this.write(() => {
+      const snapshot = this.getChangeSet(parsed.missionId);
+      const mission = this.getRequired(parsed.missionId);
+      const now = new Date();
+      if (!snapshot || snapshot.manifestHash !== parsed.expectedManifestHash)
+        throw new ControlStackError("change_set_revision_conflict", "change set head changed");
+      if (snapshot.snapshot.definition.subjectInputHash !== executionPlanSubjectInputHash(mission))
+        throw new ControlStackError("change_set_input_mismatch", "mission inputs changed");
+      if (["succeeded", "failed", "cancelled", "rejected", "quarantined"].includes(mission.status))
+        throw new ControlStackError("change_set_mission_terminal", "mission is terminal");
+      if (
+        Date.parse(parsed.expiresAt) <= now.getTime() ||
+        Date.parse(parsed.expiresAt) > Date.parse(snapshot.snapshot.definition.expiresAt)
+      )
+        throw new ControlStackError("change_set_approval_expired", "approval expiry is outside snapshot lifetime");
+      const policy = readVerifiedChangeSetAuthorityEvent(this.db, parsed.policyAuditEventId);
+      const decision = policy.body.decision as { decision?: string } | undefined;
+      const operations = policy.body.operations as
+        Array<{ operationId?: string; decision?: { decision?: string } }> | undefined;
+      if (
+        policy.name !== "change_set.policy_evaluated" ||
+        changeSetPolicyHash(policy.body) !== parsed.policyHash ||
+        policy.body.missionId !== parsed.missionId ||
+        policy.body.manifestHash !== parsed.expectedManifestHash ||
+        policy.body.revision !== snapshot.snapshot.revision ||
+        policy.body.actorId !== parsed.approvedByActorId ||
+        !["allow", "require_approval"].includes(decision?.decision ?? "") ||
+        !Array.isArray(operations) ||
+        operations.length !== snapshot.snapshot.definition.operations.length ||
+        operations.some(
+          (operation, index) =>
+            operation.operationId !== snapshot.snapshot.definition.operations[index]?.operationId ||
+            !["allow", "require_approval"].includes(operation.decision?.decision ?? "")
+        )
+      )
+        throw new ControlStackError(
+          "change_set_approval_policy_mismatch",
+          "approval policy does not match current snapshot"
+        );
+      if (
+        operations.some((operation) => operation.decision?.decision === "require_approval") &&
+        [mission.requesterSubject, snapshot.createdByActorId, snapshot.snapshot.definition.executingActorId].includes(
+          parsed.approvedByActorId
+        )
+      )
+        throw new ControlStackError("change_set_self_approval", "restricted bundle cannot be self-approved");
+      const reason = String(redactValue(parsed.reason));
+      const replay = this.getChangeSetApprovalByRequest(parsed.missionId, parsed.requestId);
+      if (replay) {
+        if (
+          replay.manifestHash !== parsed.expectedManifestHash ||
+          replay.policyHash !== parsed.policyHash ||
+          replay.approvedByActorId !== parsed.approvedByActorId ||
+          replay.reason !== reason ||
+          replay.expiresAt !== parsed.expiresAt
+        )
+          throw new ControlStackError("change_set_approval_conflict", "approval request identifier reused");
+        this.requireActiveChangeSetApproval(replay.approvalId, replay.manifestHash, replay.executingActorId);
+        return { value: replay, events: [] };
+      }
+      const core = changeSetApprovalCoreSchema.parse({
+        schemaVersion: "acs.change-set.approval.v1",
+        approvalId: createId("cs_approval"),
+        missionId: parsed.missionId,
+        revision: snapshot.snapshot.revision,
+        manifestHash: snapshot.manifestHash,
+        requestId: parsed.requestId,
+        approvedByActorId: parsed.approvedByActorId,
+        executingActorId: snapshot.snapshot.definition.executingActorId,
+        subjectInputHash: snapshot.snapshot.definition.subjectInputHash,
+        policyHash: parsed.policyHash,
+        policyAuditEventId: parsed.policyAuditEventId,
+        reason,
+        createdAt: now.toISOString(),
+        expiresAt: parsed.expiresAt
+      });
+      const approvalHash = changeSetApprovalHash(core);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "change_set.approved",
+          {
+            approvalId: core.approvalId,
+            missionId: core.missionId,
+            manifestHash: core.manifestHash,
+            approvedByActorId: core.approvedByActorId,
+            approvalHash,
+            policyHash: core.policyHash
+          },
+          { "work_item.id": core.missionId, "change_set.hash": core.manifestHash }
+        )
+      );
+      const record: ChangeSetApproval = { ...core, approvalHash, auditEventId: event.id };
+      this.db
+        .prepare(
+          `INSERT INTO change_set_approvals
+        (approval_id, mission_id, revision, manifest_hash, request_id, record_json, approval_hash, audit_event_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          core.approvalId,
+          core.missionId,
+          core.revision,
+          core.manifestHash,
+          core.requestId,
+          strictCanonicalJsonV1(record),
+          approvalHash,
+          event.id
+        );
+      return { value: record, events: [event] };
+    });
+  }
+
+  requireActiveChangeSetApproval(
+    approvalId: string,
+    manifestHash: string,
+    executingActorId: string,
+    now = new Date()
+  ): ChangeSetApproval {
+    return this.withTransaction(() => {
+      const approval = this.getChangeSetApproval(approvalId);
+      if (!approval || approval.manifestHash !== manifestHash || approval.executingActorId !== executingActorId)
+        throw new ControlStackError("change_set_approval_binding_mismatch", "approval binding mismatch");
+      const snapshot = this.getChangeSet(approval.missionId);
+      const mission = this.getRequired(approval.missionId);
+      if (!snapshot || snapshot.manifestHash !== manifestHash || snapshot.snapshot.revision !== approval.revision)
+        throw new ControlStackError("change_set_approval_superseded", "approval snapshot superseded");
+      if (approval.subjectInputHash !== executionPlanSubjectInputHash(mission))
+        throw new ControlStackError("change_set_input_mismatch", "mission inputs changed");
+      if (["succeeded", "failed", "cancelled", "rejected", "quarantined"].includes(mission.status))
+        throw new ControlStackError("change_set_mission_terminal", "mission is terminal");
+      if (
+        Date.parse(approval.expiresAt) <= now.getTime() ||
+        Date.parse(snapshot.snapshot.definition.expiresAt) <= now.getTime()
+      )
+        throw new ControlStackError("change_set_approval_expired", "approval expired");
+      if (readChangeSetApprovalRevocation(this.db, approvalId))
+        throw new ControlStackError("change_set_approval_revoked", "approval revoked");
+      return approval;
+    });
+  }
+
+  revokeChangeSetApproval(
+    approvalId: string,
+    actorId: string,
+    reason: string,
+    options: PrivilegedTransitionOptions
+  ): void {
+    requirePrivilegedTransition(options, "revoke_change_set_approval");
+    if (options.via !== "policy_gate" || options.actorId !== actorId)
+      throw new ControlStackError(
+        "change_set_approval_authority_mismatch",
+        "revocation requires bound Policy Gate authority"
+      );
+    this.write(() => {
+      const approval = this.getChangeSetApproval(approvalId);
+      if (!approval) throw new ControlStackError("change_set_approval_binding_mismatch", "approval not found");
+      if (readChangeSetApprovalRevocation(this.db, approvalId)) return { value: undefined, events: [] };
+      const safeReason = String(redactValue(requiredString(reason, "reason"))).slice(0, 4_000);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "change_set.approval_revoked",
+          { approvalId, actorId, reason: safeReason },
+          { "work_item.id": approval.missionId }
+        )
+      );
+      this.db
+        .prepare("INSERT INTO change_set_approval_revocations VALUES (?, ?, ?, ?)")
+        .run(approvalId, actorId, safeReason, event.id);
+      return { value: undefined, events: [event] };
+    });
+  }
+
+  getChangeSetOperationPermit(permitId: string): ChangeSetOperationPermit | undefined {
+    return readChangeSetOperationPermit(this.db, permitId);
+  }
+
+  getChangeSetOperationPermitForOperation(
+    missionId: string,
+    manifestHash: string,
+    operationId: string
+  ): ChangeSetOperationPermit | undefined {
+    const row = this.db
+      .prepare(
+        "SELECT permit_id FROM change_set_operation_permits WHERE mission_id = ? AND manifest_hash = ? AND operation_id = ?"
+      )
+      .get(missionId, manifestHash, operationId) as { permit_id: string } | undefined;
+    return row ? this.getChangeSetOperationPermit(row.permit_id) : undefined;
+  }
+
+  bindChangeSetOperationPermit(
+    input: BindChangeSetOperationPermit,
+    options: PrivilegedTransitionOptions
+  ): ChangeSetOperationPermit {
+    requirePrivilegedTransition(options, "bind_change_set_operation_permit");
+    if (options.via !== "policy_gate")
+      throw new ControlStackError("change_set_permit_authority_mismatch", "operation requires Policy Gate authority");
+    return this.write(() => {
+      const approval = this.requireActiveChangeSetExecutionAuthority(input, input.manifestHash, options.actorId);
+      if (approval.missionId !== input.missionId || approval.policyHash !== input.policyHash)
+        throw new ControlStackError("change_set_permit_authority_mismatch", "approval policy binding mismatch");
+      const snapshot = this.getChangeSet(input.missionId)!;
+      const operation = snapshot.snapshot.definition.operations.find((op) => op.operationId === input.operationId);
+      const policyEvent = readVerifiedChangeSetAuthorityEvent(this.db, approval.policyAuditEventId);
+      const policyOperation = (
+        policyEvent.body.operations as Array<{ operationId: string; invocationHash: string }>
+      ).find((op) => op.operationId === input.operationId);
+      const child = this.getRequired(input.executionWorkItemId);
+      const params = child.requestedActions[0]?.params;
+      if (
+        !operation ||
+        operation.runtime !== input.runtime ||
+        operation.toolName !== input.toolName ||
+        policyOperation?.invocationHash !== input.invocationHash ||
+        child.id === input.missionId ||
+        child.requesterSubject !== approval.executingActorId ||
+        child.requestedActions.length !== 1 ||
+        params?.invocationHash !== input.invocationHash ||
+        params?.tool !== input.toolName ||
+        strictCanonicalJsonV1(params?.changeSetBinding) !==
+          strictCanonicalJsonV1({
+            missionId: input.missionId,
+            manifestHash: input.manifestHash,
+            operationId: input.operationId,
+            ...(input.approvalId ? { approvalId: input.approvalId } : { authorizationId: input.authorizationId })
+          }) ||
+        options.actorId !== approval.executingActorId ||
+        this.getWorkItemAssignment(child.id)?.selectedWorkerId !== input.workerId ||
+        child.status !== "approved"
+      )
+        throw new ControlStackError("change_set_permit_binding_mismatch", "operation execution binding mismatch");
+      const existing = this.getChangeSetOperationPermitForOperation(
+        input.missionId,
+        input.manifestHash,
+        input.operationId
+      );
+      if (existing) {
+        if (
+          existing.executionWorkItemId !== child.id ||
+          existing.approvalId !== input.approvalId ||
+          existing.authorizationId !== input.authorizationId
+        )
+          throw new ControlStackError("change_set_permit_conflict", "operation already has a canonical execution");
+        return { value: existing, events: [] };
+      }
+      const first = this.db
+        .prepare(
+          "SELECT permit_id FROM change_set_operation_permits WHERE mission_id = ? AND manifest_hash = ? ORDER BY rowid ASC LIMIT 1"
+        )
+        .get(input.missionId, input.manifestHash) as { permit_id: string } | undefined;
+      const createdAt = new Date().toISOString();
+      let grantStartedAt = createdAt;
+      if (approval.grant) {
+        const usage = this.db
+          .prepare(
+            `SELECT p.permit_id FROM change_set_operation_permits p
+          JOIN change_set_grant_authorizations a ON a.authorization_id = p.authorization_id
+          WHERE a.grant_id = ? ORDER BY p.rowid ASC`
+          )
+          .all(approval.grant.grantId) as { permit_id: string }[];
+        if (usage.length >= approval.grant.definition.limits.maxOperations)
+          throw new ControlStackError("autonomous_authority_budget_exhausted", "grant operation budget exhausted");
+        if (usage[0]) grantStartedAt = this.getChangeSetOperationPermit(usage[0].permit_id)!.createdAt;
+      }
+      const missionStartedAt = first ? this.getChangeSetOperationPermit(first.permit_id)!.createdAt : createdAt;
+      const expiresAt = new Date(
+        Math.min(
+          Date.parse(approval.expiresAt),
+          Date.parse(missionStartedAt) + snapshot.snapshot.definition.constraints.maxRuntimeMs,
+          approval.grant ? Date.parse(grantStartedAt) + approval.grant.definition.limits.maxRuntimeMs : Infinity
+        )
+      ).toISOString();
+      if (Date.parse(expiresAt) <= Date.parse(createdAt))
+        throw new ControlStackError("change_set_permit_expired", "mission execution time budget exhausted");
+      const core = changeSetOperationPermitCoreSchema.parse({
+        ...input,
+        schemaVersion: input.authorizationId
+          ? "acs.change-set.operation-permit.v2"
+          : "acs.change-set.operation-permit.v1",
+        permitId: createId("cs_permit"),
+        revision: snapshot.snapshot.revision,
+        executingActorId: approval.executingActorId,
+        executionInputHash: executionPlanSubjectInputHash(child),
+        createdAt,
+        expiresAt
+      });
+      const permitHash = changeSetOperationPermitHash(core);
+      const event = this.appendAuditEvent(
+        createEvent(
+          "change_set.operation_permitted",
+          {
+            permitId: core.permitId,
+            permitHash,
+            missionId: core.missionId,
+            manifestHash: core.manifestHash,
+            operationId: core.operationId,
+            ...(core.approvalId ? { approvalId: core.approvalId } : { bindingId: core.authorizationId }),
+            executionWorkItemId: core.executionWorkItemId
+          },
+          { "work_item.id": core.missionId, "change_set.hash": core.manifestHash, "execution.work_item_id": child.id }
+        )
+      );
+      const record = { ...core, permitHash, auditEventId: event.id };
+      this.db
+        .prepare(`INSERT INTO change_set_operation_permits VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+        .run(
+          core.permitId,
+          core.missionId,
+          core.revision,
+          core.manifestHash,
+          core.operationId,
+          core.approvalId ?? null,
+          core.authorizationId ?? null,
+          child.id,
+          strictCanonicalJsonV1(record),
+          permitHash,
+          event.id
+        );
+      return { value: record, events: [event] };
+    });
+  }
+
+  requireActiveChangeSetOperationPermit(
+    workItemId: string,
+    workerId?: string,
+    now = new Date()
+  ): ChangeSetOperationPermit | undefined {
+    return this.withTransaction(() => {
+      const child = this.getRequired(workItemId);
+      const row = this.db
+        .prepare("SELECT permit_id FROM change_set_operation_permits WHERE execution_work_item_id = ?")
+        .get(workItemId) as { permit_id: string } | undefined;
+      const marker = child.requestedActions[0]?.params.changeSetBinding;
+      if (!row && !marker) {
+        const retained = this.db
+          .prepare(
+            `SELECT id FROM audit_events WHERE name = 'change_set.operation_permitted'
+          AND CASE WHEN json_valid(body) THEN json_extract(body, '$.executionWorkItemId') = ? ELSE 1 END LIMIT 1`
+          )
+          .get(workItemId);
+        if (retained)
+          throw new ControlStackError("change_set_permit_integrity_mismatch", "operation permit projection missing");
+        return undefined;
+      }
+      if (!row) throw new ControlStackError("change_set_permit_integrity_mismatch", "operation permit missing");
+      const permit = this.getChangeSetOperationPermit(row.permit_id)!;
+      if (
+        !marker ||
+        permit.executionWorkItemId !== workItemId ||
+        permit.executionInputHash !== executionPlanSubjectInputHash(child) ||
+        (workerId !== undefined && permit.workerId !== workerId)
+      )
+        throw new ControlStackError("change_set_permit_binding_mismatch", "operation execution binding changed");
+      const approval = this.requireActiveChangeSetExecutionAuthority(
+        permit,
+        permit.manifestHash,
+        permit.executingActorId,
+        now
+      );
+      if (
+        approval.policyHash !== permit.policyHash ||
+        approval.missionId !== permit.missionId ||
+        approval.revision !== permit.revision ||
+        Date.parse(permit.expiresAt) > Date.parse(approval.expiresAt)
+      )
+        throw new ControlStackError("change_set_permit_integrity_mismatch", "operation authority binding changed");
+      if (Date.parse(permit.expiresAt) <= now.getTime())
+        throw new ControlStackError("change_set_permit_expired", "mission execution time budget exhausted");
+      const snapshot = this.getChangeSet(permit.missionId)!;
+      const operation = snapshot.snapshot.definition.operations.find((op) => op.operationId === permit.operationId);
+      if (!operation || operation.runtime !== permit.runtime || operation.toolName !== permit.toolName)
+        throw new ControlStackError("change_set_permit_binding_mismatch", "operation no longer exists");
+      // Verified once per transaction and reused for every dependency. Progress
+      // reconstruction is a deep integrity check, so calling it per dependency made
+      // claim/lease/renew cost grow with the dependency fan-out. Everything here runs
+      // inside this transaction's single database snapshot, so the shared result is
+      // never stale with respect to a later mutation.
+      const dependencyProgress =
+        operation.dependsOn.length > 0 ? this.getChangeSetProgress(permit.missionId, permit.manifestHash) : undefined;
+      for (const dependency of operation.dependsOn) {
+        const previous = this.getChangeSetOperationPermitForOperation(
+          permit.missionId,
+          permit.manifestHash,
+          dependency
+        );
+        if (
+          !previous ||
+          dependencyProgress!.operations.find((entry) => entry.operationId === dependency)?.status !== "succeeded"
+        )
+          throw new ControlStackError("change_set_dependency_pending", "operation dependency has not succeeded");
+      }
+      const siblings = this.db
+        .prepare(
+          `SELECT execution_work_item_id FROM change_set_operation_permits
+        WHERE mission_id = ? AND manifest_hash = ? AND execution_work_item_id <> ?`
+        )
+        .all(permit.missionId, permit.manifestHash, workItemId) as Array<{ execution_work_item_id: string }>;
+      const states = siblings.map((sibling) => this.getRequired(sibling.execution_work_item_id).status);
+      if (
+        snapshot.snapshot.definition.constraints.failureBehavior === "stop" &&
+        states.some((state) => ["failed", "cancelled", "rejected", "quarantined"].includes(state))
+      )
+        throw new ControlStackError("change_set_execution_stopped", "sibling operation failed or was cancelled");
+      if (
+        states.filter((state) => ["running", "verifying"].includes(state)).length >=
+        snapshot.snapshot.definition.constraints.maxParallelOperations
+      )
+        throw new ControlStackError("change_set_parallel_limit", "bundle concurrency limit reached");
+      if (approval.grant) {
+        const active = this.db
+          .prepare(
+            `SELECT count(*) AS n FROM change_set_operation_permits p
+          JOIN change_set_grant_authorizations a ON a.authorization_id = p.authorization_id
+          JOIN work_items w ON w.id = p.execution_work_item_id
+          WHERE a.grant_id = ? AND w.id <> ? AND w.status IN ('running','verifying')`
+          )
+          .get(approval.grant.grantId, workItemId) as { n: number };
+        if (active.n >= approval.grant.definition.limits.maxParallelOperations)
+          throw new ControlStackError("autonomous_authority_parallel_limit", "grant concurrency limit reached");
+      }
+      return permit;
+    });
+  }
+
+  assignWorkItem(input: AssignWorkItemInput, options: PrivilegedTransitionOptions): WorkItemAssignment {
+    requirePrivilegedTransition(options, "assign_work_item");
+    const parsed = assignWorkItemInputSchema.parse(input);
+    if (options.actorId && options.actorId !== parsed.assignedByActorId) {
+      throw new ControlStackError("work_item_assignment_actor_mismatch", "assignment actor does not match authority");
+    }
+    return this.write(() => {
+      const item = this.getRequired(parsed.workItemId);
+      if (!["draft", "pending_policy", "needs_approval", "approved", "blocked"].includes(item.status)) {
+        throw new ControlStackError(
+          "work_item_assignment_state_invalid",
+          "work item cannot be assigned in its current state"
+        );
+      }
+      const assignment = workItemAssignmentSchema.parse({
+        workItemId: parsed.workItemId,
+        selectedWorkerId: parsed.selectedWorkerId,
+        selectedAgentId: parsed.selectedAgentId,
+        routingDecisionId: parsed.routingDecisionId,
+        assignedByActorId: parsed.assignedByActorId,
+        assignedAt: (parsed.now ?? new Date()).toISOString()
+      });
+      this.db
+        .prepare(
+          `INSERT INTO work_item_assignments
+        (work_item_id, selected_worker_id, selected_agent_id, routing_decision_id, assigned_by_actor_id, assigned_at)
+        VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(work_item_id) DO UPDATE SET
+        selected_worker_id = excluded.selected_worker_id, selected_agent_id = excluded.selected_agent_id,
+        routing_decision_id = excluded.routing_decision_id, assigned_by_actor_id = excluded.assigned_by_actor_id, assigned_at = excluded.assigned_at`
+        )
+        .run(
+          assignment.workItemId,
+          assignment.selectedWorkerId,
+          assignment.selectedAgentId ?? null,
+          assignment.routingDecisionId ?? null,
+          assignment.assignedByActorId,
+          assignment.assignedAt
+        );
+      const event = this.appendAuditEvent(
+        createEvent(
+          "work_item.assigned",
+          { ...assignment },
+          { "work_item.id": item.id, "actor.id": assignment.assignedByActorId }
+        )
+      );
+      return { value: assignment, events: [event] };
+    });
+  }
+
+  getWorkItemAssignment(workItemId: string): WorkItemAssignment | undefined {
+    const row = this.db.prepare("SELECT * FROM work_item_assignments WHERE work_item_id = ?").get(workItemId) as
+      | {
+          work_item_id: string;
+          selected_worker_id: string;
+          selected_agent_id: string | null;
+          routing_decision_id: string | null;
+          assigned_by_actor_id: string;
+          assigned_at: string;
+        }
+      | undefined;
+    return row
+      ? workItemAssignmentSchema.parse({
+          workItemId: row.work_item_id,
+          selectedWorkerId: row.selected_worker_id,
+          selectedAgentId: row.selected_agent_id ?? undefined,
+          routingDecisionId: row.routing_decision_id ?? undefined,
+          assignedByActorId: row.assigned_by_actor_id,
+          assignedAt: row.assigned_at
+        })
+      : undefined;
+  }
+
+  findNextApprovedWorkItemForWorker(workerId: string): WorkItem | undefined {
+    const mode = this.db.prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`).get() as
+      { mode?: string } | undefined;
+    const rows = this.db
+      .prepare(
+        `SELECT w.* FROM work_items w
+         LEFT JOIN work_item_assignments a ON a.work_item_id = w.id
+         WHERE w.status = 'approved'
+           AND (a.work_item_id IS NULL OR a.selected_worker_id = ?)
+           AND NOT EXISTS (SELECT 1 FROM change_set_heads c WHERE c.mission_id = w.id)
+           AND NOT EXISTS (
+             SELECT 1 FROM json_each(w.requested_actions_json) action
+             WHERE json_extract(action.value, '$.params.contract') = 'acs.jc.v1'
+           )
+           AND (
+             NOT EXISTS (
+               SELECT 1 FROM json_each(w.target_json, '$.services') service
+               JOIN agents agent ON agent.id = service.value
+             )
+             OR EXISTS (
+               SELECT 1 FROM json_each(w.target_json, '$.services') service
+               JOIN agents agent ON agent.id = service.value
+               WHERE agent.id = ?
+             )
+           )
+         ORDER BY w.created_at ASC, w.id ASC`
+      )
+      .all(workerId, workerId) as unknown as WorkItemRow[];
+    for (const row of rows) {
+      const item = rowToWorkItem(row);
+      if (
+        mode?.mode !== "admin" &&
+        (this.hasGrantedApprovalBy(item.id, "acs:admin") ||
+          this.hasGrantedExecutionPlanApprovalBy(item.id, "acs:admin"))
+      ) {
+        continue;
+      }
+      return item;
+    }
+    return undefined;
   }
 
   get(id: string): WorkItem | undefined {
@@ -1940,11 +3257,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
       const nextEpoch = attemptRow.current_fencing_epoch + 1;
       const now = (parsed.now ?? new Date()).toISOString();
-      const expiresAt = new Date(Date.parse(now) + parsed.ttlMs).toISOString();
       // Renewal is useless if max equals the initial TTL. Default the ceiling to
       // at least one hour (still capped by issueLeaseInputSchema's 24h max).
-      const maxTtlMs = parsed.maxTtlMs ?? Math.max(parsed.ttlMs, 60 * 60 * 1_000);
+      const operationPermit = this.requireActiveChangeSetOperationPermit(
+        parsed.workItemId,
+        parsed.workerId,
+        new Date(now)
+      );
+      const authorityRemainingMs = operationPermit ? Date.parse(operationPermit.expiresAt) - Date.parse(now) : Infinity;
+      const maxTtlMs = Math.min(parsed.maxTtlMs ?? Math.max(parsed.ttlMs, 60 * 60 * 1_000), authorityRemainingMs);
       const maxExpiresAt = new Date(Date.parse(now) + maxTtlMs).toISOString();
+      const expiresAt = new Date(Date.parse(now) + Math.min(parsed.ttlMs, maxTtlMs)).toISOString();
       const events: StoredAuditEvent[] = [];
 
       // One active lease per attempt is a DB invariant. Re-leasing an interrupted
@@ -2098,6 +3421,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
     const parsed = renewAttemptLeaseInputSchema.parse(input);
     return this.write(() => {
       const nowDate = parsed.now ?? new Date();
+      this.requireActiveChangeSetOperationPermit(parsed.workItemId, parsed.workerId, nowDate);
       const now = nowDate.toISOString();
       const nowMs = Date.parse(now);
       const row = this.db
@@ -2370,21 +3694,43 @@ export class SqliteWorkItemStore implements WorkItemStore {
       const existing = this.db
         .prepare(`SELECT * FROM recovery_records WHERE idempotency_key = ?`)
         .get(parsed.idempotencyKey) as unknown as RecoveryRow | undefined;
-      if (existing)
+      if (existing) {
+        if (
+          existing.attempt_id !== parsed.attemptId ||
+          existing.work_item_id !== parsed.workItemId ||
+          existing.decision !== parsed.decision ||
+          existing.retry_allowed !== Number(parsed.retryAllowed) ||
+          existing.reason !== parsed.reason ||
+          (existing.retry_after_ms ?? undefined) !== parsed.retryAfterMs
+        )
+          throw new ControlStackError(
+            "recovery_submission_conflict",
+            "recovery key belongs to different evidence or decision"
+          );
         return {
-          value: recoveryRecordSchema.parse({
-            recordId: existing.record_id,
-            attemptId: existing.attempt_id,
-            workItemId: existing.work_item_id,
-            decision: existing.decision,
-            retryAllowed: existing.retry_allowed === 1,
-            reason: existing.reason,
-            ...(existing.retry_after_ms === null ? {} : { retryAfterMs: existing.retry_after_ms }),
-            idempotencyKey: existing.idempotency_key,
-            createdAt: existing.created_at
-          }),
+          value: this.readVerifiedRecoveryRecord(existing),
           events: []
         };
+      }
+      const attempt = this.getAttempt(parsed.attemptId);
+      if (!attempt || attempt.workItemId !== parsed.workItemId)
+        throw new ControlStackError(
+          "recovery_attempt_binding_mismatch",
+          "recovery attempt belongs to another work item"
+        );
+      if (parsed.retryAllowed !== (parsed.decision === "retryable"))
+        throw new ControlStackError("recovery_decision_mismatch", "retry permission must match the recovery decision");
+      if (
+        parsed.retryAllowed &&
+        (attempt.status !== "pending" ||
+          attempt.currentFencingEpoch !== 0 ||
+          attempt.startedAt !== undefined ||
+          this.getActiveLeaseForAttempt(attempt.attemptId) !== undefined)
+      )
+        throw new ControlStackError(
+          "recovery_execution_uncertain",
+          "only an unleased, unstarted attempt can be marked retryable"
+        );
       const recordId = createId("recovery");
       const createdAt = (parsed.now ?? new Date()).toISOString();
       this.db
@@ -2402,7 +3748,9 @@ export class SqliteWorkItemStore implements WorkItemStore {
           parsed.idempotencyKey,
           createdAt
         );
-      const record = recoveryRecordSchema.parse({ ...parsed, recordId, createdAt });
+      const { now: _recoveryClock, ...decision } = parsed;
+      void _recoveryClock;
+      const record = recoveryRecordSchema.parse({ ...decision, recordId, createdAt });
       const event = this.appendAuditEvent(
         createEvent("attempt.recovery_decision.recorded", record, {
           "attempt.id": record.attemptId,
@@ -2417,19 +3765,37 @@ export class SqliteWorkItemStore implements WorkItemStore {
     const row = this.db
       .prepare(`SELECT * FROM recovery_records WHERE attempt_id = ? ORDER BY created_at DESC LIMIT 1`)
       .get(attemptId) as unknown as RecoveryRow | undefined;
-    return row
-      ? recoveryRecordSchema.parse({
-          recordId: row.record_id,
-          attemptId: row.attempt_id,
-          workItemId: row.work_item_id,
-          decision: row.decision,
-          retryAllowed: row.retry_allowed === 1,
-          reason: row.reason,
-          ...(row.retry_after_ms === null ? {} : { retryAfterMs: row.retry_after_ms }),
-          idempotencyKey: row.idempotency_key,
-          createdAt: row.created_at
-        })
-      : undefined;
+    return row ? this.readVerifiedRecoveryRecord(row) : undefined;
+  }
+
+  private readVerifiedRecoveryRecord(row: RecoveryRow): RecoveryRecord {
+    try {
+      const record = recoveryRecordSchema.parse({
+        recordId: row.record_id,
+        attemptId: row.attempt_id,
+        workItemId: row.work_item_id,
+        decision: row.decision,
+        retryAllowed: row.retry_allowed === 1,
+        reason: row.reason,
+        ...(row.retry_after_ms === null ? {} : { retryAfterMs: row.retry_after_ms }),
+        idempotencyKey: row.idempotency_key,
+        createdAt: row.created_at
+      });
+      const attempt = this.getAttempt(record.attemptId);
+      const events = this.db
+        .prepare(
+          "SELECT id FROM audit_events WHERE name = 'attempt.recovery_decision.recorded' AND json_extract(body, '$.recordId') = ?"
+        )
+        .all(record.recordId) as { id: string }[];
+      if (!attempt || attempt.workItemId !== record.workItemId || events.length !== 1)
+        throw new Error("recovery provenance missing");
+      const event = readVerifiedChangeSetAuthorityEvent(this.db, events[0]!.id);
+      if (strictCanonicalJsonV1(event.body) !== strictCanonicalJsonV1(record))
+        throw new Error("recovery evidence changed");
+      return record;
+    } catch {
+      throw new ControlStackError("recovery_integrity_mismatch", "persisted recovery evidence is invalid");
+    }
   }
 
   // === ADR 0015 governance projections ===================================
@@ -2668,6 +4034,7 @@ export class SqliteWorkItemStore implements WorkItemStore {
           {
             "work_item.id": parsed.workItemId,
             "attempt.id": parsed.attemptId,
+            ...(options.actorId ? { "actor.id": options.actorId } : {}),
             "review.reviewer_principal_id": parsed.reviewerPrincipalId,
             "review.verdict": parsed.verdict,
             "review.evidence_manifest_hash": parsed.evidenceManifestHash,
@@ -2948,6 +4315,111 @@ export class SqliteWorkItemStore implements WorkItemStore {
       : undefined;
   }
 
+  reviewChangeSetOperation(
+    workItemId: string,
+    input: ChangeSetReviewInput,
+    options: PrivilegedTransitionOptions
+  ): ReviewFindingProjection {
+    requirePrivilegedTransition(options, "review_change_set_operation");
+    const parsed = changeSetReviewBodySchema.parse(input);
+    return this.write(() => {
+      const attempt = this.getAttempt(parsed.attemptId);
+      const permitRow = this.db
+        .prepare("SELECT permit_id FROM change_set_operation_permits WHERE execution_work_item_id = ?")
+        .get(workItemId) as { permit_id: string } | undefined;
+      const permit = permitRow ? this.getChangeSetOperationPermit(permitRow.permit_id) : undefined;
+      if (!attempt || attempt.workItemId !== workItemId || attempt.status !== "succeeded" || !permit)
+        throw new ControlStackError(
+          "change_set_review_result_missing",
+          "review requires a durably observed successful result"
+        );
+      if (!options.actorId || [permit.executingActorId, attempt.claimedByWorkerId].includes(options.actorId))
+        throw new ControlStackError(
+          "change_set_review_self_approval",
+          "executor cannot independently review its own work"
+        );
+      // Reconstruct accepted result and lease integrity before trusting evidence.
+      const progress = this.getChangeSetProgress(permit.missionId, permit.manifestHash);
+      const operation = progress.operations.find((op) => op.operationId === permit.operationId)!;
+      if (!["awaiting_verification", "succeeded", "blocked"].includes(operation.status))
+        throw new ControlStackError("change_set_review_result_missing", "operation is not ready for review");
+      const evidence = this.getEvidenceManifest(parsed.evidenceManifestHash);
+      if (
+        !evidence ||
+        evidence.attemptId !== attempt.attemptId ||
+        evidence.workItemId !== workItemId ||
+        evidence.manifest.permitHash !== permit.permitHash ||
+        evidence.manifest.manifestHash !== permit.manifestHash ||
+        this.getEvidenceManifestForAttempt(attempt.attemptId)?.manifestHash !== parsed.evidenceManifestHash
+      )
+        throw new ControlStackError(
+          "change_set_review_evidence_mismatch",
+          "review evidence does not belong to this result"
+        );
+      assertChangeSetEvidenceAudit(this.db, evidence);
+      const finding = {
+        schemaVersion: "acs.change-set.review.v1",
+        workItemId,
+        attemptId: attempt.attemptId,
+        evidenceManifestHash: parsed.evidenceManifestHash,
+        reviewerPrincipalId: options.actorId,
+        verdict: parsed.verdict,
+        reason: parsed.reason
+      };
+      const existing = this.listReviewFindings(attempt.attemptId).find(
+        (review) =>
+          review.finding.schemaVersion === "acs.change-set.review.v1" && review.reviewerPrincipalId === options.actorId
+      );
+      if (existing) {
+        if (!sameReview(existing.finding, finding))
+          throw new ControlStackError(
+            "change_set_review_replay_conflict",
+            "reviewer already recorded a different decision"
+          );
+        return { value: existing, events: [] };
+      }
+      if (this.getVerificationDecision(attempt.attemptId))
+        throw new ControlStackError("change_set_review_closed", "verification decision is immutable");
+      const findingHash = changeSetReviewHash(finding);
+      const review = this.recordReviewFinding(
+        {
+          findingHash,
+          findingId: findingHash,
+          workItemId,
+          attemptId: attempt.attemptId,
+          reviewerPrincipalId: options.actorId,
+          reviewerProvider: "acs-authenticated",
+          evidenceManifestHash: parsed.evidenceManifestHash,
+          verdict: parsed.verdict,
+          finding
+        },
+        options
+      );
+      const required = changeSetOperationVerification(this.getChangeSet(permit.missionId)!, permit.operationId)!;
+      const hashes = verifyChangeSetReviews(
+        this.db,
+        this,
+        attempt.attemptId,
+        parsed.evidenceManifestHash,
+        required.reviewersRequired,
+        [permit.executingActorId, attempt.claimedByWorkerId ?? ""]
+      );
+      if (parsed.verdict !== "PASS" || hashes.length >= required.reviewersRequired)
+        this.recordVerificationDecision(
+          {
+            attemptId: attempt.attemptId,
+            workItemId,
+            outcome: parsed.verdict === "PASS" ? "attempt_accepted" : "attempt_rejected",
+            evidenceManifestHash: parsed.evidenceManifestHash,
+            reviewFindingHashes: parsed.verdict === "PASS" ? hashes : [findingHash],
+            verificationPolicyVersion: CHANGE_SET_VERIFICATION_POLICY
+          },
+          { via: "policy_gate" }
+        );
+      return { value: review, events: [] };
+    });
+  }
+
   recordVerificationDecision(
     input: RecordVerificationDecisionInput,
     options: PrivilegedTransitionOptions
@@ -2961,6 +4433,47 @@ export class SqliteWorkItemStore implements WorkItemStore {
           "verification_decision_evidence_missing",
           `verification decision references unknown evidence manifest ${parsed.evidenceManifestHash}`
         );
+      }
+      if (parsed.verificationPolicyVersion === CHANGE_SET_VERIFICATION_POLICY) {
+        const evidence = this.getEvidenceManifest(parsed.evidenceManifestHash)!;
+        const permitRow = this.db
+          .prepare("SELECT permit_id FROM change_set_operation_permits WHERE execution_work_item_id = ?")
+          .get(parsed.workItemId) as { permit_id: string } | undefined;
+        const permit = permitRow ? this.getChangeSetOperationPermit(permitRow.permit_id) : undefined;
+        const attempt = this.getAttempt(parsed.attemptId);
+        if (
+          !permit ||
+          !attempt ||
+          attempt.status !== "succeeded" ||
+          evidence.attemptId !== parsed.attemptId ||
+          evidence.workItemId !== parsed.workItemId ||
+          this.getVerificationDecision(parsed.attemptId)
+        )
+          throw new ControlStackError(
+            "change_set_verification_binding_mismatch",
+            "verification requires an observed result and immutable decision"
+          );
+        this.getChangeSetProgress(permit.missionId, permit.manifestHash);
+        assertChangeSetEvidenceAudit(this.db, evidence);
+        const required = changeSetOperationVerification(this.getChangeSet(permit.missionId)!, permit.operationId)!;
+        if (parsed.outcome === "attempt_accepted") {
+          const hashes = verifyChangeSetReviews(
+            this.db,
+            this,
+            parsed.attemptId,
+            parsed.evidenceManifestHash,
+            required.reviewersRequired,
+            [permit.executingActorId, attempt.claimedByWorkerId ?? ""]
+          );
+          if (
+            hashes.length < required.reviewersRequired ||
+            !sameReview([...hashes].sort(), [...parsed.reviewFindingHashes].sort())
+          )
+            throw new ControlStackError(
+              "change_set_verification_review_missing",
+              "authentic independent reviews required"
+            );
+        }
       }
       const decidedAt = (parsed.now ?? new Date()).toISOString();
       this.db
@@ -3049,6 +4562,24 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   isVerificationSatisfiedForAttempt(attemptId: string): { satisfied: boolean; reason: string } {
+    const attempt = this.getAttempt(attemptId);
+    const permitRow = attempt
+      ? (this.db
+          .prepare("SELECT permit_id FROM change_set_operation_permits WHERE execution_work_item_id = ?")
+          .get(attempt.workItemId) as { permit_id: string } | undefined)
+      : undefined;
+    if (permitRow) {
+      const permit = this.getChangeSetOperationPermit(permitRow.permit_id)!;
+      const progress = this.getChangeSetProgress(permit.missionId, permit.manifestHash);
+      const operation = progress.operations.find((entry) => entry.operationId === permit.operationId)!;
+      return {
+        satisfied: operation.status === "succeeded",
+        reason:
+          operation.status === "succeeded"
+            ? "canonical evidence and independent reviews verified"
+            : "Change Set completion verification pending"
+      };
+    }
     const requirement = this.db
       .prepare(`SELECT reviewers_required FROM verification_requirements WHERE attempt_id = ?`)
       .get(attemptId) as { reviewers_required: number } | undefined;
@@ -3725,6 +5256,19 @@ export class SqliteWorkItemStore implements WorkItemStore {
       lease: rowToAttemptLease(leaseRow),
       workspaceAllocation: rowToWorkspaceAllocation(allocationRow)
     });
+  }
+
+  getMissionTrace(missionId: string, query: MissionTraceQuery = {}): MissionTrace {
+    if (this.transactionDepth > 0) return readMissionTrace(this.db, this, missionId, query);
+    this.db.exec("BEGIN");
+    try {
+      const trace = readMissionTrace(this.db, this, missionId, query);
+      this.db.exec("COMMIT");
+      return trace;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   readEvents(options: ReadEventsOptions = {}): StoredAuditEvent[] {
@@ -4915,6 +6459,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
     const leaseMs = options.leaseMs ?? this.leaseMs;
     return this.write(() => {
       const current = this.getRequired(id);
+      if (this.getChangeSet(id))
+        throw new ControlStackError(
+          "change_set_mission_not_executable",
+          "execute approved child operations, not their aggregate mission"
+        );
       const updated = transitionWorkItem(current, "running");
       const startedAt = updated.updatedAt;
       const expiresAt = leaseExpiresAt(startedAt, leaseMs);
@@ -4997,42 +6546,11 @@ export class SqliteWorkItemStore implements WorkItemStore {
 
   claimNextApprovedWorkItem(workerId: string, options: ClaimOptions = {}): ClaimedWorkItem | undefined {
     return this.write(() => {
-      const mode = options.adminApprovalActorId
-        ? (this.db.prepare(`SELECT mode FROM execution_mode_state WHERE id = 1`).get() as { mode?: string } | undefined)
-        : undefined;
-      const row = options.adminApprovalActorId
-        ? (this.db
-            .prepare(
-              `SELECT item.* FROM work_items AS item
-               WHERE item.status = 'approved'
-                 AND (
-                   ? = 'admin'
-                   OR (
-                     NOT EXISTS (
-                       SELECT 1 FROM approval_records AS approval
-                       WHERE approval.work_item_id = item.id
-                         AND approval.approved_by = ? AND approval.status = 'granted'
-                     )
-                     AND NOT EXISTS (
-                       SELECT 1 FROM execution_plan_approvals AS approval
-                       WHERE approval.work_item_id = item.id
-                         AND approval.approved_by_actor_id = ? AND approval.status = 'granted'
-                     )
-                   )
-                 )
-               ORDER BY item.created_at ASC LIMIT 1`
-            )
-            .get(mode?.mode ?? null, options.adminApprovalActorId, options.adminApprovalActorId) as
-            (WorkItemRow & Record<string, unknown>) | undefined)
-        : (this.db
-            .prepare(`SELECT * FROM work_items WHERE status = 'approved' ORDER BY created_at ASC LIMIT 1`)
-            .get() as unknown as WorkItemRow | undefined);
-      if (!row) {
+      const current = this.findNextApprovedWorkItemForWorker(workerId);
+      if (!current) {
         return { value: undefined, events: [] };
       }
 
-      const current = rowToWorkItem(row);
-      this.assertWorkerMatchesRegisteredAgentTarget(current, workerId);
       if (options.attemptAuthority) {
         this.assertAdminApprovalModeFence(current.id, options);
         return this.claimAttemptAuthoritatively(current, workerId, options);
@@ -5091,6 +6609,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
     workerId: string,
     options: ClaimOptions
   ): { value: ClaimedWorkItem; events: StoredAuditEvent[] } {
+    const operationPermit = this.requireActiveChangeSetOperationPermit(current.id, workerId);
+    if (operationPermit) {
+      const operation = this.getChangeSet(operationPermit.missionId)!.snapshot.definition.operations.find(
+        (op) => op.operationId === operationPermit.operationId
+      )!;
+      const count = this.db
+        .prepare("SELECT count(*) AS n FROM execution_attempts WHERE work_item_id = ?")
+        .get(current.id) as { n: number };
+      if (count.n >= operation.retry.maxAttempts)
+        throw new ControlStackError("change_set_retry_limit", "approved operation attempt budget exhausted");
+    }
     const authority = options.attemptAuthority;
     if (!authority) {
       throw new ControlStackError("attempt_authority_required", "persisted attempt authority is required");
@@ -5150,6 +6679,17 @@ export class SqliteWorkItemStore implements WorkItemStore {
       },
       { via: "domain_service" }
     );
+    if (operationPermit) {
+      const specification = changeSetOperationVerification(
+        this.getChangeSet(operationPermit.missionId)!,
+        operationPermit.operationId
+      );
+      if (specification)
+        this.recordVerificationRequirement(
+          { attemptId: attempt.attemptId, workItemId: current.id, ...specification },
+          { via: "policy_gate" }
+        );
+    }
     const updated = transitionWorkItem(current, "running");
     const startedAt = updated.updatedAt;
     const attemptStarted = this.db
@@ -5258,9 +6798,18 @@ export class SqliteWorkItemStore implements WorkItemStore {
         return { value: undefined, events: [] };
       }
 
+      if (this.getChangeSet(id))
+        throw new ControlStackError(
+          "change_set_mission_not_executable",
+          "execute approved child operations, not their aggregate mission"
+        );
       const current = rowToWorkItem(row);
       this.assertWorkerMatchesRegisteredAgentTarget(current, workerId);
       const actualActionHash = executionActionHash(current);
+      const assignment = this.getWorkItemAssignment(id);
+      if (assignment && assignment.selectedWorkerId !== workerId) {
+        throw new ControlStackError("work_item_assignment_mismatch", "work item is assigned to another worker");
+      }
       if (actualActionHash !== expectedActionHash) {
         throw new ControlStackError(
           "execution_action_hash_mismatch",
@@ -5364,7 +6913,135 @@ export class SqliteWorkItemStore implements WorkItemStore {
     });
   }
 
-  countActiveAttemptLeases(now = new Date()): number {
+  /**
+   * Fence active attempt leases that consume execution capacity without a durable
+   * admission reservation. Such a lease cannot be capacity-accounted, so leaving it
+   * alive would either over-admit (capacity consumed but unreserved) or wedge new
+   * admission until natural expiry. Fencing is deterministic, single-transaction
+   * and audited; afterwards the lease is no longer active and reconciliation
+   * recovers without operator action.
+   */
+  fenceLeasesWithoutAdmissionReservation(
+    input: {
+      workerIds: readonly string[];
+      reservedAttemptIds: ReadonlySet<string>;
+      now?: Date;
+    },
+    options?: { busyTimeoutMs?: number }
+  ): WorkItem[] {
+    if (options?.busyTimeoutMs === undefined) {
+      return this.fenceLeasesWithoutAdmissionReservationInTransaction(input);
+    }
+    // Callers on a latency-sensitive path, notably the readiness probe, must not
+    // block on a contended write lock. Bound the wait so SQLITE_BUSY surfaces and the
+    // caller can report the real database state instead of stalling the probe for the
+    // default five seconds. The write itself stays fail-closed: if it cannot take the
+    // lock it changes nothing and the caller treats reconciliation as unavailable.
+    this.db.exec(`PRAGMA busy_timeout = ${Math.max(0, Math.trunc(options.busyTimeoutMs))}`);
+    try {
+      return this.fenceLeasesWithoutAdmissionReservationInTransaction(input);
+    } finally {
+      this.db.exec("PRAGMA busy_timeout = 5000");
+    }
+  }
+
+  private fenceLeasesWithoutAdmissionReservationInTransaction(input: {
+    workerIds: readonly string[];
+    reservedAttemptIds: ReadonlySet<string>;
+    now?: Date;
+  }): WorkItem[] {
+    if (input.workerIds.length === 0) return [];
+    return this.write(() => {
+      const now = input.now ?? new Date();
+      const nowIso = now.toISOString();
+      const placeholders = input.workerIds.map(() => "?").join(",");
+      const rows = this.db
+        .prepare(
+          `SELECT l.* FROM leases l
+           LEFT JOIN attempt_leases a ON a.lease_id = l.lease_id AND a.status = 'active'
+           WHERE l.status = 'active' AND l.worker_id IN (${placeholders})
+             AND COALESCE(a.expires_at, l.expires_at) > ?
+           ORDER BY l.issued_at ASC`
+        )
+        .all(...input.workerIds, nowIso) as unknown as LeaseRow[];
+      const fenced: WorkItem[] = [];
+      for (const lease of rows) {
+        const attemptLease = this.db
+          .prepare(`SELECT * FROM attempt_leases WHERE lease_id = ? AND status = 'active'`)
+          .get(lease.lease_id) as unknown as AttemptLeaseRow | undefined;
+        const attemptId = attemptLease?.attempt_id;
+        // A reserved lease is capacity-accounted; never disturb it here.
+        if (attemptId && input.reservedAttemptIds.has(attemptId)) continue;
+        const currentRow = this.getRowRequired(lease.work_item_id);
+        // Only in-flight execution can be fenced. Anything else is reported by the
+        // caller's own reconciliation rather than mutated here.
+        if (currentRow.status !== "running" || currentRow.worker_id !== lease.worker_id) continue;
+        const reason =
+          "execution lease held capacity without a durable admission reservation; fenced by reconciliation";
+        const result = this.derivedResultInput(lease, "blocked", nowIso, reason);
+        if (attemptLease) {
+          const fencedAttempt = this.db
+            .prepare(
+              `UPDATE execution_attempts
+               SET status = 'unknown', terminal_at = ?, outcome_code = 'admission_reservation_missing',
+                   recovery_reason = ?, updated_at = ?
+               WHERE attempt_id = ? AND status = 'running'
+                 AND current_fencing_epoch = ? AND claimed_by_worker_id = ?`
+            )
+            .run(nowIso, reason, nowIso, attemptLease.attempt_id, attemptLease.fencing_epoch, attemptLease.worker_id);
+          if (fencedAttempt.changes !== 1)
+            throw new ControlStackError(
+              "attempt_fence_mismatch",
+              `unreserved attempt lease is stale or inconsistent: ${lease.lease_id}`
+            );
+        }
+        this.appendAuditEvent(
+          createEvent(
+            "attempt_lease.fenced_without_admission",
+            {
+              leaseId: lease.lease_id,
+              attemptId: attemptId ?? null,
+              workItemId: lease.work_item_id,
+              workerId: lease.worker_id,
+              fencingEpoch: attemptLease?.fencing_epoch ?? null,
+              expiresAt: attemptLease?.expires_at ?? lease.expires_at,
+              fencedAt: nowIso,
+              reason
+            },
+            {
+              "work_item.id": lease.work_item_id,
+              "attempt.id": attemptId ?? "",
+              "lease.id": lease.lease_id,
+              "worker.id": lease.worker_id
+            }
+          )
+        );
+        // Accept the derived terminal result while the legacy lease projection is
+        // still active: execution_results_binding_guard requires that binding. The
+        // lease is closed immediately afterwards, which releases the capacity.
+        fenced.push(
+          this.acceptResultInTransaction(result, {
+            now: nowIso,
+            allowDerivedOutcome: true,
+            allowAttemptProjection: Boolean(attemptLease)
+          }).value
+        );
+        this.db
+          .prepare(
+            `UPDATE attempt_leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`
+          )
+          .run(nowIso, lease.lease_id);
+        this.db
+          .prepare(`UPDATE leases SET status = 'revoked', closed_at = ? WHERE lease_id = ? AND status = 'active'`)
+          .run(nowIso, lease.lease_id);
+      }
+      return { value: fenced, events: [] };
+    });
+  }
+
+  countActiveAttemptLeases(now = new Date(), workerIds?: readonly string[]): number {
+    if (workerIds?.length === 0) return 0;
+    const workerFilter = workerIds ? ` AND worker_id IN (${workerIds.map(() => "?").join(",")})` : "";
     const nowIso = now.toISOString();
     // Prefer authoritative attempt_leases, but also count legacy `leases` rows that
     // have no active attempt_leases twin (test-only legacy claims / dual projection).
@@ -5373,17 +7050,112 @@ export class SqliteWorkItemStore implements WorkItemStore {
         `SELECT
            (
              SELECT COUNT(*) FROM attempt_leases
-             WHERE status = 'active' AND expires_at > ?
+             WHERE status = 'active' AND expires_at > ?${workerFilter}
            ) + (
              SELECT COUNT(*) FROM leases
-             WHERE status = 'active' AND expires_at > ?
+             WHERE status = 'active' AND expires_at > ?${workerFilter}
                AND lease_id NOT IN (
                  SELECT lease_id FROM attempt_leases WHERE status = 'active'
                )
            ) AS count`
       )
-      .get(nowIso, nowIso) as { count: number };
+      .get(nowIso, ...(workerIds ?? []), nowIso, ...(workerIds ?? [])) as { count: number };
     return Number(row?.count ?? 0);
+  }
+
+  bindAdmissionPermit(input: {
+    attemptId: string;
+    workItemId: string;
+    leaseId: string;
+    workerId: string;
+    fencingEpoch: number;
+    actionHash: string;
+    planHash: string;
+    inputHash: string;
+    lane: "jc" | "dc";
+    executionClass: "execution" | "wait";
+  }): void {
+    if (!["jc", "dc"].includes(input.lane) || !["execution", "wait"].includes(input.executionClass)) {
+      throw new ControlStackError("admission_binding_invalid", "invalid admission capacity binding");
+    }
+    this.write(() => {
+      const lease = this.getActiveLeaseForAttempt(input.attemptId);
+      const attempt = this.getAttempt(input.attemptId);
+      const item = this.getRequired(input.workItemId);
+      if (
+        !lease ||
+        lease.status !== "active" ||
+        Date.parse(lease.expiresAt) <= Date.now() ||
+        lease.leaseId !== input.leaseId ||
+        lease.workItemId !== input.workItemId ||
+        lease.workerId !== input.workerId ||
+        lease.fencingEpoch !== input.fencingEpoch ||
+        lease.planHash !== input.planHash ||
+        lease.inputHash !== input.inputHash ||
+        attempt?.status !== "running" ||
+        attempt.workItemId !== input.workItemId ||
+        attempt.planHash !== input.planHash ||
+        attempt.inputHash !== input.inputHash ||
+        attempt.currentFencingEpoch !== input.fencingEpoch ||
+        attempt.claimedByWorkerId !== input.workerId ||
+        item.status !== "running" ||
+        executionActionHash(item) !== input.actionHash
+      ) {
+        throw new ControlStackError(
+          "admission_binding_invalid",
+          "admission reservation does not match current lease authority"
+        );
+      }
+      this.db
+        .prepare(
+          `INSERT INTO admission_permits
+        (attempt_id, work_item_id, lease_id, worker_id, fencing_epoch, action_hash, plan_hash, input_hash, lane, execution_class, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        )
+        .run(
+          input.attemptId,
+          input.workItemId,
+          input.leaseId,
+          input.workerId,
+          input.fencingEpoch,
+          input.actionHash,
+          input.planHash,
+          input.inputHash,
+          input.lane,
+          input.executionClass,
+          new Date().toISOString()
+        );
+      const event = this.appendAuditEvent(
+        createEvent(
+          "execution_admission.bound",
+          { ...input },
+          { "work_item.id": input.workItemId, "attempt.id": input.attemptId }
+        )
+      );
+      return { value: undefined, events: [event] };
+    });
+  }
+
+  releaseAdmissionPermit(attemptId: string): boolean {
+    return this.write(() => {
+      const lease = this.getActiveLeaseForAttempt(attemptId);
+      if (lease?.status === "active" && Date.parse(lease.expiresAt) > Date.now()) return { value: false, events: [] };
+      const result = this.db.prepare("DELETE FROM admission_permits WHERE attempt_id = ?").run(attemptId);
+      return { value: result.changes > 0, events: [] };
+    });
+  }
+
+  getAdmissionPermit(attemptId: string) {
+    const row = this.db.prepare(`SELECT * FROM admission_permits WHERE attempt_id = ?`).get(attemptId) as
+      AdmissionPermitRow | undefined;
+    return row ? mapAdmissionPermitRow(row) : undefined;
+  }
+
+  listAdmissionPermits() {
+    const rows = this.db
+      .prepare(`SELECT * FROM admission_permits ORDER BY created_at`)
+      .all() as unknown as AdmissionPermitRow[];
+    return rows.map(mapAdmissionPermitRow);
   }
 
   recordSystemEvent(input: {
@@ -5735,10 +7507,10 @@ export class SqliteWorkItemStore implements WorkItemStore {
     return row ? rowToExecutionResult(row) : undefined;
   }
 
-  getExecutionResultForIdempotency(workerId: string, idempotencyKey: string): StoredExecutionResult | undefined {
+  getExecutionResultForIdempotency(idempotencyKey: string): StoredExecutionResult | undefined {
     const row = this.db
-      .prepare(`SELECT * FROM execution_results WHERE worker_id = ? AND idempotency_key = ?`)
-      .get(workerId, idempotencyKey) as unknown as ExecutionResultRow | undefined;
+      .prepare(`SELECT * FROM execution_results WHERE idempotency_key = ?`)
+      .get(idempotencyKey) as unknown as ExecutionResultRow | undefined;
     return row ? rowToExecutionResult(row) : undefined;
   }
 
@@ -5763,8 +7535,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
       );
     }
     const existingByKey = this.db
-      .prepare(`SELECT * FROM execution_results WHERE worker_id = ? AND idempotency_key = ?`)
-      .get(input.workerId, input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
+      .prepare(`SELECT * FROM execution_results WHERE idempotency_key = ?`)
+      .get(input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
     if (existingByKey) {
       if (existingByKey.payload_hash !== payloadHash || existingByKey.work_item_id !== input.workItemId) {
         throw new ControlStackError("result_conflict", "result idempotency key conflicts with an accepted result");
@@ -5822,36 +7594,60 @@ export class SqliteWorkItemStore implements WorkItemStore {
       ...transitionWorkItem(rowToWorkItem(row), resultStatus(input.outcome), now),
       result: compactResult(input, payloadHash, now, resultId)
     };
-    this.db
-      .prepare(
-        `INSERT INTO execution_results
-         (result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome,
-          started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json,
-          artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        resultId,
-        input.workItemId,
-        input.leaseId,
-        input.workerId,
-        input.idempotencyKey,
-        input.actionHash,
-        input.outcome,
-        input.startedAt,
-        input.finishedAt,
-        input.exitCode ?? null,
-        input.summary,
-        input.stdout ?? null,
-        input.stderr ?? null,
-        JSON.stringify(input.structuredOutput),
-        JSON.stringify(input.artifacts),
-        input.error ?? null,
-        input.resourceUsage ? JSON.stringify(input.resourceUsage) : null,
-        JSON.stringify(input.simulationMetadata),
-        payloadHash,
-        now
-      );
+    try {
+      this.db
+        .prepare(
+          "INSERT INTO execution_results " +
+            "(result_id, work_item_id, lease_id, worker_id, idempotency_key, action_hash, outcome, " +
+            "started_at, finished_at, exit_code, summary, stdout, stderr, structured_output_json, " +
+            "artifacts_json, error, resource_usage_json, simulation_metadata_json, payload_hash, created_at) " +
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .run(
+          resultId,
+          input.workItemId,
+          input.leaseId,
+          input.workerId,
+          input.idempotencyKey,
+          input.actionHash,
+          input.outcome,
+          input.startedAt,
+          input.finishedAt,
+          input.exitCode ?? null,
+          input.summary,
+          input.stdout ?? null,
+          input.stderr ?? null,
+          JSON.stringify(input.structuredOutput),
+          JSON.stringify(input.artifacts),
+          input.error ?? null,
+          input.resourceUsage ? JSON.stringify(input.resourceUsage) : null,
+          JSON.stringify(input.simulationMetadata),
+          payloadHash,
+          now
+        );
+    } catch (insertError) {
+      const err = insertError as NodeJS.ErrnoException;
+      const isConstraintConflict = err.code === "ERR_SQLITE_ERROR" && /UNIQUE constraint failed/.test(err.message);
+      // Losing the write-lock race is not a semantic conflict: the same submission
+      // may simply have been committed by a concurrent writer. Resolve it exactly
+      // like a uniqueness violation so the observable outcome does not depend on
+      // whether SQLite happened to report SQLITE_BUSY or a UNIQUE constraint. Without
+      // this, the loser surfaced a raw database error while the winner returned the
+      // idempotent replay, making the contract depend on timing.
+      const isWriteContention = err.code === "ERR_SQLITE_ERROR" && /SQLITE_BUSY|database is locked/i.test(err.message);
+      if (isConstraintConflict || isWriteContention) {
+        const existing = this.db
+          .prepare("SELECT * FROM execution_results WHERE idempotency_key = ?")
+          .get(input.idempotencyKey) as unknown as ExecutionResultRow | undefined;
+        if (existing && existing.payload_hash === payloadHash && existing.work_item_id === input.workItemId) {
+          const replayed = this.getRequired(input.workItemId);
+          return { value: replayed, events: [] };
+        }
+        if (isWriteContention) throw insertError;
+        throw new ControlStackError("result_conflict", "result idempotency key conflicts with an accepted result");
+      }
+      throw insertError;
+    }
 
     const updatedWorkItem = this.db
       .prepare(
@@ -5996,7 +7792,8 @@ export class SqliteWorkItemStore implements WorkItemStore {
     // decision. This strengthens result acceptance; it does not move authority
     // out of packages/work-items. Attempts with no requirement row (the default
     // dry-run path) are unaffected.
-    if (input.outcome === "succeeded") {
+    const changeSetPermit = this.requireActiveChangeSetOperationPermit(workItem.id, input.workerId);
+    if (input.outcome === "succeeded" && !changeSetPermit) {
       const gate = this.isVerificationSatisfiedForAttempt(input.attemptId);
       if (!gate.satisfied) {
         throw new ControlStackError(
@@ -6555,6 +8352,20 @@ export class SqliteWorkItemStore implements WorkItemStore {
   }
 
   private appendAuditEvent(event: AuditEvent): StoredAuditEvent {
+    // Producer metadata is attribution only. It cannot issue or broaden authority.
+    // Reserved values are injected here so a caller cannot impersonate a process.
+    event = {
+      ...event,
+      attributes: {
+        ...event.attributes,
+        "acs.process.id": auditProcessId,
+        "acs.process.started_at": auditProcessStartedAt,
+        "acs.instance": /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/u.test(this.traceInstance)
+          ? this.traceInstance
+          : "unknown",
+        "acs.release_sha": /^(?:[a-f0-9]{40}|unreleased)$/u.test(this.releaseSha) ? this.releaseSha : "unknown"
+      }
+    };
     const previousHash = this.latestAuditHash();
     this.db
       .prepare(
@@ -7102,6 +8913,22 @@ function rowToAttemptLease(row: AttemptLeaseRow): AttemptLease {
     status: row.status,
     ...(row.closed_at === null ? {} : { closedAt: row.closed_at })
   });
+}
+
+function mapAdmissionPermitRow(row: AdmissionPermitRow) {
+  return {
+    attemptId: row.attempt_id,
+    workItemId: row.work_item_id,
+    leaseId: row.lease_id,
+    workerId: row.worker_id,
+    fencingEpoch: row.fencing_epoch,
+    actionHash: row.action_hash,
+    planHash: row.plan_hash,
+    inputHash: row.input_hash,
+    lane: row.lane,
+    executionClass: row.execution_class,
+    createdAt: row.created_at
+  };
 }
 
 function rowToWorkspaceAllocation(row: WorkspaceAllocationRow): WorkspaceAllocation {

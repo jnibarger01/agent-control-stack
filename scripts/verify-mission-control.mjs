@@ -83,6 +83,16 @@ const app = buildGateway({
   moa: false
 });
 const origin = await app.listen({ host: "127.0.0.1", port: 0 });
+// The stream-loss check shuts the gateway down mid-run to prove the browser marks
+// data stale, and the finally block also closes it. Closing a Fastify instance twice
+// throws, so track the shutdown and make it idempotent.
+let appClosed = false;
+async function closeApp() {
+  if (appClosed) return;
+  appClosed = true;
+  app.server.closeAllConnections();
+  await app.close();
+}
 const browser = await chromium.launch({
   headless: true,
   ...(process.env.ACS_BROWSER_EXECUTABLE ? { executablePath: process.env.ACS_BROWSER_EXECUTABLE } : {})
@@ -294,8 +304,7 @@ try {
   await page.goto(origin + "/#overview");
   await page.screenshot({ path: join(out, "mission-control-mobile.png"), fullPage: true });
   await check("Stream loss marks data stale and disables mutations", async () => {
-    app.server.closeAllConnections();
-    await app.close();
+    await closeApp();
     await page.waitForFunction(() => document.querySelector(".live")?.dataset.state === "disconnected");
     if (await page.locator("#sse-stale-banner").isHidden())
       throw Error("No stale-state warning after gateway shutdown");
@@ -324,5 +333,5 @@ try {
   console.log("BROWSER_PASS " + checks.length + " checks; evidence: " + out);
 } finally {
   await browser.close();
-  await app.close();
+  await closeApp();
 }

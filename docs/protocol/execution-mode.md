@@ -20,8 +20,17 @@ through the normal lease, capability, and audit path. Jace Commander
 
 Consumers:
 
-- `acs mode status|strict|admin` reads and writes the same row (`ACS_DB_PATH`).
+- `acs mode status|strict` reads or reduces authority in the same row (`ACS_DB_PATH`).
+  `acs mode admin` refuses activation: local database access is not authenticated human approval.
 - Mission Control shows the mode on the primary header and posts to `POST /execution-mode`.
 - `GET /authority` and `GET /execution-mode` report that row plus the live lease observation.
 
 Do not set a second mode in an environment variable. `ACS_MODE` is not consulted.
+
+`POST /execution-mode` requires a configured `user` identity with the `operator`
+role and `acs:approve` scope. Service, worker, mixed-role, and agent identities
+cannot change mode even when they hold that scope. Request-body identity fields
+do not confer authority. This restricts the legacy global mode; it does not yet
+implement mission-scoped Autonomous Authority Grants or make global admin mode
+the target autonomy contract. Processes that can directly modify the database
+remain within its trusted administrative boundary.

@@ -24,7 +24,20 @@ Creation still uses the existing composer and `POST /work-items`. Retry still us
 
 ## Minimal backend additions
 
-No HTTP routes, schema migrations, dependencies or authority-changing operations were added. The authenticated dashboard projection now includes:
+Scope: this section describes the Mission Control redesign only. It adds no new canonical URLs, no new dependencies, and no authority-changing operation of its own. The dashboard reads through the existing authenticated `GET /dashboard/fragments` projection and the existing store read methods; the browser still never grants authority.
+
+It also does not change persisted schema. No migration was added for this work.
+
+The wider branch this redesign ships alongside does add routes, schema migrations, dependencies, and authority-affecting behavior elsewhere in the system. That is separate work with its own contracts, and it is not covered by the statement above:
+
+- schema migrations for change sets and revisions, change set approvals, change set operation permits, autonomous authority, operation-permit grant authority, and work-item assignments;
+- HTTP routes for change set submission, policy and authority evaluation, approval, and operation permits;
+- durable work-item assignment, enforced through the policy-gate claim tools rather than a dedicated HTTP route;
+- authority-affecting behavior including hash-bound approvals, operation permits, and work-item assignment.
+
+Consult `docs/security-contracts.md`, `docs/architecture.md`, and the change set and approval protocol documents for those. If you are reviewing the effect of this branch as a whole, do not rely on this section as a statement that no routes, migrations, dependencies, or authority operations were added.
+
+The authenticated dashboard projection now includes:
 
 - Current execution plans through the existing integrity-checking store method.
 - Batched current-plan admissions, parsed with the shared admission schema.
@@ -55,8 +68,12 @@ Run the normal repository build first. The standalone verification script uses a
 
 ```bash
 npm run build
-ACS_UI_EVIDENCE_DIR=/absolute/output/directory node scripts/verify-mission-control.mjs
+npm run test:mission-control-e2e:check                       # always run; no browser needed
+ACS_UI_EVIDENCE_DIR=/absolute/output/directory \
+  ACS_UI_E2E=1 npm run test:mission-control-e2e              # execute the harness itself
 ```
+
+`test:mission-control-e2e:check` runs as part of `npm run check`. Because the harness needs Playwright and Chromium, that gate enforces everything that does not require a browser: that the harness is reachable from a named npm script, that its environment contract is still declared, that the gateway is still shut down exactly once, and that the responsive, stale-state, authentication and accessibility checks are still present. Set `ACS_UI_E2E=1` with `ACS_UI_EVIDENCE_DIR` to execute the harness itself; without that flag the gate reports that it was skipped rather than silently passing. This is the same optional-dependency pattern as `ACS_SANDBOX_INTEGRATION` for the sandbox suite.
 
 The script expects Playwright and its Chromium browser. In an environment with an externally supplied Playwright runtime, set `ACS_PLAYWRIGHT_MODULE` to its module path and optionally `ACS_BROWSER_EXECUTABLE` to an existing browser executable. This avoids adding a production dependency. It checks all eleven routes and refreshes, all pages at four widths, WCAG A/AA rules including contrast, real detail retrieval, approve/reject/retry/mode mutation and refresh, authentication rejection, and actual stream loss/stale behavior. It writes screenshots and JSON evidence.
 

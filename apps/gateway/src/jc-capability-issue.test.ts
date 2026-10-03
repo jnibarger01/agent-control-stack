@@ -530,6 +530,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         }
         return delegate.acquire(request);
       },
+      restoreActivePermit: (input) => delegate.restoreActivePermit(input),
       shutdown: () => delegate.shutdown(),
       snapshot: () => delegate.snapshot()
     };
@@ -594,6 +595,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         }
         return delegate.acquire(request);
       },
+      restoreActivePermit: (input) => delegate.restoreActivePermit(input),
       shutdown: () => delegate.shutdown(),
       snapshot: () => delegate.snapshot()
     };
@@ -652,6 +654,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         await admissionResume;
         return delegate.acquire(request);
       },
+      restoreActivePermit: (input) => delegate.restoreActivePermit(input),
       shutdown: () => delegate.shutdown(),
       snapshot: () => delegate.snapshot()
     };
