@@ -384,7 +384,10 @@ function gateWorkerClaimByIdInTransaction(
   if (targetedAgents.length > 0 && !targetedAgents.includes(parsed.workerId)) {
     throw new ControlStackError("worker_target_mismatch", "work item targets a different registered agent");
   }
-  if (!authoritativeRouteAllows(store, candidate.id, parsed.workerId)) {
+  if (
+    !authoritativeRouteAllows(store, candidate.id, parsed.workerId) &&
+    !adminRoutingOverride(store, candidate.id, parsed)
+  ) {
     return undefined;
   }
 
@@ -568,6 +571,35 @@ export function authoritativeRouteAllows(store: WorkItemStore, workItemId: strin
   const evidence = store.getLatestAuthoritativeRoutingEvidence(workItemId);
   if (!evidence || (evidence.decision !== "route" && evidence.decision !== "fallback")) return false;
   return evidence.selectedActorId === workerId;
+}
+
+/**
+ * Admin execution mode is the temporary authority override for authoritative routing. It applies only while the
+ * canonical mode is admin (TTL-aware), only to a claim that carries the admin fence (the gateway sets it exactly when
+ * it is consuming an ACS admin approval), and only when that approval really exists on the item. Strict mode, claims
+ * without the fence and claim_next keep full routing enforcement; assignment, target and attempt fencing checks are
+ * unaffected. Each override is audited once per work item.
+ */
+function adminRoutingOverride(
+  store: WorkItemStore,
+  workItemId: string,
+  parsed: z.infer<typeof claimByIdInputSchema>
+): boolean {
+  if (parsed.executionModeFence !== "admin") return false;
+  if (store.getExecutionMode().mode !== "admin") return false;
+  if (
+    !store.hasGrantedApprovalBy(workItemId, ACS_ADMIN_APPROVER) &&
+    !store.hasGrantedExecutionPlanApprovalBy(workItemId, ACS_ADMIN_APPROVER)
+  ) {
+    return false;
+  }
+  store.recordSystemEventOnceForWorkItem({
+    name: "execution_mode.routing_override",
+    workItemId,
+    body: { workItemId, workerId: parsed.workerId, reason: "admin_execution_mode_active" },
+    attributes: { "work_item.id": workItemId, "execution_mode.mode": "admin" }
+  });
+  return true;
 }
 
 export function approvalRequired(evaluations: PolicyEvaluation[]): PolicyEvaluation[] {
