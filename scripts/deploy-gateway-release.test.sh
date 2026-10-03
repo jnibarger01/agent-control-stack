@@ -23,7 +23,13 @@ make_stubs() {
 #!/usr/bin/env bash
 echo "systemctl $*" >>"$SANDBOX/calls.log"
 case "$*" in
-  *NRestarts*) echo "${SHIM_NRESTARTS:-0}"; exit 0 ;;
+  *NRestarts*)
+    n=$(($(cat "$SANDBOX/restart-reads" 2>/dev/null || echo 0) + 1)); echo "$n" >"$SANDBOX/restart-reads"
+    # SHIM_NRESTARTS is a pre-existing count; with SHIM_RESTART_GROWTH=1 it climbs by one per read (a crash loop).
+    if [[ "${SHIM_RESTART_GROWTH:-0}" == 1 ]]; then echo $((${SHIM_NRESTARTS:-0} + n - 1)); else echo "${SHIM_NRESTARTS:-0}"; fi
+    exit 0 ;;
+  *" is-active "*) [[ "${SHIM_STOP_FAILS:-0}" == 1 ]] && exit 0; exit 3 ;;
+  *" stop "*) [[ "${SHIM_STOP_FAILS:-0}" == 1 ]] && exit 1 ;;
   *" restart "*) echo new >"$SANDBOX/mode" ;;
   *" start "*) echo old >"$SANDBOX/mode" ;;
 esac
@@ -130,7 +136,7 @@ expect "tells the operator writes since the backup are lost" grep -q "writes sin
 echo "C: a crash-looping unit fails fast"
 setup C
 start=$SECONDS
-SHIM_NEW_BROKEN=1 SHIM_NRESTARTS=5 ACS_DEPLOY_WAIT_SEC=120 run_deploy
+SHIM_NEW_BROKEN=1 SHIM_NRESTARTS=5 SHIM_RESTART_GROWTH=1 ACS_DEPLOY_WAIT_SEC=120 run_deploy
 expect "exit 1" test "$(exit_code)" -eq 1
 expect "reported the crash loop" grep -q "crash-looping" "$SANDBOX/out.log"
 expect "gave up well before the 120s wait" test $((SECONDS - start)) -lt 30
@@ -153,7 +159,7 @@ echo "B2: failed database restore leaves the unit stopped"
 setup B2
 SHIM_NEW_BROKEN=1 SHIM_DBOPS_FAIL=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
 expect "exit 1" test "$(exit_code)" -eq 1
-expect "warns that the database restore failed and the unit is left stopped" grep -q "DATABASE RESTORE FAILED.*STOPPED" "$SANDBOX/out.log"
+expect "warns that the database restore failed and the unit is left stopped" grep -q "DATABASE NOT RESTORED.*the restore failed.*STOPPED" "$SANDBOX/out.log"
 expect "previous release drop-in still restored for a manual start" grep -q "OLD-RELEASE" "$DROPINS/40-immutable-release.conf"
 expect "the unit was stopped" grep -q "systemctl --user stop" "$SANDBOX/calls.log"
 expect "the previous release was NOT started against the unrestored database" bash -c '! grep -q "systemctl --user start" "$SANDBOX/calls.log"'
@@ -261,6 +267,49 @@ expect "failed release drop-in removed (nothing existed before)" test ! -e "$DRO
 expect "dispatch drop-in removed" test ! -e "$DROPINS/50-agent-dispatch.conf"
 expect "unit started again on its base configuration" bash -c 'awk "/systemctl --user stop/{s=NR} /systemctl --user start/{t=NR} END{exit !(s&&t&&s<t)}" "$SANDBOX/calls.log"'
 expect "never restarted the failed release" bash -c '! grep -q "$FINAL/apps/gateway" "$DROPINS"/*.conf 2>/dev/null'
+
+# --- L: restarts from an earlier incident must not look like a crash loop now ------------------------------
+echo "L: a pre-existing restart count is a baseline, not a crash loop"
+setup L
+SHIM_NRESTARTS=7 SHIM_LIVE_FAIL_FIRST=4 ACS_DEPLOY_WAIT_SEC=40 run_deploy
+expect "exit 0 although NRestarts was already 7" test "$(exit_code)" -eq 0
+expect "no rollback was triggered" bash -c '! grep -q "systemctl --user stop\|db-ops" "$SANDBOX/calls.log"'
+
+# --- M: never restore a database another process still has open ---------------------------------------------
+echo "M: rollback refuses to restore while another process holds the database"
+setup M
+( exec 3<"$SANDBOX/store/control.db"; sleep 12 ) &
+holder=$!
+sleep 1
+SHIM_NEW_BROKEN=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
+kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+expect "exit 1" test "$(exit_code)" -eq 1
+expect "no database restore was attempted" bash -c '! grep -q "db-ops.mjs restore" "$SANDBOX/calls.log"'
+expect "says another process still has the database open and the unit is left stopped" grep -q "still open.*STOPPED\|STOPPED.*still open" "$SANDBOX/out.log"
+expect "the previous release was not started against it" bash -c '! grep -q "systemctl --user start" "$SANDBOX/calls.log"'
+
+echo "M2: rollback refuses to restore when the unit would not stop"
+setup M2
+SHIM_NEW_BROKEN=1 SHIM_STOP_FAILS=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
+expect "exit 1" test "$(exit_code)" -eq 1
+expect "no database restore was attempted" bash -c '! grep -q "db-ops.mjs restore" "$SANDBOX/calls.log"'
+expect "says the unit did not stop" grep -q "did not stop" "$SANDBOX/out.log"
+expect "nothing was started" bash -c '! grep -q "systemctl --user start" "$SANDBOX/calls.log"'
+
+# --- N: a pre-existing dispatch drop-in is restored, and the guidance says so ---------------------------------
+echo "N: previous dispatch drop-in is restored and the guidance is conditional"
+setup N
+printf '[Service]\n# OLD-DISPATCH\n' >"$DROPINS/50-agent-dispatch.conf"
+SHIM_NEW_BROKEN=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
+expect "the saved dispatch drop-in is back after rollback" grep -q "OLD-DISPATCH" "$DROPINS/50-agent-dispatch.conf"
+setup N2
+printf '[Service]\n# OLD-DISPATCH\n' >"$DROPINS/50-agent-dispatch.conf"
+ACS_DEPLOY_WAIT_SEC=40 run_deploy
+expect "success guidance says to restore the saved dispatch drop-in" grep -q "restore $DROPINS/50-agent-dispatch.conf.pre-" "$SANDBOX/out.log"
+expect "success guidance does not tell the operator to delete a pre-existing dispatch drop-in" bash -c '! grep -q "remove $DROPINS/50-agent-dispatch.conf," "$SANDBOX/out.log"'
+setup N3
+ACS_DEPLOY_WAIT_SEC=40 run_deploy
+expect "when none existed the guidance says to remove the one installed" grep -q "remove $DROPINS/50-agent-dispatch.conf" "$SANDBOX/out.log"
 
 # --- E: the build must not inherit the gateway's NODE_ENV=production -------------------------------------
 echo "E: build step is immune to the gateway env file"

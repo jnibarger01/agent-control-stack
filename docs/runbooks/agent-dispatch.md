@@ -38,11 +38,15 @@ else touching the service.
   180s), or the unit crash-loops, the script stops the unit, restores the pre-activation backup over the live database
   with the previous release's `db-ops`, restores the previous drop-ins (or removes the ones it installed, on a first deployment where none existed) and starts the previous release. The new release
   may already have migrated the database, which the previous release cannot read, so the restore is not optional.
-  **Writes made between the backup and the rollback are lost.** The output prints the backup path. If the restore
-  itself fails, the script fails closed: it puts the previous drop-ins back but **leaves the unit stopped**, because
-  the previous release would still answer `/livez` against a possibly migrated database and could mutate it. Restore
-  the database by hand from the printed backup, then start the unit. After a successful restore the script waits for
-  `/readyz`, not just `/livez`.
+  **Writes made between the backup and the rollback are lost.** The output prints the backup path. Before restoring it
+  fails closed: the unit must really be stopped and no other process (a worker, scheduler, CLI or another gateway) may
+  have the database open, because `--writers-stopped` is an attestation the script has to earn. If either check fails, or
+  the restore itself fails, it restores nothing, starts nothing, puts the previous drop-ins back and leaves the unit for
+  you: the previous release would still answer `/livez` against a possibly migrated database and could mutate it. Stop
+  whatever holds the database, restore from the printed backup by hand, then start the unit. After a successful restore
+  the script waits for `/readyz`, not just `/livez`. Crash-loop detection counts restarts since the activation began, so
+  restarts from an earlier incident do not trigger a rollback. On a first deployment, or when no dispatch drop-in
+  existed, rollback removes the drop-ins this run installed instead of restoring copies.
 - **`--resume`** activates an already published release (same `--ref` and `--label`) without rebuilding and without a
   new backup. It never restores a database: use it only to go forward after an interrupted activation.
 - The sandbox test (`npm run test:deploy-script`, also part of `npm test`) exercises the wait, rollback, `--resume` and

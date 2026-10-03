@@ -27,3 +27,18 @@ choose_lock_dir() {
   lock_dir_is_secure "$fallback" || { echo "refusing to lock in $fallback: not a private directory owned by uid $(id -u)" >&2; return 1; }
   printf '%s\n' "$fallback"
 }
+
+# db_open_by_others <db path>
+# Prints "pid(command)" for every other process that has the database, or its -wal/-shm/-journal sidecar, open. Reads
+# /proc directly (no fuser/lsof dependency); processes this account cannot inspect are not visible, which is why the
+# deploy also requires the unit itself to be stopped.
+db_open_by_others() {
+  local real fd pid
+  real="$(realpath -m "$1")"
+  while IFS= read -r fd; do
+    pid="${fd#/proc/}"; pid="${pid%%/*}"
+    [[ "$pid" == "$$" || "$pid" == "${BASHPID:-}" ]] && continue
+    printf '%s(%s)\n' "$pid" "$(cat "/proc/$pid/comm" 2>/dev/null || echo '?')"
+  done < <(find /proc -maxdepth 3 -path '/proc/[0-9]*/fd/*' \
+             \( -lname "$real" -o -lname "$real-wal" -o -lname "$real-shm" -o -lname "$real-journal" \) 2>/dev/null) | sort -u
+}

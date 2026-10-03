@@ -23,9 +23,12 @@
 #     because the failed release may already have migrated it and the previous release cannot read a migrated
 #     database. Any write made between the backup and the rollback is LOST; the output names the backup.
 #     With --resume there is no new backup and nothing is restored: only the drop-ins and unit are left as they are.
-#   - Rollback also puts the previous release drop-in back and removes the dispatch drop-in. If the database restore
-#     itself fails, the unit is LEFT STOPPED (starting the previous release against a possibly migrated database would
-#     serve and could mutate it); restore the database by hand, then start the unit.
+#   - Rollback also puts the previous drop-ins back, or removes the ones this run installed when none existed before
+#     (a first deployment, or no dispatch drop-in yet). Before it restores the database it requires the unit to be
+#     really stopped and no other process to hold the database open; otherwise it restores nothing, starts nothing and
+#     leaves everything for an operator. If the database restore itself fails, the unit is LEFT STOPPED (starting the
+#     previous release against a possibly migrated database would serve and could mutate it); restore the database by
+#     hand, then start the unit.
 set -euo pipefail
 
 REF="HEAD"
@@ -228,11 +231,20 @@ BASE_URL="http://127.0.0.1:${PORT:-3000}"
 
 # Wait for the unit to start listening. Startup verifies the release, migrates the database and boots, so
 # /livez is not reachable the moment systemctl returns. Give up early if systemd is crash-looping the unit.
+# NRestarts is cumulative: restarts from an earlier incident would otherwise look like a crash loop on the very first
+# miss and trigger a destructive rollback. Measure increments against the value taken just before this (re)start.
+restart_count() {
+  local n
+  n="$(systemctl --user show -p NRestarts --value "$UNIT" 2>/dev/null || true)"
+  printf '%s\n' "${n:-0}"
+}
+RESTARTS_BASE=0
+
 wait_live() {
   local deadline=$((SECONDS + ${ACS_DEPLOY_WAIT_SEC:-180})) restarts
   until curl -fsS -m 3 "$BASE_URL/livez" >/dev/null 2>&1; do
-    restarts="$(systemctl --user show -p NRestarts --value "$UNIT" 2>/dev/null || echo 0)"
-    if (( restarts >= 3 )); then echo "unit is crash-looping (NRestarts=$restarts)" >&2; return 1; fi
+    restarts=$(( $(restart_count) - RESTARTS_BASE ))
+    if (( restarts >= 3 )); then echo "unit is crash-looping ($restarts restarts since this activation began)" >&2; return 1; fi
     if (( SECONDS > deadline )); then echo "timed out waiting for $BASE_URL/livez" >&2; return 1; fi
     sleep 2
   done
@@ -243,8 +255,8 @@ wait_live() {
 wait_ready() {
   local deadline=$((SECONDS + ${ACS_DEPLOY_WAIT_SEC:-180})) restarts
   until curl -fsS -m 3 "$BASE_URL/readyz" >/dev/null 2>&1; do
-    restarts="$(systemctl --user show -p NRestarts --value "$UNIT" 2>/dev/null || echo 0)"
-    if (( restarts >= 3 )); then echo "unit is crash-looping (NRestarts=$restarts)" >&2; return 1; fi
+    restarts=$(( $(restart_count) - RESTARTS_BASE ))
+    if (( restarts >= 3 )); then echo "unit is crash-looping ($restarts restarts since this activation began)" >&2; return 1; fi
     if (( SECONDS > deadline )); then echo "timed out waiting for $BASE_URL/readyz" >&2; return 1; fi
     sleep 2
   done
@@ -257,27 +269,47 @@ rollback() {
     return 0
   fi
   echo "ROLLING BACK. If the failed release got far enough to migrate the database, the previous release cannot read it," >&2
-  echo "so the database is restored from $BACKUP_DB (writes since that backup are lost)." >&2
-  systemctl --user stop "$UNIT" || true
-  # Restore with the PREVIOUS release's tool: it verifies the backup against the numbering that release wrote.
-  # The new release's tool rejects a pre-migration backup as migration_missing.
-  local prev_dir="$PREV_WORKDIR"
-  if [[ ( -z "$prev_dir" || ! -f "$prev_dir/scripts/db-ops.mjs" ) && -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then
-    prev_dir="$(sed -n 's/^WorkingDirectory=//p' "$RELEASE_DROPIN.pre-$SHORT-$STAMP" | head -1)"
+  echo "so the database is restored from $BACKUP_DB (writes since that backup are lost) - but only once nothing else can write it." >&2
+
+  # --writers-stopped is an attestation, so earn it: the unit must really be stopped and no other process may hold the
+  # database. Otherwise an idle writer could slip past the restore tool's momentary lock check and keep writing the
+  # replaced database (or its old inode). Failing any of this leaves everything stopped for an operator.
+  local stop_ok=1 holders="" restored=0 reason=""
+  systemctl --user stop "$UNIT" || stop_ok=0
+  if systemctl --user is-active --quiet "$UNIT"; then stop_ok=0; fi
+  if [[ "$stop_ok" -eq 1 ]]; then holders="$(db_open_by_others "$LIVE_DB")"; fi
+
+  if [[ "$stop_ok" -eq 0 ]]; then
+    reason="$UNIT did not stop. Not restoring the database and not starting anything"
+  elif [[ -n "$holders" ]]; then
+    reason="the database is still open by other process(es): $(printf '%s' "$holders" | tr '\n' ' '). Leaving $UNIT STOPPED"
+  else
+    # Restore with the PREVIOUS release's tool: it verifies the backup against the numbering that release wrote.
+    # The new release's tool rejects a pre-migration backup as migration_missing.
+    local prev_dir="$PREV_WORKDIR"
+    if [[ ( -z "$prev_dir" || ! -f "$prev_dir/scripts/db-ops.mjs" ) && -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then
+      prev_dir="$(sed -n 's/^WorkingDirectory=//p' "$RELEASE_DROPIN.pre-$SHORT-$STAMP" | head -1)"
+    fi
+    [[ -n "$prev_dir" && -f "$prev_dir/scripts/db-ops.mjs" ]] || prev_dir="$FINAL"
+    if node "$prev_dir/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped; then
+      restored=1
+    else
+      reason="the restore failed. Leaving $UNIT STOPPED"
+    fi
   fi
-  [[ -n "$prev_dir" && -f "$prev_dir/scripts/db-ops.mjs" ]] || prev_dir="$FINAL"
-  local restored=1
-  if ! node "$prev_dir/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped; then restored=0; fi
+
   if [[ "$HAD_RELEASE_DROPIN" -eq 1 ]]; then cp -p "$RELEASE_DROPIN.pre-$SHORT-$STAMP" "$RELEASE_DROPIN"; else rm -f "$RELEASE_DROPIN"; fi
   if [[ "$HAD_DISPATCH_DROPIN" -eq 1 ]]; then cp -p "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" "$DISPATCH_DROPIN"; else rm -f "$DISPATCH_DROPIN"; fi
   systemctl --user daemon-reload
+
   if [[ "$restored" -eq 0 ]]; then
     # Fail closed: the previous release cannot safely run against a database the failed release may have migrated. It
-    # would still answer /livez and could mutate that database. Leave the unit stopped for an operator.
-    echo "DATABASE RESTORE FAILED (backup: $BACKUP_DB). Leaving $UNIT STOPPED. The previous drop-ins are back in place." >&2
-    echo "Restore the database by hand, then: systemctl --user start $UNIT" >&2
+    # would still answer /livez and could mutate that database. Leave the unit for an operator.
+    echo "DATABASE NOT RESTORED (backup: $BACKUP_DB): $reason. The previous drop-ins are back in place." >&2
+    echo "Once nothing else uses the database: restore it by hand from the backup, then: systemctl --user start $UNIT" >&2
     return 0
   fi
+  RESTARTS_BASE="$(restart_count)"
   systemctl --user start "$UNIT" || true
   wait_ready || echo "previous release did not become ready; inspect: journalctl --user -u $UNIT" >&2
 }
@@ -301,6 +333,7 @@ EOF
 
 log "restart $UNIT"
 systemctl --user daemon-reload
+RESTARTS_BASE="$(restart_count)"
 if ! systemctl --user restart "$UNIT" || ! wait_live || ! "$REPO/scripts/gateway-post-deploy-healthcheck.sh" "$BASE_URL"; then
   rollback
   exit 1
@@ -313,4 +346,6 @@ live_online="$(curl -fsS -m 5 -H "authorization: Bearer ${ACS_GATEWAY_TOKEN:-}" 
 echo "live gateway: $live_online agent(s) AVAILABLE"
 echo
 echo "Deployed $RELEASE_NAME. Database backup: $BACKUP_DB"
-echo "Rollback: restore $RELEASE_DROPIN.pre-$SHORT-$STAMP over $RELEASE_DROPIN, remove $DISPATCH_DROPIN, systemctl --user daemon-reload && systemctl --user restart $UNIT"
+if [[ "$HAD_RELEASE_DROPIN" -eq 1 ]]; then rel_step="restore $RELEASE_DROPIN.pre-$SHORT-$STAMP over $RELEASE_DROPIN"; else rel_step="remove $RELEASE_DROPIN"; fi
+if [[ "$HAD_DISPATCH_DROPIN" -eq 1 ]]; then disp_step="restore $DISPATCH_DROPIN.pre-$SHORT-$STAMP over $DISPATCH_DROPIN"; else disp_step="remove $DISPATCH_DROPIN"; fi
+echo "Rollback: $rel_step, $disp_step, systemctl --user daemon-reload && systemctl --user restart $UNIT"
