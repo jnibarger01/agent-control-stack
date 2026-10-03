@@ -1546,16 +1546,34 @@ function serverNowMs() {
   return Date.now() + serverClockOffsetMs;
 }
 
-function fetchJson(url) {
+// A request that never settles would leave the caller's in-flight latch set
+// forever, so the dashboard (fragments refresh, metrics poll, readiness probe,
+// audit paging, agent roster, work-item detail) would stop updating until a
+// reload. Bound every client request and report the deadline as its own error.
+async function fetchJson(url) {
   const requestStartedMs = Date.now();
-  return fetch(url, { headers: { accept: 'application/json' } }).then(async function (res) {
+  const controller = typeof AbortController === 'function' ? new AbortController() : null;
+  const options = { headers: { accept: 'application/json' } };
+  let timedOut = false;
+  const timer = setTimeout(function () {
+    timedOut = true;
+    if (controller) controller.abort();
+  }, 10000);
+  if (controller) options.signal = controller.signal;
+  try {
+    const res = await fetch(url, options);
     observeServerClock(res, requestStartedMs);
     const body = await res.json().catch(function () { return {}; });
     if (!res.ok) {
       throw new Error(body.error || body.code || ('HTTP ' + res.status));
     }
     return body;
-  });
+  } catch (error) {
+    if (timedOut) throw new Error('request timed out after 10000ms');
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function bindWorkItems() {
