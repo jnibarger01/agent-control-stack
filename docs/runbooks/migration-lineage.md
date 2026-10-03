@@ -61,6 +61,17 @@ legacy permits remain bound to their original human approval. New grant permits
 use schema version 2 and bind the authorization identifier into their hash.
 Neither migration grants authority to existing missions or executors.
 
+## Databases written by release 464d54b (admission permits at 39)
+
+The table above is the sequence before JC admin approvals took version 39. Release 464d54b recorded admission
+permits at 39 through operation-permit grant authority at 47 (nine rows, `039_admission_permits.sql` first). Current
+code registers JC admin approvals at 39 and those migrations at 40-48, then coding missions (49) and authoritative
+routing (50). Startup recognises that exact deployed layout, or a contiguous prefix of it, checks each row against the
+shipped SQL for its new number (the lineage marker's released checksum is pinned in the legacy block because only a
+comment line changed), and renumbers the rows in one `BEGIN IMMEDIATE` transaction, preserving `applied_at`. The
+ordinary loop then applies 39, 49 and 50. Any other layout still fails closed with `deployed migration layout ...`.
+Take a consistent backup first; `scripts/deploy-gateway-release.sh` does and rehearses the upgrade on a copy.
+
 ## Validation and rollout
 
 ```bash

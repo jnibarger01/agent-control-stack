@@ -142,7 +142,8 @@ describe("audit history (#12)", () => {
     expect(names[0]).toBe("agent.heartbeat");
     expect(names.at(-1)).toBe("agent.heartbeat");
     expect(pause.title).toBe("");
-  });
+    // Renders 500+ timeline rows: well under a second locally, but past the 5s default on a loaded CI runner.
+  }, 30_000);
 
   it("loads older events below the current ones using the oldest sequence", async () => {
     const olderPage = Array.from({ length: 50 }, (_, index) => event(41 + index - 40)).map((entry, index) =>

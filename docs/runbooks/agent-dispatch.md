@@ -15,6 +15,17 @@ Set these on the gateway and restart it. Dispatch stays off until both are set.
 | `ACS_AGENT_WORKTREE_ROOT`      | Where run worktrees go. Default `~/.acs/agent-worktrees`. Keep it outside your repos.                                                        |
 | `ACS_AGENT_RUN_OUTPUT_ROOT`    | Where redacted output is kept. Default `~/.acs/agent-runs`.                                                                                  |
 
+The gateway process also needs to find the CLIs. A systemd user service starts with a bare `PATH`, so add the
+directories that hold them (for example `~/.local/bin` and the Homebrew `bin`) to the unit's `Environment=PATH=...`.
+If a CLI is missing from the gateway's `PATH`, the roster shows `executable_not_found` and Dispatch shows it as
+not installed.
+
+## Roster heartbeats
+
+The gateway re-probes each CLI (`<cli> --version`) every 60 s and refreshes its heartbeat, so the roster stays
+**online**. `ACS_ACTOR_DISCOVERY_INTERVAL_MS` changes the cadence; `0` turns the loop off, after which agents expire to
+offline once the 15-minute heartbeat TTL passes.
+
 Sign in to Mission Control with a human operator credential (`actor: user`, `operator` role, `acs:approve`).
 Click **Add to roster** once to list the CLIs under Agents.
 
