@@ -62,44 +62,55 @@ async function runAxe(html: string): Promise<AxeViolation[]> {
   return result.violations.filter((violation) => violation.impact === "critical" || violation.impact === "serious");
 }
 
+// axe-core over the full dashboard takes under a second locally but several seconds on a loaded CI runner.
+const AXE_TEST_TIMEOUT_MS = 30_000;
+
 describe("mission-control a11y + mobile smoke", () => {
-  it("clears critical axe findings on the home dashboard", async () => {
-    const html = renderDashboard({
-      workItems: [workItem, blockedItem],
-      events: [],
-      approvalActionHashesByWorkItem: { wrk_a11y: ["hash-a"] },
-      now: new Date("2026-09-13T00:01:00.000Z")
-    });
+  it(
+    "clears critical axe findings on the home dashboard",
+    async () => {
+      const html = renderDashboard({
+        workItems: [workItem, blockedItem],
+        events: [],
+        approvalActionHashesByWorkItem: { wrk_a11y: ["hash-a"] },
+        now: new Date("2026-09-13T00:01:00.000Z")
+      });
 
-    expect(html).toContain('href="#main-content"');
-    expect(html).toContain('id="main-content"');
-    expect(html).toContain('for="reason-wrk_a11y"');
-    expect(html).toContain('aria-describedby="reason-wrk_a11y"');
-    expect(html).toContain("@media (max-width: 767px)");
-    expect(html).toContain("min-height: 44px");
-    expect(html).toContain(":focus-visible");
+      expect(html).toContain('href="#main-content"');
+      expect(html).toContain('id="main-content"');
+      expect(html).toContain('for="reason-wrk_a11y"');
+      expect(html).toContain('aria-describedby="reason-wrk_a11y"');
+      expect(html).toContain("@media (max-width: 767px)");
+      expect(html).toContain("min-height: 44px");
+      expect(html).toContain(":focus-visible");
 
-    const violations = await runAxe(html);
-    expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
-  });
+      const violations = await runAxe(html);
+      expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
+    },
+    AXE_TEST_TIMEOUT_MS
+  );
 
-  it("clears critical axe findings on work-item detail", async () => {
-    const detail = renderWorkItemDetailHtml(workItem, [
-      {
-        name: "work_item.needs_approval",
-        timeUnixNano: String(Date.parse("2026-09-13T00:00:30.000Z") * 1_000_000),
-        attributes: { "work_item.id": "wrk_a11y" }
-      }
-    ]);
-    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8" /><title>Work item detail</title></head><body><main id="main-content"><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-labelledby="work-detail-title">${detail}</section></main></body></html>`;
+  it(
+    "clears critical axe findings on work-item detail",
+    async () => {
+      const detail = renderWorkItemDetailHtml(workItem, [
+        {
+          name: "work_item.needs_approval",
+          timeUnixNano: String(Date.parse("2026-09-13T00:00:30.000Z") * 1_000_000),
+          attributes: { "work_item.id": "wrk_a11y" }
+        }
+      ]);
+      const html = `<!doctype html><html lang="en"><head><meta charset="utf-8" /><title>Work item detail</title></head><body><main id="main-content"><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-labelledby="work-detail-title">${detail}</section></main></body></html>`;
 
-    expect(detail).toContain('id="work-detail-title"');
-    expect(detail).toContain("Requested Actions");
-    expect(detail).toContain("Timeline");
+      expect(detail).toContain('id="work-detail-title"');
+      expect(detail).toContain("Requested Actions");
+      expect(detail).toContain("Timeline");
 
-    const violations = await runAxe(html);
-    expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
-  });
+      const violations = await runAxe(html);
+      expect(violations, JSON.stringify(violations, null, 2)).toEqual([]);
+    },
+    AXE_TEST_TIMEOUT_MS
+  );
 
   it("keeps approval controls in reason-then-action focus order", () => {
     const html = renderDashboard({

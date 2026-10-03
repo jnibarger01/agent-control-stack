@@ -62,7 +62,9 @@ jobs:
         run: npm run test:integration
 
       - name: Dependency audit
-        run: npm audit --audit-level=high
+        # Same as `npm audit --audit-level=high` except one documented, self-expiring
+        # exception (see scripts/audit-gate.mjs).
+        run: npm run audit:gate
 
   execution-chain-e2e:
     name: Execution-chain E2E (ACS -> gateway/relay -> DC)

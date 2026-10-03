@@ -80,3 +80,12 @@ forged/expired capability, wrong scope, approval mismatch, attempt/lease/
 fencing mismatch, stale/competing lease, nonce replay; fail-closed when ACS is
 unreachable; managed mode refuses unconfigured startup; fresh capability per
 call (no gateway replay/cache path); lease-safe recycle decisions.
+
+## Client attribution (visibility only)
+
+The edge verifies the OAuth token, so `client_id` and `sub` are trustworthy. It additionally caches each client's
+`initialize.clientInfo`, forwards it with the `User-Agent` to ACS issuance as `x-mcp-client-name`,
+`x-mcp-client-version` and `x-mcp-user-agent`, and reports `initialize` and `tools/list` to ACS
+`POST /mcp-clients/observe` (fire-and-forget, 1.5 s timeout, throttled). These are unverified claims for
+operators; they never affect authorization, and a failure to report never affects a request. See ADR 0023.
+
