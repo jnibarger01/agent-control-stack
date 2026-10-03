@@ -286,6 +286,8 @@ export interface GatewayOptions {
   /** Governed ports for autonomous coding missions. Absent ports fail closed. */
   codingMissionPorts?: CodingMissionPorts;
   heartbeatTtlMs?: number;
+  /** Agent CLI dispatch settings. Defaults to the ACS_AGENT_* environment (off unless enabled). */
+  agentDispatch?: AgentDispatchConfig;
   /** Admin execution mode lasts this long before reverting to strict. Env: ACS_ADMIN_MODE_TTL_MS. */
   adminModeTtlMs?: number;
   logger?: boolean;
