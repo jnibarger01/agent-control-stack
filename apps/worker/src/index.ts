@@ -398,9 +398,13 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     }
 
     const bridge = new ExecutionLearningBridge(learning);
-    const prepared = bridge.beforeExecution(running, running.attemptId);
+    const executionWorkItem = workItems.get(running.id);
+    if (!executionWorkItem || executionWorkItem.status !== "running") {
+      throw new ControlStackError("worker_claim_integrity_mismatch", "persisted work item changed before execution");
+    }
+    const prepared = bridge.beforeExecution(executionWorkItem, running.attemptId);
     const result = await execute({
-      ...running,
+      ...executionWorkItem,
       retrievedSkills: prepared.retrievedSkills,
       ...(workspace ? { workspace } : {})
     });
@@ -418,7 +422,7 @@ export async function runWorkerOnce(options: WorkerOptions = {}): Promise<Worker
     const learningRecord = bridge.afterExecution({
       workItemId: running.id,
       attemptId: running.attemptId,
-      repository: running.target?.repo ?? running.target?.cwd,
+      repository: executionWorkItem.target?.repo ?? executionWorkItem.target?.cwd,
       retrievedSkills: prepared.retrievedSkills,
       usedSkillIds: usedSkills,
       engineSucceeded: result.ok,
