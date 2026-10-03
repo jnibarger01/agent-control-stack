@@ -284,19 +284,19 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
       expect(other.json().capability).toBeUndefined();
     }));
 
-  it("admin execution mode never auto-approves privileged_exec, and acs:admin cannot approve it", () =>
+  it("admin execution mode auto-authorizes privileged_exec", () =>
     withGateway(async (ctx) => {
       const switched = await ctx.app.inject({
         method: "POST",
         url: "/execution-mode",
         headers: { authorization: `Bearer ${OP_TOKEN}` },
-        payload: { mode: "admin", reason: "jc admin-mode negative test" }
+        payload: { mode: "admin", reason: "jc universal admin test" }
       });
       expect(switched.statusCode).toBe(200);
       const response = await issue(ctx, "privileged_exec", PRIV_ARGS);
-      expect(response.statusCode).toBe(409);
-      expect(response.json().decision).toBe("require_approval");
-      expect(response.json().capability).toBeUndefined();
+      expect(response.statusCode).toBe(200);
+      expect(response.json().decision).toBe("allow");
+      expect(typeof response.json().capability.payload.approvalId).toBe("string");
     }));
 
   it("self-approval by the requesting subject is rejected at /approve and nothing is signed", () =>
@@ -311,7 +311,9 @@ describe("POST /jc/capability/issue (acs.jc.v1)", () => {
     }));
 });
 
-// Every approval-gated JC tool requires a human grant, including in admin mode.
+// Every approval-gated JC tool refuses requester self-approval and keeps
+// its approver-visible summary. Canonical admin mode may auto-authorize every
+// managed mutation, including privileged_exec.
 describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval, B3 approval summary)", () => {
   const GATED = jaceCommanderToolNames().filter((name) => jaceCommanderToolPolicy(name)?.requiresApproval === true);
   const head = "0123456789abcdef0123456789abcdef01234567";
@@ -399,7 +401,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
-  it("admin execution mode still requires human approval for every gated JC tool", () =>
+  it("admin execution mode auto-authorizes every gated tool, including privileged_exec", () =>
     withGateway(
       async (ctx) => {
         const switched = await ctx.app.inject({
@@ -415,13 +417,9 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         for (const tool of GATED) {
           const { args } = fixtures[tool]!;
           const first = await issue(ctx, tool, args);
-          expect(first.statusCode, `${tool}: ${first.body}`).toBe(409);
-          expect(first.json().decision).toBe("require_approval");
-          expect(first.json().capability).toBeUndefined();
-          expect((await approve(ctx, first.json().workItemId, first.json().actionHash)).statusCode).toBe(200);
-          const issued = await issue(ctx, tool, args);
-          expect(issued.statusCode, `${tool}: ${issued.body}`).toBe(200);
-          expect(typeof issued.json().capability.payload.approvalId).toBe("string");
+          expect(first.statusCode, `${tool}: ${first.body}`).toBe(200);
+          expect(first.json().decision).toBe("allow");
+          expect(typeof first.json().capability.payload.approvalId).toBe("string");
         }
 
         const db = new DatabaseSync(ctx.dbPath);
@@ -431,7 +429,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
               "SELECT DISTINCT approved_by_actor_id AS actor FROM jace_commander_capability_issuances WHERE approval_id IS NOT NULL ORDER BY actor"
             )
             .all() as Array<{ actor: string }>;
-          expect(approvers.map((row) => row.actor)).toEqual(["user"]);
+          expect(approvers.map((row) => row.actor)).toEqual(["acs:admin"]);
         } finally {
           db.close();
         }
@@ -440,7 +438,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
-  it("does not create an auto-authorization audit event for an unapproved JC request", () =>
+  it("records an auto-authorization audit event for an admin-approved JC request", () =>
     withGateway(
       async (ctx) => {
         const switched = await ctx.app.inject({
@@ -455,9 +453,9 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         try {
           const args = { path: join(ctx.root, "workspace", "audit-retry") };
           const response = await issue(ctx, "create_directory", args);
-          expect(response.statusCode).toBe(409);
-          expect(response.json().decision).toBe("require_approval");
-          expect(response.json().capability).toBeUndefined();
+          expect(response.statusCode).toBe(200);
+          expect(response.json().decision).toBe("allow");
+          expect(response.json().capability.payload.approvalId).toBeTypeOf("string");
 
           const detail = await ctx.app.inject({
             method: "GET",
@@ -466,7 +464,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
           });
           expect(
             detail.json().events.filter((event: { name: string }) => event.name === "execution_mode.auto_authorized")
-          ).toHaveLength(0);
+          ).toHaveLength(1);
         } finally {
           db.close();
         }
@@ -475,7 +473,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       workspace
     ));
 
-  it("keeps human approval required when managed authority is not active", () =>
+  it("denies admin authorization when managed authority is not active", () =>
     withGateway(
       async (ctx) => {
         const switched = await ctx.app.inject({
@@ -489,8 +487,8 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         const response = await issue(ctx, "create_directory", {
           path: join(ctx.root, "workspace", "blocked-admin")
         });
-        expect(response.statusCode).toBe(409);
-        expect(response.json().decision).toBe("require_approval");
+        expect(response.statusCode).toBe(403);
+        expect(response.json().decision).toBe("deny");
         expect(response.json().capability).toBeUndefined();
       },
       true,
@@ -498,7 +496,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       { ...healthyAuthority, authoritative: false, leaseActive: false, detail: "executor lease inactive" }
     ));
 
-  it("admin mode cannot leave an unapproved item reusable after switching to strict mode", () => {
+  it("admin mode cannot leave an issued item reusable after switching to strict mode", () => {
     return withGateway(
       async (ctx) => {
         const admin = await ctx.app.inject({
@@ -511,7 +509,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
 
         const args = { path: join(ctx.root, "workspace", "mode-transition") };
         const interrupted = await issue(ctx, "create_directory", args);
-        expect(interrupted.statusCode).toBe(409);
+        expect(interrupted.statusCode).toBe(200);
         const pendingId = interrupted.json().workItemId;
 
         const strict = await ctx.app.inject({
@@ -525,12 +523,14 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         const retry = await issue(ctx, "create_directory", args);
         expect(retry.statusCode).toBe(409);
         expect(retry.json().decision).toBe("require_approval");
-        expect(retry.json().workItemId).toBe(pendingId);
+        expect(retry.json().workItemId).not.toBe(pendingId);
         expect(retry.json().capability).toBeUndefined();
         const db = new DatabaseSync(ctx.dbPath);
         try {
-          const grants = db.prepare("SELECT COUNT(*) AS count FROM execution_plan_approvals WHERE approved_by_actor_id = 'acs:admin'").get() as { count: number };
-          expect(grants.count).toBe(0);
+          const grants = db
+            .prepare("SELECT COUNT(*) AS count FROM execution_plan_approvals WHERE approved_by_actor_id = 'acs:admin'")
+            .get() as { count: number };
+          expect(grants.count).toBe(1);
         } finally {
           db.close();
         }
@@ -538,7 +538,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       true,
       workspace,
       healthyAuthority
-    )
+    );
   });
 
   it("does not renew an expired human approval when retrying a JC request", () =>
@@ -548,7 +548,7 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
           method: "POST",
           url: "/execution-mode",
           headers: { authorization: `Bearer ${OP_TOKEN}` },
-          payload: { mode: "admin", reason: "expired human approval remains gated" }
+          payload: { mode: "strict", reason: "expired human approval remains gated" }
         });
         expect(admin.statusCode).toBe(200);
 
@@ -560,7 +560,8 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         const db = new DatabaseSync(ctx.dbPath);
         try {
           db.prepare("UPDATE approval_records SET expires_at = ? WHERE work_item_id = ?").run(
-            "2000-01-01T00:00:00.000Z", pending.json().workItemId
+            "2000-01-01T00:00:00.000Z",
+            pending.json().workItemId
           );
           db.prepare("UPDATE execution_plan_approvals SET status = 'expired' WHERE work_item_id = ?").run(
             pending.json().workItemId
@@ -577,15 +578,16 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
       true,
       workspace,
       healthyAuthority
-    )
-  );
+    ));
 
-  it("does not enter admission before a human approves an admin-mode JC request", () => {
+  it("denies issuance if admin mode changes while entering admission", () => {
     const delegate = testAdmission();
     let admissionCalls = 0;
+    let switchToStrict: () => Promise<unknown>;
     const executionAdmission: ExecutionAdmissionController = {
       acquire: async (request) => {
         admissionCalls += 1;
+        await switchToStrict();
         return delegate.acquire(request);
       },
       restoreActivePermit: (input) => delegate.restoreActivePermit(input),
@@ -603,12 +605,19 @@ describe("POST /jc/capability/issue: every approval-gated tool (B2 self-approval
         });
         expect(admin.statusCode).toBe(200);
 
+        switchToStrict = () =>
+          ctx.app.inject({
+            method: "POST",
+            url: "/execution-mode",
+            headers: { authorization: `Bearer ${OP_TOKEN}` },
+            payload: { mode: "strict", reason: "mode changed during admission" }
+          });
         const args = { path: join(ctx.root, "workspace", "queued-mode-transition") };
         const response = await issue(ctx, "create_directory", args);
         expect(response.statusCode).toBe(409);
-        expect(response.json().decision).toBe("require_approval");
+        expect(response.json().code, response.body).toBe("execution_mode_fence_mismatch");
         expect(response.json().capability).toBeUndefined();
-        expect(admissionCalls).toBe(0);
+        expect(admissionCalls).toBe(1);
 
         const db = new DatabaseSync(ctx.dbPath);
         try {

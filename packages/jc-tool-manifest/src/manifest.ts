@@ -85,7 +85,7 @@ export interface JcToolContract {
   readonly scopes: readonly JcScope[];
   readonly actionKind: JcActionKind;
   readonly risk: JcRiskClass;
-  /** ACS requires approval before issuance; privileged_exec is always human-only. */
+  /** ACS requires an approval record before issuance; admin mode may auto-authorize it. */
   readonly requiresApproval: boolean;
   /** Strict argument schema; unknown keys are rejected. */
   readonly argsSchema: z.ZodTypeAny;
@@ -225,7 +225,7 @@ const TOOL_ROWS: Readonly<Record<JcToolName, ToolRow>> = {
     "read-only; contained to allowed trace roots"
   ),
   privileged_exec: row(
-    "Run ONE exact command as root via the jc-privileged-helper. Requires an ACS acs.jc.v1 capability carrying a human approvalId bound to this exact argv/cwd/timeoutMs/stdin. The first call returns an ACS approval challenge (workItemId, actionHash, argv); after a human approves it in ACS, retry the identical call. Each approval authorizes one run. No shell: argv[0] must be an absolute path.",
+    "Run ONE exact command as root via the jc-privileged-helper. Requires an ACS acs.jc.v1 capability carrying an approvalId bound to this exact argv/cwd/timeoutMs/stdin. In strict mode a human approval is required; in admin mode ACS may auto-authorize the exact invocation. Each approval authorizes one run. No shell: argv[0] must be an absolute path.",
     {
       type: "object",
       properties: {

@@ -846,6 +846,31 @@ describe("recovery migration 37-38 lineage", () => {
     }
   });
 
+  it("upgrades the main v50 lineage with universal admin without replacing admission migration 40", () => {
+    const db = database(50);
+    try {
+      const previous = db.prepare("SELECT * FROM schema_migrations ORDER BY version").all();
+      applyControlPlaneMigrations(db);
+      applyControlPlaneMigrations(db);
+      expect(db.prepare("SELECT * FROM schema_migrations WHERE version <= 50 ORDER BY version").all()).toEqual(
+        previous
+      );
+      expect(db.prepare("SELECT name, filename FROM schema_migrations WHERE version = 40").get()).toEqual({
+        name: "admission_permits",
+        filename: "040_admission_permits.sql"
+      });
+      expect(db.prepare("SELECT name, filename FROM schema_migrations WHERE version = 51").get()).toEqual({
+        name: "jace_commander_universal_admin",
+        filename: "051_jace_commander_universal_admin.sql"
+      });
+      expect(db.prepare("SELECT name FROM sqlite_master WHERE name = 'admission_permits'").get()).toEqual({
+        name: "admission_permits"
+      });
+    } finally {
+      db.close();
+    }
+  });
+
   it("registers each migration version once in deterministic order", () => {
     const versions = controlPlaneMigrations().map((migration) => migration.version);
     expect(new Set(versions).size).toBe(versions.length);

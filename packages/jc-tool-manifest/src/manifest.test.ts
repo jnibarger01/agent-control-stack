@@ -42,7 +42,7 @@ describe("jc-tool-manifest", () => {
     }
   });
 
-  it("marks approval-required tools separately from the human-only privileged tool", () => {
+  it("marks every approval-required tool, including the privileged tool", () => {
     const approval = new Set([
       "privileged_exec",
       "write_file",
@@ -62,7 +62,7 @@ describe("jc-tool-manifest", () => {
     expect(jcToolContracts().filter((entry) => entry.requiresApproval && entry.name !== "privileged_exec").length).toBe(
       10
     );
-    expect(jcToolContract("privileged_exec")?.description).toContain("human approvalId");
+    expect(jcToolContract("privileged_exec")?.description).toContain("admin mode ACS may auto-authorize");
     expect(jcToolContracts().length).toBeGreaterThanOrEqual(30);
   });
 
