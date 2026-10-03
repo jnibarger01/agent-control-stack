@@ -76,6 +76,12 @@ export class GatewayMetrics {
     this.sqliteReady = ready ? 1 : 0;
   }
 
+  clearGauges(name: string): void {
+    for (const key of this.gauges.keys()) {
+      if (key === name || key.startsWith(`${name}{`)) this.gauges.delete(key);
+    }
+  }
+
   render(): string {
     const lines = [
       "# HELP acs_sqlite_ready Whether the SQLite control plane passed its latest health check.",
