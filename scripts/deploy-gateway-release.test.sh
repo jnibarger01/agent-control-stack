@@ -251,6 +251,17 @@ expect "test-mode relocation requires the sandbox identity (non-account HOME), n
   grep -q "\"\$HOME\" != \"\$real_home\"" "$ROOT/scripts/deploy-gateway-release.sh" &&
   grep -q "\"\$IN_SANDBOX\" -eq 1 && -n \"\${XDG_RUNTIME_DIR" "$ROOT/scripts/deploy-gateway-release.sh"'
 
+# --- K: first deployment (no previous release drop-in) must not leave the failed release in place ----------
+echo "K: rollback of a first deployment removes the new drop-in"
+setup K
+rm -f "$DROPINS/40-immutable-release.conf"
+SHIM_NEW_BROKEN=1 ACS_DEPLOY_WAIT_SEC=4 run_deploy
+expect "exit 1" test "$(exit_code)" -eq 1
+expect "failed release drop-in removed (nothing existed before)" test ! -e "$DROPINS/40-immutable-release.conf"
+expect "dispatch drop-in removed" test ! -e "$DROPINS/50-agent-dispatch.conf"
+expect "unit started again on its base configuration" bash -c 'awk "/systemctl --user stop/{s=NR} /systemctl --user start/{t=NR} END{exit !(s&&t&&s<t)}" "$SANDBOX/calls.log"'
+expect "never restarted the failed release" bash -c '! grep -q "$FINAL/apps/gateway" "$DROPINS"/*.conf 2>/dev/null'
+
 # --- E: the build must not inherit the gateway's NODE_ENV=production -------------------------------------
 echo "E: build step is immune to the gateway env file"
 expect "npm ci and the build run with NODE_ENV unset" bash -c '

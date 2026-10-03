@@ -215,8 +215,14 @@ else
 fi
 RELEASE_DROPIN="$DROPIN_DIR/40-immutable-release.conf"
 DISPATCH_DROPIN="$DROPIN_DIR/50-agent-dispatch.conf"
-[[ -f "$RELEASE_DROPIN" ]] && cp -p "$RELEASE_DROPIN" "$RELEASE_DROPIN.pre-$SHORT-$STAMP"
-[[ -f "$DISPATCH_DROPIN" ]] && cp -p "$DISPATCH_DROPIN" "$DISPATCH_DROPIN.pre-$SHORT-$STAMP"
+# Remember what existed before this deploy. On a first deployment there is no release drop-in to restore, and rollback must
+# then REMOVE the one this run installs, or it would start the failed release again.
+HAD_RELEASE_DROPIN=0
+HAD_DISPATCH_DROPIN=0
+if [[ -f "$RELEASE_DROPIN" ]]; then HAD_RELEASE_DROPIN=1; cp -p "$RELEASE_DROPIN" "$RELEASE_DROPIN.pre-$SHORT-$STAMP"; fi
+if [[ -f "$DISPATCH_DROPIN" ]]; then HAD_DISPATCH_DROPIN=1; cp -p "$DISPATCH_DROPIN" "$DISPATCH_DROPIN.pre-$SHORT-$STAMP"; fi
+# The release the unit runs today (from the base unit or the current drop-in), for the rollback's database tool.
+PREV_WORKDIR="$(systemctl --user show -p WorkingDirectory --value "$UNIT" 2>/dev/null || true)"
 
 BASE_URL="http://127.0.0.1:${PORT:-3000}"
 
@@ -255,15 +261,15 @@ rollback() {
   systemctl --user stop "$UNIT" || true
   # Restore with the PREVIOUS release's tool: it verifies the backup against the numbering that release wrote.
   # The new release's tool rejects a pre-migration backup as migration_missing.
-  local prev_dir=""
-  if [[ -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then
+  local prev_dir="$PREV_WORKDIR"
+  if [[ ( -z "$prev_dir" || ! -f "$prev_dir/scripts/db-ops.mjs" ) && -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then
     prev_dir="$(sed -n 's/^WorkingDirectory=//p' "$RELEASE_DROPIN.pre-$SHORT-$STAMP" | head -1)"
   fi
   [[ -n "$prev_dir" && -f "$prev_dir/scripts/db-ops.mjs" ]] || prev_dir="$FINAL"
   local restored=1
   if ! node "$prev_dir/scripts/db-ops.mjs" restore "$BACKUP_DB" "$LIVE_DB" --replace --writers-stopped; then restored=0; fi
-  if [[ -f "$RELEASE_DROPIN.pre-$SHORT-$STAMP" ]]; then cp -p "$RELEASE_DROPIN.pre-$SHORT-$STAMP" "$RELEASE_DROPIN"; fi
-  if [[ -f "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" ]]; then cp -p "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" "$DISPATCH_DROPIN"; else rm -f "$DISPATCH_DROPIN"; fi
+  if [[ "$HAD_RELEASE_DROPIN" -eq 1 ]]; then cp -p "$RELEASE_DROPIN.pre-$SHORT-$STAMP" "$RELEASE_DROPIN"; else rm -f "$RELEASE_DROPIN"; fi
+  if [[ "$HAD_DISPATCH_DROPIN" -eq 1 ]]; then cp -p "$DISPATCH_DROPIN.pre-$SHORT-$STAMP" "$DISPATCH_DROPIN"; else rm -f "$DISPATCH_DROPIN"; fi
   systemctl --user daemon-reload
   if [[ "$restored" -eq 0 ]]; then
     # Fail closed: the previous release cannot safely run against a database the failed release may have migrated. It

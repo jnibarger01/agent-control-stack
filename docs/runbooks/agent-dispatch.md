@@ -36,7 +36,7 @@ else touching the service.
 - **Backup first.** Activation backs up the live database and the current drop-ins before changing anything.
 - **Automatic rollback restores the database.** If the new release is not live within `ACS_DEPLOY_WAIT_SEC` (default
   180s), or the unit crash-loops, the script stops the unit, restores the pre-activation backup over the live database
-  with the previous release's `db-ops`, restores the previous drop-ins and starts the previous release. The new release
+  with the previous release's `db-ops`, restores the previous drop-ins (or removes the ones it installed, on a first deployment where none existed) and starts the previous release. The new release
   may already have migrated the database, which the previous release cannot read, so the restore is not optional.
   **Writes made between the backup and the rollback are lost.** The output prints the backup path. If the restore
   itself fails, the script fails closed: it puts the previous drop-ins back but **leaves the unit stopped**, because
