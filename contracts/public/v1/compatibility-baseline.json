@@ -116,7 +116,7 @@
       ],
       "propertyTypes": {
         "jsonrpc": "\"string\"",
-        "id": "null",
+        "id": "[\"string\",\"number\",\"null\"]",
         "method": "\"string\"",
         "params": "null"
       },
