@@ -1,3 +1,4 @@
+import { registerMissionDispatchRoutes } from "./mission-dispatch-routes.js";
 import {
   CodingMissionController,
   codingMissionPortsFromEnv,
@@ -296,6 +297,7 @@ export interface GatewayOptions {
   agentDispatch?: AgentDispatchConfig;
   /** Test seam: clock for agent confirmation expiry. */
   agentRunNow?: () => number;
+  missionDispatchEnabled?: boolean;
   /** Admin execution mode lasts this long before reverting to strict. Env: ACS_ADMIN_MODE_TTL_MS. */
   adminModeTtlMs?: number;
   logger?: boolean;
@@ -1794,6 +1796,14 @@ export function buildGateway(options: GatewayOptions = {}): FastifyInstance {
     requireBridge: (request, reply) => requireWorkerIdentity(request, reply, auth),
     laneForBridge: (workerId) =>
       workerId === JC_BRIDGE_WORKER_ID ? "jc" : workerId === DC_BRIDGE_WORKER_ID ? "dc" : undefined,
+    sendError
+  });
+  registerMissionDispatchRoutes({
+    app,
+    store: workItems,
+    enabled: options.missionDispatchEnabled ?? process.env.ACS_MISSION_DISPATCH_ENABLED === "1",
+    requireRead,
+    requireHumanActor: (request, reply) => requireHumanApprovalActor(request, reply, auth),
     sendError
   });
   const agentRuns = new AgentRunService(
@@ -5137,6 +5147,7 @@ function isRateLimitedRoute(url: string): boolean {
     path === "/dashboard/policy-preview" ||
     // MCP client visibility: bridge reports and operator labelling write audit events, so they are limited too.
     path === "/mcp-clients/observe" ||
+    path.startsWith("/api/mission-dispatch") ||
     path === "/api/mcp-clients" ||
     path === "/api/mcp-clients/label" ||
     path === "/api/mcp-clients/label/clear" ||
@@ -5148,7 +5159,12 @@ function isRateLimitedRoute(url: string): boolean {
 function isRateLimitedGetRoute(url: string): boolean {
   // /device/verify rate limiting is enforced in-handler (see registerDeviceAuthRoutes).
   const path = url.split("?", 1)[0];
-  return path === "/execution-mode" || path === "/authority" || path === "/api/mcp-clients";
+  return (
+    path === "/execution-mode" ||
+    path === "/authority" ||
+    path === "/api/mcp-clients" ||
+    path === "/api/mission-dispatch"
+  );
 }
 
 function rateLimitKey(request: FastifyRequest, auth: GatewayAuthOptions | undefined): string {

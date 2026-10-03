@@ -7,6 +7,19 @@
  */
 export function agentDispatchPanelHtml(): string {
   return `<section id="agent-dispatch" class="grid dispatch-grid" data-view-panel="dispatch">
+  <article class="panel wide" id="governed-dispatch-panel">
+    <div class="panel-head"><div><h2>Execute an approved mission</h2><p>ACS checks the approved plan, reserves execution capacity, and fences results with worker leases. Jev supplies advice only.</p></div></div>
+    <form id="mission-dispatch-form">
+      <label>Mission identifier<input name="missionId" required autocomplete="off"></label>
+      <label>Approval identifier<input name="approvalId" required autocomplete="off"></label>
+      <button type="submit" class="primary-button">Review mission</button>
+      <output id="mission-dispatch-result" role="status" aria-live="polite"></output>
+    </form>
+    <div id="mission-dispatch-review" hidden></div>
+    <button type="button" id="mission-dispatch-confirm" class="primary-button" hidden>Confirm execution</button>
+    <button type="button" id="mission-dispatch-refresh" class="tool-button">Refresh mission progress</button>
+    <div id="mission-dispatch-progress" role="status" aria-live="polite"></div>
+  </article>
   <article class="panel wide" id="cli-agents-panel">
     <div class="panel-head"><div><h2>CLI agents</h2><p>Installed coding agents on this machine. Dispatch is human-confirmed and runs in a fresh git worktree.</p></div>
       <span class="panel-tools"><button type="button" id="cli-agents-sync" class="tool-button">Add to roster</button><button type="button" id="cli-agents-refresh" class="tool-button">Refresh</button></span></div>
@@ -14,7 +27,7 @@ export function agentDispatchPanelHtml(): string {
     <div id="cli-agent-grid" class="cli-grid" aria-live="polite"><p class="muted">Loading CLI agents…</p></div>
   </article>
   <article class="panel wide" id="dispatch-form-panel">
-    <div class="panel-head"><div><h2>Dispatch an agent</h2><p>Nothing runs until you confirm the exact command. The agent works on its own branch; nothing is merged or pushed.</p></div></div>
+    <div class="panel-head"><div><h2>Host-side CLI run</h2><p>This separate path uses the CLI’s own permissions and your saved login. It does not govern each tool through ACS. Nothing runs until you confirm.</p></div></div>
     <form id="dispatch-form" novalidate>
       <div class="form-row">
         <label>Agent<select name="agentId" required></select></label>
@@ -43,7 +56,9 @@ export const AGENT_DISPATCH_EVENT_NAMES = [
   "agent_run.finished",
   "agent_run.cancel_requested",
   "agent_run.interrupted",
-  "agent_cli.tested"
+  "agent_cli.tested",
+  "mission.dispatch.requested",
+  "mission.dispatch.observed"
 ] as const;
 
 export function agentDispatchStyles(): string {
@@ -127,6 +142,7 @@ function renderCliAgents() {
     return '<div class="cli-card" data-cli-agent="' + escapeClient(agent.id) + '"><h3>' + escapeClient(agent.displayName) + dispatchStatusPill(agent) + '</h3>' +
       '<div class="cli-meta">' + meta + '</div>' + reason + test +
       '<p>' + escapeClient(agent.editContainment) + '</p>' +
+      '<p class="cli-governance" data-governance="' + escapeClient(agent.governance) + '"><strong>ACS governance:</strong> ' + escapeClient(agent.governanceSummary) + '</p>' +
       '<div><button type="button" class="tool-button" data-cli-test="' + escapeClient(agent.id) + '"' + (agent.installed && dispatchState.dispatch.enabled ? '' : ' disabled') + '>Test connection</button></div></div>';
   }).join('');
 }
@@ -192,6 +208,7 @@ async function loadAgentRuns() {
     const body = await dispatchJson('/api/agent-runs');
     dispatchState.runs = body.runs || [];
     renderAgentRuns();
+    await loadMissionDispatchProgress();
     if (dispatchState.selectedRunId) await loadAgentRunDetail(dispatchState.selectedRunId);
     syncDispatchRunsTimer();
   } catch (error) {
@@ -257,7 +274,7 @@ function requestDispatchConfirm(preview, prompt) {
     overlay.innerHTML = '<div class="approval-confirm-card dispatch-confirm"><h3 id="dispatch-confirm-title">Dispatch ' + escapeClient(preview.displayName) + '?</h3>' +
       '<dl><dt>Mode</dt><dd>' + escapeClient(preview.mode) + '</dd><dt>Repository</dt><dd>' + escapeClient(preview.repoRoot) + '</dd>' +
       '<dt>Branch</dt><dd>' + escapeClient(preview.branchPattern) + '</dd><dt>Time limit</dt><dd>' + escapeClient(Math.round(preview.timeoutSec / 60)) + ' min</dd>' +
-      '<dt>Containment</dt><dd>' + escapeClient(preview.containment) + '</dd><dt>Prompt</dt><dd>' + escapeClient(preview.promptChars) + ' characters (shown below)</dd>' +
+      '<dt>Containment</dt><dd>' + escapeClient(preview.containment) + '</dd><dt>ACS governance</dt><dd>' + escapeClient(preview.governanceSummary) + '</dd><dt>Prompt</dt><dd>' + escapeClient(preview.promptChars) + ' characters (shown below)</dd>' +
       '<dt>Command hash</dt><dd><code>' + escapeClient(preview.confirmationHash.slice(0, 16)) + '…</code></dd></dl>' +
       '<pre class="run-output" id="dispatch-confirm-prompt"></pre>' +
       '<p class="muted">This runs on your machine with your login. It cannot push or merge; it works on its own branch in a new worktree.</p>' +
@@ -272,6 +289,72 @@ function requestDispatchConfirm(preview, prompt) {
     overlay.querySelector('#dispatch-confirm-cancel').focus();
   });
 }
+
+let pendingMissionDispatch = null;
+async function loadMissionDispatchProgress() {
+  const target = document.getElementById('mission-dispatch-progress');
+  if (!target) return;
+  try {
+    const body = await dispatchJson('/api/mission-dispatch');
+    target.textContent = !body.enabled ? 'Governed mission dispatch is off on this gateway.' :
+      (body.dispatches || []).map(function (entry) {
+        return entry.missionId + ': ' + (entry.code || (entry.observation && entry.observation.code) || (entry.progress.completion ? 'completed' : entry.progress.operations.map(function (operation) { return operation.operationId + ' ' + operation.status; }).join(', ')));
+      }).join('\\n') || 'No governed missions dispatched.';
+  } catch (error) { target.textContent = 'Could not load mission progress: ' + redactClient(error.message); }
+}
+document.addEventListener('submit', async function (event) {
+  const form = event.target;
+  if (!form || form.id !== 'mission-dispatch-form') return;
+  event.preventDefault();
+  pendingMissionDispatch = null;
+  const output = document.getElementById('mission-dispatch-result');
+  const confirm = document.getElementById('mission-dispatch-confirm');
+  const review = document.getElementById('mission-dispatch-review');
+  confirm.hidden = true;
+  review.hidden = true;
+  if (!sseConnected) { output.textContent = 'Disconnected: reconnect before reviewing a mission.'; return; }
+  const data = new FormData(form);
+  const missionId = String(data.get('missionId') || '').trim();
+  const approvalId = String(data.get('approvalId') || '').trim();
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  output.textContent = 'Checking the approved mission…';
+  try {
+    const snapshot = await dispatchJson('/work-items/' + encodeURIComponent(missionId) + '/change-sets');
+    const payload = { missionId: missionId, approvalId: approvalId, expectedManifestHash: snapshot.manifestHash };
+    const preview = (await dispatchJson('/api/mission-dispatch/preview', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) })).preview;
+    pendingMissionDispatch = Object.assign({}, payload, { confirmationHash: preview.confirmationHash });
+    review.textContent = preview.objective + ' — Executor: ' + preview.executingActorId + '. Operations: ' + preview.operations.map(function (operation) { return operation.toolName; }).join(', ') + '. Approval expires: ' + formatClientTime(preview.expiresAt);
+    review.hidden = false;
+    confirm.hidden = false;
+    output.textContent = 'Review the approved operations, then confirm execution.';
+  } catch (error) { output.textContent = 'Rejected: ' + redactClient(error.message); }
+  finally { submit.disabled = false; }
+});
+document.addEventListener('input', function (event) {
+  if (event.target && event.target.closest && event.target.closest('#mission-dispatch-form')) {
+    pendingMissionDispatch = null;
+    document.getElementById('mission-dispatch-confirm').hidden = true;
+    document.getElementById('mission-dispatch-review').hidden = true;
+  }
+});
+document.addEventListener('click', async function (event) {
+  const target = event.target;
+  if (!target) return;
+  if (target.id === 'mission-dispatch-refresh') { await loadMissionDispatchProgress(); return; }
+  if (target.id !== 'mission-dispatch-confirm' || !pendingMissionDispatch) return;
+  const output = document.getElementById('mission-dispatch-result');
+  if (!sseConnected) { output.textContent = 'Disconnected: reconnect before dispatching.'; return; }
+  target.disabled = true;
+  try {
+    await dispatchJson('/api/mission-dispatch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(pendingMissionDispatch) });
+    pendingMissionDispatch = null;
+    target.hidden = true;
+    output.textContent = 'Scheduled for the ACS worker. Accepted scheduling does not mean execution completed.';
+    await loadMissionDispatchProgress();
+  } catch (error) { output.textContent = 'Rejected: ' + redactClient(error.message); }
+  finally { target.disabled = false; }
+});
 
 document.addEventListener('submit', async function (event) {
   const form = event.target;

@@ -183,19 +183,7 @@ export async function runConfiguredMission(env: NodeJS.ProcessEnv = process.env)
     approvalId = env.ACS_MISSION_APPROVAL_ID?.trim();
   if (grantId && approvalId)
     throw new ControlStackError("mission_authority_conflict", "configure one mission authority");
-  const runtimes: MissionClientConfig["runtimes"] = {};
-  for (const [runtime, prefix] of [
-    ["desktop_commander", "ACS_MISSION_DC"],
-    ["jace_commander", "ACS_MISSION_JC"]
-  ] as const) {
-    if (env[`${prefix}_MCP_URL`])
-      runtimes[runtime] = { url: required(`${prefix}_MCP_URL`), token: required(`${prefix}_MCP_TOKEN`) };
-  }
-  const client = createMissionRunnerClient({
-    gatewayUrl: required("ACS_MISSION_GATEWAY_URL"),
-    gatewayToken: required("ACS_MISSION_GATEWAY_TOKEN"),
-    runtimes
-  });
+  const client = createMissionRunnerClient(missionClientConfigFromEnv(env));
   try {
     const options: MissionRunnerOptions = {
       missionId: required("ACS_MISSION_ID"),
@@ -212,4 +200,25 @@ export async function runConfiguredMission(env: NodeJS.ProcessEnv = process.env)
   } finally {
     await client.close();
   }
+}
+
+export function missionClientConfigFromEnv(env: NodeJS.ProcessEnv): MissionClientConfig {
+  const required = (name: string) => {
+    const value = env[name]?.trim();
+    if (!value) throw new ControlStackError("mission_config_missing", `required setting ${name} is missing`);
+    return value;
+  };
+  const runtimes: MissionClientConfig["runtimes"] = {};
+  for (const [runtime, prefix] of [
+    ["desktop_commander", "ACS_MISSION_DC"],
+    ["jace_commander", "ACS_MISSION_JC"]
+  ] as const) {
+    if (env[`${prefix}_MCP_URL`])
+      runtimes[runtime] = { url: required(`${prefix}_MCP_URL`), token: required(`${prefix}_MCP_TOKEN`) };
+  }
+  return {
+    gatewayUrl: required("ACS_MISSION_GATEWAY_URL"),
+    gatewayToken: required("ACS_MISSION_GATEWAY_TOKEN"),
+    runtimes
+  };
 }
