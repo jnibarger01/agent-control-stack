@@ -512,7 +512,7 @@ body[data-active-view="connectors"] #connectors { grid-column: 1 / -1; }
 </div><div class="queue" id="queue-list"><button class="queue-item attention" data-work-item="wrk_approve" data-status="needs_approval" data-risk="high" data-title="Approve me" data-agent-id="/repo"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Approve me</strong><small>verify rendering</small></button><button class="queue-item attention" data-work-item="wrk_blocked" data-status="blocked" data-risk="low" data-title="Blocked task" data-agent-id="/repo"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><span class="attention-badge" title="Needs operator attention">&#9888; Needs attention</span></span><strong>Blocked task</strong><small>verify rendering</small><small class="error-line">worker lease expired token=[redacted]</small></button></div><div id="queue-footer" class="queue-footer"></div><section id="work-detail" class="detail-panel work-detail" tabindex="-1" aria-live="polite" aria-labelledby="work-detail-heading"><div class="detail-empty"><h3 id="work-detail-heading">No work item selected</h3><p>Timeline pending.</p></div></section></article>
       </section>
       <section class="grid approvals-grid">
-        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(required)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" required placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
+        <article id="approvals" class="panel wide" data-view-panel="overview approvals"><div class="panel-head"><h2>Approvals</h2><span id="approvals-count">2 waiting</span></div><div id="approvals-list"><div class="approval-bulk-actions"><button type="button" data-approve-all>Approve all (1)</button></div><div class="approvals-list" role="list"><article class="approval-item overdue" role="listitem" data-risk="high" data-status="needs_approval" data-work-item-ref="wrk_approve"><span><span class="pill needs_approval">needs_approval</span> <span class="pill high">high</span> <small class="wait-badge" data-waiting-since="2026-07-05T00:00:00.000Z" data-sla-ms="1800000">waiting 40m · over SLA</small></span><strong id="approval-title-wrk_approve">Approve me</strong><small>Requester: user · Actions: fs.read</small><label class="reason-field" for="reason-wrk_approve"><span class="reason-label">Reason <span class="req">(optional)</span></span><input id="reason-wrk_approve" data-reason="wrk_approve" placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Approve me"><button type="button" data-approve="wrk_approve" data-risk="high" disabled aria-describedby="reason-wrk_approve">Approval hash unavailable</button><button type="button" data-reject="wrk_approve" data-risk="high" aria-describedby="reason-wrk_approve">Reject</button></div><output id="approval-result-wrk_approve" class="approval-result" aria-live="polite"></output></article><article class="approval-item" role="listitem" data-risk="low" data-status="blocked" data-work-item-ref="wrk_blocked"><span><span class="pill blocked">blocked</span> <span class="pill low">low</span> <span class="pill execution-mode execution-mode-unknown" data-execution-mode="unknown">MODE UNKNOWN</span><small class="wait-badge" data-waiting-since="2026-07-05T00:30:00.000Z" data-sla-ms="1800000">waiting 10m</small></span><strong id="approval-title-wrk_blocked">Blocked task</strong><small>Actions: fs.read</small><small class="error-line">worker lease expired token=[redacted]</small><label class="reason-field" for="reason-wrk_blocked"><span class="reason-label">Reason <span class="req">(optional)</span></span><input id="reason-wrk_blocked" data-reason="wrk_blocked" placeholder="Why approve, reject, or unblock" autocomplete="off" /></label><div class="approval-actions" role="group" aria-label="Actions for Blocked task"><button type="button" data-unblock="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Unblock</button><button type="button" data-reject="wrk_blocked" data-risk="low" aria-describedby="reason-wrk_blocked">Reject</button></div><output id="approval-result-wrk_blocked" class="approval-result" aria-live="polite"></output></article></div></div></article>
       </section>
       <section class="grid lower">
         <article id="operator-metrics" class="panel" data-view-panel="metrics"><div class="panel-head"><h2>Operator metrics</h2><span>leases · approvals · counters</span></div><div id="operator-metrics-body"><div class="operator-metrics"><dl>
@@ -623,6 +623,15 @@ function applySseConnectionState(root, connected) {
   root.querySelectorAll('[data-approve],[data-reject],[data-unblock],[data-work-control]').forEach(function (button) {
     const approveWithoutHash = Boolean(button.dataset.approve) && !button.dataset.actionHash;
     button.disabled = !connected || approveWithoutHash;
+  });
+  const pendingApprovalCards = Array.from(root.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"]'));
+  const approvalActionCount = root.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"] [data-approve][data-action-hash]').length;
+  const incompleteApprovals = pendingApprovalCards.some(function (card) {
+    const buttons = Array.from(card.querySelectorAll('[data-approve]'));
+    return buttons.length === 0 || buttons.some(function (button) { return !button.dataset.actionHash; });
+  });
+  root.querySelectorAll('[data-approve-all]').forEach(function (button) {
+    button.disabled = !connected || approvalActionCount === 0 || incompleteApprovals;
   });
   renderLiveStatus();
 }
@@ -1157,26 +1166,67 @@ async function probePath(path) {
   const started = performance.now();
   try {
     const res = await fetch(path, { headers: { accept: 'application/json' }, cache: 'no-store' });
-    let payload = null;
-    try { payload = await res.json(); } catch {}
-    return { path, status: res.status, ms: Math.round(performance.now() - started), at: Date.now(), payload };
+    const rttMs = Math.max(0, performance.now() - started);
+    let body = {};
+    try { body = await res.json(); } catch {}
+    const headerMs = Number(res.headers && res.headers.get ? res.headers.get('x-acs-readyz-ms') : NaN);
+    const bodyMs = Number(body && body.telemetry ? body.telemetry.latestMs : NaN);
+    const gatewayMs = Number.isFinite(bodyMs) ? bodyMs : Number.isFinite(headerMs) ? headerMs : null;
+    return {
+      path,
+      status: res.status,
+      ms: rttMs,
+      gatewayMs,
+      telemetry: body && body.telemetry ? body.telemetry : null,
+      deepHealth: body && body.deepHealth ? body.deepHealth : null,
+      payload: body,
+      at: Date.now()
+    };
   } catch {
-    return { path, status: 0, ms: Math.round(performance.now() - started), at: Date.now() };
+    return {
+      path,
+      status: 0,
+      ms: Math.max(0, performance.now() - started),
+      gatewayMs: null,
+      telemetry: null,
+      deepHealth: null,
+      at: Date.now()
+    };
   }
 }
 
 function probeHealthy(row) {
-  return row.status >= 200 && row.status < 300 && row.ms < 1000;
+  return row.status >= 200 && row.status < 300;
+}
+
+function formatProbeMs(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return '—';
+  return (number < 10 ? number.toFixed(2) : Math.round(number).toString()) + 'ms';
+}
+
+function formatLaneService(lane) {
+  const service = lane && lane.service ? lane.service : null;
+  const sampleCount = service ? Number(service.sampleCount || 0) : 0;
+  if (!service || sampleCount < 1) return '—';
+  return formatProbeMs(service.latestMs) + ' · p95 ' + formatProbeMs(service.p95Ms) + ' · n=' + String(sampleCount);
 }
 
 function renderProbes() {
   const root = document.querySelector('#system-probes');
   if (!root || !probeHistory.length) return;
   const latest = probeHistory[probeHistory.length - 1];
-  const okRows = probeHistory.filter(function (row) { return row.status >= 200 && row.status < 300; });
-  const avg = okRows.length ? Math.round(okRows.reduce(function (sum, row) { return sum + row.ms; }, 0) / okRows.length) : null;
-  const failures = probeHistory.length - okRows.length;
+  const localFailures = probeHistory.filter(function (row) { return row.status < 200 || row.status >= 300; }).length;
+  const telemetry = latest.telemetry || null;
+  const admissionLatency = telemetry && telemetry.admission ? telemetry.admission : null;
+  const failures = telemetry ? Number(telemetry.failures || 0) : localFailures;
+  const sampleCount = telemetry ? Number(telemetry.sampleCount || 0) : probeHistory.length;
   const state = latest.status === 0 ? 'down' : latest.status >= 300 ? 'failing' : latest.ms >= 1000 ? 'slow' : 'ok';
+  const readiness = latest.status === 0 ? 'unreachable' : latest.status >= 300 ? 'failing' : 'healthy';
+  const deep = latest.deepHealth;
+  const deepLabel = deep
+    ? (deep.ok ? 'healthy' : 'unhealthy') + ' · ' + new Date(deep.checkedAt).toLocaleTimeString() + (deep.source ? ' · ' + deep.source : '')
+    : 'not checked';
   root.dataset.state = state;
   const payload = latest.payload && typeof latest.payload === 'object' ? latest.payload : {};
   const checks = payload.checks && typeof payload.checks === 'object' ? payload.checks : {};
@@ -1184,11 +1234,17 @@ function renderProbes() {
   const failedChecks = checkNames.filter(function (name) { return !checks[name] || checks[name].ok !== true; });
   const execution = payload.execution && typeof payload.execution === 'object' ? payload.execution : null;
   const rows = [
-    ['Gateway readiness', (latest.status || 'unreachable') + ' · ' + latest.ms + 'ms · ' + state],
+    ['Browser RTT', formatProbeMs(latest.ms)],
+    ['Gateway', formatProbeMs(latest.gatewayMs)],
+    ['p50 gateway', formatProbeMs(telemetry && telemetry.p50Ms)],
+    ['p95 gateway', formatProbeMs(telemetry && telemetry.p95Ms)],
+    ['Jace Commander service', formatLaneService(admissionLatency && admissionLatency.jc)],
+    ['Desktop Commander service', formatLaneService(admissionLatency && admissionLatency.dc)],
+    ['Readiness', readiness],
     ['Dependency checks', checkNames.length ? (failedChecks.length ? 'failed: ' + failedChecks.join(', ') : checkNames.length + ' passing') : '—'],
     ['Execution admission', execution ? String(execution.active) + ' / ' + String(execution.capacity) + ' active · ' + String(execution.queued) + ' queued' + (execution.saturated ? ' · saturated' : '') : '—'],
-    ['Average latency (ok, last ' + probeHistory.length + ')', avg === null ? '—' : avg + 'ms'],
-    ['Probe failures (last ' + probeHistory.length + ')', String(failures)],
+    ['Failures', String(failures) + ' / ' + String(sampleCount)],
+    ['Deep health', deepLabel],
     ['Last checked', new Date(latest.at).toLocaleTimeString()]
   ];
   const list = document.createElement('dl');
@@ -2568,6 +2624,108 @@ document.querySelectorAll('[data-execution-mode]').forEach((input) => {
   });
 });
 
+// Bulk approval snapshots only the currently waiting cards. Each action keeps
+// its exact action hash and high/critical actions retain their per-action confirm.
+document.addEventListener('click', async (event) => {
+  const bulkButton = event.target && event.target.closest ? event.target.closest('[data-approve-all]') : null;
+  if (!bulkButton || bulkButton.disabled) return;
+  event.preventDefault();
+  const status = document.querySelector('#action-status');
+  if (!sseConnected) {
+    if (status) status.textContent = 'Disconnected: approvals disabled until reconnect';
+    return;
+  }
+
+  const pendingCards = Array.from(document.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"]'));
+  const approvalButtons = [];
+  const incomplete = pendingCards.some(function (card) {
+    const buttons = Array.from(card.querySelectorAll('[data-approve]'));
+    if (buttons.length === 0 || buttons.some(function (button) { return !button.dataset.actionHash; })) return true;
+    approvalButtons.push.apply(approvalButtons, buttons);
+    return false;
+  });
+  if (incomplete) {
+    if (status) status.textContent = 'Cannot approve all: a waiting item is missing an approval action hash.';
+    return;
+  }
+  if (!approvalButtons.length) {
+    bulkButton.disabled = true;
+    if (status) status.textContent = 'No waiting approvals.';
+    return;
+  }
+
+  bulkButton.disabled = true;
+  let accepted = 0;
+  let failed = 0;
+  let cancelled = 0;
+  for (let index = 0; index < approvalButtons.length; index += 1) {
+    if (!sseConnected) {
+      failed += approvalButtons.length - index;
+      break;
+    }
+    const approvalButton = approvalButtons[index];
+    const id = approvalButton.dataset.approve;
+    const risk = approvalButton.dataset.risk || '';
+    const output = document.querySelector('#approval-result-' + id);
+    if ((risk === 'high' || risk === 'critical') && isElevatedApprovalRisk(risk)) {
+      if (document.getElementById('approval-confirm-dialog')) {
+        cancelled += 1;
+        continue;
+      }
+      const confirmed = await requestApprovalConfirm({
+        workItemId: id,
+        action: 'approve',
+        actionHash: approvalButton.dataset.actionHash,
+        actionKind: approvalButton.dataset.actionKind,
+        risk: risk
+      });
+      if (!confirmed) {
+        cancelled += 1;
+        continue;
+      }
+    }
+
+    const reasonInput = document.querySelector('[data-reason="' + id + '"]');
+    const reason = reasonInput ? reasonInput.value.trim() : '';
+    const payload = { actionHash: approvalButton.dataset.actionHash };
+    if (reason) payload.reason = reason;
+    try {
+      const res = await fetch('/work-items/' + encodeURIComponent(id) + '/approve', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const body = await res.json().catch(() => ({}));
+      if (res.ok) {
+        accepted += 1;
+        if (output) output.textContent = 'approve accepted';
+      } else {
+        failed += 1;
+        if (output) output.textContent = 'Rejected: ' + (body.error || body.code || res.status);
+      }
+    } catch (error) {
+      failed += 1;
+      if (output) output.textContent = 'Request failed: ' + (error && error.message ? error.message : 'network error');
+    }
+  }
+
+  const summary = 'Approve all: ' + accepted + ' of ' + approvalButtons.length + ' action approvals accepted' +
+    (failed ? '; ' + failed + ' failed' : '') + (cancelled ? '; ' + cancelled + ' cancelled' : '');
+  if (status) status.textContent = summary;
+  announce(summary);
+  if (accepted) scheduleDashboardRefresh(0);
+  const refreshedButton = document.querySelector('[data-approve-all]');
+  if (refreshedButton) {
+    const refreshedCards = Array.from(document.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"]'));
+    const remainingActions = document.querySelectorAll('#approvals-list .approval-item[data-status="needs_approval"] [data-approve][data-action-hash]').length;
+    const hasIncomplete = refreshedCards.some(function (card) {
+      const buttons = Array.from(card.querySelectorAll('[data-approve]'));
+      return buttons.length === 0 || buttons.some(function (button) { return !button.dataset.actionHash; });
+    });
+    refreshedButton.disabled = !sseConnected || remainingActions === 0 || hasIncomplete;
+  }
+});
+
 // Delegated: approval cards are replaced by live fragment patches.
 document.addEventListener('click', async (event) => {
     const button = event.target && event.target.closest ? event.target.closest('[data-approve],[data-reject],[data-unblock]') : null;
@@ -2583,11 +2741,6 @@ document.addEventListener('click', async (event) => {
     const reasonInput = document.querySelector('[data-reason="' + id + '"]');
     const reason = reasonInput ? reasonInput.value.trim() : '';
     const output = document.querySelector('#approval-result-' + id);
-    if (action !== 'unblock' && !reason) {
-      output.textContent = 'Reason required';
-      if (reasonInput) reasonInput.focus();
-      return;
-    }
     if ((action === 'approve' || action === 'reject') && isElevatedApprovalRisk(risk)) {
       if (document.getElementById('approval-confirm-dialog')) {
         return;
@@ -2602,7 +2755,8 @@ document.addEventListener('click', async (event) => {
       if (!confirmed) return;
     }
     const headers = { 'content-type': 'application/json' };
-    const payload = action === 'unblock' ? {} : { reason };
+    const payload = {};
+    if (reason && action !== 'unblock') payload.reason = reason;
     if (action === 'approve') {
       if (!button.dataset.actionHash) {
         output.textContent = 'Approval action hash unavailable';
