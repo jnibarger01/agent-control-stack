@@ -61,14 +61,23 @@ All of this lives in `AgentRunService`; the plan contract, worker and scheduler 
 - **Jev.** Neither dispatch path references Jev, and a test runs mission dispatch with Jev disabled, down and
   adversarial and requires identical results and zero calls to the advisor.
 
+- **Managed tool path (Claude Code only).** Claude runs install an ACS `PreToolUse` hook through `--settings`. It
+  logs every tool call to the run's `tool-calls.jsonl`, denies file writes outside the worktree, reads of
+  credential stores, `git push`, remote changes, network and remote-shell tools, privilege escalation and package
+  publishing, and fails closed if it cannot parse a call or record it. The run view shows the call and denial
+  counts. This is a deny-list: Bash is matched by pattern, so it is not a sandbox. Verified live against the
+  installed `claude` (an in-worktree write allowed, an outside write denied, both logged). The other eight CLIs
+  have no verified equivalent here and keep their own permission modes; each needs its own adapter.
+
 ## Not done: the remaining authority gap
 
 These need their own design and are deliberately out of this change:
 
 1. Host-side CLI runs still create no work item, execution plan, lease or approval record. Only the governed
    mission path above does.
-2. After start, the CLI's own tool calls are not routed through ACS. Containment is still the CLI's permission mode
-   plus the worktree.
+2. Apart from the Claude guard above, a CLI's own tool calls are not routed through ACS. Containment is still the
+   CLI's permission mode plus the worktree. The guard logs and denies; it does not obtain per-call ACS approval or
+   capabilities.
 3. Reconciliation terminates a surviving process rather than re-adopting it and its output.
 4. Jev observations are not correlated to run or action IDs, because Jev is not consulted for runs at all.
 

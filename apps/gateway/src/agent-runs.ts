@@ -23,6 +23,7 @@ import {
   redactLines,
   resolveRepoRoot,
   runAgent,
+  summarizeToolLog,
   type AgentCliProbe,
   type AgentRunMode
 } from "@agent-control-stack/agent-cli";
@@ -56,6 +57,8 @@ export interface AgentRunView {
   resultCheck?: AgentResultCheck;
   /** Human review state. A succeeded run is `pending_review` until an operator accepts or rejects it. */
   acceptance: AgentRunAcceptance;
+  /** Tool calls seen by the ACS tool guard (Claude Code only). Absent when the CLI has no guard. */
+  toolCalls?: { total: number; denied: number; deniedCalls: Array<{ tool: string; reason: string }> };
   reviewedBy?: string;
   reviewedAt?: string;
   reviewNote?: string;
@@ -358,12 +361,14 @@ export class AgentRunService {
         agentId: preview.agentId,
         worktreeRoot: this.config.worktreeRoot
       });
+      const toolLogPath = join(outDir, "tool-calls.jsonl");
       const command = planAgentCommand({
         agentId: preview.agentId,
         prompt,
         mode: preview.mode,
         cwd: worktree.worktreePath,
-        timeoutSec: preview.timeoutSec
+        timeoutSec: preview.timeoutSec,
+        toolGuardLog: toolLogPath
       });
       const outputPath = join(outDir, "output.log");
       this.store.recordSystemEvent({
@@ -400,6 +405,14 @@ export class AgentRunService {
       writeAtomic(outputPath, result.output);
       const changes = await inspectWorktree(worktree).catch(() => undefined);
       const assessed = assessResult(preview.mode, result, changes);
+      let toolCalls: ReturnType<typeof summarizeToolLog> | undefined;
+      if (preview.agentId === "claude") {
+        try {
+          toolCalls = summarizeToolLog(readFileSync(toolLogPath, "utf8"));
+        } catch {
+          toolCalls = { total: 0, denied: 0, deniedCalls: [] };
+        }
+      }
       this.store.recordSystemEvent({
         name: AGENT_RUN_EVENTS.finished,
         body: {
@@ -409,6 +422,7 @@ export class AgentRunService {
           reportedOutcome: result.outcome,
           ...(assessed.resultCheck ? { resultCheck: assessed.resultCheck } : {}),
           ...(assessed.error ? { error: assessed.error } : {}),
+          ...(toolCalls ? { toolCalls } : {}),
           exitCode: result.exitCode,
           durationMs: result.durationMs,
           outputSha256: result.outputSha256,
@@ -671,6 +685,9 @@ export function foldRuns(events: StoredAuditEvent[]): AgentRunView[] {
       if (typeof body.commitsAhead === "number") run.commitsAhead = body.commitsAhead;
       if (typeof body.truncated === "boolean") run.truncated = body.truncated;
       if (typeof body.error === "string") run.error = body.error;
+      if (body.toolCalls && typeof body.toolCalls === "object") {
+        run.toolCalls = body.toolCalls as NonNullable<AgentRunView["toolCalls"]>;
+      }
       if (typeof body.resultCheck === "string") run.resultCheck = body.resultCheck as AgentResultCheck;
       if (run.status === "succeeded") run.acceptance = "pending_review";
     } else if (event.name === AGENT_RUN_EVENTS.interrupted) {

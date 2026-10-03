@@ -28,6 +28,8 @@ export interface AgentCliInvocationInput {
   timeoutSec: number;
   /** Absolute worktree path. Always also the process cwd. */
   cwd: string;
+  /** `--settings` JSON installing the ACS tool guard. Only honoured by CLIs that support hooks (Claude Code). */
+  guardSettings?: string;
 }
 
 export interface AgentCliSpec {
@@ -66,9 +68,16 @@ export const AGENT_CLI_CATALOG: Readonly<Record<AgentCliId, AgentCliSpec>> = {
     versionArgs: ["--version"],
     loginPaths: [".claude"],
     envPassthrough: ["ANTHROPIC_", "CLAUDE_CODE_"],
-    editContainment: "acceptEdits permission mode: file edits auto-approved, other tools gated by Claude's own rules",
+    editContainment:
+      "acceptEdits permission mode plus the ACS tool guard: every tool call is logged, file writes outside the worktree, git push, network and privilege tools are denied (a deny-list, not a sandbox)",
     readOnlySupported: true,
-    buildArgs: ({ prompt, mode }) => ["-p", prompt, "--permission-mode", mode === "edit" ? "acceptEdits" : "plan"]
+    buildArgs: ({ prompt, mode, guardSettings }) => [
+      "-p",
+      prompt,
+      "--permission-mode",
+      mode === "edit" ? "acceptEdits" : "plan",
+      ...(guardSettings ? ["--settings", guardSettings] : [])
+    ]
   },
   codex: {
     id: "codex",

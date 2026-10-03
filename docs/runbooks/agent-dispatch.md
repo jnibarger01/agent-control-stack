@@ -59,6 +59,8 @@ connection**; if it passes, remove the reason from the catalog in a PR.
 
 - Edit mode lets the CLI change files in its worktree under its own permission rules. Cline and Hermes run
   their own tools without ACS-level gating. Read the containment line in the confirmation.
+- Claude Code runs also carry the ACS tool guard (ADR 0024): every tool call is logged and a deny-list blocks writes
+  outside the worktree, `git push`, network and privilege tools. It is not a sandbox, and no other CLI has it.
 - The CLI uses your real `HOME` and saved logins. It does not receive `ACS_*` variables or unrelated tokens.
 - Everything is in the audit log under `agent_run.*`. Prompts are kept in `prompt.txt` beside the output, not in
   the audit log; only a hash and a redacted 240-character preview are.
